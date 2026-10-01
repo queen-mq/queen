@@ -210,7 +210,12 @@ fn link_tree(src: &Path, dst: &Path, rel: &str, out: &mut Vec<FileEntry>) -> io:
             link_tree(&e.path(), &dst.join(n), &child_rel, out)?;
             continue;
         }
-        if !ft.is_file() || n.ends_with(".qidx") || n.ends_with(".tmp") || n.contains(".compact") {
+        if !ft.is_file()
+            || n.ends_with(".qidx")
+            || n.ends_with(".tmp")
+            || n.contains(".compact")
+            || n.ends_with(".dead")
+        {
             continue;
         }
         if n.ends_with(".qlog") {

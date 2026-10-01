@@ -55,6 +55,7 @@ pub(crate) fn err_response(e: RsmError) -> Response {
             (StatusCode::TOO_MANY_REQUESTS, Some(*retry_after_s))
         }
         RsmError::Timeout => (StatusCode::SERVICE_UNAVAILABLE, Some(1)),
+        RsmError::InDoubt => (StatusCode::SERVICE_UNAVAILABLE, Some(1)),
         RsmError::Rejected { .. } => (StatusCode::BAD_REQUEST, None),
         RsmError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };

@@ -83,6 +83,16 @@ fn qtxn(n: usize, pid: Pid) -> Refusal {
 
 impl Engine {
     pub(crate) fn prepare(&self, txn: &TxnCommand, now: i64) -> Result<TxnPart, Refusal> {
+        // One incarnation from the shadows to the reservation ([`Engine::serving`]).
+        let _serving = super::state::read(&self.serving);
+        if !self.leader.load(std::sync::atomic::Ordering::Acquire)
+            || self.now_us()
+                < self
+                    .drain_until_us
+                    .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(Refusal::retry("not_leader", "this node does not lead"));
+        }
         {
             let t = lock(&self.txns);
             if let Some(r) = t.map.get(&txn.request_id) {
@@ -142,7 +152,7 @@ impl Engine {
                     sh.pids.get(&t.pid).map_or(0, |pi| pi.txns_start)
                 };
                 let s = shadow!(g, t.pid);
-                let acked = ack_target(&fr, &mut s.0, s.1, txns_start, t, &cfg.queue, now)?;
+                let acked = ack_target(&fr, &mut s.0, s.1, txns_start, t, &cfg.queue, now, false)?;
                 if !acked.res.stale_hashes.is_empty() {
                     return Ok(Err(qtxn(acked.res.stale_hashes.len(), t.pid)));
                 }
@@ -260,6 +270,22 @@ impl Engine {
                 reserved.push((pid, gid));
                 if !changed {
                     continue;
+                }
+                // The bundle's row carries the part's current state — with any
+                // change an ack, a nack or a DLQ head made since a checkpoint
+                // last took it (a reserved part is no checkpoint's): from here
+                // those answers are in doubt at a step-down, as if a
+                // checkpoint carried them (the entry may commit under the next
+                // leader, and a re-run would find its lease released).
+                p.doubt_ver = p.doubt_ver.max(p.ver);
+                let carried: Vec<u64> = p
+                    .waiters
+                    .iter()
+                    .filter(|(_, v)| *v <= p.ver)
+                    .map(|(a, _)| *a)
+                    .collect();
+                if !carried.is_empty() {
+                    self.mark_sent(&carried);
                 }
                 let g = &groups[&gid];
                 if delete {

@@ -99,6 +99,10 @@ pub(crate) struct Cur {
     pub total_consumed: u64,
     pub created_at_us: i64,
     pub metadata: String,
+    /// The lease the last ack released and its batch (`worker`, `lo..=hi`):
+    /// a repeat of that ack is answered as the first was
+    /// ([`crate::rsm::effect::CursorRow::released`]).
+    pub released: Option<(Arc<str>, u64, u64)>,
 }
 
 impl Cur {
@@ -112,6 +116,7 @@ impl Cur {
             total_consumed: 0,
             created_at_us: now_us,
             metadata: String::new(),
+            released: None,
         }
     }
 
@@ -139,6 +144,10 @@ impl Cur {
             total_consumed: row.total_consumed,
             created_at_us: row.created_at_us,
             metadata: row.metadata.clone(),
+            released: row
+                .released
+                .as_ref()
+                .map(|r| (Arc::from(r.worker.as_str()), r.lo, r.hi)),
         }
     }
 
@@ -160,6 +169,14 @@ impl Cur {
             delivered: Vec::new(),
             created_at_us: self.created_at_us,
             metadata: self.metadata.clone(),
+            released: self
+                .released
+                .as_ref()
+                .map(|(w, lo, hi)| crate::rsm::effect::ReleasedLease {
+                    worker: w.to_string(),
+                    lo: *lo,
+                    hi: *hi,
+                }),
         }
     }
 
@@ -234,6 +251,10 @@ pub(crate) struct Part {
     pub ver: u64,
     pub sent_ver: u64,
     pub durable_ver: u64,
+    /// The highest version a checkpoint carried that resolved without a
+    /// commit this engine saw: the entry may still commit under the next
+    /// leader, so an answer at or below it is in doubt ([`PendingAnswer::sent`]).
+    pub doubt_ver: u64,
     /// Answers waiting for this part to be durable at a version.
     pub waiters: SmallVec<[(u64, u64); 1]>,
     /// Dead letters decided on this part, not yet in a checkpoint / in flight.
@@ -258,6 +279,7 @@ impl Part {
             ver: 0,
             sent_ver: 0,
             durable_ver: 0,
+            doubt_ver: 0,
             waiters: SmallVec::new(),
             dlq: Vec::new(),
             dlq_sent: Vec::new(),
@@ -426,6 +448,8 @@ pub(crate) struct GroupSt {
     pub cat_ver: u64,
     pub cat_sent_ver: u64,
     pub cat_durable: u64,
+    /// As [`Part::doubt_ver`], for the catalog effects.
+    pub cat_doubt: u64,
     pub cat_waiters: Vec<(u64, u64)>,
     pub cat_dirty: bool,
     /// The group was deleted (its state dropped); a later command makes a new one.
@@ -474,6 +498,7 @@ impl Group {
                 cat_ver: 0,
                 cat_sent_ver: 0,
                 cat_durable: 0,
+                cat_doubt: 0,
                 cat_waiters: Vec::new(),
                 cat_dirty: false,
                 dropped: false,
@@ -605,6 +630,15 @@ pub(crate) struct PendingAnswer {
     pub sink: oneshot::Sender<Reply>,
     /// The leases a claim answer granted: released when nobody receives it.
     pub claims: Vec<(Pid, Gid, Arc<str>, u64)>,
+    /// A command whose second run could answer differently from its first
+    /// (an ack, a nack, a positional ack, a DLQ head, a seek): once its
+    /// change may be in the log it is never run again ([`Deps::exact`]).
+    ///
+    /// [`Deps::exact`]: super::checkpoint::Deps::exact
+    pub exact: bool,
+    /// A checkpoint carrying the change this answer waits on was sent: the
+    /// change may commit even if this node stops leading before it learns so.
+    pub sent: bool,
 }
 
 /// The answers waiting on checkpoints.

@@ -187,6 +187,7 @@ pub fn cursor_row(committed: i64) -> CursorRow {
         delivered: Vec::new(),
         created_at_us: BASE_US,
         metadata: String::new(),
+        released: None,
     }
 }
 

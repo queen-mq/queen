@@ -1985,3 +1985,47 @@ fn open_drops_a_newest_file_that_was_never_taken() {
         }
     }
 }
+
+/// A retention pass drops a dead file from the log under the lock and unlinks
+/// it after: in between it is renamed out of the log's names, so an open (a
+/// live truncation reopens the log) never reads it back, and open removes it.
+#[test]
+fn a_dropped_file_waits_for_its_unlink_out_of_the_logs_names() {
+    let td = TmpDir::new("graveyard");
+    let opts = QLogOptions::testing(300);
+    let (mut q, _) = QLog::open(td.path(), 1, opts).unwrap();
+    fill(&mut q, 4, 16);
+    let mut sealed: Vec<u64> = q
+        .files()
+        .iter()
+        .filter(|f| f.sealed)
+        .map(|f| f.id)
+        .collect();
+    sealed.sort_unstable();
+    let victim = sealed[0];
+    let dir = super::queue_dir(td.path(), 1);
+    let (n, doomed) = q.take_dead_files(|m| m.id == victim);
+    assert_eq!(n, 1);
+    assert!(
+        !qlog_file(td.path(), 1, victim).exists(),
+        "renamed out of the log's names"
+    );
+    assert!(
+        doomed
+            .iter()
+            .any(|p| p.to_string_lossy().ends_with(".qlog.dead")),
+        "{doomed:?}"
+    );
+    // A reopen before the unlink: the file is not read back, and it is gone.
+    drop(q);
+    let (q2, _) = QLog::open(td.path(), 1, opts).unwrap();
+    assert!(!q2.files().iter().any(|f| f.id == victim), "not read back");
+    let left: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".dead"))
+        .collect();
+    assert!(left.is_empty(), "open removed the graveyard: {left:?}");
+    // The deferred unlink of what is already gone is a no-op.
+    QLog::remove_reclaimed(&dir, &doomed, true).unwrap();
+}

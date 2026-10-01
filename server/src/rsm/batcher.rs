@@ -523,6 +523,20 @@ impl Command {
         )
     }
 
+    /// Whether this command must not run a second time once it may have run:
+    /// the engine serves it from memory, so no request-id record answers a
+    /// retry of it (I6 covers what the batcher logs), and a second run could
+    /// answer differently from the first — an ack or a DLQ head would find
+    /// the lease its first run released, a positional ack or a nack the
+    /// cursor it moved. A pop runs again safely (its first claim's lease
+    /// expires and the messages come back), and so does a renew.
+    pub(crate) fn runs_once(&self) -> bool {
+        matches!(
+            self,
+            Command::Ack(_) | Command::AckPositional(_) | Command::Nack(_) | Command::DlqHead(_)
+        )
+    }
+
     /// Whether §11.8 must refuse this command while a node is above the disk
     /// high-water mark. Deletes, acknowledgements and admin cleanup continue.
     pub(crate) fn grows_storage(&self) -> bool {
@@ -2447,6 +2461,32 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             while let Some(front) = q.front() {
                 if batch.len() >= max_cmds {
                     break;
+                }
+                // An engine checkpoint whose engine is gone (this node stopped
+                // leading while it waited here, and leads again): never
+                // planned — its rows are that engine's, older than what a
+                // leader in between may have written.
+                // The same for a transaction whose consumption half that
+                // engine prepared (its cursor rows ride in `extra_effects`):
+                // planned only while the engine still holds its reservation.
+                // Answered `Retry`, the facade prepares it again, on whoever
+                // leads (a reservation that outlived its TTL is stale too).
+                let stale = match (&front.command, &self.engine) {
+                    (Command::Effects(c), Some(e)) => {
+                        crate::rsm::consume::is_checkpoint_id(&c.request_id)
+                            && !e.answers_at_commit(&c.request_id)
+                    }
+                    (Command::Transaction(t), Some(e)) => {
+                        t.extra_effects.iter().any(|x| {
+                            matches!(x, Effect::CursorSet { .. } | Effect::CursorDelete { .. })
+                        }) && !e.holds_reservation(&t.request_id)
+                    }
+                    _ => false,
+                };
+                if stale {
+                    let sub = q.pop_front().unwrap();
+                    let _ = sub.reply.send(Reply::Retry { hint: None });
+                    continue;
                 }
                 let hint = front.command.size_hint();
                 if !batch.is_empty() && bytes + hint > max_bytes {

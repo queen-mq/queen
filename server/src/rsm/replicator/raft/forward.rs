@@ -398,8 +398,12 @@ pub(crate) enum FwdError {
     /// The leader does not serve the route (an older version): use the
     /// per-command path.
     Unsupported,
-    /// Anything else in transit: retry (same request id).
+    /// Anything else in transit, before the command went out: retry (same
+    /// request id).
     Transport(String),
+    /// The command went out and no answer came back: the leader may have run
+    /// it ([`super::RemoteError::Lost`]).
+    Lost(String),
 }
 
 /// A follower's streams to the leader. See the module header.
@@ -614,13 +618,14 @@ impl Forwarder {
             SENT.fetch_add(1, Ordering::Relaxed);
             return match tokio::time::timeout_at(deadline, rx).await {
                 Ok(Ok(Ok(answer))) => Ok(answer),
-                Ok(Ok(Err(why))) => Err(FwdError::Transport(why)),
-                Ok(Err(_)) => Err(FwdError::Transport("the forward stream closed".into())),
+                // The stream died with it on board (`Pending::kill`), or the
+                // leader's intake failed it (a command that did not decode,
+                // a task that ended): whether it ran is not known here.
+                Ok(Ok(Err(why))) => Err(FwdError::Lost(why)),
+                Ok(Err(_)) => Err(FwdError::Lost("the forward stream closed".into())),
                 Err(_) => {
                     pending.forget(seq);
-                    Err(FwdError::Transport(format!(
-                        "{addr}: no answer within {ttl:?}"
-                    )))
+                    Err(FwdError::Lost(format!("{addr}: no answer within {ttl:?}")))
                 }
             };
         }
@@ -1176,8 +1181,8 @@ mod tests {
             )
             .await;
         assert!(
-            matches!(r, Err(FwdError::Transport(_))),
-            "no answer within the deadline: {r:?}"
+            matches!(r, Err(FwdError::Lost(_))),
+            "no answer within the deadline (sent: the leader may have run it): {r:?}"
         );
         // Kill the stream under a waiting command.
         let (f2, a2) = (fwd.clone(), addr.clone());
@@ -1201,7 +1206,7 @@ mod tests {
             .expect("answered at once")
             .expect("task");
         assert!(
-            matches!(r, Err(FwdError::Transport(ref m)) if m.contains("test kills")),
+            matches!(r, Err(FwdError::Lost(ref m)) if m.contains("test kills")),
             "{r:?}"
         );
         let ok = fwd

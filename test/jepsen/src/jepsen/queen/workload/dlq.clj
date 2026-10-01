@@ -303,7 +303,12 @@
             reads     (->> ops (h/filter #(and (= :read-dlq (:f %)) (= :ok (:type %)))) vec)
             per-node  (into (sorted-map)
                             (map (fn [op] [(:node op) (frequencies (:value op))]) reads))
-            dlq       (set (mapcat (comp keys val) per-node))
+            ; A dead letter that came back without its payload (`data` null):
+            ; the value cannot be recovered from it — reported, not crashed on.
+            no-data   (->> reads (mapcat :entries) (filter #(nil? (:v %)))
+                           (map #(select-keys % [:txn :offset :pid :retry]))
+                           distinct vec)
+            dlq       (set (remove nil? (mapcat (comp keys val) per-node)))
             dups      (into (sorted-map)
                             (keep (fn [[n fr]]
                                     (let [d (sort (keep (fn [[v c]] (when (< 1 c) v)) fr))]
@@ -319,11 +324,13 @@
             bad-txn   (->> reads (mapcat :entries)
                            (remove #(= (:txn %) (txn (:v %))))
                            (take 8) vec)]
-        {:valid?             (and (seq reads)
+        {:valid?             (and (seq reads) (empty? no-data)
                                   (empty? lost) (empty? both) (empty? normal)
                                   (empty? wrong-done) (empty? missing) (empty? unexpected)
                                   (empty? dups) (<= (count views) 1)
                                   (empty? after) (empty? bad-txn))
+         :dlq-without-payload (take 16 no-data)
+         :dlq-without-payload-count (count no-data)
          :pushed             (count pushed)
          :completed          (count completed)
          :completed-unknown  (count (remove #(or (completed %) (dlq %)) maybe-done))

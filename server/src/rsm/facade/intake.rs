@@ -88,6 +88,13 @@ pub(super) async fn submit_here(
     deadline: Instant,
 ) -> Result<Reply, RsmError> {
     let command = match command {
+        // A retry of a transaction that committed (its reply lost, or the
+        // leader changed under it): the batcher answers it from the record
+        // its entry left (I6). Preparing it again would find its acks applied
+        // — their leases released — and roll it back, although it committed.
+        Command::Transaction(t) if has_consumption_half(&t) && engine.recorded(&t.request_id) => {
+            Command::Transaction(t)
+        }
         Command::Transaction(t) if has_consumption_half(&t) => match prepare(engine, t) {
             Ok(c) => c,
             // This node stopped leading: the caller takes the transaction to

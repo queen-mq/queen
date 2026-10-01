@@ -66,10 +66,17 @@ pub const VERSION_1: u16 = 1;
 /// reports version 2 only when it carries such a row (§5.3).
 pub const VERSION_2: u16 = 2;
 
+/// The third catalogue version: [`Kind::CursorSet`] carrying the lease the
+/// last ack released ([`CursorRow::released`]), after the metadata (written
+/// even when empty). Every ack that completes a batch writes it: a build
+/// below this version cannot follow a log this build leads (stop-all
+/// upgrade).
+pub const VERSION_3: u16 = 3;
+
 /// The highest catalogue version this build can decode and apply. The
 /// replicated cluster version (§12.8) may be lower; it never rises above the
 /// minimum of every voter's value (D20).
-pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_2 as u32;
+pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_3 as u32;
 
 /// Refuse a length prefix above this before allocating: a corrupt file or a
 /// hostile peer must not drive an OOM. Far above
@@ -410,6 +417,20 @@ pub struct CursorRow {
     /// the one [`Kind::CursorSet`] shape at catalogue [`VERSION_2`]; without it
     /// the effect keeps its version-1 bytes.
     pub metadata: String,
+    /// The lease the last ack RELEASED, and its batch (`lo..=hi`): an ack the
+    /// client repeats under that lease — its first reply lost, or answered
+    /// `outcome_unknown` at a leader change and retried by the SDK — is
+    /// answered as the first was (success), not "stale", on any leader. A row
+    /// that carries it is [`Kind::CursorSet`] at catalogue [`VERSION_3`].
+    pub released: Option<ReleasedLease>,
+}
+
+/// The lease an ack released ([`CursorRow::released`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleasedLease {
+    pub worker: String,
+    pub lo: u64,
+    pub hi: u64,
 }
 
 /// A timer row as the RSM holds it (§6.1), with no claim fields: a fire is
@@ -844,6 +865,9 @@ impl Effect {
         // The one kind with two shapes: a cursor row that carries position
         // metadata is minted at version 2, every other one stays at 1.
         if let Effect::CursorSet { row, .. } = self {
+            if row.released.is_some() {
+                return VERSION_3;
+            }
             if !row.metadata.is_empty() {
                 return VERSION_2;
             }
@@ -1075,8 +1099,15 @@ impl Effect {
                 w.bool(row.lease_conflated);
                 w.vec_bytes16(&row.delivered);
                 w.i64(row.created_at_us);
-                // Version 2 ([`Effect::version`]): the metadata, last.
-                if !row.metadata.is_empty() {
+                // Version 2 ([`Effect::version`]): the metadata, last;
+                // version 3: the metadata (even empty), then the released
+                // lease.
+                if let Some(rel) = &row.released {
+                    w.str(&row.metadata);
+                    w.str(&rel.worker);
+                    w.u64(rel.lo);
+                    w.u64(rel.hi);
+                } else if !row.metadata.is_empty() {
                     w.str(&row.metadata);
                 }
             }
@@ -1351,8 +1382,10 @@ impl Effect {
     /// Decode a body of the given kind and version. Errors name the field that
     /// failed, so a corrupt entry is diagnosable from one log line.
     pub fn decode_body(kind: Kind, version: u16, body: &[u8]) -> Result<Effect, CodecError> {
-        // Version 2 exists for one kind only (see [`VERSION_2`]).
-        let known = version == VERSION_1 || (version == VERSION_2 && kind == Kind::CursorSet);
+        // Versions 2 and 3 exist for one kind only (see [`VERSION_2`],
+        // [`VERSION_3`]).
+        let known = version == VERSION_1
+            || ((version == VERSION_2 || version == VERSION_3) && kind == Kind::CursorSet);
         if !known {
             return Err(CodecError::UnknownVersion {
                 kind: kind as u16,
@@ -1474,6 +1507,15 @@ impl Effect {
                         r.str("cursor.metadata")?
                     } else {
                         String::new()
+                    },
+                    released: if version >= VERSION_3 {
+                        Some(ReleasedLease {
+                            worker: r.str("cursor.released.worker")?,
+                            lo: r.u64("cursor.released.lo")?,
+                            hi: r.u64("cursor.released.hi")?,
+                        })
+                    } else {
+                        None
                     },
                 },
             },

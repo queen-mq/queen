@@ -344,6 +344,7 @@ pub fn fresh_cursor(committed: i64, created_at_us: i64) -> CursorRow {
         delivered: Vec::new(),
         created_at_us,
         metadata: String::new(),
+        released: None,
     }
 }
 

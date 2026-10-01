@@ -506,3 +506,264 @@ fn a_batch_ack_answers_every_target_in_input_order() {
         o => panic!("{o:?}"),
     }
 }
+
+/// An ack of `txns` (all `Ok`) under `worker`, served: its answer waits for
+/// the checkpoint that carries it.
+fn ack_later(
+    h: &mut H,
+    pid: Pid,
+    txns: &[&str],
+    worker: &str,
+) -> tokio::sync::oneshot::Receiver<Reply> {
+    let items: Vec<(&str, crate::rsm::planner::AckStatus)> =
+        txns.iter().map(|t| (*t, Ok)).collect();
+    let t = h.ack_target(pid, "q", "g", worker, &items);
+    let c = crate::rsm::planner::AckCommand {
+        request_id: h.rid(),
+        targets: vec![t],
+    };
+    h.later(crate::rsm::batcher::Command::Ack(c))
+}
+
+/// Jepsen p11-w2-restart (2026-09-30): a graceful leader restart while an
+/// ack's checkpoint was on its way. The old leader answered `Retry`, the
+/// follower sent the ack to the new leader, whose state already held the
+/// checkpoint — the lease released — and it called the message stale: the
+/// client was told its ack failed, and the message never came back. An ack
+/// whose change a checkpoint carried is in doubt, never retried.
+#[test]
+fn an_ack_whose_checkpoint_was_sent_is_in_doubt_when_its_leader_steps_down() {
+    let mut h = H::new("ack-in-doubt");
+    h.queue("q", qcfg());
+    let pid = lease(&mut h, "q", "p0", &["a"], "w1");
+    let mut rx = ack_later(&mut h, pid, &["a"], "w1");
+    let _in_flight = h.e.take_checkpoint(h.now).expect("the ack's checkpoint");
+    assert!(rx.try_recv().is_err(), "answered before the commit");
+    h.e.on_step_down();
+    match rx.try_recv() {
+        Result::Ok(Reply::Refused(r)) => {
+            assert_eq!(r.code, super::IN_DOUBT, "{r:?}");
+            assert!(!r.retryable, "{r:?}");
+        }
+        other => panic!("expected in doubt, got {other:?}"),
+    }
+}
+
+/// The same, when the checkpoint came back without a commit this engine saw
+/// (a step-down answers the batcher's commands `Retry` whether or not their
+/// entry is in the log) before the leader stepped down.
+#[test]
+fn an_ack_whose_checkpoint_resolved_unknown_is_in_doubt_when_its_leader_steps_down() {
+    let mut h = H::new("ack-doubt-resolved");
+    h.queue("q", qcfg());
+    let pid = lease(&mut h, "q", "p0", &["a"], "w1");
+    let mut rx = ack_later(&mut h, pid, &["a"], "w1");
+    let cp = h.e.take_checkpoint(h.now).expect("the ack's checkpoint");
+    h.e.checkpoint_resolved(cp.ticket, false);
+    h.e.on_step_down();
+    match rx.try_recv() {
+        Result::Ok(Reply::Refused(r)) => assert_eq!(r.code, super::IN_DOUBT, "{r:?}"),
+        other => panic!("expected in doubt, got {other:?}"),
+    }
+}
+
+/// An ack no checkpoint carried yet cannot be in the log: the next leader
+/// runs it on the state before it, and answers it as this one would have.
+#[test]
+fn an_ack_no_checkpoint_carried_is_retried_when_its_leader_steps_down() {
+    let mut h = H::new("ack-retry");
+    h.queue("q", qcfg());
+    let pid = lease(&mut h, "q", "p0", &["a"], "w1");
+    let mut rx = ack_later(&mut h, pid, &["a"], "w1");
+    h.e.on_step_down();
+    assert!(
+        matches!(rx.try_recv(), Result::Ok(Reply::Retry { .. })),
+        "a change no checkpoint took is retried"
+    );
+}
+
+/// A claim runs again safely (the first claim's lease expires and its
+/// messages come back): a pop whose checkpoint was sent is still retried.
+#[test]
+fn a_claim_whose_checkpoint_was_sent_is_retried_when_its_leader_steps_down() {
+    let mut h = H::new("claim-retry");
+    h.queue("q", qcfg());
+    h.push("q", "p0", &["a"]);
+    h.advance(1_000_000);
+    let c = h.pop_cmd("q", "g", "w1");
+    let mut rx = h.later(crate::rsm::batcher::Command::PopWildcard(c));
+    let _in_flight = h.e.take_checkpoint(h.now).expect("the claim's checkpoint");
+    h.e.on_step_down();
+    assert!(
+        matches!(rx.try_recv(), Result::Ok(Reply::Retry { .. })),
+        "a pop is retried"
+    );
+}
+
+/// A leader on its way out (a graceful stop) drains before it hands off: a
+/// new command is not run (`Retry`: the next leader runs it), and an ack it
+/// already served still commits and is answered — instead of the step-down
+/// answering it in doubt.
+#[test]
+fn a_draining_leader_runs_no_new_command_and_answers_what_it_served() {
+    use crate::rsm::consume::Served;
+    let mut h = H::new("drain");
+    h.queue("q", qcfg());
+    let pid = lease(&mut h, "q", "p0", &["a", "b"], "w1");
+    let mut rx = ack_later(&mut h, pid, &["a"], "w1");
+    assert!(h.e.exact_pending(), "the ack waits for its checkpoint");
+    h.e.begin_drain(std::time::Duration::from_secs(30));
+    let t = h.ack_target(pid, "q", "g", "w1", &[("b", Ok)]);
+    let c = crate::rsm::planner::AckCommand {
+        request_id: h.rid(),
+        targets: vec![t],
+    };
+    assert!(
+        matches!(
+            h.e.serve(&crate::rsm::batcher::Command::Ack(c), h.now),
+            Served::Now(Reply::Retry { .. })
+        ),
+        "a draining leader runs no new command"
+    );
+    h.checkpoint();
+    match rx.try_recv() {
+        Result::Ok(Reply::Done {
+            outcome: Outcome::Ack(a),
+            ..
+        }) => assert_eq!(a.results[0].committed, 0, "{a:?}"),
+        other => panic!("the served ack is answered: {other:?}"),
+    }
+    assert!(!h.e.exact_pending());
+    h.e.end_drain();
+    let r = h.ack(pid, "q", "g", "w1", &[("b", Ok)]);
+    assert_eq!(r.committed, 1, "serving again: {r:?}");
+}
+
+/// The batcher plans an engine checkpoint only while the engine that took it
+/// still has it in flight: after a step-down the checkpoint's commands are
+/// the gone incarnation's (older rows than a leader in between may have
+/// written) and must never reach the log should this node lead again.
+#[test]
+fn a_checkpoint_of_a_gone_incarnation_is_no_longer_claimed_by_the_engine() {
+    let mut h = H::new("stale-ckpt");
+    h.queue("q", qcfg());
+    let pid = lease(&mut h, "q", "p0", &["a"], "w1");
+    let _rx = ack_later(&mut h, pid, &["a"], "w1");
+    let cp = h.e.take_checkpoint(h.now).expect("the ack's checkpoint");
+    for c in &cp.commands {
+        assert!(super::is_checkpoint_id(&c.request_id), "marked");
+        assert!(h.e.answers_at_commit(&c.request_id), "in flight: planned");
+    }
+    h.e.on_step_down();
+    for c in &cp.commands {
+        assert!(
+            !h.e.answers_at_commit(&c.request_id),
+            "the gone engine's checkpoint is refused at planning"
+        );
+    }
+    h.e.on_leader(2, u64::MAX);
+    for c in &cp.commands {
+        assert!(
+            !h.e.answers_at_commit(&c.request_id),
+            "and when it leads again"
+        );
+    }
+    // A client's request id is never taken for a checkpoint's.
+    assert!(!super::is_checkpoint_id(&crate::util::uuidv7_bytes()));
+}
+
+/// A transaction that prepares on a part an ack changed (no checkpoint took
+/// it yet: a reserved part is no checkpoint's) carries that change in its
+/// own row: the ack's answer is in doubt from then on, as if a checkpoint
+/// carried it — a step-down must not answer it `Retry`, or the next leader
+/// re-runs it on the committed row and calls it stale.
+#[test]
+fn an_ack_a_transaction_carries_is_in_doubt_when_its_leader_steps_down() {
+    let mut h = H::new("ack-txn-doubt");
+    h.queue("q", qcfg());
+    let pid = lease(&mut h, "q", "p0", &["a", "b"], "w1");
+    let mut rx = ack_later(&mut h, pid, &["a"], "w1");
+    let id = h.rid();
+    let mut txn = h.txn(id);
+    txn.acks
+        .push(h.ack_target(pid, "q", "g", "w1", &[("b", Ok)]));
+    let part =
+        h.e.txn_prepare(&txn, h.now)
+            .expect("prepare")
+            .expect("a part");
+    assert!(
+        part.effects
+            .iter()
+            .any(|e| matches!(e, crate::rsm::effect::Effect::CursorSet { .. })),
+        "the bundle writes the row"
+    );
+    h.e.on_step_down();
+    match rx.try_recv() {
+        Result::Ok(Reply::Refused(r)) => assert_eq!(r.code, super::IN_DOUBT, "{r:?}"),
+        other => panic!("expected in doubt, got {other:?}"),
+    }
+}
+
+/// A step-down waits for a command already running (`Engine::serving`): it
+/// never lands between a command's change and its answer's registration.
+#[test]
+fn a_step_down_waits_for_the_command_in_progress() {
+    let h = H::new("serving-fence");
+    let held = super::state::read(&h.e.serving);
+    let e = h.e.clone();
+    let (tx, done) = std::sync::mpsc::channel();
+    let t = std::thread::spawn(move || {
+        e.on_step_down();
+        let _ = tx.send(());
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(done.try_recv().is_err(), "the reset waited");
+    drop(held);
+    done.recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the reset ran once the command ended");
+    t.join().unwrap();
+}
+
+/// An ack repeated after it released its lease — its reply lost, or the
+/// client (an SDK retrying a 503 `outcome_unknown`) sending it again — is
+/// answered as the first one was, success, on this leader and on the next:
+/// the released lease rides in the cursor row. Another lease, or a message
+/// that was not in that batch, is still stale.
+#[test]
+fn a_repeated_ack_of_a_released_lease_is_answered_as_the_first() {
+    let mut h = H::new("repeat-ack");
+    h.queue("q", qcfg());
+    let pid = lease(&mut h, "q", "p0", &["a", "b"], "w1");
+    let first = h.ack(pid, "q", "g", "w1", &[("a", Ok), ("b", Ok)]);
+    assert_eq!(first.committed, 1, "{first:?}");
+    assert!(
+        first.lease_released && first.stale_hashes.is_empty(),
+        "{first:?}"
+    );
+    // The same ack again: success, not stale.
+    let again = h.ack(pid, "q", "g", "w1", &[("a", Ok), ("b", Ok)]);
+    assert!(again.stale_hashes.is_empty(), "{again:?}");
+    assert!(again.lease_released, "{again:?}");
+    assert_eq!(again.committed, 1, "nothing moved: {again:?}");
+    // A part of it too.
+    let part = h.ack(pid, "q", "g", "w1", &[("b", Ok)]);
+    assert!(part.stale_hashes.is_empty(), "{part:?}");
+    // Another lease: stale.
+    let other = h.ack(pid, "q", "g", "w9", &[("a", Ok)]);
+    assert_eq!(other.stale_hashes.len(), 1, "{other:?}");
+    // A message of no batch that lease held: stale.
+    h.push("q", "p0", &["c"]);
+    let late = h.ack(pid, "q", "g", "w1", &[("c", Ok)]);
+    assert_eq!(late.stale_hashes.len(), 1, "{late:?}");
+    // On the next leader (it loads the cursor rows the checkpoints wrote).
+    h.checkpoint();
+    h.e.on_step_down();
+    h.e.on_leader(2, u64::MAX);
+    h.e.serve_after_us
+        .store(0, std::sync::atomic::Ordering::Release);
+    let next = h.ack(pid, "q", "g", "w1", &[("a", Ok), ("b", Ok)]);
+    assert!(
+        next.stale_hashes.is_empty(),
+        "the next leader knows the lease: {next:?}"
+    );
+}

@@ -156,9 +156,47 @@ fn every_kind_pins_its_catalogue_version() {
     } = effect_sample(Kind::CursorSet)
     {
         row.metadata = "m".into();
-        let v2 = Effect::CursorSet { pid, group, row };
+        let v2 = Effect::CursorSet {
+            pid,
+            group: group.clone(),
+            row: row.clone(),
+        };
         assert_eq!(v2.version(), VERSION_2);
         all.push(v2);
+        // Version 3: a cursor row carrying the lease the last ack released,
+        // with or without metadata; it round-trips whole.
+        for meta in ["", "m"] {
+            row.metadata = meta.into();
+            row.released = Some(crate::rsm::effect::ReleasedLease {
+                worker: "01a0f3fc-6cfc-7001-b32d-13447206b481".into(),
+                lo: 1034,
+                hi: 1036,
+            });
+            let v3 = Effect::CursorSet {
+                pid,
+                group: group.clone(),
+                row: row.clone(),
+            };
+            assert_eq!(v3.version(), crate::rsm::effect::VERSION_3);
+            let bytes = encode_effect(&v3);
+            assert_eq!(
+                u16::from_le_bytes([bytes[2], bytes[3]]),
+                crate::rsm::effect::VERSION_3
+            );
+            let mut e = Entry::new(1_768_000_000_000_000, 1, 1);
+            e.add_command(uuid(9), crate::rsm::entry::Outcome::Empty, vec![v3.clone()])
+                .unwrap();
+            let back = decode_entry(&encode_entry(&e).expect("encode")).expect("decode");
+            assert_eq!(back.effects[0], v3, "a v3 cursor row round-trips");
+            // The store's row bytes too.
+            let stored = crate::rsm::store::rows::cursor_encode(&row);
+            assert_eq!(stored[0], crate::rsm::store::rows::ROW_V3);
+            assert_eq!(
+                crate::rsm::store::rows::cursor_decode(&stored).expect("row"),
+                row
+            );
+            all.push(v3);
+        }
     }
     assert_eq!(kinds_version_of(&all), SUPPORTED_KINDS_VERSION);
 }
@@ -615,6 +653,7 @@ fn every_field_has_its_own_slot() {
         delivered: vec![uuid(10)],
         created_at_us: 11,
         metadata: String::new(),
+        released: None,
     };
     let e = Effect::CursorSet {
         pid: 12,

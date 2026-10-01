@@ -103,6 +103,45 @@ pub struct TxnPart {
     pub planner_positions: Vec<crate::rsm::planner::positions::PositionOp>,
 }
 
+/// The first bytes of every checkpoint command's request id. A request id
+/// the receiver mints is a uuidv7 (these bytes are its millisecond clock, in
+/// the 2020s near `0x0199`): no client command carries this prefix.
+const CHECKPOINT_MARK: [u8; 4] = [0xFF, 0x51, 0x43, 0x4B];
+
+/// A request id for one checkpoint command.
+pub(crate) fn checkpoint_id() -> RequestId {
+    let mut id = crate::util::uuidv7_bytes();
+    id[..4].copy_from_slice(&CHECKPOINT_MARK);
+    id
+}
+
+/// Whether a command's request id is a consumption engine checkpoint's. The
+/// batcher plans one only while the engine that took it still has it in
+/// flight ([`Engine::answers_at_commit`]): a checkpoint of an incarnation that
+/// is gone — its node stopped leading, then led again before its queue was
+/// answered — carries that engine's whole cursor rows, older than what a
+/// leader in between may have written (acks undone, leases revived).
+pub fn is_checkpoint_id(id: &RequestId) -> bool {
+    id[..4] == CHECKPOINT_MARK
+}
+
+/// The refusal code of an answer in doubt ([`in_doubt`]).
+pub const IN_DOUBT: &str = "in_doubt";
+
+/// The answer to a command whose change may or may not be in the log when
+/// this node stops leading: a checkpoint carrying it was on its way. Not
+/// retryable — the next leader would run the command again on a state that
+/// may already hold it (an ack would find its lease released and call its
+/// messages stale); the caller learns the outcome is unknown (the facade's
+/// `503 outcome_unknown`), as it would from a lost reply.
+pub fn in_doubt() -> Refusal {
+    Refusal::client(
+        IN_DOUBT,
+        "the leader changed while this change was being made durable: it may or may not have \
+         applied",
+    )
+}
+
 /// The leader lease probe: the age of the last quorum ack (`None` when this
 /// node does not lead; `ZERO` for a single voter).
 pub type LeaderLease = Arc<dyn Fn() -> Option<Duration> + Send + Sync>;
@@ -212,6 +251,18 @@ pub struct Engine {
     pub(crate) gen: AtomicU64,
     /// Serve nothing before this instant (a new leader's pause).
     pub(crate) serve_after_us: AtomicI64,
+    /// Take no new command before this instant: the leader drains before it
+    /// hands its leadership over ([`Engine::begin_drain`]).
+    pub(crate) drain_until_us: AtomicI64,
+    /// Held SHARED by whatever changes the state and registers answers — a
+    /// command's run (`run`, a parked pop's `retry_waiter`), a checkpoint's
+    /// `take`, a transaction's `prepare` — and EXCLUSIVELY by `reset`: a
+    /// step-down never lands between a command's change and its answer's
+    /// registration. Without it, an ack whose parts a reset wiped before its
+    /// answer waited on them was answered `Done` (the parts looked durable)
+    /// for a change that never reached the log, and one a checkpoint had
+    /// already carried could be answered `Retry` before it was marked sent.
+    pub(crate) serving: RwLock<()>,
     /// When this node's term began (leases acquired before it are foreign).
     pub(crate) term_start_us: AtomicI64,
     /// The engine's clock is `mono_us() + clock_offset` ([`Engine::now_us`]).
@@ -275,6 +326,8 @@ impl Engine {
             leader: AtomicBool::new(false),
             gen: AtomicU64::new(0),
             serve_after_us: AtomicI64::new(0),
+            drain_until_us: AtomicI64::new(0),
+            serving: RwLock::new(()),
             term_start_us: AtomicI64::new(0),
             clock_offset: AtomicI64::new(wall_us() - mono_us()),
             own_from: AtomicU64::new(u64::MAX),
@@ -361,6 +414,11 @@ impl Engine {
         if !self.leader.load(Ordering::Acquire) {
             return Some(Reply::Retry { hint: None });
         }
+        // Draining to hand the leadership over: a command that never ran here
+        // runs on the next leader.
+        if self.now_us() < self.drain_until_us.load(Ordering::Acquire) {
+            return Some(Reply::Retry { hint: None });
+        }
         let probe = read(&self.lease).clone();
         if let Some(f) = probe {
             match f() {
@@ -411,6 +469,15 @@ impl Engine {
         now_us: i64,
         sink: &mut Option<oneshot::Sender<Reply>>,
     ) -> Option<Reply> {
+        let _serving = read(&self.serving);
+        // The gate again, under the guard: a command that passed it just
+        // before a step-down or a drain began must not run now (a drain that
+        // already saw no exact answer pending would hand off under it).
+        if !self.leader.load(Ordering::Acquire)
+            || self.now_us() < self.drain_until_us.load(Ordering::Acquire)
+        {
+            return Some(Reply::Retry { hint: None });
+        }
         if now_us < self.serve_after_us.load(Ordering::Acquire) {
             // A new leader's pause: held, served when it ends.
             if let Some(tx) = sink.take() {
@@ -465,6 +532,26 @@ impl Engine {
             return Err(Refusal::retry("not_leader", "this node does not lead"));
         }
         self.prepare(txn, now_us).map(Some)
+    }
+
+    /// Whether a logged command with this request id committed and is still
+    /// in the request-id window (D6): a retry of it is answered from that
+    /// record, never prepared again.
+    pub fn recorded(&self, id: &RequestId) -> bool {
+        use crate::rsm::store::{Store, TypedReads};
+        self.store
+            .read(|r| r.request_outcome(id))
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// Whether this engine holds the reservation of a transaction it
+    /// prepared ([`Engine::txn_prepare`]): the batcher plans an engine-prepared
+    /// transaction only then (a step-down, or the reservation's TTL, drops it,
+    /// and with it the validity of the rows the transaction carries).
+    pub fn holds_reservation(&self, id: &RequestId) -> bool {
+        lock(&self.txns).map.contains_key(id)
     }
 
     /// The transaction's entry committed (`true`) or never will (`false`).
@@ -528,6 +615,9 @@ impl Engine {
     /// `last_index`: the log's last index as this node begins to lead (every
     /// later entry is this term's, [`Engine::own_from`]).
     pub fn on_leader(&self, _term: u64, last_index: u64) {
+        // Nothing runs on the incarnation being replaced while it is (a term
+        // change without a step-down in between: the batcher's first look).
+        self.leader.store(false, Ordering::Release);
         let floor = {
             use crate::rsm::store::{Store, TypedReads};
             self.store.read(|r| r.last_now_us()).unwrap_or(0)
@@ -545,17 +635,48 @@ impl Engine {
             now + self.k.ckpt_ms as i64 * 1000 + self.k.skew_us
         };
         self.serve_after_us.store(pause, Ordering::Release);
-        self.gen.fetch_add(1, Ordering::AcqRel);
+        // (The generation moved inside the reset's fence: a take or a load
+        // of the incarnation before sees it change, none of this one does.)
         self.leader.store(true, Ordering::Release);
         self.start_thread();
         self.nudge();
     }
 
-    /// This node no longer leads: every held answer gets `Retry`.
+    /// This leader is about to hand its leadership over (a graceful stop):
+    /// for at most `max`, every new command is answered `Retry` (it never ran
+    /// here: the next leader runs it), while the ticker keeps checkpointing
+    /// what was already served. The caller waits until no exact answer is
+    /// pending ([`Engine::exact_pending`]) and then hands off: an ack answered
+    /// from memory before the stop reaches the log and its client, instead of
+    /// being answered in doubt ([`in_doubt`]) at the step-down. The drain
+    /// ends by itself after `max` should the caller never end it.
+    pub fn begin_drain(&self, max: Duration) {
+        let until = self
+            .now_us()
+            .saturating_add(max.as_micros().min(i64::MAX as u128) as i64);
+        self.drain_until_us.store(until, Ordering::Release);
+        // A command that passed the gate before the drain began ends before
+        // this returns: its exact answer is then one `exact_pending` sees.
+        drop(write(&self.serving));
+    }
+
+    /// The drain is over (the hand-off happened, or did not and this node
+    /// serves on).
+    pub fn end_drain(&self) {
+        self.drain_until_us.store(0, Ordering::Release);
+    }
+
+    /// Whether an exact command (an ack, a nack, a positional ack, a DLQ head)
+    /// still waits for its checkpoint to commit.
+    pub fn exact_pending(&self) -> bool {
+        lock(&self.answers).map.values().any(|a| a.exact)
+    }
+
+    /// This node no longer leads: every held answer gets `Retry` — but for
+    /// an exact command's whose change a checkpoint carried ([`in_doubt`]).
     pub fn on_step_down(&self) {
         self.leader.store(false, Ordering::Release);
         self.own_from.store(u64::MAX, Ordering::Release);
-        self.gen.fetch_add(1, Ordering::AcqRel);
         self.reset(Reply::Retry { hint: None });
     }
 
@@ -599,6 +720,12 @@ impl Engine {
 
     /// Drop every piece of state, answering what waits with `reply`.
     fn reset(&self, reply: Reply) {
+        // Every command, take and prepare in progress ends first; none starts
+        // until this reset is done ([`Engine::serving`]).
+        let _fence = write(&self.serving);
+        // A checkpoint being taken now is of the incarnation that ends here:
+        // it must not register (checkpoint.rs `take`).
+        self.gen.fetch_add(1, Ordering::AcqRel);
         // Held commands (the pause).
         for h in std::mem::take(&mut *lock(&self.paused)) {
             let _ = h.sink.send(reply.clone());
@@ -647,7 +774,14 @@ impl Engine {
         }
         let answers = std::mem::take(&mut lock(&self.answers).map);
         for (_, a) in answers {
-            let _ = a.sink.send(reply.clone());
+            // A retry of an exact command whose change may be in the log
+            // would run it a second time: in doubt instead.
+            let r = if a.exact && a.sent {
+                Reply::Refused(in_doubt())
+            } else {
+                reply.clone()
+            };
+            let _ = a.sink.send(r);
         }
         *lock(&self.txns) = txn::Reservations::default();
         lock(&self.waking.q).clear();

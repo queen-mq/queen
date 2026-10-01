@@ -218,7 +218,9 @@ impl RaftFacade {
         let index = match r.leader_read_index(ctx.deadline.remaining()).await {
             Ok(i) => i,
             Err(RemoteError::NoLeader) => return Err(RsmError::NoLeader),
-            Err(RemoteError::Transport(m)) => return Err(RsmError::Internal(m)),
+            Err(RemoteError::Transport(m)) | Err(RemoteError::Lost(m)) => {
+                return Err(RsmError::Internal(m))
+            }
         };
         let grace = ctx
             .deadline

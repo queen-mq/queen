@@ -2116,28 +2116,69 @@ impl QLogReader {
         if dead.is_empty() && rewrite.is_none() {
             return Ok(out);
         }
-        let Ok(mut guard) = log.try_write() else {
-            // An append holds the log: the verdicts stand until the next pass.
+        // The copy of the one rewrite, OFF the lock: an append never waits
+        // for tens of MiB to be read, written and synced
+        // ([`super::copy_forward`]). Under the lock only what the log's memory
+        // and names need is done, and the unlinks come after it.
+        let prepared = match &rewrite {
+            Some((id, bytes, starts)) => {
+                match super::copy_forward(&cand.dir, *id, *bytes, starts, cand.fsync) {
+                    Ok(rw) => Some(rw),
+                    Err(e) => {
+                        tracing::debug!(
+                            target: "rsm",
+                            log = log_id,
+                            file = id,
+                            error = %e,
+                            "rsm qlog retention could not rewrite a file this pass",
+                        );
+                        out.more = true;
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        let drop_prepared = |rw: Option<super::Rewritten>| {
+            if let Some(rw) = rw {
+                let _ = std::fs::remove_file(rw.tmp());
+            }
+        };
+        if dead.is_empty() && prepared.is_none() {
+            return Ok(out);
+        }
+        // Only the short part waits for the lock now: an append holds it for
+        // microseconds, so wait a little rather than throw a finished copy away.
+        let mut guard = None;
+        for _ in 0..20 {
+            if let Ok(g) = log.try_write() {
+                guard = Some(g);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let Some(mut guard) = guard else {
+            // Appends held the log all along: the verdicts stand until the
+            // next pass.
+            drop_prepared(prepared);
             out.more = true;
             return Ok(out);
         };
         if self.reclaim_paused.load(Ordering::Acquire) > 0 {
             // A snapshot began linking the files while this pass judged them.
+            drop(guard);
+            drop_prepared(prepared);
             out.more = true;
             return Ok(out);
         }
         let (files_before, bytes_before) = (guard.file_count() as u64, guard.bytes());
-        let applied = guard.reclaim_apply(
-            &dead,
-            rewrite
-                .as_ref()
-                .map(|(id, bytes, starts)| (*id, *bytes, starts)),
-        );
+        let applied = guard.reclaim_apply(&dead, prepared);
         let (files_after, bytes_after) = (guard.file_count() as u64, guard.bytes());
         drop(guard);
         replace_total(&self.totals.files, files_before, files_after);
         replace_total(&self.totals.bytes, bytes_before, bytes_after);
-        let applied = applied?;
+        let (applied, doomed, sync) = applied?;
+        super::QLog::remove_reclaimed(&cand.dir, &doomed, sync)?;
         out.changed += applied.changed;
         out.compacted += applied.compacted;
         if applied.compacted > 0 {

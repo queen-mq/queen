@@ -213,6 +213,11 @@ pub enum RemoteError {
     NoLeader,
     /// The leader could not be reached or did not answer: retry.
     Transport(String),
+    /// The command went out and no answer came back (the stream broke, the
+    /// deadline passed): the leader may have run it. A retry is safe only
+    /// for a command whose second run the leader recognises (its request id,
+    /// I6) — [`crate::rsm::batcher::Command::runs_once`].
+    Lost(String),
 }
 
 /// `QUEEN_RAFT_CLIENT_OFFLOAD` (default on): a follower serves its clients
@@ -360,6 +365,7 @@ async fn read_index_rounds(
                 Ok(i) => Ok(*i),
                 Err(RemoteError::NoLeader) => Err(RemoteError::NoLeader),
                 Err(RemoteError::Transport(m)) => Err(RemoteError::Transport(m.clone())),
+                Err(RemoteError::Lost(m)) => Err(RemoteError::Lost(m.clone())),
             });
         }
     }
@@ -1834,7 +1840,9 @@ impl<S: Store + 'static> RaftReplicator<S> {
         )
         .await
         .map_err(|e| match e {
-            network::Fail::Unreachable(m) | network::Fail::Network(m) => RemoteError::Transport(m),
+            network::Fail::Unreachable(m) => RemoteError::Transport(m),
+            // Connected: the request may have reached the leader.
+            network::Fail::Network(m) => RemoteError::Lost(m),
         })
     }
 
@@ -1865,6 +1873,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
                 match fwd.call(&addr, body.clone(), ttl, drain).await {
                     Ok(answer) => return Ok(answer),
                     Err(forward::FwdError::Transport(m)) => return Err(RemoteError::Transport(m)),
+                    Err(forward::FwdError::Lost(m)) => return Err(RemoteError::Lost(m)),
                     Err(forward::FwdError::Unsupported) => {}
                 }
             }
@@ -2161,13 +2170,15 @@ impl<S: Store + 'static> RaftReplicator<S> {
             Err(RemoteError::NoLeader) => Err(ReplError::NotLeader {
                 hint: m.current_leader.filter(|l| *l != m.id),
             }),
-            Err(RemoteError::Transport(msg)) => Err(ReplError::refused(
-                "leader_unreachable",
-                format!(
-                    "the leader did not answer ({msg}): the change may or may not have been \
-                     made; read the membership before repeating it"
-                ),
-            )),
+            Err(RemoteError::Transport(msg)) | Err(RemoteError::Lost(msg)) => {
+                Err(ReplError::refused(
+                    "leader_unreachable",
+                    format!(
+                        "the leader did not answer ({msg}): the change may or may not have been \
+                         made; read the membership before repeating it"
+                    ),
+                ))
+            }
         }
     }
 
@@ -2656,7 +2667,9 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
                 Err(RemoteError::NoLeader) => {
                     return Err(ProposeError::NotLeader { hint: None });
                 }
-                Err(RemoteError::Transport(m)) => return Err(ProposeError::Refused(m)),
+                Err(RemoteError::Transport(m)) | Err(RemoteError::Lost(m)) => {
+                    return Err(ProposeError::Refused(m))
+                }
             };
             if !self.wait_applied(index, deadline).await {
                 return Err(ProposeError::Timeout);

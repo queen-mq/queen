@@ -130,6 +130,7 @@ pub(crate) fn ack_target<R: Reads + ?Sized>(
     target: &AckTarget,
     cfg: &crate::rsm::effect::QueueConfig,
     now: i64,
+    repeat_ok: bool,
 ) -> Result<Acked> {
     let pid = target.pid;
     let worker = &target.worker;
@@ -160,6 +161,25 @@ pub(crate) fn ack_target<R: Reads + ?Sized>(
     if !worker.is_empty()
         && (cur0.worker() != Some(worker.as_str()) || cur0.expires().is_none_or(|e| e < now))
     {
+        // The same ack again, after it released this lease: its first reply
+        // was lost, or the leader changed and the client (an SDK retrying a
+        // 503 `outcome_unknown`) sends it once more. Answered as it was the
+        // first time, on any leader: the released lease rides in the row.
+        // Only for a plain ack: a transaction acking a message its lease
+        // already settled is refused (its other legs would commit twice).
+        let repeat = if repeat_ok {
+            repeat_of_released(fr, &cur0, pid, worker, target, txns_start)?
+        } else {
+            None
+        };
+        if let Some(res) = repeat {
+            return Ok(Acked {
+                res,
+                dlq: Vec::new(),
+                changed: false,
+                released: false,
+            });
+        }
         return Ok(reject(cur0.committed, &target.items));
     }
 
@@ -191,6 +211,10 @@ pub(crate) fn ack_target<R: Reads + ?Sized>(
                     0
                 };
                 cur.release();
+                cur.released = cur0
+                    .lease
+                    .as_ref()
+                    .map(|l| (l.worker.clone(), (committed + 1).max(0) as u64, batch_end));
                 cur.committed = new;
                 cur.attempt_offset = None;
                 cur.attempt_count = 0;
@@ -493,6 +517,20 @@ pub(crate) fn ack_target<R: Reads + ?Sized>(
             }
         }
     }
+    // This ack settled the lease's whole batch: remember the lease, so a
+    // repeat of this ack is answered as this one is ([`repeat_of_released`]).
+    // Not a release for redelivery (a `failed` with budget left): those
+    // messages come back, and a repeat is stale.
+    if has_lease
+        && !released_for_retry
+        && cur.lease.is_none()
+        && cur.committed >= batch_end as i64
+        && !worker.is_empty()
+    {
+        if let Some(l) = cur0.lease.as_ref() {
+            cur.released = Some((l.worker.clone(), (committed + 1).max(0) as u64, batch_end));
+        }
+    }
     let lease_released = cur.worker().is_none() && cur0.worker().is_some();
     let changed = !same(cur, &cur0);
     Ok(Acked {
@@ -511,6 +549,48 @@ pub(crate) fn ack_target<R: Reads + ?Sized>(
         changed,
         released: released_for_retry,
     })
+}
+
+/// An ack under the lease the last ack released (`cur.released`): every
+/// item that is one of that batch's messages is answered success, as the
+/// first ack answered it (every one of them is at or below the cursor now);
+/// any other item stale. `None` when the lease is not that one, or no item
+/// is of its batch: the ordinary refusal.
+fn repeat_of_released<R: Reads + ?Sized>(
+    fr: &Frames<'_, R>,
+    cur: &Cur,
+    pid: Pid,
+    worker: &str,
+    target: &AckTarget,
+    txns_start: u64,
+) -> Result<Option<AckResult>> {
+    let Some((released, lo, hi)) = cur.released.as_ref() else {
+        return Ok(None);
+    };
+    if &**released != worker {
+        return Ok(None);
+    }
+    let mut stale_hashes = Vec::new();
+    for it in &target.items {
+        let r = fr.resolve(pid, &it.hash, *lo, *hi, cur.committed, txns_start)?;
+        if r.eff.is_none_or(|off| (off as i64) > cur.committed) {
+            stale_hashes.push(it.hash);
+        }
+    }
+    if stale_hashes.len() == target.items.len() {
+        return Ok(None);
+    }
+    Ok(Some(AckResult {
+        pid,
+        committed: cur.committed,
+        acked: 0,
+        conflated: 0,
+        dlq: 0,
+        lease_released: true,
+        batch_retry_count: cur.batch_retry_count,
+        noop_hashes: Vec::new(),
+        stale_hashes,
+    }))
 }
 
 /// Whether two cursors are the same row.
@@ -674,7 +754,10 @@ impl Engine {
         let mut woken: Vec<Gid> = Vec::new();
         let res = self.store.read(|r| {
             let fr = self.frames(r, &seg);
-            let mut deps = Deps::default();
+            let mut deps = Deps {
+                exact: true,
+                ..Deps::default()
+            };
             let mut results = Vec::with_capacity(c.targets.len());
             // A target a transaction holds refuses the whole ack (retryable)
             // before any target moves.
@@ -697,19 +780,25 @@ impl Engine {
                 }
                 groups.push(g);
             }
+            // Once a target changed, the command must not be refused (nor
+            // fail retryably): a re-run would find that target's lease
+            // released and call it stale. A target that cannot be acked from
+            // then on is answered stale on its own; every target keeps its
+            // place in the results (the render reads them by position).
+            let stale = |t: &crate::rsm::planner::AckTarget| AckResult {
+                pid: t.pid,
+                committed: -1,
+                acked: 0,
+                conflated: 0,
+                dlq: 0,
+                lease_released: false,
+                batch_retry_count: 0,
+                noop_hashes: Vec::new(),
+                stale_hashes: t.items.iter().map(|i| i.hash).collect(),
+            };
             for (t, g) in c.targets.iter().zip(groups) {
                 let Some(g) = g else {
-                    results.push(AckResult {
-                        pid: t.pid,
-                        committed: -1,
-                        acked: 0,
-                        conflated: 0,
-                        dlq: 0,
-                        lease_released: false,
-                        batch_retry_count: 0,
-                        noop_hashes: Vec::new(),
-                        stale_hashes: t.items.iter().map(|i| i.hash).collect(),
-                    });
+                    results.push(stale(t));
                     continue;
                 };
                 let cfg = g.cfg();
@@ -721,17 +810,31 @@ impl Engine {
                     .get_mut(&g.id)
                     .and_then(|gs| gs.parts.get_mut(&t.pid))
                 else {
+                    results.push(stale(t));
                     continue;
                 };
                 if p.reserved.is_some() {
-                    return Ok(Err(Refusal::retry(
-                        "reserved",
-                        "a transaction holds this partition's cursor",
-                    )));
+                    if deps.rows.is_empty() {
+                        return Ok(Err(Refusal::retry(
+                            "reserved",
+                            "a transaction holds this partition's cursor",
+                        )));
+                    }
+                    results.push(stale(t));
+                    continue;
                 }
                 let mut cur = p.cur.clone();
                 let has_row = p.has_row;
-                let acked = ack_target(&fr, &mut cur, has_row, txns_start, t, &cfg.queue, now)?;
+                let acked = match ack_target(
+                    &fr, &mut cur, has_row, txns_start, t, &cfg.queue, now, true,
+                ) {
+                    Ok(a) => a,
+                    Err(e) if deps.rows.is_empty() => return Err(e),
+                    Err(_) => {
+                        results.push(stale(t));
+                        continue;
+                    }
+                };
                 if acked.changed || !acked.dlq.is_empty() {
                     if let Some(v) = self.commit_cur(sh, g.id, t.pid, cur, acked.dlq, now) {
                         deps.rows.push((t.pid, g.id, v));
@@ -790,7 +893,10 @@ impl Engine {
                 Ok(r) => r,
                 Err(refusal) => return Ok(Err(refusal)),
             };
-            let mut deps = Deps::default();
+            let mut deps = Deps {
+                exact: true,
+                ..Deps::default()
+            };
             if res.is_some() && !same(&cur, &p.cur) {
                 if let Some(v) = self.commit_cur(sh, g.id, c.pid, cur, Vec::new(), now) {
                     deps.rows.push((c.pid, g.id, v));
@@ -870,7 +976,10 @@ impl Engine {
                 noop_hashes: Vec::new(),
                 stale_hashes: Vec::new(),
             };
-            let mut deps = Deps::default();
+            let mut deps = Deps {
+                exact: true,
+                ..Deps::default()
+            };
             if had {
                 if let Some(v) = self.commit_cur(sh, g.id, c.pid, cur, Vec::new(), now) {
                     deps.rows.push((c.pid, g.id, v));
@@ -1042,7 +1151,10 @@ impl Engine {
             cur.batch_retry_count = 0;
             cur.total_consumed += 1;
             let committed = cur.committed;
-            let mut deps = Deps::default();
+            let mut deps = Deps {
+                exact: true,
+                ..Deps::default()
+            };
             if let Some(v) = self.commit_cur(sh, g.id, c.pid, cur, vec![effect], now) {
                 deps.rows.push((c.pid, g.id, v));
             }

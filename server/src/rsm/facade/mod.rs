@@ -199,6 +199,12 @@ pub enum RsmError {
     Overloaded { retry_after_s: u64 },
     /// The command's deadline elapsed before it could be answered (I15).
     Timeout,
+    /// The command may or may not have taken effect: the leader changed while
+    /// its change was on its way to the log, or its forwarded call was lost
+    /// after it went out — and it is one the next leader cannot recognise as
+    /// a retry (an ack the consumption engine served from memory,
+    /// [`crate::rsm::batcher::Command::runs_once`]) → `503 outcome_unknown`.
+    InDoubt,
     /// A non-retryable, whole-command refusal from the planner (§5.4, I14): a
     /// bad request the client must fix, not retry — rendered `400` with the
     /// planner's own `code`. Distinct from [`RsmError::Internal`] (a broker
@@ -221,6 +227,7 @@ impl RsmError {
             RsmError::StorageFull => "storage_full",
             RsmError::Overloaded { .. } => "overloaded",
             RsmError::Timeout => "timeout",
+            RsmError::InDoubt => "outcome_unknown",
             RsmError::Rejected { .. } => "rejected",
             RsmError::Internal(_) => "internal",
         }
@@ -249,6 +256,11 @@ impl std::fmt::Display for RsmError {
                 "the broker is over its push admission budget; retry after {retry_after_s} s"
             ),
             RsmError::Timeout => write!(f, "the request deadline elapsed"),
+            RsmError::InDoubt => write!(
+                f,
+                "the leader changed while this change was being made durable: it may or may not \
+                 have applied"
+            ),
             RsmError::Rejected { message, .. } => write!(f, "{message}"),
             RsmError::Internal(m) => write!(f, "{m}"),
         }

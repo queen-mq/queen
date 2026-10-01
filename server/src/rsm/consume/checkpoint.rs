@@ -39,6 +39,14 @@ pub(crate) struct Deps {
     pub cats: Vec<(Arc<Group>, u64)>,
     /// The leases a claim answer grants: handed back when nobody receives it.
     pub claims: Vec<(Pid, Gid, Arc<str>, u64)>,
+    /// The command must not run twice ([`PendingAnswer::exact`]): if this
+    /// node stops leading while its change may be in the log, the answer is
+    /// [`super::in_doubt`], never a `Retry` another leader would run again —
+    /// an ack's second run finds the lease its first run released and calls
+    /// every message stale (2026-09-30, Jepsen p11-w2-restart: a graceful
+    /// leader restart, an ack answered stale, its message never delivered
+    /// again).
+    pub exact: bool,
 }
 
 impl Deps {
@@ -74,15 +82,24 @@ impl Engine {
                     reply,
                     sink: tx,
                     claims: deps.claims.clone(),
+                    exact: deps.exact,
+                    sent: false,
                 },
             );
             id
         };
         let mut met = 1usize; // the registration guard
+                              // A checkpoint may have taken the change before this answer waited
+                              // on it (the command changed the part, then let the shard go): in
+                              // flight, or resolved without a commit seen, it is in doubt already.
+        let mut sent = false;
         for (pid, gid, ver) in &deps.rows {
             let mut sh = lock(&self.shards[shard_of(*pid)]);
             match sh.groups.get_mut(gid).and_then(|gs| gs.parts.get_mut(pid)) {
-                Some(p) if p.durable_ver < *ver => p.waiters.push((id, *ver)),
+                Some(p) if p.durable_ver < *ver => {
+                    p.waiters.push((id, *ver));
+                    sent |= p.sent_ver >= *ver || p.doubt_ver >= *ver;
+                }
                 _ => met += 1,
             }
         }
@@ -90,12 +107,27 @@ impl Engine {
             let mut st = lock(&g.st);
             if st.cat_durable < *ver && !st.dropped {
                 st.cat_waiters.push((id, *ver));
+                sent |= st.cat_sent_ver >= *ver || st.cat_doubt >= *ver;
             } else {
                 met += 1;
             }
         }
+        if sent {
+            self.mark_sent(&[id]);
+        }
         self.settle(id, met);
         None
+    }
+
+    /// The answers `ids` wait on a change a checkpoint (or a transaction's
+    /// entry) carried.
+    pub(crate) fn mark_sent(&self, ids: &[u64]) {
+        let mut a = lock(&self.answers);
+        for id in ids {
+            if let Some(p) = a.map.get_mut(id) {
+                p.sent = true;
+            }
+        }
     }
 
     /// `n` more dependencies of answer `id` are durable.
@@ -158,11 +190,20 @@ impl Engine {
 
     /// Drain the dirty state into one checkpoint.
     pub(crate) fn take(&self, now_us: i64) -> Option<Checkpoint> {
+        // A reset waits for this take to finish ([`Engine::serving`]): the
+        // answers it marks sent are marked before the reset reads them.
+        let _serving = super::state::read(&self.serving);
+        // The incarnation this checkpoint is of: one that ends while it is
+        // taken (a step-down resets the engine) registers nothing, so the
+        // batcher never plans its rows ([`super::is_checkpoint_id`]).
+        let gen = self.gen.load(Ordering::Acquire);
         let lanes = self.k.lanes.max(1);
         // (tenant, lane) -> the effects, part by part (a part's row and its
         // dead letters stay together).
         let mut per: HashMap<(String, u64), Vec<Vec<Effect>>> = HashMap::new();
         let mut ticket = Ticket::default();
+        // The answers waiting on a change this checkpoint carries.
+        let mut sent: Vec<u64> = Vec::new();
         for s in self.shards.iter() {
             let mut sh = lock(s);
             let sh = &mut *sh;
@@ -205,6 +246,12 @@ impl Engine {
                 effs.extend(dlq.iter().cloned());
                 p.dlq_sent.extend(dlq);
                 p.sent_ver = p.ver;
+                sent.extend(
+                    p.waiters
+                        .iter()
+                        .filter(|(_, v)| *v <= p.ver)
+                        .map(|(a, _)| *a),
+                );
                 ticket.rows.push((pid, gid, p.ver));
                 if !effs.is_empty() {
                     per.entry((tenant, pid % lanes)).or_default().push(effs);
@@ -231,6 +278,13 @@ impl Engine {
                 let effs = std::mem::take(&mut st.cat);
                 st.cat_sent = effs.clone();
                 st.cat_sent_ver = st.cat_ver;
+                let ver = st.cat_ver;
+                sent.extend(
+                    st.cat_waiters
+                        .iter()
+                        .filter(|(_, v)| *v <= ver)
+                        .map(|(a, _)| *a),
+                );
                 ticket.cats.push((g.id, st.cat_ver));
                 drop(st);
                 cats.entry(g.tenant.clone()).or_default().extend(effs);
@@ -270,7 +324,7 @@ impl Engine {
             let effects = cats.remove(&t).unwrap_or_default();
             if !effects.is_empty() {
                 commands.push(EffectsCommand {
-                    request_id: crate::util::uuidv7_bytes(),
+                    request_id: super::checkpoint_id(),
                     tenant: t,
                     effects,
                 });
@@ -285,7 +339,7 @@ impl Engine {
             for effs in parts {
                 if rows >= self.k.rows_per_cmd && !cur.is_empty() {
                     commands.push(EffectsCommand {
-                        request_id: crate::util::uuidv7_bytes(),
+                        request_id: super::checkpoint_id(),
                         tenant: key.0.clone(),
                         effects: std::mem::take(&mut cur),
                     });
@@ -296,7 +350,7 @@ impl Engine {
             }
             if !cur.is_empty() {
                 commands.push(EffectsCommand {
-                    request_id: crate::util::uuidv7_bytes(),
+                    request_id: super::checkpoint_id(),
                     tenant: key.0.clone(),
                     effects: cur,
                 });
@@ -306,12 +360,21 @@ impl Engine {
         ticket.ids = commands.iter().map(|c| c.request_id).collect();
         let id = {
             let mut t = lock(&self.tickets);
+            if self.gen.load(Ordering::Acquire) != gen {
+                return None;
+            }
             let id = t.next;
             t.next += 1;
             t.ids.extend(ticket.ids.iter().copied());
             t.inflight.insert(id, ticket);
             id
         };
+        // Registered: the batcher may now plan it, so what it carries is in
+        // doubt from here (not before: a take that registers nothing hands
+        // the batcher nothing).
+        if !sent.is_empty() {
+            self.mark_sent(&sent);
+        }
         if commands.is_empty() {
             // Nothing to log (the rows were first contacts that went away):
             // durable as it is.
@@ -361,6 +424,10 @@ impl Engine {
                     }
                 });
             } else {
+                // Refused, or its fate unknown (a step-down answers the
+                // batcher's commands `Retry` whether or not their entry is
+                // in the log): an answer at this version is in doubt.
+                p.doubt_ver = p.doubt_ver.max(*ver);
                 // Its dead letters go again, before any decided since.
                 let mut back = std::mem::take(&mut p.dlq_sent);
                 back.append(&mut p.dlq);
@@ -394,6 +461,7 @@ impl Engine {
                     }
                 });
             } else {
+                st.cat_doubt = st.cat_doubt.max(ver);
                 let mut back = std::mem::take(&mut st.cat_sent);
                 back.append(&mut st.cat);
                 st.cat = back;

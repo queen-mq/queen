@@ -802,6 +802,95 @@ pub(crate) struct ReclaimCandidates {
     pub all_ids: std::collections::BTreeSet<u64>,
     /// [`QLog::set_compact_min_dead_pct`].
     pub compact_pct: u8,
+    /// The log's fsync mode (a copy-forward done off the lock syncs its file
+    /// as the log would).
+    pub fsync: Fsync,
+}
+
+/// A copy-forward rewrite prepared OFF the log's lock ([`copy_forward`]): the
+/// live records of sealed file `id` (judged at `judged_bytes`) written and
+/// synced to its private rewrite file. [`QLog::reclaim_apply`] publishes it
+/// under the lock — or, the file changed since, drops it.
+pub(crate) struct Rewritten {
+    pub id: u64,
+    pub judged_bytes: u64,
+    tmp: PathBuf,
+    at: u64,
+    records: Vec<index::Record>,
+}
+
+impl Rewritten {
+    /// The private rewrite file (never published): removable at any time.
+    pub fn tmp(&self) -> &Path {
+        &self.tmp
+    }
+}
+
+/// The copy half of a compaction, with no lock on the log: a sealed file is
+/// immutable, and its private rewrite file (`compact_path`) is this pass's
+/// alone (one retention pass at a time; a crash leaves it unpublished, and
+/// open discards it). Before, the whole compaction — reading and writing up to
+/// a file's 64 MiB and syncing it — ran under the log's WRITE lock, and every
+/// append of the queue waited behind it: the leader's local write stalled
+/// 200-350 ms once per retention pass (every 5 s), and with it every commit
+/// (2026-09-30 soak: e2e p99 ~60 ms before completed retention began, ~350 ms
+/// after).
+pub(crate) fn copy_forward(
+    dir: &Path,
+    id: u64,
+    judged_bytes: u64,
+    txns_starts: &std::collections::HashMap<u64, u64>,
+    fsync: Fsync,
+) -> io::Result<Rewritten> {
+    let src = file_path(dir, id);
+    let tmp = compact_path(dir, id);
+    remove_if_present(&tmp)?;
+    let mut header = [0u8; FILE_HEADER_LEN as usize];
+    File::open(&src)?.read_exact(&mut header)?;
+    let mut out = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .read(true)
+        .open(&tmp)?;
+    let written = (|| -> io::Result<(u64, Vec<index::Record>)> {
+        out.write_all(&header)?;
+        let mut at = FILE_HEADER_LEN;
+        let mut records = Vec::new();
+        let (_valid, torn) = scan_records(&src, judged_bytes, |header, _old_at, bytes| {
+            if !record::is_entry_kind(header.kind()) {
+                let idx = index::Record::of_header(header, at);
+                if !record_is_dead(&idx, txns_starts) {
+                    out.write_all(bytes)?;
+                    records.push(idx);
+                    at = at.saturating_add(bytes.len() as u64);
+                }
+            }
+            Ok(())
+        })?;
+        if let Some((pos, why)) = torn {
+            return Err(corrupt(
+                &src,
+                &format!("damaged record at byte {pos} of compacted sealed file: {why}"),
+            ));
+        }
+        fsync_file(&out, fsync)?;
+        index::sort_records(&mut records);
+        Ok((at, records))
+    })();
+    drop(out);
+    match written {
+        Ok((at, records)) => Ok(Rewritten {
+            id,
+            judged_bytes,
+            tmp,
+            at,
+            records,
+        }),
+        Err(e) => {
+            let _ = remove_if_present(&tmp);
+            Err(e)
+        }
+    }
 }
 
 impl QLog {
@@ -837,6 +926,8 @@ impl QLog {
         for id in &ids {
             remove_if_present(&compact_path(&dir, *id))?;
         }
+        // Files a retention pass dropped and had not unlinked yet.
+        remove_graveyard(&dir)?;
 
         let mut rec = QLogRecovery::default();
 
@@ -2523,6 +2614,22 @@ impl QLog {
     /// candidate, whatever the predicate says — recovery replays from there.
     ///
     pub fn unlink_dead_files(&mut self, is_dead: impl Fn(&FileMeta) -> bool) -> io::Result<usize> {
+        let (n, paths) = self.take_dead_files(is_dead);
+        if n == 0 {
+            return Ok(0);
+        }
+        for p in &paths {
+            remove_if_present(p)?;
+        }
+        sync_dir(&self.dir)?;
+        Ok(n)
+    }
+
+    /// Drop the sealed files `is_dead` names from the log (memory only) and
+    /// return how many, and the paths to unlink: the caller removes them,
+    /// under the lock ([`QLog::unlink_dead_files`]) or after it
+    /// ([`QLog::reclaim_apply`]).
+    fn take_dead_files(&mut self, is_dead: impl Fn(&FileMeta) -> bool) -> (usize, Vec<PathBuf>) {
         let active_id = self.active_index.file_id();
         let floor = self.floor.load(Ordering::Acquire);
         let victims: Vec<u64> = self
@@ -2532,31 +2639,56 @@ impl QLog {
             .map(|m| m.id)
             .collect();
         if victims.is_empty() {
-            return Ok(0);
+            return (0, Vec::new());
         }
+        let mut paths = Vec::with_capacity(victims.len() * 3);
         for id in &victims {
             self.sealed.remove(id);
             // P3.2: drop the cached read fd (an in-flight read keeps its own
             // `Arc<File>`, so the unlinked inode stays readable until it ends).
             self.cache.forget_file(*id);
             self.seq_points.lock_unpoisoned().forget_file(*id);
-            remove_if_present(&file_path(&self.dir, *id))?;
-            remove_if_present(&qidx_path(&self.dir, *id))?;
-            remove_if_present(&qidx_tmp_path(&self.dir, *id))?;
+            // Out of the log's names now (a rename: no data moves), unlinked
+            // later: a reopen in between must not read the file back.
+            for path in [file_path(&self.dir, *id), qidx_path(&self.dir, *id)] {
+                let dead = dead_path(&path);
+                match std::fs::rename(&path, &dead) {
+                    Ok(()) => paths.push(dead),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => paths.push(path),
+                }
+            }
+            paths.push(qidx_tmp_path(&self.dir, *id));
         }
         // P3.3: the dropped records' hash blocks are unreachable (no index entry
         // names them); retention is rare, so free them all rather than track
         // which file each block came from.
         self.cache.clear_hashes();
         self.files.retain(|m| !victims.contains(&m.id));
-        sync_dir(&self.dir)?;
         tracing::debug!(
             target: "rsm",
             queue = self.queue_id,
             dropped = victims.len(),
             "rsm qlog dead files unlinked",
         );
-        Ok(victims.len())
+        (victims.len(), paths)
+    }
+
+    /// Unlink what [`QLog::reclaim_apply`] dropped, and make it durable: run
+    /// with no lock on the log.
+    pub(crate) fn remove_reclaimed(dir: &Path, doomed: &[PathBuf], sync: bool) -> io::Result<()> {
+        for p in doomed {
+            remove_if_present(p)?;
+        }
+        if sync || !doomed.is_empty() {
+            // The queue's directory may be gone already (an idle queue's
+            // whole log removed in the meantime): nothing left to sync.
+            match sync_dir(dir) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                other => other?,
+            }
+        }
+        Ok(())
     }
 
     /// Reclaim sealed files below their partitions' `txns_start` watermarks.
@@ -2707,44 +2839,122 @@ impl QLog {
                 .collect(),
             all_ids: self.files.iter().map(|m| m.id).collect(),
             compact_pct: self.compact_min_dead_pct,
+            fsync: self.opts.fsync,
         }
     }
 
-    /// Carry out what per-file retention decided off the lock: unlink the
-    /// wholly dead files in `dead`, and rewrite `rewrite = (id, bytes,
-    /// txns_starts)` keeping only its live messages. Each file is checked again
-    /// here (sealed, not active, at or below the recovery floor, and the rewrite
-    /// still the length it was judged at), so a stale decision changes nothing.
+    /// Carry out, under the write lock, what per-file retention decided and
+    /// prepared off it: drop the wholly dead files in `dead` from the log, and
+    /// publish `rewrite` (a copy-forward [`copy_forward`] made off the lock)
+    /// if its file is still the one it was judged at (sealed, not active, at
+    /// or below the recovery floor, the same length) — a stale decision
+    /// changes nothing. Only memory, the rewrite's index and one rename happen
+    /// here: the paths to unlink come back (`doomed`, with whether a
+    /// directory sync is owed) for the caller to remove AFTER it releases the
+    /// lock. A crash before they are gone leaves dead files an open reads and
+    /// the next pass unlinks again.
     pub(crate) fn reclaim_apply(
         &mut self,
         dead: &[u64],
-        rewrite: Option<(u64, u64, &std::collections::HashMap<u64, u64>)>,
-    ) -> io::Result<ReclaimProgress> {
+        rewrite: Option<Rewritten>,
+    ) -> io::Result<(ReclaimProgress, Vec<PathBuf>, bool)> {
         let mut out = ReclaimProgress::default();
+        let mut doomed = Vec::new();
+        let mut sync = false;
         if !dead.is_empty() {
-            out.changed += self.unlink_dead_files(|meta| dead.contains(&meta.id))?;
+            let (n, paths) = self.take_dead_files(|meta| dead.contains(&meta.id));
+            out.changed += n;
+            doomed.extend(paths);
+            sync |= n > 0;
         }
-        if let Some((id, bytes, starts)) = rewrite {
+        if let Some(rw) = rewrite {
             let active = self.active_index.file_id();
             let floor = self.floor.load(Ordering::Acquire);
             let unchanged = self.files.iter().any(|m| {
-                m.id == id
+                m.id == rw.id
                     && m.sealed
                     && Some(m.id) != active
                     && m.max_seq <= floor
-                    && m.bytes == bytes
+                    && m.bytes == rw.judged_bytes
             });
-            if unchanged {
-                self.compact_file_below_txns(id, starts)?;
-                self.reclaim_checked.remove(&id);
-                out.changed += 1;
-                out.compacted += 1;
+            // Its private file may be gone: a live truncation reopened the
+            // log while the copy ran (an open discards every rewrite file).
+            if unchanged && rw.tmp.exists() {
+                let id = rw.id;
+                let tmp = rw.tmp.clone();
+                match self.publish_rewrite(rw) {
+                    Ok(()) => {
+                        self.reclaim_checked.remove(&id);
+                        out.changed += 1;
+                        out.compacted += 1;
+                        sync = true;
+                    }
+                    Err(e) => {
+                        // The old file stands (a published index without its
+                        // rename is a length mismatch the next open rebuilds);
+                        // the dropped files are still unlinked.
+                        tracing::warn!(
+                            target: "rsm",
+                            queue = self.queue_id,
+                            file = id,
+                            error = %e,
+                            "rsm qlog retention could not publish a rewrite"
+                        );
+                        doomed.push(tmp);
+                        sync = true;
+                    }
+                }
+            } else {
+                doomed.push(rw.tmp);
             }
         }
         let live_ids: std::collections::BTreeSet<u64> =
             self.files.iter().map(|meta| meta.id).collect();
         self.reclaim_checked.retain(|id, _| live_ids.contains(id));
-        Ok(out)
+        Ok((out, doomed, sync))
+    }
+
+    /// Publish a copy-forward prepared off the lock: its index first (while
+    /// the lock is held, readers still use the old mmap; a crash here leaves a
+    /// length mismatch and open rebuilds the old file's index), then the
+    /// rename, then memory. The directory sync that makes the rename durable
+    /// is the caller's, after the lock.
+    fn publish_rewrite(&mut self, rw: Rewritten) -> io::Result<()> {
+        let Rewritten {
+            id,
+            tmp,
+            at,
+            records,
+            ..
+        } = rw;
+        let src = file_path(&self.dir, id);
+        write_qidx(&self.dir, id, at, &records)?;
+        let view = index::View::open(&qidx_path(&self.dir, id), Some(at))?;
+        crate::rsm::faults::hit("compaction.copied");
+        std::fs::rename(&tmp, &src)?;
+        self.cache.forget_file(id);
+        self.cache.clear_hashes();
+        self.seq_points.lock_unpoisoned().forget_file(id);
+        self.sealed.insert(id, view);
+        if let Some(meta) = self.files.iter_mut().find(|meta| meta.id == id) {
+            meta.bytes = at;
+            meta.records = records.len() as u64;
+            meta.min_created_at_us = i64::MAX;
+            meta.max_created_at_us = i64::MIN;
+            for record in &records {
+                meta.absorb(record.created_at_us);
+            }
+        }
+        crate::rsm::faults::hit("compaction.loc_committed");
+        tracing::debug!(
+            target: "rsm",
+            queue = self.queue_id,
+            file = id,
+            bytes = at,
+            records = records.len(),
+            "rsm qlog sealed file compacted",
+        );
+        Ok(())
     }
 
     /// Crash-safe copy-forward compaction of one sealed, durable file. The
@@ -3482,6 +3692,30 @@ fn qidx_tmp_path(dir: &Path, id: u64) -> PathBuf {
 
 fn compact_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("r{id:08}.qlog.compact.tmp"))
+}
+
+/// A dropped file's name until it is unlinked ([`QLog::take_dead_files`]):
+/// not a `.qlog`, so an open between the drop and the unlink (a live
+/// truncation reopens the log) never reads it back; open removes it.
+fn dead_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".dead");
+    path.with_file_name(name)
+}
+
+/// Remove the files a retention pass dropped but had not unlinked yet.
+fn remove_graveyard(dir: &Path) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.ends_with(".dead"))
+        {
+            remove_if_present(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// Every `rNNNNNNNN.qlog` id in `dir`.

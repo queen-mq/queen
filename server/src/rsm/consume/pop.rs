@@ -927,11 +927,28 @@ impl Engine {
     /// Serve one parked waiter again: the waiter back when it found nothing
     /// (it parks again), `None` when it was answered.
     pub(crate) fn retry_waiter(&self, g: &Arc<Group>, w: Waiter, now: i64) -> Option<Waiter> {
+        // One incarnation from the claim to its answer ([`Engine::serving`]).
+        let _serving = super::state::read(&self.serving);
         if w.sink.is_closed() {
             return None;
         }
         if expired(&w.cmd, now, self.k.margin_us) {
             let _ = w.sink.send(Engine::empty_pop());
+            return None;
+        }
+        // Not leading any more, or draining to hand the leadership over: a
+        // parked pop claims nothing here (a claim answered at the hand-off
+        // would be retried elsewhere, its lease left to expire); it never
+        // ran, so the next leader runs it.
+        if !self.leader.load(std::sync::atomic::Ordering::Acquire)
+            || self.now_us()
+                < self
+                    .drain_until_us
+                    .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let _ = w
+                .sink
+                .send(crate::rsm::batcher::Reply::Retry { hint: None });
             return None;
         }
         let seg = self.seg_source();

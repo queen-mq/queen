@@ -72,6 +72,7 @@ pub fn cursor_row() -> CursorRow {
         // compares exactly this value with the cleanup cutoff (006 ≈623).
         created_at_us: 1_767_999_000_000_000,
         metadata: String::new(),
+        released: None,
     }
 }
 

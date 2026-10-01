@@ -1749,6 +1749,83 @@ async fn a_transaction_acks_the_input_and_pushes_the_output_all_or_nothing() {
     facade.shutdown().await;
 }
 
+/// A transaction's reply lost after it committed (the leader restarted,
+/// changed, or the forward stream broke): the retry — the same request id —
+/// is answered from the record the committed entry left (I6). The engine that
+/// served the first attempt is gone, and preparing the retry again would find
+/// its ack applied (the lease released) and roll it back: a transaction that
+/// committed, reported rolled back (Jepsen W5: a phantom output).
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_retried_transaction_that_committed_is_answered_from_its_record() {
+    let dir = scratch("txn-retry");
+    let body;
+    let rid;
+    {
+        let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+        facade
+            .push(
+                ctx(),
+                PushReq {
+                    raw: br#"{"items":[{"queue":"inq","payload":{"n":1},"transactionId":"t1"}]}"#
+                        .to_vec(),
+                },
+            )
+            .await
+            .expect("push");
+        let pop = pop_q(&facade, "inq").await;
+        let pid = pop["partitionId"]
+            .as_str()
+            .expect("partitionId")
+            .to_string();
+        let lease = pop["leaseId"].as_str().expect("leaseId").to_string();
+        body = serde_json::json!({
+            "operations": [
+                {"type": "ack", "transactionId": "t1", "partitionId": pid, "leaseId": lease},
+                {"type": "push", "items": [{"queue": "outq", "payload": {"n": 1}, "transactionId": "o-first"}]}
+            ]
+        });
+        let c = ctx();
+        rid = c.request_id;
+        let out = facade
+            .transaction(
+                c,
+                crate::rsm::facade::TxnReq {
+                    raw: body.to_string().into_bytes(),
+                },
+            )
+            .await
+            .expect("transaction");
+        assert_eq!(parse(&out.body)["success"], true, "{}", out.body);
+        facade.shutdown().await;
+    }
+    // A new engine (the restart): the retry of the same command.
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("reopen facade");
+    let mut c = ctx();
+    c.request_id = rid;
+    let out = facade
+        .transaction(
+            c,
+            crate::rsm::facade::TxnReq {
+                raw: body.to_string().into_bytes(),
+            },
+        )
+        .await
+        .expect("retried transaction");
+    let v = parse(&out.body);
+    assert_eq!(
+        v["success"], true,
+        "the committed bundle, not a rollback: {v}"
+    );
+    let outm = pop_q(&facade, "outq").await;
+    assert_eq!(
+        outm["messages"].as_array().map(|m| m.len()),
+        Some(1),
+        "the output was pushed once: {outm}"
+    );
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_transaction_carries_a_kv_rider_all_or_nothing() {
     // Phase B4: the `kv` rider rides the SAME entry as the bundle's messages.

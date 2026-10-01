@@ -364,6 +364,154 @@ pub struct RaftFacade {
     storage_check_interval_us: i64,
     disk_high_pct: f64,
     disk_low_pct: f64,
+    /// What this node last heard of the leader's commit index (a follower:
+    /// `/health`'s catch-up lag, [`RaftFacade::catch_up_lag_ms`]).
+    leader_commit: Arc<LeaderCommit>,
+}
+
+/// The leader's commit index as a follower last read it, every second
+/// ([`spawn_leader_commit_probe`]).
+#[derive(Default)]
+struct LeaderCommit {
+    index: std::sync::atomic::AtomicU64,
+    /// When `index` was read (wall ms); 0 = never.
+    at_ms: std::sync::atomic::AtomicI64,
+}
+
+/// `QUEEN_RAFT_READY_LAG_ENTRIES` (default 1000): how many entries behind the
+/// leader's commit a follower may be and still count as caught up for
+/// `/health` (the slack of ordinary replication and a sampled commit index).
+fn ready_lag_entries() -> u64 {
+    static N: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+        std::env::var("QUEEN_RAFT_READY_LAG_ENTRIES")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(1000)
+    });
+    *N
+}
+
+/// Every second, on a node that does not lead: ask the leader its commit
+/// index (the read-index call reads already use, half a second at most). A
+/// node that lost its way to the leader keeps the last answer, which ages
+/// out of [`RaftFacade::catch_up_lag_ms`].
+fn spawn_leader_commit_probe(repl: &Arc<NodeReplicator<HeedStore>>, lc: Arc<LeaderCommit>) {
+    if !matches!(&**repl, NodeReplicator::Raft(_)) {
+        return;
+    }
+    let weak = Arc::downgrade(repl);
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(Duration::from_secs(1));
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            every.tick().await;
+            let Some(repl) = weak.upgrade() else {
+                break;
+            };
+            let NodeReplicator::Raft(r) = &*repl else {
+                break;
+            };
+            if repl.role().is_leader() {
+                continue;
+            }
+            if let Ok(i) = r.leader_read_index(Duration::from_millis(500)).await {
+                lc.index.store(i, std::sync::atomic::Ordering::Relaxed);
+                lc.at_ms
+                    .store(wall_micros() / 1000, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+impl RaftFacade {
+    /// `/health`'s lag (ms): how far behind the leader this node's apply is,
+    /// as the age of the last entry it applied — but only while it is more
+    /// than [`ready_lag_entries`] behind the leader's commit index (read in
+    /// the last 5 s). A node that restarted tens of thousands of entries
+    /// behind answers its clients only once it has applied what the leader
+    /// had (read-your-writes), so it reports `settling` until it caught up:
+    /// a readiness probe keeps clients off it, and a rolling restart waits
+    /// for it before it stops the next node. The leader, a single node, a
+    /// node that cannot reach the leader, and an idle cluster report 0.
+    fn catch_up_lag_ms(&self, applied: u64, role: &crate::rsm::replicator::Role) -> u64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        if matches!(role, crate::rsm::replicator::Role::Leader { .. }) {
+            return 0;
+        }
+        let last_now_us = || {
+            use crate::rsm::store::{Store, TypedReads};
+            self.store.read(|r| r.last_now_us()).unwrap_or(0)
+        };
+        catch_up_lag(
+            self.leader_commit.index.load(Relaxed),
+            self.leader_commit.at_ms.load(Relaxed),
+            applied,
+            ready_lag_entries(),
+            wall_micros(),
+            last_now_us,
+        )
+    }
+}
+
+/// [`RaftFacade::catch_up_lag_ms`] on its inputs: the leader's commit index
+/// and when it was read (wall ms, 0 = never), this node's applied index, the
+/// entries of slack, the wall clock (µs) and the applied entry's stamp (µs,
+/// read only when needed).
+fn catch_up_lag(
+    leader_index: u64,
+    at_ms: i64,
+    applied: u64,
+    slack: u64,
+    now_us: i64,
+    last_now_us: impl FnOnce() -> i64,
+) -> u64 {
+    if at_ms == 0 || now_us / 1000 - at_ms > 5_000 {
+        return 0;
+    }
+    if leader_index.saturating_sub(applied) <= slack {
+        return 0;
+    }
+    let last = last_now_us();
+    if last <= 0 {
+        return 0;
+    }
+    ((now_us - last) / 1000).max(1) as u64
+}
+
+#[cfg(test)]
+mod catch_up_lag_tests {
+    use super::catch_up_lag;
+
+    const NOW: i64 = 1_790_820_000_000_000;
+
+    #[test]
+    fn a_node_far_behind_the_leader_reports_the_age_of_what_it_applied() {
+        // 50,000 entries behind, its last applied entry 40 s old.
+        let lag = catch_up_lag(1_050_000, NOW / 1000 - 300, 1_000_000, 1000, NOW, || {
+            NOW - 40_000_000
+        });
+        assert_eq!(lag, 40_000);
+    }
+
+    #[test]
+    fn a_node_within_the_slack_or_without_news_of_the_leader_reports_none() {
+        let old = || NOW - 40_000_000;
+        assert_eq!(
+            catch_up_lag(1_000_500, NOW / 1000, 1_000_000, 1000, NOW, old),
+            0
+        );
+        // Never heard from the leader, or not for over 5 s: no claim either way.
+        assert_eq!(catch_up_lag(2_000_000, 0, 1_000_000, 1000, NOW, old), 0);
+        assert_eq!(
+            catch_up_lag(2_000_000, NOW / 1000 - 6_000, 1_000_000, 1000, NOW, old),
+            0
+        );
+        // An idle cluster: caught up, its last entry long ago.
+        assert_eq!(
+            catch_up_lag(1_000_000, NOW / 1000, 1_000_000, 1000, NOW, old),
+            0
+        );
+    }
 }
 
 /// Wall micros: the clock the consumption engine serves on (pop deadlines,
@@ -742,6 +890,9 @@ impl RaftFacade {
             }));
         }
 
+        let leader_commit = Arc::new(LeaderCommit::default());
+        spawn_leader_commit_probe(&repl, leader_commit.clone());
+
         tracing::info!(
             target: "rsm",
             dir = %dir.display(),
@@ -786,6 +937,7 @@ impl RaftFacade {
                 .saturating_mul(1_000),
             disk_high_pct: ctx.disk_high_pct,
             disk_low_pct: ctx.disk_low_pct,
+            leader_commit,
         })
     }
 
@@ -819,6 +971,7 @@ impl RaftFacade {
             disk_low_pct: _,
             offload: _,
             pop_floor: _,
+            leader_commit: _,
         } = self;
         drop(cmd_tx); // the batcher sees a closed channel, drains, and exits
         let _ = batcher_join.await; // its Arc<repl>/Arc<store> drop here
@@ -1028,6 +1181,18 @@ impl RaftFacade {
                     Err(RemoteError::Transport(_)) => {
                         crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.fwd_transport_retry, 1);
                     }
+                    // Sent, and no answer came back: the leader may have run
+                    // it. A command the leader's batcher plans is safe to send
+                    // again (its request id, I6); one the engine runs from
+                    // memory is not — a second run of an ack finds the lease
+                    // its first run released and calls its messages stale.
+                    Err(RemoteError::Lost(_)) if command.runs_once() => {
+                        crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.fwd_lost_in_doubt, 1);
+                        return Err(RsmError::InDoubt);
+                    }
+                    Err(RemoteError::Lost(_)) => {
+                        crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.fwd_transport_retry, 1);
+                    }
                 }
             }
             let nap = backoff.min(ctx.deadline.remaining());
@@ -1196,7 +1361,19 @@ impl RaftFacade {
         let (first, flats) = self.resolve_acks_once(ctx, group, flats).await?;
         let missed = matches!(&first, Ok((_, _, bad))
             if bad.iter().any(|(_, why)| why.starts_with(NO_PARTITION)));
-        if self.offload && missed && self.linearizable(ctx).await.is_ok() {
+        // A `failed`/`dlq` item whose message this node could not snapshot:
+        // its cursor row here predates the claim (the engine answers a claim
+        // once its checkpoint COMMITS; this node — a follower, or the leader
+        // itself — may not have applied it yet), so the snapshot was looked
+        // for in the wrong range. Filed as it is, the dead letter would carry
+        // the transaction id and no payload (Jepsen W7, 2026-10-01: 8 of
+        // 7,625 dead letters with `data: null`). Once this node has applied
+        // what was committed, the claim's row is here.
+        let unsnapped = matches!(&first, Ok((targets, _, _))
+        if targets.iter().any(|t| t.items.iter().any(|i| {
+            i.snapshot.as_ref().is_some_and(|s| s.message_id.is_none())
+        })));
+        if ((self.offload && missed) || unsnapped) && self.linearizable(ctx).await.is_ok() {
             return Ok(self.resolve_acks_once(ctx, group, flats).await?.0);
         }
         Ok(first)
@@ -1358,11 +1535,20 @@ fn release_claims(repl: &Arc<NodeReplicator<HeedStore>>, command: &Command, repl
     });
 }
 
+/// The longest a leader on its way out waits for the acks its engine already
+/// answered to commit before it hands the leadership over
+/// ([`RaftFacade::hand_off_leadership`]): a checkpoint every 5 ms, committed
+/// within tens of ms.
+const HAND_OFF_DRAIN: Duration = Duration::from_millis(500);
+
 fn reply_error(reply: Reply) -> RsmError {
     match reply {
         Reply::Retry { hint } => RsmError::Retry {
             leader_hint: hint.map(|n| n.to_string()),
         },
+        // The engine lost its lead while this command's change was on its
+        // way to the log: the outcome is unknown, as after a lost reply.
+        Reply::Refused(r) if r.code == crate::rsm::consume::IN_DOUBT => RsmError::InDoubt,
         Reply::Refused(r) => {
             if r.retryable {
                 RsmError::Retry { leader_hint: None }
@@ -3229,6 +3415,9 @@ struct PartInfo {
     queue: String,
     bucket: u16,
     sealed: Vec<u32>,
+    /// The retention watermark when the render read the row: an offset below
+    /// it is gone by policy.
+    log_start: u64,
 }
 
 /// The blocking render: one store read for every claimed partition's name and
@@ -3319,6 +3508,7 @@ fn render_part_infos(
                         queue: part.queue,
                         bucket,
                         sealed,
+                        log_start: part.log_start,
                     },
                 );
             }
@@ -3455,11 +3645,37 @@ fn render_pop_body(
             };
             let (base, created_at_us, frame_count, blob) = match popped {
                 Some(t) => t,
-                None => {
-                    // A gap (retention passed it, or not yet visible): skip one.
+                // Retention removed it after the claim (gone by policy), or
+                // the claim is an auto-ack one: its cursor already moved past
+                // the whole claim and no lease brings anything back, so
+                // stopping here would lose every message after this one.
+                None if off < info.log_start || auto_ack => {
                     crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.render_gap_offsets, 1);
                     off += 1;
                     continue;
+                }
+                None => {
+                    // A record that must be here is not. Deliver what came
+                    // before it and nothing past it: an ack is implicit up to
+                    // the highest offset it names, so a later message's ack
+                    // would complete this one too — a message its consumer
+                    // never saw, lost. Left under the lease, it comes back
+                    // when the lease expires (and this line says why).
+                    crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.render_gap_truncated, 1);
+                    static TRUNC_LOGGED: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    if TRUNC_LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 100 {
+                        tracing::warn!(
+                            target: "rsm",
+                            pid = claim.pid,
+                            offset = off,
+                            claim_start = claim.start_offset,
+                            claim_end = claim.end_offset,
+                            log_start = info.log_start,
+                            "pop render: a claimed message is not readable here; the delivery stops before it"
+                        );
+                    }
+                    break;
                 }
             };
             let seg_created = iso_from_us(created_at_us);
@@ -4727,7 +4943,7 @@ impl Rsm for RaftFacade {
             term: m.term,
             applied: m.applied_index,
             commit: m.committed_index,
-            lag_ms: 0,
+            lag_ms: self.catch_up_lag_ms(m.applied_index, &role),
             storage_ready: !matches!(role, crate::rsm::replicator::Role::Stopped),
             apply: self.repl.apply_status(),
         }
@@ -4788,7 +5004,23 @@ impl Rsm for RaftFacade {
     }
 
     async fn hand_off_leadership(&self, wait: std::time::Duration) {
+        // A graceful stop of the leader (a rolling restart): first let what
+        // the consumption engine answered from memory reach the log. New
+        // commands go to the next leader meanwhile (`Retry`: they never ran
+        // here); an ack already served commits and is answered, where a
+        // hand-off under it would answer it in doubt (503: the next leader
+        // cannot tell whether it applied). Bounded: at worst the hand-off
+        // waits HAND_OFF_DRAIN and the leftovers are in doubt, as before.
+        if self.repl.role().is_leader() {
+            self.engine
+                .begin_drain(HAND_OFF_DRAIN + Duration::from_secs(1));
+            let until = std::time::Instant::now() + HAND_OFF_DRAIN;
+            while self.engine.exact_pending() && std::time::Instant::now() < until {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
         self.repl.hand_off_leadership(wait).await;
+        self.engine.end_drain();
     }
 
     fn cluster_id(&self) -> Option<String> {
