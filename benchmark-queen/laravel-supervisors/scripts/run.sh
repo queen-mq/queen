@@ -21,6 +21,7 @@ SLEEP_MS=10
 CPU_ITERATIONS=0
 DISPATCH_MODE="${BENCH_DISPATCH_MODE:-single}"
 DISPATCH_RATE="${BENCH_DISPATCH_RATE:-0}"
+BACKLOG_FIRST="${BENCH_BACKLOG_FIRST:-0}"
 QUEEN_PREFETCH="${QUEEN_PREFETCH:-1}"
 QUEEN_ACK_BATCH="${QUEEN_ACK_BATCH:-1}"
 QUEEN_BULK_BATCH="${QUEEN_BULK_BATCH:-100}"
@@ -93,6 +94,9 @@ Options:
   --dispatch-mode single|bulk   Producer API shape (default: single)
   --dispatch-rate N             Measured jobs per second, single mode; 0 is
                                 as fast as possible (default: 0)
+  --backlog-first 0|1           Hold every worker while the measured jobs are
+                                dispatched, then release them: the rate is
+                                the drain of a full queue (default: 0)
   --queen-prefetch N            Jobs claimed by each Queen pop (default: 1)
   --queen-ack-batch N           Deferred Queen ACK batch; <= prefetch (default: 1)
   --queen-bulk-batch N          Jobs per bulk producer call/request (default: 100)
@@ -224,6 +228,7 @@ while [ "$#" -gt 0 ]; do
         --cpu-iterations) CPU_ITERATIONS="${2:?--cpu-iterations requires a value}"; shift 2 ;;
         --dispatch-mode) DISPATCH_MODE="${2:?--dispatch-mode requires a value}"; shift 2 ;;
         --dispatch-rate) DISPATCH_RATE="${2:?--dispatch-rate requires a value}"; shift 2 ;;
+        --backlog-first) BACKLOG_FIRST="${2:?--backlog-first requires a value}"; shift 2 ;;
         --queen-prefetch) QUEEN_PREFETCH="${2:?--queen-prefetch requires a value}"; shift 2 ;;
         --queen-ack-batch) QUEEN_ACK_BATCH="${2:?--queen-ack-batch requires a value}"; shift 2 ;;
         --queen-bulk-batch) QUEEN_BULK_BATCH="${2:?--queen-bulk-batch requires a value}"; shift 2 ;;
@@ -369,6 +374,10 @@ case "$DISPATCH_MODE" in single|bulk) ;; *) die "--dispatch-mode must be single 
 require_uint "--dispatch-rate" "$DISPATCH_RATE"
 if [ "$DISPATCH_RATE" -gt 0 ] && [ "$DISPATCH_MODE" != single ]; then
     die "--dispatch-rate requires --dispatch-mode single"
+fi
+case "$BACKLOG_FIRST" in 0|1) ;; *) die "--backlog-first must be 0 or 1" ;; esac
+if [ "$BACKLOG_FIRST" = 1 ] && [ "$DISPATCH_RATE" -gt 0 ]; then
+    die "--backlog-first excludes --dispatch-rate"
 fi
 case "$SCALING_STRATEGY" in size|time) ;; *) die "--strategy must be size or time" ;; esac
 case "$LEDGER_MODE" in off|durable) ;; *) die "BENCH_LEDGER_MODE must be off or durable" ;; esac
@@ -817,6 +826,45 @@ producer() {
     compose_current exec --no-TTY producer "$@"
 }
 
+# Run artisan in the lane's supervisor container.
+supervisor_artisan() {
+    compose_current exec --no-TTY "$CURRENT_ENGINE" php artisan --no-ansi "$@"
+}
+
+# Stop every worker from taking jobs, and return once none can. Horizon
+# pauses its workers in place; the Queen supervisor drains them.
+hold_workers() {
+    deadline=$(( $(date +%s) + 60 ))
+    if [ "$CURRENT_ENGINE" = horizon ]; then
+        supervisor_artisan horizon:pause >/dev/null
+        # A supervisor reports paused only after it has signalled its workers.
+        until supervisor_artisan horizon:supervisors 2>/dev/null \
+            | awk '/paused/ { paused++ } /running/ { running++ } END { exit !(paused > 0 && running == 0) }'; do
+            [ "$(date +%s)" -lt "$deadline" ] || die "Horizon did not pause its supervisors"
+            sleep 0.5
+        done
+    else
+        supervisor_artisan queen:supervisor pause >/dev/null
+        until supervisor_artisan queen:supervisor status --json 2>/dev/null | python3 -c '
+import json, sys
+status = json.load(sys.stdin)
+budget = status.get("process_budget") or {}
+sys.exit(0 if status.get("paused") and budget.get("active_worker_processes") == 0
+         and status.get("draining") == 0 else 1)'; do
+            [ "$(date +%s)" -lt "$deadline" ] || die "the Queen supervisor did not drain its workers"
+            sleep 0.5
+        done
+    fi
+}
+
+release_workers() {
+    if [ "$CURRENT_ENGINE" = horizon ]; then
+        supervisor_artisan horizon:continue >/dev/null
+    else
+        supervisor_artisan queen:supervisor continue >/dev/null
+    fi
+}
+
 capture_backend_metrics() {
     phase="$1"
     case "$phase" in
@@ -925,6 +973,7 @@ export BENCHMARK_SLEEP_MS="$SLEEP_MS"
 export BENCHMARK_CPU_ITERATIONS="$CPU_ITERATIONS"
 export BENCHMARK_DISPATCH_MODE="$DISPATCH_MODE"
 export BENCHMARK_DISPATCH_RATE="$DISPATCH_RATE"
+export BENCHMARK_BACKLOG_FIRST="$BACKLOG_FIRST"
 export BENCHMARK_QUEUE="$TIMED_QUEUE"
 export BENCHMARK_QUEUES=""
 export BENCHMARK_FAILED_DRIVER="null"
@@ -1077,6 +1126,7 @@ settings = {
     "cpu_iterations": int(os.environ["BENCHMARK_CPU_ITERATIONS"]),
     "dispatch_mode": os.environ["BENCHMARK_DISPATCH_MODE"],
     "dispatch_rate": int(os.environ["BENCHMARK_DISPATCH_RATE"]),
+    "backlog_first": os.environ["BENCHMARK_BACKLOG_FIRST"] == "1",
     "queues": [os.environ["BENCHMARK_QUEUE"]],
     "failed_driver": os.environ["BENCHMARK_FAILED_DRIVER"],
     "lease_renewal": os.environ["BENCHMARK_LEASE_RENEWAL"] == "true",
@@ -1393,6 +1443,10 @@ run_lane() {
         fi
     fi
 
+    if [ "$BACKLOG_FIRST" = 1 ]; then
+        hold_workers
+    fi
+
     # Establish counter baselines after warm-up. This happens before the
     # dispatch timestamp used by the resource and latency windows.
     capture_backend_metrics before
@@ -1409,6 +1463,12 @@ run_lane() {
         --cpu-iterations="$CPU_ITERATIONS" \
         --dispatch-mode="$DISPATCH_MODE" \
         --rate="$DISPATCH_RATE" >"${CURRENT_HOST_RUN}/dispatch-command.json"
+    if [ "$BACKLOG_FIRST" = 1 ]; then
+        # Evidence that the whole backlog waited for the workers.
+        producer php artisan bench:count --no-ansi "$run_id" \
+            >"${CURRENT_HOST_RUN}/backlog-count.json"
+        release_workers
+    fi
 
     set +e
     producer php artisan bench:results --no-ansi "$run_id" \
