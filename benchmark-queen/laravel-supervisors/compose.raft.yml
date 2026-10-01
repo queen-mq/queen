@@ -70,7 +70,8 @@ x-app-environment: &app-environment
   REDIS_QUEUE_DB: "0"
 
 x-app: &app
-  image: queen-laravel-supervisor-bench:local
+  # BENCH_APP_IMAGE lets a second checkout build and run beside a running campaign.
+  image: ${BENCH_APP_IMAGE:-queen-laravel-supervisor-bench:local}
   build:
     context: ../..
     dockerfile: benchmark-queen/laravel-supervisors/Dockerfile
