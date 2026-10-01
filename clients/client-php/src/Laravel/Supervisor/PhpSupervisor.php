@@ -248,24 +248,8 @@ final class PhpSupervisor
             $failure = $error;
         }
 
-        $shutdownComplete = false;
         try {
-            try {
-                // External signals and --once do not pass through the control
-                // inbox, so publish the generation-specific drain fence here
-                // before touching children in every termination path.
-                $this->writeStatus('terminating');
-            } catch (\Throwable $error) {
-                $failure ??= $error;
-            }
-            // The other replicas take over this share while it drains.
-            $this->leaveReplicas();
-            try {
-                $this->shutdown();
-                $shutdownComplete = true;
-            } catch (\Throwable $error) {
-                $failure ??= $error;
-            }
+            $shutdownComplete = $this->drain($failure);
             if ($shutdownComplete) {
                 try {
                     $this->writeStatus('stopped');
@@ -287,6 +271,41 @@ final class PhpSupervisor
     public function stop(): void
     {
         $this->running = false;
+    }
+
+    /**
+     * Fence controls, then drain every worker. True once every worker is
+     * observed gone; a failure is kept in $failure.
+     */
+    private function drain(?\Throwable &$failure): bool
+    {
+        $terminating = null;
+        try {
+            // External signals and --once do not pass through the control
+            // inbox, so publish the generation-specific drain fence here
+            // before touching children in every termination path.
+            $terminating = $this->writeStatus('terminating', publish: false);
+        } catch (\Throwable $error) {
+            $failure ??= $error;
+        }
+        try {
+            // The broker calls wait until every worker has its SIGTERM: on a
+            // slow or unreachable broker each may take http_timeout per
+            // endpoint, and the platform's stop deadline does not wait.
+            $this->shutdown(function () use ($terminating): void {
+                if ($terminating !== null) {
+                    $this->remoteStatusPublisher()?->publish($terminating);
+                }
+                // The other replicas take over this share while it drains.
+                $this->leaveReplicas();
+            });
+
+            return true;
+        } catch (\Throwable $error) {
+            $failure ??= $error;
+
+            return false;
+        }
     }
 
     /** @return array<string, int> */
@@ -1014,7 +1033,13 @@ final class PhpSupervisor
         }
     }
 
-    private function shutdown(): void
+    /**
+     * SIGTERM every worker, wait for the grace, then SIGKILL. $whileDraining
+     * runs once every worker is signalled, inside the grace.
+     *
+     * @param (\Closure(): void)|null $whileDraining
+     */
+    private function shutdown(?\Closure $whileDraining = null): void
     {
         /** @var array<int, Process> $running */
         $running = [];
@@ -1045,6 +1070,14 @@ final class PhpSupervisor
         }
 
         $deadline = microtime(true) + $this->config['shutdown_grace'];
+        if ($whileDraining !== null) {
+            try {
+                $whileDraining();
+            } catch (\Throwable $error) {
+                // Never at the cost of the drain.
+                $this->emit("Queen supervisor shutdown step failed: {$error->getMessage()}\n", 'err');
+            }
+        }
         do {
             foreach ($running as $objectId => $process) {
                 if (!$process->isRunning()) {
@@ -1251,7 +1284,12 @@ final class PhpSupervisor
         $this->paused = false;
     }
 
-    private function writeStatus(string $status): void
+    /**
+     * Write status.json and, unless told otherwise, publish it remotely.
+     *
+     * @return array<string, mixed> the document written
+     */
+    private function writeStatus(string $status, bool $publish = true): array
     {
         $pools = [];
         $poolStatus = [];
@@ -1370,7 +1408,11 @@ final class PhpSupervisor
             'pool_status' => $poolStatus,
             'configuration' => $this->statusConfiguration(),
         ]);
-        $this->remoteStatusPublisher()?->publish($document);
+        if ($publish) {
+            $this->remoteStatusPublisher()?->publish($document);
+        }
+
+        return $document;
     }
 
     /**
