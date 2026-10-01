@@ -150,6 +150,35 @@ final class PreforkTest extends TestCase
         $this->assertSame(0, $worker->getExitCode());
     }
 
+    /**
+     * queen:fork-server runs under Laravel's error handler, which throws the
+     * warning pcntl_fork() raises when it fails (a pids or nproc limit, no
+     * memory). That must be a failed fork, not the end of the server.
+     */
+    public function testAFailedForkIsReportedAndTheServerKeepsServing(): void
+    {
+        $server = ForkServerClient::start(
+            [PHP_BINARY, __DIR__ . '/Fixtures/Prefork/fork_server_without_processes.php'],
+            __DIR__,
+            getenv(),
+            10,
+        );
+        try {
+            foreach ([1, 2] as $attempt) {
+                try {
+                    $server->fork(['exit'], [], 5);
+                } catch (\RuntimeException $failure) {
+                    $this->assertStringContainsString('could not fork', $failure->getMessage(), "attempt {$attempt}");
+                    continue;
+                }
+                $this->markTestSkipped('This user can fork past RLIMIT_NPROC, as root can.');
+            }
+            $this->assertTrue($server->isAlive(), 'the server died with its failed fork');
+        } finally {
+            $server->close(5);
+        }
+    }
+
     public function testAMalformedRequestIsRefusedAndTheServerKeepsServing(): void
     {
         $reflection = new \ReflectionProperty(ForkServerClient::class, 'commands');
