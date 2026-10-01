@@ -3,6 +3,28 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**PHP client: a detached request is written before the next job runs.** With `ack_async` or
+`pop_ahead`, a request on a new connection (a worker's first detached request, or one after the
+broker closed an idle keep-alive connection) was only started when it was sent: cURL wrote it
+when the request was settled, which with `prefetch` above 1 is after the next job. A hard kill
+during that job (shutdown grace exceeded, out of memory, node loss) lost the ACK, and the
+acknowledged job ran again when its lease expired. `postDetached()` and `getDetached()` now
+return once the whole request is written, the connection included; on the Guzzle transport
+(behind a proxy, or with `QUEEN_SDK_HTTP_TRANSPORT=guzzle`) this holds for a request with a
+body, the ACK. A request that cannot be written within the 5-second connect timeout throws at
+once, and the Laravel queue then acknowledges synchronously.
+
+**PHP client: a process forked by a job exits.** libcurl's resolver threads do not survive
+`fork()`, and recent libcurl keeps them alive for a moment after each name resolution (2 seconds
+on the multi handle that carries detached requests). A child forked in that window, by Laravel's
+fork concurrency driver or by `pcntl_fork()` in a job, waited for them forever when its exit
+freed the cURL handles it inherited, so the job hung until its timeout and left the child stuck.
+The cURL transport now sets `CURLOPT_QUICK_EXIT` and shares one DNS cache between its handles,
+so detached requests reuse the synchronous handle's resolution and never start a resolver
+thread of their own.
+
 ## 1.6.0 - 2026-09-11
 
 **A read-scoped credential could replay a dead letter through the proxy. It cannot now.**

@@ -134,12 +134,19 @@ fn send_signal(peer: &Peer, signal: i32) -> std::io::Result<()> {
 fn fence_worker(fence: &Fence, peer: &Peer, signal: i32) {
     if let Err(error) = fence(peer, signal) {
         if error.raw_os_error() != Some(libc::ESRCH) {
-            eprintln!(
+            log(format_args!(
                 "lease service: signal {signal} to worker {} failed: {error}",
                 peer.pid
-            );
+            ));
         }
     }
+}
+
+/// One line to stderr. A write that fails, to a broken pipe for instance, is
+/// dropped: `eprintln!` would panic, and end the thread that must fence.
+fn log(line: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
 /// The clock PHP's `hrtime` reads: CLOCK_MONOTONIC, or on macOS the
@@ -191,7 +198,7 @@ fn accept(listener: &UnixListener, client: &reqwest::blocking::Client, fence: &F
         let stream = match stream {
             Ok(stream) => stream,
             Err(error) => {
-                eprintln!("lease service: accept failed: {error}");
+                log(format_args!("lease service: accept failed: {error}"));
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }
@@ -199,7 +206,7 @@ fn accept(listener: &UnixListener, client: &reqwest::blocking::Client, fence: &F
         let peer = match peer(&stream, fence) {
             Ok(peer) => peer,
             Err(error) => {
-                eprintln!("lease service: refused a worker: {error}");
+                log(format_args!("lease service: refused a worker: {error}"));
                 continue;
             }
         };
@@ -211,7 +218,9 @@ fn accept(listener: &UnixListener, client: &reqwest::blocking::Client, fence: &F
             .spawn(move || serve(stream, &peer, client, &fence));
         // The worker sees the connection close and falls back to a helper.
         if let Err(error) = spawned {
-            eprintln!("lease service: no thread for worker {pid}: {error}");
+            log(format_args!(
+                "lease service: no thread for worker {pid}: {error}"
+            ));
         }
     }
 }
@@ -417,12 +426,13 @@ fn serve(stream: UnixStream, peer: &Peer, client: reqwest::blocking::Client, fen
     .unwrap_or_else(|_| End::Fence("the renewal thread panicked".into()));
     if let (End::Fence(reason), Some(lease)) = (end, held) {
         // Nobody renews this lease any more: the job must not outlive it.
-        eprintln!(
-            "lease service: killing worker {} holding lease {}: {reason}",
+        // Signal first: nothing, not even a log line, may stand in the way.
+        fence_worker(fence, peer, libc::SIGKILL);
+        log(format_args!(
+            "lease service: killed worker {} holding lease {}: {reason}",
             peer.pid,
             bounded(&lease.id)
-        );
-        fence_worker(fence, peer, libc::SIGKILL);
+        ));
     }
 }
 

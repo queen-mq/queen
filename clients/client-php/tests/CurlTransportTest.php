@@ -129,6 +129,43 @@ class CurlTransportTest extends TestCase
         $this->assertSame($before, $client->get('/echo')['connection'], 'the parent keeps its connection');
     }
 
+    /**
+     * libcurl's resolver threads do not survive fork(): a child freeing an
+     * inherited handle at exit waited for them forever. Resolving an IP
+     * literal uses them where libcurl resolves literals (macOS); a broker
+     * host name always does.
+     */
+    #[\PHPUnit\Framework\Attributes\TestWith(['sync'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['detached'])]
+    public function testAForkedChildExitsRightAfterTheParentOpenedItsConnections(string $mode): void
+    {
+        if (!function_exists('pcntl_fork') || !function_exists('posix_kill')) {
+            $this->markTestSkipped('Needs ext-pcntl and ext-posix.');
+        }
+
+        $pipes = [];
+        $worker = proc_open(
+            [PHP_BINARY, __DIR__ . '/Fixtures/CurlForkedChildWorker.php', $mode],
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+            null,
+            null,
+            ['bypass_shell' => true],
+        );
+        $this->assertIsResource($worker);
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = trim((string) stream_get_contents($pipes[2]));
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+
+        $this->assertSame(0, proc_close($worker), $stderr);
+        $this->assertTrue(
+            json_decode((string) $stdout, true, 512, JSON_THROW_ON_ERROR)['child_exited'],
+            'the forked child hung at exit, waiting for resolver threads it does not have',
+        );
+    }
+
     public function testAProxyVariableOrTheEscapeKeepsGuzzle(): void
     {
         foreach (['HTTPS_PROXY=http://proxy.test:3128', 'QUEEN_SDK_HTTP_TRANSPORT=guzzle'] as $setting) {
@@ -187,6 +224,40 @@ class CurlTransportTest extends TestCase
         $transport = (new \ReflectionProperty($client, 'transport'))->getValue($client);
         $this->assertSame([], (new \ReflectionProperty($transport, 'finished'))->getValue($transport));
         $this->assertSame('GET', $client->settleDetached($client->getDetached('/echo'))['method']);
+    }
+
+    /**
+     * With prefetch, an ACK sent detached is settled only after the next job:
+     * if a new connection held it back until then, a hard kill during that
+     * job would run the acknowledged job again.
+     */
+    #[\PHPUnit\Framework\Attributes\TestWith(['curl'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['guzzle'])]
+    public function testADetachedRequestOnANewConnectionReachesTheServerBeforeItIsSettled(string $transport): void
+    {
+        if ($transport === 'guzzle') {
+            putenv('QUEEN_SDK_HTTP_TRANSPORT=guzzle');
+        }
+        try {
+            $client = $this->client();
+            $this->assertSame($transport === 'curl', $this->usesCurlTransport($client));
+
+            // The first detached request of a client opens its own connection.
+            $ack = $client->postDetached('/echo?ack=1', ['transactionId' => 't-1']);
+            $pop = $transport === 'curl' ? $client->getDetached('/echo?pop=1') : null;
+            // The next job runs: nothing settles the requests meanwhile.
+            usleep(300_000);
+            $received = $this->client()->get('/received');
+
+            $this->assertContains('POST /echo?ack=1', $received, 'the ACK waited for settle()');
+            if ($pop !== null) {
+                $this->assertContains('GET /echo?pop=1', $received, 'the pop sent ahead waited for settle()');
+                $this->assertSame('GET', $client->settleDetached($pop)['method']);
+            }
+            $this->assertSame('POST', $client->settleDetached($ack)['method']);
+        } finally {
+            putenv('QUEEN_SDK_HTTP_TRANSPORT');
+        }
     }
 
     public function testEveryRequestAsksForTcpKeepAlive(): void

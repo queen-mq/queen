@@ -44,10 +44,24 @@ final class CurlTransport
 
     private ?\CurlMultiHandle $multi = null;
 
+    /**
+     * The DNS cache of every handle. libcurl's resolver threads do not
+     * survive fork(): a child that frees a handle whose resolver ran in the
+     * last seconds waits for them forever at exit, and a job may fork
+     * (Laravel's fork concurrency driver does). The synchronous handle never
+     * waits for them (CURLOPT_QUICK_EXIT), and detached requests reuse what
+     * it resolved, so the multi handle, which PHP cannot tell to skip that
+     * wait, never starts a resolver of its own.
+     */
+    private ?\CurlShareHandle $share = null;
+
     /** The process that owns the handles: a forked child must not share a connection. */
     private ?int $owner = null;
 
-    /** @var list<object> Handles a fork inherited, never closed so the parent's connections live. */
+    /**
+     * @var list<object> Handles a fork inherited, kept open while the child
+     *      runs so the parent's connections live. PHP frees them at its exit.
+     */
     private array $inherited = [];
 
     /** @var array<int, int> cURL result code per finished detached handle id. */
@@ -82,12 +96,17 @@ final class CurlTransport
     }
 
     /**
-     * Start a request and return once cURL has written what it can: on a
-     * kept-alive connection the whole request; a new connection proceeds
-     * while settle() waits. No timeout runs until then. A request dropped
-     * without settle() is freed with it.
+     * Start a request and return once cURL has written all of it: on a
+     * kept-alive connection one pass does, a new connection is established
+     * first. Writing must not wait for settle(), which with prefetch comes
+     * after the next job: a request still unwritten when the process dies is
+     * lost, and a lost ACK runs its job again. Writing takes at most the
+     * connect timeout; a request still unwritten then is dropped, so nothing
+     * reached the server, and reported. No timeout runs on the answer until
+     * settle(). A request dropped without settle() is freed with it.
      *
      * @param array<string, string|list<string>> $headers
+     * @throws TransportException when the request could not be written in time
      */
     public function start(string $method, string $url, array $headers, ?string $body): DetachedRequest
     {
@@ -95,11 +114,28 @@ final class CurlTransport
         $easy = curl_init();
         $request = new DetachedRequest($easy, $url, fn () => $this->release($easy));
         curl_setopt_array($easy, $this->options($method, $url, $headers, $body, 0, 0, $request->retryAfter));
+        // The synchronous handle resolved the host first (a worker pops before
+        // anything else): never resolve it again here. Its next new
+        // connection refreshes the entry.
+        curl_setopt($easy, CURLOPT_DNS_CACHE_TIMEOUT, -1);
         $added = curl_multi_add_handle($multi, $easy);
         if ($added !== CURLM_OK) {
             throw new TransportException('cURL could not start a detached request: ' . curl_multi_strerror($added), $added);
         }
         $this->drive();
+        $id = spl_object_id($easy);
+        $deadline = hrtime(true) + self::CONNECT_TIMEOUT_MILLIS * 1_000_000;
+        $idle = self::IDLE_MIN_MICROS;
+        while (!isset($this->finished[$id]) && !self::written($easy, $body)) {
+            if (!$this->wait($multi, $deadline, $idle)) {
+                $request->release();
+                throw new TransportException(
+                    'Queen could not send a detached request within ' . self::CONNECT_TIMEOUT_MILLIS . ' ms.',
+                    28,
+                );
+            }
+            $this->drive();
+        }
 
         return $request;
     }
@@ -119,17 +155,9 @@ final class CurlTransport
         $this->drive();
         $idle = self::IDLE_MIN_MICROS;
         while (!isset($this->finished[$id])) {
-            $left = ($deadline - hrtime(true)) / 1e9;
-            if ($left <= 0) {
+            if (!$this->wait($multi, $deadline, $idle)) {
                 $request->release();
                 throw new TransportException("Queen did not answer a detached request within {$timeoutMillis} ms.", 28);
-            }
-            // Blocks until a socket is ready, unlike a Guzzle tick.
-            $selected = hrtime(true);
-            if (curl_multi_select($multi, min($left, self::SELECT_SECONDS)) < 1
-                && hrtime(true) - $selected < 1_000_000) {
-                usleep($idle);
-                $idle = min($idle * 2, self::IDLE_MAX_MICROS);
             }
             $this->drive();
         }
@@ -197,7 +225,12 @@ final class CurlTransport
 
                 return strlen($line);
             },
+            CURLOPT_SHARE => $this->share(),
         ];
+        // libcurl 7.87 and later: see $share.
+        if (defined('CURLOPT_QUICK_EXIT')) {
+            $options[CURLOPT_QUICK_EXIT] = 1;
+        }
         if ($method === 'GET' && $body === null) {
             $options[CURLOPT_HTTPGET] = true;
         } elseif ($method === 'POST') {
@@ -212,6 +245,34 @@ final class CurlTransport
         }
 
         return $options;
+    }
+
+    /**
+     * Wait until one of cURL's sockets is ready, or briefly when it has none
+     * to watch: false once $deadline (hrtime) has passed.
+     */
+    private function wait(\CurlMultiHandle $multi, int $deadline, int &$idle): bool
+    {
+        $left = ($deadline - hrtime(true)) / 1e9;
+        if ($left <= 0) {
+            return false;
+        }
+        // Blocks until a socket is ready, unlike a Guzzle tick.
+        $selected = hrtime(true);
+        if (curl_multi_select($multi, min($left, self::SELECT_SECONDS)) < 1
+            && hrtime(true) - $selected < 1_000_000) {
+            usleep($idle);
+            $idle = min($idle * 2, self::IDLE_MAX_MICROS);
+        }
+
+        return true;
+    }
+
+    /** Whether cURL has written the whole request: its headers, then its body. */
+    private static function written(\CurlHandle $easy, ?string $body): bool
+    {
+        return curl_getinfo($easy, CURLINFO_REQUEST_SIZE) > 0
+            && curl_getinfo($easy, CURLINFO_SIZE_UPLOAD_T) >= strlen($body ?? '');
     }
 
     /** Run cURL without waiting and record every request that finished. */
@@ -253,6 +314,17 @@ final class CurlTransport
         return $this->multi ??= curl_multi_init();
     }
 
+    private function share(): \CurlShareHandle
+    {
+        $this->claim();
+        if ($this->share === null) {
+            $this->share = curl_share_init();
+            curl_share_setopt($this->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+        }
+
+        return $this->share;
+    }
+
     private function claim(): void
     {
         $pid = getmypid();
@@ -261,9 +333,10 @@ final class CurlTransport
         }
         if ($this->owner !== null) {
             // Closing an inherited handle could end the parent's TLS session.
-            array_push($this->inherited, ...array_filter([$this->handle, $this->multi]));
+            array_push($this->inherited, ...array_filter([$this->handle, $this->multi, $this->share]));
             $this->handle = null;
             $this->multi = null;
+            $this->share = null;
             $this->finished = [];
         }
         $this->owner = $pid;

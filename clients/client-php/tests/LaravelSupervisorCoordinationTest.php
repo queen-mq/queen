@@ -193,6 +193,61 @@ final class LaravelSupervisorCoordinationTest extends TestCase
         }
     }
 
+    /**
+     * Each coordination or remote status call may take http_timeout per
+     * endpoint when the broker is slow or unreachable. The workers' SIGTERM
+     * must not wait behind them, or the platform's stop deadline kills the
+     * workers in the middle of a job.
+     */
+    public function testWorkersGetSigtermBeforeTheReplicaLeavesTheCoordination(): void
+    {
+        $config = SupervisorConfiguration::resolve($this->queen([]), '/app');
+        $config['state_directory'] = $this->stateDirectory = sys_get_temp_dir() . '/queen-coordination-' . bin2hex(random_bytes(6));
+        $config['shutdown_grace'] = 0;
+        $events = [];
+        $plan = new PlanHandler([], ['status' => 200, 'json' => ['results' => [['applied' => true]]]]);
+        $recording = static function ($request, array $options) use ($plan, &$events) {
+            if (str_contains((string) $request->getBody(), '"op":"delete"')) {
+                $events[] = 'leave';
+            }
+
+            return $plan($request, $options);
+        };
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            $config,
+            queenFactory: fn (string $name, array $options): Queen => new Queen([...$options, 'handler' => HandlerStack::create($recording)]),
+        );
+        $lock = (new ReflectionProperty(PhpSupervisor::class, 'state'))->getValue($supervisor)->acquireLock();
+        $worker = $this->createStub(\Symfony\Component\Process\Process::class);
+        $signalled = false;
+        $worker->method('isRunning')->willReturnCallback(static function () use (&$signalled): bool {
+            return !$signalled;
+        });
+        $worker->method('signal')->willReturnCallback(
+            static function (int $signal) use (&$events, &$signalled, $worker): \Symfony\Component\Process\Process {
+                $events[] = $signal === SIGTERM ? 'SIGTERM' : "signal {$signal}";
+                $signalled = true;
+
+                return $worker;
+            },
+        );
+        $worker->method('getPid')->willReturn(null);
+        (new ReflectionProperty(PhpSupervisor::class, 'processes'))->setValue($supervisor, ['default' => ['high' => [$worker]]]);
+
+        $failure = null;
+        try {
+            $drained = (new ReflectionMethod(PhpSupervisor::class, 'drain'))->invokeArgs($supervisor, [&$failure]);
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+
+        $this->assertTrue($drained);
+        $this->assertNull($failure);
+        $this->assertSame(['SIGTERM', 'leave'], $events);
+    }
+
     /** @param list<string> $members */
     private function answerWith(PlanHandler $handler, string $scope, array $members): void
     {

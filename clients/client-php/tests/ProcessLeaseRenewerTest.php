@@ -248,6 +248,44 @@ class ProcessLeaseRenewerTest extends TestCase
         $this->assertTrue($result['worker_alive']);
     }
 
+    /**
+     * A job may fork, as Laravel's fork concurrency driver does. The child
+     * inherits the renewer: neither its exit nor its own subprocesses may stop
+     * the parent's helper, and the parent's watchdog must not fence the child.
+     */
+    #[\PHPUnit\Framework\Attributes\TestWith(['exit'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['subprocess'])]
+    public function testAForkedChildNeitherStopsTheHelperNorIsFencedByItsWatchdog(string $mode): void
+    {
+        if (!ProcessLeaseRenewer::isSupported() || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('This platform cannot run the lease renewal helper.');
+        }
+
+        $pipes = [];
+        $worker = proc_open(
+            [PHP_BINARY, __DIR__ . '/Fixtures/LeaseRenewalForkedChildWorker.php', $mode],
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+            null,
+            null,
+            ['bypass_shell' => true],
+        );
+        $this->assertIsResource($worker);
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = trim((string) stream_get_contents($pipes[2]));
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $status = proc_get_status($worker);
+        $exitCode = proc_close($worker);
+
+        $this->assertFalse($status['signaled'] ?? false, "The worker was killed by its own watchdog. {$stderr}");
+        $this->assertSame(0, $exitCode, $stderr);
+        $result = json_decode((string) $stdout, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(0, $result['child_exit'], "The forked child was fenced. {$stderr}");
+        $this->assertNull($result['child_signal']);
+    }
+
     public function testUnsafeDiagnosticErrorsAreBoundedAndPrintable(): void
     {
         $method = new \ReflectionMethod(\Queen\Laravel\Queue\LeaseRenewalWorker::class, 'boundedError');

@@ -806,12 +806,9 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         thread::sleep(Duration::from_millis(200));
     }
 
-    // The other replicas take over this share while it drains.
-    if let Some(coordinator) = coordinator.as_mut() {
-        coordinator.leave(&client, &scope_list(&coordinated_scopes));
-    }
     replica_counts.clear();
-    match state.write_status(
+    // The fence against new controls, before any worker is touched.
+    let terminating = match state.write_status(
         "rust",
         "terminating",
         StatusSnapshot {
@@ -825,21 +822,34 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             replicas: &replica_counts,
         },
     ) {
-        Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
+        Ok(status) => Some(status),
         Err(error) => {
             let error = format!("state status write failed: {error}");
             eprintln!("{error}");
             if status_failure.is_none() {
                 status_failure = Some(error);
             }
+            None
         }
-    }
+    };
+    // The broker calls wait until every worker has its SIGTERM: on a slow or
+    // unreachable broker each may take http_timeout per endpoint, and the
+    // platform's stop deadline does not wait.
     shutdown(
         &config,
         &mut pools,
         &mut draining,
         Duration::from_secs(config.shutdown_grace),
         &mut pending_telemetry_cleanup,
+        || {
+            if let Some(status) = &terminating {
+                remote_status::publish(&mut remote_status, &client, status);
+            }
+            // The other replicas take over this share while it drains.
+            if let Some(coordinator) = coordinator.as_mut() {
+                coordinator.leave(&client, &scope_list(&coordinated_scopes));
+            }
+        },
     );
     if let Some(server) = &fork_server {
         // Every worker has drained: the server exits, fencing any straggler.
@@ -3437,8 +3447,19 @@ fn record_worker_exit(
         );
         return;
     }
+    // Backoff is for short-lived exits. A worker that ran this long is not
+    // crash-looping: queue:work exits 12 at --memory, and a job timeout kills
+    // the worker.
     if !worker.restart_probe && uptime >= Duration::from_secs(options.stable_after) {
         restart.record_healthy();
+        eprintln!(
+            "[{}:{}] pid={} exited with {status} after {:.3}s; restarting",
+            key.0,
+            key.1,
+            worker.child.id(),
+            uptime.as_secs_f64(),
+        );
+        return;
     }
     let (delay, circuit_open) = restart.record_failure(options, Instant::now());
     eprintln!(
@@ -3478,12 +3499,15 @@ fn observe_stable_workers(config: &Config, pools: &mut Pools, restarts: &mut Res
     }
 }
 
+/// SIGTERM every worker, wait for the grace, then SIGKILL. `while_draining`
+/// runs once every worker is signalled, inside the grace.
 fn shutdown(
     config: &Config,
     pools: &mut Pools,
     draining: &mut Draining,
     grace: Duration,
     pending: &mut PendingTelemetryCleanup,
+    while_draining: impl FnOnce(),
 ) {
     for pool in pools.values_mut() {
         for worker in pool.iter_mut() {
@@ -3494,6 +3518,7 @@ fn shutdown(
         signal_worker(&mut entry.worker.child, libc::SIGTERM);
     }
     let deadline = Instant::now() + grace;
+    while_draining();
     loop {
         reap_for_shutdown(config, pools, pending);
         reap_draining(config, draining, pending);
@@ -4533,6 +4558,49 @@ mod tests {
         );
         assert_eq!(successful_guard.state_name(), "closed");
         assert_eq!(successful_guard.consecutive_failures, 0);
+    }
+
+    /// queue:work exits 12 at --memory, and a job timeout kills the worker:
+    /// routine for a worker that ran for a while, and no reason to hold its
+    /// pool at one probe for stable_after.
+    #[cfg(unix)]
+    #[test]
+    fn a_long_lived_workers_exit_is_not_a_crash() {
+        let options = options("auto");
+        let key = ("default".to_owned(), "high".to_owned());
+        let Some(long_ago) =
+            Instant::now().checked_sub(Duration::from_secs(options.stable_after + 1))
+        else {
+            // A host up for less than a minute cannot date such a worker.
+            return;
+        };
+        let (memory_limit, exited_12) = exited_worker(12, false);
+        let mut killed_child = Command::new("/bin/sh")
+            .args(["-c", "kill -9 $$"])
+            .spawn()
+            .unwrap();
+        let killed_status = killed_child.wait().unwrap();
+        let timed_out = Worker::new(killed_child, false);
+
+        for (mut worker, status) in [(memory_limit, exited_12), (timed_out, killed_status)] {
+            worker.started_at = long_ago;
+            let mut guard = RestartGuard::default();
+            record_worker_exit(&key, &worker, status, &options, &mut guard);
+            assert_eq!(
+                guard.state_name(),
+                "closed",
+                "{status} after a minute throttled the pool"
+            );
+            assert_eq!(
+                guard.spawn_permission(Instant::now()),
+                SpawnPermission::Normal
+            );
+        }
+
+        let (failed_at_once, status) = exited_worker(1, false);
+        let mut guard = RestartGuard::default();
+        record_worker_exit(&key, &failed_at_once, status, &options, &mut guard);
+        assert_eq!(guard.state_name(), "backoff");
     }
 
     #[cfg(unix)]
@@ -6065,10 +6133,68 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
             &mut draining,
             Duration::ZERO,
             &mut pending,
+            || {},
         );
 
         assert!(pools.values().all(Vec::is_empty));
         assert!(draining.is_empty());
+    }
+
+    /// The broker calls of a stop (coordination leave, remote status) may
+    /// take http_timeout per endpoint on a slow broker: they run only once
+    /// every worker has its SIGTERM.
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_signals_every_worker_before_the_broker_calls() {
+        let directory = temporary_directory("sigterm-first");
+        let ready = directory.join("ready");
+        let marker = directory.join("terminated");
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap 'touch \"$MARKER\"; exit 0' TERM; touch \"$READY\"; while :; do sleep 0.05; done",
+        ]);
+        command.env("READY", &ready).env("MARKER", &marker);
+        let child = command.spawn().unwrap();
+        // A SIGTERM before the trap would end the shell without a trace.
+        let started = Instant::now();
+        while !ready.exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the worker never started"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut pools = Pools::from([(
+            ("default".into(), "high".into()),
+            vec![Worker::new(child, false)],
+        )]);
+        let mut draining = Draining::new();
+        let resolved = config(options("auto"));
+        let mut pending = PendingTelemetryCleanup::new();
+        let mut signalled_first = false;
+
+        shutdown(
+            &resolved,
+            &mut pools,
+            &mut draining,
+            Duration::from_secs(5),
+            &mut pending,
+            || {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !marker.exists() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                signalled_first = marker.exists();
+            },
+        );
+
+        assert!(
+            signalled_first,
+            "a broker call ran before the workers' SIGTERM"
+        );
+        assert!(pools.values().all(Vec::is_empty));
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[cfg(unix)]

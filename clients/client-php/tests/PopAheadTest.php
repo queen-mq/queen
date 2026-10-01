@@ -16,6 +16,8 @@ class PopAheadTest extends TestCase
 {
     private const ACKED = ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]];
 
+    private const COMMITTED = ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']];
+
     public function testTheNextBatchIsPoppedWithTheLastJobAndTrackedWhenItEnds(): void
     {
         $handler = new PlanHandler([
@@ -91,13 +93,14 @@ class PopAheadTest extends TestCase
         $this->assertSame(['pop', 'ack', 'pop', 'ack', 'ack', 'pop'], $this->paths($handler));
     }
 
-    public function testABatchTooLateToTrackIsHandedBackAtOnce(): void
+    public function testABatchTooLateToTrackIsHandedBackAtOnceWithoutChargingAnAttempt(): void
     {
         $handler = new PlanHandler([
             $this->pop('lease-1', ['job-1']),
-            $this->pop('lease-2', ['job-2', 'job-3']),
+            // A redelivered batch: the attempt it reports must survive.
+            $this->pop('lease-2', ['job-2', 'job-3'], deliveryAttempt: 2),
             self::ACKED,
-            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+            self::COMMITTED,
         ]);
         $renewer = new PopAheadLeaseRenewer();
         $renewer->refuse = 'lease-2';
@@ -105,11 +108,20 @@ class PopAheadTest extends TestCase
 
         $queue->pop('emails')->delete();
 
-        $this->assertSame(['pop', 'pop', 'ack', 'ack'], $this->paths($handler));
-        $release = json_decode((string) $handler->requests[3]->getBody(), true);
-        $this->assertSame('/api/v1/ack/batch', $handler->requests[3]->getUri()->getPath());
-        $this->assertSame(['transaction-2'], array_column($release['acknowledgments'], 'transactionId'), 'one per partition');
-        $this->assertSame('retry', $release['acknowledgments'][0]['status']);
+        $this->assertSame(['pop', 'pop', 'ack', 'transaction'], $this->paths($handler));
+        $handBack = $this->handBack($handler->requests[3]);
+        $this->assertSame(['transaction-2', 'transaction-3'], array_column($handBack['acks'], 'transactionId'));
+        $this->assertSame(['completed', 'completed'], array_column($handBack['acks'], 'status'));
+        $this->assertSame(['lease-2'], $handBack['body']['requiredLeases']);
+        $this->assertSame(['job-2', 'job-3'], array_map(
+            static fn (array $copy): string => $copy['payload']['uuid'],
+            $handBack['copies'],
+        ));
+        $this->assertSame([1, 1], array_map(
+            static fn (array $copy): int => $copy['payload']['_queen']['attempts'],
+            $handBack['copies'],
+        ));
+        $this->assertSame(2, $this->redeliveredAttempts($handBack['copies'][0]), 'as it was when popped ahead');
     }
 
     public function testShutdownHandsBackTheBatchPoppedAhead(): void
@@ -117,7 +129,7 @@ class PopAheadTest extends TestCase
         $handler = new PlanHandler([
             $this->pop('lease-1', ['job-1']),
             $this->pop('lease-2', ['job-2']),
-            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+            self::COMMITTED,
         ]);
         $renewer = new PopAheadLeaseRenewer();
         $queue = $this->queue($handler, $renewer);
@@ -125,9 +137,14 @@ class PopAheadTest extends TestCase
         $queue->pop('emails');
         $queue->shutdown();
 
-        $this->assertSame(['pop', 'pop', 'ack'], $this->paths($handler));
-        $release = json_decode((string) $handler->requests[2]->getBody(), true);
-        $this->assertSame(['transaction-2'], array_column($release['acknowledgments'], 'transactionId'));
+        $this->assertSame(['pop', 'pop', 'transaction'], $this->paths($handler));
+        $handBack = $this->handBack($handler->requests[2]);
+        $this->assertSame(['transaction-2'], array_column($handBack['acks'], 'transactionId'));
+        $this->assertSame(['job-2'], array_map(
+            static fn (array $copy): string => $copy['payload']['uuid'],
+            $handBack['copies'],
+        ));
+        $this->assertSame(1, $this->redeliveredAttempts($handBack['copies'][0]));
         $this->assertNotContains('track lease-2', $renewer->calls, 'released, never renewed');
     }
 
@@ -169,7 +186,7 @@ class PopAheadTest extends TestCase
             $this->pop('lease-1', ['job-1']),
             $this->pop('lease-2', ['job-2']),
             self::ACKED,
-            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+            self::COMMITTED,
         ]);
         $renewer = new PopAheadLeaseRenewer();
         $queue = $this->queue($handler, $renewer, retryAfter: 1);
@@ -178,8 +195,10 @@ class PopAheadTest extends TestCase
         usleep(600_000);
         $first->delete();
 
-        $this->assertSame(['pop', 'pop', 'ack', 'ack'], $this->paths($handler));
-        $this->assertSame('retry', json_decode((string) $handler->requests[3]->getBody(), true)['acknowledgments'][0]['status']);
+        $this->assertSame(['pop', 'pop', 'ack', 'transaction'], $this->paths($handler));
+        $handBack = $this->handBack($handler->requests[3]);
+        $this->assertSame(['completed'], array_column($handBack['acks'], 'status'));
+        $this->assertSame(0, $handBack['copies'][0]['payload']['_queen']['attempts']);
         $this->assertNotContains('track lease-2', $renewer->calls);
     }
 
@@ -242,13 +261,61 @@ class PopAheadTest extends TestCase
     private function paths(PlanHandler $handler): array
     {
         return array_map(
-            static fn ($request): string => str_contains($request->getUri()->getPath(), '/ack') ? 'ack' : 'pop',
+            static fn ($request): string => match (true) {
+                str_contains($request->getUri()->getPath(), '/ack') => 'ack',
+                str_contains($request->getUri()->getPath(), '/transaction') => 'transaction',
+                default => 'pop',
+            },
             $handler->requests,
         );
     }
 
+    /** @return array{body: array, acks: list<array>, copies: list<array>} */
+    private function handBack($request): array
+    {
+        $this->assertSame('/api/v1/transaction', $request->getUri()->getPath());
+        $body = json_decode((string) $request->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        $acks = [];
+        $copies = [];
+        foreach ($body['operations'] as $operation) {
+            if ($operation['type'] === 'ack') {
+                $acks[] = $operation;
+            } else {
+                array_push($copies, ...$operation['items']);
+            }
+        }
+
+        return ['body' => $body, 'acks' => $acks, 'copies' => $copies];
+    }
+
+    /** The attempt Laravel sees when the broker delivers a copy for the first time. */
+    private function redeliveredAttempts(array $copy): int
+    {
+        $handler = new PlanHandler([[
+            'status' => 200,
+            'json' => ['success' => true, 'messages' => [[
+                'id' => 'message-copy',
+                'transactionId' => $copy['transactionId'],
+                'partitionId' => '0198f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83',
+                'partition' => $copy['partition'],
+                'leaseId' => 'lease-copy',
+                'consumerGroup' => 'workers',
+                'deliveryAttempt' => 1,
+                'data' => $copy['payload'],
+            ]]],
+        ]]);
+        $queue = new QueenQueue(
+            new Queen(['url' => 'http://queen.test:6632', 'handler' => HandlerStack::create($handler)]),
+            consumerGroup: 'workers',
+        );
+        $queue->setContainer(new Container());
+        $queue->setConnectionName('queen');
+
+        return $queue->pop($copy['queue'])->attempts();
+    }
+
     /** @param list<string> $uuids */
-    private function pop(string $leaseId, array $uuids): array
+    private function pop(string $leaseId, array $uuids, int $deliveryAttempt = 1): array
     {
         $messages = [];
         foreach ($uuids as $uuid) {
@@ -260,7 +327,7 @@ class PopAheadTest extends TestCase
                 'partition' => 'job-0001',
                 'leaseId' => $leaseId,
                 'consumerGroup' => 'workers',
-                'deliveryAttempt' => 1,
+                'deliveryAttempt' => $deliveryAttempt,
                 'data' => [
                     'uuid' => $uuid,
                     'displayName' => 'Handler',

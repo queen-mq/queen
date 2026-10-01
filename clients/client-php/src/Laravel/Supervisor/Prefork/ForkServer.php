@@ -73,6 +73,19 @@ final class ForkServer
         stream_set_blocking($this->commands, false);
         $this->send(['ready' => self::PROTOCOL, 'pid' => getmypid()]);
 
+        // The fence holds whatever ends the loop. A forked child never runs
+        // this: it leaves through exit(), which runs no finally block.
+        try {
+            $this->loop();
+        } finally {
+            $this->killChildren();
+        }
+
+        return 0;
+    }
+
+    private function loop(): void
+    {
         $buffer = '';
         while (!$this->stopping) {
             $this->reap();
@@ -101,10 +114,6 @@ final class ForkServer
                 break;
             }
         }
-
-        $this->killChildren();
-
-        return 0;
     }
 
     private function handle(string $line): void
@@ -127,7 +136,10 @@ final class ForkServer
         // Blocked across the fork: a SIGTERM for the new worker must not reach
         // the server's handler, which the child inherits until it resets it.
         pcntl_sigprocmask(SIG_BLOCK, [SIGTERM, SIGINT], $mask);
-        $pid = pcntl_fork();
+        // A failed fork (a pids or nproc limit, no memory) raises a warning,
+        // which Laravel's error handler throws: it is a failed request, -1
+        // below, never the end of the server.
+        $pid = @pcntl_fork();
         if ($pid === 0) {
             $this->becomeWorker($argv, $environment, $mask);
         }

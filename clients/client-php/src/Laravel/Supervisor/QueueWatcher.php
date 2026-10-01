@@ -243,6 +243,11 @@ final class QueueWatcher
         $transient = null;
         $unavailable = null;
         foreach ($this->connection['urls'] as $url) {
+            // A streamed body's timeout bounds each read, not the answer: a
+            // connection gone silent mid-answer times every read out empty
+            // and never ends. The whole answer is bounded instead, or the
+            // master loop waiting on it stalls for good.
+            $deadline = hrtime(true) + (int) (($this->timeoutSeconds + $waitMillis / 1000) * 1e9);
             try {
                 $response = $this->http->request('POST', rtrim($url, '/') . '/api/v1/fetch', [
                     'body' => json_encode(['entries' => $entries, 'maxWaitMs' => $waitMillis], JSON_THROW_ON_ERROR),
@@ -277,8 +282,17 @@ final class QueueWatcher
             }
             $body = $response->getBody();
             $read = '';
+            $stalled = false;
             while (!$body->eof() && strlen($read) <= self::MAX_ANSWER_BYTES) {
+                if (hrtime(true) >= $deadline) {
+                    $stalled = true;
+                    break;
+                }
                 $read .= $body->read(65536);
+            }
+            if ($stalled) {
+                $transient = new \RuntimeException('POST /api/v1/fetch stalled in the middle of its answer');
+                continue;
             }
             if (strlen($read) > self::MAX_ANSWER_BYTES) {
                 return null;
