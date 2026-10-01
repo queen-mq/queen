@@ -51,6 +51,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; the pop_ahead sentence and the measured figures still hold.
 # sourceOfTruth re-read 2026-10-01 (Linux server campaign): the throughput, memory and CPU sections and the benchmark section now lead with the server results; the CPU advantage of Horizon is narrowed to the broker at a low, steady rate.
+# sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): the panel retries a failed job from its detail page, and the failed-jobs row and the richer-dashboard section say so; the max_ms JobMetricsRecorder now records and the redacted URL error of SupervisorConfiguration change no comparison.
 ---
 
 Queen is not a drop-in reimplementation of Horizon. Both can supervise Laravel workers, but they
@@ -99,7 +100,7 @@ implementation and tests named in this page's frontmatter.
 | Long-wait notifications | Mail, Slack and SMS routes; the wait is estimated from backlog and runtime | `queen:check-waits`: the broker's age of the oldest waiting job per consumer group, a `LongWaitDetected` event and mail |
 | Autoscaler metrics | Not built in | Prometheus endpoint for Kubernetes HPA and KEDA |
 | Per-supervisor controls | Pause, continue and status for individual supervisors | Controls currently apply to the complete local master |
-| Failed jobs | Horizon commands and dashboard integration | Laravel commands remain authoritative; Queen synchronizes a DLQ snapshot and shows paged metadata, plus the exception on a detail page per job |
+| Failed jobs | Horizon commands and dashboard integration | Laravel commands remain authoritative; Queen synchronizes a DLQ snapshot and shows paged metadata, plus the exception and a one-click retry on a detail page per job |
 | Clear a queue | `horizon:clear` | No atomic clear across ready jobs, live leases and Laravel timers |
 | Native binary | Not needed | Rust engine requires an explicit version-pinned installation |
 
@@ -269,9 +270,9 @@ storage and state-directory decisions.
 Horizon still has silenced jobs, lists of recent, pending and completed jobs, batches, Slack and SMS
 notification routes and per-supervisor controls. Queen's panel
 covers process health, safe master controls, per-job-class metrics over up to a day, monitored tags,
-read-only failed-job details and a per-queue chart from the broker's counters; controls apply to a
-whole master, global backlog analytics and DLQ operations live in the separate broker dashboard, and
-failed-job web mutations are not implemented.
+failed-job details with a one-click retry and a per-queue chart from the broker's counters; controls
+apply to a whole master, global backlog analytics and DLQ operations live in the separate broker
+dashboard, and forgetting, flushing and pruning failed jobs stay with Laravel's commands.
 
 ### Multi-host supervisors
 

@@ -518,7 +518,8 @@ general-availability claim still requires:
 7. native installer, process-tree and provenance verification for every release target;
 8. macOS Developer ID signing and notarization before general macOS availability;
 9. a native Windows process backend and Windows end-to-end tests before any Windows asset;
-10. either web actions for the failed-job lifecycle or an explicit revision of that dashboard gate.
+10. web actions to forget, flush and prune failed jobs, or an explicit revision of that dashboard
+    gate; retry already has one, on the failed-job detail page.
 
 The historical Queen broker result near one million accepted pushes per second used Go loaders,
 200 partitions and 600 consumers on dedicated infrastructure. It did not execute Laravel jobs or
