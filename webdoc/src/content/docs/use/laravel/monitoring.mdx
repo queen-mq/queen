@@ -42,6 +42,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; nothing this page monitors changes.
 # sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): workers also record max_ms, the longest attempt per class, which the Configuration page's advice reads, and the Jobs per class section says so; a cache store that cannot be resolved now leaves the read uncached instead of failing; the retry route, console_url and the queue-contents reader add no metric.
 # sourceOfTruth re-read 2026-10-02 (through ad0f816b + this patch): job metric and tag writes now make one attempt of at most two seconds, and the Jobs per class section says so; the unstarted hand-back and the provider's exit-marker listener change nothing this page monitors.
+# sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
 ---
 
 The supervisor [dashboard](/use/laravel/dashboard) shows what the supervisors do. This page covers

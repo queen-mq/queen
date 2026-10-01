@@ -47,6 +47,7 @@ verifiedBy:
   - clients/client-php/tests/EventDrivenScalingTest.php
   - supervisor/src/lease/tests.rs
 # sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): the shutdown section already gives the SIGTERM before the broker calls, and the prefetch section the unstarted hand-back that keeps its attempt; which exits restart without backoff (WorkerExitMarker), the forked child and the renewal helper, the bounded metrics client and the Rust CA store change nothing this page explains.
+# sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
 ---
 
 This page explains how a Laravel job travels through Queen, one idea at a time. Each section ends
