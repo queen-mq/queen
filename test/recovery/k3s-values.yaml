@@ -1,0 +1,18 @@
+# prod.yaml, adapted to a local k3s: local image, local-path disks, no public host, small requests
+image: local/queen
+imageTag: recovery
+imagePullPolicy: IfNotPresent
+data:
+  size: 2Gi
+  storageClass: local-path
+resources:
+  requests:
+    cpu: 200m
+    memory: 1Gi
+  limits:
+    memory: 2Gi
+zoneSpread: ScheduleAnyway
+proxy:
+  hostName: ""
+  publicUrl: ""
+  cookieDomain: ""

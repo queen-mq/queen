@@ -36,8 +36,9 @@
 //!      Consume wait=true, and
 //!      GET /ephemeral/pop wait=true -> parked_slot RAII guard held across the
 //!      upstream await
-//!   5. forward: rebuild URI on ctx.cell_base_url, strip hop-by-hop headers,
-//!      inject Authorization (ctx.cell_token), X-Queen-Tenant (cfg.send_tenant_header),
+//!   5. forward: rebuild URI on ctx.cell_base_url, strip hop-by-hop headers and
+//!      the broker-to-broker ones (config::BROKER_INTERNAL_HEADERS), inject
+//!      Authorization (ctx.cell_token), X-Queen-Tenant (cfg.send_tenant_header),
 //!      X-Queen-Request-Id; long-poll timeout = min(client timeout|30s, cfg max) + margin
 //!   6. meter post-response (M1–M6): push -> parse per-item statuses (exclude
 //!      error, dedupe duplicate), pop -> delivered count + debit_deliveries,
@@ -673,6 +674,18 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         if let Ok(v) = HeaderValue::from_str(&ctx.broker_tenant.to_string()) {
             parts.headers.insert(crate::config::TENANT_HEADER, v);
         }
+    }
+    // The broker-to-broker headers (config.rs `BROKER_INTERNAL_HEADERS`). Each
+    // one is a broker's word to another broker: "I already relayed this
+    // ephemeral push and charged its rate", "I am the follower that forwarded
+    // this to you", or the cluster's own secret. None of them may ever be the
+    // client's word, so they go UNCONDITIONALLY, like the tenant header above.
+    // Here, at the one point every request crosses on its way out, so both
+    // upstreams (the HTTP relay and the single binary's in-process router) get
+    // the request without them. `remove` takes every value under the name, and
+    // names arrive lowercased, so a repeated or re-cased header goes too.
+    for h in crate::config::BROKER_INTERNAL_HEADERS {
+        parts.headers.remove(*h);
     }
     if let Ok(v) = HeaderValue::from_str(&rid) {
         parts.headers.insert(crate::config::REQUEST_ID_HEADER, v);
@@ -4069,6 +4082,163 @@ mod tests {
         // A JSON value that is not an object names nothing at the broker.
         assert_eq!(dest(br#"["orders","eu-2"]"#), Ok((None, None)));
         assert_eq!(dest(br#""orders""#), Ok((None, None)));
+    }
+
+    // ---- broker-to-broker headers never come from a client ------------------
+    //
+    // `x-queen-eph-fwd`, `x-queen-raft-token` and `x-queen-forwarded` are what
+    // brokers say to each other (config.rs `BROKER_INTERNAL_HEADERS`). Relayed
+    // from a client, the first one alone was enough to skip the tenant's
+    // ephemeral msgs/s charge at the broker. The tests below drive the real
+    // pipeline against a broker that records each request head it is handed,
+    // once per upstream: the strip has to hold where the single binary hands
+    // the request to its own router as well as where a cell broker is dialled.
+
+    /// Every request head a recording broker was handed: (path, headers).
+    type Heads = std::sync::Arc<std::sync::Mutex<Vec<(String, HeaderMap)>>>;
+
+    /// A broker that writes down the head of each request and answers `{}`.
+    fn recording_broker(heads: Heads) -> axum::Router {
+        axum::Router::new().fallback(move |req: Request| {
+            let heads = heads.clone();
+            async move {
+                heads
+                    .lock()
+                    .unwrap()
+                    .push((req.uri().path().to_string(), req.headers().clone()));
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .expect("recording response")
+            }
+        })
+    }
+
+    /// `replay_st`, relaying to `upstream` instead: the same world and the same
+    /// dev-insecure principal, so two relays built this way differ in nothing
+    /// but where `st.upstream.call` hands the request.
+    async fn relay_st(cell_url: &str, spool_dir: &str, upstream: crate::upstream::Upstream) -> St {
+        let Ok(mut state) = std::sync::Arc::try_unwrap(replay_st(cell_url, spool_dir).await) else {
+            panic!("a freshly built St has exactly one owner");
+        };
+        state.upstream = upstream;
+        std::sync::Arc::new(state)
+    }
+
+    /// Sends one request through `handle` per kind of step-4 arm a forward can
+    /// leave from: the ephemeral push (the rate bypass itself), a produce, a KV
+    /// batch (rebuilt by `Request::from_parts` at step 3b), the DLQ retry and a
+    /// streamed read. Each one carries the three internal headers the way a
+    /// hostile client would send them, re-cased and repeated, next to a header
+    /// of the client's own that must still get through. Then checks every head
+    /// the broker was handed.
+    async fn assert_internal_headers_never_reach(st: &St, heads: &Heads) {
+        let routes = [
+            (
+                Method::POST,
+                EPH_PUSH_PATH,
+                r#"{"queue":"orders","messages":[{"payload":1}]}"#,
+            ),
+            (
+                Method::POST,
+                "/api/v1/push",
+                r#"{"items":[{"queue":"orders","payload":1}]}"#,
+            ),
+            (
+                Method::POST,
+                "/api/v1/kv",
+                r#"{"operations":[{"op":"get","ns":"orders","key":"k"}]}"#,
+            ),
+            (Method::POST, RETRY_PATH, "{}"),
+            (Method::GET, "/api/v1/resources/queues", ""),
+        ];
+        for (method, path, body) in &routes {
+            let req = Request::builder()
+                .method(method.clone())
+                .uri(*path)
+                .header(header::HOST, "cell.test")
+                .header("X-Queen-Eph-Fwd", "1")
+                .header("x-queen-eph-fwd", "1")
+                .header("X-QUEEN-RAFT-TOKEN", "guessed-or-leaked")
+                .header("x-queen-forwarded", "1")
+                .header("x-client-trace", "kept")
+                .body(Body::from(*body))
+                .expect("request");
+            let resp = handle(State(st.clone()), req).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{method} {path}");
+        }
+
+        let seen = heads.lock().unwrap().clone();
+        // Every request reached the broker: a head that never arrived would make
+        // "the header is absent" true for the wrong reason.
+        let paths: Vec<&str> = seen.iter().map(|(p, _)| p.as_str()).collect();
+        let sent: Vec<&str> = routes.iter().map(|(_, p, _)| *p).collect();
+        assert_eq!(paths, sent);
+        // The broker's own spellings, written out rather than read back from
+        // `BROKER_INTERNAL_HEADERS`: a name dropped from that list has to fail
+        // here, not shrink this check together with the strip.
+        let internal = ["x-queen-eph-fwd", "x-queen-raft-token", "x-queen-forwarded"];
+        for (path, h) in &seen {
+            for name in internal {
+                assert!(
+                    h.get_all(name).iter().next().is_none(),
+                    "{path}: the broker was handed the client's {name}"
+                );
+            }
+            // ...and only those went: the client's own header is relayed, and
+            // the two the proxy stamps are there, so these are the heads the
+            // forward built rather than something else that dropped headers.
+            assert_eq!(
+                h.get("x-client-trace").and_then(|v| v.to_str().ok()),
+                Some("kept"),
+                "{path}"
+            );
+            assert!(h.contains_key(crate::config::TENANT_HEADER), "{path}");
+            assert!(h.contains_key(crate::config::REQUEST_ID_HEADER), "{path}");
+        }
+    }
+
+    /// Over HTTP, to a cell broker in another process.
+    #[tokio::test]
+    async fn a_client_cannot_send_broker_internal_headers_through_the_http_relay() {
+        let dir = std::env::temp_dir().join(format!(
+            "queen-proxy-internal-http-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let dir = dir.to_str().expect("temp path").to_string();
+        let heads = Heads::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = recording_broker(heads.clone());
+        let _broker = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let st = replay_st(&format!("http://{addr}"), &dir).await;
+        assert!(!st.upstream.in_process());
+
+        assert_internal_headers_never_reach(&st, &heads).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// In-process, to the router of the broker the single binary runs inside:
+    /// the path that never opens a socket, and the one production serves.
+    #[tokio::test]
+    async fn a_client_cannot_send_broker_internal_headers_through_the_in_process_router() {
+        let dir = std::env::temp_dir().join(format!(
+            "queen-proxy-internal-inproc-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let dir = dir.to_str().expect("temp path").to_string();
+        let heads = Heads::default();
+        let upstream = crate::upstream::Upstream::InProcess(recording_broker(heads.clone()));
+        let st = relay_st("inprocess://self", &dir, upstream).await;
+        assert!(st.upstream.in_process());
+
+        assert_internal_headers_never_reach(&st, &heads).await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

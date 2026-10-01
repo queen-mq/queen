@@ -778,3 +778,217 @@ fn options_are_clamped_against_the_knobs() {
         "a negative ttl is no ttl, never a drop-everything"
     );
 }
+
+// ===========================================================================
+// §3.7 across raft nodes — placement and hand-over
+// ===========================================================================
+
+fn ids(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+/// "Every node computes the same owners from the same view": the pick must not
+/// depend on the order the members arrive in, and must spread partitions.
+#[test]
+fn hrw_pick_ignores_member_order_and_spreads_partitions() {
+    let a = ids(&["1", "2", "3"]);
+    let b = ids(&["3", "1", "2"]);
+    let mut per = HashMap::new();
+    for i in 0..300 {
+        let key = rendezvous_key(T, &format!("q{i}"), "Default");
+        let x = hrw_pick(&key, &a).unwrap();
+        assert_eq!(Some(x), hrw_pick(&key, &b));
+        *per.entry(x.to_string()).or_insert(0) += 1;
+    }
+    for n in ["1", "2", "3"] {
+        assert!(per[n] > 60, "node {n} owns {} of 300", per[n]);
+    }
+}
+
+/// Removing a node moves ONLY the partitions it owned: everything else keeps
+/// its owner, so a node leaving costs hand-overs for its share and no more.
+#[test]
+fn removing_a_node_moves_only_its_partitions() {
+    let all = ids(&["1", "2", "3"]);
+    let two = ids(&["1", "3"]);
+    for i in 0..300 {
+        let key = rendezvous_key(T, &format!("q{i}"), "p");
+        let before = hrw_pick(&key, &all).unwrap();
+        let after = hrw_pick(&key, &two).unwrap();
+        if before != "2" {
+            assert_eq!(before, after);
+        }
+    }
+}
+
+fn placement(me: &str, nodes: &[&str]) -> Placement {
+    Placement {
+        me: me.to_string(),
+        nodes: ids(nodes),
+        addrs: nodes
+            .iter()
+            .filter(|n| **n != me)
+            .map(|n| (n.to_string(), format!("http://node-{n}")))
+            .collect(),
+    }
+}
+
+/// Option 2: a ring that moves takes its consumers' positions with it. A group
+/// that consumed two messages resumes at the third; a leased, unacked message
+/// is redelivered first; a group the old owner never saw reads everything.
+#[test]
+fn a_handed_over_ring_resumes_every_group_where_it_was() {
+    let a = engine(small());
+    let b = engine(small());
+    a.push(T, "q", "Default", bodies(5), 0).unwrap();
+    // g2 first: a group created after g1 had consumed would start past what
+    // every existing group had consumed (the ring trims it).
+    let leased = a.pop(T, "q", None, Some("g2"), 1, false, 0);
+    assert_eq!(payload_of(&leased[0]), "{\"n\":0}");
+    assert_eq!(a.pop(T, "q", None, Some("g1"), 2, true, 0).len(), 2);
+
+    a.set_placement(Some(placement("A", &["A", "B"])));
+    a.set_leaving();
+    assert_eq!(a.reap_foreign(), 1);
+    assert_eq!(a.global_bytes(), 0, "the detached ring is refunded here");
+    let out = a.take_outbox();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].owner, "B");
+
+    let ring = out.into_iter().next().unwrap().ring;
+    assert_eq!(b.adopt(ring, 1).unwrap(), 5);
+    // A group the old owner never saw reads everything still held.
+    assert_eq!(b.pop(T, "q", None, Some("g3"), 10, true, 1).len(), 5);
+    let g1: Vec<String> = b
+        .pop(T, "q", None, Some("g1"), 10, true, 1)
+        .iter()
+        .map(payload_of)
+        .collect();
+    assert_eq!(g1, ["{\"n\":2}", "{\"n\":3}", "{\"n\":4}"]);
+    let g2 = b.pop(T, "q", None, Some("g2"), 10, true, 1);
+    assert_eq!(
+        payload_of(&g2[0]),
+        "{\"n\":0}",
+        "the leased message comes back first"
+    );
+    assert_eq!(g2[0].attempts, 2);
+    assert_eq!(g2.len(), 5);
+}
+
+/// A ring that already took pushes while the nodes disagreed gets the handed
+/// over messages AFTER its own: reordered, never lost (§1.4).
+#[test]
+fn a_hand_over_into_a_busy_ring_appends() {
+    let a = engine(small());
+    let b = engine(small());
+    a.push(T, "q", "Default", bodies(2), 0).unwrap();
+    b.push(T, "q", "Default", vec![body("{\"n\":100}")], 0)
+        .unwrap();
+    a.set_placement(Some(placement("A", &["A", "B"])));
+    a.set_leaving();
+    a.reap_foreign();
+    let ring = a.take_outbox().into_iter().next().unwrap().ring;
+    b.adopt(ring, 1).unwrap();
+    let got: Vec<String> = b
+        .pop(T, "q", None, None, 10, true, 1)
+        .iter()
+        .map(payload_of)
+        .collect();
+    assert_eq!(got, ["{\"n\":100}", "{\"n\":0}", "{\"n\":1}"]);
+}
+
+/// A partition this node owns stays local; one it does not is detached for
+/// its owner the first time it is routed.
+#[test]
+fn routing_a_foreign_partition_detaches_it_for_the_owner() {
+    let a = engine(small());
+    a.push(T, "q", "Default", bodies(3), 0).unwrap();
+    assert_eq!(a.route(T, "q", "Default"), Route::Local);
+    a.set_placement(Some(placement("A", &["B"])));
+    match a.route(T, "q", "Default") {
+        Route::Remote { server_id, .. } => assert_eq!(server_id, "B"),
+        Route::Local => panic!("B is the only candidate"),
+    }
+    let mine = a.take_handover(T, "q", Some("Default"));
+    assert_eq!(mine.len(), 1);
+    assert_eq!(mine[0].ring.msgs.len(), 3);
+    assert!(a.take_outbox().is_empty());
+}
+
+fn members(
+    view_age_ms: u64,
+    acks: &[(u64, Option<u64>)],
+) -> crate::rsm::replicator::ClusterMembers {
+    use crate::rsm::replicator::{ClusterMembers, MemberSeen, MembersView};
+    ClusterMembers {
+        node_id: 1,
+        leader: Some(1),
+        term: 2,
+        view: Some(MembersView {
+            leader: 1,
+            term: 2,
+            members: acks
+                .iter()
+                .map(|(id, ack)| MemberSeen {
+                    id: *id,
+                    voter: true,
+                    http: format!("127.0.0.1:{}", 6630 + id),
+                    raft: String::new(),
+                    last_ack_ms: *ack,
+                    matched: None,
+                    kinds: None,
+                })
+                .collect(),
+        }),
+        view_age: Some(std::time::Duration::from_millis(view_age_ms)),
+    }
+}
+
+/// The Kafka facade's rule: down past the ttl, back only within half of it,
+/// nothing judged on a stale view, and alone means every partition is local.
+#[test]
+fn the_member_judge_has_hysteresis_and_ignores_stale_views() {
+    let none = std::collections::HashSet::new();
+    let mut j = MemberJudge::new(4_000);
+    let p = j
+        .judge(
+            &members(0, &[(1, Some(0)), (2, Some(100)), (3, Some(5_000))]),
+            &none,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(p.nodes, ids(&["1", "2"]));
+    assert_eq!(p.addrs["2"], "http://127.0.0.1:6632");
+    assert_eq!(j.down_ids(), ids(&["3"]));
+    // Heard again at 3 s: inside the ttl, but it was down — not yet.
+    let p = j
+        .judge(
+            &members(0, &[(1, Some(0)), (2, Some(100)), (3, Some(3_000))]),
+            &none,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(p.nodes, ids(&["1", "2"]));
+    let p = j
+        .judge(
+            &members(0, &[(1, Some(0)), (2, Some(100)), (3, Some(1_000))]),
+            &none,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(p.nodes, ids(&["1", "2", "3"]));
+    // A view older than half the ttl decides nothing.
+    assert!(j.judge(&members(2_500, &[(1, Some(0))]), &none).is_none());
+    // A leaving notice keeps a live member out.
+    let gone: std::collections::HashSet<String> = ["2".to_string()].into();
+    let p = j
+        .judge(
+            &members(0, &[(1, Some(0)), (2, Some(100)), (3, Some(100))]),
+            &gone,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(p.nodes, ids(&["1", "3"]));
+    // Alone: no placement at all, the single-node path.
+    assert_eq!(j.judge(&members(0, &[(1, Some(0))]), &none), Some(None));
+}

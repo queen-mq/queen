@@ -843,6 +843,29 @@ pub trait Rsm: Send + Sync {
     /// a caught-up peer, so the cluster does not wait out an election timeout.
     /// Bounded by `wait`. Nothing to do without a cluster.
     async fn hand_off_leadership(&self, _wait: std::time::Duration) {}
+
+    /// Who is in the cluster and when the raft leader last heard from each
+    /// member, as this node knows it (`GET /api/v1/raft/liveness`). The
+    /// ephemeral placement is computed over it. `None`: no replicator.
+    fn members(&self) -> Option<crate::rsm::replicator::ClusterMembers> {
+        None
+    }
+
+    /// The ephemeral control rows as THIS node has applied them: the switch,
+    /// the declarations, the grants. Read every second by every node, so a
+    /// `configure`, `delete`, switch or grant served by another node reaches
+    /// this one's RAM. `None`: nothing stored to read.
+    fn ephemeral_control(&self) -> Option<EphControl> {
+        None
+    }
+}
+
+/// [`Rsm::ephemeral_control`]'s answer.
+#[derive(Clone, Debug, Default)]
+pub struct EphControl {
+    pub enabled: bool,
+    pub configs: Vec<(String, String, serde_json::Value)>,
+    pub grants: Vec<(String, crate::rsm::effect::QuotaGrant)>,
 }
 
 // ---------------------------------------------------------------------------

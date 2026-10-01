@@ -421,6 +421,26 @@ pub const REQUEST_ID_HEADER: &str = "x-queen-request-id";
 /// honoured for an API key: a data-plane credential stays bound to the cluster
 /// it was issued on. See acting.rs for the full matrix.
 pub const ACT_CLUSTER_HEADER: &str = "x-queen-act-cluster";
+/// The broker's "another broker already relayed this ephemeral request" mark
+/// (server/src/peerclient.rs `FWD_HEADER`). A push carrying it skips the
+/// per-tenant ephemeral msgs/s charge, because the broker that relayed it
+/// already charged it, so a client able to send it pushes past its plan's
+/// message rate for free.
+pub const EPH_FWD_HEADER: &str = "x-queen-eph-fwd";
+/// The raft cluster's shared secret (server/src/rsm/replicator/raft/cluster.rs
+/// `TOKEN_HEADER`), which authenticates broker-to-broker calls. A client cannot
+/// know the value; it is stripped anyway so that a guessed or leaked one is
+/// never relayed into the cell from the proxy's own address.
+pub const RAFT_TOKEN_HEADER: &str = "x-queen-raft-token";
+/// The raft follower-to-leader relay mark (server/src/handlers/raft.rs
+/// `FORWARDED_HEADER`): a request carrying it is served on the node it lands
+/// on instead of being sent on to the leader. Only a follower may set it.
+pub const RAFT_FORWARDED_HEADER: &str = "x-queen-forwarded";
+/// What brokers say to EACH OTHER, which a client must never be able to say.
+/// `gateway::handle` removes every one of these from the client's request
+/// before relaying it, to the HTTP upstream and to the in-process router alike.
+pub const BROKER_INTERNAL_HEADERS: &[&str] =
+    &[EPH_FWD_HEADER, RAFT_TOKEN_HEADER, RAFT_FORWARDED_HEADER];
 /// Fixed default tenant UUID — must match the broker's Track B constant.
 pub const DEFAULT_TENANT_UUID: &str = "00000000-0000-0000-0000-000000000001";
 

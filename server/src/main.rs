@@ -220,6 +220,9 @@ async fn run_raft(cfg: config::Config) {
     metrics::spawn_samplers(state.metrics.clone());
     // The ephemeral (RAM) queues' lease/ttl/idle backstop.
     ephemeral::spawn_backstop(state.ephemeral.clone());
+    // Ephemeral partitions across the raft nodes: placement over the members'
+    // view, hand-over when ownership moves, control rows converged each second.
+    handlers::spawn_ephemeral_placement(state.clone());
 
     // On SIGTERM a node that leads first hands its leadership to a caught-up
     // peer, and only then does the listener drain: stopping the leader (a
@@ -228,8 +231,12 @@ async fn run_raft(cfg: config::Config) {
     let handoff_rsm = state.rsm.clone();
     let shutdown = {
         let rsm = handoff_rsm.clone();
+        let st = state.clone();
         async move {
             obs::shutdown_signal().await;
+            // The ephemeral rings go to their next owners first, while the
+            // peers still answer and this node still serves.
+            handlers::ephemeral_drain(&st).await;
             rsm.hand_off_leadership(HAND_OFF_WAIT).await;
         }
     };

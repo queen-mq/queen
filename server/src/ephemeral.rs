@@ -402,6 +402,170 @@ pub enum Route {
     },
 }
 
+/// Who serves ephemeral partitions, as one node sees it: itself and the live
+/// raft members with a client address. Every node computes the same owners
+/// from the same view — the raft LEADER's observations, which every node
+/// serves (`replicator/raft/members.rs`) — so there is no lease and no vote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placement {
+    /// This node's raft id, in decimal.
+    pub me: String,
+    /// The candidates, sorted: `me` (unless leaving) and every live peer.
+    pub nodes: Vec<String>,
+    /// Base URL per peer, e.g. `http://queen-1.queen-headless:6632`.
+    pub addrs: HashMap<String, String>,
+}
+
+/// HRW score of `node` for `key` (seeded xxh3: stable across builds).
+pub fn hrw_score(node: &str, key: &str) -> u64 {
+    xxhash_rust::xxh3::xxh3_64_with_seed(
+        key.as_bytes(),
+        xxhash_rust::xxh3::xxh3_64(node.as_bytes()),
+    )
+}
+
+/// The highest-random-weight node for `key`; ties go to the larger id, so the
+/// answer never depends on the order of `nodes`.
+pub fn hrw_pick<'a>(key: &str, nodes: &'a [String]) -> Option<&'a str> {
+    let mut best: Option<(&'a str, u64)> = None;
+    for n in nodes {
+        let s = hrw_score(n, key);
+        let take = match best {
+            None => true,
+            Some((bn, bs)) => s > bs || (s == bs && n.as_str() > bn),
+        };
+        if take {
+            best = Some((n.as_str(), s));
+        }
+    }
+    best.map(|(n, _)| n)
+}
+
+/// The placement key of one partition: the engine's composite queue key plus
+/// the partition, so two tenants' same-named queues place independently.
+pub fn rendezvous_key(tenant: &str, name: &str, partition: &str) -> String {
+    format!("{}\x1f{}", Ephemeral::qkey(tenant, name), partition)
+}
+
+/// Which members are live, judged the way the Kafka facade judges them
+/// (`queen-kafka/src/cluster/liveness.rs`): a member the leader has not heard
+/// from within `ttl_ms` is down; one that was down comes back only once heard
+/// within half of it, so a member at the edge does not flap partitions back and
+/// forth; and a view older than half the ttl judges nothing.
+pub struct MemberJudge {
+    ttl_ms: u64,
+    live: HashMap<u64, bool>,
+}
+
+impl MemberJudge {
+    pub fn new(ttl_ms: u64) -> MemberJudge {
+        MemberJudge {
+            ttl_ms: ttl_ms.max(1),
+            live: HashMap::new(),
+        }
+    }
+
+    /// The members the last judgement found down. A node that announced it was
+    /// leaving needs no exclusion once raft says it is gone: clearing it then
+    /// lets the restarted node back in as soon as it is heard again, instead of
+    /// after the notice's full window.
+    pub fn down_ids(&self) -> Vec<String> {
+        self.live
+            .iter()
+            .filter(|(_, live)| !**live)
+            .map(|(id, _)| id.to_string())
+            .collect()
+    }
+
+    /// `None`: nothing to judge by (no view yet, or one too old) — keep the
+    /// placement in force. `Some(None)`: no live peer — every partition is local.
+    pub fn judge(
+        &mut self,
+        cm: &crate::rsm::replicator::ClusterMembers,
+        excluded: &std::collections::HashSet<String>,
+    ) -> Option<Option<Placement>> {
+        let view = cm.view.as_ref()?;
+        let age = cm.view_age?.as_millis() as u64;
+        if age > self.ttl_ms / 2 {
+            return None;
+        }
+        let me = cm.node_id;
+        let mut nodes = vec![me.to_string()];
+        let mut addrs = HashMap::new();
+        for m in &view.members {
+            if m.id == me {
+                continue;
+            }
+            let was = self.live.get(&m.id).copied();
+            let is = match m.last_ack_ms {
+                None => was.unwrap_or(true),
+                Some(ack) => {
+                    let ack = ack.saturating_add(age);
+                    match was {
+                        Some(false) => ack <= self.ttl_ms / 2,
+                        _ => ack <= self.ttl_ms,
+                    }
+                }
+            };
+            self.live.insert(m.id, is);
+            let id = m.id.to_string();
+            if !is || m.http.is_empty() || excluded.contains(&id) {
+                continue;
+            }
+            let addr = if m.http.starts_with("http://") || m.http.starts_with("https://") {
+                m.http.clone()
+            } else {
+                format!("http://{}", m.http)
+            };
+            nodes.push(id.clone());
+            addrs.insert(id, addr);
+        }
+        if addrs.is_empty() {
+            return Some(None);
+        }
+        nodes.sort();
+        Some(Some(Placement {
+            me: me.to_string(),
+            nodes,
+            addrs,
+        }))
+    }
+}
+
+/// One consumer group's position in a handed-over ring, as offsets from the
+/// ring's first message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupExport {
+    pub name: String,
+    /// Next message the group had not been handed.
+    pub next: u64,
+    /// Messages to hand again: awaiting redelivery, or leased and unacked (the
+    /// lease does not travel; the new owner redelivers, inside at-least-once).
+    pub redeliver: Vec<u64>,
+    pub attempts: Vec<(u64, u32)>,
+    pub skipped: u64,
+}
+
+/// One partition's contents on their way to the node that now owns it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RingExport {
+    pub tenant: String,
+    pub queue: String,
+    pub partition: String,
+    /// `(enqueued_ms, payload)` in ring order. Payloads are the raw JSON the
+    /// push carried.
+    pub msgs: Vec<(i64, Box<[u8]>)>,
+    pub groups: Vec<GroupExport>,
+}
+
+/// A ring queued for its new owner.
+#[derive(Debug)]
+pub struct Handover {
+    pub owner: String,
+    pub addr: String,
+    pub ring: RingExport,
+}
+
 /// `e:<epoch_hex>:<partition>:<seq>` — opaque to clients, self-describing to
 /// the broker (§3.1).
 ///
@@ -802,6 +966,111 @@ impl Ring {
         }
         freed
     }
+
+    /// Empty the ring INTO a hand-over: the messages, and every group's position
+    /// as offsets from the first one. A leased message travels as a redelivery.
+    fn export(&mut self) -> (Vec<(i64, Box<[u8]>)>, Vec<GroupExport>, Freed) {
+        let base = self.head_seq;
+        let mut names = vec![String::new(); self.groups.len()];
+        for (n, &i) in &self.gix {
+            names[i as usize] = n.clone();
+        }
+        let mut groups = Vec::with_capacity(self.groups.len());
+        for (i, g) in self.groups.iter().enumerate() {
+            let mut redeliver: Vec<u64> = g
+                .redeliver
+                .iter()
+                .filter(|&&s| s >= base)
+                .map(|&s| s - base)
+                .collect();
+            for (gi, s) in self.lease_at.keys() {
+                if *gi == i as u32 && *s >= base {
+                    redeliver.push(s - base);
+                }
+            }
+            redeliver.sort_unstable();
+            redeliver.dedup();
+            groups.push(GroupExport {
+                name: std::mem::take(&mut names[i]),
+                next: g.next.saturating_sub(base),
+                redeliver,
+                attempts: g
+                    .attempts
+                    .iter()
+                    .filter(|(s, _)| **s >= base)
+                    .map(|(s, n)| (s - base, *n))
+                    .collect(),
+                skipped: g.skipped,
+            });
+        }
+        let freed = Freed {
+            bytes: self.bytes,
+            count: self.deque.len() as i64,
+            by_ttl: 0,
+            by_bounds: 0,
+        };
+        let msgs = self
+            .deque
+            .drain(..)
+            .map(|m| (m.enqueued_ms, m.payload))
+            .collect();
+        self.bytes = 0;
+        self.head_seq = self.next_seq;
+        self.leases.clear();
+        self.lease_at.clear();
+        for g in self.groups.iter_mut() {
+            g.next = self.next_seq;
+            g.redeliver.clear();
+            g.attempts.clear();
+        }
+        (msgs, groups, freed)
+    }
+
+    /// Take a handed-over ring's messages at the tail. Into a ring with nothing
+    /// in it and nothing in flight — the usual case, at most a parked pop got
+    /// here first — every group resumes exactly where it was. Into a ring that
+    /// already took new pushes (the seconds while nodes disagree) the messages
+    /// land after them and groups keep their cursors: reordered and possibly
+    /// re-delivered, which the class allows (§1.4) where losing them is worse.
+    fn adopt(&mut self, msgs: Vec<(i64, Box<[u8]>)>, groups: &[GroupExport]) {
+        let fresh = self.deque.is_empty() && self.leases.is_empty();
+        let base = self.next_seq;
+        for (enqueued_ms, payload) in msgs {
+            let seq = self.next_seq;
+            self.next_seq += 1;
+            if self.deque.is_empty() {
+                self.head_seq = seq;
+            }
+            self.bytes += payload.len() as i64;
+            self.deque.push_back(Msg {
+                seq,
+                payload,
+                enqueued_ms,
+            });
+        }
+        let end = self.next_seq;
+        for g in groups {
+            let gi = self.group(&g.name) as usize;
+            if !fresh {
+                continue;
+            }
+            let st = &mut self.groups[gi];
+            st.next = base.saturating_add(g.next).min(end);
+            st.redeliver = g
+                .redeliver
+                .iter()
+                .map(|o| base + o)
+                .filter(|s| *s < end)
+                .collect();
+            st.attempts = g
+                .attempts
+                .iter()
+                .filter(|(o, _)| base + o < end)
+                .map(|(o, n)| (base + o, *n))
+                .collect();
+            st.skipped += g.skipped;
+        }
+    }
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -1164,6 +1433,20 @@ pub struct Ephemeral {
     /// optimization for a loop that may not exist, and the on-touch sweep is the
     /// correctness floor either way. Same shape as `Notifier::attach_transport`.
     wake_hint: OnceLock<fn(i64)>,
+    /// §3.7 — who serves which partition, from the raft members' view
+    /// ([`Ephemeral::set_placement`]). `None`: no live peer to share with, so
+    /// every partition is local — the single-node and embedded path.
+    placement: std::sync::RwLock<Option<Arc<Placement>>>,
+    /// Set on SIGTERM: this node owns nothing any more and hands every ring to
+    /// the next owner ([`Ephemeral::set_leaving`]).
+    leaving: AtomicBool,
+    /// Peers that announced they are leaving, and until when (epoch ms): they
+    /// are out of the placement before raft notices they are gone.
+    excluded: Mutex<HashMap<String, i64>>,
+    /// Rings detached for their new owner and not shipped yet ([`Handover`]).
+    outbox: Mutex<Vec<Handover>>,
+    /// Wakes the placement loop early: a hand-over queued, a drain notice.
+    kick: tokio::sync::Notify,
 }
 
 impl Ephemeral {
@@ -1182,6 +1465,11 @@ impl Ephemeral {
             knobs,
             metrics,
             wake_hint: OnceLock::new(),
+            placement: std::sync::RwLock::new(None),
+            leaving: AtomicBool::new(false),
+            excluded: Mutex::new(HashMap::new()),
+            outbox: Mutex::new(Vec::new()),
+            kick: tokio::sync::Notify::new(),
         })
     }
 
@@ -1433,17 +1721,338 @@ impl Ephemeral {
         }
     }
 
-    // ------------------------------------------------------------ placement
+    // ------------------------------------------------- §3.7 rendezvous placement
 
-    /// Where `(queue, partition)` lives: always this broker. The rings are
-    /// node-local RAM; there is no cross-broker placement.
-    pub fn route(&self, _tenant: &str, _name: &str, _partition: &str) -> Route {
-        Route::Local
+    /// Install the placement the members' view gives (`None`: alone). Returns
+    /// whether it changed, so the caller knows to hand over the rings that
+    /// moved. A leaving node never places anything on itself.
+    pub fn set_placement(&self, p: Option<Placement>) -> bool {
+        let leaving = self.leaving.load(Ordering::Relaxed);
+        let p = p.map(|mut p| {
+            if leaving {
+                let me = p.me.clone();
+                p.nodes.retain(|n| *n != me);
+            }
+            Arc::new(p)
+        });
+        let mut cur = self.placement.write().unwrap();
+        let changed = match (&*cur, &p) {
+            (None, None) => false,
+            (Some(a), Some(b)) => **a != **b,
+            _ => true,
+        };
+        if changed {
+            *cur = p;
+        }
+        changed
     }
 
-    /// The partition-less pop's placement: this broker, like every partition.
-    pub fn route_queue(&self, _tenant: &str, _name: &str) -> Route {
-        Route::Local
+    fn placement(&self) -> Option<Arc<Placement>> {
+        self.placement.read().unwrap().clone()
+    }
+
+    /// The peers ephemeral partitions are shared with: `(node id, base URL)`.
+    pub fn peers(&self) -> Vec<(String, String)> {
+        let Some(p) = self.placement() else {
+            return Vec::new();
+        };
+        let mut v: Vec<(String, String)> = p
+            .addrs
+            .iter()
+            .map(|(k, a)| (k.clone(), a.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// SIGTERM: from now on this node owns nothing. The next `reap_foreign`
+    /// detaches every ring for its new owner.
+    pub fn set_leaving(&self) {
+        self.leaving.store(true, Ordering::Relaxed);
+        let cur = self.placement();
+        if let Some(p) = cur {
+            let mut q = (*p).clone();
+            let me = q.me.clone();
+            q.nodes.retain(|n| *n != me);
+            *self.placement.write().unwrap() = Some(Arc::new(q));
+        }
+    }
+
+    pub fn is_leaving(&self) -> bool {
+        self.leaving.load(Ordering::Relaxed)
+    }
+
+    /// A peer said it is leaving: keep it out of the placement until `until_ms`,
+    /// before raft notices it is gone.
+    pub fn exclude_peer(&self, id: &str, until_ms: i64) {
+        self.excluded
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), until_ms);
+        self.kick.notify_one();
+    }
+
+    /// Forget a leaving notice: raft has judged that peer down, so whatever
+    /// comes back at its address is a new process and joins normally.
+    pub fn clear_exclusion(&self, id: &str) {
+        self.excluded.lock().unwrap().remove(id);
+    }
+
+    /// The peers still excluded at `now_ms` (expired notices are forgotten).
+    pub fn excluded_peers(&self, now_ms: i64) -> std::collections::HashSet<String> {
+        let mut m = self.excluded.lock().unwrap();
+        m.retain(|_, until| *until > now_ms);
+        m.keys().cloned().collect()
+    }
+
+    /// The placement loop's early wake-up.
+    pub fn kick_handle(&self) -> &tokio::sync::Notify {
+        &self.kick
+    }
+
+    /// Who owns `(queue, partition)` under `p`: `None` = this node.
+    fn owner_in(
+        p: &Placement,
+        tenant: &str,
+        name: &str,
+        partition: &str,
+    ) -> Option<(String, String)> {
+        let key = rendezvous_key(tenant, name, partition);
+        let owner = hrw_pick(&key, &p.nodes)?;
+        if owner == p.me {
+            return None;
+        }
+        // The address is looked up on the WINNER: the hash's input is the id
+        // set every node agrees on, an address is how this node reaches it.
+        let addr = p.addrs.get(owner).filter(|a| !a.is_empty())?;
+        Some((owner.to_string(), addr.clone()))
+    }
+
+    /// Where `(queue, partition)` lives. A `Remote` answer also DETACHES what
+    /// this node still holds for that partition and queues it for the new owner
+    /// (option 2: a hand-over, where v1 wiped), so an ownership move carries the
+    /// contents with it instead of dropping them.
+    pub fn route(&self, tenant: &str, name: &str, partition: &str) -> Route {
+        let Some(p) = self.placement() else {
+            return Route::Local;
+        };
+        match Self::owner_in(&p, tenant, name, partition) {
+            None => Route::Local,
+            Some((server_id, http_addr)) => {
+                self.detach_to(tenant, name, partition, &server_id, &http_addr);
+                Route::Remote {
+                    server_id,
+                    http_addr,
+                }
+            }
+        }
+    }
+
+    /// The partition-less pop's placement (§3.7, v1 rule): serve here when any
+    /// partition of the queue is owned here — the pop sees this node's share —
+    /// otherwise route on the default partition. Naming the partition is the
+    /// exact answer.
+    pub fn route_queue(&self, tenant: &str, name: &str) -> Route {
+        if self.placement().is_none() {
+            return Route::Local;
+        }
+        let mut any_local = false;
+        if let Some(q) = self.lookup(tenant, name, false) {
+            for p in q.partition_names() {
+                if self.route(tenant, name, &p) == Route::Local {
+                    any_local = true;
+                }
+            }
+        }
+        if any_local {
+            return Route::Local;
+        }
+        self.route(tenant, name, DEFAULT_PARTITION)
+    }
+
+    /// Take one partition's ring out of this node and queue it for `owner`.
+    /// `true` when there was something to hand over.
+    fn detach_to(
+        &self,
+        tenant: &str,
+        name: &str,
+        partition: &str,
+        owner: &str,
+        addr: &str,
+    ) -> bool {
+        let Some(q) = self.lookup(tenant, name, false) else {
+            return false;
+        };
+        let Some(ring) = q.partitions.lock().unwrap().remove(partition) else {
+            return false;
+        };
+        let (msgs, groups, freed) = ring.lock().unwrap().export();
+        self.release(tenant, &q, &freed);
+        if msgs.is_empty() {
+            return false;
+        }
+        self.outbox.lock().unwrap().push(Handover {
+            owner: owner.to_string(),
+            addr: addr.to_string(),
+            ring: RingExport {
+                tenant: tenant.to_string(),
+                queue: name.to_string(),
+                partition: partition.to_string(),
+                msgs,
+                groups,
+            },
+        });
+        self.kick.notify_one();
+        true
+    }
+
+    /// Detach every ring this node holds but no longer owns (a membership
+    /// change, a drain). Returns how many were queued for hand-over.
+    pub fn reap_foreign(&self) -> u64 {
+        let Some(p) = self.placement() else {
+            return 0;
+        };
+        let snapshot: Vec<(String, Arc<EqQueue>)> = self
+            .queues
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut n = 0u64;
+        for (key, q) in &snapshot {
+            let (tenant, _) = crate::handlers::split_tenant_queue(key);
+            for part in q.partition_names() {
+                if let Some((id, addr)) = Self::owner_in(&p, tenant, &q.name, &part) {
+                    if self.detach_to(tenant, &q.name, &part, &id, &addr) {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    /// The hand-overs queued for one queue (one partition, or all of them), so
+    /// a request that is about to be relayed ships its partition's contents
+    /// FIRST and the new owner serves them in order.
+    pub fn take_handover(
+        &self,
+        tenant: &str,
+        name: &str,
+        partition: Option<&str>,
+    ) -> Vec<Handover> {
+        let mut out = self.outbox.lock().unwrap();
+        let mut mine = Vec::new();
+        let mut i = 0;
+        while i < out.len() {
+            let r = &out[i].ring;
+            if r.tenant == tenant
+                && r.queue == name
+                && (partition.is_none() || partition == Some(r.partition.as_str()))
+            {
+                mine.push(out.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        mine
+    }
+
+    /// Every queued hand-over.
+    pub fn take_outbox(&self) -> Vec<Handover> {
+        std::mem::take(&mut *self.outbox.lock().unwrap())
+    }
+
+    /// A hand-over that could not be delivered: its contents are gone, which is
+    /// the class's contract (§1.2) — counted, never silent.
+    pub fn handover_lost(&self, h: &Handover) {
+        self.metrics.eph_wipes.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(
+            target: "ephemeral",
+            queue = %h.ring.queue,
+            partition = %h.ring.partition,
+            owner = %h.owner,
+            messages = h.ring.msgs.len(),
+            "hand-over failed; the partition's contents are dropped"
+        );
+    }
+
+    /// Take over a ring another node handed over. Charged like a push (bounds,
+    /// tenant bytes, the cell), all or nothing.
+    pub fn adopt(&self, ring_in: RingExport, now_ms: i64) -> Result<usize, Refusal> {
+        let RingExport {
+            tenant,
+            queue,
+            partition,
+            msgs,
+            groups,
+        } = ring_in;
+        if msgs.is_empty() {
+            return Ok(0);
+        }
+        let Some(q) = self.lookup(&tenant, &queue, true) else {
+            return Err(Refusal::NoRoom);
+        };
+        let cfg = *q.config.lock().unwrap();
+        for g in &groups {
+            q.remember_group(&g.name);
+        }
+        let ring = q.ring_or_create(&partition, || self.next_ring_base());
+        q.touch(now_ms);
+        let total: i64 = msgs.iter().map(|(_, p)| p.len() as i64).sum();
+        let count = msgs.len() as i64;
+        if !self.charge_queue(&q, cfg.policy, &ring, total, count, &tenant) {
+            return Err(Refusal::QueueFull);
+        }
+        let tenant_ok = self
+            .with_tenant(&tenant, |t| t.bytes.charge(total))
+            .unwrap_or(false);
+        if !tenant_ok {
+            q.bytes.refund(total);
+            q.length.refund(count);
+            return Err(Refusal::TenantQuota);
+        }
+        if !self.global.charge(total) {
+            q.bytes.refund(total);
+            q.length.refund(count);
+            let _ = self.with_tenant(&tenant, |t| t.bytes.refund(total));
+            return Err(Refusal::NoRoom);
+        }
+        ring.lock().unwrap().adopt(msgs, &groups);
+        self.metrics
+            .eph_bytes
+            .store(self.global.used(), Ordering::Relaxed);
+        if cfg.ttl_ms > 0 {
+            self.hint(cfg.ttl_ms);
+        }
+        Ok(count as usize)
+    }
+
+    /// Converge the declared queues on the replicated declarations (every
+    /// node, every second): configure the rows present, and drop the declared
+    /// queues whose row is gone — a `delete` served by another node.
+    pub fn reconcile_declared(&self, rows: Vec<(String, String, QueueOptions)>) {
+        let mut present: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(rows.len());
+        for (tenant, queue, opts) in rows {
+            present.insert(Self::qkey(&tenant, &queue));
+            self.set_config(&tenant, &queue, opts, true);
+        }
+        let doomed: Vec<(String, String)> = self
+            .queues
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, q)| q.declared.load(Ordering::Relaxed) && !present.contains(*k))
+            .map(|(k, q)| {
+                let (tenant, _) = crate::handlers::split_tenant_queue(k);
+                (tenant.to_string(), q.name.clone())
+            })
+            .collect();
+        for (tenant, name) in doomed {
+            self.remove(&tenant, &name);
+        }
     }
 
     // ---------------------------------------------------------------- push

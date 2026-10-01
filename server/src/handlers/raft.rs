@@ -1037,6 +1037,21 @@ pub(crate) fn build_raft_router(
             "/api/v1/ephemeral/queues/:queue/depth",
             get(super::handle_ephemeral_depth),
         )
+        .route(
+            "/api/v1/ephemeral/queue/:queue",
+            axum::routing::delete(super::handle_ephemeral_delete_queue),
+        )
+        // Broker to broker (§3.7 across nodes): a ring hand-over and a drain
+        // notice. Behind auth and tenancy like every route; the handlers also
+        // require the forward mark (and the cluster token when one is set).
+        .route(
+            "/api/v1/ephemeral/_adopt",
+            post(super::handle_ephemeral_adopt),
+        )
+        .route(
+            "/api/v1/ephemeral/_leaving",
+            post(super::handle_ephemeral_leaving),
+        )
         // Phase-2 /api and /streams are served by the generic RSM facade;
         // everything else falls through to the SPA/static handler.
         .fallback(raft_fallback)
@@ -1139,6 +1154,11 @@ async fn forward_to_leader(
 #[cfg(feature = "server")]
 fn is_node_local(path: &str) -> bool {
     path.starts_with("/api/v1/raft/")
+        // The ephemeral rings are node RAM and place themselves (§3.7): only
+        // the two verbs that write the replicated declaration go to the leader.
+        || (path.starts_with("/api/v1/ephemeral/")
+            && path != "/api/v1/ephemeral/configure"
+            && !path.starts_with("/api/v1/ephemeral/queue/"))
 }
 
 #[cfg(feature = "server")]

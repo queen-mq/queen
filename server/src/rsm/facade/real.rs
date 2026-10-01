@@ -4601,6 +4601,53 @@ impl RaftFacade {
 
 #[async_trait]
 impl Rsm for RaftFacade {
+    fn members(&self) -> Option<crate::rsm::replicator::ClusterMembers> {
+        Some(self.repl.members())
+    }
+
+    fn ephemeral_control(&self) -> Option<super::EphControl> {
+        self.store
+            .read(|r| {
+                let enabled = r
+                    .flag(crate::switches::Switches::KEY_EPHEMERAL)?
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .and_then(|v| v.get("enabled").and_then(serde_json::Value::as_bool))
+                    .unwrap_or(true);
+                let mut configs = Vec::new();
+                r.scan_eph_configs(usize::MAX, &mut |tenant, queue, row| {
+                    if let Ok(options) = serde_json::from_slice(&row.options) {
+                        configs.push((tenant.to_string(), queue.to_string(), options));
+                    }
+                    true
+                })?;
+                let mut grants = Vec::new();
+                r.scan_raw(
+                    crate::rsm::store::Keyspace::Quotas,
+                    &[],
+                    &[],
+                    usize::MAX,
+                    &mut |key, value| {
+                        if let (
+                            Some((crate::rsm::effect::QuotaKind::Ephemeral, tenant)),
+                            Ok(grant),
+                        ) = (
+                            crate::rsm::store::keys::quota_parts(key),
+                            crate::rsm::store::rows::quota_decode(value),
+                        ) {
+                            grants.push((tenant, grant));
+                        }
+                        true
+                    },
+                )?;
+                Ok(super::EphControl {
+                    enabled,
+                    configs,
+                    grants,
+                })
+            })
+            .ok()
+    }
+
     fn bootstrap(&self) -> super::RsmBootstrap {
         match self.store.read(|r| {
             let flag = |key: &str, default: bool| -> crate::rsm::store::Result<bool> {

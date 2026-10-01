@@ -34,7 +34,6 @@ use serde_json::value::RawValue;
 
 use super::{json, qbool, qint, AppState};
 use crate::ephemeral::{self, AckOutcome, AckStatus, Refusal, Route};
-use crate::peerclient::FWD_HEADER;
 use crate::switches::{decide_ephemeral, Origin, Surface};
 use crate::tenant::Tenant;
 
@@ -223,7 +222,7 @@ const FORWARD_SLACK_MS: u64 = 5_000;
 
 /// Was this request already relayed by another broker?
 fn is_forwarded(h: &HeaderMap) -> bool {
-    h.contains_key(FWD_HEADER)
+    crate::peerclient::forwarded(h)
 }
 
 /// §3.6 — the one answer a broker gives for a request it was handed but does not
@@ -262,10 +261,9 @@ fn forward_failed(detail: &str) -> Response {
 /// Everything else is dropped on purpose: copying an arbitrary header set from
 /// one broker's request into another's is how a hop-by-hop header becomes a bug.
 fn relay_headers(tenant: &str, inbound: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
-    let mut out: Vec<(HeaderName, HeaderValue)> = Vec::with_capacity(3);
-    if let Ok(k) = HeaderName::from_bytes(FWD_HEADER.as_bytes()) {
-        out.push((k, HeaderValue::from_static("1")));
-    }
+    // The forward mark, and the cluster token next to it when one is set:
+    // the owner believes the mark only with the token (`peerclient::forwarded`).
+    let mut out: Vec<(HeaderName, HeaderValue)> = crate::peerclient::internal_headers();
     if let (Ok(k), Ok(v)) = (
         HeaderName::from_bytes(crate::config::TENANT_HEADER.as_bytes()),
         HeaderValue::from_str(tenant),
@@ -530,6 +528,14 @@ pub async fn handle_ephemeral_push(
         if forwarded {
             return owner_moved();
         }
+        // What this node still held for the partition goes FIRST, so the
+        // owner serves it before this push (a hand-over, where v1 wiped).
+        ship(
+            &st,
+            st.ephemeral
+                .take_handover(tenant.as_str(), &parsed.queue, Some(partition)),
+        )
+        .await;
         if let Some(r) = forward_to_owner(
             &st,
             tenant.as_str(),
@@ -654,6 +660,12 @@ pub async fn handle_ephemeral_pop(
         if is_forwarded(&headers) {
             return owner_moved();
         }
+        ship(
+            &st,
+            st.ephemeral
+                .take_handover(tenant.as_str(), queue, partition),
+        )
+        .await;
         // §10 Q5 — the owner holds a `wait=true` pop open for the client's FULL
         // timeout, so the relay's own deadline has to outlive it.
         let deadline_ms = if wait {
@@ -867,6 +879,12 @@ pub async fn handle_ephemeral_ack(
         if is_forwarded(&headers) {
             return owner_moved();
         }
+        ship(
+            &st,
+            st.ephemeral
+                .take_handover(tenant.as_str(), &parsed.queue, Some(&ack_partition)),
+        )
+        .await;
         if let Some(r) = forward_to_owner(
             &st,
             tenant.as_str(),
@@ -1015,6 +1033,7 @@ pub async fn handle_ephemeral_reset(
     State(st): State<Arc<AppState>>,
     Extension(_authed): Extension<crate::auth::AuthedSub>,
     Extension(tenant): Extension<Tenant>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     if let Some(r) = gated(&st, tenant.as_str(), Surface::EphAdmin, 0) {
@@ -1031,6 +1050,19 @@ pub async fn handle_ephemeral_reset(
         .ephemeral
         .reset(tenant.as_str(), &parsed.queue)
         .unwrap_or(0);
+    // §3.5 — the queue's partitions live on every node, so every node resets
+    // its own. Fire and forget, as v1's mesh frame was; a relayed reset is
+    // never relayed again.
+    if !is_forwarded(&headers) {
+        fan_out(
+            &st,
+            tenant.as_str(),
+            &headers,
+            Method::POST,
+            "/api/v1/ephemeral/reset".to_string(),
+            body.clone(),
+        );
+    }
     // §3.5 — every broker drops its own rings for this queue. `dropped` is
     // therefore THIS broker's count and not the cell's, which is the honest
     // number to report: a fire-and-forget broadcast cannot know what the peers
@@ -1055,6 +1087,7 @@ pub async fn handle_ephemeral_delete_queue(
     State(st): State<Arc<AppState>>,
     Extension(_authed): Extension<crate::auth::AuthedSub>,
     Extension(tenant): Extension<Tenant>,
+    headers: HeaderMap,
     Path(queue): Path<String>,
 ) -> Response {
     if let Some(r) = gated(&st, tenant.as_str(), Surface::EphAdmin, 0) {
@@ -1063,7 +1096,19 @@ pub async fn handle_ephemeral_delete_queue(
     if let Err(r) = check_name("queue", &queue) {
         return r;
     }
-    crate::handlers::raft::dispatch_api(
+    // A peer relaying its delete: drop this node's rings, nothing else (the
+    // declaration is one replicated row, removed once by the node served).
+    if is_forwarded(&headers) {
+        let deleted = st.ephemeral.remove(tenant.as_str(), &queue);
+        let mut out = String::with_capacity(48 + queue.len());
+        out.push_str("{\"queue\":\"");
+        crate::util::json_escape_into(&mut out, &queue);
+        out.push_str("\",\"deleted\":");
+        out.push_str(if deleted { "true" } else { "false" });
+        out.push('}');
+        return json(StatusCode::OK, out);
+    }
+    let resp = crate::handlers::raft::dispatch_api(
         &st,
         tenant.as_str(),
         "DELETE",
@@ -1071,7 +1116,18 @@ pub async fn handle_ephemeral_delete_queue(
         None,
         Bytes::new(),
     )
-    .await
+    .await;
+    if resp.status().is_success() {
+        fan_out(
+            &st,
+            tenant.as_str(),
+            &headers,
+            Method::DELETE,
+            format!("/api/v1/ephemeral/queue/{}", percent_path(&queue)),
+            Bytes::new(),
+        );
+    }
+    resp
 }
 
 /// `GET /api/v1/ephemeral/queues` — tenant-scoped list, declared and implicit.
@@ -1238,4 +1294,471 @@ pub async fn handle_ephemeral_depth(
     }
     out.push_str("]}");
     json(StatusCode::OK, out)
+}
+
+// ===========================================================================
+// §3.7 across raft nodes — placement, hand-over, drain
+// ===========================================================================
+//
+// Every node computes the owner of each (queue, partition) from the raft
+// members' view (`Ephemeral::set_placement`); a node that is not the owner
+// relays push/pop/ack to it (above). When ownership moves — a node joins,
+// leaves, or is judged down — the node that held a ring HANDS IT OVER to the new
+// owner instead of dropping it, and a node stopping on SIGTERM hands over
+// everything first. Only a crash still loses the crashed node's share (§1.2).
+
+/// How long a node that announced it is leaving stays out of the placement.
+/// Long enough for raft to judge it down if it really went; a node that comes
+/// back sooner rejoins when the notice expires.
+const LEAVING_EXCLUSION_MS: i64 = 30_000;
+
+/// Deadline for one hand-over request.
+const HANDOVER_DEADLINE: Duration = Duration::from_secs(10);
+
+/// A hand-over request's size target: rings are batched per (peer, tenant)
+/// up to about this many bytes.
+const HANDOVER_BATCH_BYTES: usize = 8 * 1024 * 1024;
+
+/// Percent-encode one path segment (a queue name may hold `/`, `?`, spaces).
+fn percent_path(seg: &str) -> String {
+    let mut out = String::with_capacity(seg.len());
+    for b in seg.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Relay an admin verb to every peer, fire and forget (v1's `T_EPH_ADMIN`).
+fn fan_out(
+    st: &Arc<AppState>,
+    tenant: &str,
+    inbound: &HeaderMap,
+    method: Method,
+    path: String,
+    body: Bytes,
+) {
+    let peers = st.ephemeral.peers();
+    if peers.is_empty() {
+        return;
+    }
+    let headers = relay_headers(tenant, inbound);
+    let st = st.clone();
+    tokio::spawn(async move {
+        for (_, addr) in peers {
+            let url = format!("{}{}", addr.trim_end_matches('/'), path);
+            if let Err(e) = st
+                .peers
+                .call(
+                    method.clone(),
+                    &url,
+                    &headers,
+                    body.clone(),
+                    Duration::from_millis(FORWARD_DEADLINE_MS),
+                )
+                .await
+            {
+                tracing::warn!(target: "ephemeral", %url, error = %e, "admin fan-out failed");
+            }
+        }
+    });
+}
+
+/// One ring as the `_adopt` body carries it.
+fn ring_json(out: &mut String, r: &ephemeral::RingExport) {
+    out.push_str("{\"queue\":\"");
+    crate::util::json_escape_into(out, &r.queue);
+    out.push_str("\",\"partition\":\"");
+    crate::util::json_escape_into(out, &r.partition);
+    out.push_str("\",\"messages\":[");
+    let mut first = true;
+    for (t, p) in &r.msgs {
+        // Payloads are the raw JSON a push carried; anything else never got in.
+        let Ok(raw) = std::str::from_utf8(p) else {
+            continue;
+        };
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str("{\"t\":");
+        out.push_str(&t.to_string());
+        out.push_str(",\"p\":");
+        out.push_str(raw);
+        out.push('}');
+    }
+    out.push_str("],\"groups\":[");
+    for (i, g) in r.groups.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"g\":\"");
+        crate::util::json_escape_into(out, &g.name);
+        out.push_str("\",\"next\":");
+        out.push_str(&g.next.to_string());
+        out.push_str(",\"redeliver\":[");
+        for (j, o) in g.redeliver.iter().enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            out.push_str(&o.to_string());
+        }
+        out.push_str("],\"attempts\":[");
+        for (j, (o, n)) in g.attempts.iter().enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!("[{o},{n}]"));
+        }
+        out.push_str("],\"skipped\":");
+        out.push_str(&g.skipped.to_string());
+        out.push('}');
+    }
+    out.push_str("]}");
+}
+
+/// Ship hand-overs to their new owners, batched per (peer, tenant). A batch
+/// that does not land is dropped and counted — the contents of a class that
+/// survives nothing (§1.2) — never retried into a loop. Returns
+/// `(rings delivered, rings lost)`.
+pub(crate) async fn ship(st: &AppState, out: Vec<ephemeral::Handover>) -> (usize, usize) {
+    if out.is_empty() {
+        return (0, 0);
+    }
+    let mut by: std::collections::BTreeMap<(String, String), Vec<ephemeral::Handover>> =
+        std::collections::BTreeMap::new();
+    for h in out {
+        by.entry((h.addr.clone(), h.ring.tenant.clone()))
+            .or_default()
+            .push(h);
+    }
+    let (mut delivered, mut lost) = (0usize, 0usize);
+    for ((addr, tenant), hs) in by {
+        let url = format!("{}/api/v1/ephemeral/_adopt", addr.trim_end_matches('/'));
+        let mut headers = crate::peerclient::internal_headers();
+        if let (Ok(k), Ok(v)) = (
+            HeaderName::from_bytes(crate::config::TENANT_HEADER.as_bytes()),
+            HeaderValue::from_str(&tenant),
+        ) {
+            headers.push((k, v));
+        }
+        let mut i = 0;
+        while i < hs.len() {
+            let start = i;
+            let mut body = String::from("{\"rings\":[");
+            while i < hs.len() && (i == start || body.len() < HANDOVER_BATCH_BYTES) {
+                if i > start {
+                    body.push(',');
+                }
+                ring_json(&mut body, &hs[i].ring);
+                i += 1;
+            }
+            body.push_str("]}");
+            let r = st
+                .peers
+                .call(
+                    Method::POST,
+                    &url,
+                    &headers,
+                    Bytes::from(body),
+                    HANDOVER_DEADLINE,
+                )
+                .await;
+            match r {
+                Ok(resp) if resp.status.is_success() => delivered += i - start,
+                Ok(resp) => {
+                    tracing::warn!(
+                        target: "ephemeral",
+                        %url,
+                        status = resp.status.as_u16(),
+                        body = %String::from_utf8_lossy(&resp.body),
+                        "hand-over refused"
+                    );
+                    for h in &hs[start..i] {
+                        st.ephemeral.handover_lost(h);
+                    }
+                    lost += i - start;
+                }
+                Err(e) => {
+                    tracing::warn!(target: "ephemeral", %url, error = %e, "hand-over failed");
+                    for h in &hs[start..i] {
+                        st.ephemeral.handover_lost(h);
+                    }
+                    lost += i - start;
+                }
+            }
+        }
+    }
+    (delivered, lost)
+}
+
+#[derive(Deserialize)]
+struct AdoptMsg<'a> {
+    t: i64,
+    #[serde(borrow)]
+    p: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct AdoptGroup {
+    g: String,
+    next: u64,
+    #[serde(default)]
+    redeliver: Vec<u64>,
+    #[serde(default)]
+    attempts: Vec<(u64, u32)>,
+    #[serde(default)]
+    skipped: u64,
+}
+
+#[derive(Deserialize)]
+struct AdoptRing<'a> {
+    queue: String,
+    partition: String,
+    #[serde(borrow)]
+    messages: Vec<AdoptMsg<'a>>,
+    #[serde(default)]
+    groups: Vec<AdoptGroup>,
+}
+
+#[derive(Deserialize)]
+struct AdoptBody<'a> {
+    #[serde(borrow)]
+    rings: Vec<AdoptRing<'a>>,
+}
+
+fn internal_only() -> Response {
+    err(
+        StatusCode::FORBIDDEN,
+        "internal_only",
+        "this route is for the brokers of this cluster",
+    )
+}
+
+/// `POST /api/v1/ephemeral/_adopt` — broker to broker: take over rings whose
+/// ownership moved here. The tenant is the request's (the trusted header the
+/// sending broker set), never a body field: a hand-over cannot cross tenants.
+pub async fn handle_ephemeral_adopt(
+    State(st): State<Arc<AppState>>,
+    Extension(_authed): Extension<crate::auth::AuthedSub>,
+    Extension(tenant): Extension<Tenant>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !is_forwarded(&headers) {
+        return internal_only();
+    }
+    let parsed: AdoptBody = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return bad_request(&format!("bad body: {e}")),
+    };
+    let now = crate::util::now_epoch_ms();
+    let (mut adopted, mut refused) = (0usize, 0usize);
+    let mut woken: Vec<(String, String)> = Vec::new();
+    for r in parsed.rings {
+        if check_name("queue", &r.queue).is_err() || check_name("partition", &r.partition).is_err()
+        {
+            refused += 1;
+            continue;
+        }
+        let ring = ephemeral::RingExport {
+            tenant: tenant.as_str().to_string(),
+            queue: r.queue.clone(),
+            partition: r.partition.clone(),
+            msgs: r
+                .messages
+                .iter()
+                .map(|m| (m.t, m.p.get().as_bytes().to_vec().into_boxed_slice()))
+                .collect(),
+            groups: r
+                .groups
+                .into_iter()
+                .map(|g| ephemeral::GroupExport {
+                    name: g.g,
+                    next: g.next,
+                    redeliver: g.redeliver,
+                    attempts: g.attempts,
+                    skipped: g.skipped,
+                })
+                .collect(),
+        };
+        match st.ephemeral.adopt(ring, now) {
+            Ok(n) => {
+                adopted += n;
+                woken.push((
+                    ephemeral::Ephemeral::qkey(tenant.as_str(), &r.queue),
+                    r.partition,
+                ));
+            }
+            Err(_) => refused += 1,
+        }
+    }
+    if !woken.is_empty() {
+        st.notifier.notify_pushed_batch(&woken);
+    }
+    json(
+        StatusCode::OK,
+        format!("{{\"adopted\":{adopted},\"refusedRings\":{refused}}}"),
+    )
+}
+
+#[derive(Deserialize)]
+struct LeavingBody {
+    node: String,
+}
+
+/// `POST /api/v1/ephemeral/_leaving` — broker to broker: the sender is
+/// stopping (SIGTERM) and has handed its rings over; place nothing on it.
+pub async fn handle_ephemeral_leaving(
+    State(st): State<Arc<AppState>>,
+    Extension(_authed): Extension<crate::auth::AuthedSub>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !is_forwarded(&headers) {
+        return internal_only();
+    }
+    let parsed: LeavingBody = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return bad_request(&format!("bad body: {e}")),
+    };
+    st.ephemeral.exclude_peer(
+        &parsed.node,
+        crate::util::now_epoch_ms() + LEAVING_EXCLUSION_MS,
+    );
+    json(StatusCode::OK, "{\"ok\":true}".to_string())
+}
+
+/// Bring this node's RAM in line with the replicated control rows: the switch,
+/// the grants, the declarations. `apply_local_control` does it at once on the
+/// node that served the write; this does it within a second on every other.
+fn reconcile_control(st: &AppState) {
+    let Some(ctl) = st.rsm.ephemeral_control() else {
+        return;
+    };
+    st.switches.set_ephemeral(ctl.enabled);
+    st.ephemeral.apply_grants(
+        ctl.grants
+            .into_iter()
+            .map(|(tenant, grant)| ephemeral::Grant {
+                tenant,
+                enabled: grant.enabled,
+                max_bytes: grant.max_bytes,
+                max_queues: grant.max_queues.map(i64::from),
+                max_msgs_per_sec: grant.max_msgs_per_sec.map(i64::from),
+            })
+            .collect(),
+    );
+    st.ephemeral.reconcile_declared(
+        ctl.configs
+            .iter()
+            .map(|(tenant, queue, options)| {
+                (
+                    tenant.clone(),
+                    queue.clone(),
+                    ephemeral::parse_stored_options(options),
+                )
+            })
+            .collect(),
+    );
+}
+
+/// `QUEEN_EPHEMERAL_MEMBER_TTL_MS` (default 4000): a member the raft leader
+/// has not heard from for this long owns no ephemeral partition.
+fn member_ttl_ms() -> u64 {
+    std::env::var("QUEEN_EPHEMERAL_MEMBER_TTL_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v >= 200)
+        .unwrap_or(4_000)
+}
+
+/// The placement loop (server only): every 250 ms — sooner when kicked — judge
+/// the raft members' view, install the placement, hand over the rings that
+/// moved, and once a second converge the control rows.
+pub fn spawn_ephemeral_placement(st: Arc<AppState>) {
+    if st.rsm.members().is_none() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut judge = ephemeral::MemberJudge::new(member_ttl_ms());
+        let mut last_reconcile = Instant::now();
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                _ = st.ephemeral.kick_handle().notified() => {}
+            }
+            if !st.ephemeral.is_leaving() {
+                if let Some(cm) = st.rsm.members() {
+                    let excluded = st.ephemeral.excluded_peers(crate::util::now_epoch_ms());
+                    let judged = judge.judge(&cm, &excluded);
+                    for id in judge.down_ids() {
+                        st.ephemeral.clear_exclusion(&id);
+                    }
+                    if let Some(p) = judged {
+                        if st.ephemeral.set_placement(p) {
+                            let moved = st.ephemeral.reap_foreign();
+                            tracing::info!(
+                                target: "ephemeral",
+                                peers = ?st.ephemeral.peers(),
+                                handed_over = moved,
+                                "placement changed"
+                            );
+                        }
+                    }
+                }
+            }
+            let out = st.ephemeral.take_outbox();
+            if !out.is_empty() {
+                let (delivered, lost) = ship(&st, out).await;
+                tracing::info!(target: "ephemeral", delivered, lost, "hand-over");
+            }
+            if last_reconcile.elapsed() >= Duration::from_secs(1) {
+                last_reconcile = Instant::now();
+                reconcile_control(&st);
+            }
+        }
+    });
+}
+
+/// SIGTERM, before the raft hand-off: tell the peers this node is leaving,
+/// stop owning anything, and hand every ring to its next owner. Bounded: a
+/// stop is never held hostage by a peer that does not answer.
+pub async fn ephemeral_drain(st: &Arc<AppState>) {
+    let peers = st.ephemeral.peers();
+    if peers.is_empty() {
+        return;
+    }
+    let me = st
+        .rsm
+        .members()
+        .map(|c| c.node_id.to_string())
+        .unwrap_or_default();
+    st.ephemeral.set_leaving();
+    let headers = crate::peerclient::internal_headers();
+    let body = format!("{{\"node\":\"{me}\"}}");
+    let notices = peers.iter().map(|(_, addr)| {
+        let url = format!("{}/api/v1/ephemeral/_leaving", addr.trim_end_matches('/'));
+        let headers = headers.clone();
+        let body = Bytes::from(body.clone());
+        let st = st.clone();
+        async move {
+            let _ = st
+                .peers
+                .call(Method::POST, &url, &headers, body, Duration::from_secs(2))
+                .await;
+        }
+    });
+    futures_util::future::join_all(notices).await;
+    let rings = st.ephemeral.reap_foreign();
+    let out = st.ephemeral.take_outbox();
+    let (delivered, lost) = match tokio::time::timeout(Duration::from_secs(15), ship(st, out)).await
+    {
+        Ok(x) => x,
+        Err(_) => (0, rings as usize),
+    };
+    tracing::info!(target: "shutdown", rings, delivered, lost, "ephemeral rings handed over");
 }

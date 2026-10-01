@@ -724,6 +724,7 @@ impl Broker {
                 State(self.inner.st.clone()),
                 Extension(crate::auth::AuthedSub(None)),
                 Extension(crate::tenant::Tenant::default_tenant()),
+                axum::http::HeaderMap::new(),
                 Bytes::from(serde_json::json!({ "queue": queue }).to_string()),
             )
             .await,
@@ -738,6 +739,7 @@ impl Broker {
                 State(self.inner.st.clone()),
                 Extension(crate::auth::AuthedSub(None)),
                 Extension(crate::tenant::Tenant::default_tenant()),
+                axum::http::HeaderMap::new(),
                 Path(queue.to_string()),
             )
             .await,

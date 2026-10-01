@@ -54,6 +54,69 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 /// during the seconds of membership disagreement §1.4 permits.
 pub const FWD_HEADER: &str = "x-queen-eph-fwd";
 
+/// The cluster's shared secret on the HTTP port (`QUEEN_RAFT_TOKEN`, the value
+/// every Raft RPC already carries). A request presenting it comes from another
+/// broker of this cluster: a relayed ephemeral request, a ring hand-over, a
+/// drain notice. The proxy strips it from client requests.
+pub const TOKEN_HEADER: &str = "x-queen-raft-token";
+
+/// `QUEEN_RAFT_TOKEN`, read once. `None` when unset or blank: a cluster without
+/// a token (a dev cluster) has no credential for broker-to-broker calls.
+fn cluster_token() -> Option<&'static str> {
+    static TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TOKEN
+        .get_or_init(|| {
+            std::env::var("QUEEN_RAFT_TOKEN")
+                .ok()
+                .filter(|t| !t.trim().is_empty())
+        })
+        .as_deref()
+}
+
+/// Does this request carry the cluster token? Always `false` when no token is
+/// configured. Compared in constant time: it is a credential.
+pub fn token_matches(h: &HeaderMap) -> bool {
+    let (Some(want), Some(got)) = (cluster_token(), h.get(TOKEN_HEADER)) else {
+        return false;
+    };
+    let (a, b) = (want.as_bytes(), got.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Was this request relayed by another broker, and may it be believed?
+///
+/// The mark alone used to be enough, and a client could set it: a relayed push
+/// skips the per-tenant rate charge. With a token configured the mark counts
+/// only next to the token; without one (a dev cluster) the mark alone, as before.
+pub fn forwarded(h: &HeaderMap) -> bool {
+    if !h.contains_key(FWD_HEADER) {
+        return false;
+    }
+    match cluster_token() {
+        Some(_) => token_matches(h),
+        None => true,
+    }
+}
+
+/// The headers that make a request this broker sends to a peer recognisable
+/// as internal: the forward mark, and the token when one is configured.
+pub fn internal_headers() -> Vec<(HeaderName, HeaderValue)> {
+    let mut out = Vec::with_capacity(2);
+    out.push((
+        HeaderName::from_static(FWD_HEADER),
+        HeaderValue::from_static("1"),
+    ));
+    if let Some(t) = cluster_token() {
+        if let Ok(v) = HeaderValue::from_str(t) {
+            out.push((HeaderName::from_static(TOKEN_HEADER), v));
+        }
+    }
+    out
+}
+
 /// What a peer answered. Status and bytes only: the ephemeral wire is JSON with
 /// no meaningful response headers, and copying an arbitrary header set from one
 /// broker's response into another's is how a hop-by-hop header becomes a bug.
