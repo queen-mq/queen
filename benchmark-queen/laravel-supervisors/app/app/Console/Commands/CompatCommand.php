@@ -73,6 +73,12 @@ final class CompatCommand extends Command
         } catch (Throwable $error) {
             $this->check('ran without an exception', false, $error::class . ': ' . $error->getMessage());
         }
+        if (in_array(false, array_column($this->checks, 'passed'), true)) {
+            // The whole trail, to see why without reproducing it.
+            $this->observed['events'] = array_map(static fn (array $e): array => [
+                $e['job_id'], $e['event'], $e['attempt'], round((float) $e['at'], 2), $e['exception'], $e['pid'],
+            ], $this->log->read($this->run));
+        }
         $this->line(json_encode([
             'scenario' => $scenario,
             'run_id' => $this->run,
@@ -87,6 +93,20 @@ final class CompatCommand extends Command
 
     private function setup(): int
     {
+        // The database cache: its locks are atomic across processes, which
+        // unique jobs, WithoutOverlapping and the rate limiter rely on.
+        if (!Schema::hasTable('cache')) {
+            Schema::create('cache', static function ($table): void {
+                $table->string('key')->primary();
+                $table->mediumText('value');
+                $table->integer('expiration');
+            });
+            Schema::create('cache_locks', static function ($table): void {
+                $table->string('key')->primary();
+                $table->string('owner');
+                $table->integer('expiration');
+            });
+        }
         if (!Schema::hasTable('job_batches')) {
             Schema::create('job_batches', static function ($table): void {
                 $table->string('id')->primary();
@@ -318,6 +338,9 @@ final class CompatCommand extends Command
         }
         $this->waitFor(fn (): bool => count($this->failedIds()) === 2);
         $ids = $this->failedIds();
+        // Queen's failed-job store keeps the last second out of an unqualified
+        // flush, so a retry failing again in that second is never lost.
+        sleep(2);
         Artisan::call('queue:forget', ['id' => $ids['f4'] ?? 'missing']);
         $this->check('queue:forget removed one row', array_keys($this->failedIds()) === ['f5'], implode(',', array_keys($this->failedIds())));
         Artisan::call('queue:flush');
@@ -364,7 +387,9 @@ final class CompatCommand extends Command
         $run = $this->run;
         $jobs = [];
         foreach ($ok as $index) {
-            $jobs[] = new CompatJob($run, "b{$index}", 'ok', 200);
+            // Staggered, so the workers never update the batch row at the
+            // same instant: SQLite would refuse the second writer.
+            $jobs[] = new CompatJob($run, "b{$index}", 'ok', 200 + 400 * $index);
         }
         foreach ($throwing as $index) {
             $jobs[] = new CompatJob($run, "b{$index}", 'throw');

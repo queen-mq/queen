@@ -681,6 +681,8 @@ def laravel_compat(lane: Lane) -> list[Check]:
     """Laravel's queue features, each checked by `bench:compat` inside the supervisor's
     container: the workers there share its SQLite file and file cache."""
     lane.docker("exec", lane.container(lane.profile.engine), "touch", "/tmp/compat.sqlite")
+    # The supervisor's processes may already hold the empty file open: setup
+    # creates the tables, then every scenario uses them.
     lane.app_artisan("bench:compat", "setup")
     checks: list[Check] = []
     for name in COMPAT_SCENARIOS:
@@ -726,7 +728,7 @@ SCENARIOS = [
     Scenario("replicas-rolling", replicas_rolling, {"BENCH_QUEEN_COORDINATION": "true"}, replicas=2),
     Scenario("soak", soak, {"BENCH_WORKERS": "8", "BENCH_MIN_WORKERS": "8", "BENCH_MAX_WORKERS": "8"}),
     Scenario("laravel-compat", laravel_compat, {
-        "BENCH_CACHE_STORE": "file", "BENCH_DB_DATABASE": "/tmp/compat.sqlite",
+        "BENCH_CACHE_STORE": "database", "BENCH_DB_DATABASE": "/tmp/compat.sqlite",
         "BENCH_WORKERS": "3", "BENCH_MIN_WORKERS": "3", "BENCH_MAX_WORKERS": "3",
     }),
 ]

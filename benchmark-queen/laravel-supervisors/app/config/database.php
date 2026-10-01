@@ -9,6 +9,9 @@ return [
         'sqlite' => [
             'driver' => 'sqlite',
             'database' => env('BENCH_DB_DATABASE', ':memory:'),
+            // Several workers update one batch row at once in the compatibility lanes.
+            'busy_timeout' => 15000,
+            'journal_mode' => 'wal',
             'prefix' => '',
             'foreign_key_constraints' => false,
         ],
