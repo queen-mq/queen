@@ -5,7 +5,11 @@ namespace App\Providers;
 use App\Support\BenchmarkEffectLedger;
 use App\Support\FailureMatrixLog;
 use App\Support\JsonlResultSink;
+use App\Support\RetryingBatchRepository;
+use Illuminate\Bus\BatchFactory;
+use Illuminate\Bus\DatabaseBatchRepository;
 use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Queue\Job;
 use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\JobProcessed;
@@ -27,6 +31,17 @@ final class AppServiceProvider extends ServiceProvider
 
         $this->app->singleton(JsonlResultSink::class, function (): JsonlResultSink {
             return new JsonlResultSink((string) config('benchmark.results_directory'));
+        });
+
+        // Batches in SQLite: see RetryingBatchRepository. An extender, because
+        // BusServiceProvider is deferred: it binds DatabaseBatchRepository
+        // when first needed, over any plain binding made here.
+        $this->app->extend(DatabaseBatchRepository::class, static function (DatabaseBatchRepository $repository, Application $app): RetryingBatchRepository {
+            return new RetryingBatchRepository(
+                $app->make(BatchFactory::class),
+                $app->make('db')->connection($app['config']->get('queue.batching.database')),
+                $app['config']->get('queue.batching.table', 'job_batches'),
+            );
         });
     }
 
