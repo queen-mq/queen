@@ -776,6 +776,79 @@ def fig_laravel_vm_latency(out: Path, theme: Theme) -> str:
     return "laravel-vm-latency"
 
 
+def fig_laravel_headline(out: Path, theme: Theme) -> str:
+    """The three Linux-server results a reader weighing a move from Horizon
+    asks about first: capacity, memory and latency, one small panel each.
+
+    Three units, so three scales: each panel has its own, and none shows a y
+    axis, because a shared-looking axis would invite comparing a MiB bar with
+    a jobs/s bar. Every bar starts at zero and carries its value; the panel
+    title names the unit and which direction is better.
+    """
+    rows = read_csv(LINUX_VM)
+    # (title, which way is better, value suffix, field, [(tick, group, lane)])
+    panels = [
+        ("Jobs per second, queue full", "higher is better", "", "jobs_per_second",
+         [("32 workers", "drain", "drain-32"), ("64 workers", "drain", "drain-64")]),
+        ("App memory", "lower is better", " MiB", "app_memory_mib",
+         [("64 workers", "drain", "drain-64")]),
+        ("p95 latency", "lower is better", " ms", "end_to_end_p95_ms",
+         [("500 jobs/s asked", "load", "paced-500")]),
+    ]
+    engines = [("horizon", "Horizon, Redis", theme.series[1]),
+               ("queen-rust", "Queen, Raft broker", theme.series[0])]
+
+    style(theme)
+    left = 0.01
+    fig, axes = plt.subplots(
+        1, 3, figsize=(7.2, 2.3), gridspec_kw={"width_ratios": [2, 1, 1], "wspace": 0.22}
+    )
+    fig.subplots_adjust(left=left, right=0.99)
+    width = 0.38
+    for ax, (title, better, unit, field, groups) in zip(axes, panels):
+        top = 0.0
+        for offset, (engine, label, color) in zip((-width / 2, width / 2), engines):
+            values = [vm_median(rows, group, lane, engine, field) for _, group, lane in groups]
+            top = max(top, *values)
+            bars = ax.bar([i + offset for i in range(len(groups))], values, width * 0.92,
+                          color=color, label=label)
+            for bar, value in zip(bars, values):
+                ax.annotate(f"{value:,.0f}{unit}", xy=(bar.get_x() + bar.get_width() / 2, value),
+                            xytext=(0, 3), textcoords="offset points", ha="center", va="bottom",
+                            fontsize=8.5, color=theme.ink_strong)
+        finish(ax, theme, "")
+        ax.grid(False)
+        ax.spines["left"].set_visible(False)
+        ax.set_yticks([])
+        ax.set_ylim(0, top * 1.22)
+        # The same width per group in every panel, so every bar is as wide.
+        ax.set_xlim(-0.55, len(groups) - 0.45)
+        ax.set_xticks(range(len(groups)), [tick for tick, _, _ in groups])
+        ax.set_title(f"{title}\n", color=theme.ink_strong, fontsize=9, loc="left", pad=2)
+        ax.text(0, 1.0, better, transform=ax.transAxes, ha="left", va="bottom",
+                fontsize=8, color=theme.ink)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower left", bbox_to_anchor=(left, 1.03), ncol=2,
+               handlelength=1.0, columnspacing=1.6, borderaxespad=0, borderpad=0)
+    # How many runs each median is of, read from the same rows: one count if
+    # every bar has the same, as the campaign intends.
+    counts = {
+        sum(1 for r in rows if r["group"] == group and r["lane"] == lane
+            and r["engine"] == engine and r["correct"] == "True")
+        for *_, groups in panels for _, group, lane in groups for engine, _, _ in engines
+    }
+    medians = f"Medians of {counts.pop()} runs" if len(counts) == 1 else "Medians of each lane's runs"
+    # The latency lane asked for 500 jobs/s and Horizon's producer could not
+    # send that many: say so on the figure, from the same rows.
+    reached = vm_median(rows, "load", "paced-500", "horizon", "jobs_per_second")
+    fig.text(left, -0.04, f"{medians} on one 16-vCPU Linux server, 10 ms jobs, fsync on every "
+             f"write.\nAt 500 jobs/s asked, Horizon's producer reached {reached:.0f} jobs/s.",
+             ha="left", va="top", fontsize=8, color=theme.ink, linespacing=1.5)
+
+    save(fig, out, "laravel-headline", theme)
+    return "laravel-headline"
+
+
 FIGURES = (
     fig_soak24,
     fig_pipeline,
@@ -792,6 +865,7 @@ FIGURES = (
     fig_laravel_vm_capacity,
     fig_laravel_vm_memory,
     fig_laravel_vm_latency,
+    fig_laravel_headline,
 )
 
 

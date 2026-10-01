@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="525.312pt" height="221.222781pt" viewBox="0 0 525.312 221.222781" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 221.222781 
+L 525.312 221.222781 
+L 525.312 0 
+L 0 0 
+L 0 221.222781 
+z
+" style="fill: none"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 8.64 169.218406 
+L 230.165581 169.218406 
+L 230.165581 41.706406 
+L 8.64 41.706406 
+L 8.64 169.218406 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_1"/>
+     <g id="text_1">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #52514e" x="66.658605" y="181.677078" transform="rotate(-0 66.658605 181.677078)">32 workers</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_2"/>
+     <g id="text_2">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #52514e" x="172.146977" y="181.677078" transform="rotate(-0 172.146977 181.677078)">64 workers</text>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2"/>
+   <g id="patch_3">
+    <path d="M 28.176447 169.218406 
+L 65.055181 169.218406 
+L 65.055181 142.502747 
+L 28.176447 142.502747 
+z
+" clip-path="url(#p0)" style="fill: #eb6834"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 133.664819 169.218406 
+L 170.543553 169.218406 
+L 170.543553 143.311231 
+L 133.664819 143.311231 
+z
+" clip-path="url(#p0)" style="fill: #eb6834"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 68.262028 169.218406 
+L 105.140763 169.218406 
+L 105.140763 103.747801 
+L 68.262028 103.747801 
+z
+" clip-path="url(#p0)" style="fill: #2a78d6"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 173.7504 169.218406 
+L 210.629135 169.218406 
+L 210.629135 64.700373 
+L 173.7504 64.700373 
+z
+" clip-path="url(#p0)" style="fill: #2a78d6"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 8.64 169.218406 
+L 230.165581 169.218406 
+" style="fill: none; stroke: #e6e6e4; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_3">
+    <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #181818" x="46.615814" y="137.735012" transform="rotate(-0 46.615814 137.735012)">1,124</text>
+   </g>
+   <g id="text_4">
+    <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #181818" x="152.104186" y="138.543497" transform="rotate(-0 152.104186 138.543497)">1,090</text>
+   </g>
+   <g id="text_5">
+    <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #181818" x="86.701395" y="98.980066" transform="rotate(-0 86.701395 98.980066)">2,753</text>
+   </g>
+   <g id="text_6">
+    <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #181818" x="192.189767" y="59.932639" transform="rotate(-0 192.189767 59.932639)">4,395</text>
+   </g>
+   <g id="text_7">
+    <text style="font-size: 8px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: start; fill: #52514e" x="8.64" y="40.042656" transform="rotate(-0 8.64 40.042656)">higher is better</text>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 9px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; fill: #181818" transform="translate(8.64 29.628375)">Jobs per second, queue full</text>
+    <text style="font-size: 9px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; fill: #181818" transform="translate(8.64 39.706406)"/>
+   </g>
+  </g>
+  <g id="axes_2">
+   <g id="patch_8">
+    <path d="M 262.656 169.218406 
+L 373.418791 169.218406 
+L 373.418791 41.706406 
+L 262.656 41.706406 
+L 262.656 169.218406 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_3">
+    <g id="xtick_3">
+     <g id="line2d_3"/>
+     <g id="text_9">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #52514e" x="318.037395" y="181.677078" transform="rotate(-0 318.037395 181.677078)">64 workers</text>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_4"/>
+   <g id="patch_9">
+    <path d="M 281.304426 169.218406 
+L 316.506855 169.218406 
+L 316.506855 64.700373 
+L 281.304426 64.700373 
+z
+" clip-path="url(#p1)" style="fill: #eb6834"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 319.567936 169.218406 
+L 354.770364 169.218406 
+L 354.770364 159.117425 
+L 319.567936 159.117425 
+z
+" clip-path="url(#p1)" style="fill: #2a78d6"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 262.656 169.218406 
+L 373.418791 169.218406 
+" style="fill: none; stroke: #e6e6e4; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #181818" x="298.905641" y="59.932639" transform="rotate(-0 298.905641 59.932639)">1,892 MiB</text>
+   </g>
+   <g id="text_11">
+    <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #181818" x="337.16915" y="154.349691" transform="rotate(-0 337.16915 154.349691)">183 MiB</text>
+   </g>
+   <g id="text_12">
+    <text style="font-size: 8px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: start; fill: #52514e" x="262.656" y="40.042656" transform="rotate(-0 262.656 40.042656)">lower is better</text>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 9px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; fill: #181818" transform="translate(262.656 29.628375)">App memory</text>
+    <text style="font-size: 9px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; fill: #181818" transform="translate(262.656 39.706406)"/>
+   </g>
+  </g>
+  <g id="axes_3">
+   <g id="patch_12">
+    <path d="M 405.909209 169.218406 
+L 516.672 169.218406 
+L 516.672 41.706406 
+L 405.909209 41.706406 
+L 405.909209 169.218406 
+z
+" style="fill: none"/>
+   </g>
+   <g id="matplotlib.axis_5">
+    <g id="xtick_4">
+     <g id="line2d_4"/>
+     <g id="text_14">
+      <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #52514e" x="461.290605" y="181.677078" transform="rotate(-0 461.290605 181.677078)">500 jobs/s asked</text>
+     </g>
+    </g>
+   </g>
+   <g id="matplotlib.axis_6"/>
+   <g id="patch_13">
+    <path d="M 424.557636 169.218406 
+L 459.760064 169.218406 
+L 459.760064 64.700373 
+L 424.557636 64.700373 
+z
+" clip-path="url(#p2)" style="fill: #eb6834"/>
+   </g>
+   <g id="patch_14">
+    <path d="M 462.821145 169.218406 
+L 498.023574 169.218406 
+L 498.023574 158.499788 
+L 462.821145 158.499788 
+z
+" clip-path="url(#p2)" style="fill: #2a78d6"/>
+   </g>
+   <g id="patch_15">
+    <path d="M 405.909209 169.218406 
+L 516.672 169.218406 
+" style="fill: none; stroke: #e6e6e4; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #181818" x="442.15885" y="59.932639" transform="rotate(-0 442.15885 59.932639)">227 ms</text>
+   </g>
+   <g id="text_16">
+    <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: middle; fill: #181818" x="480.422359" y="153.732053" transform="rotate(-0 480.422359 153.732053)">23 ms</text>
+   </g>
+   <g id="text_17">
+    <text style="font-size: 8px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: start; fill: #52514e" x="405.909209" y="40.042656" transform="rotate(-0 405.909209 40.042656)">lower is better</text>
+   </g>
+   <g id="text_18">
+    <text style="font-size: 9px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; fill: #181818" transform="translate(405.909209 29.628375)">p95 latency</text>
+    <text style="font-size: 9px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; fill: #181818" transform="translate(405.909209 39.706406)"/>
+   </g>
+  </g>
+  <g id="text_19">
+   <text style="font-size: 8px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; fill: #52514e" transform="translate(8.64 200.137156)">Medians of 3 runs on one 16-vCPU Linux server, 10 ms jobs, fsync on every write.</text>
+   <text style="font-size: 8px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; fill: #52514e" transform="translate(8.64 210.919031)">At 500 jobs/s asked, Horizon's producer reached 440 jobs/s.</text>
+  </g>
+  <g id="legend_1">
+   <g id="patch_16">
+    <path d="M 8.64 15.098672 
+L 17.14 15.098672 
+L 17.14 9.148672 
+L 8.64 9.148672 
+z
+" style="fill: #eb6834"/>
+   </g>
+   <g id="text_20">
+    <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: start; fill: #52514e" x="23.94" y="15.098672" transform="rotate(-0 23.94 15.098672)">Horizon, Redis</text>
+   </g>
+   <g id="patch_17">
+    <path d="M 98.380078 15.098672 
+L 106.880078 15.098672 
+L 106.880078 9.148672 
+L 98.380078 9.148672 
+z
+" style="fill: #2a78d6"/>
+   </g>
+   <g id="text_21">
+    <text style="font-size: 8.5px; font-family: 'Inter', 'Helvetica Neue', 'Arial', sans-serif; text-anchor: start; fill: #52514e" x="113.680078" y="15.098672" transform="rotate(-0 113.680078 15.098672)">Queen, Raft broker</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p0">
+   <rect x="8.64" y="41.706406" width="221.525581" height="127.512"/>
+  </clipPath>
+  <clipPath id="p1">
+   <rect x="262.656" y="41.706406" width="110.762791" height="127.512"/>
+  </clipPath>
+  <clipPath id="p2">
+   <rect x="405.909209" y="41.706406" width="110.762791" height="127.512"/>
+  </clipPath>
+ </defs>
+</svg>
