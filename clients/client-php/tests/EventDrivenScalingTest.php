@@ -167,6 +167,55 @@ final class EventDrivenScalingTest extends TestCase
         $this->assertTrue($down->ready());
     }
 
+    /**
+     * A connection gone silent after the headers: every read of the streamed
+     * body times out empty, and it never reaches its end. The master loop
+     * that waits on the watcher must not stall with it.
+     */
+    public function testAStalledAnswerCannotFreezeTheMasterLoop(): void
+    {
+        if (!function_exists('pcntl_alarm')) {
+            $this->markTestSkipped('Needs ext-pcntl.');
+        }
+        $stalled = \GuzzleHttp\Psr7\FnStream::decorate(\GuzzleHttp\Psr7\Utils::streamFor(''), [
+            'eof' => static fn (): bool => false,
+            'read' => static function (int $length): string {
+                usleep(10_000);
+
+                return '';
+            },
+        ]);
+        $watcher = new QueueWatcher(
+            ['urls' => ['http://queen.test:6632'], 'bearer_token' => 'token', 'headers' => []],
+            'queen',
+            [['queue' => 'high', 'partition' => 'laravel-0000']],
+            1.0,
+            null,
+            fn (): float => $this->now,
+            static fn ($request, array $options) => new \GuzzleHttp\Promise\FulfilledPromise(
+                new \GuzzleHttp\Psr7\Response(200, ['Content-Type' => 'application/json'], $stalled),
+            ),
+        );
+        // This test's own safety net; the master loop has none.
+        $async = pcntl_async_signals(true);
+        $previous = pcntl_signal_get_handler(SIGALRM);
+        pcntl_signal(SIGALRM, static function (): void {
+            throw new \RuntimeException('the master loop froze');
+        });
+        pcntl_alarm(5);
+        $started = microtime(true);
+        try {
+            $this->assertSame([], $watcher->wait(800));
+        } finally {
+            pcntl_alarm(0);
+            pcntl_signal(SIGALRM, is_callable($previous) || is_int($previous) ? $previous : SIG_DFL);
+            pcntl_async_signals($async);
+        }
+
+        $this->assertLessThan(3.0, microtime(true) - $started, 'a stalled answer held the master loop');
+        $this->assertFalse($watcher->ready(), 'a stalled endpoint is retried later, as a failure');
+    }
+
     public function testAWokenOrClimbingPoolIsDueBeforeTheNextPollOnceASecond(): void
     {
         $supervisor = new PhpSupervisor($this->createStub(QueueManager::class), [
