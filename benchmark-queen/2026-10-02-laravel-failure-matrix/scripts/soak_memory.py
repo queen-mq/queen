@@ -43,7 +43,7 @@ def main() -> int:
 
     def write(name: str, header: list[str], rows: list[list]) -> None:
         with (raw / name).open("w", newline="") as fh:
-            writer = csv.writer(fh)
+            writer = csv.writer(fh, lineterminator="\n")
             writer.writerow(header)
             for row in rows:
                 writer.writerow(["" if v is None else (round(v, 1) if isinstance(v, float) else v) for v in row])
