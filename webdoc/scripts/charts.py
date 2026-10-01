@@ -40,6 +40,7 @@ from charts_laravel import (
     fig_laravel_queen_optimizations,
     fig_laravel_replicas,
     fig_laravel_scale_up,
+    fig_laravel_soak_memory,
     fig_laravel_vm_capacity,
     fig_laravel_vm_latency,
     fig_laravel_vm_memory,
@@ -171,6 +172,7 @@ FIGURES = (
     fig_laravel_vm_memory,
     fig_laravel_vm_latency,
     fig_laravel_headline,
+    fig_laravel_soak_memory,
 )
 
 

@@ -461,6 +461,7 @@ at the same time.
 | `dispatch()` while the backend is down | Pass: it throws | Pass: it throws | Pass: it throws |
 | Two masters, one killed | Pass | Pass | Pass |
 | Two masters, restarted one after the other | Pass | Pass | Pass |
+| 45 minutes of mixed jobs, with a worker killed every 10 minutes and a deploy | Pass | Pass | Pass |
 
 A fourth profile, the Rust engine with prefetch 4, `ack_async` and `pop_ahead`, passed every lane
 except one: a job that crashes its worker also charges an attempt to the jobs prefetched with it

@@ -35,6 +35,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through 79204459): config/queen.php gains dashboard.console_url and the provider binds the queue-contents reader; both are covered on the dashboard page, and nothing this overview describes changes.
 # sourceOfTruth re-read 2026-10-02 (through ad0f816b + this patch): the Queen Rust choice row no longer gives crash-loop circuit breaking as a reason to pick Rust, since both engines have it; the unstarted hand-back that keeps its attempt, the forked child and the renewal helper, the bounded metrics client and the provider's exit-marker listener change nothing else this overview states.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-02 (failure tests): the Start here list gains the failure, replica, soak and Laravel-feature results of the 2026-10-02 dataset, as the comparison page reports them.
 ---
 
 ## Start here
@@ -70,6 +71,10 @@ Each line below names the measurement behind it:
   reached 20 workers 5.6 s after a burst, against 13.9 s when it polled every 3 s; Horizon was not
   part of that run
   ([benchmark](/benchmarks/laravel-supervisors#event-driven-scaling)).
+- **Tested against failures.** On the Linux server, both Queen engines passed 15 failure scenarios
+  (crashes, deploys, job timeouts, backend restarts), two replica scenarios, a 45-minute soak with
+  kills and a deploy, and 32 Laravel queue features
+  ([the tables](/use/laravel/queen-vs-horizon#what-happens-when-something-fails)).
 
 These results are diagnostic: each comes from one host, and the protocol was written by the Queen
 team. Horizon keeps advantages too, such as less broker CPU at a low, steady rate and a more complete

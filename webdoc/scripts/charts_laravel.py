@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-from chartlib import plt, BENCH, Theme, finish, read_csv, save, style
+from chartlib import plt, BENCH, Theme, finish, label_last, read_csv, save, style
 
 LARAVEL = BENCH / "2026-09-30-laravel-supervisor-features" / "raw"
 
@@ -505,3 +505,54 @@ def fig_laravel_headline(out: Path, theme: Theme) -> str:
 
     save(fig, out, "laravel-headline", theme)
     return "laravel-headline"
+
+
+FAILURE_MATRIX = BENCH / "2026-10-02-laravel-failure-matrix" / "raw"
+SOAK_ENGINES = (("horizon", "Horizon", 1), ("queen-php", "Queen PHP", 2), ("queen-rust", "Queen Rust", 0))
+
+
+def fig_laravel_soak_memory(out: Path, theme: Theme) -> str:
+    """The 45-minute mixed soak: the master's and the median worker's resident
+    memory per engine. Two measures, two panels; the kills and the deploy are
+    marked once, on the shared time axis."""
+    rows = read_csv(FAILURE_MATRIX / "soak-memory.csv")
+    events = read_csv(FAILURE_MATRIX / "soak-events.csv")
+
+    style(theme)
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.9), gridspec_kw={"wspace": 0.42})
+    panels = (("master_rss_mib", "Master"), ("worker_rss_median_mib", "Median worker"))
+    for ax, (field, title) in zip(axes, panels):
+        top, ends = 0.0, []
+        for engine, label, slot in SOAK_ENGINES:
+            series = [r for r in rows if r["engine"] == engine and r[field]]
+            if not series:
+                continue
+            t = [int(r["t_s"]) / 60 for r in series]
+            y = [float(r[field]) for r in series]
+            top = max(top, *y)
+            ax.plot(t, y, color=theme.series[slot], linewidth=1.4)
+            ends.append([y[-1], t[-1], label, slot])
+        ylim = top * 1.25 if top else 1
+        # Direct labels at the series ends, pushed apart where two lines end
+        # close together, so each name stays readable.
+        gap = ylim * 0.07
+        ends.sort()
+        for i in range(1, len(ends)):
+            ends[i][0] = max(ends[i][0], ends[i - 1][0] + gap)
+        for y_label, t_end, label, slot in ends:
+            label_last(ax, t_end, y_label, label, theme.series[slot], theme)
+        # The same schedule ran on every engine: mark it once.
+        marks = sorted({(int(e["t_s"]), e["event"]) for e in events if e["engine"] == "queen-rust"})
+        for t_s, event in marks:
+            ax.axvline(t_s / 60, color=theme.ink, linewidth=0.8,
+                       linestyle="--" if event == "deploy" else ":", zorder=0)
+            if event == "deploy" and ax is axes[0]:
+                ax.annotate("deploy", xy=(t_s / 60, ylim), xytext=(3, -2), textcoords="offset points",
+                            va="top", ha="left", fontsize=7.5, color=theme.ink)
+        finish(ax, theme, "Resident memory (MiB)" if ax is axes[0] else "")
+        ax.set_title(title, color=theme.ink_strong, fontsize=9, loc="left")
+        ax.set_xlabel("Minutes", color=theme.ink, fontsize=8.5)
+        ax.set_ylim(0, ylim)
+
+    save(fig, out, "laravel-soak-memory", theme)
+    return "laravel-soak-memory"

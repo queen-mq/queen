@@ -66,6 +66,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through 79af91ee): run.sh gains --backlog-first, off by default; every run this page reports was measured without it, so its figures and method still hold.
 # sourceOfTruth re-read 2026-10-01 (Linux server campaign): the new section reports the 2026-10-01-linux-vm-horizon-raft dataset, whose drain lanes are the ones that use --backlog-first.
 # sourceOfTruth re-read 2026-10-02 (failure matrix): the new section reports the 2026-10-02-laravel-failure-matrix dataset, read from its tables.py output; compose.yml and compose.raft.yml gained BENCH_APP_IMAGE, which changes no measurement.
+# sourceOfTruth re-read 2026-10-02 (soak): the soak paragraph, its table and the laravel-soak-memory figure come from raw/soak, soak-memory.csv and tables.md of the failure-matrix dataset.
 ---
 
 This qualification asks whether Queen can replace the **process control plane** of Laravel
@@ -597,7 +598,25 @@ failed before its fix; the changelog lists them.
 | Two masters on one queue; SIGKILL on one, as a node loss would | All 40 jobs complete once | Pass | Pass | Pass | Pass |
 | A rolling restart of two masters while 60 jobs run | All 60 complete once | Pass | Pass | Pass | Pass |
 
-{/* SOAK */}
+The soak dispatched jobs at 5 per second for 45 minutes on 8 workers: 85% short jobs, 5% jobs of
+5 to 20 s, 5% that fail once and succeed on retry, 3% that always fail (`tries` 2) and 2% delayed by
+10 to 60 s. A worker was killed every 10 minutes, and a deploy restarted the application halfway.
+
+|  | Horizon | Queen PHP | Queen Rust |
+| --- | --- | --- | --- |
+| Jobs dispatched | 13,501 | 13,501 | 13,501 |
+| Jobs that ended as their kind says | All | All | All |
+| Rows in `failed_jobs`, one per permanent failure | 398 | 398 | 398 |
+| Dead-letter entries | – | 398 | 398 |
+| Master memory, first third → last third | 48.9 → 48.9 MiB | 58.3 → 57.8 MiB | 6.9 → 6.9 MiB |
+| Median worker memory, first third → last third | 50.7 → 54.7 MiB | 40.9 → 47.0 MiB | 40.5 → 45.0 MiB |
+
+<Chart
+  src="laravel-soak-memory"
+  alt="Two line panels over 45 minutes of the soak. The master's resident memory stays flat: Queen PHP about 58 MiB, Horizon about 49 MiB, Queen Rust about 7 MiB. The median worker grows slowly on every engine, from about 48 to 57 MiB on Horizon and from about 39 to 47 MiB on both Queen engines, and drops at the deploy after 23 minutes."
+  caption="Resident memory of the master and of the median worker, sampled every minute during the 45-minute soak. Dotted lines: a worker killed; dashed line: the deploy."
+  source="benchmark-queen/2026-10-02-laravel-failure-matrix/raw/soak-memory.csv"
+/>
 
 ### Laravel queue features
 
