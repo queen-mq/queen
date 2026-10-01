@@ -642,6 +642,16 @@ def soak_report(report: dict) -> dict:
     return {**report, "summary": {name: {**kind, "anomalies": kind["anomalies"] or {}} for name, kind in kinds.items()}}
 
 
+def soak_drained(report: dict, dispatched: int | None) -> bool:
+    """Every dispatched job has reached a worker and ended. A job that never started is absent
+    from the report, not pending in it: a delayed job dispatched in the last minute is due
+    only after the dispatch ends."""
+    seen = sum(kind["jobs"] for kind in report["summary"].values())
+    pending = any(anomaly.startswith("not ") for kind in report["summary"].values()
+                  for anomaly in kind["anomalies"].values())
+    return seen >= (dispatched or 0) and not pending
+
+
 def soak(lane: Lane) -> list[Check]:
     """A long mixed workload: a worker killed every 10 minutes, one rolling restart halfway,
     then every job must end as its kind says, and memory must stay flat."""
@@ -679,12 +689,10 @@ def soak(lane: Lane) -> list[Check]:
         return soak_report(json.loads(lane.artisan("bench:matrix-report", lane.run_id, "--summary").stdout))
 
     deadline, report = time.monotonic() + 900, summary()
-    while time.monotonic() < deadline and any(
-        anomaly.startswith("not ") for kind in report["summary"].values() for anomaly in kind["anomalies"].values()
-    ):
+    while time.monotonic() < deadline and not soak_drained(report, dispatched.get("dispatched")):
         time.sleep(15)
         report = summary()
-    lane.note("drained")
+    lane.note("drained" if soak_drained(report, dispatched.get("dispatched")) else "drain: TIMED OUT")
     lane.extra.update({"dispatched": dispatched, "summary": report, "memory": samples})
 
     checks = []

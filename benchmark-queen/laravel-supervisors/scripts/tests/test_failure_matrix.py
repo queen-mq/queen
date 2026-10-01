@@ -121,6 +121,15 @@ class FailureMatrixChecksTest(unittest.TestCase):
         self.assertEqual({}, clean["summary"]["ok"]["anomalies"])
         self.assertEqual(0, empty["failed_store"])
 
+    def test_a_soak_is_drained_only_when_every_dispatched_job_has_ended(self) -> None:
+        def report(jobs: int, anomalies: dict) -> dict:
+            return {"summary": {"late": {"jobs": jobs, "as_expected": jobs, "anomalies": anomalies}}}
+
+        self.assertFalse(matrix.soak_drained(report(90, {}), 93), "three delayed jobs are not due yet")
+        self.assertFalse(matrix.soak_drained(report(93, {"late-0000001": "not completed yet"}), 93))
+        self.assertTrue(matrix.soak_drained(report(93, {}), 93))
+        self.assertTrue(matrix.soak_drained(report(93, {"late-0000001": "completed 2 times"}), 93))
+
 
 if __name__ == "__main__":
     unittest.main()
