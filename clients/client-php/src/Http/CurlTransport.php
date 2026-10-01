@@ -44,10 +44,24 @@ final class CurlTransport
 
     private ?\CurlMultiHandle $multi = null;
 
+    /**
+     * The DNS cache of every handle. libcurl's resolver threads do not
+     * survive fork(): a child that frees a handle whose resolver ran in the
+     * last seconds waits for them forever at exit, and a job may fork
+     * (Laravel's fork concurrency driver does). The synchronous handle never
+     * waits for them (CURLOPT_QUICK_EXIT), and detached requests reuse what
+     * it resolved, so the multi handle, which PHP cannot tell to skip that
+     * wait, never starts a resolver of its own.
+     */
+    private ?\CurlShareHandle $share = null;
+
     /** The process that owns the handles: a forked child must not share a connection. */
     private ?int $owner = null;
 
-    /** @var list<object> Handles a fork inherited, never closed so the parent's connections live. */
+    /**
+     * @var list<object> Handles a fork inherited, kept open while the child
+     *      runs so the parent's connections live. PHP frees them at its exit.
+     */
     private array $inherited = [];
 
     /** @var array<int, int> cURL result code per finished detached handle id. */
@@ -100,6 +114,10 @@ final class CurlTransport
         $easy = curl_init();
         $request = new DetachedRequest($easy, $url, fn () => $this->release($easy));
         curl_setopt_array($easy, $this->options($method, $url, $headers, $body, 0, 0, $request->retryAfter));
+        // The synchronous handle resolved the host first (a worker pops before
+        // anything else): never resolve it again here. Its next new
+        // connection refreshes the entry.
+        curl_setopt($easy, CURLOPT_DNS_CACHE_TIMEOUT, -1);
         $added = curl_multi_add_handle($multi, $easy);
         if ($added !== CURLM_OK) {
             throw new TransportException('cURL could not start a detached request: ' . curl_multi_strerror($added), $added);
@@ -207,7 +225,12 @@ final class CurlTransport
 
                 return strlen($line);
             },
+            CURLOPT_SHARE => $this->share(),
         ];
+        // libcurl 7.87 and later: see $share.
+        if (defined('CURLOPT_QUICK_EXIT')) {
+            $options[CURLOPT_QUICK_EXIT] = 1;
+        }
         if ($method === 'GET' && $body === null) {
             $options[CURLOPT_HTTPGET] = true;
         } elseif ($method === 'POST') {
@@ -291,6 +314,17 @@ final class CurlTransport
         return $this->multi ??= curl_multi_init();
     }
 
+    private function share(): \CurlShareHandle
+    {
+        $this->claim();
+        if ($this->share === null) {
+            $this->share = curl_share_init();
+            curl_share_setopt($this->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+        }
+
+        return $this->share;
+    }
+
     private function claim(): void
     {
         $pid = getmypid();
@@ -299,9 +333,10 @@ final class CurlTransport
         }
         if ($this->owner !== null) {
             // Closing an inherited handle could end the parent's TLS session.
-            array_push($this->inherited, ...array_filter([$this->handle, $this->multi]));
+            array_push($this->inherited, ...array_filter([$this->handle, $this->multi, $this->share]));
             $this->handle = null;
             $this->multi = null;
+            $this->share = null;
             $this->finished = [];
         }
         $this->owner = $pid;

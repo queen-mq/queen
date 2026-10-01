@@ -16,6 +16,15 @@ return once the whole request is written, the connection included; on the Guzzle
 body, the ACK. A request that cannot be written within the 5-second connect timeout throws at
 once, and the Laravel queue then acknowledges synchronously.
 
+**PHP client: a process forked by a job exits.** libcurl's resolver threads do not survive
+`fork()`, and recent libcurl keeps them alive for a moment after each name resolution (2 seconds
+on the multi handle that carries detached requests). A child forked in that window, by Laravel's
+fork concurrency driver or by `pcntl_fork()` in a job, waited for them forever when its exit
+freed the cURL handles it inherited, so the job hung until its timeout and left the child stuck.
+The cURL transport now sets `CURLOPT_QUICK_EXIT` and shares one DNS cache between its handles,
+so detached requests reuse the synchronous handle's resolution and never start a resolver
+thread of their own.
+
 ## 1.6.0 - 2026-09-11
 
 **A read-scoped credential could replay a dead letter through the proxy. It cannot now.**
