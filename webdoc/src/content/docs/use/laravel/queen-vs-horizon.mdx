@@ -89,7 +89,9 @@ for a team that runs Horizon today. Every measured row links to the run behind i
 | Reaction to a burst | Reads queue sizes every `balanceCooldown` | With `event_driven`, 20 workers after 5.6 s, against 13.9 s when polling | [Supervisor features](/benchmarks/laravel-supervisors#event-driven-scaling) |
 | Several masters on one queue | Each sizes its pools from the whole backlog | Opt-in coordination shares one target | [Supervisor features](/benchmarks/laravel-supervisors#coordinated-replicas) |
 | Dashboard and alerts | Mature: job lists, batches, silenced jobs, Slack and SMS | Preview: process health, job metrics, tags, the jobs waiting and running per queue, failed jobs with a one-click retry, tuning advice, mail, Prometheus | [Monitoring](/use/laravel/monitoring) |
-| Clear a queue | `horizon:clear` | No atomic clear | [Migration pitfalls](/use/laravel/migrate-from-horizon#clearing-a-queue) |
+| Clear a queue | `horizon:clear` and `queue:clear` | `queue:clear` is not supported: the command fails, and the jobs still run | [Migration pitfalls](/use/laravel/migrate-from-horizon#clearing-a-queue) |
+| 15 failures on one Linux server: crashes, deploys, timeouts, backend restarts | Every lane passed but one: 2 of 300 jobs ran twice after a Redis restart | Every lane passed, both engines | [What happens when something fails](#what-happens-when-something-fails) |
+| 32 Laravel queue features: chains, batches, unique jobs, middleware, listeners, commands | All passed | All passed, both engines | [Laravel queue features](#laravel-queue-features) |
 | Maturity | Established | Preview, with supervisors on Unix only | [Requirements](/use/laravel/supervisors#requirements) |
 
 The figures are diagnostic: one host per run, a single broker node, and a protocol written by the
@@ -362,7 +364,7 @@ implementation and tests named in this page's frontmatter.
 | Autoscaler metrics | Not built in | Prometheus endpoint for Kubernetes HPA and KEDA |
 | Per-supervisor controls | Pause, continue and status for individual supervisors | Controls currently apply to the complete local master |
 | Failed jobs | Horizon commands and dashboard integration | Laravel commands remain authoritative; Queen synchronizes a DLQ snapshot and shows paged metadata, plus the exception and a one-click retry on a detail page per job |
-| Clear a queue | `horizon:clear` | No atomic clear across ready jobs, live leases and Laravel timers |
+| Clear a queue | `horizon:clear` and `queue:clear` | `queue:clear` is not supported: the command fails, and the jobs still run |
 | Native binary | Not needed | Rust engine requires an explicit version-pinned installation |
 
 Matching names do not imply identical algorithms. Capacity limits can be configured to the same
