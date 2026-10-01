@@ -50,6 +50,25 @@ class LaravelSupervisorProductionTest extends TestCase
         ], '/app');
     }
 
+    public function testARefusedBrokerUrlIsReportedWithoutItsCredentials(): void
+    {
+        try {
+            SupervisorConfiguration::readOnlyConnection(
+                'queen',
+                [],
+                ['url' => 'https://usr-7f3b:pw-5e2a@queen.example.test:6632/base?tenant=t-91c0'],
+                [],
+            );
+            $this->fail('A URL with user info was accepted.');
+        } catch (InvalidArgumentException $exception) {
+            // The message reaches logs and error pages.
+            $this->assertStringContainsString('https://queen.example.test:6632', $exception->getMessage());
+            foreach (['usr-7f3b', 'pw-5e2a', 't-91c0'] as $secret) {
+                $this->assertStringNotContainsString($secret, $exception->getMessage());
+            }
+        }
+    }
+
     public function testConfigurationRejectsAnUnsafeGlobalProcessLimit(): void
     {
         $this->expectException(InvalidArgumentException::class);
