@@ -126,9 +126,9 @@ the `Retry-After` contract and the jitter are in
 ### Transport
 
 With `ext-curl`, every synchronous request, and the detached ACK and pop of the Laravel driver, go
-over the client's own kept-alive cURL handles instead of Guzzle. A pop and an ACK then cost about
-60% less CPU in the worker; retries, failover, timeouts, TLS verification and errors behave as
-before. Guzzle stays for the async API and carries every request when an HTTP proxy variable is set
+over the client's own kept-alive cURL handles instead of Guzzle. A pop and an ACK then cost the
+client about 60% less CPU, and a Laravel worker with 10 ms jobs used 13 to 25% less in the
+benchmark; retries, failover, timeouts, TLS verification and errors behave as before. Guzzle stays for the async API and carries every request when an HTTP proxy variable is set
 (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` or a lower-case form), when `ext-curl` is missing, or when
 `QUEEN_SDK_HTTP_TRANSPORT=guzzle`.
 

@@ -246,9 +246,9 @@ still need idempotency keys. `process_limit` still counts a slot for the helper,
 starts when the master refuses it.
 [The safe delivery profile](https://queenmq.com/use/laravel/#start-with-the-safe-delivery-profile).
 
-Requests go over the client's own kept-alive cURL handles, not Guzzle, which costs a worker about
-60% less CPU per pop and ACK. `QUEEN_SDK_HTTP_TRANSPORT=guzzle` switches back; an HTTP proxy variable
-does so too.
+Requests go over the client's own kept-alive cURL handles, not Guzzle: a pop and an ACK cost the
+client about 60% less CPU, and with 10 ms jobs a whole worker used 13 to 25% less.
+`QUEEN_SDK_HTTP_TRANSPORT=guzzle` switches back; an HTTP proxy variable does so too.
 
 `QUEEN_ACK_ASYNC` and `QUEEN_POP_AHEAD` take the broker's round trip off the worker's path. A failed
 asynchronous ACK is reported one job later and the job is delivered again; `QUEEN_POP_AHEAD` needs
