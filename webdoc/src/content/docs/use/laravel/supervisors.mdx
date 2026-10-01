@@ -17,6 +17,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/PhpSupervisor.php
   - clients/client-php/src/Laravel/Supervisor/RemoteStatusPublisher.php
   - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
+  - clients/client-php/src/Laravel/Supervisor/WorkerExitMarker.php
   - clients/client-php/src/Laravel/Supervisor/AutoScaler.php
   - clients/client-php/src/Laravel/Supervisor/ReplicaCoordinator.php
   - clients/client-php/src/Laravel/Supervisor/QueueWatcher.php
@@ -47,6 +48,7 @@ verifiedBy:
   - clients/client-php/tests/FastScaleUpTest.php
   - clients/client-php/tests/PreforkTest.php
   - clients/client-php/tests/EventDrivenScalingTest.php
+  - clients/client-php/tests/WorkerExitMarkerTest.php
 # sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds PHP-only remote status publication and its heartbeat budget; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through cd2c7135): the config change is a dashboard comment only and changes no supervisor setting; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): SupervisorConfiguration gains readOnlyConnection for the dashboard and changes no supervisor setting; page matches the code.
@@ -60,6 +62,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): pop_ahead pops ahead only after a full batch; the supervisor behavior this page states is unchanged.
 # sourceOfTruth re-read 2026-10-02 (through 79204459): config/queen.php only gains dashboard.console_url, and SupervisorConfiguration names a refused URL by scheme, host and port only; no supervisor setting or behavior this page states changes.
+# sourceOfTruth re-read 2026-10-02 (through b602eea2 + this patch): an exit after stable_after, after Laravel's job timeout or at --memory after a job no longer counts toward the backoff (WorkerExitMarker and the exits/ directory are new), workers get SIGTERM before the master calls the broker, the engine table no longer lists the circuit breaker as Rust-only, and the restart paragraph, the state directory and Terminate say so; the fork server's failed-fork, --quiet and stalled-fetch fixes, the CA store and the lease service's fence order change nothing else this page states.
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel
@@ -71,7 +74,7 @@ Both engines consume the same resolved configuration:
 | Engine | Master | Workers | Distinct behavior |
 | --- | --- | --- | --- |
 | Queen PHP | A Laravel application remains resident | `artisan queue:work queen` | Reference implementation and fallback |
-| Queen Rust | Rust remains resident after one Artisan config load | `artisan queue:work queen` | Lower master memory, process-group fencing and crash-loop circuit breaker |
+| Queen Rust | Rust remains resident after one Artisan config load | `artisan queue:work queen` | Lower master memory and process-group fencing |
 
 Switching engines does not change the pool configuration, CLI controls or dashboard protocol. Both
 engines can also [publish their status](/use/laravel/dashboard#a-supervisor-on-another-host) for a
@@ -100,8 +103,8 @@ Native Windows is not supported by either Queen supervisor today.
 
 ## Prepare private state
 
-Status, the local ownership lock, control requests and bounded worker telemetry share one private
-directory. Create it as the same user that will run the supervisor:
+Status, the local ownership lock, control requests, bounded worker telemetry and the workers' exit
+markers share one private directory. Create it as the same user that will run the supervisor:
 
 ```bash
 install -d -m 0700 /srv/example/queen-supervisor-state
@@ -283,6 +286,11 @@ It uses the same capped exponential restart backoff as Rust. After five consecut
 opens the pool circuit and, after `restart_backoff_max`, admits one probe until that worker is
 stable.
 
+In both engines, a worker that ran for `stable_after`, one that Laravel killed after a job timeout,
+and one that stopped at `--memory` after a job restart without backoff; for the last two, the worker
+leaves a marker in the state directory before it exits. Every other non-zero exit counts as a
+failure, a `SIGKILL` without that marker included, such as the OOM killer's.
+
 Use the PHP engine first when native artifacts are not published for the host, or as a reference
 during a Rust rollout.
 
@@ -367,8 +375,9 @@ growth separately. The child-process budget also excludes the master, container 
 subprocesses created by job code, so leave explicit headroom in the systemd/container PID limit.
 
 Pause drains current workers and starts no replacements until continue. It does not suspend a PHP
-process while that process retains a prefetched tail. Terminate drains for `shutdown_grace`, then
-forces the remaining process group down.
+process while that process retains a prefetched tail. Terminate sends `SIGTERM` to every worker
+before it publishes the remote status or leaves the coordination, so a slow broker cannot shorten
+the drain; after `shutdown_grace`, it forces the remaining process group down.
 
 ## Prefork workers
 

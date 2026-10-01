@@ -46,6 +46,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; the migration mapping is unchanged.
 # sourceOfTruth re-read 2026-10-02 (checklist and pitfalls): the queue.php and horizon.php maps are read from config/queen.php, the gate and event names from AuthorizeDashboard and LongWaitDetected, and the tag limits from JobTags and TagMonitor; the pitfalls follow QueenConnector (renewal timing), QueenQueue (job timeout refusal, one lease per stripe, no ClearableQueue), SyncedFailedJobProvider and the shutdown path of both engines.
 # sourceOfTruth re-read 2026-10-02 (through 79204459): the dashboard's Retry now button runs the same queue:retry this runbook names, and dashboard.console_url, the queue-contents reader and the redacted URL error of SupervisorConfiguration change nothing in the runbook; page matches the code.
+# sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): which exits restart without backoff, the SIGTERM before the broker calls, the unstarted hand-back that keeps its attempt, the bounded metrics client and the Rust CA store change nothing this runbook states; its deploy and shutdown_grace steps still hold.
 ---
 
 Moving from Horizon changes two things, not one:
