@@ -113,6 +113,14 @@ class FailureMatrixChecksTest(unittest.TestCase):
         self.assertEqual({"horizon", "queen-php", "queen-rust", "queen-rust-fast"}, set(matrix.PROFILES))
         self.assertEqual(("horizon", "queen-php", "queen-rust"), matrix.DEFAULT_PROFILES)
 
+    def test_a_soak_report_with_empty_php_arrays_reads_as_maps(self) -> None:
+        empty = matrix.soak_report({"summary": [], "failed_store": 0})
+        clean = matrix.soak_report({"summary": {"ok": {"jobs": 2, "as_expected": 2, "anomalies": []}}})
+
+        self.assertEqual({}, empty["summary"])
+        self.assertEqual({}, clean["summary"]["ok"]["anomalies"])
+        self.assertEqual(0, empty["failed_store"])
+
 
 if __name__ == "__main__":
     unittest.main()

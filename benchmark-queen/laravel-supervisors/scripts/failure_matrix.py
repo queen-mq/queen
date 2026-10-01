@@ -614,6 +614,12 @@ def growth(samples: list[dict], key: str) -> tuple[float | None, float | None]:
     return first[len(first) // 2], last[len(last) // 2]
 
 
+def soak_report(report: dict) -> dict:
+    """`bench:matrix-report --summary` with its maps as dicts: PHP encodes an empty array as a list."""
+    kinds = report["summary"] if isinstance(report["summary"], dict) else {}
+    return {**report, "summary": {name: {**kind, "anomalies": kind["anomalies"] or {}} for name, kind in kinds.items()}}
+
+
 def soak(lane: Lane) -> list[Check]:
     """A long mixed workload: a worker killed every 10 minutes, one rolling restart halfway,
     then every job must end as its kind says, and memory must stay flat."""
@@ -648,7 +654,7 @@ def soak(lane: Lane) -> list[Check]:
     lane.note(f"dispatch done: {dispatched}")
 
     def summary() -> dict:
-        return json.loads(lane.artisan("bench:matrix-report", lane.run_id, "--summary").stdout)
+        return soak_report(json.loads(lane.artisan("bench:matrix-report", lane.run_id, "--summary").stdout))
 
     deadline, report = time.monotonic() + 900, summary()
     while time.monotonic() < deadline and any(

@@ -36,7 +36,7 @@ final class FailureMatrixReportCommand extends Command
         if ($this->option('summary')) {
             $this->line(json_encode([
                 'run_id' => $runId,
-                'summary' => $this->summary($jobs),
+                'summary' => (object) $this->summary($jobs),
                 'failed_store' => count($this->failedStore($runId)['job_ids'] ?? []),
                 'dead_letter' => $this->deadLetter($runId)['entries'] ?? null,
             ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
@@ -89,6 +89,11 @@ final class FailureMatrixReportCommand extends Command
             }
         }
         ksort($kinds);
+        // Objects even when empty: kinds and job ids are keys.
+        foreach ($kinds as &$kind) {
+            $kind['anomalies'] = (object) $kind['anomalies'];
+        }
+        unset($kind);
 
         return $kinds;
     }
