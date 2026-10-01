@@ -50,9 +50,10 @@ final class JobMetricsReader
 
     /**
      * `truncated` is true when the window held more rows than one read takes:
-     * the table then covers only the window's oldest part.
+     * the table then covers only the window's oldest part. `max_ms` is the
+     * longest single run, null when no worker recorded one (earlier releases).
      *
-     * @return array{available: bool, truncated: bool, range: string, minutes: int, totals: array{processed: int, failed: int}, classes: list<array{class: string, processed: int, failed: int, runtime_ms: int, average_ms: ?int, per_minute: float}>}
+     * @return array{available: bool, truncated: bool, range: string, minutes: int, totals: array{processed: int, failed: int}, classes: list<array{class: string, processed: int, failed: int, runtime_ms: int, max_ms: ?int, average_ms: ?int, per_minute: float}>}
      */
     public function read(string $range): array
     {
@@ -152,7 +153,7 @@ final class JobMetricsReader
         ];
     }
 
-    /** @param array<string, array{processed: int, failed: int, runtime_ms: int}> $classes */
+    /** @param array<string, array{processed: int, failed: int, runtime_ms: int, max_ms: ?int}> $classes */
     private function add(array &$classes, mixed $recorded): void
     {
         if (!is_array($recorded) || array_is_list($recorded)) {
@@ -171,12 +172,21 @@ final class JobMetricsReader
                 }
                 $values[$field] = $value;
             }
+            // Absent from rows written before it was recorded; such a row
+            // neither sets nor lowers the longest run.
+            $longest = $counts['max_ms'] ?? null;
+            if ($longest !== null && (!is_int($longest) || $longest < 0 || $longest > PHP_INT_MAX >> 8)) {
+                continue;
+            }
             if (!isset($classes[$class]) && count($classes) >= self::MAX_CLASSES) {
                 $class = JobMetricsRecorder::OTHER_CLASS;
             }
-            $current = $classes[$class] ?? ['processed' => 0, 'failed' => 0, 'runtime_ms' => 0];
+            $current = $classes[$class] ?? ['processed' => 0, 'failed' => 0, 'runtime_ms' => 0, 'max_ms' => null];
             foreach ($values as $field => $value) {
                 $current[$field] += $value;
+            }
+            if ($longest !== null) {
+                $current['max_ms'] = max($current['max_ms'] ?? 0, $longest);
             }
             $classes[$class] = $current;
         }

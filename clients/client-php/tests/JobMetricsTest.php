@@ -78,6 +78,46 @@ final class JobMetricsTest extends TestCase
         $this->assertSame(['App\Jobs\B'], array_keys($last['value']['classes']));
     }
 
+    public function testAWorkerRecordsTheLongestRunOfEachClass(): void
+    {
+        $handler = $this->applying();
+        $recorder = $this->recorder($handler);
+
+        $this->process($recorder, 'App\Jobs\Export', false, 30_000);
+        $this->process($recorder, 'App\Jobs\Export', false);
+        $recorder->flush();
+
+        $counts = $this->operations($handler, 0)[0]['value']['classes']['App\Jobs\Export'];
+        $this->assertGreaterThanOrEqual(30, $counts['max_ms']);
+        $this->assertLessThanOrEqual($counts['runtime_ms'], $counts['max_ms'], 'one run, not the sum');
+    }
+
+    public function testTheReaderKeepsTheLongestRunOfEveryWorker(): void
+    {
+        $handler = new PlanHandler([['status' => 200, 'json' => ['rows' => [
+            ['key' => 'jobs/v1/1790000100/aaaa', 'value' => ['classes' => [
+                'App\Jobs\Export' => ['processed' => 3, 'failed' => 0, 'runtime_ms' => 9000, 'max_ms' => 7000],
+                'App\Jobs\Send' => ['processed' => 2, 'failed' => 0, 'runtime_ms' => 40],
+            ]]],
+            ['key' => 'jobs/v1/1790000100/bbbb', 'value' => ['classes' => [
+                'App\Jobs\Export' => ['processed' => 1, 'failed' => 1, 'runtime_ms' => 95000, 'max_ms' => 94000],
+                'App\Jobs\Resize' => ['processed' => 1, 'failed' => 0, 'runtime_ms' => 10, 'max_ms' => -1],
+            ]]],
+            // A worker of an earlier release records no longest run.
+            ['key' => 'jobs/v1/1790000400/cccc', 'value' => ['classes' => [
+                'App\Jobs\Export' => ['processed' => 5, 'failed' => 0, 'runtime_ms' => 500],
+            ]]],
+        ], 'truncated' => false]]]);
+        $reader = new JobMetricsReader($this->queen($handler), 'queen-metrics', null, fn (): int => 1_790_000_500);
+
+        $classes = array_column($reader->read('1h')['classes'], null, 'class');
+
+        $this->assertSame(94000, $classes['App\Jobs\Export']['max_ms']);
+        $this->assertSame(10, $classes['App\Jobs\Export']['processed'] + $classes['App\Jobs\Export']['failed']);
+        $this->assertNull($classes['App\Jobs\Send']['max_ms'], 'unknown, not zero');
+        $this->assertArrayNotHasKey('App\Jobs\Resize', $classes, 'an invalid row is dropped');
+    }
+
     public function testClassesBeyondTheCapAreGroupedAndABrokerErrorNeverReachesTheJob(): void
     {
         $handler = new PlanHandler([], ['status' => 503, 'json' => []]);
@@ -149,11 +189,14 @@ final class JobMetricsTest extends TestCase
         $this->assertSame('1h', JobMetricsReader::range('7d'));
     }
 
-    private function process(JobMetricsRecorder $recorder, string $class, bool $failed): void
+    private function process(JobMetricsRecorder $recorder, string $class, bool $failed, int $runMicroseconds = 0): void
     {
         $job = $this->createStub(Job::class);
         $job->method('resolveName')->willReturn($class);
         $recorder->start($job);
+        if ($runMicroseconds > 0) {
+            usleep($runMicroseconds);
+        }
         $recorder->finish($job, $failed);
     }
 
