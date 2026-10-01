@@ -45,6 +45,28 @@ worker's job events and on `WorkerStopping`, and used the queue's ordinary clien
 retries held the worker on a slow or rate-limiting broker and could spend the shutdown grace
 before the prefetched tail was handed back. They now use one 2-second attempt.
 
+**Laravel dashboard: retry a failed job in one click.** The failed-job page has a *Retry now*
+button. It runs `queue:retry` for that job, so the broker's dead-letter entry and the
+`failed_jobs` row stay in step, and the page still shows the command for a terminal. Forgetting,
+flushing and pruning stay with Laravel's commands.
+
+**Laravel dashboard: what each queue holds now.** The Workload page shows, for every supervised
+queue, the jobs waiting and running and how long the oldest unfinished job has waited, from one
+broker read per queue, cached for 5 seconds. `QUEEN_DASHBOARD_CONSOLE_URL` links each queue to
+the Queen console, which lists the messages themselves.
+
+**Laravel dashboard: the Configuration page is a tuning guide.** It shows every resolved setting
+of the connection and the supervisor with its environment variable, each pool as the running
+supervisor published it, and advice from the supervisor's state and the job metrics: job classes
+whose longest run exceeds `shutdown_grace`, one worker for several queues, short jobs on
+`prefetch` 1, prefork off, a lease helper per worker, polling instead of event-driven scaling,
+and pools that could run a job twice. A setting that can hold a credential shows only whether it
+is set. Job metrics now record each class's longest run.
+
+**Laravel: a rejected broker URL no longer leaks its password.** The supervisor configuration
+printed an invalid broker URL, credentials included, into logs and error pages; it now redacts
+them.
+
 **Supervisors (both engines).** A worker that ran at least `stable_after` and exits non-zero
 (`queue:work` exits 12 at `--memory`, a job timeout kills the worker) is restarted at once: it
 no longer holds its pool at a single probe for `stable_after`. On stop, the workers get SIGTERM
