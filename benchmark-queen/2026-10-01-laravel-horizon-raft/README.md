@@ -53,12 +53,23 @@ and not used.
 | --- | --- |
 | `raw/faults/*.md`, `raw/faults/*.metadata.json` | The fault-recovery reports and their protocols |
 | `raw/faults/long-tail-jobs.csv` | Every job of the long-tail fault run: worker, attempt, start and completion in seconds after the first enqueue |
+| `raw/runs-final.csv` | The same rows for seven lanes repeated on the final commit, `85584a8f` |
 | `raw/runs.csv` | One row per run: throughput, queue wait and end-to-end latency percentiles, memory (PSS of orchestrator, workers and lease helpers; cgroup memory of the application and the backend), CPU seconds, and scaling |
 | `scripts/campaign.sh` | The lanes, as `laravel-supervisors/scripts/run.sh` invocations |
 | `scripts/extract.py` | Builds `raw/runs.csv` from the campaign directories |
 
 The per-run artifacts (samples, events, compose logs) stay in the git-ignored
 `laravel-supervisors/results/2026-10-01-overnight`.
+
+## Repeat on the final commit
+
+The main lanes ran on commits `cb08f2cb` (without `pop_ahead`) and
+`e0dd7e45` (with it). Fixes after the final review changed the client again,
+so seven lanes ran again on `85584a8f`: `strict-all`, `everysec-all`,
+`noop-all`, `lean-all`, `latency-300-all`, `latency-100-all` and `burst-all`.
+All 65 runs were correct. Throughput and latency medians moved by at most 3%,
+except the time to the burst's peak: 5.3 s for Queen and 6.3 s for Horizon,
+against 4.3 s and 7.3 s before.
 
 ## Fault recovery
 

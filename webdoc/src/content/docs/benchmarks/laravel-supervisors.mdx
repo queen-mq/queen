@@ -366,6 +366,10 @@ were equal, 5.8 against 6.0 seconds for 10,000 jobs. The HTTP client costs more 
 phpredis. At 100 paced jobs/s the Raft broker also used 4.7 CPU seconds against Redis's 1.1. Size
 worker CPU from your own jobs.
 
+Seven of these lanes ran again on the final commit, after the last review fixes: throughput and
+latency moved by at most 3%, and the time to the burst's peak became 5.3 s for Queen against 6.3 s
+for Horizon. Those runs are in `raw/runs-final.csv`.
+
 Two fault-recovery runs on the same broker checked the new paths under failure. With 24 jobs of
 2 s on 2 workers, a worker killed with SIGKILL during a job was back after 1.0 s under Horizon and
 1.4 s under Queen, and both ran all 24 jobs with no duplicate effect; the killed job ran again, as
