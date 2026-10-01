@@ -1,0 +1,16 @@
+engine,t_s,event
+horizon,602,worker killed
+horizon,1203,worker killed
+horizon,1392,deploy
+horizon,1817,worker killed
+horizon,2419,worker killed
+queen-php,602,worker killed
+queen-php,1204,worker killed
+queen-php,1391,deploy
+queen-php,1816,worker killed
+queen-php,2417,worker killed
+queen-rust,602,worker killed
+queen-rust,1203,worker killed
+queen-rust,1391,deploy
+queen-rust,1817,worker killed
+queen-rust,2419,worker killed

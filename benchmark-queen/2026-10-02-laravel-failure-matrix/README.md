@@ -135,6 +135,15 @@ updates (fixed by taking the write lock first, `RetryingBatchRepository`); the p
 draining workers; a soak drained before its last delayed jobs were due; an empty PHP array arrived
 as a JSON list; and the matrix job's readonly properties broke its partitioned subclass.
 
+**The soak (`soak`):** 45 minutes at 5 jobs/s on 8 workers, a worker killed every 10 minutes and a
+deploy after 23 minutes. Each engine received 13,501 jobs, and every one ended as its kind says. The
+398 permanent failures left 398 failed-job rows, and on Queen 398 dead-letter entries. The master's
+resident memory stayed flat: Horizon 48.9 MiB, Queen PHP 58.3 to 57.8 MiB, Queen Rust 6.9 MiB. The
+median worker grew slowly, as long-lived PHP workers do: Horizon 50.7 to 54.7 MiB, Queen PHP 40.9 to
+47.0 and Queen Rust 40.5 to 45.0 (first third against last third, `raw/soak-memory.csv`). The soak
+ran before the exit markers, which change only how a worker killed by a job timeout restarts; no
+soak job timed out.
+
 The local soak (`local-soak-prefetch`, Docker Desktop, 15 minutes, prefetch 4 with `ack_async` and
 `pop_ahead`, every client fix): 4,501 jobs ended as their kind says, 124 failed-job rows and 124
 dead-letter entries for 124 permanent failures, the master flat at 6.3 MiB, the median worker from

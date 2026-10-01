@@ -185,6 +185,41 @@ def compat(raw: Path) -> list[str]:
     return [*lines, ""]
 
 
+def soak_details(raw: Path) -> list[str]:
+    """The soak lanes in numbers: jobs, failures and memory drift per engine."""
+    lanes = {e: load(raw / "soak" / "soak" / f"{e}.json") for e in ENGINES[:3]}
+    engines = [e for e in ENGINES[:3] if lanes[e] and lanes[e].get("extra")]
+    if not engines:
+        return []
+
+    def check(engine: str, prefix: str) -> str:
+        found = next((c for c in lanes[engine]["checks"] if c["name"].startswith(prefix)), None)
+        return found["detail"] if found else "–"
+
+    def drift(engine: str, key: str) -> str:
+        detail = check(engine, key.replace("_", " "))
+        first, _, last = detail.partition(" → ")
+        try:
+            return f"{float(first):.1f} → {float(last.split()[0]):.1f} MiB"
+        except ValueError:
+            return detail
+
+    rows = {
+        "Jobs dispatched": lambda e: f"{lanes[e]['extra']['dispatched']['dispatched']:,}",
+        "Jobs that ended as their kind says": lambda e: "all" if all(
+            c["passed"] for c in lanes[e]["checks"] if c["name"].endswith("jobs ended as expected")) else "not all",
+        "Rows in `failed_jobs`, one per permanent failure": lambda e: check(e, "one failed-job row").split(" rows")[0],
+        "Dead-letter entries": lambda e: check(e, "one dead-letter entry").split(" entries")[0],
+        "Master memory, first third → last third": lambda e: drift(e, "master_rss_mib"),
+        "Median worker memory, first third → last third": lambda e: drift(e, "worker_rss_median_mib"),
+    }
+    head = ["", *(ENGINE_TITLES[e] for e in engines)]
+    lines = ["## Soak in numbers", "", "| " + " | ".join(head) + " |", "|" + " --- |" * len(head)]
+    for title, value in rows.items():
+        lines.append(f"| {title} | " + " | ".join(value(e) for e in engines) + " |")
+    return [*lines, ""]
+
+
 def changed(before: dict, after: dict) -> list[str]:
     rows = []
     for key in sorted(after):
@@ -205,6 +240,7 @@ def main() -> int:
     out += table("Failures", FAILURES, results, ENGINES)
     out += table("Replicas", REPLICAS, results, ENGINES)
     out += table("Soak", SOAK, results, ENGINES[:3])
+    out += soak_details(raw)
     out += compat(raw)
     out += changed(first, results)
     print("\n".join(out))
