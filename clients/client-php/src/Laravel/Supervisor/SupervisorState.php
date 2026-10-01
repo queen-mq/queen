@@ -14,6 +14,10 @@ final class SupervisorState
 
     private const MAX_OWNER_BYTES = 65536;
 
+    private const MAX_EXIT_MARKER_BYTES = 64;
+
+    private const MAX_EXIT_MARKER_ENTRIES = 8192;
+
     private const DEFAULT_STALE_AFTER_SECONDS = 60;
 
     private const DEFAULT_CONTROL_TTL_SECONDS = 3600;
@@ -379,17 +383,63 @@ final class SupervisorState
 
     public function telemetryDirectory(): string
     {
-        $this->ensureDirectory();
-        $path = $this->path('telemetry');
-        if (!is_dir($path) && !@mkdir($path, 0700) && !is_dir($path)) {
-            throw new RuntimeException("Unable to create Queen telemetry directory [{$path}].");
+        return $this->privateChildDirectory('telemetry');
+    }
+
+    /**
+     * The private directory where workers leave exit markers (see
+     * WorkerExitMarker), emptied for this generation: a marker an earlier
+     * generation left explains no exit of this one.
+     */
+    public function resetExitMarkers(): string
+    {
+        $path = $this->privateChildDirectory('exits');
+        $names = [];
+        foreach (new \FilesystemIterator($path, \FilesystemIterator::SKIP_DOTS) as $entry) {
+            if (count($names) >= self::MAX_EXIT_MARKER_ENTRIES) {
+                // A leftover only matters for its pid, and the master removes
+                // it when a worker starts with that pid.
+                break;
+            }
+            $names[] = $entry->getFilename();
         }
-        $metadata = @lstat($path);
-        if ($metadata === false || ($metadata['mode'] & 0170000) !== 0040000) {
-            throw new RuntimeException("Queen telemetry directory [{$path}] must not be a symbolic link.");
+        foreach ($names as $name) {
+            $this->removeExitMarkerEntry($path . DIRECTORY_SEPARATOR . $name);
         }
-        $this->makePrivate($path);
+
         return $path;
+    }
+
+    /**
+     * Read and remove the marker a worker left before it exited: at most a
+     * few bytes, from a private regular file, never through a symbolic link.
+     * Null when there is none. Anything else under that name is removed too.
+     */
+    public function takeExitMarker(int $pid): ?string
+    {
+        $path = $this->exitMarkerPath($pid);
+        if ($path === null) {
+            return null;
+        }
+        $this->removeExitMarkerEntry($path . '.tmp');
+        $metadata = @lstat($path);
+        if ($metadata === false) {
+            return null;
+        }
+        $marker = $this->readExitMarker($path, $metadata);
+        $this->removeExitMarkerEntry($path);
+
+        return $marker;
+    }
+
+    /** Remove a worker's marker, and its temporary file, unread. */
+    public function removeExitMarker(int $pid): void
+    {
+        $path = $this->exitMarkerPath($pid);
+        if ($path !== null) {
+            $this->removeExitMarkerEntry($path);
+            $this->removeExitMarkerEntry($path . '.tmp');
+        }
     }
 
     public function removeTelemetryForPid(int $pid): void
@@ -423,6 +473,84 @@ final class SupervisorState
             && ($current['mode'] & 0170000) === 0100000
             && $current['dev'] === $metadata['dev']
             && $current['ino'] === $metadata['ino']) {
+            @unlink($path);
+        }
+    }
+
+    private function privateChildDirectory(string $name): string
+    {
+        $this->ensureDirectory();
+        $path = $this->path($name);
+        if (!is_dir($path) && !@mkdir($path, 0700) && !is_dir($path)) {
+            throw new RuntimeException("Unable to create Queen {$name} directory [{$path}].");
+        }
+        $metadata = @lstat($path);
+        if ($metadata === false || ($metadata['mode'] & 0170000) !== 0040000) {
+            throw new RuntimeException("Queen {$name} directory [{$path}] must not be a symbolic link.");
+        }
+        $this->makePrivate($path);
+        return $path;
+    }
+
+    /** `exits/<pid>`, when `exits` is the private real directory the master made. */
+    private function exitMarkerPath(int $pid): ?string
+    {
+        if ($pid < 1) {
+            return null;
+        }
+        $directory = $this->existingDirectoryMetadata();
+        if ($directory === null) {
+            return null;
+        }
+        $exits = $this->path('exits');
+        $metadata = @lstat($exits);
+        if (!is_array($metadata)
+            || ($metadata['mode'] & 0170000) !== 0040000
+            || ($metadata['mode'] & 07777) !== 0700
+            || ($metadata['uid'] ?? null) !== ($directory['uid'] ?? null)) {
+            return null;
+        }
+
+        return $exits . DIRECTORY_SEPARATOR . $pid;
+    }
+
+    /** @param array<string, mixed> $metadata lstat() of $path */
+    private function readExitMarker(string $path, array $metadata): ?string
+    {
+        if (($metadata['mode'] & 0170000) !== 0100000
+            || ($metadata['mode'] & 07777) !== 0600
+            || ($metadata['uid'] ?? null) !== posix_geteuid()
+            || $metadata['size'] < 1
+            || $metadata['size'] > self::MAX_EXIT_MARKER_BYTES) {
+            return null;
+        }
+        $handle = @fopen($path, 'rb');
+        if ($handle === false) {
+            return null;
+        }
+        $opened = fstat($handle);
+        $contents = false;
+        // The inode inspected above, not whatever the name points to now.
+        if (is_array($opened)
+            && ($opened['mode'] & 0170000) === 0100000
+            && $opened['dev'] === $metadata['dev']
+            && $opened['ino'] === $metadata['ino']) {
+            $contents = stream_get_contents($handle, self::MAX_EXIT_MARKER_BYTES + 1);
+        }
+        fclose($handle);
+        if (!is_string($contents) || strlen($contents) > self::MAX_EXIT_MARKER_BYTES) {
+            return null;
+        }
+        $contents = trim($contents);
+
+        return $contents === '' ? null : $contents;
+    }
+
+    /** unlink() removes a symbolic link itself, never its target; a directory stays. */
+    private function removeExitMarkerEntry(string $path): void
+    {
+        $metadata = @lstat($path);
+        if (is_array($metadata) && ($metadata['mode'] & 0170000) !== 0040000) {
             @unlink($path);
         }
     }

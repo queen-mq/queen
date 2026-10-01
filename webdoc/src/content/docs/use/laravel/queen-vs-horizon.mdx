@@ -56,6 +56,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (Linux server campaign): the throughput, memory and CPU sections and the benchmark section now lead with the server results; the CPU advantage of Horizon is narrowed to the broker at a low, steady rate.
 # sourceOfTruth re-read 2026-10-02 (decision guide): an at-a-glance table and the choice lists now lead; renewal and fencing (QueenConnector, lease/mod.rs) add a Queen advantage, the one-lease-per-stripe rule of QueenQueue adds a Horizon one, and the long-tail fault run is described as no duplicate effect rather than one run per job; the burst figures come from the Linux-server runs.csv and the event-driven figures from the supervisor-features README.
 # sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): the panel retries a failed job from its detail page, and the failed-jobs row and the richer-dashboard section say so; the max_ms JobMetricsRecorder now records and the redacted URL error of SupervisorConfiguration change no comparison.
+# sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): the Crash-loop control row now says which exits restart at once (Laravel's job timeout and --memory after a job, both through WorkerExitMarker, and an exit after stable_after); the unstarted hand-back that keeps its attempt, the SIGTERM before the broker calls, the fork-server and lease-service fixes, the bounded metrics client and the Rust CA store change nothing else this page states.
 ---
 
 Horizon and Queen both run ordinary Laravel jobs and both supervise their workers, but on different
@@ -352,7 +353,7 @@ implementation and tests named in this page's frontmatter.
 | Long jobs | `retry_after` must exceed the job | Lease renewal, with fencing before the lease ends |
 | Master runtime | PHP with Laravel/Horizon loaded | PHP reference engine or optimized Rust engine |
 | Worker memory | Every worker boots Laravel | The same, or prefork: workers forked from one booted Laravel share it copy-on-write |
-| Crash-loop control | Process restart behavior managed by Horizon and the outer monitor | Capped restart backoff plus an open/one-probe circuit breaker in both engines |
+| Crash-loop control | Process restart behavior managed by Horizon and the outer monitor | Capped restart backoff plus an open/one-probe circuit breaker in both engines, for short-lived crashes only: a worker that Laravel killed after a job timeout, that stopped at `--memory` after a job, or that ran for `stable_after` restarts at once |
 | Multiple master hosts | Master records and supervisor state are shared through Horizon's Redis repository | Opt-in coordination: replicas share each pool's target through the broker's key/value store; otherwise one master per application and consumer group |
 | Dashboard | Mature Horizon dashboard over its Redis state | Supervisor panel listing every host or pod, Jobs and Tags pages, plus a separate global Queen broker dashboard |
 | Job metrics | Per-job and per-queue graphs from the scheduled `horizon:snapshot` | Live per-job-class throughput, failures and runtime over one hour to one day, from every worker; per-queue completed and failed chart from the broker's counters |

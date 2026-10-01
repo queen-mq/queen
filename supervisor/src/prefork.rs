@@ -96,7 +96,8 @@ impl ForkServer {
             .stderr(Stdio::inherit())
             .env("QUEEN_FORK_SERVER", PROTOCOL)
             // The server is no worker: none of their variables may leak into it.
-            .env_remove("QUEEN_SUPERVISOR_TELEMETRY_DIR");
+            .env_remove("QUEEN_SUPERVISOR_TELEMETRY_DIR")
+            .env_remove("QUEEN_SUPERVISOR_EXITS_DIR");
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("QUEEN_LARAVEL_") {
                 command.env_remove(name);

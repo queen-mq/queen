@@ -5,6 +5,7 @@ namespace Queen\Laravel\Commands;
 use Illuminate\Console\Command;
 use Illuminate\Queue\Console\WorkCommand;
 use Queen\Laravel\Supervisor\Prefork\ForkServer;
+use Queen\Laravel\Supervisor\WorkerExitMarker;
 use Queen\Laravel\Supervisor\WorkerTelemetry;
 use Symfony\Component\Console\Command\Command as SymfonyCommand;
 use Symfony\Component\Console\Input\ArgvInput;
@@ -98,5 +99,6 @@ class ForkServerCommand extends Command
             }
         }
         WorkerTelemetry::listenFromEnvironment($this->laravel['events']);
+        WorkerExitMarker::listenFromEnvironment($this->laravel['events']);
     }
 }

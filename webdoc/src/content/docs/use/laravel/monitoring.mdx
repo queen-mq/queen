@@ -41,6 +41,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; nothing this page monitors changes.
 # sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): workers also record max_ms, the longest attempt per class, which the Configuration page's advice reads, and the Jobs per class section says so; a cache store that cannot be resolved now leaves the read uncached instead of failing; the retry route, console_url and the queue-contents reader add no metric.
+# sourceOfTruth re-read 2026-10-02 (through ad0f816b + this patch): job metric and tag writes now make one attempt of at most two seconds, and the Jobs per class section says so; the unstarted hand-back and the provider's exit-marker listener change nothing this page monitors.
 ---
 
 The supervisor [dashboard](/use/laravel/dashboard) shows what the supervisors do. This page covers
@@ -78,8 +79,9 @@ supervisor's `shutdown_grace`. Records of earlier workers have no `max_ms`, and 
 is not compared.
 
 That is one write per worker every ten seconds, never one per job, and no two workers ever write the
-same key. Keys expire after a day, which bounds the longest window. Recording is best effort: a
-failed write is dropped and never reaches the job. A preforked worker starts its own counts after
+same key. Keys expire after a day, which bounds the longest window. Recording is best effort: one
+attempt of at most two seconds, with no failover and no retry, and a failed write is dropped and
+never reaches the job. A preforked worker starts its own counts after
 its fork.
 
 | Variable | Default | Meaning |

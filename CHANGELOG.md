@@ -77,6 +77,15 @@ the master loop on an answer that stalls mid-body, its fork server survives a fa
 CA store (and `SSL_CERT_FILE`), so a broker behind a private CA works, and its lease service
 fences a worker before it logs why, so a broken stderr pipe cannot skip the fence.
 
+**Supervisors: a job timeout is not a crash.** Laravel SIGKILLs a worker whose job outlives its
+timeout, and both engines counted that exit as a crash: with job timeouts shorter than
+`stable_after`, a burst of them opened the restart circuit and left the pool at one probe worker
+for every job on its queue, the healthy ones included. The worker now leaves a marker in the state directory's `exits/` before it dies, and
+the master restarts it without backoff and without counting it. A worker that stops at `--memory`
+after it handled a job counts as a clean exit too; one that stops before any job still backs off,
+since its boot alone passes the limit. Every other non-zero exit counts as before, a `SIGKILL`
+without a marker included (the OOM killer, a lease fence, `kill -9`).
+
 ## 1.6.0 - 2026-09-11
 
 **A read-scoped credential could replay a dead letter through the proxy. It cannot now.**
