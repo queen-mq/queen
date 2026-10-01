@@ -29,6 +29,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): the throughput reader binding adds nothing this overview describes; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the new supervisor, monitoring and metrics blocks in config/queen.php add nothing this overview describes; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through dc5b5994): the event_driven switch in config/queen.php adds nothing this overview describes; page matches the code.
+# sourceOfTruth re-read 2026-10-01 (through this patch): Queen::ackDetached/settleAck and QueueBuilder::popDetached/settlePop are new public API, now in the Acknowledge section; the ack_async, pop_ahead and lease comments in config/queen.php and the QueenQueue changes add nothing else this overview describes.
+# sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; ackDetached/popDetached, which this page documents, are unchanged.
 ---
 
 The PHP client is a plain PSR-4 library, `Queen\` mapped onto `src/`, with an optional Laravel
@@ -99,6 +103,18 @@ $client->ack($messages, true, ['group' => 'billing']);
 mandatory. An ack is an offset commit, so a nack clamps the group's cursor at the failed message
 and everything after it in that batch comes back. A rejected ack still arrives as HTTP 200: read
 `success` off each item.
+
+A consumer that should not wait for the answer can send a single ack detached, do other work, and
+read the answer later. The request is on the wire when `ackDetached()` returns, over a kept-alive
+connection; `settleAck()` returns what `ack()` would have. It makes one attempt against one backend,
+so retry an exception from `settleAck()` with `ack()`. `popDetached()` and `settlePop()` do the same
+for a pop. The Laravel driver's `ack_async` and `pop_ahead` are built on them.
+
+```php
+$pending = $client->ackDetached($message, true, ['group' => 'billing']);
+// ... the next message's work ...
+$result = $client->settleAck($pending);
+```
 
 ## Laravel
 

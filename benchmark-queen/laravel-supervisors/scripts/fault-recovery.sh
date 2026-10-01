@@ -9,6 +9,9 @@ REPOSITORY_ROOT="$(CDPATH='' cd -- "${BENCH_DIR}/../.." && pwd)"
 COMPOSE_FILE="${BENCH_DIR}/compose.yml"
 APP_IMAGE="queen-laravel-supervisor-bench:local"
 BROKER_IMAGE="queen-laravel-supervisor-broker:local"
+QUEEN_STORAGE="postgres"
+QUEEN_ACK_ASYNC=0
+QUEEN_LEASE_SERVICE=1
 
 ENGINES_CSV="horizon,queen-php,queen-rust"
 FAULT_SCENARIO="worker-sigkill"
@@ -56,6 +59,10 @@ Options:
   --job-tries N                Attempts allowed after the crash (default: 2)
   --queen-prefetch N           Queen deliveries claimed per pop (default: 1)
   --queen-ack-batch N          Queen ACKs flushed together; <= prefetch (default: 1)
+  --queen-ack-async 0|1         Send Queen ACKs without waiting (default: 0)
+  --queen-lease-service 0|1     Renew leases in the Rust supervisor (default: 1)
+  --queen-storage postgres|raft Broker storage; raft needs the image
+                                queen-laravel-supervisor-broker:raft (default: postgres)
   --worker-timeout SECONDS     Laravel worker timeout (default: 10)
   --retry-after SECONDS        Queue visibility timeout (default: 12)
   --kill-delay-ms N            Delay after target's proof-of-work (default: 100)
@@ -75,6 +82,11 @@ and prefetch greater than one. Master/backend/network/storage faults are kept
 as separate campaign classes because their recovery and durability gates are
 not equivalent to a child-process replacement.
 EOF
+}
+
+# "true" or "false" for a 0|1 switch, the spelling Compose passes on.
+switch_word() {
+    if [ "$1" = 1 ]; then printf true; else printf false; fi
 }
 
 die() {
@@ -109,6 +121,9 @@ while [ "$#" -gt 0 ]; do
         --job-tries) JOB_TRIES="${2:?--job-tries requires a value}"; shift 2 ;;
         --queen-prefetch) QUEEN_PREFETCH="${2:?--queen-prefetch requires a value}"; shift 2 ;;
         --queen-ack-batch) QUEEN_ACK_BATCH="${2:?--queen-ack-batch requires a value}"; shift 2 ;;
+        --queen-ack-async) QUEEN_ACK_ASYNC="${2:?--queen-ack-async requires a value}"; shift 2 ;;
+        --queen-lease-service) QUEEN_LEASE_SERVICE="${2:?--queen-lease-service requires a value}"; shift 2 ;;
+        --queen-storage) QUEEN_STORAGE="${2:?--queen-storage requires a value}"; shift 2 ;;
         --worker-timeout) WORKER_TIMEOUT="${2:?--worker-timeout requires a value}"; shift 2 ;;
         --retry-after) RETRY_AFTER="${2:?--retry-after requires a value}"; shift 2 ;;
         --kill-delay-ms) KILL_DELAY_MS="${2:?--kill-delay-ms requires a value}"; shift 2 ;;
@@ -123,6 +138,16 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$OUTPUT_DIRECTORY" ] || die "--output is required"
+case "$QUEEN_ACK_ASYNC" in 0|1) ;; *) die "--queen-ack-async must be 0 or 1" ;; esac
+case "$QUEEN_LEASE_SERVICE" in 0|1) ;; *) die "--queen-lease-service must be 0 or 1" ;; esac
+case "$QUEEN_STORAGE" in
+    postgres) ;;
+    raft)
+        COMPOSE_FILE="${BENCH_DIR}/compose.raft.yml"
+        BROKER_IMAGE="queen-laravel-supervisor-broker:raft"
+        ;;
+    *) die "--queen-storage must be postgres or raft" ;;
+esac
 require_command git
 require_command python3
 require_positive_int "--jobs" "$JOBS"
@@ -200,7 +225,8 @@ write_protocol_metadata() {
         "$FAULT_SCENARIO" \
         "$JOBS" "$WORKERS" "$SLEEP_MS" "$CPU_ITERATIONS" "$JOB_TRIES" \
         "$QUEEN_PREFETCH" "$QUEEN_ACK_BATCH" "$WORKER_TIMEOUT" "$RETRY_AFTER" "$KILL_DELAY_MS" "$RESPAWN_TIMEOUT" \
-        "$COMPLETION_TIMEOUT" "$BUILD_IMAGES" "$DRY_RUN" "$ALLOW_LEASE_RISK" <<'PY'
+        "$COMPLETION_TIMEOUT" "$BUILD_IMAGES" "$DRY_RUN" "$ALLOW_LEASE_RISK" \
+        "$QUEEN_STORAGE" "$QUEEN_ACK_ASYNC" "$QUEEN_LEASE_SERVICE" <<'PY'
 import datetime as dt
 import json
 import platform
@@ -212,6 +238,7 @@ from pathlib import Path
     output, campaign_id, repository, engines, fault_scenario, jobs, workers, sleep_ms,
     cpu_iterations, job_tries, queen_prefetch, queen_ack_batch, worker_timeout, retry_after, kill_delay_ms,
     respawn_timeout, completion_timeout, build_images, dry_run, allow_lease_risk,
+    queen_storage, queen_ack_async, queen_lease_service,
 ) = sys.argv[1:]
 
 def command(*args: str) -> str:
@@ -244,6 +271,9 @@ metadata = {
         "completion_timeout_seconds": int(completion_timeout),
         "queen_prefetch": int(queen_prefetch),
         "queen_ack_batch": int(queen_ack_batch),
+        "queen_ack_async": queen_ack_async == "1",
+        "queen_lease_service": queen_lease_service == "1",
+        "queen_storage": queen_storage,
         "ledger_mode": "durable",
         "queues": ["benchmark"],
         "bench_queues_csv": "",
@@ -317,9 +347,12 @@ image_id() {
 if [ "$BUILD_IMAGES" -eq 1 ]; then
     printf 'Building fault-test application image...\n'
     docker compose --file "$COMPOSE_FILE" --profile tools build producer
-    if [ "$contains_queen" -eq 1 ]; then
+    if [ "$contains_queen" -eq 1 ] && [ "$QUEEN_STORAGE" = postgres ]; then
         printf 'Building Queen broker image...\n'
         docker compose --file "$COMPOSE_FILE" --profile queen-php build broker
+    elif [ "$contains_queen" -eq 1 ]; then
+        # The Raft broker is built from its own branch, outside this checkout.
+        [ -n "$(image_id "$BROKER_IMAGE")" ] || die "missing image: $BROKER_IMAGE"
     fi
 else
     [ -n "$(image_id "$APP_IMAGE")" ] || die "missing image: $APP_IMAGE"
@@ -967,6 +1000,11 @@ run_lane() {
     export BENCH_LEASE_RENEWAL_INTERVAL=''
     export QUEEN_PREFETCH="$QUEEN_PREFETCH"
     export QUEEN_ACK_BATCH="$QUEEN_ACK_BATCH"
+    BENCH_QUEEN_ACK_ASYNC="$(switch_word "$QUEEN_ACK_ASYNC")"
+    export BENCH_QUEEN_ACK_ASYNC
+    BENCH_QUEEN_LEASE_SERVICE="$(switch_word "$QUEEN_LEASE_SERVICE")"
+    export BENCH_QUEEN_LEASE_SERVICE
+    export BENCH_QUEEN_POP_AHEAD=false
     export QUEEN_BULK_BATCH=100
     export QUEEN_PARTITIONS=64
     export QUEEN_POP_FUSION=0

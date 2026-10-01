@@ -157,6 +157,11 @@ final class ForkServer
             if (posix_setsid() < 0) {
                 throw new \RuntimeException('the worker could not lead its own session');
             }
+            // Show the command line a spawned worker has, so ps, top and
+            // process monitors see a queue:work worker, not the fork server.
+            if (function_exists('cli_set_process_title')) {
+                @cli_set_process_title(implode(' ', [PHP_BINARY, $_SERVER['argv'][0] ?? 'artisan', 'queue:work', ...$argv]));
+            }
             // The events pipe does not belong to the worker. STDIN stays
             // open because console code probes it (stream_isatty); the
             // worker never reads it, and the server still sees EOF when the

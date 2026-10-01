@@ -35,6 +35,8 @@ return [
             'block_for' => $benchmark['block_for'],
             'prefetch' => $benchmark['queen_prefetch'],
             'ack_batch' => $benchmark['queen_ack_batch'],
+            'ack_async' => $benchmark['queen_ack_async'],
+            'pop_ahead' => $benchmark['queen_pop_ahead'],
             'bulk_batch' => $benchmark['queen_bulk_batch'],
             'after_commit' => false,
         ],

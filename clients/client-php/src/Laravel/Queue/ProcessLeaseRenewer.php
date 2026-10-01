@@ -14,6 +14,8 @@ use RuntimeException;
  */
 final class ProcessLeaseRenewer implements LeaseRenewer
 {
+    use RenewsOneLease;
+
     /** @var array<int, \WeakReference<self>> Helper PID to owning worker-side renewer. */
     private static array $armedWatchdogs = [];
 
@@ -28,12 +30,6 @@ final class ProcessLeaseRenewer implements LeaseRenewer
 
     /** @var array<int, resource> */
     private array $pipes = [];
-
-    /** @var array<string, true> */
-    private array $tracked = [];
-
-    /** @var array<string, string> */
-    private array $failures = [];
 
     private string $stderr = '';
 
@@ -116,20 +112,7 @@ final class ProcessLeaseRenewer implements LeaseRenewer
             $this->assertHealthy($leaseId);
             return;
         }
-        if ($this->tracked !== []) {
-            throw new RuntimeException(
-                'Queen Laravel lease renewal supports exactly one live pop lease per synchronous worker.',
-            );
-        }
-
-        $now = self::monotonicMillis();
-        $initialReserveSeconds = 2 * $this->requestBudgetSeconds
-            + 1
-            + $this->killGraceSeconds
-            + $this->safetyMarginSeconds;
-        if ($deadlineMonotonicMillis <= $now + $initialReserveSeconds * 1000) {
-            throw new RuntimeException("Queen lease [{$leaseId}] reached its renewal deadline before tracking began.");
-        }
+        $this->assertTrackable($leaseId, $deadlineMonotonicMillis);
         $this->start();
         $this->send([
             'command' => 'track',
@@ -174,14 +157,7 @@ final class ProcessLeaseRenewer implements LeaseRenewer
     public function assertHealthy(string $leaseId): void
     {
         $this->drainOutput();
-        if (isset($this->failures[$leaseId])) {
-            throw new RuntimeException(
-                "Queen lease renewal became unsafe for [{$leaseId}]: {$this->failures[$leaseId]}",
-            );
-        }
-        if (!isset($this->tracked[$leaseId])) {
-            throw new RuntimeException("Queen lease renewal is not tracking [{$leaseId}].");
-        }
+        $this->assertLeaseSafe($leaseId);
         if (!$this->running()) {
             $detail = $this->stderr !== '' ? ': ' . trim($this->stderr) : '';
             throw new RuntimeException("Queen lease renewal helper stopped unexpectedly{$detail}");
@@ -354,6 +330,10 @@ final class ProcessLeaseRenewer implements LeaseRenewer
                 $this->phpBinary,
                 '-d',
                 'display_errors=stderr',
+                // The helper loads a handful of files once; a command-line
+                // opcache would only add its own shared memory to every helper.
+                '-d',
+                'opcache.enable_cli=0',
                 '-r',
                 'require $argv[1]; \\Queen\\Laravel\\Queue\\LeaseRenewalWorker::main();',
                 $autoload,
@@ -435,11 +415,7 @@ final class ProcessLeaseRenewer implements LeaseRenewer
     private function drainOutput(): void
     {
         while (($event = $this->nextEvent()) !== null) {
-            if (($event['event'] ?? null) === 'unsafe'
-                && is_string($event['lease_id'] ?? null)
-                && $event['lease_id'] !== '') {
-                $this->failures[$event['lease_id']] = (string) ($event['error'] ?? 'renewal deadline exhausted');
-            }
+            $this->recordFailure($event);
         }
         $this->stderr .= $this->readStderr();
         if (strlen($this->stderr) > 4096) {
@@ -458,11 +434,7 @@ final class ProcessLeaseRenewer implements LeaseRenewer
             if (($event['event'] ?? null) === 'tracked' && ($event['lease_id'] ?? null) === $leaseId) {
                 return;
             }
-            if (($event['event'] ?? null) === 'unsafe'
-                && is_string($event['lease_id'] ?? null)
-                && $event['lease_id'] !== '') {
-                $this->failures[$event['lease_id']] = (string) ($event['error'] ?? 'renewal deadline exhausted');
-            }
+            $this->recordFailure($event);
             if (!$this->running()) {
                 break;
             }
@@ -547,18 +519,6 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         }
 
         throw new RuntimeException('Unable to locate Composer autoload.php for the Queen lease renewal helper.');
-    }
-
-    private function validateLeaseId(string $leaseId): void
-    {
-        if ($leaseId === '' || strlen($leaseId) > 255 || preg_match('/[\x00-\x1F\x7F]/', $leaseId)) {
-            throw new RuntimeException('Queen returned an invalid lease ID for renewal.');
-        }
-    }
-
-    private static function monotonicMillis(): int
-    {
-        return intdiv(hrtime(true), 1_000_000);
     }
 
     /** @param list<int> $values */

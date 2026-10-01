@@ -35,17 +35,31 @@ return [
     // tail, so Queen supervisors require lease_renewal whenever prefetch > 1.
     'prefetch' => env('QUEEN_PREFETCH', 1),
     'ack_batch' => env('QUEEN_ACK_BATCH', 1),
+    // Send each successful ACK without waiting for the answer, which the
+    // worker reads when it finishes the next job or before its next pop. The
+    // broker writes the ACK while the next job runs. A failed ACK is then
+    // reported one job later: that job may already have run on the same
+    // lease, and the failed one is delivered again (at-least-once). Requires
+    // ack_batch 1, and gains little with prefetch 1 without pop_ahead, where
+    // the answer is read before the next pop.
+    'ack_async' => env('QUEEN_ACK_ASYNC', false),
+    // Pop the next batch while the last job of the current one runs, and take
+    // it in when that job ends. The batch is leased one job earlier. Only
+    // after a full batch: a short one means the queue was nearly empty, and a
+    // pop sent ahead would come back empty. Requires lease_renewal.
+    'pop_ahead' => env('QUEEN_POP_AHEAD', false),
     // Let the broker choose the pop sweep width instead of the fixed
     // `partitions` stripe count above. Only that one dimension is delegated:
     // `batch` stays pinned to prefetch because the local prefetch buffer, the
     // ack_batch <= prefetch bound and the lease budget all key off it, and
     // `partitions` still stripes pushes. Off keeps the wire bytes unchanged.
     'autopilot' => env('QUEEN_AUTOPILOT', false),
-    // Opt-in data-plane helper for jobs whose runtime cannot be bounded by the
-    // original pop lease. One small PHP subprocess per Laravel worker renews
-    // the single lease shared by its active and prefetched jobs. If renewal can
-    // no longer finish safely it TERM/KILL-fences the worker before expiry;
-    // effects already emitted by a job can still be duplicated (at-least-once).
+    // Opt-in lease renewal for jobs whose runtime cannot be bounded by the
+    // original pop lease. The Rust supervisor on Linux renews the single lease
+    // shared by a worker's active and prefetched jobs; elsewhere one small PHP
+    // subprocess per Laravel worker does. If renewal can no longer finish
+    // safely it TERM/KILL-fences the worker before expiry; effects already
+    // emitted by a job can still be duplicated (at-least-once).
     'lease_renewal' => env('QUEEN_LEASE_RENEWAL', false),
     'lease_renewal_interval' => env('QUEEN_LEASE_RENEWAL_INTERVAL'),
     'lease_renewal_timeout' => env('QUEEN_LEASE_RENEWAL_TIMEOUT', 5),

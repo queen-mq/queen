@@ -26,6 +26,16 @@ sourceOfTruth:
   - benchmark-queen/2026-09-30-laravel-supervisor-features/scripts/replicas-timeline.sh
   - benchmark-queen/2026-09-30-laravel-supervisor-features/scripts/scale-up.sh
   - benchmark-queen/2026-09-30-laravel-supervisor-features/scripts/event-driven.sh
+  - benchmark-queen/2026-10-01-laravel-horizon-raft/README.md
+  - benchmark-queen/2026-10-01-laravel-horizon-raft/scripts/campaign.sh
+  - benchmark-queen/2026-10-01-laravel-horizon-raft/scripts/extract.py
+  - benchmark-queen/laravel-supervisors/compose.raft.yml
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/README.md
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/raw/broker-profile.md
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/scripts/load.sh
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/scripts/drain.sh
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/scripts/popfix.sh
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/scripts/extract.py
 verifiedBy:
   - benchmark-queen/laravel-supervisors/scripts/tests/test_campaign_stats.py
   - benchmark-queen/laravel-supervisors/scripts/tests/test_container_isolation.py
@@ -38,8 +48,16 @@ verifiedBy:
   - clients/client-php/tests/LaravelDashboardTest.php
   - clients/client-php/tests/LaravelDashboardDisabledTest.php
   - clients/client-php/tests/ProcessLeaseRenewerTest.php
+  - clients/client-php/tests/SupervisorLeaseRenewerTest.php
+  - clients/client-php/tests/AsyncAckTest.php
+  - clients/client-php/tests/PopAheadTest.php
   - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): coordination, prefork and fast scale-up are opt-in and off in the benchmarked configuration, so the qualification results stand; the supervisor-features section adds the new measurements.
+# sourceOfTruth re-read 2026-10-01 (through f5eb7a39): the Raft dataset README now states the repeat's 70 runs; the Raft section matches it.
+# sourceOfTruth re-read 2026-10-01 (through c97c1ca7): run.sh and fault-recovery.sh only spell their Compose switches through a helper; no option or measurement changes.
+# sourceOfTruth re-read 2026-10-01 (through eaf37ad0): run.sh and the compose files gain an HTTP transport switch for the Queen lanes; the transport A/B paragraph says what it measured.
+# sourceOfTruth re-read 2026-10-01 (through 79af91ee): run.sh gains --backlog-first, off by default; every run this page reports was measured without it, so its figures and method still hold.
+# sourceOfTruth re-read 2026-10-01 (Linux server campaign): the new section reports the 2026-10-01-linux-vm-horizon-raft dataset, whose drain lanes are the ones that use --backlog-first.
 ---
 
 This qualification asks whether Queen can replace the **process control plane** of Laravel
@@ -171,9 +189,9 @@ requires lease renewal. The helper has passed focused and end-to-end smoke tests
 that outlived its original lease and a renewal failure that fenced the worker before retry, but its
 cost was not present in the final table.
 
-The production performance candidate is therefore prefetch 4, ACK batch 1, renewal enabled. It
-must be measured again before the diagnostic ratios above can become a production performance
-claim. ACK batches greater than one remain separate fault-oriented experiments because they widen
+The production performance candidate is therefore prefetch 4, ACK batch 1, renewal enabled. The
+[Raft campaign below](#horizon-against-queen-on-raft-2026-10-01) measures it, still as a diagnostic
+result. ACK batches greater than one remain separate fault-oriented experiments because they widen
 the duplicate and recovery window.
 
 ## Supervisor features, 2026-09-30
@@ -272,6 +290,219 @@ the Laravel boot of `bench:dispatch`, which is the same in both modes.
   source="benchmark-queen/2026-09-30-laravel-supervisor-features/raw/event-driven.csv"
 />
 
+## Horizon against Queen on Raft, 2026-10-01
+
+This campaign compares Horizon with the Queen supervisor on the Queen **Raft** broker, and measures
+the worker-side changes of this release one at a time:
+[lease renewal in the master](/use/laravel/supervisors#lease-renewal-in-the-master),
+[asynchronous acknowledgements](/use/laravel#asynchronous-acknowledgements) and
+[popping the next batch ahead](/use/laravel#pop-the-next-batch-ahead). It is the paired campaign for
+prefetch 4 with renewal enabled that the section above asked for. Scripts, one row per run and limits
+are in `benchmark-queen/2026-10-01-laravel-horizon-raft/`.
+
+- One Apple Silicon host with Docker Desktop, cgroup v2, and the same Laravel application as above.
+- Horizon on Redis 7.4 with AOF. The strict cells use `appendfsync always`, so Redis and the Raft
+  log both fsync every acknowledged write; the relaxed cell uses `everysec` for Redis, while Raft
+  keeps fsyncing every write. Redis and the broker each had 2 CPUs and 2 GiB.
+- Queen with the Rust supervisor, prefork workers and the command-line opcache, one Raft node on a
+  local data directory, prefetch 4 with lease renewal unless a row says otherwise.
+- One fixed pool of 8 workers, jobs of 10 ms, dispatched with `Queue::bulk()` at the start of each
+  run, 5 runs per engine and lane on a fresh backend. All 165 runs completed the exact job set, with
+  no duplicate and no failure.
+
+Values are medians of 5 runs.
+
+| Lane | Horizon | Queen | Queen against Horizon |
+| --- | ---: | ---: | ---: |
+| 10 ms jobs, fsync every write | 417 jobs/s | 643 jobs/s | 1.54x |
+| 10 ms jobs, Redis `everysec`, Raft fsync every write | 548 jobs/s | 635 jobs/s | 1.16x |
+| Empty jobs | 670 jobs/s | 1,585 jobs/s | 2.37x |
+| CPU-bound jobs of about 20 ms | 389 jobs/s | 401 jobs/s | 1.03x |
+| Prefetch 1 | 410 jobs/s | 628 jobs/s | 1.53x |
+| Burst, autoscaling from 1 to 16 workers | 451 jobs/s | 709 jobs/s | 1.57x |
+| Workers at the peak of that burst, and time to reach it | 10 after 7.3 s | 15 after 4.3 s | |
+| 300 jobs/s arriving one by one, end-to-end p95 | 90 to 105 ms | 19 to 20 ms | 0.18x to 0.22x |
+| 100 jobs/s arriving one by one, end-to-end p95 | 19 ms | 21 ms | 1.11x |
+| PSS of master and 8 workers | 310 MiB | 70 MiB | 0.23x |
+
+<Chart
+  src="laravel-horizon-throughput"
+  alt="Grouped horizontal bars of completed jobs per second. Queen is faster in every lane: 643 against 417 with fsync on every write, 635 against 548 when Redis fsyncs once a second, 1,585 against 670 for empty jobs, 401 against 389 for CPU-bound jobs and 709 against 451 in a burst with autoscaling."
+  caption="Completed jobs per second, median of 5 runs per engine and lane, 8 workers except the burst lane."
+  source="benchmark-queen/2026-10-01-laravel-horizon-raft/raw/runs.csv"
+/>
+
+Throughput depends on how long a worker waits between two jobs. Every Raft write, a pop or an ACK,
+waits for a group-commit fsync of about 5 ms on this host. A Horizon worker makes two fsynced Redis
+writes per job. Queen now keeps both of its writes off the worker's critical path: the ACK of a job
+travels while the next job runs, and the pop for the next batch travels while the last job of the
+current one runs. The CPU-bound lane shows where that stops mattering: when the job itself dominates,
+both systems are equal.
+
+<Chart
+  src="laravel-queen-optimizations"
+  alt="Horizontal bars of Queen jobs per second at the same strict durability, one change at a time: 453 with one lease helper per worker and a synchronous ACK, 453 with renewal in the supervisor, 566 with an asynchronous ACK only, 571 with both, and 643 when the next batch is also popped ahead. A dashed line marks Horizon at 417."
+  caption="10 ms jobs, 8 workers, fsync on every write, median of 5 runs. Renewal in the supervisor saves memory, not time; the asynchronous ACK and the pop ahead save time."
+  source="benchmark-queen/2026-10-01-laravel-horizon-raft/raw/runs.csv"
+/>
+
+Memory is where the supervisor-side change counts. A lease helper per worker cost 99 MiB for 8
+workers; serving renewal from the Rust master removes all of it. With prefork, the whole Queen
+application, master and workers, used 70 MiB against Horizon's 310 MiB. The backends are separate:
+the Raft broker used 23 to 37 MiB and Redis 20 to 57 MiB, depending on the lane.
+
+<Chart
+  src="laravel-horizon-memory"
+  alt="Stacked horizontal bars of proportional set size with 8 workers. Horizon: 62 MiB orchestrator and 248 MiB workers, 310 MiB in total. Queen with a lease helper per worker: 18 MiB master, 44 MiB workers and 99 MiB of helpers, 161 MiB. Queen with renewal in the supervisor: 23 MiB master and 47 MiB workers, 70 MiB."
+  caption="PSS of the orchestrator, the workers and the lease helpers, median of 5 runs, 8 workers and 10 ms jobs."
+  source="benchmark-queen/2026-10-01-laravel-horizon-raft/raw/runs.csv"
+/>
+
+The backlog lanes enqueue every job at once, so their latency measures the length of the queue. The
+paced lanes dispatch one job at a time at a fixed rate below capacity and measure how soon a job
+runs. At 100 jobs/s the two systems are equal. At 300 jobs/s, Horizon's workers queue behind Redis's
+fsync on every write, and its p95 grows to 90 to 105 ms; Queen's stays at 19 to 21 ms, with prefetch
+1 or 4 and with or without the pop ahead.
+
+<Chart
+  src="laravel-horizon-latency"
+  alt="Grouped bars of end-to-end latency at a steady arrival rate. At 100 jobs per second, p50 14 against 15 ms and p95 19 against 21 ms for Horizon and Queen. At 300 jobs per second, p50 44 against 15 ms and p95 105 against 19 ms."
+  caption="Dispatch to completion, 10 ms jobs, 8 workers, prefetch 1 and asynchronous ACKs for Queen, fsync on every write, median of 5 runs."
+  source="benchmark-queen/2026-10-01-laravel-horizon-raft/raw/runs.csv"
+/>
+
+Queen spends more CPU in the workers in most lanes. With 10 ms jobs and fsync on every write, the
+Queen application used 7.8 CPU seconds for 5,000 jobs, against Horizon's 3.1; with empty jobs the two
+were equal, 5.8 against 6.0 seconds for 10,000 jobs. The HTTP client costs more per request than
+phpredis. At 100 paced jobs/s the Raft broker also used 4.7 CPU seconds against Redis's 1.1. Size
+worker CPU from your own jobs.
+
+The PHP client's [cURL transport](/reference/sdk/php#transport) was measured afterwards in
+Queen-only lanes, against the Guzzle transport on identical images. With 10 ms jobs and fsync on every
+write the application used 6.3 to 6.8 CPU seconds for 5,000 jobs against 7.4 to 7.7, at 660 to 665
+against 649 to 652 jobs/s. With empty jobs and prefork it used more, 6.5 to 6.9 against 5.6 to 6.3
+seconds for 10,000 jobs, and the broker's CPU rose by about a third; without prefork the two were
+within noise. That case is not explained on Docker Desktop; on the Linux server below, cURL was
+faster and cheaper with empty jobs too.
+
+Seven of these lanes ran again on the final commit, after the last review fixes: throughput and
+latency moved by at most 3%, and the time to the burst's peak became 5.3 s for Queen against 6.3 s
+for Horizon. Those runs are in `raw/runs-final.csv`.
+
+Two fault-recovery runs on the same broker checked the new paths under failure. With 24 jobs of
+2 s on 2 workers, a worker killed with SIGKILL during a job was back after 1.0 s under Horizon and
+1.4 s under Queen, and both ran all 24 jobs with no duplicate effect; the killed job ran again, as
+at-least-once delivery allows. In the second run, 16 jobs of 8 s with prefetch 4 and a 30 s lease,
+the last job of a prefetched batch ended 32.1 s after its pop on its first attempt, because the
+master renewed the lease; again all 16 jobs ran with no duplicate effect.
+
+These results are diagnostic. Docker Desktop's virtual disk sets the fsync cost, a single Raft node
+adds no replication round trip, and the protocol was written by the Queen team. The next section
+repeats them on a dedicated Linux server; a Raft cluster is still to come.
+
+## Horizon against Queen on a Linux server, 2026-10-01
+
+The same comparison on a dedicated Linux virtual machine, with 16 to 64 workers, up to 360,000 jobs
+per run and a 15-minute soak. Scripts, one row per run, the broker profile and limits are in
+`benchmark-queen/2026-10-01-linux-vm-horizon-raft/`.
+
+- A DigitalOcean droplet with 16 vCPUs (Intel Xeon Gold 6548N), 31 GiB and a virtual disk, Ubuntu
+  24.04, Docker 29. Nothing else ran on it.
+- The application had 8 CPUs and 8 GiB; the broker and Redis 4 CPUs and 4 GiB each.
+- Horizon on Redis 7.4 with AOF, `appendfsync always` unless a lane says otherwise. Queen on one Raft
+  node, server `2.0.0-beta.2`, which fsyncs every acknowledged write in every lane, with the Rust
+  supervisor, prefork, lease renewal in the supervisor, `ack_async`, `pop_ahead`, prefetch 4 and the
+  cURL transport.
+- Jobs of 10 ms unless a lane says empty, 3 runs per engine and lane, engines alternating, each run
+  on a fresh backend. All 119 runs completed the exact job set, with no duplicate and no failure.
+
+When all jobs are dispatched in one burst, Horizon's rate is its producer's. For every job it
+dispatches, Horizon writes its monitoring records to Redis, and with `appendfsync always` one
+producer sends about 860 jobs/s. The drain lanes take the producer out: every worker is held until
+the whole batch is enqueued (`run.sh --backlog-first 1`), and in none of their 24 runs did a job run
+before the release.
+
+| Lane | Horizon | Queen | Queen against Horizon |
+| --- | ---: | ---: | ---: |
+| 32 workers, 10 ms jobs, fsync every write | 1,124 jobs/s | 2,753 jobs/s | 2.4x |
+| 32 workers, Redis `everysec` | 1,247 jobs/s | 2,752 jobs/s | 2.2x |
+| 32 workers, Redis `appendfsync no` | 1,313 jobs/s | 2,714 jobs/s | 2.1x |
+| 32 workers, empty jobs | 1,090 jobs/s | 5,995 jobs/s | 5.5x |
+| 64 workers, 10 ms jobs | 1,090 jobs/s | 4,395 jobs/s | 4.0x |
+
+<Chart
+  src="laravel-vm-capacity"
+  alt="Grouped horizontal bars of completed jobs per second with the queue full before the workers start. Queen against Horizon: 2,753 against 1,124 with fsync on every write, 2,752 against 1,247 when Redis fsyncs once a second, 2,714 against 1,313 when Redis never fsyncs, 5,995 against 1,090 for empty jobs and 4,395 against 1,090 with 64 workers."
+  caption="Worker capacity on the Linux server, median of 3 runs. Queen fsyncs every write in every lane; only Redis's fsync mode changes."
+  source="benchmark-queen/2026-10-01-linux-vm-horizon-raft/raw/runs.csv"
+/>
+
+Horizon stays between 1,090 and 1,313 jobs/s whatever the worker count, the job length or Redis's
+fsync mode. Each Horizon job costs about 33 Redis commands, against 1.3 Queen requests. Queen grows with the pool, from 2,753 to 4,395 jobs/s between 32
+and 64 workers.
+
+With the producer included, as an application sees it:
+
+| Lane | Horizon | Queen |
+| --- | ---: | ---: |
+| 50,000 jobs, 32 workers, all done after | 58.5 s | 18.0 s |
+| 100,000 empty jobs, 32 workers | 889 jobs/s | 5,989 jobs/s |
+| 30,000 jobs, autoscaling from 1 to 64 workers, all done after | 37.0 s | 9.5 s |
+| 500 jobs/s asked, one dispatch per job | 440 jobs/s reached | 500 jobs/s |
+
+Latency, jobs dispatched one at a time:
+
+<Chart
+  src="laravel-vm-latency"
+  alt="Grouped bars of end-to-end latency. At 500 jobs per second asked, p50 75 against 15 ms and p95 227 against 23 ms for Horizon and Queen. Over 15 minutes at 400 jobs per second, p50 71 against 14 ms and p95 249 against 22 ms."
+  caption="Dispatch to completion, 10 ms jobs, 16 workers, fsync on every write, median of 3 runs at 500 jobs/s and one 15-minute run at 400 jobs/s."
+  source="benchmark-queen/2026-10-01-linux-vm-horizon-raft/raw/runs.csv"
+/>
+
+Memory grows with the pool for both, at very different rates. A Horizon worker boots its own
+Laravel: 28 MiB of its 48 MiB resident set is private. A Queen worker is forked from one booted
+Laravel and shares that process's pages until it writes them: 1.4 MiB private of 33 MiB resident.
+The container's cgroup counts a shared page once, so the 64-worker pool used 183 MiB against
+1,892 MiB. The benchmark job is tiny; in a real application each worker keeps more private memory, so
+the ratio will be smaller, while the boot cost that prefork removes stays.
+
+<Chart
+  src="laravel-vm-memory"
+  alt="Grouped horizontal bars of application container memory. With 16 workers, Horizon 525 MiB and Queen 83 MiB; with 32, 988 against 120 MiB; with 64, 1,892 against 183 MiB."
+  caption="Application container memory, supervisor and workers, median of 3 runs."
+  source="benchmark-queen/2026-10-01-linux-vm-horizon-raft/raw/runs.csv"
+/>
+
+Over the 15-minute soak, the workers' proportional set size stayed flat for both engines, 529 MiB for
+Horizon and 81 MiB for Queen. Redis grew from 67 to 611 MiB with Horizon's job records; the broker
+grew from 59 to 117 MiB, plus page cache of its log. Whether the broker levels off was not measured.
+
+CPU per job, application and backend:
+
+| Lane | Horizon | Queen |
+| --- | ---: | ---: |
+| 50,000 jobs, 32 workers | 1.83 and 0.37 ms | 0.91 and 0.23 ms |
+| 500 jobs/s, 16 workers | 1.46 and 0.49 ms | 1.35 and 0.87 ms |
+| 400 jobs/s for 15 minutes | 1.56 and 0.54 ms | 1.46 and 0.97 ms |
+
+Under load the Raft broker spends less CPU per job than Redis; at a low, steady rate it spends more.
+A profile of the broker at 500 jobs/s found the reason: each job is its own Raft entry, and about half
+of the broker's CPU goes to handing work between threads (waking them, system calls and scheduling),
+not to the queue's work; the fsync itself is about 3%. Under a bulk load one entry carries about 12 jobs and the cost is shared.
+`raw/broker-profile.md` has the breakdown. The profile also found that `pop_ahead` sent a pop with
+every job at a low rate, which came back empty; it now pops ahead only after a full batch. On the
+server that halved the pops at 500 jobs/s and took 12% off the broker's CPU and 8% off the
+application's, with the same latency and no change under load.
+
+The worker-side changes, one at a time, with 50,000 jobs and 32 workers: 1,890 jobs/s with prefork
+alone and 417 MiB for the application, 1,879 jobs/s and 116 MiB with lease renewal in the
+supervisor, 2,270 with `ack_async` and 2,794 with `pop_ahead`. The cURL transport against Guzzle,
+with 100,000 empty jobs: 6,030 against 5,441 jobs/s, and 1.03 against 1.41 ms of application CPU per
+job.
+
+The limits stay: one virtual machine and its disk, one Raft node, and a protocol written by the Queen
+team. A Raft cluster and other hosts must repeat it before it becomes a release performance claim.
+
 ## What remains before GA
 
 The current evidence supports a Unix release candidate within the tested single-master scope. A
@@ -279,7 +510,8 @@ general-availability claim still requires:
 
 1. fixed, automatic and scaling campaigns on dedicated native Linux amd64 hosts;
 2. equivalent native Linux arm64 campaigns before publishing an arm64 performance claim;
-3. a paired performance campaign for prefetch 4, ACK batch 1 and renewal enabled;
+3. the paired campaign for prefetch 4, ACK batch 1 and renewal enabled, run above on one Docker
+   Desktop host and one dedicated Linux virtual machine, repeated on more hosts and a Raft cluster;
 4. the 1, 2, 4 and 8 worker matrix, three queues, and the declared partition and pop-fusion cells;
 5. a 24-hour Laravel soak for each engine with a durable ledger and memory-slope analysis;
 6. repeated supervisor, broker, PostgreSQL, network, packet-loss, latency and full-storage faults;

@@ -453,7 +453,11 @@ def normalized_resources(
     backend_cpu = Decimal(0)
     backend_memory = 0
     backend_detail: dict[str, Any] = {}
-    for backend_name in EXPECTED_BACKENDS[engine]:
+    backends = EXPECTED_BACKENDS[engine]
+    if engine != "horizon" and "postgres" not in compose:
+        # Raft storage (compose.raft.yml): the broker is the whole backend.
+        backends = ("broker",)
+    for backend_name in backends:
         backend = compose.get(backend_name)
         if not isinstance(backend, Mapping):
             errors.append(f"compose backend service missing: {backend_name}")

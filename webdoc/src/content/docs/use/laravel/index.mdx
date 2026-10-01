@@ -15,6 +15,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Queue/QueenQueue.php
   - clients/client-php/src/Laravel/Queue/QueenJob.php
   - clients/client-php/src/Laravel/Queue/ProcessLeaseRenewer.php
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/README.md
 verifiedBy:
   - clients/client-php/tests/LaravelServiceProviderTest.php
   - clients/client-php/tests/LaravelQueueDriverTest.php
@@ -25,6 +26,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): either engine can publish remote status; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the coordination, prefork, waits, notifications, job metrics, tags and Prometheus blocks in config/queen.php and the new provider bindings add nothing this overview describes; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through dc5b5994): the event_driven switch in config/queen.php adds nothing this overview describes; page matches the code.
+# sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; the Pop the next batch ahead section states the rule.
+# sourceOfTruth re-read 2026-10-01 (Linux server campaign): the pop_ahead section adds the measured effect of the full-batch rule.
 ---
 
 Queen can play two separate roles in a Laravel application:
@@ -126,12 +130,57 @@ QUEEN_ACK_BATCH=1
 QUEEN_LEASE_RENEWAL=true
 ```
 
-Enable lease renewal even with `prefetch=1` when the longest runtime cannot be bounded safely. Lease
-renewal starts a small PHP helper beside each worker. It extends the active lease and fences the
-worker if renewal can no longer finish safely. An exact-PID `SIGCHLD` watchdog also kills the
-owning worker if that helper disappears while a lease is active. This Unix CLI path requires
-PCNTL/POSIX support, and application code must not replace Queen's signal handler. Renewal cannot
-make external side effects exactly once, so jobs must remain idempotent.
+Enable lease renewal even with `prefetch=1` when the longest runtime cannot be bounded safely.
+Renewal extends the active lease and fences the worker if renewal can no longer finish safely. Under
+the [Rust supervisor on Linux](/use/laravel/supervisors#lease-renewal-in-the-master), the master
+renews the leases of all its workers. Elsewhere, lease renewal starts a small PHP helper beside each
+worker, and an exact-PID `SIGCHLD` watchdog kills the owning worker if that helper disappears while
+a lease is active. This Unix CLI path requires PCNTL/POSIX support, and application code must not
+replace Queen's signal handler. Renewal cannot make external side effects exactly once, so jobs
+must remain idempotent.
+
+### Asynchronous acknowledgements
+
+With `ack_async`, a worker sends the acknowledgement of a completed job and starts the next job at
+once. The broker commits the acknowledgement while the next job runs, and the worker reads the
+answer when that job ends or before its next pop.
+
+```dotenv
+QUEEN_ACK_ASYNC=true
+```
+
+The cost is a later failure report. When the broker refuses an acknowledgement, the job after it
+has already run on the same lease. The worker reports the refusal through Laravel's exception
+handler, abandons the lease and discards the rest of its prefetched jobs, and the refused job is
+delivered again after its lease expires. Delivery stays at-least-once. `ack_async` requires
+`ack_batch=1`, because a batch already defers its acknowledgements.
+
+With `prefetch=1` and without `pop_ahead`, the worker must read the answer before its next pop,
+so `ack_async` gains little there. The gain is the broker's write latency per job. On the Raft broker, which fsyncs every acknowledged
+write, eight workers with 10 ms jobs and prefetch 4 went from 453 to 566 jobs/s with `ack_async`, and
+to 643 with `pop_ahead` too ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-raft-2026-10-01)).
+
+### Pop the next batch ahead
+
+With `pop_ahead`, a worker that starts the last job of its local batch also sends the pop for the
+next batch. The broker leases that batch while the job runs, and the worker takes it in when the
+job ends, so the next job starts without a round trip.
+
+```dotenv
+QUEEN_LEASE_RENEWAL=true
+QUEEN_POP_AHEAD=true
+```
+
+The batch is leased one job earlier than without the option, so it needs `lease_renewal` like any
+prefetched job. The worker tracks the new lease as soon as the job ends, before it can pause. A
+worker does not pop ahead after a job that took more than a third of `retry_after`, and when a job
+still leaves too little of the new lease to renew it safely, the worker returns the batch to the
+queue at once. A worker that serves a comma-separated queue list never pops ahead, because its
+next job may come from another queue. A worker pops ahead only after a full batch: a batch that
+came back short shows that the queue was nearly empty, so a pop sent ahead would most likely come
+back empty too. Under a light load the worker then sends one pop per job, not two: at 500 jobs/s on
+the benchmark server that took 12% off the broker's CPU and 8% off the workers', with no change under
+a backlog. A pop sent ahead never waits for new jobs, so an idle queue behaves as before.
 
 ## What changes from another Laravel connection
 

@@ -59,6 +59,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): pools report their coordinated replicas and the shared-queue warning ignores coordinated replicas and fixed pools; page matches the code.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the panel gains the Jobs and Tags pages and a Prometheus endpoint, documented on the new monitoring page; per-pool rows show replica shares.
 # sourceOfTruth re-read 2026-09-30 (through dc5b5994): the event_driven switch and its stripes export change no dashboard behavior; page matches the code.
+# sourceOfTruth re-read 2026-10-01 (through this patch): config/queen.php adds ack_async and pop_ahead and rewords the lease_renewal comment; nothing this page describes changes.
+# sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): the config/queen.php pop_ahead comment states the full-batch rule; nothing this page describes changes.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It

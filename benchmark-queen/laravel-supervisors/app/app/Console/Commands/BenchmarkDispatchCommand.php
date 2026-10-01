@@ -21,6 +21,7 @@ final class BenchmarkDispatchCommand extends Command
         {--connection= : Queue connection; defaults to BENCH_CONNECTION}
         {--queue= : Queue name; defaults to BENCH_QUEUE}
         {--dispatch-mode= : single or bulk; defaults to BENCH_DISPATCH_MODE}
+        {--rate=0 : Jobs per second in single mode; 0 dispatches as fast as possible}
         {--metadata= : Dispatch manifest path; defaults to <results>/<run-id>/dispatch.json}';
 
     protected $description = 'Dispatch one deterministic benchmark burst and print its JSON manifest';
@@ -46,12 +47,25 @@ final class BenchmarkDispatchCommand extends Command
         if (!in_array($dispatchMode, ['single', 'bulk'], true)) {
             throw new InvalidArgumentException('--dispatch-mode must be single or bulk.');
         }
+        $rate = $this->integerOption('rate', 0, 1_000_000);
+        if ($rate > 0 && $dispatchMode !== 'single') {
+            throw new InvalidArgumentException('--rate requires --dispatch-mode=single.');
+        }
 
         $sink->reserveRun($runId);
         $ledger->reserveRun($runId);
         $startedAt = hrtime(true);
         if ($dispatchMode === 'single') {
             for ($index = 0; $index < $jobs; ++$index) {
+                if ($rate > 0) {
+                    // An open-loop arrival schedule: a late dispatch never
+                    // shifts the ones after it.
+                    $due = $startedAt + intdiv($index * 1_000_000_000, $rate);
+                    $early = $due - hrtime(true);
+                    if ($early > 0) {
+                        usleep(intdiv($early, 1_000));
+                    }
+                }
                 $jobId = sprintf('%09d', $index);
                 BenchmarkJob::dispatch(
                     runId: $runId,
@@ -89,6 +103,7 @@ final class BenchmarkDispatchCommand extends Command
             'connection' => $connection,
             'queue' => $queue,
             'dispatch_mode' => $dispatchMode,
+            'dispatch_rate' => $rate,
             'dispatch_batch_size' => $dispatchMode === 'bulk'
                 ? (int) config('benchmark.queen_bulk_batch')
                 : 1,

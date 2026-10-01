@@ -2,6 +2,7 @@
 
 namespace Queen;
 
+use GuzzleHttp\Promise\PromiseInterface;
 use Queen\Http\HttpClient;
 use Queen\Http\LoadBalancer;
 use Queen\Http\Retry429Policy;
@@ -154,9 +155,7 @@ class Queen
      */
     public function ack(array|string $message, bool|string $status = true, array $context = []): array
     {
-        $affinityKey = is_string($context['affinityKey'] ?? null) && $context['affinityKey'] !== ''
-            ? $context['affinityKey']
-            : null;
+        $affinityKey = self::affinityKeyOf($context);
 
         // Batch ack
         $isBatch = is_array($message) && (isset($message[0]) || empty($message));
@@ -195,25 +194,73 @@ class Queen
         }
 
         // Single ack
+        try {
+            $body = $this->singleAckBody($message, $status, $context);
+        } catch (\InvalidArgumentException $invalid) {
+            return ['success' => false, 'error' => $invalid->getMessage()];
+        }
+
+        try {
+            return self::ackResult($this->httpClient->post('/api/v1/ack', $body, affinityKey: $affinityKey));
+        } catch (\Throwable $error) {
+            return ['success' => false, 'error' => $error->getMessage()];
+        }
+    }
+
+    /**
+     * Send one ACK and return as soon as it is on the wire. settleAck()
+     * reads the answer later. One attempt against one backend: retry a
+     * settleAck() exception with ack().
+     *
+     * @throws \InvalidArgumentException for a message without its IDs
+     */
+    public function ackDetached(array $message, bool|string $status = true, array $context = []): PromiseInterface
+    {
+        $affinityKey = self::affinityKeyOf($context);
+
+        return $this->httpClient->postDetached(
+            '/api/v1/ack',
+            $this->singleAckBody($message, $status, $context),
+            $affinityKey,
+        );
+    }
+
+    /**
+     * The answer to ackDetached(), in ack()'s shape.
+     *
+     * @throws \Throwable when the request failed or got no answer in time
+     */
+    public function settleAck(PromiseInterface $ack, ?int $timeoutMillis = null): array
+    {
+        return self::ackResult($this->httpClient->settleDetached($ack, $timeoutMillis));
+    }
+
+    private static function affinityKeyOf(array $context): ?string
+    {
+        $affinityKey = $context['affinityKey'] ?? null;
+
+        return is_string($affinityKey) && $affinityKey !== '' ? $affinityKey : null;
+    }
+
+    private function singleAckBody(array|string $message, bool|string $status, array $context): array
+    {
         $msg = is_string($message) ? ['transactionId' => $message] : $message;
         $transactionId = $msg['transactionId'] ?? $msg['id'] ?? null;
         $partitionId = $msg['partitionId'] ?? null;
         $leaseId = $msg['leaseId'] ?? null;
 
         if ($transactionId === null) {
-            return ['success' => false, 'error' => 'Message must have transactionId or id property'];
+            throw new \InvalidArgumentException('Message must have transactionId or id property');
         }
 
         if ($partitionId === null) {
-            return ['success' => false, 'error' => 'Message must have partitionId property to ensure message uniqueness'];
+            throw new \InvalidArgumentException('Message must have partitionId property to ensure message uniqueness');
         }
-
-        $statusStr = is_bool($status) ? ($status ? 'completed' : 'failed') : $status;
 
         $body = [
             'transactionId' => $transactionId,
             'partitionId' => $partitionId,
-            'status' => $statusStr,
+            'status' => is_bool($status) ? ($status ? 'completed' : 'failed') : $status,
             'error' => $context['error'] ?? null,
             'consumerGroup' => $context['group'] ?? null,
         ];
@@ -222,17 +269,16 @@ class Queen
             $body['leaseId'] = $leaseId;
         }
 
-        try {
-            $result = $this->httpClient->post('/api/v1/ack', $body, affinityKey: $affinityKey);
+        return $body;
+    }
 
-            if (is_array($result) && isset($result['error'])) {
-                return ['success' => false, 'error' => $result['error']];
-            }
-
-            return array_merge(['success' => true], $result ?? []);
-        } catch (\Throwable $error) {
-            return ['success' => false, 'error' => $error->getMessage()];
+    private static function ackResult(mixed $result): array
+    {
+        if (is_array($result) && isset($result['error'])) {
+            return ['success' => false, 'error' => $result['error']];
         }
+
+        return array_merge(['success' => true], $result ?? []);
     }
 
     // ===========================

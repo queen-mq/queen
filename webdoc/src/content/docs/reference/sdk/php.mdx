@@ -19,6 +19,9 @@ sourceOfTruth:
   - clients/client-php/src/Builders/OperationBuilder.php
   - clients/client-php/src/Consumer/HighLevelConsumer.php
   - clients/client-php/src/Http/Retry429Policy.php
+  - clients/client-php/src/Http/HttpClient.php
+  - clients/client-php/src/Http/CurlTransport.php
+  - clients/client-php/src/Http/TransportException.php
   - clients/client-php/src/Exceptions/HttpException.php
   - clients/client-php/src/Exceptions/ErrorCode.php
   - clients/client-php/src/Laravel/QueenServiceProvider.php
@@ -51,6 +54,7 @@ sourceOfTruth:
   - server/src/main.rs
 verifiedBy:
   - clients/client-php/tests/ProcessLeaseRenewerTest.php
+  - clients/client-php/tests/CurlTransportTest.php
   - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
   - clients/client-php/tests/LaravelDashboardTest.php
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
@@ -66,6 +70,11 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds the supervisor.coordination keys for coordinated replicas and pins supervisor 0.4.0.
 # sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds the prefork, per-queue minimum, fast scale-up, waits, notifications, job metrics, tags and Prometheus keys, and pins supervisor 0.4.0.
 # sourceOfTruth re-read 2026-09-30 (through 708fd8b2): a skipped event-driven pool now counts as evaluated, and both coordinators expose whether they hold a replica view; no documented behavior changes; page matches the code.
+# sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through the cURL transport): HttpClient sends synchronous and detached requests over CurlTransport; the Transport subsection and the Errors section say so.
+# sourceOfTruth re-read 2026-10-01 (through the TCP keep-alive change): CurlTransport sets TCP keep-alive on every connection; the Transport subsection says so.
+# sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; the pop_ahead option row is unchanged.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -115,6 +124,18 @@ The load-balancing keys are inert with a single URL: the `LoadBalancer` is only 
 the `Retry-After` contract and the jitter are in
 [What the clients do with a 429](/reference/errors#what-the-clients-do-with-a-429).
 `capMs` has a hard 300,000ms ceiling so a single retry sleep remains operationally bounded.
+
+### Transport
+
+With `ext-curl`, every synchronous request, and the detached ACK and pop of the Laravel driver, go
+over the client's own kept-alive cURL handles instead of Guzzle. A pop and an ACK then cost the
+client about 60% less CPU, and a Laravel worker with 10 ms jobs used 13 to 25% less in the
+benchmark; retries, failover, timeouts, TLS verification and errors behave as before. Its
+connections carry TCP keep-alive probes after 30 idle seconds, every 15 seconds after that, so a
+NAT gateway or load balancer that silently drops an idle connection does not leave the next
+request waiting for its timeout. Guzzle stays for the async API and carries every request when an HTTP proxy variable is set
+(`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` or a lower-case form), when `ext-curl` is missing, or when
+`QUEEN_SDK_HTTP_TRANSPORT=guzzle`.
 
 ## `Queen`
 
@@ -442,7 +463,9 @@ upgrade.
 ## Errors
 
 Non-2xx responses throw `Queen\Exceptions\HttpException`, with `isClusterSuspended()` and
-`isRateLimited()` helpers. The machine-readable codes are constants on
+`isRateLimited()` helpers. A request with no HTTP answer, because the connection failed or timed
+out, throws `Queen\Http\TransportException` on the cURL path; it is a Guzzle `TransferException`,
+like the exceptions of the Guzzle path. The machine-readable codes are constants on
 `Queen\Exceptions\ErrorCode`, one per proxy code listed under
 [Behind the proxy](/reference/errors#behind-the-proxy).
 
@@ -478,6 +501,8 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `block_for` | `QUEEN_BLOCK_FOR` | `0` seconds |
 | `prefetch` | `QUEEN_PREFETCH` | `1` job |
 | `ack_batch` | `QUEEN_ACK_BATCH` | `1` job (cannot exceed `prefetch`) |
+| `ack_async` | `QUEEN_ACK_ASYNC` | `false` (requires `ack_batch=1`) |
+| `pop_ahead` | `QUEEN_POP_AHEAD` | `false` (requires `lease_renewal`) |
 | `lease_renewal` | `QUEEN_LEASE_RENEWAL` | `false` |
 | `lease_renewal_interval` | `QUEEN_LEASE_RENEWAL_INTERVAL` | derived from lease timing |
 | `lease_renewal_timeout` | `QUEEN_LEASE_RENEWAL_TIMEOUT` | `5` seconds |
@@ -576,9 +601,13 @@ broker timeout and the HTTP client adds five seconds of transport slack.
 The default `prefetch=1` and `ack_batch=1` keep the per-job synchronous ACK
 boundary. Short, idempotent workloads can opt into a larger prefetch; the
 connector then requires `lease_renewal=true` on every worker path. One pop feeds
-the standard sequential Laravel worker, while the helper keeps the active job,
+the standard sequential Laravel worker, while the renewer keeps the active job,
 local tail and deferred acknowledgements leased. This remains at-least-once
-delivery and widens the crash duplicate window. An exact-PID `SIGCHLD` watchdog
+delivery and widens the crash duplicate window. The renewer is the Rust
+supervisor master on Linux, which exports `QUEEN_SUPERVISOR_LEASE_SOCKET` to its
+workers, and otherwise one PHP helper per worker. Set
+`QUEEN_SUPERVISOR_LEASE_SERVICE=false` in the master's environment to keep the
+helpers under the Rust supervisor too. An exact-PID `SIGCHLD` watchdog
 fences the worker if its helper disappears while a lease is active. The renewed
 profile requires Unix CLI PHP with PCNTL/POSIX support; application code must
 not replace Queen's signal handler. Leave prefetch at `1` for unsupported

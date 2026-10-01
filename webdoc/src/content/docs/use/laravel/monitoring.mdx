@@ -36,6 +36,10 @@ verifiedBy:
   - clients/client-php/tests/LaravelDashboardTest.php
   - clients/client-php/tests/LaravelQueueDriverTest.php
 # sourceOfTruth re-read 2026-09-30 (through dc5b5994): the event_driven switch changes no metric, tag or alert; page matches the code.
+# sourceOfTruth re-read 2026-10-01 (through this patch): config/queen.php adds ack_async and pop_ahead; QueenQueue settles detached ACKs and pops; neither changes the monitoring this page describes.
+# sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; nothing this page monitors changes.
 ---
 
 The supervisor [dashboard](/use/laravel/dashboard) shows what the supervisors do. This page covers
