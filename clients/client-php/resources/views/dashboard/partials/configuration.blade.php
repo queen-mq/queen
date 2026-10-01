@@ -92,7 +92,13 @@
                         <td>{{ $configured['connection'] ?? '—' }} / <span class="technical">{{ $configured['consumer_group'] ?? '—' }}</span></td>
                         <td>{{ implode(', ', $configured['queues']) }}</td>
                         <td>{{ $configured['balance'] ?? '—' }} / {{ $configured['strategy'] ?? '—' }}</td>
-                        <td>{{ ($configured['balance'] ?? null) === 'simple' ? ($configured['processes'] ?? '—') : (($configured['min_processes'] ?? '—') . '–' . ($configured['max_processes'] ?? '—')) }}</td>
+                        <td>
+                            @if (($configured['refused'] ?? null) !== null)
+                                <span class="badge warning">{{ $configured['refused'] }}</span>
+                            @else
+                                {{ ($configured['balance'] ?? null) === 'simple' ? ($configured['processes'] ?? '—') : (($configured['min_processes'] ?? '—') . '–' . ($configured['max_processes'] ?? '—')) }}
+                            @endif
+                        </td>
                         <td>timeout {{ $configured['timeout'] ?? '—' }}s · retry {{ $configured['retry_after'] ?? '—' }}s · tries {{ $configured['tries'] ?? '—' }} · memory {{ $configured['memory'] ?? '—' }} MB</td>
                         <td>backoff {{ ($configured['backoff'] ?? null) === null ? '—' : $configured['backoff'] . ' s' }} · max jobs {{ $limit($configured['max_jobs'] ?? null) }} · max time {{ $limit($configured['max_time'] ?? null, ' s') }} · sleep {{ ($configured['sleep'] ?? null) === null ? '—' : $configured['sleep'] . ' s' }}</td>
                     </tr>

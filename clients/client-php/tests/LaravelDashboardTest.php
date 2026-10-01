@@ -2254,6 +2254,21 @@ final class LaravelDashboardTest extends TestCase
         $this->assertStringContainsString('As the running supervisor published them', $xpath->query('//section[@id="configuration"]')->item(0)->textContent);
     }
 
+    public function testWithoutARunningSupervisorThePoolsAreThisApplicationsWithWhatTheSupervisorWouldRefuse(): void
+    {
+        $this->app['config']->set('queen.supervisor.supervisors.default.min_processes', 9);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/configuration')->assertOk()->getContent());
+
+        $this->assertStringContainsString(
+            "No running supervisor has published its pools, so these are this application's.",
+            $xpath->query('//section[@id="configuration"]')->item(0)->textContent,
+        );
+        $pool = $this->tableRows($xpath, 'Worker pools')[0];
+        $this->assertSame(['default', 'min_processes above max_processes'], [$pool[0], $pool[4]]);
+        $this->assertSame(1, $xpath->query('//div[@aria-label="Worker pools"]//tbody/tr[1]/td[5]/span[@class="badge warning"]')->length);
+    }
+
     public function testCredentialsInTheConfigurationNeverReachTheConfigurationPage(): void
     {
         $secrets = [

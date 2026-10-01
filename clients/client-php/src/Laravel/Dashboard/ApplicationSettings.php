@@ -85,11 +85,7 @@ final class ApplicationSettings
      */
     public function connection(string $name = 'queen'): array
     {
-        $queue = is_array($this->config['queue'] ?? null) ? $this->config['queue'] : [];
-        $connections = is_array($queue['connections'] ?? null) ? $queue['connections'] : [];
-        $own = is_array($connections[$name] ?? null) ? $connections[$name] : [];
-
-        return array_replace($this->queen(), $own);
+        return array_replace($this->queen(), $this->ownConnection($name));
     }
 
     /** A connection's integer: the default when unset, null when invalid. */
@@ -149,7 +145,11 @@ final class ApplicationSettings
                 continue;
             }
             $connectionName = self::text($options['connection'] ?? 'queen', 128);
-            $connection = $connectionName !== null ? $this->connection($connectionName) : [];
+            // As SupervisorConfiguration::connectionConfig reads it:
+            // config('queen') stands under the queen connection only.
+            $connection = $connectionName !== null
+                ? array_replace($connectionName === 'queen' ? $queen : [], $this->ownConnection($connectionName))
+                : [];
             $queues = $options['queues'] ?? $options['queue'] ?? [$queen['queue'] ?? 'default'];
             $queues = is_string($queues) ? explode(',', $queues) : (is_array($queues) ? $queues : []);
             $queues = array_values(array_unique(array_filter(array_map(
@@ -173,7 +173,7 @@ final class ApplicationSettings
                 'min_processes' => $min,
                 'max_processes' => $max,
                 'timeout' => self::positiveOr($options['timeout'] ?? null, 60),
-                'retry_after' => self::positiveOr($options['retry_after'] ?? $connection['retry_after'] ?? null, 90),
+                'retry_after' => self::positiveOr($options['retry_after'] ?? $connection['retry_after'] ?? $queen['retry_after'] ?? null, 90),
                 'tries' => self::integerOr($options['tries'] ?? null, 3),
                 'memory' => self::positiveOr($options['memory'] ?? null, 128),
                 'backoff' => self::integerOr($options['backoff'] ?? null, 0),
@@ -182,6 +182,8 @@ final class ApplicationSettings
                 'sleep' => self::integerOr($options['sleep'] ?? null, 1),
                 'fast_scale_up' => self::switchOr($options['fast_scale_up'] ?? null, false),
                 'lease_renewal' => self::switchOr($connection['lease_renewal'] ?? null, false),
+                // Why the supervisor would refuse the pool's sizes, if it would.
+                'refused' => $min !== null && $max !== null && $min > $max ? 'min_processes above max_processes' : null,
             ];
         }
 
@@ -247,6 +249,7 @@ final class ApplicationSettings
         if (array_key_exists('autopilot', $connection)) {
             $connectionRows[] = $this->setting('autopilot', ['QUEEN_AUTOPILOT', 'switch', false, 0, null, 'Let the broker choose how many partitions one pop sweeps.'], $connection['autopilot']);
         }
+        $connectionRows = $this->refusedTogether($connectionRows);
 
         $supervisorRows = [
             ...array_map(
@@ -266,6 +269,62 @@ final class ApplicationSettings
         ];
 
         return ['connection' => $connectionRows, 'supervisor' => $supervisorRows];
+    }
+
+    /**
+     * What QueenConnector refuses together, marked on the setting that depends
+     * on the other, with the reason: a worker with any of these cannot connect.
+     *
+     * @param list<array<string, mixed>> $rows
+     * @return list<array<string, mixed>>
+     */
+    private function refusedTogether(array $rows): array
+    {
+        $prefetch = $this->connectionInteger('prefetch', 1);
+        $ackBatch = $this->connectionInteger('ack_batch', 1);
+        $renewal = $this->connectionSwitch('lease_renewal', false);
+        $reasons = [
+            'prefetch' => $prefetch !== null && $prefetch > 1 && $renewal === false ? 'needs lease_renewal' : null,
+            'pop_ahead' => $this->connectionSwitch('pop_ahead', false) === true && $renewal === false ? 'needs lease_renewal' : null,
+            'ack_batch' => $ackBatch !== null && $prefetch !== null && $ackBatch > $prefetch ? 'above prefetch' : null,
+            'ack_async' => $this->connectionSwitch('ack_async', false) === true && $ackBatch !== null && $ackBatch > 1 ? 'needs ack_batch 1' : null,
+            'lease_renewal' => $renewal === true && $this->renewalTimingFits() === false ? 'renewal timing does not fit in retry_after' : null,
+        ];
+        foreach ($rows as $index => $row) {
+            $reason = $reasons[$row['name']] ?? null;
+            // A value already invalid on its own keeps that mark.
+            if ($reason !== null && !$row['invalid']) {
+                $rows[$index] = [...$row, 'value' => $row['value'] . " ({$reason})", 'invalid' => true];
+            }
+        }
+
+        return $rows;
+    }
+
+    /**
+     * QueenConnector's renewal budget: the interval, two request budgets (one
+     * per broker endpoint each), one second, the kill grace and the safety
+     * margin must end before retry_after. Null when a value is invalid.
+     */
+    private function renewalTimingFits(): ?bool
+    {
+        $connection = $this->connection();
+        $retryAfter = $this->connectionInteger('retry_after', 90);
+        $interval = $connection['lease_renewal_interval'] ?? null;
+        $interval = $interval === null || $interval === ''
+            ? ($retryAfter !== null ? max(1, intdiv($retryAfter, 3)) : null)
+            : self::integerOr($interval, 0);
+        $timeout = $this->connectionInteger('lease_renewal_timeout', 5);
+        $killGrace = $this->connectionInteger('lease_renewal_kill_grace', 2);
+        $margin = $this->connectionInteger('lease_renewal_safety_margin', 1);
+        if (in_array(null, [$retryAfter, $interval, $timeout, $killGrace, $margin], true)) {
+            return null;
+        }
+        $urls = $connection['urls'] ?? null;
+        $urls = is_string($urls) ? array_filter(array_map('trim', explode(',', $urls))) : $urls;
+        $budget = $timeout * (is_array($urls) && $urls !== [] ? count($urls) : 1);
+
+        return $interval + 2 * $budget + 1 + $killGrace + $margin < $retryAfter;
     }
 
     /** @return array<string, mixed> a queen.supervisor setting, with the defaults the supervisor computes */
@@ -433,6 +492,15 @@ final class ApplicationSettings
     private function queen(): array
     {
         return is_array($this->config['queen'] ?? null) ? $this->config['queen'] : [];
+    }
+
+    /** @return array<string, mixed> a connection's own options in queue.connections */
+    private function ownConnection(string $name): array
+    {
+        $queue = is_array($this->config['queue'] ?? null) ? $this->config['queue'] : [];
+        $connections = is_array($queue['connections'] ?? null) ? $queue['connections'] : [];
+
+        return is_array($connections[$name] ?? null) ? $connections[$name] : [];
     }
 
     /** A queen.supervisor value by dotted path, such as `remote_status.ttl`. */

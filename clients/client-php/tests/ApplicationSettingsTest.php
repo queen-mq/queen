@@ -4,6 +4,8 @@ namespace Queen\Tests;
 
 use PHPUnit\Framework\TestCase;
 use Queen\Laravel\Dashboard\ApplicationSettings;
+use Queen\Laravel\Queue\QueenConnector;
+use Queen\Laravel\Queue\QueenQueue;
 
 final class ApplicationSettingsTest extends TestCase
 {
@@ -59,6 +61,52 @@ final class ApplicationSettingsTest extends TestCase
         $this->assertSame('not set', $this->row($this->settings([]), 'connection', 'bearer_token')['value']);
         // QueenConnector also reads the client's own spelling.
         $this->assertSame('set', $this->row($this->settings([], ['bearerToken' => 'tok-c4d2']), 'connection', 'bearer_token')['value']);
+    }
+
+    public function testWhatTheConnectorRefusesTogetherIsMarkedWithTheReason(): void
+    {
+        $refused = [
+            'prefetch' => [['prefetch' => 4], '4 (needs lease_renewal)'],
+            'pop_ahead' => [['pop_ahead' => true], 'on (needs lease_renewal)'],
+            'ack_batch' => [['prefetch' => 2, 'ack_batch' => 3, 'lease_renewal' => true], '3 (above prefetch)'],
+            'ack_async' => [['prefetch' => 2, 'ack_batch' => 2, 'ack_async' => true, 'lease_renewal' => true], 'on (needs ack_batch 1)'],
+            'lease_renewal' => [['lease_renewal' => true, 'retry_after' => 10], 'on (renewal timing does not fit in retry_after)'],
+        ];
+        foreach ($refused as $name => [$connection, $shown]) {
+            $row = $this->row($this->settings([], $connection), 'connection', $name);
+            $this->assertSame([$shown, true], [$row['value'], $row['invalid']], $name);
+            try {
+                (new QueenConnector())->connect(['driver' => 'queen', ...$connection]);
+                $this->fail("QueenConnector accepted what the page marks: {$name}");
+            } catch (\InvalidArgumentException) {
+                // The worker refuses it too.
+            }
+        }
+
+        $tuned = ['prefetch' => 4, 'ack_async' => true, 'pop_ahead' => true, 'lease_renewal' => true];
+        $this->assertInstanceOf(QueenQueue::class, (new QueenConnector())->connect(['driver' => 'queen', ...$tuned]));
+        $this->assertSame([], array_values(array_filter(
+            $this->settings([], $tuned)->rows()['connection'],
+            static fn (array $row): bool => $row['invalid'],
+        )));
+    }
+
+    public function testAPoolReadsItsConnectionAsTheSupervisorDoes(): void
+    {
+        $settings = new ApplicationSettings([
+            'queen' => ['lease_renewal' => true, 'retry_after' => 120, 'supervisor' => ['supervisors' => [
+                'mail' => ['connection' => 'mail', 'queues' => ['mail']],
+                'main' => ['queues' => ['default'], 'min_processes' => 6, 'max_processes' => 4],
+            ]]],
+            'queue' => ['connections' => ['queen' => ['driver' => 'queen'], 'mail' => ['driver' => 'queen']]],
+        ]);
+
+        $pools = array_column($settings->pools(), null, 'name');
+        // config('queen') stands under the queen connection only, except retry_after.
+        $this->assertSame([false, 120], [$pools['mail']['lease_renewal'], $pools['mail']['retry_after']]);
+        $this->assertSame([true, 120], [$pools['main']['lease_renewal'], $pools['main']['retry_after']]);
+        $this->assertSame('min_processes above max_processes', $pools['main']['refused']);
+        $this->assertNull($pools['mail']['refused']);
     }
 
     public function testEveryBrokerEndpointIsListedWithoutItsCredentials(): void
