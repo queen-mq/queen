@@ -69,6 +69,8 @@ final class PhpSupervisor
     private array $climbing = [];
     /** @var array<string, float> when each pool was last evaluated, for the wake interval */
     private array $lastEvaluated = [];
+    /** Where workers leave exit markers; null until it is ready. */
+    private ?string $exitMarkers = null;
 
     public function __construct(
         private QueueManager $queues,
@@ -89,6 +91,7 @@ final class PhpSupervisor
         $failure = null;
 
         try {
+            $this->prepareExitMarkers();
             $this->startForkServer();
             $this->startWatchers();
             $this->writeStatus('running');
@@ -550,6 +553,8 @@ final class PhpSupervisor
             'QUEEN_LARAVEL_SUPERVISOR' => $name,
             'QUEEN_LARAVEL_RETRY_AFTER' => (string) ($options['retry_after'] ?? ($options['timeout'] + 1)),
             'QUEEN_LARAVEL_BLOCK_FOR' => $options['balance'] === 'off' ? '0' : null,
+            // Where the worker says why it exits; see WorkerExitMarker.
+            WorkerExitMarker::ENVIRONMENT => $this->exitMarkers ?? false,
         ];
         $process = $this->forkWorker($name, $queue, $arguments, $environment)
             ?? $this->spawnWorker($name, $queue, $arguments, $environment);
@@ -558,6 +563,8 @@ final class PhpSupervisor
         $pid = $process->getPid();
         if (is_int($pid)) {
             $this->workerPids[$objectId] = $pid;
+            // A marker an earlier process left under this pid explains nothing.
+            $this->forgetExitMarker($pid);
         }
         $this->emit("started {$name}:{$queue} pid=" . ($pid ?? 'unknown') . ($process instanceof ForkedProcess ? ' (forked)' : '') . "\n", 'out');
         return $process;
@@ -630,7 +637,8 @@ final class PhpSupervisor
         $environment = [
             ...array_filter(
                 getenv(),
-                fn (string $name): bool => $name !== 'QUEEN_SUPERVISOR_TELEMETRY_DIR' && !str_starts_with($name, 'QUEEN_LARAVEL_'),
+                fn (string $name): bool => !in_array($name, ['QUEEN_SUPERVISOR_TELEMETRY_DIR', WorkerExitMarker::ENVIRONMENT], true)
+                    && !str_starts_with($name, 'QUEEN_LARAVEL_'),
                 ARRAY_FILTER_USE_KEY,
             ),
             'QUEEN_FORK_SERVER' => Prefork\ForkServer::PROTOCOL,
@@ -687,14 +695,25 @@ final class PhpSupervisor
                 $this->scheduleTelemetryCleanup($name, $options, $pid);
                 $exitCode = $process->getExitCode();
                 $this->emit("exited {$name}:{$queue} pid=" . ($pid ?? 'unknown') . " code=" . ($exitCode ?? 'unknown') . "\n", $exitCode === 0 ? 'out' : 'err');
+                $announced = $this->announcedExit($pid, $exitCode);
                 if ($poolHadProbe && !$wasProbe) {
                     continue;
                 }
                 // Backoff is for short-lived exits. A worker that ran this
                 // long is not crash-looping: queue:work exits 12 at --memory,
-                // and a job timeout kills the worker.
-                if ($exitCode === 0 || (!$wasProbe && $runtime >= (float) $options['stable_after'])) {
+                // and a job timeout kills the worker. Nor is a worker that
+                // stopped at --memory after a job: it made progress.
+                if ($exitCode === 0
+                    || $announced === WorkerExitMarker::MEMORY
+                    || (!$wasProbe && $runtime >= (float) $options['stable_after'])) {
                     $this->resetCrashes($name, $queue);
+                } elseif ($announced === WorkerExitMarker::TIMEOUT) {
+                    // The job failed, not the worker, however soon it came. A
+                    // probe proved nothing either way: the next starts at once.
+                    if ($wasProbe) {
+                        $this->releaseRestartProbe($restartKey);
+                    }
+                    $this->emit("[{$name}:{$queue}] worker pid={$pid} exited after Laravel's job timeout; restarted without backoff\n", 'err');
                 } else {
                     $this->registerCrash(
                         $name,
@@ -739,6 +758,71 @@ final class PhpSupervisor
         $this->restartPhase[$key] = $circuitOpen ? 'open' : 'backoff';
         $state = $circuitOpen ? 'circuit open' : 'backoff';
         $this->emit("[{$name}:{$queue}] worker crash ({$reason}); {$state} for {$delay}s (failure {$count})\n", 'err');
+    }
+
+    /**
+     * What the worker announced before this exit (see WorkerExitMarker):
+     * Laravel's job timeout, when SIGKILL ended it, or its memory limit after
+     * a job, when it exited 12. A marker explains no other exit. Either way
+     * the marker is consumed.
+     *
+     * @return WorkerExitMarker::TIMEOUT|WorkerExitMarker::MEMORY|null
+     */
+    private function announcedExit(?int $pid, ?int $exitCode): ?string
+    {
+        if ($this->exitMarkers === null || !is_int($pid) || $pid < 1) {
+            return null;
+        }
+        try {
+            $marker = $this->state->takeExitMarker($pid);
+        } catch (\Throwable $error) {
+            $this->emit("exit marker read failed for pid={$pid}: {$error->getMessage()}\n", 'err');
+
+            return null;
+        }
+
+        return match (true) {
+            $marker === WorkerExitMarker::TIMEOUT && $exitCode === 128 + SIGKILL => WorkerExitMarker::TIMEOUT,
+            $marker === WorkerExitMarker::MEMORY && $exitCode === WorkerExitMarker::MEMORY_EXIT_CODE => WorkerExitMarker::MEMORY,
+            default => null,
+        };
+    }
+
+    /** Admit the next restart probe at once, with the failure count unchanged. */
+    private function releaseRestartProbe(string $key): void
+    {
+        if (($this->restartPhase[$key] ?? null) !== 'probe') {
+            return;
+        }
+        $this->restartPhase[$key] = ($this->crashCount[$key] ?? 0) >= self::CRASH_CIRCUIT_THRESHOLD ? 'open' : 'backoff';
+        $this->restartAfter[$key] = microtime(true);
+    }
+
+    /**
+     * Empty the directory where workers say why they exit (see
+     * WorkerExitMarker): a marker left by an earlier generation explains no
+     * exit of this one. Without the directory, every exit counts as before.
+     */
+    private function prepareExitMarkers(): void
+    {
+        try {
+            $this->exitMarkers = $this->state->resetExitMarkers();
+        } catch (\Throwable $error) {
+            $this->exitMarkers = null;
+            $this->emit("exit markers disabled, a job timeout counts as a crash: {$error->getMessage()}\n", 'err');
+        }
+    }
+
+    private function forgetExitMarker(mixed $pid): void
+    {
+        if ($this->exitMarkers === null || !is_int($pid) || $pid < 1) {
+            return;
+        }
+        try {
+            $this->state->removeExitMarker($pid);
+        } catch (\Throwable $error) {
+            $this->emit("exit marker cleanup failed for pid={$pid}: {$error->getMessage()}\n", 'err');
+        }
     }
 
     private function resetCrashes(string $name, string $queue): void
@@ -972,6 +1056,7 @@ final class PhpSupervisor
                 $this->config['supervisors'][$supervisor] ?? [],
                 $this->trackedPid($process),
             );
+            $this->forgetExitMarker($this->trackedPid($process));
             unset($this->workerPids[$objectId]);
             return;
         }
@@ -1002,6 +1087,8 @@ final class PhpSupervisor
                     $this->config['supervisors'][$entry['supervisor']] ?? [],
                     $this->trackedPid($process),
                 );
+                // A drained worker's exit is not classified: drop its marker.
+                $this->forgetExitMarker($this->trackedPid($process));
                 unset($this->workerPids[$objectId]);
                 continue;
             }

@@ -30,6 +30,7 @@ use Queen\Laravel\Queue\QueenConnector;
 use Queen\Laravel\Queue\SyncedFailedJobProvider;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
 use Queen\Laravel\Supervisor\SupervisorState;
+use Queen\Laravel\Supervisor\WorkerExitMarker;
 use Queen\Laravel\Supervisor\WorkerTelemetry;
 use Queen\Queen;
 use RuntimeException;
@@ -561,6 +562,9 @@ class QueenServiceProvider extends ServiceProvider
     private function registerWorkerTelemetry(): void
     {
         WorkerTelemetry::listenFromEnvironment($this->app['events']);
+        // Under a supervisor: tell the master when Laravel's job timeout, or
+        // --memory after a job, ends this worker, so it counts no crash.
+        WorkerExitMarker::listenFromEnvironment($this->app['events']);
         $this->registerJobMetrics();
     }
 
