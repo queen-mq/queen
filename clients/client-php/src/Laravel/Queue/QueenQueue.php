@@ -1081,6 +1081,18 @@ class QueenQueue extends BaseQueue implements QueueContract
         return $this->queen;
     }
 
+    /**
+     * The client for writes that may fail, such as job metrics: one attempt,
+     * two seconds, no failover, no 429 retry. They run in a worker's job
+     * events and in WorkerStopping, where the ordinary client's retries would
+     * hold the worker; the ordinary client when the connector did not build
+     * this queue.
+     */
+    public function getBestEffortQueen(): Queen
+    {
+        return $this->shutdownClient !== null ? ($this->shutdownClient)() : $this->queen;
+    }
+
     public function getConsumerGroup(): string
     {
         return $this->consumerGroup;

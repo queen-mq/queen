@@ -247,10 +247,11 @@ class QueenServiceProvider extends ServiceProvider
             $connection = (string) $app['config']->get('queen.job_metrics.connection', 'queen');
 
             return new JobMetricsRecorder(
+                // Written from job events and WorkerStopping: one bounded try.
                 function () use ($app, $connection): ?Queen {
                     $queue = $app['queue']->connection($connection);
 
-                    return $queue instanceof QueenQueue ? $queue->getQueen() : null;
+                    return $queue instanceof QueenQueue ? $queue->getBestEffortQueen() : null;
                 },
                 (string) $app['config']->get('queen.job_metrics.namespace', 'queen-metrics'),
             );
@@ -260,10 +261,11 @@ class QueenServiceProvider extends ServiceProvider
             $connection = (string) $app['config']->get('queen.tags.connection', 'queen');
 
             return new TagMonitor(
+                // Written from job events: one bounded try.
                 function () use ($app, $connection): ?Queen {
                     $queue = $app['queue']->connection($connection);
 
-                    return $queue instanceof QueenQueue ? $queue->getQueen() : null;
+                    return $queue instanceof QueenQueue ? $queue->getBestEffortQueen() : null;
                 },
                 (string) $app['config']->get('queen.tags.namespace', 'queen-metrics'),
                 max(60, (int) $app['config']->get('queen.tags.retention_minutes', 1440) * 60),

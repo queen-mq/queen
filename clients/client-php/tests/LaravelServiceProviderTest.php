@@ -70,6 +70,36 @@ class LaravelServiceProviderTest extends TestCase
         $this->assertSame('priority-workers', $connection->getConsumerGroup());
     }
 
+    /**
+     * Job metrics and tag records are written from every worker's job events
+     * and from WorkerStopping, before the queue's own bounded shutdown. With
+     * the queue's ordinary client a slow, failing or rate-limiting broker
+     * held the worker for every retry of a best-effort write.
+     */
+    public function testMonitoringWritesMakeOneBoundedAttempt(): void
+    {
+        $handler = new PlanHandler([], ['status' => 503, 'json' => ['error' => 'unavailable']]);
+        $this->app['config']->set('queue.connections.queen', array_replace(
+            $this->app['config']->get('queue.connections.queen'),
+            ['handler' => HandlerStack::create($handler), 'retry_attempts' => 3, 'retry_delay' => 0],
+        ));
+        $job = $this->createStub(\Illuminate\Contracts\Queue\Job::class);
+        $job->method('resolveName')->willReturn('App\Jobs\SendInvoice');
+        $job->method('payload')->willReturn(['tags' => ['customer:7']]);
+
+        $recorder = $this->app->make(\Queen\Laravel\Monitoring\JobMetricsRecorder::class);
+        $recorder->start($job);
+        $recorder->finish($job, false);
+        $this->assertSame(1, $handler->count(), 'a metrics write was retried');
+        $this->assertSame(2, $handler->options[0]['timeout']);
+
+        $handler->requests = [];
+        $handler->options = [];
+        $this->app->make(\Queen\Laravel\Monitoring\TagMonitor::class)->record($job, 'completed');
+        $this->assertSame(1, $handler->count(), 'reading the monitored tags was retried');
+        $this->assertSame(2, $handler->options[0]['timeout']);
+    }
+
     public function testProviderRegistersSupervisorCommands(): void
     {
         $this->artisan('list')
