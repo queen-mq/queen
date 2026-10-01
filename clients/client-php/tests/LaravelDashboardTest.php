@@ -48,10 +48,11 @@ final class LaravelDashboardTest extends TestCase
         $this->stateDirectory = sys_get_temp_dir() . '/queen-dashboard-state-' . $suffix;
         $this->failedPath = sys_get_temp_dir() . '/queen-dashboard-failed-' . $suffix . '.json';
         parent::setUp();
-        // No test reaches a real broker for the throughput counters or the
-        // queue contents.
+        // No test reaches a real broker for the throughput counters, the
+        // queue contents or the job metrics.
         $this->throughputBroker([]);
         $this->queueContentsBroker([]);
+        $this->jobMetricsBroker([]);
     }
 
     protected function tearDown(): void
@@ -2154,6 +2155,126 @@ final class LaravelDashboardTest extends TestCase
         $this->assertSame(0, $xpath->query('//div[@aria-label="Jobs in each queue now"]//tbody/tr[2]/td[position() < 4]//a')->length, 'no message links without numbers');
     }
 
+    public function testTheConfigurationPageGivesAdviceAboveTheSettings(): void
+    {
+        $this->app['config']->set('queen.supervisor.prefork', false);
+        $this->app['config']->set('queen.supervisor.event_driven', false);
+        $this->liveSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []]);
+        $this->failedJobsFile(2);
+        $this->jobMetricsBroker(['App\Jobs\Export' => ['processed' => 3, 'failed' => 0, 'runtime_ms' => 300000, 'max_ms' => 130000]]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/configuration')->assertOk()->getContent());
+
+        $this->assertSame(
+            ['advice', 'configuration'],
+            array_map(fn (\DOMElement $section): string => $section->getAttribute('id'), iterator_to_array($xpath->query('//main//section'))),
+            'the advice comes above the settings',
+        );
+        $items = iterator_to_array($xpath->query('//section[@id="advice"]//li[contains(@class, "advice")]'));
+        $this->assertSame(
+            ['Deploys interrupt App\Jobs\Export', 'Every worker boots Laravel on its own', 'Bursts wait for the next poll', '2 failed jobs'],
+            array_map(fn (\DOMElement $item): string => trim($xpath->query('.//h3', $item)->item(0)->textContent), $items),
+            'most severe first, from the settings, the running supervisor, the failed jobs and the last hour of jobs',
+        );
+        $this->assertSame(['Warning', 'Info', 'Info', 'Info'], array_map(
+            fn (\DOMElement $item): string => trim($xpath->query('.//span[contains(@class, "badge")]', $item)->item(0)->textContent),
+            $items,
+        ));
+        $this->assertStringContainsString('2 min 10 s', $items[0]->textContent);
+        $this->assertStringContainsString('QUEEN_SUPERVISOR_SHUTDOWN_GRACE', $items[0]->textContent);
+        $docs = iterator_to_array($xpath->query('//section[@id="advice"]//a[starts-with(@href, "https://queenmq.com/")]'));
+        $this->assertCount(4, $docs);
+        foreach ($docs as $link) {
+            $this->assertStringStartsWith('Read more', trim($link->textContent));
+            $this->assertSame('_blank', $link->getAttribute('target'));
+            $this->assertSame('noopener noreferrer', $link->getAttribute('rel'));
+        }
+        $this->assertSame('Open Failed jobs', trim($xpath->query('//section[@id="advice"]//a[@href="/queen/failed-jobs"]')->item(0)->textContent));
+    }
+
+    public function testTheConfigurationPageSaysPlainlyWhenThereIsNoAdvice(): void
+    {
+        $this->app['config']->set('queen.supervisor.prefork', true);
+        $this->app['config']->set('queen.supervisor.event_driven', true);
+        $this->liveSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/configuration')->assertOk()->getContent());
+
+        $this->assertSame(0, $xpath->query('//section[@id="advice"]//li')->length);
+        $this->assertSame(
+            'No advice: nothing in these settings, the running supervisor or the last hour of jobs calls for a change.',
+            trim($xpath->query('//section[@id="advice"]//div[@class="empty"]')->item(0)->textContent),
+        );
+    }
+
+    public function testTheSettingsShowEachValueWithItsDefaultAndMeaning(): void
+    {
+        $this->app['config']->set('queue.connections.queen.prefetch', 4);
+        $this->app['config']->set('queue.connections.queen.lease_renewal', true);
+        $this->app['config']->set('queue.connections.queen.ack_async', 'yes');
+        $this->app['config']->set('queen.supervisor.supervisors.default.backoff', 5);
+        $this->app['config']->set('queen.supervisor.supervisors.default.max_jobs', 1000);
+        $this->liveSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/configuration')->assertOk()->getContent());
+
+        $connection = $this->settingsRows($xpath, 'Connection settings');
+        $this->assertSame(['4', '1'], [$connection['prefetch'][1], $connection['prefetch'][2]]);
+        $this->assertSame(1, $xpath->query('//div[@aria-label="Connection settings"]//tr[td[1]/code="prefetch"]/td[2]/strong')->length, 'a changed value stands out');
+        $this->assertSame('invalid', $connection['ack_async'][1]);
+        $this->assertSame(1, $xpath->query('//div[@aria-label="Connection settings"]//tr[td[1]/code="ack_async"]/td[2]/span[@class="badge warning"]')->length);
+        $this->assertSame(['on', 'off'], [$connection['lease_renewal'][1], $connection['lease_renewal'][2]]);
+        $this->assertSame('30,000 ms', $connection['timeout'][1]);
+        $this->assertStringContainsString('QUEEN_PREFETCH', $connection['prefetch'][0]);
+        $supervisor = $this->settingsRows($xpath, 'Supervisor settings');
+        $this->assertSame(['75 s', '75 s'], [$supervisor['shutdown_grace'][1], $supervisor['shutdown_grace'][2]]);
+        $this->assertSame('on', $supervisor['QUEEN_SUPERVISOR_LEASE_SERVICE'][1]);
+        foreach ([...$connection, ...$supervisor] as $name => $cells) {
+            $this->assertNotSame('', $cells[3], "{$name} has a meaning");
+        }
+
+        $pool = $this->tableRows($xpath, 'Worker pools')[0];
+        $this->assertSame('default', $pool[0]);
+        $this->assertStringContainsString('backoff 5 s', $pool[6]);
+        $this->assertStringContainsString('max jobs 1,000', $pool[6]);
+        $this->assertStringContainsString('max time no limit', $pool[6]);
+        $this->assertStringContainsString('As the running supervisor published them', $xpath->query('//section[@id="configuration"]')->item(0)->textContent);
+    }
+
+    public function testCredentialsInTheConfigurationNeverReachTheConfigurationPage(): void
+    {
+        $secrets = [
+            'queen.bearer_token' => 'Tok-Bearer-91c3e',
+            'queue.connections.queen.bearer_token' => 'Tok-Connection-5ab02',
+            'queen.supervisor.read_bearer_token' => 'Tok-Read-77d1f',
+            'queen.supervisor.remote_status.key' => 'Key-Status-0e9d4',
+            'queen.metrics.token' => 'Tok-Metrics-' . str_repeat('8', 32),
+            'queen.supervisor_binary.manifest_sha256' => 'Sha-Manifest-3f6a1',
+            // A key the page does not list at all.
+            'queen.custom_password' => 'Pass-Custom-e1f47',
+        ];
+        foreach ($secrets as $key => $value) {
+            $this->app['config']->set($key, $value);
+        }
+        $this->app['config']->set('queue.connections.queen.headers', ['Authorization' => 'Bearer Hdr-Value-2c8b7', 'X-Api-Key' => 'Hdr-Value-a41e0']);
+        $this->app['config']->set('queue.connections.queen.urls', ['https://ops-user:Url-Pass-6d3c9@queen-0.internal.test:6632/tenant?key=Url-Query-b7e25']);
+        $this->liveSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []]);
+
+        $content = $this->get('/queen/configuration')->assertOk()->getContent();
+
+        foreach ([...array_values($secrets), 'Hdr-Value-2c8b7', 'Hdr-Value-a41e0', 'ops-user', 'Url-Pass-6d3c9', 'Url-Query-b7e25'] as $secret) {
+            $this->assertStringNotContainsString($secret, $content);
+        }
+        $xpath = $this->dashboardXPath($content);
+        $connection = $this->settingsRows($xpath, 'Connection settings');
+        $this->assertSame('set', $connection['bearer_token'][1]);
+        $this->assertSame('https://queen-0.internal.test:6632', $connection['urls'][1]);
+        $this->assertSame('2 set, values hidden', $connection['headers'][1]);
+        $supervisor = $this->settingsRows($xpath, 'Supervisor settings');
+        $this->assertSame('set', $supervisor['read_bearer_token'][1]);
+        $this->assertSame('set', $supervisor['remote_status.key'][1]);
+    }
+
     public function testAnInvalidConsoleUrlIsRefusedAtBoot(): void
     {
         foreach ([
@@ -2220,6 +2341,31 @@ final class LaravelDashboardTest extends TestCase
             ]),
             fn () => $this->app['cache']->store(),
             fn (): int => self::THROUGHPUT_NOW,
+        ));
+    }
+
+    /**
+     * The job metrics of one worker in the current five-minute bucket.
+     *
+     * @param array<string, array<string, int>> $classes counts per job class
+     */
+    private function jobMetricsBroker(array $classes): void
+    {
+        $rows = $classes === [] ? [] : [[
+            'key' => 'jobs/v1/' . sprintf('%010d', intdiv(time(), 300) * 300) . '/aaaa',
+            'value' => ['classes' => $classes],
+        ]];
+        $this->app->instance(\Queen\Laravel\Dashboard\JobMetricsReader::class, new \Queen\Laravel\Dashboard\JobMetricsReader(
+            new Queen([
+                'url' => 'http://queen.test:6632',
+                'retryAttempts' => 1,
+                'retryDelayMillis' => 0,
+                'handler' => HandlerStack::create(new PlanHandler([], ['status' => 200, 'json' => ['results' => [[
+                    'rows' => $rows,
+                    'truncated' => false,
+                ]]]])),
+            ]),
+            'queen-metrics',
         ));
     }
 
@@ -2292,6 +2438,21 @@ final class LaravelDashboardTest extends TestCase
                 $cells[] = trim($cell->textContent);
             }
             $rows[] = $cells;
+        }
+
+        return $rows;
+    }
+
+    /** @return array<string, list<string>> the cells of a settings table, by setting name */
+    private function settingsRows(\DOMXPath $xpath, string $label): array
+    {
+        $rows = [];
+        foreach ($xpath->query('//div[@aria-label="' . $label . '"]//tbody/tr') as $row) {
+            $name = trim((string) $xpath->query('./td[1]/code', $row)->item(0)?->textContent);
+            $rows[$name] = array_map(
+                fn (\DOMNode $cell): string => trim($cell->textContent),
+                iterator_to_array($xpath->query('./td', $row)),
+            );
         }
 
         return $rows;
