@@ -74,9 +74,10 @@ Both engines consume the same resolved configuration:
 Switching engines does not change the pool configuration, CLI controls or dashboard protocol. Both
 engines can also [publish their status](/use/laravel/dashboard#a-supervisor-on-another-host) for a
 dashboard on another host; the Rust engine does so from supervisor 0.2.0, and into its own
-instance slot from 0.3.0. The package pins 0.5.0: it coordinates
-[several replicas](#several-replicas) from 0.4.0 and scales on
-[broker events](#event-driven-scaling) from 0.5.0.
+instance slot from 0.3.0. The package pins 0.6.0: it coordinates
+[several replicas](#several-replicas) from 0.4.0, scales on
+[broker events](#event-driven-scaling) from 0.5.0 and
+[renews leases in the master](#lease-renewal-in-the-master) from 0.6.0.
 
 ## Requirements
 

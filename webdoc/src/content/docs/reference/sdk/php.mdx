@@ -584,7 +584,9 @@ the standard sequential Laravel worker, while the renewer keeps the active job,
 local tail and deferred acknowledgements leased. This remains at-least-once
 delivery and widens the crash duplicate window. The renewer is the Rust
 supervisor master on Linux, which exports `QUEEN_SUPERVISOR_LEASE_SOCKET` to its
-workers, and otherwise one PHP helper per worker. An exact-PID `SIGCHLD` watchdog
+workers, and otherwise one PHP helper per worker. Set
+`QUEEN_SUPERVISOR_LEASE_SERVICE=false` in the master's environment to keep the
+helpers under the Rust supervisor too. An exact-PID `SIGCHLD` watchdog
 fences the worker if its helper disappears while a lease is active. The renewed
 profile requires Unix CLI PHP with PCNTL/POSIX support; application code must
 not replace Queen's signal handler. Leave prefetch at `1` for unsupported

@@ -30,6 +30,11 @@ Median proportional set size of the orchestrator alone, from the
 number, not a whole-stack claim: Queen still runs a broker and its storage. The PHP reference master
 measures 35.1 MiB.
 
+With 8 workers and 10 ms jobs, on a broker and a Redis that both fsync every write, Queen completed
+643 jobs/s against Horizon's 417, and its master and workers used 70 MiB against 310 MiB. One Docker
+Desktop host, diagnostic; every lane and its limits are on the
+[benchmark page](https://queenmq.com/benchmarks/laravel-supervisors#horizon-against-queen-on-raft-2026-10-01).
+
 ---
 
 ## Why move off Horizon
@@ -47,7 +52,11 @@ resolve configuration, then leaves only Rust and your ordinary `queue:work` proc
 2.9 MiB against Horizon's 65 MiB in the qualification campaign.
 
 **Smaller workers.** With prefork, Laravel boots once and every worker is forked from it, sharing the
-framework and the opcache: 38 to 75% less worker memory in our measurements.
+framework and the opcache: 38 to 75% less worker memory in our measurements. The Rust master also
+renews the workers' leases itself, so prefetching workers need no helper process.
+
+**More jobs per worker.** The acknowledgement of a job and the pop for the next batch can travel
+while a job runs, so a worker does not wait for the broker's fsync between jobs.
 
 **Built for Kubernetes.** Coordinated replicas split every pool's target, and a Prometheus endpoint
 gives HPA or KEDA the backlog to scale pods on.
@@ -209,6 +218,8 @@ starting point for a migration.
 | `QUEEN_BLOCK_FOR` | `0` | long-poll seconds; `0` polls without blocking |
 | `QUEEN_BULK_BATCH` | `100` | bound for `Queue::bulk()`, not for `dispatch()` |
 | `QUEEN_LEASE_RENEWAL` | `false` | keeps the lease alive under a running job |
+| `QUEEN_ACK_ASYNC` | `false` | sends each ACK without waiting; the answer is read after the next job |
+| `QUEEN_POP_AHEAD` | `false` | pops the next batch while the last job of the current one runs |
 
 Raising prefetch trades round trips for a wider redelivery window: a crash can redeliver the
 unflushed batch, and a paused worker can sit on prefetched jobs until the lease expires. So the
@@ -228,10 +239,18 @@ QUEEN_LEASE_RENEWAL=true
 QUEEN_LEASE_RENEWAL_INTERVAL=30
 ```
 
-Renewal starts one small PHP helper per worker, on Unix CLI PHP, that renews the lease under the
-active job and fences the worker if it cannot. Delivery stays at least once either way — handlers
-still need idempotency keys. Budget one extra process per renewed worker.
+Renewal keeps the lease alive under the active job and fences the worker if it cannot. Under the
+Rust supervisor on Linux the master renews the leases of all its workers; elsewhere each worker
+starts one small PHP helper, on Unix CLI PHP. Delivery stays at least once either way — handlers
+still need idempotency keys. `process_limit` still counts a slot for the helper, which a worker
+starts when the master refuses it.
 [The safe delivery profile](https://queenmq.com/use/laravel/#start-with-the-safe-delivery-profile).
+
+`QUEEN_ACK_ASYNC` and `QUEEN_POP_AHEAD` take the broker's round trip off the worker's path. A failed
+asynchronous ACK is reported one job later and the job is delivered again; `QUEEN_POP_AHEAD` needs
+`QUEEN_LEASE_RENEWAL`, and `QUEEN_ACK_ASYNC` needs `QUEEN_ACK_BATCH=1`. With both, 8 workers on the
+Raft broker went from 453 to 643 jobs/s of 10 ms jobs.
+[Asynchronous acknowledgements](https://queenmq.com/use/laravel/#asynchronous-acknowledgements).
 
 Keep `prefetch=1` for long jobs, strict per-job acknowledgement, or comma-separated priority queues.
 
@@ -296,6 +315,7 @@ Each pool reads these; the defaults are the ones shipped in `config/queen.php`.
 | `QUEEN_SUPERVISOR_MIN_PROCESSES_PER_QUEUE` | `0` | `auto` only: workers every queue keeps without backlog |
 | `QUEEN_SUPERVISOR_FAST_SCALE_UP` | `false` | close half of the gap to the target per decision |
 | `QUEEN_SUPERVISOR_EVENT_DRIVEN` | `false` | wake on new jobs through a read-only long poll instead of the next poll |
+| `QUEEN_SUPERVISOR_LEASE_SERVICE` | `true` | Rust engine on Linux, master's environment: renew workers' leases in the master; `false` keeps one helper per worker |
 | `QUEEN_SUPERVISOR_SCALE_DOWN_DELAY` | `10` | idle seconds before shrinking |
 | `QUEEN_SUPERVISOR_RESTART_BACKOFF` | `1` | first restart delay |
 | `QUEEN_SUPERVISOR_RESTART_BACKOFF_MAX` | `30` | backoff ceiling |
@@ -395,7 +415,7 @@ document is split across `<key>/<instance_id>/head` and `<key>/<instance_id>/chu
 ceiling. A `<key>/head` document from an earlier release is still read. Publishing is best effort
 and budgeted into the heartbeat; a broker outage shows the supervisor as stale and never stops
 supervision. The Rust engine publishes the same format from supervisor 0.3.0 (this package pins
-0.5.0); 0.2.0 wrote the single `<key>/head` slot.
+0.6.0); 0.2.0 wrote the single `<key>/head` slot.
 
 | Variable | Default | |
 | --- | --- | --- |
