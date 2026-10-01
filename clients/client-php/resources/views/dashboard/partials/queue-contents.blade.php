@@ -76,5 +76,8 @@
         @if ($contentsHidden > 0)
             <p class="card-note">The first {{ count($contentsRows) }} queues are shown; {{ $contentsHidden }} more are supervised.</p>
         @endif
+        @if ($consoleLinksLeftOut)
+            <p class="card-note">No console links: these queues use more than one connection, and one console address serves one broker.</p>
+        @endif
     @endif
 </section>

@@ -76,6 +76,23 @@ class QueueContentsReaderTest extends TestCase
         $this->assertNull($row['oldest_seconds']);
     }
 
+    public function testALagAnswerOfAnUnknownShapeIsNotNothingLagging(): void
+    {
+        foreach ([['foo' => 1], null, 'busy'] as $answer) {
+            $contents = $this->reader([
+                '/api/v1/resources/queues/app.default/depth' => ['pending' => 2, 'processing' => 0, 'ready' => 2],
+                '/api/v1/consumer-groups/lagging' => $answer,
+            ])->read($this->queues(['app.default']));
+
+            $this->assertFalse($contents['queues'][0]['oldest_available'], json_encode($answer));
+        }
+        $empty = $this->reader([
+            '/api/v1/resources/queues/app.default/depth' => ['pending' => 2, 'processing' => 0, 'ready' => 2],
+            '/api/v1/consumer-groups/lagging' => [],
+        ])->read($this->queues(['app.default']));
+        $this->assertTrue($empty['queues'][0]['oldest_available'], 'an empty list is nothing lagging');
+    }
+
     public function testACacheThatCannotBeResolvedCostsOnlyTheCache(): void
     {
         $handler = fn (RequestInterface $request): FulfilledPromise => new FulfilledPromise(new Response(

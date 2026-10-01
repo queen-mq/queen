@@ -42,7 +42,12 @@ final class DashboardController
                 $data['refreshUrl'] .= '?range=' . $range;
             }
             $data['queueContents'] = $queueContents->read($data['snapshot']['queues']);
-            $data['consoleLinks'] = ConsoleLinks::fromConfig(config('queen.dashboard.console_url'));
+            $console = ConsoleLinks::fromConfig(config('queen.dashboard.console_url'));
+            // One console address serves one broker: with queues of several
+            // connections a link could open the wrong one.
+            $several = count(array_unique(array_column($data['queueContents']['queues'], 'connection'))) > 1;
+            $data['consoleLinks'] = $several ? null : $console;
+            $data['consoleLinksLeftOut'] = $several && $console !== null;
         }
 
         if ($section === 'jobs') {

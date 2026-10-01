@@ -130,8 +130,9 @@ final class QueueContentsReader
         $lag = [];
         foreach ($clients as $connection => $_) {
             $answer = $settled["lag:{$connection}"] ?? null;
-            if (($answer['state'] ?? null) === 'fulfilled') {
-                $lag[$connection] = $this->oldestPerQueue($answer['value']);
+            $oldest = ($answer['state'] ?? null) === 'fulfilled' ? $this->oldestPerQueue($answer['value']) : null;
+            if ($oldest !== null) {
+                $lag[$connection] = $oldest;
             }
         }
 
@@ -159,14 +160,23 @@ final class QueueContentsReader
         return ['available' => $available, 'queues' => $rows];
     }
 
-    /** @return array<string, array{seconds: int, partition: ?string}> the oldest lag per group and queue */
-    private function oldestPerQueue(mixed $answer): array
+    /**
+     * @return array<string, array{seconds: int, partition: ?string}>|null the oldest lag
+     *   per group and queue; null for an answer that is not a list of partitions,
+     *   which says nothing about how old the jobs are
+     */
+    private function oldestPerQueue(mixed $answer): ?array
     {
-        $rows = is_array($answer) && array_is_list($answer)
-            ? $answer
-            : (is_array($answer) ? ($answer['data'] ?? $answer['groups'] ?? $answer['consumers'] ?? []) : []);
+        $rows = match (true) {
+            is_array($answer) && array_is_list($answer) => $answer,
+            is_array($answer) => $answer['data'] ?? $answer['groups'] ?? $answer['consumers'] ?? null,
+            default => null,
+        };
+        if (!is_array($rows) || !array_is_list($rows)) {
+            return null;
+        }
         $oldest = [];
-        foreach (is_array($rows) ? $rows : [] as $row) {
+        foreach ($rows as $row) {
             if (!is_array($row)) {
                 continue;
             }

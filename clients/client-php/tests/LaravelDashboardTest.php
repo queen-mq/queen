@@ -2144,6 +2144,42 @@ final class LaravelDashboardTest extends TestCase
         );
     }
 
+    public function testQueuesOfSeveralConnectionsGetNoConsoleLinks(): void
+    {
+        $this->app['config']->set('queue.connections.secondary', ['driver' => 'queen']);
+        $this->app['config']->set('queen.supervisor.supervisors.reports', [
+            'connection' => 'secondary',
+            'consumer_group' => 'laravel',
+            'queues' => ['reports'],
+        ]);
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->app['config']->set('queen.dashboard.console_url', 'https://console.example.test');
+
+        $xpath = $this->dashboardXPath($this->get('/queen/workload')->assertOk()->getContent());
+
+        $this->assertCount(3, $this->tableRows($xpath, 'Jobs in each queue now'));
+        $this->assertSame(0, $xpath->query('//section[@id="queue-contents"]//a')->length, 'one console address serves one broker');
+        $this->assertStringContainsString(
+            'No console links: these queues use more than one connection, and one console address serves one broker.',
+            $xpath->query('//section[@id="queue-contents"]')->item(0)->textContent,
+        );
+    }
+
+    public function testThePackageReadersDegradeWhenTheirConnectionCannotBeResolved(): void
+    {
+        // A URL with user info is refused while the read client is built:
+        // the readers mark the queue unavailable, and nothing is requested.
+        $this->app['config']->set('queue.connections.queen.url', 'https://ops:Pw-41d7@queen.invalid');
+        $queue = [['connection' => 'queen', 'consumer_group' => 'laravel', 'queue' => 'default']];
+        foreach ([QueueContentsReader::class, ThroughputReader::class] as $reader) {
+            $this->app->forgetInstance($reader);
+            $this->assertSame($this->app->make($reader), $this->app->make($reader), "{$reader} is a singleton");
+        }
+
+        $this->assertFalse($this->app->make(QueueContentsReader::class)->read($queue)['queues'][0]['available']);
+        $this->assertFalse($this->app->make(ThroughputReader::class)->read($queue, '1h')['queues'][0]['available']);
+    }
+
     public function testAnUnreachableBrokerLeavesTheQueueContentsUnavailable(): void
     {
         $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
