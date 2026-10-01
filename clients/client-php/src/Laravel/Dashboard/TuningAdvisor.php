@@ -25,6 +25,9 @@ final class TuningAdvisor
     /** Below this, a job's pop is a large share of its time. */
     private const SHORT_JOB_MS = 100;
 
+    /** One run a minute over the default hour; rarer jobs gain nothing worth a change. */
+    private const SHORT_JOB_MIN_RUNS = 60;
+
     private const WINDOWS = ['1h' => 'hour', '6h' => '6 hours', '24h' => '24 hours'];
 
     /**
@@ -43,7 +46,7 @@ final class TuningAdvisor
         $advice = [
             ...$this->interruptedByDeploys($settings, $snapshot, $classes, $jobMetrics),
             ...$this->oneWorkerForSeveralQueues($published, $snapshot),
-            ...$this->shortJobs($settings, $classes),
+            ...$this->shortJobs($settings, $classes, $published),
             ...$this->prefork($settings),
             ...$this->leaseHelpers($settings),
             ...$this->pollingBursts($settings, $snapshot, $published),
@@ -141,19 +144,22 @@ final class TuningAdvisor
 
     /**
      * With prefetch 1 a worker pops before every job; for short jobs the pop
-     * is a large share of the time.
+     * is a large share of the time. pop_ahead already hides it.
      *
      * @param list<array{class: string, runs: int, average_ms: ?int, max_ms: ?int}> $classes
+     * @param list<array<string, mixed>> $published
      * @return list<array<string, mixed>>
      */
-    private function shortJobs(ApplicationSettings $settings, array $classes): array
+    private function shortJobs(ApplicationSettings $settings, array $classes, array $published): array
     {
-        if ($settings->connectionInteger('prefetch', 1) !== 1) {
+        if ($settings->connectionInteger('prefetch', 1) !== 1 || $settings->connectionSwitch('pop_ahead', false) === true) {
             return [];
         }
         $short = array_values(array_filter(
             $classes,
-            static fn (array $class): bool => $class['runs'] > 0 && $class['average_ms'] !== null && $class['average_ms'] < self::SHORT_JOB_MS,
+            static fn (array $class): bool => $class['runs'] >= self::SHORT_JOB_MIN_RUNS
+                && $class['average_ms'] !== null
+                && $class['average_ms'] < self::SHORT_JOB_MS,
         ));
         if ($short === []) {
             return [];
@@ -167,12 +173,20 @@ final class TuningAdvisor
         if ($settings->connectionSwitch('lease_renewal', false) !== true) {
             $action .= ' Prefetch above 1 and pop_ahead need QUEEN_LEASE_RENEWAL=true.';
         }
+        // A crash fails each prefetched job that has no try left.
+        $action .= ' Keep tries at 2 or more: a worker that crashes charges one attempt to each job it had prefetched.';
+        $pools = $published !== [] ? $published : $settings->pools();
+        $oneTry = array_values(array_column(
+            array_filter($pools, static fn (array $pool): bool => ($pool['tries'] ?? null) === 1),
+            'name',
+        ));
 
         return [self::item(
-            'info',
+            $oneTry === [] ? 'info' : 'warning',
             'Short jobs wait for one pop each',
             'Prefetch is 1, so a worker asks the broker for each job before it runs it, and these jobs take under '
-            . self::SHORT_JOB_MS . ' ms on average: ' . self::list(array_values($named)) . '.',
+            . self::SHORT_JOB_MS . ' ms on average: ' . self::list(array_values($named)) . '.'
+            . ($oneTry === [] ? '' : ' ' . (count($oneTry) === 1 ? "Pool {$oneTry[0]} has" : 'Pools ' . self::list($oneTry) . ' have') . ' tries 1.'),
             $action,
             '/use/laravel#asynchronous-acknowledgements',
         )];
@@ -262,21 +276,31 @@ final class TuningAdvisor
     {
         $advice = [];
         foreach ($settings->pools() as $pool) {
-            if ($pool['lease_renewal'] !== false
-                || $pool['timeout'] === null
-                || $pool['retry_after'] === null
-                || $pool['timeout'] < $pool['retry_after']) {
+            if ($pool['timeout'] === null || $pool['retry_after'] === null || $pool['timeout'] < $pool['retry_after']) {
                 continue;
             }
-            $advice[] = self::item(
-                'critical',
-                "Pool {$pool['name']} can run a job twice at once",
-                "Its timeout is {$pool['timeout']} s and its lease (retry_after) {$pool['retry_after']} s, with lease renewal"
-                . ' off: a job still running when its lease ends is handed to a second worker while the first one goes on.',
-                'Raise retry_after above the timeout (QUEEN_RETRY_AFTER), or lower the timeout. The Queen supervisor does'
-                . ' not start with this pool until then.',
-                '/use/laravel/supervisors#configure-a-pool',
-            );
+            if ($pool['lease_renewal'] === false) {
+                $advice[] = self::item(
+                    'critical',
+                    "Pool {$pool['name']} can run a job twice at once",
+                    "Its timeout is {$pool['timeout']} s and its lease (retry_after) {$pool['retry_after']} s, with lease renewal"
+                    . ' off: a job still running when its lease ends is handed to a second worker while the first one goes on.',
+                    'Raise retry_after above the timeout (QUEEN_RETRY_AFTER), or lower the timeout. The Queen supervisor does'
+                    . ' not start with this pool until then.',
+                    '/use/laravel/supervisors#configure-a-pool',
+                );
+            } elseif ($pool['lease_renewal'] === true) {
+                // Renewal keeps the lease alive, but SupervisorConfiguration
+                // refuses the pair whatever the renewal.
+                $advice[] = self::item(
+                    'critical',
+                    "The supervisor does not start with pool {$pool['name']}",
+                    "Its timeout is {$pool['timeout']} s and its retry_after {$pool['retry_after']} s. The supervisor requires"
+                    . ' retry_after to be longer than the timeout, even with lease renewal on.',
+                    'Raise retry_after above the timeout (QUEEN_RETRY_AFTER), or lower the timeout.',
+                    '/use/laravel/supervisors#configure-a-pool',
+                );
+            }
         }
 
         return $advice;
@@ -344,7 +368,7 @@ final class TuningAdvisor
      * DashboardRepository; checked again here, since this class takes any array.
      *
      * @param array<string, mixed> $snapshot
-     * @return list<array{name: string, connection: string, consumer_group: string, queues: list<string>, balance: string, max_processes: int}>
+     * @return list<array{name: string, connection: string, consumer_group: string, queues: list<string>, balance: string, max_processes: int, tries: ?int}>
      */
     private function publishedPools(array $snapshot): array
     {
@@ -367,6 +391,7 @@ final class TuningAdvisor
                 'queues' => array_values(array_filter($pool['queues'], 'is_string')),
                 'balance' => $pool['balance'],
                 'max_processes' => $pool['max_processes'],
+                'tries' => is_int($pool['tries'] ?? null) ? $pool['tries'] : null,
             ];
         }
 

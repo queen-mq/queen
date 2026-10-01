@@ -89,14 +89,42 @@ final class TuningAdvisorTest extends TestCase
         foreach (['QUEEN_PREFETCH=4', 'QUEEN_ACK_ASYNC=true', 'QUEEN_POP_AHEAD=true', 'QUEEN_LEASE_RENEWAL=true'] as $variable) {
             $this->assertStringContainsString($variable, $advice[0]['action']);
         }
+        $this->assertStringEndsWith(
+            'Keep tries at 2 or more: a worker that crashes charges one attempt to each job it had prefetched.',
+            $advice[0]['action'],
+        );
         $this->assertSame('https://queenmq.com/use/laravel#asynchronous-acknowledgements', $advice[0]['doc']);
+    }
+
+    public function testPrefetchAdviceIsAWarningForAPoolWithOneTry(): void
+    {
+        $advice = $this->advise(
+            snapshot: $this->snapshot(['configuration' => ['shutdown_grace' => 75, 'poll_interval' => 3, 'supervisors' => [
+                $this->publishedPool(['tries' => 1]),
+            ]]]),
+            metrics: $this->metrics([['class' => 'App\Jobs\Ping', 'average_ms' => 12, 'max_ms' => 40, 'processed' => 900]]),
+        );
+
+        $this->assertSame(['warning'], array_column($advice, 'severity'));
+        $this->assertStringContainsString('Pool default has tries 1', $advice[0]['evidence']);
     }
 
     public function testLongerJobsOrAPrefetchAboveOneAreNotToldAboutPrefetch(): void
     {
-        $short = $this->metrics([['class' => 'App\Jobs\Ping', 'average_ms' => 12, 'max_ms' => 40]]);
+        $short = $this->metrics([['class' => 'App\Jobs\Ping', 'average_ms' => 12, 'max_ms' => 40, 'processed' => 900]]);
         $this->assertSame([], $this->advise(config: $this->config([], ['prefetch' => 4, 'lease_renewal' => true]), metrics: $short));
-        $this->assertSame([], $this->advise(metrics: $this->metrics([['class' => 'App\Jobs\Ping', 'average_ms' => 100, 'max_ms' => 300]])));
+        $this->assertSame([], $this->advise(metrics: $this->metrics([['class' => 'App\Jobs\Ping', 'average_ms' => 100, 'max_ms' => 300, 'processed' => 900]])));
+    }
+
+    public function testRareShortJobsOrAPopAlreadySentAheadAreNotToldAboutPrefetch(): void
+    {
+        // Fewer than one run a minute over the hour gains nothing worth a change.
+        $this->assertSame([], $this->advise(metrics: $this->metrics([['class' => 'App\Jobs\Ping', 'average_ms' => 5, 'max_ms' => 9, 'processed' => 59]])));
+        // pop_ahead already hides the pop behind the running job.
+        $this->assertSame([], $this->advise(
+            config: $this->config([], ['pop_ahead' => true, 'lease_renewal' => true]),
+            metrics: $this->metrics([['class' => 'App\Jobs\Ping', 'average_ms' => 5, 'max_ms' => 9, 'processed' => 900]]),
+        ));
     }
 
     public function testWorkersThatBootLaravelOneByOneAreToldAboutPrefork(): void
@@ -160,10 +188,17 @@ final class TuningAdvisorTest extends TestCase
         $this->assertSame(['critical'], array_column($equal, 'severity'), 'a lease as long as the timeout is too short');
     }
 
-    public function testLeaseRenewalOrALongerLeaseKeepsAJobFromRunningTwice(): void
+    public function testLeaseRenewalKeepsAJobFromRunningTwiceButTheSupervisorStillRefusesThePool(): void
     {
-        $long = ['supervisor' => ['supervisors' => ['default' => ['timeout' => 120]]]];
-        $this->assertSame([], $this->advise(config: $this->config($long, ['lease_renewal' => true])));
+        $advice = $this->advise(config: $this->config(['supervisor' => ['supervisors' => ['default' => ['timeout' => 120]]]], ['lease_renewal' => true]));
+
+        $this->assertSame(['critical'], array_column($advice, 'severity'));
+        $this->assertSame('The supervisor does not start with pool default', $advice[0]['title']);
+        $this->assertStringContainsString('even with lease renewal', $advice[0]['evidence']);
+    }
+
+    public function testALeaseLongerThanTheTimeoutIsFine(): void
+    {
         $this->assertSame([], $this->advise(config: $this->config(['supervisor' => ['supervisors' => ['default' => ['timeout' => 120, 'retry_after' => 150]]]])));
     }
 
