@@ -32,9 +32,9 @@ class QueueContentsReaderTest extends TestCase
         $this->assertTrue($contents['available']);
         $this->assertSame([
             ['connection' => 'queen', 'consumer_group' => 'app', 'queue' => 'app.default', 'available' => true,
-                'waiting' => 4, 'running' => 1, 'oldest_seconds' => 3913, 'oldest_partition' => 'laravel-0000'],
+                'waiting' => 4, 'running' => 1, 'oldest_available' => true, 'oldest_seconds' => 3913, 'oldest_partition' => 'laravel-0000'],
             ['connection' => 'queen', 'consumer_group' => 'app', 'queue' => 'app.mail', 'available' => true,
-                'waiting' => 0, 'running' => 0, 'oldest_seconds' => null, 'oldest_partition' => null],
+                'waiting' => 0, 'running' => 0, 'oldest_available' => true, 'oldest_seconds' => null, 'oldest_partition' => null],
         ], $contents['queues'], 'another group\'s lag is not this queue\'s');
         $this->assertContains('/api/v1/consumer-groups/lagging', $this->paths);
         $this->assertSame(1, count(array_keys($this->paths, '/api/v1/consumer-groups/lagging')), 'one lag read per connection');
@@ -62,6 +62,39 @@ class QueueContentsReaderTest extends TestCase
         ]);
         $this->assertFalse($contents['queues'][1]['available']);
         $this->assertTrue($contents['available'], 'one readable queue keeps the card');
+    }
+
+    public function testALagReadThatFailsLeavesTheOldestAgeUnknown(): void
+    {
+        $contents = $this->reader([
+            '/api/v1/resources/queues/app.default/depth' => ['pending' => 2, 'processing' => 0, 'ready' => 2],
+        ], ['/api/v1/consumer-groups/lagging' => 503])->read($this->queues(['app.default']));
+
+        $row = $contents['queues'][0];
+        $this->assertTrue($row['available']);
+        $this->assertFalse($row['oldest_available'], 'no lag answer is not "nothing older than a minute"');
+        $this->assertNull($row['oldest_seconds']);
+    }
+
+    public function testACacheThatCannotBeResolvedCostsOnlyTheCache(): void
+    {
+        $handler = fn (RequestInterface $request): FulfilledPromise => new FulfilledPromise(new Response(
+            200,
+            ['Content-Type' => 'application/json'],
+            json_encode(str_ends_with($request->getUri()->getPath(), '/depth') ? ['pending' => 1, 'processing' => 0, 'ready' => 1] : []),
+        ));
+        $reader = new QueueContentsReader(
+            fn (string $connection): Queen => new Queen([
+                'url' => 'http://queen.test:6632',
+                'retryAttempts' => 1,
+                'retryDelayMillis' => 0,
+                'enableFailover' => false,
+                'handler' => HandlerStack::create($handler),
+            ]),
+            fn () => throw new \RuntimeException('cache store [missing] is not defined'),
+        );
+
+        $this->assertSame(1, $reader->read($this->queues(['app.default']))['queues'][0]['waiting']);
     }
 
     public function testNothingReadableMeansUnavailable(): void

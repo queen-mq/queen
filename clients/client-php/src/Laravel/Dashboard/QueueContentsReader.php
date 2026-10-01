@@ -17,7 +17,8 @@ use Queen\Queen;
  * reports a partition once its oldest unacknowledged message is a minute old:
  * a job waiting, or a job running, that long. The answers are untrusted:
  * every number is validated, and a queue the broker does not answer for is
- * marked unavailable instead of shown as empty.
+ * marked unavailable instead of shown as empty. `oldest_available` tells a
+ * lag read that failed from one that found nothing a minute old.
  */
 final class QueueContentsReader
 {
@@ -41,13 +42,13 @@ final class QueueContentsReader
 
     /**
      * @param list<array<string, mixed>> $queues the dashboard's queue rows (connection, consumer_group, queue)
-     * @return array{available: bool, queues: list<array{connection: string, consumer_group: string, queue: string, available: bool, waiting: ?int, running: ?int, oldest_seconds: ?int, oldest_partition: ?string}>}
+     * @return array{available: bool, queues: list<array{connection: string, consumer_group: string, queue: string, available: bool, waiting: ?int, running: ?int, oldest_available: bool, oldest_seconds: ?int, oldest_partition: ?string}>}
      */
     public function read(array $queues): array
     {
         $targets = $this->targets($queues);
         $key = 'queen:dashboard:queue-contents:' . sha1(json_encode($targets, JSON_THROW_ON_ERROR));
-        $cache = $this->cache !== null ? ($this->cache)() : null;
+        $cache = $this->cacheStore();
         if ($cache !== null) {
             try {
                 $cached = $cache->get($key);
@@ -149,6 +150,7 @@ final class QueueContentsReader
                 'available' => $depth !== null,
                 'waiting' => $waiting,
                 'running' => $running,
+                'oldest_available' => isset($lag[$target['connection']]),
                 'oldest_seconds' => $oldest['seconds'] ?? null,
                 'oldest_partition' => $oldest['partition'] ?? null,
             ];
@@ -190,5 +192,18 @@ final class QueueContentsReader
     private function count(mixed $value): ?int
     {
         return is_int($value) && $value >= 0 ? $value : null;
+    }
+
+    private function cacheStore(): ?CacheRepository
+    {
+        if ($this->cache === null) {
+            return null;
+        }
+        try {
+            return ($this->cache)();
+        } catch (\Throwable) {
+            // A store that cannot be resolved costs the cache, not the card.
+            return null;
+        }
     }
 }

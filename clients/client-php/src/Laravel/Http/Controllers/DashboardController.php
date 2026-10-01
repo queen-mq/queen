@@ -4,9 +4,11 @@ namespace Queen\Laravel\Http\Controllers;
 
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\Request;
+use Queen\Laravel\Dashboard\ConsoleLinks;
 use Queen\Laravel\Dashboard\DashboardPage;
 use Queen\Laravel\Dashboard\DashboardRepository;
 use Queen\Laravel\Dashboard\JobMetricsReader;
+use Queen\Laravel\Dashboard\QueueContentsReader;
 use Queen\Laravel\Dashboard\ThroughputReader;
 use Queen\Laravel\Monitoring\JobTags;
 use Queen\Laravel\Monitoring\TagMonitor;
@@ -18,6 +20,7 @@ final class DashboardController
         DashboardRepository $dashboard,
         DashboardPage $page,
         ThroughputReader $throughput,
+        QueueContentsReader $queueContents,
         JobMetricsReader $jobMetrics,
         TagMonitor $tags,
     ): View {
@@ -29,12 +32,14 @@ final class DashboardController
             $data['refreshUrl'] .= '?cursor=' . $cursor;
         }
         if ($section === 'workload') {
-            // Only the workload page reads the broker's counters.
+            // Only the workload page reads the broker's counters and queue contents.
             $range = ThroughputReader::range($request->query('range'));
             $data['throughput'] = $throughput->read($data['snapshot']['queues'], $range);
             if ($range !== ThroughputReader::DEFAULT_RANGE) {
                 $data['refreshUrl'] .= '?range=' . $range;
             }
+            $data['queueContents'] = $queueContents->read($data['snapshot']['queues']);
+            $data['consoleLinks'] = ConsoleLinks::fromConfig(config('queen.dashboard.console_url'));
         }
 
         if ($section === 'jobs') {

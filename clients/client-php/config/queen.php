@@ -205,6 +205,11 @@ return [
         'allow_local' => env('QUEEN_DASHBOARD_ALLOW_LOCAL', true),
         // Page size of the failed-jobs page (keyset pagination, newest first).
         'failed_jobs_limit' => env('QUEEN_DASHBOARD_FAILED_JOBS_LIMIT', 50),
+        // Base URL of the Queen web console, such as https://queen.example.com.
+        // When set, each queue of the Workload page links to its console page
+        // and its waiting and running jobs. An http or https URL without user
+        // info, query or fragment; any other value fails at boot.
+        'console_url' => env('QUEEN_DASHBOARD_CONSOLE_URL'),
     ],
 
     // Like Horizon's `waits`: seconds the oldest job of a queue may wait

@@ -568,6 +568,25 @@ a.button {
     color: var(--muted);
     font-size: 13px;
 }
+.queue-group {
+    display: block;
+    color: var(--muted);
+    font-size: 12px;
+}
+.table-link {
+    color: var(--brand);
+    font-weight: 600;
+    text-decoration: none;
+}
+.table-link:hover { color: var(--brand-hover); text-decoration: underline; }
+.table-link:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 2px; }
+.card-note {
+    margin: 0;
+    padding: 12px 20px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 13px;
+}
 .pager {
     display: flex;
     justify-content: flex-end;
