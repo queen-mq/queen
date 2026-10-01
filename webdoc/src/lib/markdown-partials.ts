@@ -58,6 +58,7 @@
 
 import { getCollection } from "astro:content";
 import { renderEntryAsMarkdown } from "@cloudflare/nimbus-docs";
+import { SCHEMATICS, describeSchematic } from "./schematic-models";
 
 /** The shape this module needs from a content entry — docs page or partial. */
 interface MarkdownEntry {
@@ -196,6 +197,17 @@ const componentMap = {
   },
 
   /**
+   * The inline-SVG schematics (JobLifecycle, LeaseTimeline, RollingUpdate,
+   * WorkerTimeline, SupervisorTopology, PreforkMemory) become their
+   * description, as a `<Partition />` does. Their default `alt` is computed
+   * from their props, so it comes from the same model the component draws
+   * from (`describeSchematic()` in `schematic-models.ts`), never from the tag
+   * alone; a page's own `alt` still wins. A figure carrying measured values
+   * cites the artifact, as `<Chart />` does.
+   */
+  ...Object.fromEntries(SCHEMATICS.map((name) => [name, schematicMarkdown(name)])),
+
+  /**
    * The accordion family, unwrapped to its text.
    *
    * The downleveler knows the other paired components but not these four, so
@@ -212,6 +224,22 @@ const componentMap = {
   AccordionTrigger: ({ children }: { children: string }): string => `\n**${children.trim()}**\n`,
   AccordionContent: ({ children }: { children: string }): string => children,
 };
+
+/** The markdown rule for one schematic: its description, caption and source. */
+function schematicMarkdown(name: string) {
+  return ({ attrs }: { attrs: Record<string, string | boolean> }): string => {
+    const str = (key: string): string => {
+      const value = attrs[key];
+      return typeof value === "string" ? value.trim() : "";
+    };
+    const described = describeSchematic(name, attrs);
+    const parts = [`**Figure.** ${str("alt") || described.alt}`];
+    const caption = str("caption");
+    if (caption) parts.push(caption);
+    if (described.source) parts.push(`Values from \`${described.source}\`.`);
+    return `\n${parts.join("\n\n")}\n`;
+  };
+}
 
 interface Context {
   partials: Map<string, MarkdownEntry>;

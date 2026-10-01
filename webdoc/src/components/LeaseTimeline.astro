@@ -1,0 +1,193 @@
+---
+/**
+ * One long job under a lease, twice: with the broker reachable, and with the
+ * broker gone mid-job.
+ *
+ * Every time on the drawing is computed, by leaseTimeline() in
+ * src/lib/schematic-models.ts, from the rules of the lease service in
+ * supervisor/src/lease/mod.rs (the PHP helper in LeaseRenewalWorker.php runs
+ * the same algorithm), with the defaults QueenConnector resolves:
+ *
+ * - the pop leases the job for `retry_after` seconds;
+ * - a renewal is due at min(now + interval, max(now, lease end - reserve)),
+ *   where reserve is two request budgets, the one-second retry delay, the
+ *   kill grace and the safety margin; a renewal moves the lease end to
+ *   retry_after after the request started;
+ * - a failed renewal is retried a second later, and when no renewal can
+ *   finish before the lease end minus the safety margin the worker gets
+ *   SIGTERM, then SIGKILL at the earlier of kill grace later and lease end
+ *   minus safety margin.
+ *
+ * Failed renewals are drawn failing at once (a refused connection). A renewal
+ * that times out instead is retried less often but reaches the same fence:
+ * the rule compares the next possible attempt with the lease end, not a count.
+ */
+import Schematic from "./Schematic.astro";
+import { TOKEN, arrowHead, seconds } from "../lib/schematic";
+import { RENEWAL_RETRY_DELAY, leaseTimeline } from "../lib/schematic-models";
+
+interface Props {
+  /** `retry_after`: the lease a pop takes, and each renewal extends it to. */
+  retryAfter?: number;
+  /** `lease_renewal_interval`. Default: a third of retry_after. */
+  interval?: number;
+  /** `lease_renewal_timeout`, one broker endpoint. */
+  timeout?: number;
+  /** `lease_renewal_kill_grace`. */
+  killGrace?: number;
+  /** `lease_renewal_safety_margin`. */
+  safetyMargin?: number;
+  /** How long the job runs, longer than retry_after to need renewal. */
+  jobSeconds?: number;
+  /** When the broker becomes unreachable in the second row. */
+  outageAt?: number;
+  /** Overrides the generated description. */
+  alt?: string;
+  /** One line under the figure. */
+  caption?: string;
+}
+
+const { caption } = Astro.props;
+const {
+  retryAfter,
+  interval,
+  jobSeconds,
+  outageAt,
+  healthy,
+  renewed,
+  leaseEnd,
+  firstFailure,
+  sigterm,
+  sigkill,
+  latestKill,
+  killedByGrace,
+  secondAttempt,
+  alt: defaultAlt,
+} = leaseTimeline(Astro.props);
+const alt = Astro.props.alt ?? defaultAlt;
+
+// --- Geometry --------------------------------------------------------------
+const W = 680;
+const X0 = 24;
+const X1 = 656;
+const T_END = Math.ceil((Math.max(jobSeconds, secondAttempt) + 10) / 30) * 30;
+const x = (t: number) => X0 + (Math.min(t, T_END) / T_END) * (X1 - X0);
+
+const r1 = { title: 16, lease: 30, job: 42, note: 82 };
+const r2 = { title: 114, lease: 128, job: 140, job2: 166 };
+const BAR = 20;
+const AXIS_Y = 204;
+const ticks = Array.from({ length: T_END / 30 + 1 }, (_, i) => i * 30);
+
+// The fence happens within a few seconds of the lease end: zoom on it.
+const Z0 = sigterm - 5;
+const Z1 = secondAttempt + 7;
+const zx = (t: number) => X0 + ((t - Z0) / (Z1 - Z0)) * (X1 - X0);
+const inset = { top: 240, lease: 286, job: 298, job2: 324, bottom: 360 };
+const H = inset.bottom + 40;
+
+const failTicks: number[] = [];
+for (let t = firstFailure; t <= sigterm; t += RENEWAL_RETRY_DELAY) failTicks.push(t);
+
+const gap = leaseEnd - sigkill;
+---
+
+<Schematic width={W} height={H} alt={alt} caption={caption}>
+  {/* Row 1: the broker answers every renewal. */}
+  <text x={X0} y={r1.title} class="s-title" fill={TOKEN.fg}>
+    Broker reachable
+    <tspan class="s-note" fill={TOKEN.muted} dx="8">the lease service renews every {seconds(interval)}, each time to {seconds(retryAfter)} ahead</tspan>
+  </text>
+  <rect x={x(0)} y={r1.lease} width={x(jobSeconds) - x(0)} height="6" rx="3" fill={TOKEN.warning} opacity="0.85" />
+  {healthy.map((t) => <circle cx={x(t)} cy={r1.lease + 3} r="4.5" fill={TOKEN.warning} stroke={TOKEN.card} stroke-width="1.5" />)}
+  <rect x={x(0)} y={r1.job} width={x(jobSeconds) - x(0)} height={BAR} rx="4" fill={TOKEN.surface} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+  <text x={x(0) + 8} y={r1.job + 14} class="s-label" fill={TOKEN.fg}>job, {seconds(jobSeconds)}</text>
+  <line x1={x(jobSeconds)} y1={r1.lease - 4} x2={x(jobSeconds)} y2={r1.job + BAR + 4} stroke={TOKEN.success} stroke-width="2" />
+  <text x={x(jobSeconds) + 6} y={r1.job + 14} class="s-label" fill={TOKEN.success}>ack</text>
+  <line x1={x(retryAfter)} y1={r1.lease - 6} x2={x(retryAfter)} y2={r1.note - 12} stroke={TOKEN.muted} stroke-width="1.25" stroke-dasharray="3 3" />
+  <text x={x(retryAfter)} y={r1.note} text-anchor="middle" class="s-note" fill={TOKEN.muted}>
+    without renewal the lease would end here, at <tspan class="s-code">retry_after</tspan>, mid-job
+  </text>
+
+  {/* Row 2: renewals fail from outageAt. Only the first attempt's lanes are
+      shaded: the worker that runs attempt 2 reaches the broker. */}
+  <rect x={x(outageAt)} y={r2.title + 6} width={X1 - x(outageAt)} height={r2.job + BAR + 4 - (r2.title + 6)} fill={TOKEN.dangerBg} />
+  <line x1={x(outageAt)} y1={r2.title + 6} x2={x(outageAt)} y2={r2.job + BAR + 4} stroke={TOKEN.danger} stroke-width="1" stroke-dasharray="2 3" />
+  <text x={X0} y={r2.title} class="s-title" fill={TOKEN.danger}>
+    Renewals fail from {seconds(firstFailure)}
+    <tspan class="s-note" fill={TOKEN.muted} dx="8">the broker is unreachable from {seconds(outageAt)}; each is retried a second later</tspan>
+  </text>
+  <rect x={x(0)} y={r2.lease} width={x(leaseEnd) - x(0)} height="6" rx="3" fill={TOKEN.warning} opacity="0.85" />
+  {renewed.map((t) => <circle cx={x(t)} cy={r2.lease + 3} r="4.5" fill={TOKEN.warning} stroke={TOKEN.card} stroke-width="1.5" />)}
+  {failTicks.map((t) => <line x1={x(t)} y1={r2.lease - 5} x2={x(t)} y2={r2.lease + 11} stroke={TOKEN.danger} stroke-width="1" />)}
+  <rect x={x(0)} y={r2.job} width={x(sigkill) - x(0)} height={BAR} rx="4" fill={TOKEN.surface} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+  <text x={x(0) + 8} y={r2.job + 14} class="s-label" fill={TOKEN.fg}>job, attempt 1</text>
+  <line x1={x(sigterm)} y1={r2.lease - 6} x2={x(sigterm)} y2={r2.job + BAR + 2} stroke={TOKEN.warning} stroke-width="2" />
+  <line x1={x(sigkill)} y1={r2.lease - 6} x2={x(sigkill)} y2={r2.job + BAR + 2} stroke={TOKEN.danger} stroke-width="2" />
+  <line x1={x(leaseEnd)} y1={r2.lease - 6} x2={x(leaseEnd)} y2={r2.job2 + BAR + 2} stroke={TOKEN.warning} stroke-width="1.25" stroke-dasharray="3 3" />
+  <rect x={x(secondAttempt)} y={r2.job2} width={X1 - x(secondAttempt)} height={BAR} rx="4" fill={TOKEN.surface} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+  <text x={x(secondAttempt) + 8} y={r2.job2 + 14} class="s-label" fill={TOKEN.fg}>attempt 2</text>
+
+  {/* The shared time axis. */}
+  <line x1={X0} y1={AXIS_Y} x2={X1} y2={AXIS_Y} stroke={TOKEN.borderStrong} stroke-width="1" />
+  {
+    ticks.map((t) => (
+      <g>
+        <line x1={x(t)} y1={AXIS_Y} x2={x(t)} y2={AXIS_Y + 4} stroke={TOKEN.borderStrong} stroke-width="1" />
+        <text x={x(t)} y={AXIS_Y + 17} text-anchor="middle" class="s-small s-num" fill={TOKEN.muted}>{seconds(t)}</text>
+      </g>
+    ))
+  }
+
+  {/* The zoom: a box on the timeline, and the same seconds drawn wide below. */}
+  <rect x={x(Z0)} y={r2.lease - 10} width={x(Z1) - x(Z0)} height={r2.job2 + BAR + 6 - (r2.lease - 10)} fill="none" stroke={TOKEN.muted} stroke-width="1" stroke-dasharray="2 2" rx="3" />
+  <line x1={x(Z0)} y1={r2.job2 + BAR + 6} x2={X0} y2={inset.top} stroke={TOKEN.border} stroke-width="1" />
+  <line x1={x(Z1)} y1={r2.job2 + BAR + 6} x2={X1} y2={inset.top} stroke={TOKEN.border} stroke-width="1" />
+  <rect x={X0} y={inset.top} width={X1 - X0} height={inset.bottom - inset.top} rx="6" fill={TOKEN.card} stroke={TOKEN.border} stroke-width="1" />
+
+  <rect x={X0} y={inset.lease} width={zx(leaseEnd) - X0} height="6" fill={TOKEN.warning} opacity="0.85" />
+  {failTicks.filter((t) => t >= Z0).map((t) => <line x1={zx(t)} y1={inset.lease - 5} x2={zx(t)} y2={inset.lease + 11} stroke={TOKEN.danger} stroke-width="1" />)}
+  <rect x={X0} y={inset.job} width={zx(sigkill) - X0} height={BAR} fill={TOKEN.surface} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+  <rect x={zx(sigkill) - 4} y={inset.job} width="4" height={BAR} fill={TOKEN.danger} />
+  <text x={X0 + 8} y={inset.job + 14} class="s-label" fill={TOKEN.fg}>attempt 1</text>
+  <rect x={zx(secondAttempt)} y={inset.job2} width={X1 - zx(secondAttempt)} height={BAR} fill={TOKEN.surface} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+  <text x={zx(secondAttempt) + 8} y={inset.job2 + 14} class="s-label" fill={TOKEN.fg}>attempt 2, from the start</text>
+
+  <line x1={zx(sigterm)} y1={inset.top + 8} x2={zx(sigterm)} y2={inset.job + BAR + 4} stroke={TOKEN.warning} stroke-width="2" />
+  <text x={zx(sigterm) - 6} y={inset.top + 17} text-anchor="end" class="s-label" fill={TOKEN.warning}>SIGTERM, {seconds(sigterm)}</text>
+  <text x={zx(sigterm) - 6} y={inset.top + 31} text-anchor="end" class="s-small" fill={TOKEN.muted}>no renewal can finish in time</text>
+
+  <line x1={zx(sigkill)} y1={inset.top + 8} x2={zx(sigkill)} y2={inset.job + BAR + 4} stroke={TOKEN.danger} stroke-width="2" />
+  <text x={zx(sigkill) + 6} y={inset.top + 17} class="s-label" fill={TOKEN.danger}>SIGKILL, {seconds(sigkill)}</text>
+  <text x={zx(sigkill) + 6} y={inset.top + 31} class="s-small" fill={TOKEN.muted}>
+    {
+      killedByGrace ? (
+        <>
+          <tspan class="s-code">kill_grace</tspan> after SIGTERM
+        </>
+      ) : (
+        <>
+          lease end − <tspan class="s-code">safety_margin</tspan>
+        </>
+      )
+    }
+  </text>
+
+  <line x1={zx(latestKill)} y1={inset.lease - 4} x2={zx(latestKill)} y2={inset.bottom - 8} stroke={TOKEN.danger} stroke-width="1" stroke-dasharray="2 3" />
+  <text x={zx(latestKill) - 6} y={inset.bottom - 10} text-anchor="end" class="s-small" fill={TOKEN.muted}>
+    never later: lease end − <tspan class="s-code">safety_margin</tspan>
+  </text>
+
+  <line x1={zx(leaseEnd)} y1={inset.top + 8} x2={zx(leaseEnd)} y2={inset.bottom - 8} stroke={TOKEN.warning} stroke-width="1.25" stroke-dasharray="3 3" />
+  <text x={zx(leaseEnd) + 6} y={inset.top + 17} class="s-label" fill={TOKEN.warning}>lease ends, {seconds(leaseEnd)}</text>
+  <text x={zx(leaseEnd) + 6} y={inset.top + 31} class="s-small" fill={TOKEN.muted}>another worker may pop it</text>
+
+  <path d={`M ${zx(sigkill) + 3} ${inset.job + BAR / 2} H ${zx(leaseEnd) - 3}`} stroke={TOKEN.muted} stroke-width="1" />
+  <path d={arrowHead([zx(leaseEnd) - 20, inset.job + BAR / 2], [zx(leaseEnd) - 1, inset.job + BAR / 2], 5)} fill={TOKEN.muted} />
+  <path d={arrowHead([zx(sigkill) + 20, inset.job + BAR / 2], [zx(sigkill) + 1, inset.job + BAR / 2], 5)} fill={TOKEN.muted} />
+  <text x={(zx(sigkill) + zx(leaseEnd)) / 2} y={inset.job + BAR / 2 - 5} text-anchor="middle" class="s-small" fill={TOKEN.fg}>{seconds(gap)}: neither runs</text>
+
+  <text x={X0} y={H - 14} class="s-note" fill={TOKEN.fg}>
+    The two attempts never overlap. Delivery is at-least-once: what attempt 1 did before the kill can happen again.
+  </text>
+</Schematic>

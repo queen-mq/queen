@@ -1,0 +1,95 @@
+---
+/**
+ * Why forked workers are small: the memory of five of 64 workers, drawn to
+ * one scale, split into the pages a worker shares with other processes and
+ * the pages only it holds.
+ *
+ * The values are measured, not illustrative: the `drain-64` worker rows of
+ * benchmark-queen/2026-10-01-linux-vm-horizon-raft/raw/process-memory.csv
+ * (typed into preforkMemory() in src/lib/schematic-models.ts),
+ * where each Horizon worker booted its own Laravel and each Queen worker was
+ * forked from the one Laravel the fork server booted (prefork). Shared is
+ * resident minus private. The shared pages are drawn once across the workers
+ * because they are held once in memory; each private block is a worker's own.
+ */
+import Schematic from "./Schematic.astro";
+import { TOKEN } from "../lib/schematic";
+import { preforkMemory } from "../lib/schematic-models";
+
+interface Props {
+  /** Overrides the generated description. */
+  alt?: string;
+  /** One line under the figure. */
+  caption?: string;
+}
+
+const { caption } = Astro.props;
+const { horizon, queen, source, total, alt: defaultAlt } = preforkMemory();
+const alt = Astro.props.alt ?? defaultAlt;
+
+const panels = [
+  { ...horizon, x: 8, title: "Each worker boots Laravel", engine: "Horizon" },
+  { ...queen, x: 348, title: "Forked from one booted Laravel", engine: "Queen supervisor with prefork" },
+];
+
+// --- Geometry: one MiB is as tall in both panels ---------------------------
+const W = 680;
+const BASE_Y = 238;
+const SCALE = 150 / Math.max(...panels.map((p) => p.resident));
+const COLS = 5;
+const COL_W = 28;
+const COL_STEP = 36;
+const LABEL_DX = 200;
+const H = BASE_Y + 46;
+const mib = (value: number) => `${value.toFixed(1)} MiB`;
+
+const drawn = panels.map((p) => {
+  const colX = (k: number) => p.x + 14 + k * COL_STEP;
+  const top = BASE_Y - p.resident * SCALE;
+  const sharedTop = BASE_Y - p.shared * SCALE;
+  const labelX = p.x + LABEL_DX;
+  const lastRight = colX(COLS - 1) + COL_W;
+  // Keep the two labels apart even when the private block is a sliver.
+  const privateY = Math.min((top + sharedTop) / 2, sharedTop - 22);
+  const sharedY = Math.max((sharedTop + BASE_Y) / 2, privateY + 40);
+  return { ...p, colX, top, sharedTop, labelX, lastRight, privateY, sharedY };
+});
+---
+
+<Schematic width={W} height={H} alt={alt} caption={caption} source={source}>
+  {
+    drawn.map((p) => (
+      <g>
+        <text x={p.x + 14} y="22" class="s-title" fill={TOKEN.fg}>{p.title}</text>
+        <text x={p.x + 14} y="38" class="s-small" fill={TOKEN.muted}>{p.engine}, {p.workers} workers</text>
+
+        <text x={p.colX(0)} y={p.top - 8} class="s-small s-num" fill={TOKEN.fg}>{mib(p.resident)} resident each</text>
+
+        {/* Shared pages are held once: one band under every worker, with
+            each worker's outline drawn through it. */}
+        <rect x={p.colX(0) - 4} y={p.sharedTop} width={p.lastRight - p.colX(0) + 8} height={BASE_Y - p.sharedTop} rx="3" fill={TOKEN.success} fill-opacity="0.14" stroke={TOKEN.success} stroke-width="1.25" />
+        {Array.from({ length: COLS }, (_, k) => (
+          <g>
+            <rect x={p.colX(k)} y={p.sharedTop + 3} width={COL_W} height={BASE_Y - p.sharedTop - 3} fill="none" stroke={TOKEN.success} stroke-opacity="0.55" stroke-width="1" stroke-dasharray="2 3" />
+            <rect x={p.colX(k)} y={p.top} width={COL_W} height={p.sharedTop - p.top} rx="2" fill={TOKEN.warning} fill-opacity="0.3" stroke={TOKEN.warning} stroke-width="1.25" />
+          </g>
+        ))}
+        <line x1={p.colX(0) - 8} y1={BASE_Y} x2={p.lastRight + 8} y2={BASE_Y} stroke={TOKEN.borderStrong} stroke-width="1" />
+
+        <path d={`M ${p.lastRight + 3} ${(p.top + p.sharedTop) / 2} L ${p.labelX - 6} ${p.privateY - 4}`} stroke={TOKEN.warning} stroke-width="1" fill="none" />
+        <text x={p.labelX} y={p.privateY} class="s-label s-num" fill={TOKEN.warning}>{mib(p.private)}</text>
+        <text x={p.labelX} y={p.privateY + 14} class="s-small" fill={TOKEN.muted}>private to each</text>
+
+        <path d={`M ${p.lastRight + 6} ${(p.sharedTop + BASE_Y) / 2} L ${p.labelX - 6} ${p.sharedY - 4}`} stroke={TOKEN.success} stroke-width="1" fill="none" />
+        <text x={p.labelX} y={p.sharedY} class="s-label s-num" fill={TOKEN.success}>{mib(p.shared)}</text>
+        <text x={p.labelX} y={p.sharedY + 14} class="s-small" fill={TOKEN.muted}>shared, held once</text>
+
+        <text x={p.x + 14} y={BASE_Y + 20} class="s-label s-num" fill={TOKEN.fg}>
+          {p.workers} workers: {total(p.pssTotal)}
+        </text>
+        <text x={p.x + 14} y={BASE_Y + 35} class="s-small" fill={TOKEN.muted}>proportional set size, five of {p.workers} drawn</text>
+      </g>
+    ))
+  }
+  <line x1={W / 2} y1="10" x2={W / 2} y2={H - 8} stroke={TOKEN.border} stroke-width="1" />
+</Schematic>

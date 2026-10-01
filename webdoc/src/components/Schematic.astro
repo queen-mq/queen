@@ -1,0 +1,117 @@
+---
+/**
+ * The frame every inline-SVG schematic shares: the figure, the accessible
+ * name, the caption, and the text styles the drawings use.
+ *
+ * Not used in MDX directly. JobLifecycle, LeaseTimeline, RollingUpdate,
+ * WorkerTimeline, SupervisorTopology and PreforkMemory compute their geometry
+ * and pass the marks in as children; this component owns what they would
+ * otherwise each repeat. Partition.astro predates it and keeps its own frame,
+ * which this one matches.
+ *
+ * The drawing scales down with the column until `minWidth`, then the figure
+ * scrolls sideways instead: below that the labels would shrink past reading.
+ */
+interface Props {
+  /** The viewBox width, in the drawing's own units (pixels at full size). */
+  width: number;
+  /** The viewBox height. */
+  height: number;
+  /** What the figure shows, for readers who cannot see it. */
+  alt: string;
+  /** One line under the figure: what it demonstrates. */
+  caption?: string;
+  /** Repo-relative artifact any measured value on the figure comes from. */
+  source?: string;
+  /** The narrowest the drawing may be rendered before the figure scrolls. */
+  minWidth?: number;
+}
+
+const { width, height, alt, caption, source, minWidth = Math.round(width * 0.82) } = Astro.props;
+---
+
+<figure class="nb-schematic">
+  <svg
+    viewBox={`0 0 ${width} ${height}`}
+    width={width}
+    height={height}
+    role="img"
+    aria-label={alt}
+    xmlns="http://www.w3.org/2000/svg"
+    style={`min-width: ${minWidth}px`}
+  >
+    <title>{alt}</title>
+    <slot />
+  </svg>
+  {
+    (caption || source) && (
+      <figcaption>
+        {caption}
+        {source && (
+          <>
+            {caption ? " " : ""}
+            <span class="nb-schematic-source">
+              Values from <code>{source}</code>.
+            </span>
+          </>
+        )}
+      </figcaption>
+    )
+  }
+</figure>
+
+<style is:global>
+  .nb-schematic {
+    margin: 1.25rem 0;
+    border: 1px solid var(--nb-border);
+    border-radius: 0.5rem;
+    padding: 0.75rem 0.5rem 0.5rem;
+    overflow-x: auto;
+  }
+  .nb-schematic svg {
+    display: block;
+    margin: 0 auto;
+    max-width: 100%;
+    height: auto;
+  }
+  .nb-schematic figcaption {
+    margin-top: 0.5rem;
+    text-align: center;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    color: var(--nb-muted-foreground);
+  }
+  .nb-schematic .nb-schematic-source code {
+    font-size: 0.75rem;
+  }
+  /* Fills come from attributes on each mark, never from here: a CSS fill
+   * would override every attribute and flatten the semantic colours. */
+  .nb-schematic text {
+    font-family: var(--nb-font-sans);
+    font-size: 12px;
+  }
+  .nb-schematic .s-title {
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .nb-schematic .s-label {
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .nb-schematic .s-note {
+    font-size: 11.5px;
+  }
+  .nb-schematic .s-small {
+    font-size: 10.5px;
+  }
+  .nb-schematic .s-tiny {
+    font-size: 9.5px;
+  }
+  .nb-schematic .s-code {
+    font-family: var(--nb-font-mono);
+    font-size: 11.5px;
+  }
+  .nb-schematic .s-num {
+    font-variant-numeric: tabular-nums;
+  }
+</style>
