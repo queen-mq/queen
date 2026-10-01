@@ -671,7 +671,10 @@ final class PhpSupervisor
                 if ($poolHadProbe && !$wasProbe) {
                     continue;
                 }
-                if ($exitCode === 0) {
+                // Backoff is for short-lived exits. A worker that ran this
+                // long is not crash-looping: queue:work exits 12 at --memory,
+                // and a job timeout kills the worker.
+                if ($exitCode === 0 || (!$wasProbe && $runtime >= (float) $options['stable_after'])) {
                     $this->resetCrashes($name, $queue);
                 } else {
                     $this->registerCrash(
