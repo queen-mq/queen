@@ -5,10 +5,12 @@ namespace Queen\Laravel;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Support\ServiceProvider;
+use Queen\Laravel\Dashboard\ConsoleLinks;
 use Queen\Laravel\Dashboard\DashboardRepository;
 use Queen\Laravel\Dashboard\DashboardScript;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Queen\Laravel\Dashboard\FailedJobsReadModel;
+use Queen\Laravel\Dashboard\QueueContentsReader;
 use Queen\Laravel\Dashboard\RemoteStatusReader;
 use Queen\Laravel\Dashboard\JobMetricsReader;
 use Queen\Laravel\Monitoring\JobMetricsRecorder;
@@ -292,33 +294,22 @@ class QueenServiceProvider extends ServiceProvider
         });
 
         $this->app->singleton(ThroughputReader::class, function ($app): ThroughputReader {
-            // A dashboard render must not queue behind retries or a slow broker.
-            $timeout = min(5, $this->configurationInteger(
-                $app['config']->get('queen.supervisor.http_timeout', 5),
-                'queen.supervisor.http_timeout',
-                1,
-            ));
+            $timeout = $this->dashboardReadTimeout($app);
 
             return new ThroughputReader(
-                function (string $connection) use ($app, $timeout): Queen {
-                    $resolved = SupervisorConfiguration::readOnlyConnection(
-                        $connection,
-                        (array) $app['config']->get('queen.supervisor', []),
-                        (array) $app['config']->get('queen', []),
-                        (array) $app['config']->get('queue.connections', []),
-                    );
-
-                    return new Queen([
-                        'urls' => $resolved['urls'],
-                        'bearerToken' => $resolved['bearer_token'],
-                        'headers' => $resolved['headers'],
-                        'timeoutMillis' => $timeout * 1000,
-                        'retryAttempts' => 1,
-                        'retryDelayMillis' => 0,
-                    ]);
-                },
+                $this->dashboardReadClient($app, $timeout),
                 $app->bound('cache') ? fn () => $app['cache']->store() : null,
                 null,
+                $timeout * 1000,
+            );
+        });
+
+        $this->app->singleton(QueueContentsReader::class, function ($app): QueueContentsReader {
+            $timeout = $this->dashboardReadTimeout($app);
+
+            return new QueueContentsReader(
+                $this->dashboardReadClient($app, $timeout),
+                $app->bound('cache') ? fn () => $app['cache']->store() : null,
                 $timeout * 1000,
             );
         });
@@ -378,6 +369,43 @@ class QueenServiceProvider extends ServiceProvider
     private function remoteStatusEnabled($app): bool
     {
         return $app['config']->get('queen.supervisor.remote_status.enabled', false) === true;
+    }
+
+    /** Seconds a dashboard read may take: a render must not queue behind a slow broker. */
+    private function dashboardReadTimeout($app): int
+    {
+        return min(5, $this->configurationInteger(
+            $app['config']->get('queen.supervisor.http_timeout', 5),
+            'queen.supervisor.http_timeout',
+            1,
+        ));
+    }
+
+    /**
+     * A read client per Laravel queue connection, with the supervisor's read
+     * credential and one attempt, so a render never waits for retries.
+     *
+     * @return \Closure(string): Queen
+     */
+    private function dashboardReadClient($app, int $timeout): \Closure
+    {
+        return function (string $connection) use ($app, $timeout): Queen {
+            $resolved = SupervisorConfiguration::readOnlyConnection(
+                $connection,
+                (array) $app['config']->get('queen.supervisor', []),
+                (array) $app['config']->get('queen', []),
+                (array) $app['config']->get('queue.connections', []),
+            );
+
+            return new Queen([
+                'urls' => $resolved['urls'],
+                'bearerToken' => $resolved['bearer_token'],
+                'headers' => $resolved['headers'],
+                'timeoutMillis' => $timeout * 1000,
+                'retryAttempts' => 1,
+                'retryDelayMillis' => 0,
+            ]);
+        };
     }
 
     private function configurationInteger(mixed $value, string $name, int $minimum): int
@@ -494,6 +522,8 @@ class QueenServiceProvider extends ServiceProvider
             }
             $attributes['domain'] = $domain;
         }
+        // The Workload page checks it again: cached routes skip this method.
+        ConsoleLinks::fromConfig($this->app['config']->get('queen.dashboard.console_url'));
 
         $this->app['router']->group($attributes, function (): void {
             require __DIR__ . '/../../routes/dashboard.php';

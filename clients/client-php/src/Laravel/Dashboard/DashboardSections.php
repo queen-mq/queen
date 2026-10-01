@@ -52,7 +52,7 @@ final class DashboardSections
             'route' => 'queen.dashboard.configuration',
             'view' => 'queen::dashboard.partials.configuration',
             'title' => 'Configuration',
-            'description' => 'Worker settings published by the running supervisor generation.',
+            'description' => 'Tuning advice, and every Queen setting of this application with its default and meaning.',
         ],
     ];
 

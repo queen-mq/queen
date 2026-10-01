@@ -15,6 +15,7 @@ use Psr\Http\Message\RequestInterface;
 use Orchestra\Testbench\TestCase;
 use Queen\Laravel\Dashboard\DashboardScript;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
+use Queen\Laravel\Dashboard\QueueContentsReader;
 use Queen\Laravel\Dashboard\RemoteStatusReader;
 use Queen\Laravel\Dashboard\ThroughputReader;
 use Queen\Laravel\QueenServiceProvider;
@@ -35,6 +36,9 @@ final class LaravelDashboardTest extends TestCase
     /** @var list<RequestInterface> */
     private array $throughputRequests = [];
 
+    /** @var list<RequestInterface> */
+    private array $queueContentsRequests = [];
+
     /** 2026-09-29T15:03:30Z */
     private const THROUGHPUT_NOW = 1790694210;
 
@@ -44,8 +48,11 @@ final class LaravelDashboardTest extends TestCase
         $this->stateDirectory = sys_get_temp_dir() . '/queen-dashboard-state-' . $suffix;
         $this->failedPath = sys_get_temp_dir() . '/queen-dashboard-failed-' . $suffix . '.json';
         parent::setUp();
-        // No test reaches a real broker for the throughput counters.
+        // No test reaches a real broker for the throughput counters, the
+        // queue contents or the job metrics.
         $this->throughputBroker([]);
+        $this->queueContentsBroker([]);
+        $this->jobMetricsBroker([]);
     }
 
     protected function tearDown(): void
@@ -1793,6 +1800,88 @@ final class LaravelDashboardTest extends TestCase
         $this->get('/queen/failed-jobs/failed-1')->assertForbidden();
     }
 
+    public function testAFailedJobIsRetriedFromItsDetailWithOneClick(): void
+    {
+        $this->app['config']->set('queue.connections.discard', ['driver' => 'null']);
+        $this->failedJobsFile(2, ['connection' => 'discard', 'payload' => json_encode([
+            'uuid' => '9b2c1d3e-0000-4000-8000-000000000001',
+            'displayName' => 'App\\Jobs\\SendInvoice',
+            // queue:retry unserializes the command to refresh retryUntil.
+            'data' => ['command' => serialize(new \stdClass())],
+        ], JSON_THROW_ON_ERROR)]);
+        $this->app['env'] = 'local';
+
+        $form = $this->dashboardXPath($this->get('/queen/failed-jobs/failed-1')->assertOk()->getContent())
+            ->query('//section[@id="failed-job"]//form[@method="post"]')->item(0);
+        $this->assertNotNull($form, 'the detail offers a retry button');
+        $this->assertSame('/queen/failed-jobs/failed-1/retry', $form->getAttribute('action'));
+
+        $this->withSession(['_token' => 'queen-csrf'])
+            ->post('/queen/failed-jobs/failed-1/retry', ['_token' => 'queen-csrf'])
+            ->assertStatus(303)
+            ->assertHeader('Location', '/queen/failed-jobs')
+            ->assertSessionHas('queen_dashboard_control_status', 'Failed job [failed-1] was pushed back onto queue [default].');
+        $remaining = array_column(json_decode((string) file_get_contents($this->failedPath), true), 'id');
+        $this->assertSame(['failed-2'], $remaining, 'queue:retry removed it from the failed-job store');
+    }
+
+    public function testTheFailedJobsListPointsToTheRetryButton(): void
+    {
+        $this->failedJobsFile(1);
+
+        $help = $this->dashboardXPath($this->get('/queen/failed-jobs')->assertOk()->getContent())
+            ->query('//p[@class="failed-help"]')->item(0);
+
+        $this->assertSame(
+            "Select a job to see why it failed and to retry it; payloads are never displayed. Use Laravel's queue commands to forget, flush or prune jobs.",
+            trim($help->textContent),
+        );
+    }
+
+    public function testRetryNeedsCsrfAndTheDashboardAbility(): void
+    {
+        $this->failedJobsFile(1);
+        $this->app['env'] = 'local';
+        $this->post('/queen/failed-jobs/failed-1/retry')->assertStatus(419);
+        $this->get('/queen/failed-jobs/failed-1/retry')->assertStatus(405);
+
+        Gate::define('viewQueenDashboard', static fn (?Authenticatable $user = null): bool => false);
+        $this->app['env'] = 'production';
+        $this->withSession(['_token' => 'queen-csrf'])
+            ->post('/queen/failed-jobs/failed-1/retry', ['_token' => 'queen-csrf'])
+            ->assertForbidden();
+        $this->assertCount(1, json_decode((string) file_get_contents($this->failedPath), true));
+    }
+
+    public function testARetryThatCannotRunKeepsTheJobAndSaysWhy(): void
+    {
+        $this->failedJobsFile(1, ['connection' => 'missing-connection']);
+        $this->app['env'] = 'local';
+
+        $this->withSession(['_token' => 'queen-csrf'])
+            ->post('/queen/failed-jobs/failed-1/retry', ['_token' => 'queen-csrf'])
+            ->assertStatus(303)
+            ->assertHeader('Location', '/queen/failed-jobs/failed-1')
+            ->assertSessionHas('queen_dashboard_control_error');
+        $this->assertStringContainsString(
+            'Failed job [failed-1] was not retried',
+            (string) session('queen_dashboard_control_error'),
+        );
+        $this->assertCount(1, json_decode((string) file_get_contents($this->failedPath), true));
+    }
+
+    public function testRetryingAJobThatIsNoLongerFailedSaysSo(): void
+    {
+        $this->failedJobsFile(1);
+        $this->app['env'] = 'local';
+
+        $this->withSession(['_token' => 'queen-csrf'])
+            ->post('/queen/failed-jobs/failed-9/retry', ['_token' => 'queen-csrf'])
+            ->assertStatus(303)
+            ->assertHeader('Location', '/queen/failed-jobs')
+            ->assertSessionHas('queen_dashboard_control_error', 'Failed job [failed-9] is no longer in the failed-job store.');
+    }
+
     private function failedJobsTable(int $rows, bool $uuids = false): void
     {
         Schema::create('failed_jobs', function (Blueprint $table): void {
@@ -1979,6 +2068,298 @@ final class LaravelDashboardTest extends TestCase
         }
 
         $this->assertSame([], $this->throughputRequests);
+        $this->assertSame([], $this->queueContentsRequests, 'only the workload page reads the queue contents');
+    }
+
+    public function testTheWorkloadPageShowsWhatIsInEachQueueNow(): void
+    {
+        $this->app['config']->set('queen.supervisor.supervisors.default.queues', ['high', 'default', 'mail', 'reports', 'idle']);
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->queueContentsBroker([
+            'high' => ['pending' => 5, 'processing' => 1, 'ready' => 4],
+            'default' => ['pending' => 2, 'processing' => 0, 'ready' => 2],
+            'mail' => ['pending' => 3, 'processing' => 2, 'ready' => 1],
+            'reports' => ['pending' => 1, 'processing' => 0, 'ready' => 1],
+            'idle' => ['pending' => 0, 'processing' => 0, 'ready' => 0],
+        ], [
+            ['consumer_group' => 'laravel', 'queue_name' => 'high', 'partition_name' => 'laravel-0003', 'time_lag_seconds' => 3913],
+            ['consumer_group' => 'laravel', 'queue_name' => 'default', 'partition_name' => 'laravel-0001', 'time_lag_seconds' => 900],
+            ['consumer_group' => 'laravel', 'queue_name' => 'mail', 'partition_name' => 'laravel-0002', 'time_lag_seconds' => 185],
+            // Another consumer group's lag is not this one's.
+            ['consumer_group' => 'billing', 'queue_name' => 'reports', 'partition_name' => 'laravel-0000', 'time_lag_seconds' => 7200],
+        ]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/workload')->assertOk()->getContent());
+
+        $this->assertSame('queue-contents', $xpath->query('//main//section')->item(0)->getAttribute('id'), 'the card opens the page');
+        $card = $xpath->query('//section[@id="queue-contents"]')->item(0);
+        $this->assertSame('In the queue now', trim($xpath->query('.//h2', $card)->item(0)->textContent));
+        $this->assertStringContainsString(
+            'Oldest unfinished is how long the oldest job not yet acknowledged has been in the queue, waiting or running; the broker reports it from one minute.',
+            $card->textContent,
+        );
+        $this->assertSame([
+            ['high laravel', '4', '1', '1 h 05 min'],
+            ['default laravel', '2', '0', '15 min'],
+            ['mail laravel', '1', '2', '3 min'],
+            ['reports laravel', '1', '0', 'under a minute'],
+            ['idle laravel', '0', '0', '—'],
+        ], $this->tableRows($xpath, 'Jobs in each queue now'));
+        $badge = fn (int $row): ?string => $xpath->query('//div[@aria-label="Jobs in each queue now"]//tbody/tr[' . $row . ']/td[4]/span[contains(@class, "badge")]')->item(0)?->getAttribute('class');
+        $this->assertSame('badge danger', $badge(1), 'an hour or more');
+        $this->assertSame('badge warning', $badge(2), 'ten minutes or more');
+        $this->assertNull($badge(3));
+        $this->assertNull($badge(4));
+        $this->assertSame(0, $xpath->query('//section[@id="queue-contents"]//a')->length, 'no console, no links');
+        $this->assertSame(1, count(array_filter(
+            $this->queueContentsRequests,
+            fn (RequestInterface $request): bool => $request->getUri()->getPath() === '/api/v1/consumer-groups/lagging',
+        )), 'one lag read for the connection');
+    }
+
+    public function testQueueRowsLinkToTheQueenConsoleWhenOneIsConfigured(): void
+    {
+        $this->app['config']->set('queen.supervisor.supervisors.default.queues', ['high', 'billing/eu west']);
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->queueContentsBroker(['billing/eu west' => ['pending' => 3, 'processing' => 1, 'ready' => 2]], 503);
+        $this->app['config']->set('queen.dashboard.console_url', 'https://console.example.test/queen/');
+
+        $xpath = $this->dashboardXPath($this->get('/queen/workload')->assertOk()->getContent());
+
+        $links = iterator_to_array($xpath->query('//div[@aria-label="Jobs in each queue now"]//tbody/tr[2]//a'));
+        $this->assertSame([
+            'https://console.example.test/queen/messages?queue=billing%2Feu%20west&status=pending',
+            'https://console.example.test/queen/messages?queue=billing%2Feu%20west&status=processing',
+            'https://console.example.test/queen/queues/billing%2Feu%20west',
+        ], array_map(fn (\DOMElement $link): string => $link->getAttribute('href'), $links));
+        $this->assertSame(['2', '1'], [trim($links[0]->textContent), trim($links[1]->textContent)]);
+        foreach ($xpath->query('//section[@id="queue-contents"]//a') as $link) {
+            $this->assertSame('_blank', $link->getAttribute('target'));
+            $this->assertSame('noopener noreferrer', $link->getAttribute('rel'));
+        }
+        $this->assertSame(
+            ['2', '1', '—'],
+            array_slice($this->tableRows($xpath, 'Jobs in each queue now')[1], 1, 3),
+            'without a lag answer the oldest age is unknown, not under a minute',
+        );
+    }
+
+    public function testQueuesOfSeveralConnectionsGetNoConsoleLinks(): void
+    {
+        $this->app['config']->set('queue.connections.secondary', ['driver' => 'queen']);
+        $this->app['config']->set('queen.supervisor.supervisors.reports', [
+            'connection' => 'secondary',
+            'consumer_group' => 'laravel',
+            'queues' => ['reports'],
+        ]);
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->app['config']->set('queen.dashboard.console_url', 'https://console.example.test');
+
+        $xpath = $this->dashboardXPath($this->get('/queen/workload')->assertOk()->getContent());
+
+        $this->assertCount(3, $this->tableRows($xpath, 'Jobs in each queue now'));
+        $this->assertSame(0, $xpath->query('//section[@id="queue-contents"]//a')->length, 'one console address serves one broker');
+        $this->assertStringContainsString(
+            'No console links: these queues use more than one connection, and one console address serves one broker.',
+            $xpath->query('//section[@id="queue-contents"]')->item(0)->textContent,
+        );
+    }
+
+    public function testThePackageReadersDegradeWhenTheirConnectionCannotBeResolved(): void
+    {
+        // A URL with user info is refused while the read client is built:
+        // the readers mark the queue unavailable, and nothing is requested.
+        $this->app['config']->set('queue.connections.queen.url', 'https://ops:Pw-41d7@queen.invalid');
+        $queue = [['connection' => 'queen', 'consumer_group' => 'laravel', 'queue' => 'default']];
+        foreach ([QueueContentsReader::class, ThroughputReader::class] as $reader) {
+            $this->app->forgetInstance($reader);
+            $this->assertSame($this->app->make($reader), $this->app->make($reader), "{$reader} is a singleton");
+        }
+
+        $this->assertFalse($this->app->make(QueueContentsReader::class)->read($queue)['queues'][0]['available']);
+        $this->assertFalse($this->app->make(ThroughputReader::class)->read($queue, '1h')['queues'][0]['available']);
+    }
+
+    public function testAnUnreachableBrokerLeavesTheQueueContentsUnavailable(): void
+    {
+        $this->liveSupervisor(['engine' => 'php', 'state' => 'running', 'pool_status' => []]);
+        $this->queueContentsBroker(['high' => 503, 'default' => 503], 503);
+        $this->app['config']->set('queen.dashboard.console_url', 'https://console.example.test');
+
+        $xpath = $this->dashboardXPath($this->get('/queen/workload')->assertOk()->getContent());
+
+        $empty = $xpath->query('//section[@id="queue-contents"]//div[@class="empty"]')->item(0);
+        $this->assertNotNull($empty);
+        $this->assertSame('Unavailable The broker could not be read for these queues.', preg_replace('/\s+/', ' ', trim($empty->textContent)));
+        $this->assertSame(1, $xpath->query('//section[@id="throughput"]')->length, 'the other cards stay');
+
+        $this->queueContentsBroker(['default' => 503]);
+        $xpath = $this->dashboardXPath($this->get('/queen/workload')->assertOk()->getContent());
+
+        $this->assertSame([
+            ['high laravel', '0', '0', '—', 'Open in console'],
+            ['default laravel', '—', '—', 'Unavailable', 'Open in console'],
+        ], $this->tableRows($xpath, 'Jobs in each queue now'));
+        $this->assertSame('badge warning', $xpath->query('//div[@aria-label="Jobs in each queue now"]//tbody/tr[2]/td[4]/span')->item(0)->getAttribute('class'));
+        $this->assertSame(0, $xpath->query('//div[@aria-label="Jobs in each queue now"]//tbody/tr[2]/td[position() < 4]//a')->length, 'no message links without numbers');
+    }
+
+    public function testTheConfigurationPageGivesAdviceAboveTheSettings(): void
+    {
+        $this->app['config']->set('queen.supervisor.prefork', false);
+        $this->app['config']->set('queen.supervisor.event_driven', false);
+        $this->liveSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []]);
+        $this->failedJobsFile(2);
+        $this->jobMetricsBroker(['App\Jobs\Export' => ['processed' => 3, 'failed' => 0, 'runtime_ms' => 300000, 'max_ms' => 130000]]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/configuration')->assertOk()->getContent());
+
+        $this->assertSame(
+            ['advice', 'configuration'],
+            array_map(fn (\DOMElement $section): string => $section->getAttribute('id'), iterator_to_array($xpath->query('//main//section'))),
+            'the advice comes above the settings',
+        );
+        $items = iterator_to_array($xpath->query('//section[@id="advice"]//li[contains(@class, "advice")]'));
+        $this->assertSame(
+            ['Deploys interrupt App\Jobs\Export', 'Every worker boots Laravel on its own', 'Bursts wait for the next poll', '2 failed jobs'],
+            array_map(fn (\DOMElement $item): string => trim($xpath->query('.//h3', $item)->item(0)->textContent), $items),
+            'most severe first, from the settings, the running supervisor, the failed jobs and the last hour of jobs',
+        );
+        $this->assertSame(['Warning', 'Info', 'Info', 'Info'], array_map(
+            fn (\DOMElement $item): string => trim($xpath->query('.//span[contains(@class, "badge")]', $item)->item(0)->textContent),
+            $items,
+        ));
+        $this->assertStringContainsString('2 min 10 s', $items[0]->textContent);
+        $this->assertStringContainsString('QUEEN_SUPERVISOR_SHUTDOWN_GRACE', $items[0]->textContent);
+        $docs = iterator_to_array($xpath->query('//section[@id="advice"]//a[starts-with(@href, "https://queenmq.com/")]'));
+        $this->assertCount(4, $docs);
+        foreach ($docs as $link) {
+            $this->assertStringStartsWith('Read more', trim($link->textContent));
+            $this->assertSame('_blank', $link->getAttribute('target'));
+            $this->assertSame('noopener noreferrer', $link->getAttribute('rel'));
+        }
+        $this->assertSame('Open Failed jobs', trim($xpath->query('//section[@id="advice"]//a[@href="/queen/failed-jobs"]')->item(0)->textContent));
+    }
+
+    public function testTheConfigurationPageSaysPlainlyWhenThereIsNoAdvice(): void
+    {
+        $this->app['config']->set('queen.supervisor.prefork', true);
+        $this->app['config']->set('queen.supervisor.event_driven', true);
+        $this->liveSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/configuration')->assertOk()->getContent());
+
+        $this->assertSame(0, $xpath->query('//section[@id="advice"]//li')->length);
+        $this->assertSame(
+            'No advice: nothing in these settings, the running supervisor or the last hour of jobs calls for a change.',
+            trim($xpath->query('//section[@id="advice"]//div[@class="empty"]')->item(0)->textContent),
+        );
+    }
+
+    public function testTheSettingsShowEachValueWithItsDefaultAndMeaning(): void
+    {
+        $this->app['config']->set('queue.connections.queen.prefetch', 4);
+        $this->app['config']->set('queue.connections.queen.lease_renewal', true);
+        $this->app['config']->set('queue.connections.queen.ack_async', 'yes');
+        $this->app['config']->set('queen.supervisor.supervisors.default.backoff', 5);
+        $this->app['config']->set('queen.supervisor.supervisors.default.max_jobs', 1000);
+        $this->liveSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []]);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/configuration')->assertOk()->getContent());
+
+        $connection = $this->settingsRows($xpath, 'Connection settings');
+        $this->assertSame(['4', '1'], [$connection['prefetch'][1], $connection['prefetch'][2]]);
+        $this->assertSame(1, $xpath->query('//div[@aria-label="Connection settings"]//tr[td[1]/code="prefetch"]/td[2]/strong')->length, 'a changed value stands out');
+        $this->assertSame('invalid', $connection['ack_async'][1]);
+        $this->assertSame(1, $xpath->query('//div[@aria-label="Connection settings"]//tr[td[1]/code="ack_async"]/td[2]/span[@class="badge warning"]')->length);
+        $this->assertSame(['on', 'off'], [$connection['lease_renewal'][1], $connection['lease_renewal'][2]]);
+        $this->assertSame('30,000 ms', $connection['timeout'][1]);
+        $this->assertStringContainsString('QUEEN_PREFETCH', $connection['prefetch'][0]);
+        $supervisor = $this->settingsRows($xpath, 'Supervisor settings');
+        $this->assertSame(['75 s', '75 s'], [$supervisor['shutdown_grace'][1], $supervisor['shutdown_grace'][2]]);
+        $this->assertSame('on', $supervisor['QUEEN_SUPERVISOR_LEASE_SERVICE'][1]);
+        foreach ([...$connection, ...$supervisor] as $name => $cells) {
+            $this->assertNotSame('', $cells[3], "{$name} has a meaning");
+        }
+
+        $pool = $this->tableRows($xpath, 'Worker pools')[0];
+        $this->assertSame('default', $pool[0]);
+        $this->assertStringContainsString('backoff 5 s', $pool[6]);
+        $this->assertStringContainsString('max jobs 1,000', $pool[6]);
+        $this->assertStringContainsString('max time no limit', $pool[6]);
+        $this->assertStringContainsString('As the running supervisor published them', $xpath->query('//section[@id="configuration"]')->item(0)->textContent);
+    }
+
+    public function testWithoutARunningSupervisorThePoolsAreThisApplicationsWithWhatTheSupervisorWouldRefuse(): void
+    {
+        $this->app['config']->set('queen.supervisor.supervisors.default.min_processes', 9);
+
+        $xpath = $this->dashboardXPath($this->get('/queen/configuration')->assertOk()->getContent());
+
+        $this->assertStringContainsString(
+            "No running supervisor has published its pools, so these are this application's.",
+            $xpath->query('//section[@id="configuration"]')->item(0)->textContent,
+        );
+        $pool = $this->tableRows($xpath, 'Worker pools')[0];
+        $this->assertSame(['default', 'min_processes above max_processes'], [$pool[0], $pool[4]]);
+        $this->assertSame(1, $xpath->query('//div[@aria-label="Worker pools"]//tbody/tr[1]/td[5]/span[@class="badge warning"]')->length);
+    }
+
+    public function testCredentialsInTheConfigurationNeverReachTheConfigurationPage(): void
+    {
+        $secrets = [
+            'queen.bearer_token' => 'Tok-Bearer-91c3e',
+            'queue.connections.queen.bearer_token' => 'Tok-Connection-5ab02',
+            'queen.supervisor.read_bearer_token' => 'Tok-Read-77d1f',
+            'queen.supervisor.remote_status.key' => 'Key-Status-0e9d4',
+            'queen.metrics.token' => 'Tok-Metrics-' . str_repeat('8', 32),
+            'queen.supervisor_binary.manifest_sha256' => 'Sha-Manifest-3f6a1',
+            // A key the page does not list at all.
+            'queen.custom_password' => 'Pass-Custom-e1f47',
+        ];
+        foreach ($secrets as $key => $value) {
+            $this->app['config']->set($key, $value);
+        }
+        $this->app['config']->set('queue.connections.queen.headers', ['Authorization' => 'Bearer Hdr-Value-2c8b7', 'X-Api-Key' => 'Hdr-Value-a41e0']);
+        $this->app['config']->set('queue.connections.queen.urls', ['https://ops-user:Url-Pass-6d3c9@queen-0.internal.test:6632/tenant?key=Url-Query-b7e25']);
+        $this->liveSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []]);
+
+        $content = $this->get('/queen/configuration')->assertOk()->getContent();
+
+        foreach ([...array_values($secrets), 'Hdr-Value-2c8b7', 'Hdr-Value-a41e0', 'ops-user', 'Url-Pass-6d3c9', 'Url-Query-b7e25'] as $secret) {
+            $this->assertStringNotContainsString($secret, $content);
+        }
+        $xpath = $this->dashboardXPath($content);
+        $connection = $this->settingsRows($xpath, 'Connection settings');
+        $this->assertSame('set', $connection['bearer_token'][1]);
+        $this->assertSame('https://queen-0.internal.test:6632', $connection['urls'][1]);
+        $this->assertSame('2 set, values hidden', $connection['headers'][1]);
+        $supervisor = $this->settingsRows($xpath, 'Supervisor settings');
+        $this->assertSame('set', $supervisor['read_bearer_token'][1]);
+        $this->assertSame('set', $supervisor['remote_status.key'][1]);
+    }
+
+    public function testAnInvalidConsoleUrlIsRefusedAtBoot(): void
+    {
+        foreach ([
+            'ftp://console.example.test',
+            'https://admin:hunter2@console.example.test',
+            'https://console.example.test/?tenant=1',
+            'https://console.example.test/#queues',
+            'javascript:alert(1)',
+            '/queen-console',
+            "https://console.example.test/\nX-Injected: 1",
+            42,
+        ] as $invalid) {
+            $this->app['config']->set('queen.dashboard.console_url', $invalid);
+            try {
+                (new QueenServiceProvider($this->app))->boot();
+                $this->fail('accepted ' . var_export($invalid, true));
+            } catch (\InvalidArgumentException $exception) {
+                $this->assertStringContainsString('queen.dashboard.console_url', $exception->getMessage());
+                $this->assertStringNotContainsString('hunter2', $exception->getMessage(), 'the value may hold a credential');
+            }
+        }
     }
 
     public function testCountersUseTheSupervisorsReadCredential(): void
@@ -2027,6 +2408,66 @@ final class LaravelDashboardTest extends TestCase
         ));
     }
 
+    /**
+     * The job metrics of one worker in the current five-minute bucket.
+     *
+     * @param array<string, array<string, int>> $classes counts per job class
+     */
+    private function jobMetricsBroker(array $classes): void
+    {
+        $rows = $classes === [] ? [] : [[
+            'key' => 'jobs/v1/' . sprintf('%010d', intdiv(time(), 300) * 300) . '/aaaa',
+            'value' => ['classes' => $classes],
+        ]];
+        $this->app->instance(\Queen\Laravel\Dashboard\JobMetricsReader::class, new \Queen\Laravel\Dashboard\JobMetricsReader(
+            new Queen([
+                'url' => 'http://queen.test:6632',
+                'retryAttempts' => 1,
+                'retryDelayMillis' => 0,
+                'handler' => HandlerStack::create(new PlanHandler([], ['status' => 200, 'json' => ['results' => [[
+                    'rows' => $rows,
+                    'truncated' => false,
+                ]]]])),
+            ]),
+            'queen-metrics',
+        ));
+    }
+
+    /**
+     * The broker behind the queue-contents card: a depth answer (or a failing
+     * status) per queue, an empty queue for any other, and the lagging
+     * partitions (or a failing status).
+     *
+     * @param array<string, array<string, mixed>|int> $depths
+     * @param list<array<string, mixed>>|int $lagging
+     */
+    private function queueContentsBroker(array $depths, array|int $lagging = []): void
+    {
+        $this->queueContentsRequests = [];
+        $handler = function (RequestInterface $request) use ($depths, $lagging): FulfilledPromise {
+            $this->queueContentsRequests[] = $request;
+            $path = $request->getUri()->getPath();
+            $answer = 404;
+            if (preg_match('#^/api/v1/resources/queues/([^/]+)/depth$#D', $path, $matches) === 1) {
+                $answer = $depths[rawurldecode($matches[1])] ?? ['pending' => 0, 'processing' => 0, 'ready' => 0];
+            } elseif ($path === '/api/v1/consumer-groups/lagging') {
+                $answer = $lagging;
+            }
+            [$status, $body] = is_int($answer) ? [$answer, ['error' => 'unavailable']] : [200, $answer];
+
+            return new FulfilledPromise(new Response($status, ['Content-Type' => 'application/json'], json_encode($body)));
+        };
+        $this->app->instance(QueueContentsReader::class, new QueueContentsReader(
+            fn (string $connection): Queen => new Queen([
+                'url' => 'http://queen.test:6632',
+                'retryAttempts' => 1,
+                'retryDelayMillis' => 0,
+                'enableFailover' => false,
+                'handler' => HandlerStack::create($handler),
+            ]),
+        ));
+    }
+
     /** @return array<string, mixed> */
     private function queueOps(string $queue, string $bucket, int $completed, int $failed, int $pushed): array
     {
@@ -2061,6 +2502,21 @@ final class LaravelDashboardTest extends TestCase
                 $cells[] = trim($cell->textContent);
             }
             $rows[] = $cells;
+        }
+
+        return $rows;
+    }
+
+    /** @return array<string, list<string>> the cells of a settings table, by setting name */
+    private function settingsRows(\DOMXPath $xpath, string $label): array
+    {
+        $rows = [];
+        foreach ($xpath->query('//div[@aria-label="' . $label . '"]//tbody/tr') as $row) {
+            $name = trim((string) $xpath->query('./td[1]/code', $row)->item(0)?->textContent);
+            $rows[$name] = array_map(
+                fn (\DOMNode $cell): string => trim($cell->textContent),
+                iterator_to_array($xpath->query('./td', $row)),
+            );
         }
 
         return $rows;

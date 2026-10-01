@@ -4,10 +4,15 @@ namespace Queen\Laravel\Http\Controllers;
 
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\Request;
+use Illuminate\Support\Env;
+use Queen\Laravel\Dashboard\ApplicationSettings;
+use Queen\Laravel\Dashboard\ConsoleLinks;
 use Queen\Laravel\Dashboard\DashboardPage;
 use Queen\Laravel\Dashboard\DashboardRepository;
 use Queen\Laravel\Dashboard\JobMetricsReader;
+use Queen\Laravel\Dashboard\QueueContentsReader;
 use Queen\Laravel\Dashboard\ThroughputReader;
+use Queen\Laravel\Dashboard\TuningAdvisor;
 use Queen\Laravel\Monitoring\JobTags;
 use Queen\Laravel\Monitoring\TagMonitor;
 
@@ -18,6 +23,7 @@ final class DashboardController
         DashboardRepository $dashboard,
         DashboardPage $page,
         ThroughputReader $throughput,
+        QueueContentsReader $queueContents,
         JobMetricsReader $jobMetrics,
         TagMonitor $tags,
     ): View {
@@ -29,12 +35,19 @@ final class DashboardController
             $data['refreshUrl'] .= '?cursor=' . $cursor;
         }
         if ($section === 'workload') {
-            // Only the workload page reads the broker's counters.
+            // Only the workload page reads the broker's counters and queue contents.
             $range = ThroughputReader::range($request->query('range'));
             $data['throughput'] = $throughput->read($data['snapshot']['queues'], $range);
             if ($range !== ThroughputReader::DEFAULT_RANGE) {
                 $data['refreshUrl'] .= '?range=' . $range;
             }
+            $data['queueContents'] = $queueContents->read($data['snapshot']['queues']);
+            $console = ConsoleLinks::fromConfig(config('queen.dashboard.console_url'));
+            // One console address serves one broker: with queues of several
+            // connections a link could open the wrong one.
+            $several = count(array_unique(array_column($data['queueContents']['queues'], 'connection'))) > 1;
+            $data['consoleLinks'] = $several ? null : $console;
+            $data['consoleLinksLeftOut'] = $several && $console !== null;
         }
 
         if ($section === 'jobs') {
@@ -52,7 +65,34 @@ final class DashboardController
             }
         }
 
+        if ($section === 'configuration') {
+            $application = $this->application();
+            $settings = new ApplicationSettings($application);
+            $data['settings'] = $settings->rows();
+            $data['pools'] = $settings->poolTable($data['snapshot']['configuration']['supervisors']);
+            $data['advice'] = (new TuningAdvisor())->advise(
+                $application,
+                $data['snapshot'],
+                $jobMetrics->read(JobMetricsReader::DEFAULT_RANGE),
+            );
+        }
+
         return view('queen::dashboard', $data);
+    }
+
+    /**
+     * This application's Queen configuration, and the environment variable
+     * the Rust master reads itself, as this host sees it.
+     *
+     * @return array<string, mixed>
+     */
+    private function application(): array
+    {
+        return [
+            'queen' => config('queen'),
+            'queue' => ['connections' => config('queue.connections')],
+            'env' => ['QUEEN_SUPERVISOR_LEASE_SERVICE' => Env::getRepository()->get('QUEEN_SUPERVISOR_LEASE_SERVICE')],
+        ];
     }
 
     /** @return array{available: bool, monitored: list<string>, selected: ?string, jobs: list<array<string, mixed>>} */

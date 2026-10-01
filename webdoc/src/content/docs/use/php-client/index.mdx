@@ -33,6 +33,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; ackDetached/popDetached, which this page documents, are unchanged.
+# sourceOfTruth re-read 2026-10-02 (through 79204459): the provider binds the queue-contents reader and config/queen.php gains dashboard.console_url; both are dashboard surface, and nothing this overview describes changes.
 ---
 
 The PHP client is a plain PSR-4 library, `Queen\` mapped onto `src/`, with an optional Laravel

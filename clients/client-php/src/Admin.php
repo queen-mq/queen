@@ -219,6 +219,14 @@ class Admin
         return $this->httpClient->get("/api/v1/consumer-groups/lagging?minLagSeconds={$minLagSeconds}");
     }
 
+    public function getLaggingConsumersAsync(int $minLagSeconds = 60, ?int $timeoutMillis = null): PromiseInterface
+    {
+        return $this->httpClient->getAsyncWithFailover(
+            "/api/v1/consumer-groups/lagging?minLagSeconds={$minLagSeconds}",
+            $timeoutMillis,
+        );
+    }
+
     public function deleteConsumerGroupForQueue(string $consumerGroup, string $queueName, bool $deleteMetadata = true): mixed
     {
         $dm = $deleteMetadata ? 'true' : 'false';

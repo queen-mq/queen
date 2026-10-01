@@ -499,6 +499,7 @@ td strong { color: var(--text); font-weight: 600; }
 .badge.warning { background: var(--warning-soft); color: var(--warning); }
 .badge.danger { background: var(--danger-soft); color: var(--danger); }
 .badge.muted { background: var(--surface-hover); color: var(--muted-strong); }
+.badge.info { background: var(--brand-soft); color: var(--brand); }
 .empty {
     padding: 42px 20px;
     color: var(--muted);
@@ -565,6 +566,25 @@ a.button {
 .throughput-note {
     margin: 0;
     padding: 0 20px 12px;
+    color: var(--muted);
+    font-size: 13px;
+}
+.queue-group {
+    display: block;
+    color: var(--muted);
+    font-size: 12px;
+}
+.table-link {
+    color: var(--brand);
+    font-weight: 600;
+    text-decoration: none;
+}
+.table-link:hover { color: var(--brand-hover); text-decoration: underline; }
+.table-link:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 2px; }
+.card-note {
+    margin: 0;
+    padding: 12px 20px;
+    border-top: 1px solid var(--border);
     color: var(--muted);
     font-size: 13px;
 }
@@ -712,6 +732,10 @@ body:has(dialog.drawer[open]) { overflow: hidden; }
 }
 .detail-block .detail-heading h3 { margin-bottom: 0; }
 .detail-heading-end { justify-content: flex-end; margin-top: 8px; }
+.retry-form { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.retry-form span { color: var(--muted); font-size: 13px; }
+.retry-command { margin-top: 12px; }
+.retry-command summary { color: var(--muted-strong); cursor: pointer; font-size: 13px; }
 .detail-block .detail-heading + pre { margin-top: 8px; }
 /* Shown only once the dashboard script runs: without it nothing would copy. */
 .copy-button { display: none; }
@@ -754,17 +778,58 @@ body:has(dialog.drawer[open]) { overflow: hidden; }
     color: var(--muted);
     font-size: 13px;
 }
-.configuration-disclosure summary {
-    min-height: 48px;
+.advice-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.advice {
+    padding: 16px 20px 16px 17px;
+    border-top: 1px solid var(--border);
+    border-left: 3px solid var(--brand);
+}
+.advice:first-child { border-top: 0; }
+.advice-critical { border-left-color: var(--danger); }
+.advice-warning { border-left-color: var(--warning); }
+.advice-heading {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 12px 20px;
-    color: var(--muted-strong);
-    font-weight: 600;
-    cursor: pointer;
+    flex-wrap: wrap;
+    gap: 10px;
 }
-.configuration-disclosure summary::marker { color: var(--brand); }
+.advice-heading h3 {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+.advice p { margin: 8px 0 0; font-size: 14px; }
+.advice-evidence { color: var(--muted-strong); }
+.advice-action strong { color: var(--text); }
+.advice-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+}
+.settings-note {
+    margin: 0;
+    padding: 0 20px 12px;
+    color: var(--muted);
+    font-size: 13px;
+}
+.settings-table td:first-child { white-space: nowrap; }
+.settings-table td:last-child { min-width: 320px; }
+.settings-legend {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 28px;
+    margin: 0;
+    padding: 16px 20px 20px;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+}
+.settings-legend dt { color: var(--text); font-weight: 650; }
+.settings-legend dd { margin: 2px 0 0; color: var(--muted); }
 .footer {
     padding-top: 26px;
     color: var(--muted);
@@ -794,6 +859,7 @@ body:has(dialog.drawer[open]) { overflow: hidden; }
     .layout { display: block; padding-top: 18px; }
     .sidebar nav { position: static; }
     .detail-list { grid-template-columns: minmax(0, 1fr); }
+    .settings-legend { grid-template-columns: minmax(0, 1fr); }
     .nav-list {
         grid-auto-flow: column;
         grid-auto-columns: max-content;

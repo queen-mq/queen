@@ -59,6 +59,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-09-30 (through 708fd8b2): a skipped event-driven pool now counts as evaluated, and both coordinators expose whether they hold a replica view; no documented behavior changes; page matches the code.
 # sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): pop_ahead pops ahead only after a full batch; the supervisor behavior this page states is unchanged.
+# sourceOfTruth re-read 2026-10-02 (through 79204459): config/queen.php only gains dashboard.console_url, and SupervisorConfiguration names a refused URL by scheme, host and port only; no supervisor setting or behavior this page states changes.
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel

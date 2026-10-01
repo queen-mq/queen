@@ -36,9 +36,19 @@
     <div class="detail-block">
         <div class="detail-heading">
             <h3>Retry</h3>
-            <button type="button" class="button copy-button" data-copy aria-label="Copy the retry command">Copy</button>
         </div>
-        <pre><code>php artisan queue:retry {{ $failedJob['id'] }}</code></pre>
+        <form class="retry-form" method="post" action="{{ route('queen.dashboard.failed-job.retry', ['id' => $failedJob['id']], false) }}">
+            @csrf
+            <button type="submit" class="button primary">Retry now</button>
+            <span>Runs <code>queue:retry</code>: the job goes back onto queue {{ $failedJob['queue'] ?? 'its queue' }} and leaves this list.</span>
+        </form>
+        <details class="retry-command">
+            <summary>From a terminal</summary>
+            <div class="detail-heading detail-heading-end">
+                <button type="button" class="button copy-button" data-copy aria-label="Copy the retry command">Copy</button>
+            </div>
+            <pre><code>php artisan queue:retry {{ $failedJob['id'] }}</code></pre>
+        </details>
     </div>
     <p class="sr-only" role="status" data-copy-status></p>
 </section>

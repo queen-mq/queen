@@ -75,6 +75,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through the cURL transport): HttpClient sends synchronous and detached requests over CurlTransport; the Transport subsection and the Errors section say so.
 # sourceOfTruth re-read 2026-10-01 (through the TCP keep-alive change): CurlTransport sets TCP keep-alive on every connection; the Transport subsection says so.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; the pop_ahead option row is unchanged.
+# sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): Admin gains getLaggingConsumersAsync, config/queen.php gains dashboard.console_url, and the dashboard routes add the failed-job retry; the consumer-group table, the configuration table and the Supervisor dashboard section say so. SupervisorConfiguration's refused-URL error, which no section quotes, no longer repeats credentials.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -443,6 +444,7 @@ upgrade.
 | `listConsumerGroups()` | `GET /api/v1/consumer-groups` |
 | `getConsumerGroup(string $name)` | `GET /api/v1/consumer-groups/:name` |
 | `getLaggingConsumers(int $minLagSeconds = 60)` | `GET /api/v1/consumer-groups/lagging?minLagSeconds=` |
+| `getLaggingConsumersAsync(int $minLagSeconds = 60, ?int $timeoutMillis = null)` | Same route through the failover-aware async client. |
 | `deleteConsumerGroupForQueue(string $consumerGroup, string $queueName, bool $deleteMetadata = true)` | `DELETE /api/v1/consumer-groups/:group/queues/:queue` |
 | `seekConsumerGroup(string $consumerGroup, string $queueName, array $options = [])` | `POST /api/v1/consumer-groups/:group/queues/:queue/seek` |
 | `refreshConsumerStats()` | `POST /api/v1/stats/refresh` |
@@ -557,6 +559,7 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `dashboard.refresh_seconds` | `QUEEN_DASHBOARD_REFRESH_SECONDS` | `5` seconds |
 | `dashboard.allow_local` | `QUEEN_DASHBOARD_ALLOW_LOCAL` | `true` |
 | `dashboard.failed_jobs_limit` | `QUEEN_DASHBOARD_FAILED_JOBS_LIMIT` | `50` rows per page |
+| `dashboard.console_url` | `QUEEN_DASHBOARD_CONSOLE_URL` | unset; an `http` or `https` URL without user info, query or fragment |
 | `supervisor_binary.install_path` | `QUEEN_SUPERVISOR_INSTALL_PATH` | `storage/queen-supervisor-bin` |
 | `supervisor_binary.release_base_url` | `QUEEN_SUPERVISOR_RELEASE_BASE_URL` | unset |
 | `supervisor_binary.manifest` | `QUEEN_SUPERVISOR_MANIFEST` | unset |
@@ -774,7 +777,9 @@ production, enabling the route without defining an allowing Gate still returns `
 key/value store, one slot per supervisor instance, and a panel on another host lists every instance
 read-only. Failed jobs are paged with a
 keyset cursor, and each has a detail page with its exception and stack trace, never its
-payload.
+payload, and a button that retries it. The Workload page shows the jobs waiting and running in
+each queue, with links to the Queen console when `dashboard.console_url` is set, and the
+Configuration page gives tuning advice beside every resolved setting, credentials never shown.
 
 The complete authorization example, route-cache procedure and local-versus-global scope are in
 [Supervisor dashboard](/use/laravel/dashboard).
