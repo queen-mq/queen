@@ -67,6 +67,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (Linux server campaign): the new section reports the 2026-10-01-linux-vm-horizon-raft dataset, whose drain lanes are the ones that use --backlog-first.
 # sourceOfTruth re-read 2026-10-02 (failure matrix): the new section reports the 2026-10-02-laravel-failure-matrix dataset, read from its tables.py output; compose.yml and compose.raft.yml gained BENCH_APP_IMAGE, which changes no measurement.
 # sourceOfTruth re-read 2026-10-02 (soak): the soak paragraph, its table and the laravel-soak-memory figure come from raw/soak, soak-memory.csv and tables.md of the failure-matrix dataset.
+# sourceOfTruth re-read 2026-10-02 (through c916fe67): soak_memory.py only writes its CSVs with LF line ends; the figure and the soak table are unchanged.
 ---
 
 This qualification asks whether Queen can replace the **process control plane** of Laravel
