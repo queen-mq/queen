@@ -239,6 +239,23 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
             RouteClass::Blocked
         };
     }
+    // `POST /api/v1/fetch/offsets` (2026-10-01) — the first offset each
+    // partition appended at or after a time, which is how the Kafka facade
+    // answers a timestamp ListOffsets (KIP-79: Flink's timestamp start, every
+    // "reset to a date"). The fetch arm's twin once more, and `Consume` for
+    // the same reason: it hands out offsets and append times of a tenant's
+    // queues, strictly less than the payloads the fetch beside it serves, and a
+    // consume-scoped key must reach it. Without this arm it fails closed here
+    // as a 404, which the facade reads as "this Queen answers no time" — the
+    // answer every timestamp got before the route existed. POST only, the
+    // exact path only.
+    if p == "/api/v1/fetch/offsets" {
+        return if *m == Method::POST {
+            RouteClass::Consume
+        } else {
+            RouteClass::Blocked
+        };
+    }
 
     // --- queue admin ---
     if p == "/api/v1/configure" {
@@ -784,6 +801,27 @@ mod tests {
         assert_eq!(classify(&post, "/api/v1/fetch/"), RouteClass::Blocked);
         // and the arm does not swallow a neighbour that does not exist yet
         assert_eq!(classify(&post, "/api/v1/fetchall"), RouteClass::Blocked);
+    }
+
+    /// The offset for a time is the fetch's other twin: offsets and append
+    /// times of a tenant's queues, the authority of a consumer, POST-only on
+    /// one exact path.
+    #[test]
+    fn fetch_offsets_is_consume_and_post_only() {
+        let post = Method::POST;
+        assert_eq!(
+            classify(&post, "/api/v1/fetch/offsets"),
+            classify(&post, "/api/v1/fetch"),
+            "the offset for a time and the fetch it feeds carry one authority"
+        );
+        assert_eq!(
+            classify(&post, "/api/v1/fetch/offsets"),
+            RouteClass::Consume
+        );
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/fetch/offsets"),
+            RouteClass::Blocked
+        );
     }
 
     /// PLAN_S3_SINK.md §5.1/§8. Partition discovery is the fetch's twin and

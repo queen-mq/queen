@@ -166,6 +166,7 @@ no Helm chart, so a Kubernetes deployment is a manifest an operator writes, and
 | `QUEEN_KAFKA_OFFSET_STORE` | `positions` | `positions` or `kv`: where committed offsets live ([above](#where-committed-offsets-live)). Anything else is a fatal boot. An explicit `QUEEN_URL` always uses `kv`. |
 | `QUEEN_KAFKA_ADVERTISED_ADDR` | **required** | The `host:port` other machines use to reach this process. No default. See below. |
 | `QUEEN_KAFKA_DEFAULT_PARTITIONS` | `1024` | Partition count for a topic the facade auto-creates, and the floor for the width it advertises to topics that declared none of their own. A topic created through CreateTopics with a `numPartitions` carries that number as its own floor instead, so this knob stops applying to it. Integer in 1 to 100,000. |
+| `QUEEN_KAFKA_COALESCE` | `5` | How many Produce requests that one connection has already sent back to back are written to Queen as one push, then answered in order. `1` is one push per request. Clamped to 1 to 64. |
 | `QUEEN_KAFKA_MAX_CONNECTIONS` | `4096` | How many connections the listener serves at once. Integer in 16 to 1,000,000. Past it a new connection is closed immediately, which is a client that reconnects rather than a facade accepting work it cannot do. |
 | `QUEEN_KAFKA_TLS_CERT` | none | PEM certificate chain. Both this and the key, or neither. |
 | `QUEEN_KAFKA_TLS_KEY` | none | PEM private key. Read and parsed at boot, so a key that does not match its certificate fails the process and not every client. |
@@ -178,7 +179,7 @@ no Helm chart, so a Kubernetes deployment is a manifest an operator writes, and
 | `QUEEN_KAFKA_TXN_MAX_RECORDS` | `50000` | Staged records in one transaction. |
 | `QUEEN_KAFKA_TXN_MAX_STAGED_BYTES` | `134217728` | Staged bytes across every open transaction in this process. |
 | `QUEEN_KAFKA_TXN_MAX_OPEN` | `1024` | Open transactions this process holds at once. |
-| `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS` | `900000` | The ceiling on a producer's requested transaction timeout, which is Kafka's own default for `transaction.max.timeout.ms`. A one second sweep expires a transaction past its own timeout. |
+| `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS` | `3600000` | The ceiling on a producer's requested transaction timeout (`transaction.max.timeout.ms`). One hour, Flink's `KafkaSink` default, where Kafka's broker default is 15 minutes. A one second sweep expires a transaction past its own timeout. |
 | `LOG_LEVEL` | `info` | Tracing filter, `EnvFilter` syntax. |
 | `RUST_LOG` | none | Same, and it wins over `LOG_LEVEL`. |
 | `QUEEN_LOG_JSON` | `false` | `true` switches the log format to JSON. Any other value is read as false. |

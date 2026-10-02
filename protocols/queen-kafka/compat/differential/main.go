@@ -416,10 +416,10 @@ var deliberate = []classification{
 			"Kafka treats them as ordinary names; creating one here would make a queue the facade then refuses to " +
 			"show, so CreateTopics — the surface where a NAME is validated — answers INVALID_TOPIC_EXCEPTION"},
 	{regexp.MustCompile(`^createtopics/create\.compact\.`),
-		"deliberate, and the loudest refusal in the stage: log compaction is a stated non-goal, so " +
-			"cleanup.policy=compact is answered INVALID_CONFIG instead of being accepted and not performed. This " +
-			"is what makes Kafka Connect fail at STARTUP rather than lose its connector configuration on a later " +
-			"restart, and it is why CreateTopics does not unlock Connect"},
+		"deliberate since 2026-10-01: cleanup.policy=compact is ACCEPTED and the queue keeps every record " +
+			"(retention off) — phase 1 of compaction, what Kafka Connect's internal topics and Streams' " +
+			"changelogs need from a compacted topic. Any remaining difference is in what the create echoes " +
+			"(Kafka echoes every config, the facade the ones it can name the enforcer or the record of)"},
 	{regexp.MustCompile(`^createtopics/create\.kafka_only_config\.`),
 		"deliberate: a topic config Kafka has and Queen has no mechanism for is refused INVALID_CONFIG rather " +
 			"than dropped. min.insync.replicas=1 happens to be the value the facade would report anyway, but " +
@@ -437,12 +437,11 @@ var deliberate = []classification{
 			"whose columns cannot be read would be a guess",
 	},
 	{regexp.MustCompile(`^describeconfigs/topic\.(cleanup_policy|min_insync_replicas)_read_only$`),
-		"deliberate: read_only is PER ROW since M7 F4, and these two are the rows that are genuinely fixed — the " +
-			"only value either of them accepts is the one already reported (delete; one logical broker, so 1), so " +
-			"nothing about them can be changed through this facade. Kafka reports them writable because its " +
-			"AlterConfigs can really change them. retention.ms is NOT in this pattern: it is reported writable here " +
-			"too, because AlterConfigs and IncrementalAlterConfigs land on it. A UI that greys out its edit button " +
-			"on this flag is being told the truth by both"},
+		"deliberate: read_only is PER ROW. On a topic this facade did not create every row is fixed, because an " +
+			"alter of it is refused (the facade cannot read the queue's other config columns back). Since " +
+			"2026-10-01 every row of a topic it DID create is writable, as Kafka reports them, because an alter " +
+			"lands on its record — cleanup.policy and min.insync.replicas included. A UI that greys out its edit " +
+			"button on this flag is being told the truth by both"},
 	{regexp.MustCompile(`^describeconfigs/broker_logger\.`),
 		"deliberate: BROKER_LOGGER (resource type 8) describes a log4j hierarchy. The facade runs none, so it " +
 			"answers INVALID_REQUEST rather than an empty config set, which would read as 'this resource exists " +

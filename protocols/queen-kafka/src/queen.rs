@@ -499,7 +499,7 @@ impl FetchedRecord {
 }
 
 /// What one entry of a fetch answered.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct Fetched {
     #[serde(default)]
     pub records: Vec<FetchedRecord>,
@@ -520,9 +520,94 @@ pub struct Fetched {
     pub error: Option<String>,
 }
 
+/// Queen's `dedupWindowSeconds` queue option, and what a queue created FOR a
+/// Kafka topic gets. A Kafka record carries no Queen `transactionId`, so the
+/// broker mints a fresh UUID for each and a dedup window could only ever be
+/// asked whether a brand-new UUID was seen before: a probe and an entry per
+/// record for an answer that is always no. Kafka's own duplicate suppression is
+/// the idempotent producer's sequence window ([`crate::idempotent`]), which
+/// does not depend on it. A queue that already exists keeps its own setting.
+pub const DEDUP_WINDOW_SECONDS: &str = "dedupWindowSeconds";
+pub const KAFKA_DEDUP_WINDOW_SECONDS: i64 = 0;
+
 /// The two per-entry error markers C2 answers with.
 pub const FETCH_ERR_UNKNOWN: &str = "UNKNOWN_TOPIC_OR_PARTITION";
 pub const FETCH_ERR_OUT_OF_RANGE: &str = "OFFSET_OUT_OF_RANGE";
+
+// ---------------------------------------------------------------- raw records
+//
+// The record path in bytes. A Kafka record becomes ONE JSON document — the
+// envelope of [`crate::records`] — and is read back as those same bytes, so
+// there is no reason for it to be a `serde_json::Value` in between: that costs
+// a map and a string per field on the way in and a parse of every answer on the
+// way out, per record. [`QueenApi::push_raw`] and [`QueenApi::fetch_raw`] speak
+// these shapes; the `Value` shapes above stay for everything else (the
+// transaction bundle, the test double).
+
+/// One record to write: a [`PushItem`] whose payload is already serialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawPush {
+    pub queue: String,
+    /// The Queen partition NAME, as [`PushItem::partition`].
+    pub partition: String,
+    /// One JSON document, stored as these bytes.
+    pub payload: Vec<u8>,
+}
+
+impl RawPush {
+    /// The `Value` twin, for a transport that only speaks [`QueenApi::push`].
+    pub fn to_item(&self) -> PushItem {
+        PushItem {
+            queue: self.queue.clone(),
+            partition: self.partition.clone(),
+            payload: serde_json::from_slice(&self.payload).unwrap_or(serde_json::Value::Null),
+        }
+    }
+}
+
+/// One record of a fetch answer, its payload as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawRecord {
+    /// Absolute offset within the partition.
+    pub offset: i64,
+    /// The stored JSON document (`null` for an empty payload, as the route
+    /// renders one).
+    pub payload: bytes::Bytes,
+    /// The log's own timestamp for the record — its segment's — in epoch
+    /// milliseconds: the FALLBACK for a payload with no producer timestamp
+    /// ([`FetchedRecord::ts`]).
+    pub timestamp_ms: Option<i64>,
+}
+
+/// One entry of a fetch answer: [`Fetched`] with [`RawRecord`]s.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RawFetched {
+    pub records: Vec<RawRecord>,
+    pub high_watermark: i64,
+    pub log_start_offset: i64,
+    pub error: Option<String>,
+}
+
+impl RawFetched {
+    /// The raw twin of a [`Fetched`]: each payload serialized back to the bytes
+    /// the route rendered it from.
+    pub fn from_fetched(f: Fetched) -> RawFetched {
+        RawFetched {
+            records: f
+                .records
+                .into_iter()
+                .map(|r| RawRecord {
+                    offset: r.offset,
+                    timestamp_ms: r.timestamp_ms(),
+                    payload: bytes::Bytes::from(serde_json::to_vec(&r.payload).unwrap_or_default()),
+                })
+                .collect(),
+            high_watermark: f.high_watermark,
+            log_start_offset: f.log_start_offset,
+            error: f.error,
+        }
+    }
+}
 
 /// Parse the broker's segment timestamp into epoch milliseconds.
 ///
@@ -930,6 +1015,76 @@ struct DeleteQueueBody {
     error: Option<serde_json::Value>,
 }
 
+/// One question of [`QueenApi::offsets_for_times`]: the first offset of
+/// `partition` of `queue` appended at or after `timestamp_ms`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TimeLookup {
+    pub queue: String,
+    /// The Queen partition NAME, spelled as [`FetchEntry::partition`] is.
+    pub partition: String,
+    /// Epoch milliseconds, never negative: the broker refuses the whole
+    /// request on one that is.
+    #[serde(rename = "timestamp")]
+    pub timestamp_ms: i64,
+}
+
+/// One answer of [`QueenApi::offsets_for_times`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TimeFound {
+    /// The first offset appended at or after the time, or `None` when nothing
+    /// in the log was appended that late.
+    pub offset: Option<i64>,
+    /// When that offset was APPENDED, in epoch milliseconds, on the broker's
+    /// clock — not a producer's timestamp, which the broker never reads.
+    pub timestamp_ms: Option<i64>,
+    /// [`FETCH_ERR_UNKNOWN`] for a queue that is not there, as a fetch says it.
+    pub error: Option<String>,
+}
+
+/// `POST /api/v1/fetch/offsets`, as the broker writes one entry of it.
+#[derive(Debug, Deserialize)]
+struct TimeFoundWire {
+    #[serde(default)]
+    offset: Option<i64>,
+    #[serde(default)]
+    ts: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TimeFoundBody {
+    #[serde(default)]
+    entries: Vec<TimeFoundWire>,
+}
+
+#[derive(Serialize)]
+struct TimeLookupBody<'a> {
+    entries: &'a [TimeLookup],
+}
+
+/// The broker's answer to [`QueenApi::offsets_for_times`], one per lookup and
+/// in order, or a body error: an answer that does not line up with what was
+/// asked is not one to hand a consumer a start offset from.
+fn align_time_results(body: &str, asked: usize) -> Result<Vec<TimeFound>> {
+    let v: TimeFoundBody = serde_json::from_str(body)
+        .map_err(|e| Error::Body(format!("the offsets-for-times answer: {e}")))?;
+    if v.entries.len() != asked {
+        return Err(Error::Body(format!(
+            "the offsets-for-times answer has {} entries for {asked} asked",
+            v.entries.len()
+        )));
+    }
+    Ok(v.entries
+        .into_iter()
+        .map(|e| TimeFound {
+            offset: e.offset,
+            timestamp_ms: e.ts.as_deref().and_then(epoch_millis),
+            error: e.error,
+        })
+        .collect())
+}
+
 /// The calls the facade makes to Queen. A trait, and not just the concrete
 /// client below, so the policies built on it — auto-create, the produce
 /// mapping, the fetch batching, the offset store — can be tested against a
@@ -967,6 +1122,40 @@ pub trait QueenApi: Send + Sync + 'static {
         min_bytes: i64,
         token: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<Fetched>>>;
+
+    /// [`QueenApi::push`] for records whose payloads are already JSON bytes:
+    /// the same write and the same answer. The default goes through `push`
+    /// (each payload parsed back into a `Value`); [`HttpQueen`] writes the
+    /// bytes as they are, and in-process hands them to the broker untouched.
+    fn push_raw<'a>(
+        &'a self,
+        items: Vec<RawPush>,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<Pushed>>> {
+        Box::pin(async move {
+            let items: Vec<PushItem> = items.iter().map(RawPush::to_item).collect();
+            self.push(&items, token).await
+        })
+    }
+
+    /// [`QueenApi::fetch`] answered as [`RawFetched`]: the same read, each
+    /// payload as the bytes it is stored as. The default goes through `fetch`.
+    fn fetch_raw<'a>(
+        &'a self,
+        entries: &'a [FetchEntry],
+        max_wait_ms: i64,
+        min_bytes: i64,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<RawFetched>>> {
+        Box::pin(async move {
+            Ok(self
+                .fetch(entries, max_wait_ms, min_bytes, token)
+                .await?
+                .into_iter()
+                .map(RawFetched::from_fetched)
+                .collect())
+        })
+    }
 
     /// `POST /api/v1/kv` — one answer per operation, aligned to `ops` by the
     /// `index` each answer carries. `ops` must already be within
@@ -1057,6 +1246,25 @@ pub trait QueenApi: Send + Sync + 'static {
         _token: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<(String, i64)>>> {
         Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// `POST /api/v1/fetch/offsets` — for each lookup, the first offset its
+    /// partition's log appended at or after its time, answered one per lookup
+    /// and in order: what ListOffsets by timestamp (KIP-79) is answered from
+    /// ([`crate::handlers::list_offsets`]).
+    ///
+    /// `Ok(None)` is "this Queen cannot answer a time" — the default, and a
+    /// broker that predates the route — and the caller then answers "no
+    /// offset for that time", which is what every timestamp got before the
+    /// route existed. Defaulted, like [`QueenApi::partition_bytes`], so a
+    /// double testing something else needs no script for it.
+    fn offsets_for_times<'a>(
+        &'a self,
+        lookups: &'a [TimeLookup],
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Option<Vec<TimeFound>>>> {
+        let _ = (lookups, token);
+        Box::pin(async { Ok(None) })
     }
 
     /// The same Queen, reached with `host` as the HTTP `Host` header of every
@@ -1234,6 +1442,47 @@ pub trait LocalDispatch: Send + Sync + 'static {
         &self,
         req: LocalRequest,
     ) -> BoxFuture<'static, std::result::Result<LocalResponse, String>>;
+
+    /// Whether [`LocalDispatch::push_records`] and
+    /// [`LocalDispatch::fetch_records`] are served. When they are not, the
+    /// record path takes the routes through [`LocalDispatch::call`].
+    fn serves_records(&self) -> bool {
+        false
+    }
+
+    /// `POST /api/v1/push` for records, without the JSON body: the broker's own
+    /// push of these items under the same auth, tenancy and admission, answered
+    /// per item, or with the HTTP answer the route would have given instead.
+    fn push_records(
+        &self,
+        bearer: Option<String>,
+        items: Vec<RawPush>,
+    ) -> BoxFuture<'static, std::result::Result<LocalAnswer<Vec<Pushed>>, String>> {
+        let _ = (bearer, items);
+        Box::pin(async { Err("this broker does not serve records in-process".to_string()) })
+    }
+
+    /// `POST /api/v1/fetch` answered as records, without the JSON: the
+    /// broker's own read of these entries, long poll included.
+    fn fetch_records(
+        &self,
+        bearer: Option<String>,
+        entries: Vec<FetchEntry>,
+        max_wait_ms: i64,
+        min_bytes: i64,
+    ) -> BoxFuture<'static, std::result::Result<LocalAnswer<Vec<RawFetched>>, String>> {
+        let _ = (bearer, entries, max_wait_ms, min_bytes);
+        Box::pin(async { Err("this broker does not serve records in-process".to_string()) })
+    }
+}
+
+/// What a typed in-process call answered: its value, or the HTTP answer the
+/// route would have given instead (a refusal, an overload, a 503), read exactly
+/// as that route's answer is read.
+#[derive(Debug)]
+pub enum LocalAnswer<T> {
+    Done(T),
+    Refused(LocalResponse),
 }
 
 /// Where a call goes: over HTTP to `QUEEN_URL`, or to the broker this facade
@@ -1295,6 +1544,16 @@ impl HttpQueen {
     pub fn with_native_positions(mut self, on: bool) -> HttpQueen {
         self.native_positions = on;
         self
+    }
+
+    /// The in-process transport, when it serves the record path itself
+    /// ([`LocalDispatch::serves_records`]) and nothing about this client asks
+    /// for a route's own handling (a `Host` of its own).
+    fn records_dispatch(&self) -> Option<&Arc<dyn LocalDispatch>> {
+        match &self.transport {
+            Transport::Local(d) if d.serves_records() && self.host.is_none() => Some(d),
+            _ => None,
+        }
     }
 
     /// Whether this client reaches Queen without leaving the process.
@@ -1496,7 +1755,11 @@ impl QueenApi for HttpQueen {
         token: Option<&'a str>,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let payload = serde_json::json!({ "queue": name }).to_string();
+            let payload = serde_json::json!({
+                "queue": name,
+                DEDUP_WINDOW_SECONDS: KAFKA_DEDUP_WINDOW_SECONDS,
+            })
+            .to_string();
             let body = self
                 .call("POST", "/api/v1/configure", token, Some(payload), None)
                 .await?;
@@ -1602,6 +1865,27 @@ impl QueenApi for HttpQueen {
         })
     }
 
+    fn offsets_for_times<'a>(
+        &'a self,
+        lookups: &'a [TimeLookup],
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Option<Vec<TimeFound>>>> {
+        Box::pin(async move {
+            let payload = serde_json::to_string(&TimeLookupBody { entries: lookups })
+                .map_err(|e| Error::Body(format!("cannot serialize the lookups: {e}")))?;
+            match self
+                .call("POST", "/api/v1/fetch/offsets", token, Some(payload), None)
+                .await
+            {
+                Ok(body) => align_time_results(&body, lookups.len()).map(Some),
+                // A broker without the route answers no time at all, which is
+                // what every timestamp got before it existed.
+                Err(Error::Status { code: 404, .. }) => Ok(None),
+                Err(e) => Err(e),
+            }
+        })
+    }
+
     fn raft_members<'a>(
         &'a self,
         token: Option<&'a str>,
@@ -1687,6 +1971,104 @@ impl QueenApi for HttpQueen {
                 )
                 .await?;
             align_fetch_results(&body, entries)
+        })
+    }
+
+    fn push_raw<'a>(
+        &'a self,
+        items: Vec<RawPush>,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<Pushed>>> {
+        Box::pin(async move {
+            let n = items.len();
+            if let Some(dispatch) = self.records_dispatch() {
+                let answer = tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    dispatch.push_records(token.map(str::to_string), items),
+                )
+                .await
+                .map_err(|_| {
+                    Error::Transport(format!(
+                        "in-process push timed out after {} ms",
+                        REQUEST_TIMEOUT.as_millis()
+                    ))
+                })?
+                .map_err(Error::Transport)?;
+                return match answer {
+                    LocalAnswer::Done(pushed) if pushed.len() == n => Ok(pushed),
+                    LocalAnswer::Done(pushed) => Err(Error::Body(format!(
+                        "push answered {} results for {n} items",
+                        pushed.len()
+                    ))),
+                    LocalAnswer::Refused(r) => Err(refused(r)),
+                };
+            }
+            let body = self
+                .call(
+                    "POST",
+                    "/api/v1/push",
+                    token,
+                    Some(raw_push_body(&items)),
+                    None,
+                )
+                .await?;
+            align_push_results(&body, n)
+        })
+    }
+
+    fn fetch_raw<'a>(
+        &'a self,
+        entries: &'a [FetchEntry],
+        max_wait_ms: i64,
+        min_bytes: i64,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<RawFetched>>> {
+        Box::pin(async move {
+            if let Some(dispatch) = self.records_dispatch() {
+                let budget = fetch_timeout(max_wait_ms);
+                let answer = tokio::time::timeout(
+                    budget,
+                    dispatch.fetch_records(
+                        token.map(str::to_string),
+                        entries.to_vec(),
+                        max_wait_ms,
+                        min_bytes,
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    Error::Transport(format!(
+                        "in-process fetch timed out after {} ms",
+                        budget.as_millis()
+                    ))
+                })?
+                .map_err(Error::Transport)?;
+                return match answer {
+                    LocalAnswer::Done(read) if read.len() == entries.len() => Ok(read),
+                    LocalAnswer::Done(read) => Err(Error::Body(format!(
+                        "fetch answered {} entries for {} asked",
+                        read.len(),
+                        entries.len()
+                    ))),
+                    LocalAnswer::Refused(r) => Err(refused(r)),
+                };
+            }
+            let payload = serde_json::to_string(&FetchBody {
+                entries,
+                max_wait_ms,
+                min_bytes,
+            })
+            .map_err(|e| Error::Body(format!("cannot serialize the fetch body: {e}")))?;
+            let body = self
+                .call(
+                    "POST",
+                    "/api/v1/fetch",
+                    token,
+                    Some(payload),
+                    Some(fetch_timeout(max_wait_ms)),
+                )
+                .await?;
+            align_raw_fetch_results(&body, entries)
         })
     }
 
@@ -2250,6 +2632,116 @@ fn align_fetch_results(body: &str, entries: &[FetchEntry]) -> Result<Vec<Fetched
     Ok(out)
 }
 
+/// The error a [`LocalAnswer::Refused`] stands for: the one the route's answer
+/// would have been read as.
+fn refused(r: LocalResponse) -> Error {
+    Error::Status {
+        code: r.status,
+        retry_after_ms: r.retry_after.as_deref().and_then(parse_retry_after_ms),
+        body: r.body,
+    }
+}
+
+/// `{"items":[{"queue":…,"partition":…,"payload":<the bytes>},…]}`: the push
+/// body [`PushBody`] serializes, with each payload spliced in as the JSON it
+/// already is.
+fn raw_push_body(items: &[RawPush]) -> String {
+    let mut out = Vec::with_capacity(
+        16 + items
+            .iter()
+            .map(|i| i.payload.len() + i.queue.len() + i.partition.len() + 40)
+            .sum::<usize>(),
+    );
+    out.extend_from_slice(b"{\"items\":[");
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(b"{\"queue\":");
+        let _ = serde_json::to_writer(&mut out, &item.queue);
+        out.extend_from_slice(b",\"partition\":");
+        let _ = serde_json::to_writer(&mut out, &item.partition);
+        out.extend_from_slice(b",\"payload\":");
+        out.extend_from_slice(&item.payload);
+        out.push(b'}');
+    }
+    out.extend_from_slice(b"]}");
+    // Every piece is UTF-8: serde_json's strings and payloads that are JSON.
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+/// One record of the fetch response, its payload left as the JSON text it is.
+#[derive(Deserialize)]
+struct RawFetchRecord<'a> {
+    offset: i64,
+    #[serde(borrow, default)]
+    payload: Option<&'a serde_json::value::RawValue>,
+    #[serde(default)]
+    ts: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawFetchResultEntry<'a> {
+    #[serde(default)]
+    queue: String,
+    #[serde(default)]
+    partition: String,
+    #[serde(borrow, default)]
+    records: Vec<RawFetchRecord<'a>>,
+    #[serde(rename = "highWatermark", default)]
+    high_watermark: i64,
+    #[serde(rename = "logStartOffset", default)]
+    log_start_offset: i64,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawFetchResponseBody<'a> {
+    #[serde(borrow, default)]
+    entries: Vec<RawFetchResultEntry<'a>>,
+}
+
+/// [`align_fetch_results`] for [`QueenApi::fetch_raw`]: the same alignment
+/// checks, each payload kept as its JSON text.
+fn align_raw_fetch_results(body: &str, entries: &[FetchEntry]) -> Result<Vec<RawFetched>> {
+    let parsed: RawFetchResponseBody =
+        serde_json::from_str(body).map_err(|e| Error::Body(e.to_string()))?;
+    if parsed.entries.len() != entries.len() {
+        return Err(Error::Body(format!(
+            "fetch answered {} entries for {} asked",
+            parsed.entries.len(),
+            entries.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(entries.len());
+    for (i, (got, want)) in parsed.entries.into_iter().zip(entries).enumerate() {
+        if got.queue != want.queue || got.partition != want.partition {
+            return Err(Error::Body(format!(
+                "fetch entry {i} came back as {}/{} but was asked for {}/{}",
+                got.queue, got.partition, want.queue, want.partition
+            )));
+        }
+        out.push(RawFetched {
+            records: got
+                .records
+                .into_iter()
+                .map(|r| RawRecord {
+                    offset: r.offset,
+                    payload: bytes::Bytes::copy_from_slice(
+                        r.payload.map_or("null", |p| p.get()).as_bytes(),
+                    ),
+                    timestamp_ms: r.ts.as_deref().and_then(epoch_millis),
+                })
+                .collect(),
+            high_watermark: got.high_watermark,
+            log_start_offset: got.log_start_offset,
+            error: got.error,
+        });
+    }
+    Ok(out)
+}
+
 /// The push request body. Borrowed, so a batch of ten thousand records is
 /// serialized straight out of the items the produce handler already built.
 #[derive(Serialize)]
@@ -2345,6 +2837,11 @@ const LIST_TTL: Duration = Duration::from_secs(3);
 /// UNKNOWN_TOPIC_OR_PARTITION. Self-healing, and the same shape of staleness the
 /// queue list already has — just longer, which is the price of not scanning.
 const FLOORS_TTL: Duration = Duration::from_secs(30);
+
+/// How soon the floors are read again when a NEW queue still had no width
+/// record: its creator writes the record right after the queue exists, so one
+/// more look a moment later finds it.
+const FLOORS_RETRY: Duration = Duration::from_secs(2);
 
 /// The queue list, cached briefly, with single-flight refresh.
 ///
@@ -2744,6 +3241,57 @@ impl Catalog {
         match listed {
             Ok(mut queues) => {
                 attach_floors(&mut queues, &floors);
+                // A topic created through ANOTHER node: serving it the default
+                // width until the floors' own TTL is what made a 200-partition
+                // topic read as 1024 partitions in cluster mode (2026-09-30).
+                // CreateTopics now writes the width AHEAD of the queue (a
+                // pending record, `topic_record`'s module header), so a scan
+                // issued after this list has it. So a queue that is NEW to this
+                // list and has no floor is looked up now, and once more shortly
+                // after for a creator that could not write ahead.
+                let mut floors = floors;
+                let mut floors_at = floors_at;
+                // On EVERY path, not only the width consumers: a `refresh`
+                // caches what it lists too, and Metadata's auto-create check is
+                // a `refresh` whose list then answers the width — which is how a
+                // Connect worker's 5-partition status topic was handed 1024
+                // partitions on 2026-10-02 with the pending record already
+                // there. It costs a scan only when a queue is new.
+                {
+                    // Only a WARM entry: a cold one keeps its single scan (the
+                    // hot path's one KV call), at the cost of a create landing
+                    // between its two concurrent reads, which the floors' TTL
+                    // repairs.
+                    if let Some((before, _)) = &previous {
+                        let known: std::collections::HashSet<&str> =
+                            before.iter().map(|q| q.name.as_str()).collect();
+                        let new_floorless = |queues: &[Queue]| {
+                            queues
+                                .iter()
+                                .any(|q| q.floor.is_none() && !known.contains(q.name.as_str()))
+                        };
+                        if new_floorless(&queues) {
+                            // Read AFTER the list even when a scan ran beside
+                            // it: that scan may have read the store before the
+                            // list did, and a pending record is only guaranteed
+                            // to a read that starts after its queue was listed.
+                            if let Ok((found, true)) =
+                                crate::topic_record::load_floors(self.api.as_ref(), token).await
+                            {
+                                floors = Arc::new(found);
+                                floors_at = Some(Instant::now());
+                                attach_floors(&mut queues, &floors);
+                            }
+                            if new_floorless(&queues) {
+                                floors_at = floors_at.map(|_| {
+                                    Instant::now()
+                                        .checked_sub(FLOORS_TTL.saturating_sub(FLOORS_RETRY))
+                                        .unwrap_or_else(Instant::now)
+                                });
+                            }
+                        }
+                    }
+                }
                 let queues = Arc::new(queues);
                 let now = Instant::now();
                 let mut entries = self.entries.lock().await;
@@ -2886,7 +3434,7 @@ fn attach_floors(queues: &mut [Queue], floors: &HashMap<String, crate::topic_rec
     for q in queues.iter_mut() {
         q.floor = floors
             .get(&q.name)
-            .filter(|f| f.qid.as_deref() == q.id.as_deref())
+            .filter(|f| f.applies_to(q.id.as_deref()))
             .map(|f| f.partitions);
     }
 }
@@ -2933,6 +3481,9 @@ pub mod testing {
         /// send DIFFERENT bodies to the same route, and a test that could not
         /// tell them apart could not catch one being routed through the other.
         pub configures: Mutex<Vec<(String, serde_json::Value)>>,
+        /// For every `create_queue_with`, how many KV calls had been made
+        /// before it: what orders a write ahead of a create.
+        pub kv_calls_at_configure: Mutex<Vec<usize>>,
         /// Every `delete_queue`, in call order.
         pub deletes: Mutex<Vec<String>>,
         /// When set, the next `create_queue_with` fails with exactly this
@@ -3054,6 +3605,12 @@ pub mod testing {
         /// still answers — a raft pipeline too busy for a write within its
         /// budget, which is the shape that emptied the node registry.
         pub kv_write_error: Mutex<Option<Error>>,
+        /// Every `offsets_for_times`, as it was sent.
+        pub time_lookups: Mutex<Vec<Vec<TimeLookup>>>,
+        /// What every `offsets_for_times` answers. `None` is the trait's own
+        /// default, "this Queen cannot answer a time", which is what every
+        /// test that does not script one keeps getting.
+        pub time_reply: Mutex<Option<Result<Option<Vec<TimeFound>>>>>,
     }
 
     /// The fake key/value store, and the working copy a call applies to.
@@ -3124,6 +3681,7 @@ pub mod testing {
                 lists: AtomicUsize::new(0),
                 creates: Mutex::new(Vec::new()),
                 configures: Mutex::new(Vec::new()),
+                kv_calls_at_configure: Mutex::new(Vec::new()),
                 deletes: Mutex::new(Vec::new()),
                 create_error: Mutex::new(None),
                 delete_error: Mutex::new(None),
@@ -3160,7 +3718,14 @@ pub mod testing {
                 raft_member_calls: AtomicUsize::new(0),
                 partition_sizes: Mutex::new(HashMap::new()),
                 kv_write_error: Mutex::new(None),
+                time_lookups: Mutex::new(Vec::new()),
+                time_reply: Mutex::new(None),
             })
+        }
+
+        /// Every `offsets_for_times` answers `reply` from now on.
+        pub fn answer_times(&self, reply: Result<Option<Vec<TimeFound>>>) {
+            *self.time_reply.lock().unwrap() = Some(reply);
         }
 
         /// `/auth/me` names `tenant` as the cluster `token` acts on — the
@@ -3474,6 +4039,15 @@ pub mod testing {
             self.inner.fetch(entries, max_wait_ms, min_bytes, token)
         }
 
+        fn offsets_for_times<'a>(
+            &'a self,
+            lookups: &'a [TimeLookup],
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Option<Vec<TimeFound>>>> {
+            self.note();
+            self.inner.offsets_for_times(lookups, token)
+        }
+
         fn kv<'a>(
             &'a self,
             ops: &'a [KvOp],
@@ -3555,6 +4129,18 @@ pub mod testing {
                     .get(queue)
                     .cloned()
                     .unwrap_or_default())
+            })
+        }
+
+        fn offsets_for_times<'a>(
+            &'a self,
+            lookups: &'a [TimeLookup],
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Option<Vec<TimeFound>>>> {
+            Box::pin(async move {
+                self.tokens.lock().unwrap().push(token.map(str::to_string));
+                self.time_lookups.lock().unwrap().push(lookups.to_vec());
+                self.time_reply.lock().unwrap().clone().unwrap_or(Ok(None))
             })
         }
 
@@ -3650,6 +4236,8 @@ pub mod testing {
                     .lock()
                     .unwrap()
                     .push((name.to_string(), options.clone()));
+                let made_so_far = self.kv_calls.lock().unwrap().len();
+                self.kv_calls_at_configure.lock().unwrap().push(made_so_far);
                 if let Some(e) = self.create_error.lock().unwrap().take() {
                     return Err(e);
                 }
@@ -5303,6 +5891,99 @@ mod tests {
             second[0].floor,
             Some(64),
             "a failed scan narrowed a topic instead of keeping what it knew"
+        );
+    }
+
+    /// A topic created through ANOTHER node shows up in this node's list
+    /// before its width record does. Its width is looked up as soon as it
+    /// appears, and once more shortly after while the record is on its way —
+    /// not left at the broker default for the floors' 30-second TTL, which is
+    /// what made a 200-partition topic read as 1024 partitions in cluster mode.
+    #[tokio::test]
+    async fn a_topic_created_elsewhere_gets_its_width_without_waiting_out_the_ttl() {
+        let api = FakeQueen::with(&[("orders", 1)]);
+        let catalog = Catalog::with_ttl(api.clone(), Duration::from_millis(0));
+        assert_eq!(catalog.list(None).await.unwrap().len(), 1);
+
+        // Another node creates `events` and writes its record: the record is
+        // there by the time this node first lists the queue.
+        api.queues.lock().unwrap().push(Queue {
+            name: "events".to_string(),
+            partitions: 0,
+            id: None,
+            floor: None,
+        });
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &crate::topic_record::key("events"),
+            serde_json::json!({"qid": null, "set": {}, "at": 1, "partitions": 200}),
+        );
+        let listed = catalog.list(None).await.unwrap();
+        let events = listed.iter().find(|q| q.name == "events").unwrap();
+        assert_eq!(
+            events.floor,
+            Some(200),
+            "a new topic was served the default"
+        );
+
+        // A third topic whose record is written AFTER this node first lists it.
+        api.queues.lock().unwrap().push(Queue {
+            name: "late".to_string(),
+            partitions: 0,
+            id: None,
+            floor: None,
+        });
+        let listed = catalog.list(None).await.unwrap();
+        assert_eq!(
+            listed.iter().find(|q| q.name == "late").unwrap().floor,
+            None
+        );
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &crate::topic_record::key("late"),
+            serde_json::json!({"qid": null, "set": {}, "at": 1, "partitions": 64}),
+        );
+        tokio::time::sleep(FLOORS_RETRY + Duration::from_millis(50)).await;
+        let listed = catalog.list(None).await.unwrap();
+        assert_eq!(
+            listed.iter().find(|q| q.name == "late").unwrap().floor,
+            Some(64),
+            "the width record that followed the queue was not looked up again"
+        );
+    }
+
+    /// The 2026-10-01 Kafka Connect shape: another node created a 5-partition
+    /// topic, and this node lists the queue (it has an id) while the only
+    /// record is the PENDING one written ahead of it. The width is the
+    /// declared 5 from the first list, never the default.
+    #[tokio::test]
+    async fn a_queue_listed_with_only_its_pending_record_has_its_width() {
+        let api = FakeQueen::with(&[("orders", 1)]);
+        let catalog = Catalog::with_ttl(api.clone(), Duration::from_millis(0));
+        assert_eq!(catalog.list(None).await.unwrap().len(), 1);
+
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &crate::topic_record::key("connect-status"),
+            crate::topic_record::Record::new(None, serde_json::Map::new())
+                .with_partitions(Some(5))
+                .pending()
+                .to_value(),
+        );
+        api.queues.lock().unwrap().push(Queue {
+            name: "connect-status".to_string(),
+            partitions: 0,
+            id: Some("q-77".to_string()),
+            floor: None,
+        });
+        let listed = catalog.list(None).await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .find(|q| q.name == "connect-status")
+                .unwrap()
+                .floor,
+            Some(5)
         );
     }
 

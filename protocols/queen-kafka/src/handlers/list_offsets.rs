@@ -32,18 +32,35 @@
 //! no-error one, which is what a lane whose watermarks somehow reach that far
 //! would give. Only UNKNOWN_TOPIC_OR_PARTITION is a refusal.
 //!
-//! ## A concrete timestamp answers "no match", on purpose
+//! ## A concrete timestamp is looked up on the broker's APPEND clock
 //!
-//! Kafka's timestamp lookup is served by a per-segment TIME index, which Queen
-//! does not have: `queen.log_segments` is keyed by offset and carries one
-//! `created_at` for the whole segment, so answering a timestamp query would
-//! mean a scan, and answering it approximately would mean a consumer silently
-//! starting somewhere other than where it asked. The protocol already has the
-//! answer for a broker that cannot find a match — offset `-1`, error 0 — and
-//! every client handles it (the Java consumer reports the partition as having
-//! no offset for that timestamp, `offsetsForTimes` returns null for it). The
-//! plan defers time-index lookups; this is the honest shape of that deferral,
-//! and it is a `-1` a client can act on rather than an error it cannot.
+//! KIP-79's `offsetsForTimes` — Flink's timestamp start mode, Kafka Streams'
+//! and every tool's "reset to a date" — asks for the earliest offset whose
+//! timestamp is at or after `T`. It is answered from Queen's generic read
+//! `POST /api/v1/fetch/offsets` ([`crate::queen::QueenApi::offsets_for_times`]),
+//! which finds the first offset a partition APPENDED at or after `T` from the
+//! stamp every append carries: a binary search over the log's own rows, no
+//! payload read (server/src/rsm/facade/real/phase2/offsets.rs).
+//!
+//! **What that answers is Kafka's `LogAppendTime` lookup, not its `CreateTime`
+//! one.** A record fetched through this facade carries the PRODUCER's
+//! timestamp (the envelope's `t`, [`crate::records`]), and the broker reads no
+//! payload, so the two clocks can differ. They agree to within the producer's
+//! linger and the network for the ordinary producer, which stamps a record
+//! when it sends it — and they do NOT agree for one that sets a record's
+//! timestamp itself: a replay of old events, or Kafka Streams forwarding an
+//! input record's time. There the answer is where the log was at `T`, which is
+//! a position a consumer can start from but not the first record whose own
+//! timestamp is `T`. The answer's `timestamp` is that append time. Documented
+//! in `compat/ERRORS.md`.
+//!
+//! A time newer than the newest append answers Kafka's "no offset" — `-1`, no
+//! error — which every client handles (the Java consumer's `offsetsForTimes`
+//! returns null for the partition, and Flink then starts it at the end, which is
+//! where a time that has not come yet points). A broker without the route
+//! answers every time that way too, exactly as this facade did before it
+//! existed; and a lookup that FAILED is a retriable error, never "no offset",
+//! because a consumer told "no offset" starts at the end without a word.
 //!
 //! It is still an answer about a partition that EXISTS, so the bounds probe runs
 //! for a concrete timestamp too — see [`stage`]. "No offset at that time" and
@@ -59,7 +76,7 @@ use kafka_protocol::messages::{ListOffsetsRequest, ListOffsetsResponse, TopicNam
 use kafka_protocol::protocol::StrBytes;
 
 use crate::handlers::metadata;
-use crate::queen::{self, FetchEntry, Fetched};
+use crate::queen::{self, FetchEntry, Fetched, TimeFound, TimeLookup};
 use crate::Facade;
 
 /// Kafka's timestamp sentinels. `-3` (MAX_TIMESTAMP) and below arrive only from
@@ -90,11 +107,19 @@ enum Slot {
     /// Entry `index` of the batched probe carries this partition's bounds, and
     /// `timestamp` is which of them the client asked for — one of the two
     /// sentinels, or [`NO_MATCH`] for a concrete timestamp, which is probed for
-    /// its EXISTENCE alone (see [`stage`]).
-    Probe { index: usize, timestamp: i64 },
+    /// its EXISTENCE (see [`stage`]) and answered from lookup `time`.
+    Probe {
+        index: usize,
+        timestamp: i64,
+        time: Option<usize>,
+    },
     /// Answer this error.
     Reject(ResponseError, String),
 }
+
+/// What one time lookup answered: the broker's answer, `Ok(None)` for a
+/// broker that cannot answer a time, or the failure.
+type TimeAnswer = queen::Result<Option<TimeFound>>;
 
 /// The `timestamp` a [`Slot::Probe`] carries when the client asked a concrete
 /// timestamp: the partition is probed to find out whether it is there at all,
@@ -128,6 +153,7 @@ pub async fn handle(
             .await;
 
     let mut entries: Vec<FetchEntry> = Vec::new();
+    let mut lookups: Vec<TimeLookup> = Vec::new();
     let mut slots: Vec<Vec<Slot>> = Vec::with_capacity(req.topics.len());
     for topic in &req.topics {
         let name = topic.name.0.as_str();
@@ -136,7 +162,7 @@ pub async fn handle(
             topic
                 .partitions
                 .iter()
-                .map(|p| stage(&mut entries, name, width, p))
+                .map(|p| stage(&mut entries, &mut lookups, name, width, p))
                 .collect(),
         );
     }
@@ -144,10 +170,14 @@ pub async fn handle(
     // One probe for every partition of the request, chunked only if the request
     // is wider than the broker serves in one call. No long poll: the bounds are
     // whatever they are right now, and parking for them would answer the same
-    // numbers later.
-    let probed = probe(facade, &entries, token).await;
+    // numbers later. The time lookups go out beside it, not after it: two reads
+    // of the same partitions, neither waiting on the other.
+    let (probed, times) = tokio::join!(
+        probe(facade, &entries, token),
+        look_up(facade, &lookups, token)
+    );
 
-    render(req, &slots, &probed)
+    render(req, &slots, &probed, &times)
 }
 
 /// Resolve one requested partition into a probe or a refusal.
@@ -177,6 +207,7 @@ pub async fn handle(
 /// the partition's existence comes back with it.
 fn stage(
     entries: &mut Vec<FetchEntry>,
+    lookups: &mut Vec<TimeLookup>,
     topic: &str,
     width: Option<i32>,
     p: &ListOffsetsPartition,
@@ -205,6 +236,16 @@ fn stage(
         offset: BOUNDS_PROBE_OFFSET,
         max_bytes: BOUNDS_PROBE_MAX_BYTES,
     });
+    // A real time is looked up; a sentinel this facade does not speak (-3 and
+    // below, v7+) is not a time and stays "no match".
+    let time = (p.timestamp >= 0).then(|| {
+        lookups.push(TimeLookup {
+            queue: topic.to_string(),
+            partition: p.partition_index.to_string(),
+            timestamp_ms: p.timestamp,
+        });
+        lookups.len() - 1
+    });
     Slot::Probe {
         index: entries.len() - 1,
         timestamp: if p.timestamp == LATEST || p.timestamp == EARLIEST {
@@ -212,7 +253,32 @@ fn stage(
         } else {
             NO_MATCH
         },
+        time,
     }
+}
+
+/// Look every time up, in as many calls as the broker's entry ceiling needs
+/// and none when there is no time to look up. One answer per lookup, aligned.
+async fn look_up(facade: &Facade, lookups: &[TimeLookup], token: Option<&str>) -> Vec<TimeAnswer> {
+    let mut out = Vec::with_capacity(lookups.len());
+    for chunk in lookups.chunks(queen::MAX_FETCH_ENTRIES) {
+        match facade.queen.offsets_for_times(chunk, token).await {
+            Ok(Some(found)) if found.len() == chunk.len() => {
+                out.extend(found.into_iter().map(|f| Ok(Some(f))))
+            }
+            Ok(Some(found)) => {
+                let e = queen::Error::Body(format!(
+                    "the time lookup answered {} entries for {} asked",
+                    found.len(),
+                    chunk.len()
+                ));
+                out.extend(chunk.iter().map(|_| Err(e.clone())));
+            }
+            Ok(None) => out.extend(chunk.iter().map(|_| Ok(None))),
+            Err(e) => out.extend(chunk.iter().map(|_| Err(e.clone()))),
+        }
+    }
+    out
 }
 
 /// Run the bounds probe for every staged entry, in one call when they fit in
@@ -250,6 +316,7 @@ fn render(
     req: &ListOffsetsRequest,
     slots: &[Vec<Slot>],
     probed: &[queen::Result<Fetched>],
+    times: &[TimeAnswer],
 ) -> ListOffsetsResponse {
     let mut topics = Vec::with_capacity(req.topics.len());
     for (topic, row) in req.topics.iter().zip(slots) {
@@ -266,8 +333,18 @@ fn render(
                 }
                 // `get` and not an index: a handler must not panic on anything
                 // a broker answered, however wrong it is.
-                Slot::Probe { index, timestamp } => match probed.get(*index) {
-                    Some(Ok(f)) => bounds(&mut failures, p.partition_index, *timestamp, f),
+                Slot::Probe {
+                    index,
+                    timestamp,
+                    time,
+                } => match probed.get(*index) {
+                    Some(Ok(f)) => bounds(
+                        &mut failures,
+                        p.partition_index,
+                        *timestamp,
+                        f,
+                        time.map(|i| times.get(i)),
+                    ),
                     Some(Err(e)) => {
                         failures.unread(p.partition_index, e);
                         rejected(p.partition_index, kafka_error(e))
@@ -369,12 +446,15 @@ impl Failures {
     }
 }
 
-/// One partition's answer, read off the probe.
+/// One partition's answer, read off the probe and, for a concrete timestamp,
+/// off its time lookup (`time`: `None` when there was no lookup, `Some(None)`
+/// when its answer is missing).
 fn bounds(
     failures: &mut Failures,
     index: i32,
     timestamp: i64,
     f: &Fetched,
+    time: Option<Option<&TimeAnswer>>,
 ) -> ListOffsetsPartitionResponse {
     // The probe asks at an offset the log cannot hold, so OFFSET_OUT_OF_RANGE
     // is the EXPECTED shape and carries the bounds. UNKNOWN_TOPIC_OR_PARTITION
@@ -392,20 +472,49 @@ fn bounds(
         }
     }
     // The partition IS there — that is what the probe just established — so a
-    // concrete timestamp can now be answered "no match" honestly. See the
-    // module header for why there is no match to give.
-    let offset = match timestamp {
-        NO_MATCH => NO_OFFSET,
-        EARLIEST => f.log_start_offset,
-        _ => f.high_watermark,
+    // concrete timestamp is answered from its lookup. See the module header
+    // for what the time is measured on.
+    let (offset, at) = match timestamp {
+        NO_MATCH => match time.flatten() {
+            Some(Ok(Some(found))) => match found.error.as_deref() {
+                // Gone between the probe and the lookup: the lookup is the
+                // newer read.
+                Some(queen::FETCH_ERR_UNKNOWN) => {
+                    failures.refused_by_log(index, queen::FETCH_ERR_UNKNOWN, false);
+                    return rejected(index, ResponseError::UnknownTopicOrPartition);
+                }
+                Some(marker) => {
+                    failures.refused_by_log(index, marker, true);
+                    return rejected(index, ResponseError::UnknownServerError);
+                }
+                None => match found.offset {
+                    Some(offset) => (offset, found.timestamp_ms.unwrap_or(NO_OFFSET)),
+                    // Nothing appended that late: Kafka's "no offset".
+                    None => (NO_OFFSET, NO_OFFSET),
+                },
+            },
+            // A failed lookup is RETRIABLE, never "no offset": a consumer told
+            // "no offset" starts at the end without a word, which is the bug
+            // the lookup exists to fix.
+            Some(Err(e)) => {
+                failures.unread(index, e);
+                return rejected(index, kafka_error(e));
+            }
+            // A broker that cannot answer a time, or a sentinel this facade
+            // does not speak: "no offset", as before the lookup existed.
+            Some(Ok(None)) | None => (NO_OFFSET, NO_OFFSET),
+        },
+        EARLIEST => (f.log_start_offset, NO_OFFSET),
+        _ => (f.high_watermark, NO_OFFSET),
     };
     ListOffsetsPartitionResponse::default()
         .with_partition_index(index)
         .with_error_code(0)
-        // -1: the offset was found by watermark, not by time, so there is no
-        // record timestamp to report with it. This is what a broker sends for
-        // the two sentinels, and every client ignores it for them.
-        .with_timestamp(NO_OFFSET)
+        // For the two sentinels -1: the offset was found by watermark, not by
+        // time, so there is no record timestamp to report with it — what a
+        // broker sends, and what every client ignores for them. For a found
+        // time, the APPEND time of the offset found.
+        .with_timestamp(at)
         .with_offset(offset)
 }
 
@@ -673,6 +782,159 @@ mod tests {
         let p = answer(&resp, "orders", 0);
         assert_eq!(p.error_code, ResponseError::UnknownTopicOrPartition.code());
         assert_eq!(p.offset, -1);
+    }
+
+    fn found(offset: Option<i64>, timestamp_ms: Option<i64>) -> TimeFound {
+        TimeFound {
+            offset,
+            timestamp_ms,
+            error: None,
+        }
+    }
+
+    /// KIP-79 against a broker that answers times: the offset the broker found
+    /// and the APPEND time it was found at, error 0. Flink's timestamp start
+    /// mode reads exactly this; before the lookup it was told "no offset" and
+    /// started at the end.
+    #[tokio::test]
+    async fn a_concrete_timestamp_is_answered_from_the_brokers_lookup() {
+        let (f, api) = facade(&[("orders", 4)]);
+        seed(&api, "orders", "2", 0, 9);
+        api.answer_times(Ok(Some(vec![found(Some(3), Some(1_756_000_000_123))])));
+
+        let resp = handle(
+            &f,
+            &request(&[("orders", &[(2, 1_756_000_000_000)])]),
+            Some("tenant-a"),
+        )
+        .await;
+        let p = answer(&resp, "orders", 2);
+        assert_eq!(p.error_code, 0);
+        assert_eq!(p.offset, 3);
+        assert_eq!(p.timestamp, 1_756_000_000_123);
+        // The lookup carried the topic, the lane name and the time, under the
+        // connection's credential.
+        let asked = api.time_lookups.lock().unwrap().clone();
+        assert_eq!(
+            asked,
+            [vec![TimeLookup {
+                queue: "orders".into(),
+                partition: "2".into(),
+                timestamp_ms: 1_756_000_000_000,
+            }]]
+        );
+        assert!(api
+            .tokens
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|t| t.as_deref() == Some("tenant-a")));
+    }
+
+    /// A time newer than every append is Kafka's "no offset" — and the
+    /// partition is still probed, so it is an answer about a lane that EXISTS.
+    #[tokio::test]
+    async fn a_time_past_the_newest_append_is_no_offset() {
+        let (f, api) = facade(&[("orders", 1)]);
+        api.answer_times(Ok(Some(vec![found(None, None)])));
+        let resp = handle(&f, &request(&[("orders", &[(0, i64::MAX)])]), None).await;
+        let p = answer(&resp, "orders", 0);
+        assert_eq!((p.error_code, p.offset, p.timestamp), (0, -1, -1));
+        assert_eq!(api.fetched().len(), 1, "the existence probe still ran");
+    }
+
+    /// A lookup that FAILED is a retriable error and never "no offset": a
+    /// consumer told "no offset" starts at the end of the log without a word,
+    /// which is the very failure the lookup exists to remove.
+    #[tokio::test]
+    async fn a_failed_lookup_is_retriable_and_never_no_offset() {
+        for (e, want) in [
+            (
+                queen::Error::Transport("reset".into()),
+                ResponseError::NotLeaderOrFollower,
+            ),
+            (
+                queen::Error::status(503, "draining"),
+                ResponseError::NotLeaderOrFollower,
+            ),
+            (
+                queen::Error::status(500, "boom"),
+                ResponseError::UnknownServerError,
+            ),
+        ] {
+            let (f, api) = facade(&[("orders", 1)]);
+            api.answer_times(Err(e.clone()));
+            let resp = handle(&f, &request(&[("orders", &[(0, 5)])]), None).await;
+            let p = answer(&resp, "orders", 0);
+            assert_eq!(p.error_code, want.code(), "{e}");
+            assert_eq!(p.offset, -1, "{e}");
+        }
+    }
+
+    /// A queue the lookup no longer finds is gone, even if the probe beside it
+    /// still saw it: the lookup is the newer read. A marker this build does not
+    /// know is not guessed at.
+    #[tokio::test]
+    async fn the_lookups_own_marker_is_answered() {
+        let (f, api) = facade(&[("orders", 1)]);
+        api.answer_times(Ok(Some(vec![TimeFound {
+            error: Some(queen::FETCH_ERR_UNKNOWN.to_string()),
+            ..TimeFound::default()
+        }])));
+        let resp = handle(&f, &request(&[("orders", &[(0, 5)])]), None).await;
+        assert_eq!(
+            answer(&resp, "orders", 0).error_code,
+            ResponseError::UnknownTopicOrPartition.code()
+        );
+
+        let (f, api) = facade(&[("orders", 1)]);
+        api.answer_times(Ok(Some(vec![TimeFound {
+            error: Some("SOMETHING_NEW".to_string()),
+            ..TimeFound::default()
+        }])));
+        let resp = handle(&f, &request(&[("orders", &[(0, 5)])]), None).await;
+        assert_eq!(
+            answer(&resp, "orders", 0).error_code,
+            ResponseError::UnknownServerError.code()
+        );
+    }
+
+    /// Only a real time is looked up. The two sentinels are watermarks and a
+    /// sentinel this facade does not speak is not a time, so none of them costs
+    /// a lookup — and a request with no time in it makes no lookup call at all.
+    #[tokio::test]
+    async fn only_a_real_time_is_looked_up() {
+        let (f, api) = facade(&[("orders", 2)]);
+        api.answer_times(Ok(Some(vec![found(Some(0), Some(1))])));
+        let resp = handle(
+            &f,
+            &request(&[("orders", &[(0, LATEST), (0, EARLIEST), (0, -3), (1, 0)])]),
+            None,
+        )
+        .await;
+        let asked = api.time_lookups.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "one call");
+        assert_eq!(asked[0].len(), 1, "for the one real time");
+        assert_eq!(asked[0][0].partition, "1");
+        assert_eq!(resp.topics[0].partitions[2].offset, -1, "-3 is no match");
+        assert_eq!(resp.topics[0].partitions[3].offset, 0);
+
+        let (f, api) = facade(&[("orders", 2)]);
+        handle(&f, &request(&[("orders", &[(0, LATEST)])]), None).await;
+        assert!(api.time_lookups.lock().unwrap().is_empty());
+    }
+
+    /// An answer that does not line up with the lookups is not one: every
+    /// partition of the call is a server error rather than an offset read off
+    /// somebody else's lane.
+    #[tokio::test]
+    async fn a_short_lookup_answer_is_not_read_as_offsets() {
+        let (f, api) = facade(&[("orders", 2)]);
+        api.answer_times(Ok(Some(vec![found(Some(1), Some(1))])));
+        let resp = handle(&f, &request(&[("orders", &[(0, 5), (1, 5)])]), None).await;
+        for p in &resp.topics[0].partitions {
+            assert_eq!(p.error_code, ResponseError::UnknownServerError.code());
+        }
     }
 
     /// A sentinel from a version this facade does not advertise (-3 and below,

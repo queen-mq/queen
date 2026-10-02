@@ -92,8 +92,8 @@ different process, that `EndTxn` reaches a facade holding no stage, and the answ
 Because the stage is memory, it is capped in five places where Kafka has nothing to cap:
 `QUEEN_KAFKA_TXN_MAX_BYTES` (8 MiB for one transaction), `QUEEN_KAFKA_TXN_MAX_RECORDS` (50,000),
 `QUEEN_KAFKA_TXN_MAX_STAGED_BYTES` (128 MiB for the whole process), `QUEEN_KAFKA_TXN_MAX_OPEN`
-(1,024) and `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS` (900,000, which is Kafka's own default for
-`transaction.max.timeout.ms`). Two more are derived rather than chosen and cannot be set: at most
+(1,024) and `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS` (3,600,000: one hour, Flink's `KafkaSink` default,
+where Kafka's own `transaction.max.timeout.ms` is 15 minutes). Two more are derived rather than chosen and cannot be set: at most
 200 partitions and at most 62 offsets in one transaction. Past a cap the transaction is answered
 `MESSAGE_TOO_LARGE` or `INVALID_COMMIT_OFFSET_SIZE` and has to be aborted rather than retried,
 because waiting does not make a 12 MiB transaction fit an 8 MiB stage.

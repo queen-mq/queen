@@ -136,6 +136,24 @@ impl Rsm for GroupRouter {
     async fn push(&self, ctx: ReqCtx, req: PushReq) -> Result<PushOut, RsmError> {
         self.pick(&ctx.tenant).push(ctx, req).await
     }
+    async fn push_records(
+        &self,
+        ctx: ReqCtx,
+        items: Vec<RecordPush>,
+    ) -> Result<Vec<RecordPushed>, RsmError> {
+        self.pick(&ctx.tenant).push_records(ctx, items).await
+    }
+    async fn fetch_records(
+        &self,
+        ctx: ReqCtx,
+        entries: Vec<RecordFetch>,
+        max_wait_ms: u64,
+        min_bytes: usize,
+    ) -> Result<Vec<RecordsFetched>, RsmError> {
+        self.pick(&ctx.tenant)
+            .fetch_records(ctx, entries, max_wait_ms, min_bytes)
+            .await
+    }
     async fn pop_wildcard(&self, ctx: ReqCtx, req: PopReq) -> Result<PopOut, RsmError> {
         self.pick(&ctx.tenant).pop_wildcard(ctx, req).await
     }

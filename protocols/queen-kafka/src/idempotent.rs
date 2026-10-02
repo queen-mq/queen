@@ -363,6 +363,20 @@ pub struct Producers {
     len: AtomicUsize,
     /// Entries evicted for room since the process started.
     evictions: AtomicU64,
+    /// Batches accepted and not yet answered, per key, in the order they were
+    /// accepted ([`Producers::begin`]): what a producer's next batch follows
+    /// when both are written in ONE push — the requests a client sent back to
+    /// back, coalesced (`handlers::produce::handle_coalesced`). Only batches in
+    /// flight are here, so it is as small as a coalesced run is long.
+    inflight: Mutex<HashMap<Key, Vec<InFlight>>>,
+}
+
+/// One batch accepted and not yet answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InFlight {
+    epoch: i16,
+    base_seq: i32,
+    last_seq: i32,
 }
 
 /// At most this many shards: past it the contention is already gone and the
@@ -739,7 +753,68 @@ impl Producers {
             cap,
             len: AtomicUsize::new(0),
             evictions: AtomicU64::new(0),
+            inflight: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The batches of an accepted run are IN FLIGHT: staged for a push that has
+    /// not answered yet. The same producer's next batch — in the same coalesced
+    /// push — is judged against them ([`Producers::check`]) until
+    /// [`Producers::end`].
+    pub fn begin(&self, pending: &Pending) {
+        let mut inflight = self
+            .inflight
+            .lock()
+            .expect("the in-flight map lock is never held across a panic");
+        let entry = inflight.entry(pending.key.clone()).or_default();
+        entry.extend(pending.batches.iter().map(|b| InFlight {
+            epoch: pending.epoch,
+            base_seq: b.base_seq,
+            last_seq: b.last_seq,
+        }));
+    }
+
+    /// The push of an accepted run answered, whatever it answered: its batches
+    /// are no longer in flight. Called AFTER [`Producers::commit`] when the
+    /// run landed, so the window never misses them in between.
+    pub fn end(&self, pending: &Pending) {
+        let mut inflight = self
+            .inflight
+            .lock()
+            .expect("the in-flight map lock is never held across a panic");
+        if let Some(entry) = inflight.get_mut(&pending.key) {
+            entry.retain(|f| {
+                !(f.epoch == pending.epoch
+                    && pending.batches.iter().any(|b| b.base_seq == f.base_seq))
+            });
+            if entry.is_empty() {
+                inflight.remove(&pending.key);
+            }
+        }
+    }
+
+    /// How a batch starting at `base_seq` relates to the key's batches in
+    /// flight: `Some(true)` when it follows the last one (the producer's next
+    /// batch, coalesced with it), `Some(false)` when it repeats one still in
+    /// flight (a retransmission of a push not yet answered), `None` when no
+    /// batch of this epoch is in flight and the committed window decides.
+    fn after_inflight(&self, key: &Key, epoch: i16, base_seq: i32) -> Option<bool> {
+        let inflight = self
+            .inflight
+            .lock()
+            .expect("the in-flight map lock is never held across a panic");
+        let entry = inflight.get(key)?;
+        let last = entry.iter().rev().find(|f| f.epoch == epoch)?;
+        if base_seq == increment_sequence(last.last_seq, 1) {
+            return Some(true);
+        }
+        if entry
+            .iter()
+            .any(|f| f.epoch == epoch && f.base_seq == base_seq)
+        {
+            return Some(false);
+        }
+        None
     }
 
     /// The shard a key lives in. The same tuple TYPE is hashed on every path,
@@ -880,11 +955,27 @@ impl Producers {
                 batch
             })
             .collect();
+        // The producer's previous batches are accepted and their push not yet
+        // answered (a coalesced run), so the committed window does not hold
+        // them yet and would read this one as a gap.
+        let follows = self.after_inflight(&key, epoch, first.base_sequence);
         let accept = Verdict::Accept(Pending {
             key,
             epoch,
             batches,
         });
+        match follows {
+            Some(true) => return accept,
+            Some(false) => {
+                return Verdict::Reject(
+                    ResponseError::RequestTimedOut,
+                    "a retransmission of a batch whose push has not answered yet; it is \
+                     answered once that push is"
+                        .to_string(),
+                )
+            }
+            None => {}
+        }
 
         let shard = self.shard(tenant, first.producer_id, topic, partition);
         let entry = shard
@@ -1200,6 +1291,43 @@ mod tests {
         assert_eq!(p.tracked(), 0);
         landed(&p, &pending, 100);
         assert_eq!(p.tracked(), 1);
+    }
+
+    /// Two requests of one producer coalesced into one push: the second batch
+    /// is checked while the first is still in flight. It follows the in-flight
+    /// batch, a retransmission of the in-flight batch is a retriable refusal,
+    /// and once both land the window is the one a serial producer leaves.
+    #[test]
+    fn a_coalesced_batch_follows_the_batch_in_flight() {
+        let p = Producers::new();
+        let first = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 0, 3)]));
+        // Without `begin` the next batch is a gap: the window holds nothing.
+        assert_eq!(
+            rejection(p.check(&tenant(), "orders", 0, &[batch(7, 0, 3, 2)])),
+            ResponseError::OutOfOrderSequenceNumber
+        );
+        p.begin(&first);
+        let second = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 3, 2)]));
+        p.begin(&second);
+        assert_eq!(
+            rejection(p.check(&tenant(), "orders", 0, &[batch(7, 0, 0, 3)])),
+            ResponseError::RequestTimedOut,
+            "a resend of a batch still in flight"
+        );
+        // Another partition and another producer are not affected.
+        accepted(p.check(&tenant(), "orders", 1, &[batch(7, 0, 0, 1)]));
+        accepted(p.check(&tenant(), "orders", 0, &[batch(8, 0, 0, 1)]));
+        landed(&p, &first, 100);
+        p.end(&first);
+        landed(&p, &second, 103);
+        p.end(&second);
+        assert_eq!(
+            p.check(&tenant(), "orders", 0, &[batch(7, 0, 3, 2)]),
+            Verdict::Duplicate(103)
+        );
+        let third = accepted(p.check(&tenant(), "orders", 0, &[batch(7, 0, 5, 1)]));
+        assert_eq!(third.base_sequence(), 5);
+        assert!(p.inflight.lock().unwrap().is_empty());
     }
 
     #[test]

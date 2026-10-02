@@ -780,9 +780,45 @@ mod tests {
             },
         );
         assert_eq!(handle(&f, &with_id("a"), CONN, None).await.error_code, 0);
+        // A second PRODUCER, so a second connection: one connection's second id
+        // takes its own first, idle one away instead (`txn::Txns::bind`).
         assert_eq!(
-            handle(&f, &with_id("b"), CONN, None).await.error_code,
+            handle(&f, &with_id("b"), CONN + 1, None).await.error_code,
             ResponseError::ConcurrentTransactions.code()
+        );
+    }
+
+    /// Flink's `KafkaSink` asks for one hour by default, and the default cap
+    /// takes it: no operator has to raise anything before an exactly-once job
+    /// can call `initTransactions()`. One past the cap is still Kafka's own
+    /// refusal, never a silently shorter timeout.
+    #[tokio::test]
+    async fn flinks_one_hour_default_is_accepted_and_one_past_the_cap_is_not() {
+        let f = facade(&[("orders", 4)]);
+        let hour = 3_600_000;
+        assert_eq!(
+            txn::DEFAULT_MAX_TIMEOUT_MS,
+            hour as u64,
+            "the cap and Flink's default have parted"
+        );
+        let r = handle(
+            &f,
+            &with_id("flink-0-1").with_transaction_timeout_ms(hour),
+            CONN,
+            None,
+        )
+        .await;
+        assert_eq!(r.error_code, 0);
+        let r = handle(
+            &f,
+            &with_id("flink-0-2").with_transaction_timeout_ms(hour + 1),
+            CONN,
+            None,
+        )
+        .await;
+        assert_eq!(
+            r.error_code,
+            ResponseError::InvalidTransactionTimeout.code()
         );
     }
 

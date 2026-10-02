@@ -179,7 +179,8 @@ async fn a_queue_is_created_by_posting_its_name_to_configure() {
 
     let seen = seen.lock().unwrap().clone();
     assert_eq!(seen[0].line, "POST /api/v1/configure HTTP/1.1");
-    assert_eq!(seen[0].body, r#"{"queue":"orders"}"#);
+    // The dedup window a Kafka topic has no use for (`KAFKA_DEDUP_WINDOW_SECONDS`).
+    assert_eq!(seen[0].body, r#"{"dedupWindowSeconds":0,"queue":"orders"}"#);
 }
 
 /// The token is a per-call argument, and it lands as the Bearer header the
@@ -307,6 +308,69 @@ async fn partition_sizes_come_from_the_lean_route_and_fall_back_to_the_detail() 
     assert_eq!(got, [("0".to_string(), 5), ("1".to_string(), 6)]);
     let seen = seen.lock().unwrap().clone();
     assert_eq!(seen[1].line, "GET /api/v1/resources/queues/orders HTTP/1.1");
+}
+
+/// The offset for a time is one POST of every lookup, and the answer is read
+/// back in order: the offset, the append time in milliseconds, and the
+/// fetch's own marker for a queue that is not there. A broker without the
+/// route answers no time at all, which is an answer and not an error.
+#[tokio::test]
+async fn offsets_for_times_post_the_lookups_and_read_the_offsets_back() {
+    use queen_kafka::queen::{TimeFound, TimeLookup};
+    const FOUND: &str = r#"{"entries":[
+        {"queue":"orders","partition":"0","offset":42,"ts":"2026-09-21T10:00:00.004211Z",
+         "highWatermark":97,"logStartOffset":0},
+        {"queue":"orders","partition":"1","offset":null,"ts":null,
+         "highWatermark":5,"logStartOffset":0},
+        {"queue":"nope","partition":"0","offset":null,"ts":null,
+         "highWatermark":0,"logStartOffset":0,"error":"UNKNOWN_TOPIC_OR_PARTITION"}]}"#;
+    let (base, seen) = stub(vec![Canned::new(200, FOUND)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+    let lookups: Vec<TimeLookup> = [("orders", "0"), ("orders", "1"), ("nope", "0")]
+        .iter()
+        .map(|(q, p)| TimeLookup {
+            queue: q.to_string(),
+            partition: p.to_string(),
+            timestamp_ms: 1_790_000_000_000,
+        })
+        .collect();
+    let got = api
+        .offsets_for_times(&lookups, None)
+        .await
+        .unwrap()
+        .expect("answered");
+    assert_eq!(
+        got,
+        [
+            TimeFound {
+                offset: Some(42),
+                // 2026-09-21T10:00:00.004Z: milliseconds, truncated.
+                timestamp_ms: Some(1_789_984_800_004),
+                error: None,
+            },
+            TimeFound::default(),
+            TimeFound {
+                error: Some("UNKNOWN_TOPIC_OR_PARTITION".to_string()),
+                ..TimeFound::default()
+            },
+        ]
+    );
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[0].line, "POST /api/v1/fetch/offsets HTTP/1.1");
+    let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
+    assert_eq!(
+        body["entries"][0],
+        serde_json::json!({"queue":"orders","partition":"0","timestamp":1_790_000_000_000i64})
+    );
+
+    // An answer that does not line up with the lookups is not one.
+    let (base, _) = stub(vec![Canned::new(200, r#"{"entries":[]}"#)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+    assert!(api.offsets_for_times(&lookups, None).await.is_err());
+
+    let (base, _) = stub(vec![Canned::new(404, r#"{"code":"no_such_route"}"#)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+    assert_eq!(api.offsets_for_times(&lookups, None).await.unwrap(), None);
 }
 
 /// A base URL with a trailing slash must not produce `//api/v1/...`.

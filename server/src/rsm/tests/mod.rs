@@ -50,6 +50,7 @@ mod delete_race;
 mod edge;
 mod facade;
 mod facade_kv;
+mod fetch_offsets;
 mod fuzz;
 mod gates;
 mod golden;

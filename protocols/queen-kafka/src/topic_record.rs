@@ -42,7 +42,9 @@
 //!   key:       qk:topiccfg:<topic>
 //!   value:     {"qid": "<queue uuid>",
 //!               "set": {"retentionEnabled": true, "retentionSeconds": 604800},
-//!               "at":  1787824800123}
+//!               "at":  1787824800123,
+//!               "partitions": 64,                          (optional, Record::partitions)
+//!               "kafka": {"cleanup.policy": "compact"}}    (optional, Record::kafka)
 //!   expiry:    forever
 //! ```
 //!
@@ -65,6 +67,28 @@
 //! facade nothing to pin to, and a record written against such a list records
 //! that fact rather than inventing one. Where ids are reported — which is every
 //! Queen that has `018_stats.sql` — the check is real.
+//!
+//! ## The write-ahead record, and the race it closes
+//!
+//! A floor pinned to `qid` can only be written once the queue exists, so every
+//! other node lists a new topic BEFORE its width record can reach it, and in
+//! that window advertises the broker default. On 2026-10-01 that was a Kafka
+//! Connect worker creating its 5-partition status topic and, 30 ms later, being
+//! handed metadata with 200 partitions by another node: it assigned itself
+//! partitions that do not exist and timed out asking for their end offsets.
+//!
+//! So CreateTopics writes a PENDING record first ([`Record::pending`]): no
+//! `qid`, the floor, and `"pending": true`, committed before the queue's own
+//! create is even sent. Raft applies in log order on every node, so a node that
+//! can list the queue has already applied its width. The pinned record
+//! replaces it once the queue has an id.
+//!
+//! A pending floor applies to the queue of that name whatever its id, and only
+//! for [`PENDING_FLOOR_MS`] after it was written: a create that died between
+//! the two writes must not hand its width to an unrelated queue that takes the
+//! name later. The other readers ([`Record::describes`]) never match a pending
+//! record against a queue that has an id, so DescribeConfigs and the alters see
+//! the topic as untracked for the few milliseconds the pinned write takes.
 //!
 //! ## Absence is the safe direction, everywhere
 //!
@@ -89,6 +113,14 @@ use crate::queen::{self, KvOp, QueenApi};
 /// of none of them, which is the property the `qk:` shape was designed for and
 /// which [`tests::the_key_space_cannot_see_the_others`] pins.
 const KEY_PREFIX: &str = "qk:topiccfg:";
+
+/// How long a pending record's floor is believed ([`Record::pending`]).
+///
+/// The pinned record replaces it within milliseconds; the window only has to
+/// outlast a slow create and the wall-clock skew between the node that wrote
+/// `at` and the node reading it. Past it, a pending record is a create that
+/// never finished, and reads as no floor at all.
+pub const PENDING_FLOOR_MS: i64 = 120_000;
 
 /// Ceiling on one key, in bytes — the broker's KV key ceiling (`MAX_KEY_BYTES`
 /// in server/src/rsm/planner/kv.rs).
@@ -158,6 +190,21 @@ pub struct Record {
     /// every future configure as an option Queen ignores — and would be exposed
     /// to a client's `--delete-config` through [`merge`].
     pub partitions: Option<u32>,
+    /// The Kafka topic configs a client SET that are not `/configure` options,
+    /// by their Kafka names, as strings: `cleanup.policy` when it is not the
+    /// default, `min.insync.replicas` below the default, the keys
+    /// [`crate::topic_config`] records as set, and a `retention.ms` a
+    /// compacted topic keeps without applying ([`crate::topic_config::settle`]).
+    ///
+    /// A sibling of [`Record::set`] and never inside it, for the reason
+    /// [`Record::partitions`] is: `set` is posted verbatim to `/configure`. Read
+    /// tolerantly like `partitions` — a record written before it existed has
+    /// none, and that is "nothing set", not an unreadable record.
+    pub kafka: Map<String, Value>,
+    /// Written ahead of the queue's create, before any `qid` exists: see the
+    /// module header. Read tolerantly, like `partitions`: a record without the
+    /// member is a pinned one.
+    pub pending: bool,
 }
 
 impl Record {
@@ -168,7 +215,27 @@ impl Record {
             set,
             at: now_millis(),
             partitions: None,
+            kafka: Map::new(),
+            pending: false,
         }
+    }
+
+    /// The same record, written ahead of the queue's create (module header).
+    /// Its `qid` is `None`: the queue does not exist yet.
+    pub fn pending(mut self) -> Record {
+        self.qid = None;
+        self.pending = true;
+        self
+    }
+
+    /// The same record carrying the Kafka-side values a client set.
+    ///
+    /// Separate from [`Record::new`] for the reason
+    /// [`Record::with_partitions`] is: the auto-create path has none to
+    /// declare, and an alter carries the merged map through explicitly.
+    pub fn with_kafka(mut self, kafka: Map<String, Value>) -> Record {
+        self.kafka = kafka;
+        self
     }
 
     /// The same record carrying a width floor.
@@ -190,13 +257,23 @@ impl Record {
         self.describes(live).then_some(self.partitions).flatten()
     }
 
-    fn to_value(&self) -> Value {
-        serde_json::json!({
+    pub(crate) fn to_value(&self) -> Value {
+        let mut v = serde_json::json!({
             "qid": self.qid,
             "set": Value::Object(self.set.clone()),
             "at": self.at,
             "partitions": self.partitions,
-        })
+        });
+        // Only when there is something in it, so every record of a topic that
+        // set nothing beyond the bag is byte for byte what it always was.
+        if !self.kafka.is_empty() {
+            v["kafka"] = Value::Object(self.kafka.clone());
+        }
+        // The same rule: a pinned record is byte for byte what it always was.
+        if self.pending {
+            v["pending"] = Value::Bool(true);
+        }
+        v
     }
 
     /// Read a stored value back, or `None` for anything that is not one of
@@ -234,6 +311,19 @@ impl Record {
                     (1..=u64::from(crate::handlers::metadata::MAX_PARTITIONS_CEILING)).contains(n)
                 })
                 .map(|n| n as u32),
+            // Tolerant, like `partitions` and for the same reason; and only
+            // string values, which is all this facade ever writes there.
+            kafka: v
+                .get("kafka")
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .filter(|(_, v)| v.is_string())
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            pending: v.get("pending").and_then(Value::as_bool).unwrap_or(false),
         })
     }
 
@@ -261,6 +351,18 @@ pub struct StoredFloor {
     /// Always `Some`'s inner value: a record with no floor is not stored here at
     /// all, so absence from the map and "declared no floor" are one state.
     pub partitions: u32,
+    /// A write-ahead record still inside [`PENDING_FLOOR_MS`]; one past it is
+    /// never loaded.
+    pub pending: bool,
+}
+
+impl StoredFloor {
+    /// Whether this floor belongs to the queue the list shows now: the pinned
+    /// record's `qid` gate ([`Record::floor`]), or a pending record, which has
+    /// no id to compare and belongs to the queue being created under its name.
+    pub fn applies_to(&self, live: Option<&str>) -> bool {
+        self.pending || self.qid.as_deref() == live
+    }
 }
 
 /// `stored` with `delta` applied: a `Some` value sets the key, a `None` removes
@@ -439,12 +541,19 @@ pub async fn load_floors(
             // and "declared none" are deliberately the same state, so the map
             // stays the size of the topics that opted in rather than the size of
             // every topic the facade has ever configured.
-            if let Some(partitions) = Record::from_value(&row.value).and_then(|r| {
-                r.partitions.map(|p| StoredFloor {
-                    qid: r.qid,
-                    partitions: p,
+            //
+            // A pending record counts only inside its window (module header),
+            // and is measured on THIS node's clock against the writer's `at`.
+            if let Some(partitions) = Record::from_value(&row.value)
+                .filter(|r| !r.pending || (now_millis() - r.at).abs() <= PENDING_FLOOR_MS)
+                .and_then(|r| {
+                    r.partitions.map(|p| StoredFloor {
+                        qid: r.qid,
+                        partitions: p,
+                        pending: r.pending,
+                    })
                 })
-            }) {
+            {
                 out.insert(topic.to_string(), partitions);
             }
         }
@@ -577,6 +686,35 @@ mod tests {
         );
     }
 
+    /// The Kafka-side values survive the round trip; a record written before
+    /// they existed reads as one that set nothing, never as unreadable; and a
+    /// record with none writes no member at all, so it is byte for byte what
+    /// it always was.
+    #[test]
+    fn the_kafka_values_round_trip_and_an_old_record_has_none() {
+        let kafka: Map<String, Value> = [
+            ("cleanup.policy".to_string(), json!("compact")),
+            ("segment.bytes".to_string(), json!("52428800")),
+        ]
+        .into_iter()
+        .collect();
+        let r = Record::new(Some("q-1".into()), bag(&[])).with_kafka(kafka.clone());
+        assert_eq!(Record::from_value(&r.to_value()).unwrap().kafka, kafka);
+
+        let old = json!({"qid": "q-1", "set": {}, "at": 17});
+        assert!(Record::from_value(&old).unwrap().kafka.is_empty());
+        assert!(Record::new(None, bag(&[]))
+            .to_value()
+            .get("kafka")
+            .is_none());
+
+        // Only strings, which is all this facade writes there.
+        let odd = json!({"qid": null, "set": {}, "at": 1,
+                         "kafka": {"cleanup.policy": "compact", "segment.bytes": 5}});
+        let read = Record::from_value(&odd).unwrap();
+        assert_eq!(read.kafka.len(), 1);
+    }
+
     /// The `qid` gate applies to the floor exactly as it applies to the
     /// retention DescribeConfigs reports: a record pinned to a queue that was
     /// dropped and recreated under the same name describes a width nothing is
@@ -621,6 +759,58 @@ mod tests {
         let f = &floors["wide"];
         assert_eq!(f.partitions, 64);
         assert_eq!(f.qid.as_deref(), Some("q-1"));
+        assert!(!f.pending);
+    }
+
+    /// The write-ahead record (module header): marked, and only when it is one,
+    /// so a pinned record is byte for byte what it always was; never taken by
+    /// DescribeConfigs or an alter for a queue that has an id.
+    #[test]
+    fn a_pending_record_round_trips_and_a_pinned_one_carries_no_marker() {
+        let pinned = Record::new(Some("q-1".into()), bag(&[])).with_partitions(Some(5));
+        assert!(pinned.to_value().get("pending").is_none());
+
+        let ahead = Record::new(Some("ignored".into()), bag(&[]))
+            .with_partitions(Some(5))
+            .pending();
+        let v = ahead.to_value();
+        assert_eq!(v["pending"], json!(true));
+        assert_eq!(v["qid"], Value::Null, "the queue does not exist yet");
+        let read = Record::from_value(&v).unwrap();
+        assert!(read.pending);
+        assert_eq!(read.partitions, Some(5));
+        assert!(!read.describes(Some("q-1")));
+    }
+
+    /// A pending floor belongs to the queue of its name whatever that queue's
+    /// id, and only inside its window: a create that died between its two
+    /// writes declares nothing for whoever takes the name later.
+    #[tokio::test]
+    async fn the_scan_believes_a_pending_floor_only_inside_its_window() {
+        let api = FakeQueen::with(&[]);
+        api.kv_seed(
+            NAMESPACE,
+            &key("fresh"),
+            Record::new(None, bag(&[]))
+                .with_partitions(Some(5))
+                .pending()
+                .to_value(),
+        );
+        let mut abandoned = Record::new(None, bag(&[]))
+            .with_partitions(Some(7))
+            .pending();
+        abandoned.at -= PENDING_FLOOR_MS + 1_000;
+        api.kv_seed(NAMESPACE, &key("abandoned"), abandoned.to_value());
+
+        let (floors, finished) = load_floors(api.as_ref(), None).await.unwrap();
+        assert!(finished);
+        let f = floors
+            .get("fresh")
+            .expect("a pending floor inside its window");
+        assert_eq!(f.partitions, 5);
+        assert!(f.pending);
+        assert!(f.applies_to(Some("q-9")) && f.applies_to(None));
+        assert!(!floors.contains_key("abandoned"));
     }
 
     /// A truncated PAGE is not a short scan: the walk follows `nextAfter` and

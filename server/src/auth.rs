@@ -480,6 +480,15 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
         return ReadOnly;
     }
 
+    // `POST /api/v1/fetch/offsets` is the fetch arm's other twin: which offset
+    // a partition's log had reached at a time, read from the same partition
+    // and txns rows a fetch reads, nothing leased and nothing moved
+    // (rsm/facade/real/phase2/offsets.rs). An offset and a time are strictly
+    // less than the payloads `/api/v1/fetch` already serves at this level.
+    if m == "POST" && path == "/api/v1/fetch/offsets" {
+        return ReadOnly;
+    }
+
     // PLAN_S3_SINK.md §5.1 — `POST /api/v1/partitions/changed` is the fetch
     // arm's twin and takes the same level for the same reason: it is a pure
     // read (two indexed selects, nothing leased, nothing moved) that cannot
@@ -894,6 +903,26 @@ mod tests {
         );
         assert_eq!(
             route_access_level(&Method::GET, "/api/v1/pop/queue/orders"),
+            AccessLevel::ReadWrite
+        );
+    }
+
+    /// `POST /api/v1/fetch/offsets` answers which offset a log had reached at
+    /// a time: a read-only token that may fetch may ask it, and the arm is
+    /// method- and path-exact like the fetch arm.
+    #[test]
+    fn the_offset_for_a_time_is_a_read_like_the_fetch_it_feeds() {
+        let post = Method::POST;
+        assert_eq!(
+            route_access_level(&post, "/api/v1/fetch/offsets"),
+            AccessLevel::ReadOnly
+        );
+        assert_eq!(
+            route_access_level(&Method::GET, "/api/v1/fetch/offsets"),
+            AccessLevel::ReadWrite
+        );
+        assert_eq!(
+            route_access_level(&post, "/api/v1/fetch/offsets/x"),
             AccessLevel::ReadWrite
         );
     }

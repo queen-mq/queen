@@ -17,12 +17,14 @@
 //! worth being blunt about:
 //!
 //!   * a **TOPIC** answer is SHORT. Queen exposes no HTTP read of a queue's
-//!     configuration at all, so two of the three rows are the ones that are true
-//!     of every Queen queue by construction. The third, `retention.ms`, is read
-//!     from the record this facade keeps of what it last applied to the topic
-//!     ([`crate::topic_record`]) — so it round-trips for a topic this facade
-//!     created and is OMITTED for one it did not, which is where it used to be
-//!     for all of them.
+//!     configuration at all, so a topic this facade did not create is answered
+//!     with the two rows that are true of every Queen queue by construction.
+//!     One it did create is answered from the record it keeps of what it last
+//!     applied ([`crate::topic_record`]): its `cleanup.policy` (`compact`, for
+//!     Kafka Connect's internal topics, which Connect checks before it starts),
+//!     its `retention.ms`, and every other key a client set on it, each with a
+//!     documentation line saying whether anything enforces it
+//!     ([`crate::topic_config`]).
 //!   * a **BROKER** answer is the one that earns this API its place. Every value
 //!     is a number this process actually enforces, read from the running
 //!     configuration — so `kafka-configs.sh --describe --entity-type brokers
@@ -170,41 +172,26 @@ async fn load_records(
     }
 }
 
-/// The `retention.ms` row for one topic, or `None` when the facade has nothing
-/// to say about it.
+/// The rows of one topic: what its record says when the facade tracks it, the
+/// rows true of every queue when it does not.
 ///
 /// The record must both EXIST and describe the queue that is there now: a `qid`
 /// that does not match the catalog's `id` is a queue that was dropped and
 /// recreated under the same name, and its old record describes a configuration
-/// nothing enforces.
-///
-/// A record whose `retentionEnabled` is true but which carries no
-/// `retentionSeconds` is read as retention OFF rather than as some invented
-/// window — [`crate::topic_config::alter`] only ever writes the pair together,
-/// so such a record did not come from this facade's vocabulary.
-fn retention_row(
+/// nothing enforces. A tracked topic reports its policy, its in-sync count,
+/// its retention and every key a client set on it
+/// ([`topic_config::described`]) — which is what Kafka Connect reads to
+/// confirm its internal topics are compacted.
+fn topic_rows(
     records: &HashMap<String, Record>,
     topic: &str,
     live_id: Option<&str>,
-) -> Option<Reported> {
-    let record = records.get(topic)?;
-    if !record.describes(live_id) {
-        return None;
+    isr: u32,
+) -> Vec<Reported> {
+    match records.get(topic).filter(|r| r.describes(live_id)) {
+        Some(record) => topic_config::described(isr, &record.set, &record.kafka),
+        None => topic_config::topic_configs_with(isr),
     }
-    let enabled = record
-        .set
-        .get(topic_config::RETENTION_ENABLED)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let seconds = enabled
-        .then(|| {
-            record
-                .set
-                .get(topic_config::RETENTION_SECONDS)
-                .and_then(|v| v.as_i64())
-        })
-        .flatten();
-    Some(topic_config::reported_retention(seconds))
 }
 
 fn one(
@@ -243,8 +230,12 @@ fn one(
                     "no such topic",
                 );
             };
-            let mut configs = topic_config::topic_configs_with(facade.in_sync_replicas());
-            configs.extend(retention_row(records, topic, live_id.as_deref()));
+            let configs = topic_rows(
+                records,
+                topic,
+                live_id.as_deref(),
+                facade.in_sync_replicas(),
+            );
             answered(resource, &configs, resource_keys(resource), documented)
         }
         RESOURCE_BROKER => {
@@ -314,11 +305,11 @@ fn answered(
             DescribeConfigsResourceResult::default()
                 .with_name(StrBytes::from_string(c.name.to_string()))
                 .with_value(Some(StrBytes::from_string(c.value.clone())))
-                // Per row since M7 F4 (`topic_config`): the two rows whose only
-                // legal value is the one already reported are still read-only,
-                // and `retention.ms` on a tracked topic is not — an alter of it
-                // really does land. A UI that greys out its edit button on this
-                // flag is still being told the truth.
+                // Per row (`topic_config`): every row of an untracked topic is
+                // read-only, because an alter of it is refused, and every row of
+                // a tracked one is not — an alter of it really does land. A UI
+                // that greys out its edit button on this flag is still being
+                // told the truth.
                 .with_read_only(c.read_only)
                 .with_config_source(c.source as i8)
                 .with_is_sensitive(topic_config::IS_SENSITIVE)
@@ -446,6 +437,19 @@ fn broker_configs(facade: &Facade) -> Vec<Reported> {
             read_only: true,
             documentation: "QUEEN_KAFKA_GROUP_MAX_SESSION_TIMEOUT_MS. A JoinGroup above it is \
                             answered INVALID_SESSION_TIMEOUT.",
+        },
+        // The number Flink's documentation sends an operator to look for before
+        // an exactly-once job will start, so it is answered where they look.
+        Reported {
+            name: "transaction.max.timeout.ms",
+            value: facade.txns.limits().max_timeout.as_millis().to_string(),
+            source: Source::StaticBroker,
+            kind: Kind::Int,
+            read_only: true,
+            documentation: "QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS. InitProducerId refuses a longer \
+                            transaction.timeout.ms with INVALID_TRANSACTION_TIMEOUT. One hour by \
+                            default — Flink's KafkaSink default — where Apache Kafka's is fifteen \
+                            minutes.",
         },
     ]
 }
@@ -610,6 +614,63 @@ mod tests {
         assert_eq!(row.config_source, Source::Default as i8);
     }
 
+    /// Kafka Connect's check, as `TopicAdmin.verifyTopicCleanupPolicyOnlyCompact`
+    /// makes it: a DescribeConfigs of `cleanup.policy` on its internal topic
+    /// must answer exactly `compact`, or the worker refuses to start. A topic
+    /// created compacted here does — and every key a client set comes back as
+    /// set, TOPIC-sourced, with the line saying what enforces it.
+    #[tokio::test]
+    async fn a_compacted_topic_reports_compact_and_what_was_set() {
+        let (f, api) = facade_and_queen(&[("connect-configs", 1)]);
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &crate::topic_record::key("connect-configs"),
+            serde_json::json!({
+                "qid": null,
+                "set": {"retentionEnabled": false},
+                "at": 1,
+                "kafka": {"cleanup.policy": "compact", "segment.bytes": "52428800"},
+            }),
+        );
+        let only_policy = resource(RESOURCE_TOPIC, "connect-configs")
+            .with_configuration_keys(Some(vec![StrBytes::from_static_str("cleanup.policy")]));
+        let r = handle(&f, &request(vec![only_policy]), None).await;
+        assert_eq!(r.results[0].error_code, 0);
+        assert_eq!(
+            values(&r.results[0]),
+            [("cleanup.policy".to_string(), "compact".to_string())]
+        );
+        assert_eq!(r.results[0].configs[0].config_source, Source::Topic as i8);
+
+        let r = handle(
+            &f,
+            &request(vec![resource(RESOURCE_TOPIC, "connect-configs")])
+                .with_include_documentation(true),
+            None,
+        )
+        .await;
+        let got = values(&r.results[0]);
+        assert!(
+            got.contains(&("segment.bytes".into(), "52428800".into())),
+            "{got:?}"
+        );
+        assert!(
+            got.contains(&("retention.ms".into(), "-1".into())),
+            "{got:?}"
+        );
+        let segment = r.results[0]
+            .configs
+            .iter()
+            .find(|c| c.name.as_str() == "segment.bytes")
+            .unwrap();
+        assert_eq!(segment.config_source, Source::Topic as i8);
+        assert!(!segment.read_only);
+        assert!(segment
+            .documentation
+            .as_ref()
+            .is_some_and(|d| d.as_str().contains("not enforced")));
+    }
+
     /// A queue dropped and recreated under the same name does not report the
     /// old record's retention. The `qid` pin is what catches it, and it is free:
     /// the queue list this handler already reads carries the id.
@@ -726,6 +787,8 @@ mod tests {
             // The coordinator's real knobs, read from the coordinator.
             assert!(got.contains(&("group.min.session.timeout.ms".into(), "6000".into())));
             assert!(got.contains(&("group.max.session.timeout.ms".into(), "300000".into())));
+            // The cap Flink's documentation sends an operator to look for.
+            assert!(got.contains(&("transaction.max.timeout.ms".into(), "3600000".into())));
         }
     }
 

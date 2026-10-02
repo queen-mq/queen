@@ -54,8 +54,8 @@
  *                                                 topic is created at the partition
  *                                                 count the bean asked for
  *     So a Boot service has no admin rule to follow any more: declare NewTopic beans or
- *     let queen-kafka auto-create on the first Metadata request, both work.  The one
- *     shape CreateTopics still refuses is cleanup.policy=compact.
+ *     let queen-kafka auto-create on the first Metadata request, both work, compacted
+ *     topics included since 2026-10-01 (the topic keeps every record).
  *   - Duplicates across a rebalance are at-least-once semantics, not loss or corruption:
  *     phase 5 asserts on distinct (partition, offset) and reports the redelivery count.
  *

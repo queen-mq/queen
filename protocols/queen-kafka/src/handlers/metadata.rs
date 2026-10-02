@@ -1376,6 +1376,43 @@ mod tests {
         assert_eq!(named(&resp, "orders").partitions.len(), 40);
     }
 
+    /// The 2026-10-02 Kafka Connect failure, on the path that had it: this
+    /// node's cached list predates a topic another node just created with 5
+    /// partitions, so Metadata takes the auto-create path, whose re-read
+    /// finds the queue. That re-read must carry the width written ahead of the
+    /// queue (`topic_record`'s pending record), not answer the default.
+    #[tokio::test]
+    async fn a_topic_found_by_the_auto_create_re_read_has_its_declared_width() {
+        let (f, api) = facade(&[("orders", 2)], 16);
+        f.catalog.list(None).await.unwrap();
+
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &topic_record::key("connect-status"),
+            topic_record::Record::new(None, serde_json::Map::new())
+                .with_partitions(Some(5))
+                .pending()
+                .to_value(),
+        );
+        api.queues.lock().unwrap().push(crate::queen::Queue {
+            name: "connect-status".into(),
+            partitions: 0,
+            id: Some("q-77".into()),
+            floor: None,
+        });
+
+        let resp = handle(&f, &request(Some(&["connect-status"]), true), 9, None).await;
+        assert!(
+            api.created().is_empty(),
+            "an existing queue was reconfigured"
+        );
+        assert_eq!(named(&resp, "connect-status").error_code, 0);
+        assert_eq!(named(&resp, "connect-status").partitions.len(), 5);
+        // ...and the list that re-read cached answers the next Metadata too.
+        let again = handle(&f, &request(Some(&["connect-status"]), true), 9, None).await;
+        assert_eq!(named(&again, "connect-status").partitions.len(), 5);
+    }
+
     /// One request naming K new topics is 1 list + 1 re-read + K creates, not
     /// 1 + 2K. The re-read is the thing that stops `/configure` resetting a
     /// queue that already exists, and one of them covers every name in the

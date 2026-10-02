@@ -2354,8 +2354,9 @@ pub(crate) struct PushItemIn<'a> {
 struct PushResolved {
     message_id: String,
     txn: String,
-    queue: String,
-    partition: String,
+    /// Shared by the consecutive items of one partition.
+    queue: Arc<str>,
+    partition: Arc<str>,
     /// `None` for a survivor; `Some(leader index into the flat results)` for an
     /// intra-request follower.
     follower_of: Option<usize>,
@@ -2363,14 +2364,29 @@ struct PushResolved {
     frame: Vec<u8>,
 }
 
-/// A per-item rendered verdict, in input order.
+/// One push item as its parser left it: borrowed from the JSON body of the
+/// route, or from the records of [`Rsm::push_records`].
+pub(crate) struct PushInput<'a> {
+    pub(crate) queue: &'a str,
+    pub(crate) partition: Option<&'a str>,
+    pub(crate) payload: &'a [u8],
+    /// The client's `transactionId`; `None` mints one from the message id.
+    pub(crate) txn: Option<&'a str>,
+}
+
+/// The JSON one route item adds around its payload, queue and partition
+/// (`{"queue":"","partition":"","payload":},`): what [`Rsm::push_records`]
+/// charges admission per record so it meets the route's budget.
+const PUSH_ITEM_JSON_BYTES: usize = 40;
+
+/// A per-item verdict, in input order. `message_id` is set only when it is not
+/// the one minted for the item: the original id of a duplicate, a follower's
+/// leader's id.
 #[derive(Clone)]
-struct PushItemOut {
-    message_id: String,
-    txn: String,
-    queue: String,
+struct PushVerdictOut {
     status: &'static str,
     offset: Option<u64>,
+    message_id: Option<String>,
 }
 
 impl RaftFacade {
@@ -2468,30 +2484,32 @@ impl RaftFacade {
         Ok(())
     }
 
+    /// Admission (crate::rsm::admit) for callers the HTTP edge did not admit,
+    /// BEFORE the parse: a push that must wait holds only its raw body, never
+    /// its parsed items and frames. Held for the whole push (parse, pack,
+    /// submit, replies), sized by the raw body. Pushes bypass `submit`, so this
+    /// is their only facade gate.
+    async fn admit_push(
+        &self,
+        bytes: usize,
+    ) -> Result<Option<crate::rsm::admit::Admitted>, RsmError> {
+        match self.admit.filter(|_| !crate::rsm::admit::pre_admitted()) {
+            Some(gate) => Ok(Some(gate.admit(bytes).await.map_err(|o| {
+                RsmError::Overloaded {
+                    retry_after_s: o.retry_after_s,
+                }
+            })?)),
+            None => Ok(None),
+        }
+    }
+
     async fn push_impl(&self, ctx: ReqCtx, req: PushReq) -> Result<PushOut, RsmError> {
-        // PERF-J: the push-only HTTP-boundary split. `_t_prep` covers the
+        // PERF-J: the push-only HTTP-boundary split. `t_prep` covers the
         // pre-submit work (parse + resolve + pack); `submit_ns` accumulates the
         // `cmd_tx.send` await (channel back-pressure, which `arrival_to_proposed`
         // cannot see because it stamps just before the send).
-        // Admission (crate::rsm::admit) for callers the HTTP edge did not
-        // admit, BEFORE the parse: a push that must wait holds only its raw
-        // body, never its parsed items and frames. Held for the whole push
-        // (parse, pack, submit, replies), sized by the raw body. Pushes bypass
-        // `submit`, so this is their only facade gate.
-        let _admitted = match self.admit.filter(|_| !crate::rsm::admit::pre_admitted()) {
-            Some(gate) => {
-                Some(
-                    gate.admit(req.raw.len())
-                        .await
-                        .map_err(|o| RsmError::Overloaded {
-                            retry_after_s: o.retry_after_s,
-                        })?,
-                )
-            }
-            None => None,
-        };
-        let _t_prep = crate::rsm::timing::stamp();
-        let mut _submit_ns: u64 = 0;
+        let _admitted = self.admit_push(req.raw.len()).await?;
+        let t_prep = crate::rsm::timing::stamp();
         let body: PushBodyIn =
             serde_json::from_slice(&req.raw).map_err(|e| RsmError::Rejected {
                 code: "bad_body".into(),
@@ -2512,71 +2530,152 @@ impl RaftFacade {
                 ),
             });
         }
+        let inputs: Vec<PushInput<'_>> = body
+            .items
+            .iter()
+            .map(|it| PushInput {
+                queue: it.queue.as_ref(),
+                partition: it.partition.as_deref(),
+                payload: it.payload.get().as_bytes(),
+                txn: it.transaction_id.as_deref(),
+            })
+            .collect();
+        let (resolved, out) = self.push_inputs(&ctx, &inputs, t_prep).await?;
+        Ok(PushOut {
+            body: render_push(&resolved, &out),
+        })
+    }
+
+    /// [`Rsm::push_records`]: the push route minus its JSON. Admission is sized
+    /// as the route's would be, by the body these items make (the payloads plus
+    /// each item's own JSON), so an in-process producer meets the same budget an
+    /// HTTP one does.
+    async fn push_records_impl(
+        &self,
+        ctx: ReqCtx,
+        items: Vec<super::RecordPush>,
+    ) -> Result<Vec<super::RecordPushed>, RsmError> {
+        let weight = items.iter().fold(2usize, |n, it| {
+            n.saturating_add(
+                it.payload.len() + it.queue.len() + it.partition.len() + PUSH_ITEM_JSON_BYTES,
+            )
+        });
+        let _admitted = self.admit_push(weight).await?;
+        let t_prep = crate::rsm::timing::stamp();
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let inputs: Vec<PushInput<'_>> = items
+            .iter()
+            .map(|it| PushInput {
+                queue: &it.queue,
+                partition: Some(it.partition.as_str()),
+                payload: &it.payload,
+                txn: None,
+            })
+            .collect();
+        let (_, out) = self.push_inputs(&ctx, &inputs, t_prep).await?;
+        Ok(out
+            .into_iter()
+            .map(|o| super::RecordPushed {
+                status: o.status,
+                offset: o.offset,
+            })
+            .collect())
+    }
+
+    /// One push, whoever parsed it: resolve every item, submit one command per
+    /// (queue, partition) group (or one multi-push), collect the verdicts.
+    /// Answers each item's resolution beside its verdict, in input order.
+    /// Step 1 of a push: resolve every input item and collapse intra-request
+    /// duplicates by (queue, partition, txn), so the planner is never handed two
+    /// frames with the same hash in one command (its probe folds only what came
+    /// before, so it would let both survive). The leader is the first
+    /// occurrence; a follower inherits the leader's verdict at render. Answers
+    /// the resolutions in input order and the survivors grouped by
+    /// (queue, partition), first-seen order.
+    async fn push_resolve(
+        &self,
+        ctx: &ReqCtx,
+        inputs: &[PushInput<'_>],
+    ) -> Result<(Vec<PushResolved>, indexed_groups::Groups), RsmError> {
         if self.storage_pressure() {
             return Err(RsmError::StorageFull);
         }
         let encrypted_queues = self
             .encrypted_queues(
                 &ctx.tenant,
-                body.items
-                    .iter()
-                    .map(|item| item.queue.as_ref().to_string())
-                    .collect(),
+                inputs.iter().map(|item| item.queue.to_string()).collect(),
             )
             .await?;
-
-        // 1. Resolve every input item and collapse intra-request duplicates by
-        //    (queue, partition, txn), so the planner is never handed two frames
-        //    with the same hash in one command (its probe folds only what came
-        //    before, so it would let both survive). The leader is the first
-        //    occurrence; a follower inherits the leader's verdict at render.
-        let mut resolved: Vec<PushResolved> = Vec::with_capacity(body.items.len());
+        let mut resolved: Vec<PushResolved> = Vec::with_capacity(inputs.len());
         // (queue, partition, txn) → the flat index of its leader.
         let mut seen: std::collections::HashMap<(String, String, String), usize> =
             std::collections::HashMap::new();
         // (queue, partition) → the survivors' flat indices, in order.
         let mut groups: indexed_groups::Groups = indexed_groups::Groups::new();
-
-        for it in &body.items {
+        for it in inputs {
             let mid = uuidv7_bytes();
             let mid_str = uuid_bytes_to_string(&mid);
             let txn = it
-                .transaction_id
-                .as_deref()
+                .txn
                 .map(str::to_string)
                 .unwrap_or_else(|| mid_str.clone());
-            let queue = it.queue.as_ref().to_string();
-            let partition = it
-                .partition
-                .as_deref()
-                .filter(|p| !p.is_empty())
-                .unwrap_or("Default")
-                .to_string();
-
-            super::check_message_key_names(&ctx.tenant, &queue, None, Some(&partition))?;
+            let partition_name = it.partition.filter(|p| !p.is_empty()).unwrap_or("Default");
+            // The item's names, shared with the item before it when it is in
+            // the same partition (the shape of every batch): one allocation per
+            // partition rather than two per message, and the names checked once.
+            let (queue, partition) = match resolved.last() {
+                Some(prev) if &*prev.queue == it.queue && &*prev.partition == partition_name => {
+                    (prev.queue.clone(), prev.partition.clone())
+                }
+                _ => {
+                    super::check_message_key_names(
+                        &ctx.tenant,
+                        it.queue,
+                        None,
+                        Some(partition_name),
+                    )?;
+                    (
+                        std::sync::Arc::<str>::from(it.queue),
+                        std::sync::Arc::<str>::from(partition_name),
+                    )
+                }
+            };
 
             let flat = resolved.len();
-            let key = (queue.clone(), partition.clone(), txn.clone());
-            let follower_of = match seen.get(&key) {
-                Some(&leader) => Some(leader),
-                None => {
-                    seen.insert(key, flat);
-                    None
+            // A transaction id the broker just minted is a fresh UUIDv7: no
+            // other item of this request can carry it, so only a client's own
+            // ids need the duplicate map (and its three key copies per item).
+            let follower_of = if it.txn.is_none() {
+                None
+            } else {
+                let key = (queue.to_string(), partition.to_string(), txn.clone());
+                match seen.get(&key) {
+                    Some(&leader) => Some(leader),
+                    None => {
+                        seen.insert(key, flat);
+                        None
+                    }
                 }
             };
             let hash = txn_hash128(&txn);
             let frame = if follower_of.is_none() {
-                let (payload, encrypted) = self.encode_payload(
-                    encrypted_queues.contains(&queue),
-                    it.payload.get().as_bytes(),
-                    &queue,
-                );
+                let encrypt = encrypted_queues.contains(&*queue);
+                let encrypted_payload;
+                let (payload, encrypted): (&[u8], bool) = if encrypt {
+                    let (p, e) = self.encode_payload(true, it.payload, &queue);
+                    encrypted_payload = p;
+                    (&encrypted_payload, e)
+                } else {
+                    (it.payload, false)
+                };
                 pack_frames(&[FrameIn {
                     message_id: mid,
                     txn: &txn,
                     trace_id: None,
                     producer_sub: ctx.producer_sub.as_deref(),
-                    payload: &payload,
+                    payload,
                     encrypted,
                 }])
             } else {
@@ -2595,6 +2694,108 @@ impl RaftFacade {
                 frame,
             });
         }
+        Ok((resolved, groups))
+    }
+
+    /// Whether the queue-log codec starts early on this node: it plans the
+    /// command (it is not a follower forwarding it), so a group's blob — its
+    /// frames in order, which is exactly the `Append` blob when every frame
+    /// survives dedup — starts compressing now, while the command waits for
+    /// its planning cycle; the log writer then finds it done (qlog::codec).
+    fn early_codec(&self) -> bool {
+        self.qlog_reader.is_some()
+            && crate::rsm::qlog::codec::level() > 0
+            && (!self.offload
+                || matches!(
+                    self.repl.role(),
+                    crate::rsm::replicator::Role::Leader { .. }
+                ))
+    }
+
+    /// One group's [`PushCommand`]: its survivors' frames, MOVED out of the
+    /// resolutions (nothing reads a frame after this).
+    fn push_command(
+        ctx: &ReqCtx,
+        ordinal: usize,
+        g: &indexed_groups::Group,
+        resolved: &mut [PushResolved],
+        early_codec: bool,
+    ) -> PushCommand {
+        let items: Vec<PushItem> = g
+            .members
+            .iter()
+            .map(|&flat| PushItem {
+                hash: resolved[flat].hash,
+                frame: std::mem::take(&mut resolved[flat].frame),
+            })
+            .collect();
+        if early_codec {
+            let len: usize = items.iter().map(|i| i.frame.len()).sum();
+            if len >= crate::rsm::qlog::codec::MIN_BYTES {
+                let mut raw = Vec::with_capacity(len);
+                for i in &items {
+                    raw.extend_from_slice(&i.frame);
+                }
+                crate::rsm::qlog::codec::precompress(raw);
+            }
+        }
+        PushCommand {
+            request_id: derived_request_id(ctx.request_id, ordinal as u32),
+            tenant: ctx.tenant.clone(),
+            queue: g.queue.clone(),
+            partition: g.partition.clone(),
+            items,
+            create_cfg: default_queue_config(&g.queue),
+        }
+    }
+
+    /// The groups as ONE command: a multi-push when there are several and
+    /// `QUEEN_RAFT_MULTIPUSH` is on — one channel slot, one forward, one request
+    /// id and one outcome row instead of one per partition, the per-command
+    /// costs that the one-key-per-message workload pays per message. Each
+    /// group's verdicts come back in the outcome in group order.
+    fn multi_command(
+        &self,
+        ctx: &ReqCtx,
+        groups: &indexed_groups::Groups,
+        resolved: &mut [PushResolved],
+    ) -> Command {
+        let early_codec = self.early_codec();
+        if groups.len() == 1 {
+            let g = groups.iter().next().expect("one group");
+            return Command::Push(Self::push_command(ctx, 0, g, resolved, early_codec));
+        }
+        let pushes: Vec<PushCommand> = groups
+            .iter()
+            .enumerate()
+            .map(|(ordinal, g)| Self::push_command(ctx, ordinal, g, resolved, early_codec))
+            .collect();
+        Command::MultiPush(MultiPushCommand {
+            request_id: derived_request_id(ctx.request_id, MULTIPUSH_ORDINAL),
+            pushes,
+        })
+    }
+
+    /// What collecting a push's verdicts reads besides the replies.
+    fn collect_deps(&self) -> CollectDeps {
+        CollectDeps {
+            store: self.store.clone(),
+            reader: self.reader.clone(),
+            qlog: self.qlog_reader.clone(),
+        }
+    }
+
+    /// One push, whoever parsed it: resolve every item, submit one command per
+    /// (queue, partition) group (or one multi-push), collect the verdicts.
+    /// Answers each item's resolution beside its verdict, in input order.
+    async fn push_inputs(
+        &self,
+        ctx: &ReqCtx,
+        inputs: &[PushInput<'_>],
+        _t_prep: Option<std::time::Instant>,
+    ) -> Result<(Vec<PushResolved>, Vec<PushVerdictOut>), RsmError> {
+        let mut _submit_ns: u64 = 0;
+        let (mut resolved, groups) = self.push_resolve(ctx, inputs).await?;
 
         // 2. One PushCommand per (queue, partition) group, its items the group's
         //    survivors in order. Submit them all, then await every reply.
@@ -2605,68 +2806,12 @@ impl RaftFacade {
                 .record_dur(t.elapsed());
         }
         let mut rxs = Vec::with_capacity(groups.len());
-        // The queue-log codec's early start: this node plans the command (it is
-        // not a follower forwarding it), so the group's blob — its frames in
-        // order, which is exactly the `Append` blob when every frame survives
-        // dedup — starts compressing now, while the command waits for its
-        // planning cycle; the log writer then finds it done (qlog::codec).
-        let early_codec = self.qlog_reader.is_some()
-            && crate::rsm::qlog::codec::level() > 0
-            && (!self.offload
-                || matches!(
-                    self.repl.role(),
-                    crate::rsm::replicator::Role::Leader { .. }
-                ));
-        let push_cmd = |ordinal: usize, g: &indexed_groups::Group| {
-            let items: Vec<PushItem> = g
-                .members
-                .iter()
-                .map(|&flat| PushItem {
-                    hash: resolved[flat].hash,
-                    frame: resolved[flat].frame.clone(),
-                })
-                .collect();
-            if early_codec {
-                let len: usize = items.iter().map(|i| i.frame.len()).sum();
-                if len >= crate::rsm::qlog::codec::MIN_BYTES {
-                    let mut raw = Vec::with_capacity(len);
-                    for i in &items {
-                        raw.extend_from_slice(&i.frame);
-                    }
-                    crate::rsm::qlog::codec::precompress(raw);
-                }
-            }
-            Command::Push(PushCommand {
-                request_id: derived_request_id(ctx.request_id, ordinal as u32),
-                tenant: ctx.tenant.clone(),
-                queue: g.queue.clone(),
-                partition: g.partition.clone(),
-                items,
-                create_cfg: default_queue_config(&g.queue),
-            })
-        };
-        // One command for the whole request when it names several partitions
-        // (`QUEEN_RAFT_MULTIPUSH`, default on): one channel slot, one forward,
-        // one request id and one outcome row instead of one per partition —
-        // the per-command costs that the one-key-per-message workload pays per
-        // message. Each group's verdicts come back in the outcome in group
-        // order and are handed to the collector below as that group's reply.
+        let early_codec = self.early_codec();
         let multi = *MULTIPUSH && groups.len() > 1;
         if multi {
-            let pushes: Vec<PushCommand> = groups
-                .iter()
-                .enumerate()
-                .map(|(ordinal, g)| match push_cmd(ordinal, g) {
-                    Command::Push(p) => p,
-                    _ => unreachable!("push_cmd builds a push"),
-                })
-                .collect();
-            let cmd = Command::MultiPush(MultiPushCommand {
-                request_id: derived_request_id(ctx.request_id, MULTIPUSH_ORDINAL),
-                pushes,
-            });
+            let cmd = self.multi_command(ctx, &groups, &mut resolved);
             let reply = if self.offload {
-                self.submit_offloaded(&ctx, cmd).await?
+                self.submit_offloaded(ctx, cmd).await?
             } else {
                 let (sub, rx) = Submission::new(cmd);
                 let _t_send = crate::rsm::timing::stamp();
@@ -2699,11 +2844,24 @@ impl RaftFacade {
             // A cluster node: every group goes through the offload path (to the
             // leader when another node leads), all in flight together; each
             // answer arrives once this node has applied it.
-            let futs = groups.iter().enumerate().map(|(ordinal, g)| {
-                let cmd = push_cmd(ordinal, g);
-                let members = g.members.clone();
-                let ctx = &ctx;
-                async move { (members, self.submit_offloaded(ctx, cmd).await) }
+            let cmds: Vec<(Vec<usize>, Command)> = groups
+                .iter()
+                .enumerate()
+                .map(|(ordinal, g)| {
+                    (
+                        g.members.clone(),
+                        Command::Push(Self::push_command(
+                            ctx,
+                            ordinal,
+                            g,
+                            &mut resolved,
+                            early_codec,
+                        )),
+                    )
+                })
+                .collect();
+            let futs = cmds.into_iter().map(|(members, cmd)| async move {
+                (members, self.submit_offloaded(ctx, cmd).await)
             });
             for (members, res) in futures_util::future::join_all(futs).await {
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2715,7 +2873,13 @@ impl RaftFacade {
             if self.offload || multi {
                 break;
             }
-            let cmd = push_cmd(ordinal, g);
+            let cmd = Command::Push(Self::push_command(
+                ctx,
+                ordinal,
+                g,
+                &mut resolved,
+                early_codec,
+            ));
             let (sub, rx) = Submission::new(cmd);
             let _t_send = crate::rsm::timing::stamp();
             let sent = tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await;
@@ -2730,172 +2894,21 @@ impl RaftFacade {
         }
         // PERF-J: the accumulated channel-enqueue wait (all groups), and open
         // the reply-wait leg (propose+commit+apply+answer), push-only.
-        let _t_await = crate::rsm::timing::stamp();
-        if _t_await.is_some() {
+        let t_await = crate::rsm::timing::stamp();
+        if t_await.is_some() {
             crate::rsm::timing::metrics()
                 .push_h_submit
                 .record(_submit_ns);
         }
-
-        // 3. Collect. A whole-group Retry fails the whole push (the SDK retries
-        //    with the same derived ids, deduped by request id); a non-retryable
-        //    Rejected marks that group's items "error" (a push answers 201 with
-        //    per-item statuses).
-        let mut out: Vec<Option<PushItemOut>> = vec![None; resolved.len()];
-        let mut duplicate_ids: Vec<(usize, Pid, u64)> = Vec::new();
-        for (members, rx) in rxs {
-            let reply = match tokio::time::timeout(ctx.deadline.remaining(), rx).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(_)) => return Err(RsmError::Internal("planner dropped the reply".into())),
-                Err(_) => return Err(RsmError::Timeout),
-            };
-            match reply {
-                Reply::Done { outcome, .. } => {
-                    let verdicts = match outcome {
-                        Outcome::Push(p) => p.items,
-                        other => {
-                            return Err(RsmError::Internal(format!(
-                                "push got a non-push outcome: {other:?}"
-                            )))
-                        }
-                    };
-                    for (k, &flat) in members.iter().enumerate() {
-                        let r = &resolved[flat];
-                        let (status, offset) = match verdicts.get(k) {
-                            Some(PushVerdict::Created { offset, .. }) => ("queued", Some(*offset)),
-                            Some(PushVerdict::Duplicate { pid, offset }) => {
-                                duplicate_ids.push((flat, *pid, *offset));
-                                ("duplicate", Some(*offset))
-                            }
-                            Some(PushVerdict::Refused { .. }) | None => ("error", None),
-                        };
-                        out[flat] = Some(PushItemOut {
-                            message_id: r.message_id.clone(),
-                            txn: r.txn.clone(),
-                            queue: r.queue.clone(),
-                            status,
-                            offset,
-                        });
-                    }
-                }
-                Reply::Retry { hint } => {
-                    return Err(RsmError::Retry {
-                        leader_hint: hint.map(|n| n.to_string()),
-                    })
-                }
-                Reply::Refused(refusal) if refusal.retryable => {
-                    tracing::debug!(
-                        target: "rsm",
-                        code = %refusal.code,
-                        message = %refusal.message,
-                        "push refused, retryable",
-                    );
-                    return Err(RsmError::Retry { leader_hint: None });
-                }
-                Reply::Refused(_) => {
-                    for &flat in &members {
-                        let r = &resolved[flat];
-                        out[flat] = Some(PushItemOut {
-                            message_id: r.message_id.clone(),
-                            txn: r.txn.clone(),
-                            queue: r.queue.clone(),
-                            status: "error",
-                            offset: None,
-                        });
-                    }
-                }
-            }
-        }
-
-        // PERF-J: every group's reply is in — close the reply-wait leg.
-        if let Some(t) = _t_await {
-            crate::rsm::timing::metrics()
-                .push_h_await
-                .record_dur(t.elapsed());
-        }
-
-        // A duplicate returns the ORIGINAL message id, not the id minted for
-        // this rejected attempt. The replicated verdict carries its original
-        // offset; resolve the immutable frame locally after apply (D7).
-        if !duplicate_ids.is_empty() {
-            let store = self.store.clone();
-            let reader = self.reader.clone();
-            let qlog = self.qlog_reader.clone();
-            let tenant = ctx.tenant.clone();
-            let lookup: Vec<_> = duplicate_ids
-                .iter()
-                .map(|(flat, pid, offset)| {
-                    (
-                        *flat,
-                        *pid,
-                        *offset,
-                        resolved[*flat].queue.clone(),
-                        resolved[*flat].partition.clone(),
-                    )
-                })
-                .collect();
-            let ids = tokio::task::spawn_blocking(move || {
-                resolve_duplicate_message_ids(&store, &reader, qlog.as_ref(), &tenant, &lookup)
-            })
-            .await
-            .map_err(|e| RsmError::Internal(format!("duplicate id task: {e}")))??;
-            for (flat, id) in ids {
-                if let Some(item) = &mut out[flat] {
-                    item.message_id = id;
-                }
-            }
-        }
-
-        // 4. Followers inherit the leader's id, status ("duplicate") and offset
-        //    (C1). A follower whose leader errored is an error too.
-        for i in 0..resolved.len() {
-            if let Some(leader) = resolved[i].follower_of {
-                let lead = out[leader].clone();
-                let r = &resolved[i];
-                out[i] = Some(match lead {
-                    Some(l) if l.status == "error" => PushItemOut {
-                        message_id: l.message_id,
-                        txn: r.txn.clone(),
-                        queue: r.queue.clone(),
-                        status: "error",
-                        offset: None,
-                    },
-                    Some(l) => PushItemOut {
-                        message_id: l.message_id,
-                        txn: r.txn.clone(),
-                        queue: r.queue.clone(),
-                        status: "duplicate",
-                        offset: l.offset,
-                    },
-                    None => PushItemOut {
-                        message_id: r.message_id.clone(),
-                        txn: r.txn.clone(),
-                        queue: r.queue.clone(),
-                        status: "error",
-                        offset: None,
-                    },
-                });
-            }
-        }
-
-        // Dashboard counters: one push request of N items; per queue one
-        // request and the items it stored. A duplicate or a refused item adds
-        // nothing to the queue, so it is no pushed message there.
-        if let Some(m) = crate::metrics::global() {
-            m.push.record_request(resolved.len());
-            let mut per_q: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
-            for (r, o) in resolved.iter().zip(&out) {
-                let stored = o.as_ref().is_some_and(|o| o.status == "queued");
-                *per_q.entry(r.queue.as_str()).or_insert(0) += u64::from(stored);
-            }
-            for (q, n) in per_q {
-                m.per_queue.add_push(&ctx.tenant, q, n);
-            }
-        }
-
-        Ok(PushOut {
-            body: render_push(&out),
-        })
+        collect_push(
+            self.collect_deps(),
+            ctx.deadline,
+            &ctx.tenant,
+            resolved,
+            rxs,
+            t_await,
+        )
+        .await
     }
 }
 
@@ -2954,34 +2967,201 @@ fn resolve_duplicate_message_ids(
     Ok(out)
 }
 
+/// What [`collect_push`] reads besides the replies: the stores a duplicate's
+/// original message id is resolved from.
+struct CollectDeps {
+    store: Arc<HeedStore>,
+    reader: segments::Reader,
+    qlog: Option<QLogReader>,
+}
+
+/// Step 3 of a push: every group's reply into each item's verdict, in input
+/// order. A whole-group Retry fails the whole push (the SDK retries with the
+/// same derived ids, deduped by request id); a non-retryable Rejected marks
+/// that group's items "error" (a push answers 201 with per-item statuses).
+async fn collect_push(
+    deps: CollectDeps,
+    deadline: super::Deadline,
+    tenant: &str,
+    resolved: Vec<PushResolved>,
+    rxs: Vec<(Vec<usize>, tokio::sync::oneshot::Receiver<Reply>)>,
+    _t_await: Option<std::time::Instant>,
+) -> Result<(Vec<PushResolved>, Vec<PushVerdictOut>), RsmError> {
+    let mut out: Vec<Option<PushVerdictOut>> = vec![None; resolved.len()];
+    let mut duplicate_ids: Vec<(usize, Pid, u64)> = Vec::new();
+    for (members, rx) in rxs {
+        let reply = match tokio::time::timeout(deadline.remaining(), rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => return Err(RsmError::Internal("planner dropped the reply".into())),
+            Err(_) => return Err(RsmError::Timeout),
+        };
+        match reply {
+            Reply::Done { outcome, .. } => {
+                let verdicts = match outcome {
+                    Outcome::Push(p) => p.items,
+                    other => {
+                        return Err(RsmError::Internal(format!(
+                            "push got a non-push outcome: {other:?}"
+                        )))
+                    }
+                };
+                for (k, &flat) in members.iter().enumerate() {
+                    let (status, offset) = match verdicts.get(k) {
+                        Some(PushVerdict::Created { offset, .. }) => ("queued", Some(*offset)),
+                        Some(PushVerdict::Duplicate { pid, offset }) => {
+                            duplicate_ids.push((flat, *pid, *offset));
+                            ("duplicate", Some(*offset))
+                        }
+                        Some(PushVerdict::Refused { .. }) | None => ("error", None),
+                    };
+                    out[flat] = Some(PushVerdictOut {
+                        status,
+                        offset,
+                        message_id: None,
+                    });
+                }
+            }
+            Reply::Retry { hint } => {
+                return Err(RsmError::Retry {
+                    leader_hint: hint.map(|n| n.to_string()),
+                })
+            }
+            Reply::Refused(refusal) if refusal.retryable => {
+                tracing::debug!(
+                    target: "rsm",
+                    code = %refusal.code,
+                    message = %refusal.message,
+                    "push refused, retryable",
+                );
+                return Err(RsmError::Retry { leader_hint: None });
+            }
+            Reply::Refused(_) => {
+                for &flat in &members {
+                    out[flat] = Some(PushVerdictOut {
+                        status: "error",
+                        offset: None,
+                        message_id: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // PERF-J: every group's reply is in — close the reply-wait leg.
+    if let Some(t) = _t_await {
+        crate::rsm::timing::metrics()
+            .push_h_await
+            .record_dur(t.elapsed());
+    }
+
+    // A duplicate returns the ORIGINAL message id, not the id minted for
+    // this rejected attempt. The replicated verdict carries its original
+    // offset; resolve the immutable frame locally after apply (D7).
+    if !duplicate_ids.is_empty() {
+        let (store, reader, qlog) = (deps.store.clone(), deps.reader.clone(), deps.qlog.clone());
+        let tenant = tenant.to_string();
+        let lookup: Vec<_> = duplicate_ids
+            .iter()
+            .map(|(flat, pid, offset)| {
+                (
+                    *flat,
+                    *pid,
+                    *offset,
+                    resolved[*flat].queue.to_string(),
+                    resolved[*flat].partition.to_string(),
+                )
+            })
+            .collect();
+        let ids = tokio::task::spawn_blocking(move || {
+            resolve_duplicate_message_ids(&store, &reader, qlog.as_ref(), &tenant, &lookup)
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("duplicate id task: {e}")))??;
+        for (flat, id) in ids {
+            if let Some(item) = &mut out[flat] {
+                item.message_id = Some(id);
+            }
+        }
+    }
+
+    // 4. Followers inherit the leader's id, status ("duplicate") and offset
+    //    (C1). A follower whose leader errored is an error too.
+    for i in 0..resolved.len() {
+        if let Some(leader) = resolved[i].follower_of {
+            let lead = out[leader].clone();
+            let lead_id = lead
+                .as_ref()
+                .and_then(|l| l.message_id.clone())
+                .unwrap_or_else(|| resolved[leader].message_id.clone());
+            out[i] = Some(match &lead {
+                Some(l) if l.status == "error" => PushVerdictOut {
+                    status: "error",
+                    offset: None,
+                    message_id: Some(lead_id),
+                },
+                Some(l) => PushVerdictOut {
+                    status: "duplicate",
+                    offset: l.offset,
+                    message_id: Some(lead_id),
+                },
+                None => PushVerdictOut {
+                    status: "error",
+                    offset: None,
+                    message_id: None,
+                },
+            });
+        }
+    }
+
+    // Dashboard counters: one push request of N items; per queue one
+    // request and the items it stored. A duplicate or a refused item adds
+    // nothing to the queue, so it is no pushed message there.
+    if let Some(m) = crate::metrics::global() {
+        m.push.record_request(resolved.len());
+        let mut per_q: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+        for (r, o) in resolved.iter().zip(&out) {
+            let stored = o.as_ref().is_some_and(|o| o.status == "queued");
+            *per_q.entry(&*r.queue).or_insert(0) += u64::from(stored);
+        }
+        for (q, n) in per_q {
+            m.per_queue.add_push(tenant, q, n);
+        }
+    }
+
+    let out = out
+        .into_iter()
+        .map(|o| {
+            o.unwrap_or(PushVerdictOut {
+                status: "error",
+                offset: None,
+                message_id: None,
+            })
+        })
+        .collect();
+    Ok((resolved, out))
+}
+
 /// `[{index, message_id, transaction_id, queueName, status, offset?}]`, input
 /// order (`handlers/data.rs::render_push_results`).
-fn render_push(items: &[Option<PushItemOut>]) -> String {
-    let mut out = String::with_capacity(items.len() * 176 + 2);
+fn render_push(resolved: &[PushResolved], verdicts: &[PushVerdictOut]) -> String {
+    let mut out = String::with_capacity(resolved.len() * 176 + 2);
     out.push('[');
-    for (i, item) in items.iter().enumerate() {
+    for (i, (r, v)) in resolved.iter().zip(verdicts).enumerate() {
         if i > 0 {
             out.push(',');
         }
-        let it = item.as_ref();
         out.push_str("{\"index\":");
         out.push_str(&i.to_string());
         out.push_str(",\"message_id\":\"");
-        if let Some(it) = it {
-            out.push_str(&it.message_id);
-        }
+        out.push_str(v.message_id.as_deref().unwrap_or(&r.message_id));
         out.push_str("\",\"transaction_id\":\"");
-        if let Some(it) = it {
-            crate::util::json_escape_into(&mut out, &it.txn);
-        }
+        crate::util::json_escape_into(&mut out, &r.txn);
         out.push_str("\",\"queueName\":\"");
-        if let Some(it) = it {
-            crate::util::json_escape_into(&mut out, &it.queue);
-        }
+        crate::util::json_escape_into(&mut out, &r.queue);
         out.push_str("\",\"status\":\"");
-        out.push_str(it.map(|i| i.status).unwrap_or("error"));
+        out.push_str(v.status);
         out.push('"');
-        if let Some(off) = it.and_then(|i| i.offset) {
+        if let Some(off) = v.offset {
             out.push_str(",\"offset\":");
             out.push_str(&off.to_string());
         }
@@ -3011,6 +3191,14 @@ mod indexed_groups {
             }
         }
         pub fn push(&mut self, queue: &str, partition: &str, flat: usize) {
+            // Items arrive grouped by partition (a batch per partition): the
+            // group of the item before is checked before any key is built.
+            if let Some(last) = self.groups.last_mut() {
+                if last.queue == queue && last.partition == partition {
+                    last.members.push(flat);
+                    return;
+                }
+            }
             let key = (queue.to_string(), partition.to_string());
             let idx = *self.index.entry(key).or_insert_with(|| {
                 self.groups.push(Group {
@@ -4835,6 +5023,25 @@ impl Rsm for RaftFacade {
 
     async fn push(&self, ctx: ReqCtx, req: PushReq) -> Result<PushOut, RsmError> {
         self.push_impl(ctx, req).await
+    }
+
+    async fn push_records(
+        &self,
+        ctx: ReqCtx,
+        items: Vec<super::RecordPush>,
+    ) -> Result<Vec<super::RecordPushed>, RsmError> {
+        self.push_records_impl(ctx, items).await
+    }
+
+    async fn fetch_records(
+        &self,
+        ctx: ReqCtx,
+        entries: Vec<super::RecordFetch>,
+        max_wait_ms: u64,
+        min_bytes: usize,
+    ) -> Result<Vec<super::RecordsFetched>, RsmError> {
+        self.fetch_records_impl(ctx, entries, max_wait_ms, min_bytes)
+            .await
     }
 
     async fn pop_wildcard(&self, ctx: ReqCtx, req: PopReq) -> Result<PopOut, RsmError> {
