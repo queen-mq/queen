@@ -100,7 +100,8 @@ Options:
   --queen-prefetch N            Jobs claimed by each Queen pop (default: 1)
   --queen-ack-batch N           Deferred Queen ACK batch; <= prefetch (default: 1)
   --queen-bulk-batch N          Jobs per bulk producer call/request (default: 100)
-  --queen-partitions N          Queen partitions scanned per pop (default: 64)
+  --queen-partitions N          Queen partition stripes jobs are spread over, 1 to 1024; a pop
+                                scans at most 64 of them (default: 64)
   --queen-pop-fusion 0|1        Broker pop-transaction fusion (default: 0)
   --queen-prefork 0|1           Fork Queen workers from one booted Laravel (default: 0)
   --queen-opcache-cli 0|1       CLI opcache in the Queen lanes only (default: 0)
@@ -340,7 +341,7 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$QUEEN_PREFETCH" -le 1000 ] || die "--queen-prefetch must not exceed 1000"
 [ "$QUEEN_ACK_BATCH" -le "$QUEEN_PREFETCH" ] || die "--queen-ack-batch must not exceed --queen-prefetch"
 [ "$QUEEN_BULK_BATCH" -le 1000 ] || die "--queen-bulk-batch must not exceed 1000"
-[ "$QUEEN_PARTITIONS" -le 64 ] || die "--queen-partitions must not exceed 64"
+[ "$QUEEN_PARTITIONS" -le 1024 ] || die "--queen-partitions must not exceed 1024"
 [ "$QUEEN_POP_FUSION" -le 1 ] || die "--queen-pop-fusion must be 0 or 1"
 [ "$QUEEN_PREFORK" -le 1 ] || die "--queen-prefork must be 0 or 1"
 [ "$QUEEN_OPCACHE_CLI" -le 1 ] || die "--queen-opcache-cli must be 0 or 1"

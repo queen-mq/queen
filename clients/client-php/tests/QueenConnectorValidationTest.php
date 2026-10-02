@@ -52,7 +52,7 @@ class QueenConnectorValidationTest extends TestCase
             [['block_for' => -1], 'Queen Laravel block_for'],
             [['block_for' => '1.5'], 'Queen Laravel block_for'],
             [['partitions' => 0], 'Queen Laravel partitions'],
-            [['partitions' => 65], 'Queen Laravel partitions'],
+            [['partitions' => 1025], 'Queen Laravel partitions'],
             [['partitions' => 'many'], 'Queen Laravel partitions'],
             [['prefetch' => 0], 'Queen Laravel prefetch'],
             [['prefetch' => 1001], 'Queen Laravel prefetch'],
@@ -262,6 +262,34 @@ class QueenConnectorValidationTest extends TestCase
         ]));
 
         $this->assertInstanceOf(\Queen\Laravel\Queue\QueenQueue::class, $queue);
+    }
+
+    public function testMoreStripesThanOnePopChecksOutAreSweptSixtyFourAtATime(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => ['success' => true, 'messages' => []]],
+            ['status' => 201, 'json' => [['status' => 'queued', 'transactionId' => 'pushed']]],
+        ]);
+        $queue = (new QueenConnector())->connect(array_replace($this->validConfig(), [
+            'handler' => HandlerStack::create($handler),
+            'partitions' => 256,
+        ]));
+        // A job whose stripe lies past the first 64.
+        $uuid = null;
+        for ($candidate = 0; $uuid === null; ++$candidate) {
+            if (hexdec(substr(hash('sha256', "job-{$candidate}"), 0, 8)) % 256 >= 64) {
+                $uuid = "job-{$candidate}";
+            }
+        }
+
+        $this->assertNull($queue->pop());
+        $queue->pushRaw(json_encode(['uuid' => $uuid, 'job' => 'Handler@handle', 'data' => []], JSON_THROW_ON_ERROR));
+
+        parse_str($handler->requests[0]->getUri()->getQuery(), $query);
+        $this->assertSame('64', $query['partitions'], 'a pop checks out at most 64 partitions');
+        $push = json_decode((string) $handler->requests[1]->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        $slot = hexdec(substr(hash('sha256', $uuid), 0, 8)) % 256;
+        $this->assertSame(sprintf('laravel-%04d', $slot), $push['items'][0]['partition']);
     }
 
     private function validConfig(): array

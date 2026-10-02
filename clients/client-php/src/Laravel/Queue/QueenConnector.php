@@ -40,7 +40,7 @@ class QueenConnector implements ConnectorInterface
             $config['partitions'] ?? 64,
             'partitions',
             1,
-            64,
+            QueenQueue::MAX_PARTITIONS,
         );
         $partitionPrefix = self::name($config['partition_prefix'] ?? 'laravel', 'partition_prefix');
         $retryAfter = self::boundedInteger(
@@ -226,7 +226,6 @@ class QueenConnector implements ConnectorInterface
             new Queen($clientConfig),
             defaultQueue: $defaultQueue,
             consumerGroup: $consumerGroup,
-            // Queen currently checks out at most 64 partitions per pop.
             partitionCount: $partitionCount,
             partitionPrefix: $partitionPrefix,
             retryAfter: $retryAfter,

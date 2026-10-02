@@ -20,6 +20,15 @@ use UnexpectedValueException;
 
 class QueenQueue extends BaseQueue implements QueueContract
 {
+    /**
+     * Stripes ordinary jobs may be spread over: what the supervisor's
+     * event-driven watcher can follow in one fetch.
+     */
+    public const MAX_PARTITIONS = 1024;
+
+    /** The broker checks out at most this many partitions per pop. */
+    private const MAX_POP_PARTITIONS = 64;
+
     /** The shutdown tail release has the same bound. */
     private const SHUTDOWN_ACK_TIMEOUT_MILLIS = 2_000;
 
@@ -611,8 +620,10 @@ class QueenQueue extends BaseQueue implements QueueContract
             // prefetch because the local prefetch buffer, the ack_batch bound
             // and the lease budget are all sized from it, and partitionCount
             // keeps striping pushes either way. partitions(0) is the builder's
-            // "unset" spelling, which is what makes the broker size it.
-            ->partitions($this->popAutopilot ? 0 : $this->partitionCount)
+            // "unset" spelling, which is what makes the broker size it. More
+            // stripes than one pop can check out are swept a pop at a time:
+            // the broker serves the next ready partitions in turn.
+            ->partitions($this->popAutopilot ? 0 : min($this->partitionCount, self::MAX_POP_PARTITIONS))
             ->autopilot($this->popAutopilot)
             ->autoAck(false)
             ->leaseSeconds($this->retryAfter)
