@@ -49,6 +49,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): which exits restart without backoff, the SIGTERM before the broker calls, the unstarted hand-back that keeps its attempt, the bounded metrics client and the Rust CA store change nothing this runbook states; its deploy and shutdown_grace steps still hold.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): with lease renewal, retry_after now sets how soon the job a crashed worker was running runs again, since the renewer hands back the jobs it had not started; the retry_after bullet says so.
+# sourceOfTruth re-read 2026-10-02 (stripes): QUEEN_PARTITIONS now goes up to 1,024; the settings row and the stripe paragraph say so.
 ---
 
 Moving from Horizon changes two things, not one:
@@ -183,7 +184,7 @@ implementations rather than a byte-for-byte clone.
 | `block_for` | `QUEEN_BLOCK_FOR` (`block_for`, default 0) | Keep 0 when workers serve a comma-separated priority list |
 | `after_commit` | `QUEEN_AFTER_COMMIT` (`after_commit`) | Same meaning |
 | None | `QUEEN_CONSUMER_GROUP` (`consumer_group`, default `laravel`) | One group per application and environment |
-| None | `QUEEN_PARTITIONS` (`partitions`, default and maximum 64) | The stripes of every queue |
+| None | `QUEEN_PARTITIONS` (`partitions`, default 64, up to 1,024) | The stripes of every queue |
 
 ### From `config/horizon.php`
 
@@ -369,7 +370,8 @@ Laravel's own timeout still stops a job in both profiles. A job that must run lo
 A job waits for the job ahead of it in its stripe. A long job on a queue of short jobs therefore
 delays the short jobs that hash to its stripe, even while other workers are idle; on Redis that never
 happens. Move long jobs to a queue, and a pool, of their own. More workers than stripes on one queue
-gain nothing: a queue has at most 64 stripes ([queues and stripes](/use/laravel/concepts#queues-and-stripes)).
+gain nothing: raise `QUEEN_PARTITIONS` for a queue that more than 64 workers serve
+([queues and stripes](/use/laravel/concepts#queues-and-stripes)).
 
 ### Failed jobs also live in the broker DLQ
 

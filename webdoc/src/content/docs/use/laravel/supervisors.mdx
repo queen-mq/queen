@@ -71,6 +71,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through 79204459): config/queen.php only gains dashboard.console_url, and SupervisorConfiguration names a refused URL by scheme, host and port only; no supervisor setting or behavior this page states changes.
 # sourceOfTruth re-read 2026-10-02 (through b602eea2 + this patch): an exit after stable_after, after Laravel's job timeout or at --memory after a job no longer counts toward the backoff (WorkerExitMarker and the exits/ directory are new), workers get SIGTERM before the master calls the broker, the engine table no longer lists the circuit breaker as Rust-only, and the restart paragraph, the state directory and Terminate say so; the fork server's failed-fork, --quiet and stalled-fetch fixes, the CA store and the lease service's fence order change nothing else this page states.
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): the lease service now sends the hand-back a crashed worker journaled next to lease.sock, and the PHP helper the one in its private temporary directory; the Lease renewal in the master section describes both, and SuperviseCommand and the --for-engine export print the tries-1 warning on standard error.
+# sourceOfTruth re-read 2026-10-02 (stripes): SupervisorConfiguration accepts up to 1,024 stripes for event_driven; the watcher bullet gives the 1,024-per-fetch bound, and QueenConnector's wider range changes nothing else here.
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel
@@ -256,7 +257,8 @@ QUEEN_SUPERVISOR_EVENT_DRIVEN=true
 - The supervisor holds a read-only long poll on the broker, `POST /api/v1/fetch`, over the
   partition stripes of every pool that follows the backlog: `<partition_prefix>-0000` to
   `<partition_prefix>-<partitions - 1>`. It takes no lease and moves no consumer cursor, so it never
-  takes a job from a worker.
+  takes a job from a worker. One fetch watches at most 1,024 stripes per connection, counting every
+  queue; the regular poll finds jobs on the others.
 - When jobs arrive on a watched queue, the pool reads its depth at once and adds workers, inside
   `balance_cooldown` too. No queue loses a worker in such an early step. While the pool is below its
   target, it grows again every second. Scaling down keeps `balance_cooldown` and `scale_down_delay`.

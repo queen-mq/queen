@@ -76,6 +76,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (screenshots): three screenshots of the real dashboard, taken during a benchmark workload on the release candidate, show the queue card, a failed job with Retry now and the tuning advice; the text is unchanged.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid console_url instead of failing the boot, and DashboardController shows the card without links and a note; FailedJobRetryController reports an exception and shows only its class, and refuses the id all.
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): TuningAdvisor warns about a pool with tries 1 on a prefetching or pop_ahead connection, and the short-jobs advice says only a crash that is not handed back charges an attempt; the advice table says so.
+# sourceOfTruth re-read 2026-10-02 (stripes, f5d20737): the Configuration page's partitions setting now accepts 1 to 1,024; no row of this page names its range.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It

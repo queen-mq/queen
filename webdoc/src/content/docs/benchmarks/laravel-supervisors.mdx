@@ -37,6 +37,7 @@ sourceOfTruth:
   - benchmark-queen/2026-10-01-linux-vm-horizon-raft/scripts/popfix.sh
   - benchmark-queen/2026-10-01-linux-vm-horizon-raft/scripts/extract.py
   - benchmark-queen/2026-10-02-laravel-failure-matrix/README.md
+  - benchmark-queen/2026-10-02-laravel-partition-stripes/README.md
   - benchmark-queen/2026-10-02-laravel-failure-matrix/scripts/tables.py
   - benchmark-queen/2026-10-02-laravel-failure-matrix/scripts/soak_memory.py
   - benchmark-queen/laravel-supervisors/scripts/failure_matrix.py
@@ -72,6 +73,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): the memory-fatal row and the crash bullet now cite raw/local-hand-back of the failure-matrix dataset, where the Rust master or the PHP lease helper hands back a crashed worker's journal, against worker-kill in final-b.
 # sourceOfTruth re-read 2026-10-02 (031d4044): the failure-matrix README now cites the commits of the local-hand-back run; the crash bullet still matches it.
 # sourceOfTruth re-read 2026-10-02 (vm-hand-back): the crash bullet now cites the rerun on the droplet, raw/vm-hand-back of the failure-matrix dataset.
+# sourceOfTruth re-read 2026-10-02 (stripes): the new More partition stripes section reports the 2026-10-02-laravel-partition-stripes dataset, from its medians.md.
 ---
 
 This qualification asks whether Queen can replace the **process control plane** of Laravel
@@ -687,6 +689,28 @@ Laravel's Redis queue stores a due time in whole seconds, so a Horizon retry can
 second early or late: for `backoff` `[1, 3]`, Horizon's retries came 1.81 and 4.03 s after the
 failure, Queen's 1.02 to 1.04 and 3.05 s. `queue:clear` is not supported on Queen: the command fails, and
 the jobs still run.
+
+## More partition stripes, 2026-10-02
+
+The driver spreads ordinary jobs over a queue's partition stripes, and the broker leases each stripe
+to one worker at a time. The driver allowed at most 64, the partitions one pop checks out, so at
+most 64 workers could run a queue's ordinary jobs at once. It now allows up to 1,024 stripes while
+each pop still asks for at most 64, and this campaign measured 64, 128 and 256 stripes on the Linux
+server with the Rust supervisor, prefetch 4, `ack_async`, `pop_ahead` and the Raft broker. Medians of
+three runs, 10 ms jobs; every run completed its exact job set with no duplicate:
+
+| Lane | 64 stripes | 128 stripes | 256 stripes |
+| --- | ---: | ---: | ---: |
+| 50,000 jobs drained by 128 workers | 4,722 jobs/s | 7,895 jobs/s | 9,257 jobs/s |
+| 50,000 jobs drained by 64 workers | 4,580 jobs/s | 5,380 jobs/s | 5,519 jobs/s |
+| 500 jobs/s, 16 workers, p95 end to end | 23.4 ms | 17.6 ms | 16.7 ms |
+| 50 jobs/s, 16 workers, broker CPU per job | 1.49 ms | 1.53 ms | 1.49 ms |
+| Broker memory, 128-worker drain | 125 MiB | 122 MiB | 138 MiB |
+
+With 64 stripes, 128 workers drained no faster than 64. At 50 jobs/s the stripe count changed
+neither the broker's CPU per job nor the latency beyond run-to-run variation. Not measured: more
+than 256 stripes, several queues on one connection, PostgreSQL storage and the PHP supervisor. The
+dataset, with every run and the scripts, is `benchmark-queen/2026-10-02-laravel-partition-stripes/`.
 
 ## What remains before GA
 

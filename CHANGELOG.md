@@ -5,6 +5,15 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Laravel: up to 1,024 stripes per queue.** A stripe runs one job at a time, so the 64 stripes a
+queue could have capped its ordinary jobs at 64 busy workers. `QUEEN_PARTITIONS` now takes 1 to
+1,024 (64 by default, unchanged), and a pop still asks for at most the 64 partitions the broker
+checks out per call: the broker serves the next ready ones in turn. On the Linux benchmark server,
+128 workers drained 50,000 jobs at 9,257 jobs/s with 256 stripes against 4,722 with 64, 64 workers
+20% faster, and the p95 at 500 jobs/s fell from 23.4 to 16.7 ms, with no measured cost at 50 jobs/s
+(`benchmark-queen/2026-10-02-laravel-partition-stripes`). Event-driven scaling watches up to 1,024
+stripes per connection in one fetch; the regular poll finds jobs on the others.
+
 **Laravel: a crashed worker's prefetched jobs keep their attempt.** With `prefetch` above 1 and
 lease renewal, a worker that dies without a shutdown (SIGKILL, the kernel's OOM killer, a PHP
 fatal error such as `memory_limit`) no longer leaves its unstarted jobs to lease expiry, which

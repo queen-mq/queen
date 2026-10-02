@@ -59,6 +59,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): the Crash-loop control row now says which exits restart at once (Laravel's job timeout and --memory after a job, both through WorkerExitMarker, and an exit after stable_after); the unstarted hand-back that keeps its attempt, the SIGTERM before the broker calls, the fork-server and lease-service fixes, the bounded metrics client and the Rust CA store change nothing else this page states.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): the prefetch-4 profile paragraph says the Rust master or the PHP helper now hands back a crashed worker's prefetched jobs, and that memory-fatal passed in the local-hand-back rerun on both engines.
+# sourceOfTruth re-read 2026-10-02 (stripes, f5d20737): a long job still holds its stripe; the wider stripe range changes no comparison this page states.
 ---
 
 Horizon and Queen both run ordinary Laravel jobs and both supervise their workers, but on different
