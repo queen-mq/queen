@@ -45,6 +45,11 @@ final class LazyLeaseRenewer implements LeaseRenewer
         $this->delegate?->close();
     }
 
+    public function handBackJournal(): ?HandBackJournal
+    {
+        return $this->delegate?->handBackJournal();
+    }
+
     private function instance(): LeaseRenewer
     {
         if ($this->delegate === null) {

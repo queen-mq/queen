@@ -25,9 +25,11 @@ while (($line = fgets($connection)) !== false) {
     $command = json_decode($line, true);
     switch ($command['command'] ?? null) {
         case 'init':
-            $send($mode === 'refuse'
-                ? ['event' => 'startup_failed', 'error' => 'invalid renewal timing']
-                : ['event' => 'ready']);
+            $send(match ($mode) {
+                'refuse' => ['event' => 'startup_failed', 'error' => 'invalid renewal timing'],
+                'hand-back' => ['event' => 'ready', 'hand_back' => true],
+                default => ['event' => 'ready'],
+            });
             break;
         case 'track':
             $send(['event' => 'tracked', 'lease_id' => $command['lease_id']]);
@@ -114,6 +116,35 @@ PHP;
         $this->assertSame(1_000, $init['safety_margin_millis']);
         $this->assertEqualsWithDelta($this->monotonicMillis(), $init['monotonic_millis'], 10_000);
         $this->assertSame('lease-one', $commands[1]['lease_id']);
+    }
+
+    public function testAMasterThatHandsBackGetsAJournalNextToItsSocketRemovedOnACleanExit(): void
+    {
+        $socket = $this->startMaster('hand-back');
+        $renewer = new SupervisorLeaseRenewer($socket, ['url' => 'http://queen:6632'], 120, 30, 1, 1);
+
+        $journal = $renewer->handBackJournal();
+        $this->assertNotNull($journal);
+        $this->assertSame($journal, $renewer->handBackJournal());
+        $journal->plan('lease-one', [['ack' => [], 'unstarted' => [], 'ran' => []]]);
+        $prefix = $this->directory . '/hand-back-' . getmypid();
+        $this->assertFileExists("{$prefix}.plan");
+        $this->assertFileExists("{$prefix}.state");
+
+        $renewer->close();
+        $this->waitForMasterExit();
+        $this->assertFileDoesNotExist("{$prefix}.plan");
+        $this->assertFileDoesNotExist("{$prefix}.state");
+        $this->assertNull($renewer->handBackJournal());
+    }
+
+    public function testAMasterThatDoesNotHandBackGetsNoJournal(): void
+    {
+        $socket = $this->startMaster('ok');
+        $renewer = new SupervisorLeaseRenewer($socket, ['url' => 'http://queen:6632'], 120, 30, 1, 1);
+
+        $this->assertNull($renewer->handBackJournal());
+        $renewer->close();
     }
 
     public function testEmptyHeadersAreSentAsAMap(): void

@@ -133,4 +133,17 @@ class TransactionBuilderTest extends TestCase
         ]);
         $tx->commit();
     }
+
+    public function testWireOperationsAreSentAsTheyAre(): void
+    {
+        $ack = ['type' => 'ack', 'transactionId' => 'tx-1', 'partitionId' => 'p1', 'status' => 'completed', 'leaseId' => 'lease-1'];
+        $push = ['type' => 'push', 'items' => [['queue' => 'q', 'partition' => 'p', 'payload' => ['a' => 1], 'transactionId' => 'c-1']]];
+        $httpClient = $this->createMock(HttpClient::class);
+        $httpClient->expects($this->once())
+            ->method('post')
+            ->with('/api/v1/transaction', ['operations' => [$ack, $push], 'requiredLeases' => ['lease-1']])
+            ->willReturn(['success' => true]);
+
+        (new TransactionBuilder($httpClient))->wire([$ack, $push], ['lease-1'])->commit();
+    }
 }

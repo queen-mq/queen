@@ -10,7 +10,8 @@ use RuntimeException;
  * This is a delivery-path reliability process, not a supervisor/control-plane
  * process. It tracks the single live pop lease owned by Laravel's synchronous
  * worker over a private line-oriented pipe and exits when that pipe reaches
- * EOF.
+ * EOF. If the worker exited holding the lease without a shutdown, the helper
+ * first sends what the worker journaled for it (HandBackJournal).
  */
 final class ProcessLeaseRenewer implements LeaseRenewer
 {
@@ -46,6 +47,17 @@ final class ProcessLeaseRenewer implements LeaseRenewer
      * neither drive nor watch its parent's helper.
      */
     private ?int $owner = null;
+
+    /**
+     * The private directory of this worker's hand-back journal, which the
+     * helper reads if the worker dies; null when none could be made.
+     */
+    private ?string $journalDirectory = null;
+
+    /** Whether the helper hands back a crashed worker's journal (its `ready` says so). */
+    private bool $handsBack = false;
+
+    private ?HandBackJournal $journal = null;
 
     public function __construct(
         private array $clientConfig,
@@ -193,6 +205,9 @@ final class ProcessLeaseRenewer implements LeaseRenewer
             return;
         }
 
+        // A clean exit owes nothing.
+        $this->journal?->discard();
+        $this->journal = null;
         try {
             $this->send(['command' => 'shutdown']);
         } catch (\Throwable) {
@@ -215,12 +230,27 @@ final class ProcessLeaseRenewer implements LeaseRenewer
             }
         }
         @proc_close($this->process);
+        $this->removeJournal();
+        $this->handsBack = false;
         $this->process = null;
         $this->pipes = [];
         $this->tracked = [];
         $this->failures = [];
         $this->stdoutBuffer = '';
         $this->events = [];
+    }
+
+    /**
+     * In a private directory the helper reads once this worker has exited,
+     * holding a lease, without a shutdown.
+     */
+    public function handBackJournal(): ?HandBackJournal
+    {
+        if (!$this->handsBack || $this->journalDirectory === null || $this->inherited() || !$this->running()) {
+            return null;
+        }
+
+        return $this->journal ??= new HandBackJournal($this->journalDirectory . '/hand-back-' . getmypid());
     }
 
     /**
@@ -250,6 +280,7 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         // Close the registration race: SIGCHLD may have arrived just before
         // the PID entered the registry.
         if (!$this->running()) {
+            $this->removeJournal();
             self::fenceCurrentWorker("renewal helper [{$pid}] already stopped");
         }
     }
@@ -297,6 +328,7 @@ final class ProcessLeaseRenewer implements LeaseRenewer
             // Scanning our own proc handles also covers platforms that omit PID
             // or coalesce several SIGCHLD deliveries.
             if ($reportedPid === $pid || !$renewer->running()) {
+                $renewer->removeJournal();
                 self::fenceCurrentWorker("renewal helper [{$pid}] stopped unexpectedly");
             }
         }
@@ -383,10 +415,14 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         $childConfig['retryAttempts'] = 1;
         $childConfig['retryDelayMillis'] = 0;
         $childConfig['retry429'] = ['maxAttempts' => 1, 'baseMs' => 1, 'capMs' => 1];
+        $this->journalDirectory = self::privateDirectory();
         $this->send([
             'command' => 'init',
             'client' => $childConfig,
             'parent_pid' => getmypid(),
+            'hand_back_journal' => $this->journalDirectory !== null
+                ? $this->journalDirectory . '/hand-back-' . getmypid()
+                : null,
             'lease_seconds' => $this->leaseSeconds,
             'interval_millis' => $this->intervalSeconds * 1000,
             'request_budget_millis' => $this->requestBudgetSeconds * 1000,
@@ -398,6 +434,7 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         while (microtime(true) < $deadline) {
             $event = $this->nextEvent();
             if (($event['event'] ?? null) === 'ready') {
+                $this->handsBack = ($event['hand_back'] ?? false) === true;
                 return;
             }
             if (($event['event'] ?? null) === 'startup_failed') {
@@ -539,6 +576,10 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         $this->process = null;
         $this->pipes = [];
         $this->owner = null;
+        // The parent's journal: never this process's to write or remove.
+        $this->journal = null;
+        $this->journalDirectory = null;
+        $this->handsBack = false;
         $this->tracked = [];
         $this->failures = [];
         $this->stderr = '';
@@ -573,6 +614,35 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         }
 
         throw new RuntimeException('Unable to locate Composer autoload.php for the Queen lease renewal helper.');
+    }
+
+    /**
+     * Nothing will hand the journal back: remove it, payloads and all, and
+     * its directory.
+     */
+    private function removeJournal(): void
+    {
+        $this->journal?->discard();
+        $this->journal = null;
+        if ($this->journalDirectory !== null) {
+            @rmdir($this->journalDirectory);
+            $this->journalDirectory = null;
+        }
+    }
+
+    /**
+     * A directory only this user can enter, under a name nobody can guess,
+     * so no other user can read the journal's payloads or plant a link.
+     */
+    private static function privateDirectory(): ?string
+    {
+        try {
+            $directory = rtrim(sys_get_temp_dir(), '/') . '/queen-hand-back-' . bin2hex(random_bytes(12));
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return @mkdir($directory, 0700) ? $directory : null;
     }
 
     /** @param list<int> $values */

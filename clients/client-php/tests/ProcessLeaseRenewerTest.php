@@ -286,6 +286,53 @@ class ProcessLeaseRenewerTest extends TestCase
         $this->assertNull($result['child_signal']);
     }
 
+    public function testTheHelperHandsBackTheJournalOfAWorkerThatDiedHoldingItsLease(): void
+    {
+        if (!ProcessLeaseRenewer::isSupported()) {
+            $this->markTestSkipped('This platform cannot run the lease renewal helper.');
+        }
+        [$url, $log, $broker] = $this->startRecordingBroker();
+        try {
+            [$status, $prefix] = $this->runHandBackWorker($url, 'crash');
+            $this->assertSame(SIGKILL, $status['termsig'] ?? null);
+
+            $transactions = $this->waitForTransactions($log, 1);
+            $this->assertCount(1, $transactions);
+            $this->assertSame('Bearer worker-secret', $transactions[0]['authorization']);
+            $body = json_decode($transactions[0]['body'], true, 512, JSON_THROW_ON_ERROR);
+            $this->assertSame(['lease-x'], $body['requiredLeases']);
+            $this->assertSame(['ack', 'push', 'ack', 'push'], array_column($body['operations'], 'type'));
+            $this->assertSame(['t1', 't2'], array_values(array_filter(array_column($body['operations'], 'transactionId'))));
+            // The running job counts its run, the unstarted one does not.
+            $this->assertSame(1, $body['operations'][1]['items'][0]['payload']['_queen']['attempts']);
+            $this->assertSame(0, $body['operations'][3]['items'][0]['payload']['_queen']['attempts']);
+            $this->waitUntil(static fn (): bool => !is_dir(dirname($prefix)), 'the journal removed');
+        } finally {
+            proc_terminate($broker);
+            proc_close($broker);
+            @unlink($log);
+        }
+    }
+
+    public function testAWorkerThatClosesItsRenewerHandsBackNothing(): void
+    {
+        if (!ProcessLeaseRenewer::isSupported()) {
+            $this->markTestSkipped('This platform cannot run the lease renewal helper.');
+        }
+        [$url, $log, $broker] = $this->startRecordingBroker();
+        try {
+            [$status, $prefix] = $this->runHandBackWorker($url, 'close');
+            $this->assertSame(0, $status['exitcode'] ?? null);
+
+            $this->assertSame([], $this->waitForTransactions($log, 1, 1.5));
+            $this->assertDirectoryDoesNotExist(dirname($prefix));
+        } finally {
+            proc_terminate($broker);
+            proc_close($broker);
+            @unlink($log);
+        }
+    }
+
     public function testUnsafeDiagnosticErrorsAreBoundedAndPrintable(): void
     {
         $method = new \ReflectionMethod(\Queen\Laravel\Queue\LeaseRenewalWorker::class, 'boundedError');
@@ -306,5 +353,86 @@ class ProcessLeaseRenewerTest extends TestCase
             requestBudgetSeconds: 1,
             workerCommand: [PHP_BINARY, '-r', $code],
         );
+    }
+
+    /** @return array{0: string, 1: string, 2: resource} the URL, its request log and the server */
+    private function startRecordingBroker(): array
+    {
+        $probe = stream_socket_server('tcp://127.0.0.1:0');
+        $this->assertIsResource($probe);
+        $address = (string) stream_socket_get_name($probe, false);
+        fclose($probe);
+        $log = tempnam(sys_get_temp_dir(), 'qrb');
+        $server = proc_open(
+            [PHP_BINARY, '-S', $address, __DIR__ . '/Fixtures/RecordingBroker.php'],
+            [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
+            $pipes,
+            null,
+            ['QUEEN_TEST_BROKER_LOG' => $log],
+        );
+        $this->assertIsResource($server);
+        $this->waitUntil(static function () use ($address): bool {
+            $connection = @stream_socket_client("tcp://{$address}", $code, $message, 0.1);
+            if (!is_resource($connection)) {
+                return false;
+            }
+            fclose($connection);
+            return true;
+        }, 'the recording broker');
+
+        return ["http://{$address}", $log, $server];
+    }
+
+    /** @return array{0: array, 1: string} the worker's final status and its journal prefix */
+    private function runHandBackWorker(string $url, string $mode): array
+    {
+        $worker = proc_open(
+            [PHP_BINARY, __DIR__ . '/Fixtures/LeaseRenewalHandBackWorker.php', $url, $mode],
+            [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+        );
+        $this->assertIsResource($worker);
+        $output = (string) stream_get_contents($pipes[1]);
+        $errors = (string) stream_get_contents($pipes[2]);
+        do {
+            $status = proc_get_status($worker);
+            usleep(10_000);
+        } while ($status['running']);
+        proc_close($worker);
+        $prefix = json_decode(trim($output), true)['journal'] ?? null;
+        $this->assertIsString($prefix, "The worker published no journal: {$errors}");
+
+        return [$status, $prefix];
+    }
+
+    /** @return list<array<string, mixed>> the transactions the broker received */
+    private function waitForTransactions(string $log, int $count, float $seconds = 5.0): array
+    {
+        $deadline = microtime(true) + $seconds;
+        do {
+            $requests = array_map(
+                static fn (string $line): array => json_decode($line, true, 512, JSON_THROW_ON_ERROR),
+                array_filter(explode("\n", (string) file_get_contents($log))),
+            );
+            $transactions = array_values(array_filter(
+                $requests,
+                static fn (array $request): bool => $request['method'] === 'POST' && $request['path'] === '/api/v1/transaction',
+            ));
+            if (count($transactions) >= $count) {
+                return $transactions;
+            }
+            usleep(20_000);
+        } while (microtime(true) < $deadline);
+
+        return $transactions;
+    }
+
+    private function waitUntil(callable $done, string $what): void
+    {
+        $deadline = microtime(true) + 5;
+        while (!$done()) {
+            $this->assertLessThan($deadline, microtime(true), "Timed out waiting for {$what}.");
+            usleep(20_000);
+        }
     }
 }

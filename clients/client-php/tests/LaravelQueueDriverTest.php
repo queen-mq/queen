@@ -12,6 +12,7 @@ use PHPUnit\Framework\TestCase;
 use Queen\Exceptions\ConflationPolicyMismatchException;
 use Queen\Exceptions\HttpException;
 use Queen\Laravel\Contracts\QueenPartitionable;
+use Queen\Laravel\Queue\HandBackJournal;
 use Queen\Laravel\Queue\LeaseRenewer;
 use Queen\Laravel\Queue\QueenConnector;
 use Queen\Laravel\Queue\QueenJob;
@@ -21,6 +22,20 @@ use Queen\Tests\Support\PlanHandler;
 
 class LaravelQueueDriverTest extends TestCase
 {
+    /** @var list<string> */
+    private array $journalDirectories = [];
+
+    protected function tearDown(): void
+    {
+        foreach ($this->journalDirectories as $directory) {
+            foreach (glob($directory . '/*') ?: [] as $file) {
+                @unlink($file);
+            }
+            @rmdir($directory);
+        }
+        parent::tearDown();
+    }
+
     public function testConnectorBuildsAQueenQueue(): void
     {
         [$queue] = $this->queueFor(new PlanHandler());
@@ -1603,6 +1618,168 @@ class LaravelQueueDriverTest extends TestCase
         return [$queue, $handler];
     }
 
+    public function testACrashHandsBackFromTheJournalWhatShutdownWould(): void
+    {
+        $response = $this->popBatchResponse([
+            $this->payload('job-a1'),
+            $this->payload('job-a2'),
+            $this->payload('job-b1'),
+            $this->payload('job-c1'),
+        ]);
+        // job-c1 shares no partition lease with the running job-a1.
+        $response['messages'][3]['partitionId'] = '0298f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83';
+        $response['messages'][3]['partition'] = 'job-0002';
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->journal = new HandBackJournal($prefix = $this->journalPrefix());
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 4);
+
+        $queue->pop('emails');
+        $this->assertSame('ruuu', $this->journaledCodes($prefix));
+        $journaled = $this->journaledHandBack($prefix);
+        $queue->shutdown();
+
+        $shutdown = $this->handBack($handler->requests[1]);
+        $this->assertSame(['lease-1'], $journaled['body']['requiredLeases']);
+        $this->assertSame(
+            array_map(fn (array $ack): array => [...$ack, 'leaseId' => 'lease-1'], $shutdown['acks']),
+            $journaled['acks'],
+            'every ACK is fenced by the lease',
+        );
+        $withoutId = static fn (array $copy): array => array_diff_key($copy, ['transactionId' => true]);
+        $this->assertSame(array_map($withoutId, $shutdown['copies']), array_map($withoutId, $journaled['copies']));
+        $this->assertSame(['job-a1', 'job-a2', 'job-b1', 'job-c1'], $this->copiedJobs($journaled));
+        $this->assertSame([1, 0, 0, 0], $this->copiedAttempts($journaled), 'the running job counts its run');
+        $this->assertSame('----', $this->journaledCodes($prefix), 'shutdown withdrew the journal first');
+    }
+
+    public function testTheJournalNeverOwesAJobWhoseAcknowledgementIsOnTheWire(): void
+    {
+        $prefix = $this->journalPrefix();
+        $plan = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+                $this->payload('job-3'),
+            ])],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'release-1']],
+        ]);
+        $owedDuringRequests = [];
+        $handler = function ($request, array $options) use ($plan, $prefix, &$owedDuringRequests) {
+            $owedDuringRequests[] = is_file("{$prefix}.state") ? $this->journaledCodes($prefix) : null;
+
+            return $plan($request, $options);
+        };
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->journal = new HandBackJournal($prefix);
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 3);
+
+        $first = $queue->pop('emails');
+        $this->assertSame('ruu', $this->journaledCodes($prefix));
+        $first->delete();
+        $this->assertSame('-uu', $this->journaledCodes($prefix));
+        $second = $queue->pop('emails');
+        $this->assertSame('-ru', $this->journaledCodes($prefix));
+        $second->release();
+        $this->assertSame('--u', $this->journaledCodes($prefix));
+
+        // Nothing in the partition lease of an ACK or release on the wire.
+        $this->assertSame([null, '---', '---'], $owedDuringRequests);
+    }
+
+    public function testADeferredCompletionIsJournaledAsCompletedNotRunAgain(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+                $this->payload('job-3'),
+            ])],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->journal = new HandBackJournal($prefix = $this->journalPrefix());
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 3, ackBatch: 3);
+
+        $queue->pop('emails')->delete();
+        $this->assertSame('cuu', $this->journaledCodes($prefix));
+        $queue->pop('emails');
+        $this->assertSame('cru', $this->journaledCodes($prefix));
+
+        $journaled = $this->journaledHandBack($prefix);
+        $this->assertSame(
+            ['transaction-1', 'transaction-2', 'transaction-3'],
+            array_column($journaled['acks'], 'transactionId'),
+        );
+        $this->assertSame(['job-2', 'job-3'], $this->copiedJobs($journaled));
+    }
+
+    public function testABatchOfOneJobJournalsNothing(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popResponse($this->payload('job-1'))],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->journal = new HandBackJournal($prefix = $this->journalPrefix());
+        // A short batch on a prefetching worker: the queue held one job.
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 4);
+
+        $queue->pop('emails');
+
+        $this->assertFileDoesNotExist("{$prefix}.plan");
+        $this->assertFileDoesNotExist("{$prefix}.state");
+    }
+
+    private function journalPrefix(): string
+    {
+        $directory = sys_get_temp_dir() . '/qhb-' . bin2hex(random_bytes(4));
+        mkdir($directory, 0700);
+        $this->journalDirectories[] = $directory;
+
+        return "{$directory}/hand-back-1";
+    }
+
+    private function journaledCodes(string $prefix): string
+    {
+        $state = json_decode((string) file_get_contents("{$prefix}.state"), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('lease-1', $state['lease_id']);
+
+        return $state['entries'];
+    }
+
+    /**
+     * The transaction the supervisor's lease service builds from the journal
+     * (lease/hand_back.rs), split as handBack() splits a request.
+     *
+     * @return array{body: array, acks: list<array>, copies: list<array>}
+     */
+    private function journaledHandBack(string $prefix): array
+    {
+        $plan = json_decode((string) file_get_contents("{$prefix}.plan"), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('lease-1', $plan['lease_id']);
+        $operations = [];
+        foreach (str_split($this->journaledCodes($prefix)) as $index => $code) {
+            $entry = $plan['entries'][$index];
+            match ($code) {
+                '-' => null,
+                'c' => $operations[] = $entry['ack'],
+                'u' => array_push($operations, $entry['ack'], $entry['unstarted']),
+                'r' => array_push($operations, $entry['ack'], $entry['ran']),
+            };
+        }
+        $body = ['operations' => $operations, 'requiredLeases' => [$plan['lease_id']]];
+
+        return $this->handBack(new \GuzzleHttp\Psr7\Request(
+            'POST',
+            'http://queen.test:6632/api/v1/transaction',
+            [],
+            json_encode($body, JSON_THROW_ON_ERROR),
+        ));
+    }
+
     private function queueWithLeaseRenewer(
         callable $handler,
         LeaseRenewer $renewer,
@@ -1787,6 +1964,13 @@ class RecordingLeaseRenewer implements LeaseRenewer
     public function close(): void
     {
         $this->closed++;
+    }
+
+    public ?\Queen\Laravel\Queue\HandBackJournal $journal = null;
+
+    public function handBackJournal(): ?\Queen\Laravel\Queue\HandBackJournal
+    {
+        return $this->journal;
     }
 }
 
