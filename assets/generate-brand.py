@@ -39,7 +39,8 @@ Outputs (all regenerated, do not hand-edit):
   webdoc/public/queen-tile.png       512px square, schema.org Organization.logo
   webdoc/public/queen-mark.svg       the docs header
   webdoc/public/queen-badge.svg      the badge, for docs pages that want it
-  webdoc/public/queen-scene.svg      the tall scene, the docs homepage hero
+  webdoc/public/queen-scene.svg      the tall scene on plum, the docs homepage hero in the light theme
+  webdoc/public/queen-scene-cream.svg  the same on cream (rose trail), the hero in the dark theme
   clients/client-php/resources/views/dashboard/partials/mark.blade.php
                                      the mark inline, for the Laravel dashboard's header
                                      (it is served by the user's app, so nothing to fetch)
@@ -128,6 +129,7 @@ write(MARK, "webdoc", "public", "favicon.svg")
 write(MARK, "webdoc", "public", "queen-mark.svg")
 write(BADGE, "webdoc", "public", "queen-badge.svg")
 write(S.scene_svg(), "webdoc", "public", "queen-scene.svg")
+write(S.scene_svg(sky=S.CREAM, trail=S.ROSE), "webdoc", "public", "queen-scene-cream.svg")
 save(raster(MARK, 32), "webdoc", "public", "favicon-32.png")
 raster(MARK, 48).save(P("webdoc", "public", "favicon.ico"), sizes=[(16, 16), (32, 32), (48, 48)],
                       append_images=[raster(MARK16, 16), raster(MARK, 32)])
