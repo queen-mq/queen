@@ -45,8 +45,9 @@ engines. The protocol is the Queen team's; the results are diagnostic.
 | `rc` | 32 Laravel features and the replica lanes, three engines, every client fix but the exit markers | `665d01c7` |
 | `final-a`, `final-b`, `final-c` | every failure lane, the prefetched-batch lane, the 32 Laravel features and the replica lanes on the four profiles: the release candidate | `4d0ca51d` |
 | `soak` | the 45-minute soak on the three engines, with every client fix but the exit markers | `cfd04eed` |
+| `soak-pr-<profile>` | the 45-minute soak again, on the four profiles at once: PR #69's head, the release candidate | `eb9703b5` (image built at `fe2e8941`; only the harness changed) |
 | `local-soak-prefetch` | a 15-minute soak of the prefetch-4 profile on Docker Desktop, with every client fix | `cfd04eed` |
-| `local-compat-prefix` | the 32 Laravel features on Docker Desktop, before the client fixes | harness `35a009bb`, the client of 2026-10-01 |
+| `local-compat-prefix` | the 32 Laravel features on Docker Desktop, before the client fixes | harness `bbb8ed7e`, the client of 2026-10-01 |
 
 The first runs (`failure-matrix`, `failure-matrix-php`, `replicas`, `compat`, `batch-prefix`) found
 the defects that the later runs show fixed. The tables report the last run of each lane.
@@ -133,7 +134,13 @@ Known limits:
 Fixture defects found and fixed on the way, none in Queen or Horizon: SQLite refused concurrent batch
 updates (fixed by taking the write lock first, `RetryingBatchRepository`); the pause helper ignored
 draining workers; a soak drained before its last delayed jobs were due; an empty PHP array arrived
-as a JSON list; and the matrix job's readonly properties broke its partitioned subclass.
+as a JSON list; the matrix job's readonly properties broke its partitioned subclass; and
+`bench:matrix-report` read a whole attempt log with PHP's default 128 MiB. That last one cost a
+2.5-hour soak of the release candidate on the four profiles: all four ran to the end, 45,001
+jobs each with a worker killed every 10 minutes and a deploy, but the report died on the
+98,000-event log (reproduced with a synthetic log: exit 255 at 128 MiB, a summary at 512 MiB), and
+the lanes' volumes were removed with it, so that run has no verdict and is not in `raw/`. The
+matrix tools now run with 1 GiB.
 
 **The soak (`soak`):** 45 minutes at 5 jobs/s on 8 workers, a worker killed every 10 minutes and a
 deploy after 23 minutes. Each engine received 13,501 jobs, and every one ended as its kind says. The
@@ -143,6 +150,12 @@ median worker grew slowly, as long-lived PHP workers do: Horizon 50.7 to 54.7 Mi
 47.0 and Queen Rust 40.5 to 45.0 (first third against last third, `raw/soak-memory.csv`). The soak
 ran before the exit markers, which change only how a worker killed by a job timeout restarts; no
 soak job timed out.
+
+**The soak of the release candidate (`soak-pr-*`):** the same 45 minutes on PR #69's head, the four
+profiles at once. Every profile received 13,501 jobs, and every one ended as its kind says; 398
+failed-job rows, and on Queen 398 dead-letter entries. Masters flat: Horizon 49.1 MiB, Queen PHP
+58.5 MiB, Queen Rust 7.0 MiB with and without prefetch 4. Median workers: Horizon 51.0 to 56.6 MiB,
+Queen PHP 40.5 to 44.9, Queen Rust 40.4 to 43.0, Queen Rust with prefetch 4 41.1 to 45.0.
 
 The local soak (`local-soak-prefetch`, Docker Desktop, 15 minutes, prefetch 4 with `ack_async` and
 `pop_ahead`, every client fix): 4,501 jobs ended as their kind says, 124 failed-job rows and 124

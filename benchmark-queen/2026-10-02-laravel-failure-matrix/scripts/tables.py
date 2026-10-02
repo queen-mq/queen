@@ -185,10 +185,12 @@ def compat(raw: Path) -> list[str]:
     return [*lines, ""]
 
 
-def soak_details(raw: Path) -> list[str]:
-    """The soak lanes in numbers: jobs, failures and memory drift per engine."""
-    lanes = {e: load(raw / "soak" / "soak" / f"{e}.json") for e in ENGINES[:3]}
-    engines = [e for e in ENGINES[:3] if lanes[e] and lanes[e].get("extra")]
+def soak_details(raw: Path, title: str = "Soak in numbers", per_profile: bool = False) -> list[str]:
+    """The soak lanes in numbers: jobs, failures and memory drift per engine. The soak of PR #69's
+    head ran each profile in a directory of its own, `soak-pr-<profile>`."""
+    candidates = ENGINES if per_profile else ENGINES[:3]
+    lanes = {e: load(raw / (f"soak-pr-{e}" if per_profile else "soak") / "soak" / f"{e}.json") for e in candidates}
+    engines = [e for e in candidates if lanes[e] and lanes[e].get("extra")]
     if not engines:
         return []
 
@@ -214,7 +216,7 @@ def soak_details(raw: Path) -> list[str]:
         "Median worker memory, first third → last third": lambda e: drift(e, "worker_rss_median_mib"),
     }
     head = ["", *(ENGINE_TITLES[e] for e in engines)]
-    lines = ["## Soak in numbers", "", "| " + " | ".join(head) + " |", "|" + " --- |" * len(head)]
+    lines = [f"## {title}", "", "| " + " | ".join(head) + " |", "|" + " --- |" * len(head)]
     for title, value in rows.items():
         lines.append(f"| {title} | " + " | ".join(value(e) for e in engines) + " |")
     return [*lines, ""]
@@ -241,6 +243,7 @@ def main() -> int:
     out += table("Replicas", REPLICAS, results, ENGINES)
     out += table("Soak", SOAK, results, ENGINES[:3])
     out += soak_details(raw)
+    out += soak_details(raw, "Soak of the release candidate in numbers", per_profile=True)
     out += compat(raw)
     out += changed(first, results)
     print("\n".join(out))
