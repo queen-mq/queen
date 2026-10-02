@@ -26,6 +26,9 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServer.php
   - supervisor/src/main.rs
   - supervisor/src/lease/mod.rs
+  - supervisor/src/lease/hand_back.rs
+  - clients/client-php/src/Laravel/Queue/HandBackJournal.php
+  - clients/client-php/src/Laravel/Dashboard/TuningAdvisor.php
   - supervisor/src/coordination.rs
   - supervisor/src/prefork.rs
   - supervisor/src/watch.rs
@@ -46,8 +49,11 @@ verifiedBy:
   - clients/client-php/tests/PreforkTest.php
   - clients/client-php/tests/EventDrivenScalingTest.php
   - supervisor/src/lease/tests.rs
+  - clients/client-php/tests/HandBackJournalTest.php
+  - clients/client-php/tests/TuningAdvisorTest.php
 # sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): the shutdown section already gives the SIGTERM before the broker calls, and the prefetch section the unstarted hand-back that keeps its attempt; which exits restart without backoff (WorkerExitMarker), the forked child and the renewal helper, the bounded metrics client and the Rust CA store change nothing this page explains.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-02 (crash hand-back): the prefetch section now says which crashes the Rust master's lease service or the PHP lease helper hands back from the worker's journal, which are still charged, and the warning about a pool with tries 1.
 ---
 
 This page explains how a Laravel job travels through Queen, one idea at a time. Each section ends
@@ -238,19 +244,29 @@ leased or unconfirmed when a worker fails. All of them are off by default.
 
 | Setting | What it does | What it saves | What it costs |
 | --- | --- | --- | --- |
-| `prefetch` | One pop leases several jobs, and the worker runs them one after another. | One pop per job | A crash delivers the unfinished jobs of the batch again, and each one counts an attempt. A slow job delays the rest of its batch. Above 1, it needs lease renewal. |
+| `prefetch` | One pop leases several jobs, and the worker runs them one after another. | One pop per job | A crash that is not handed back delivers the unfinished jobs of the batch again, and each one counts an attempt. A slow job delays the rest of its batch. Above 1, it needs lease renewal. |
 | `ack_batch` | Sends the ACKs of several successful jobs together. | ACK requests | A crash delivers again the jobs that finished but were not acknowledged yet. |
 | `ack_async` | Sends the ACK and starts the next job without waiting for the answer. | The broker's write latency, once per job | A refused ACK is reported one job later, when the next job has already run on the same lease, and the refused job runs again. Needs `ack_batch` 1. |
 | `pop_ahead` | Sends the pop for the next batch while the last job of a full batch runs. | The pop round trip at each batch boundary | The next batch is leased one job earlier. Needs lease renewal, and never applies to a comma-separated queue list. |
 
-A crash is a worker that dies without a shutdown: SIGKILL, a PHP fatal error such as
-`memory_limit`, or a lost node. Since PHP client 1.9.0, a graceful stop hands the unstarted jobs
-back without charging them an attempt, but after a crash each job of the batch returns with one more
-attempt. So a job that crashes its worker every time also uses up the attempts of the jobs prefetched
-with it: in the
-[failure test](/benchmarks/laravel-supervisors#failures-replicas-a-soak-and-laravel-features-2026-10-02)
-with `tries` 2, one such job sent a job that never ran to `failed_jobs`. Keep prefetch 1 on queues
-whose jobs can crash a worker, or give their jobs more `tries`.
+A crash is a worker that dies without a shutdown: SIGKILL, the kernel's OOM killer, a PHP fatal
+error such as `memory_limit`, or a lost node. Since PHP client 1.9.0, a graceful stop hands the
+unstarted jobs back without charging them an attempt, and so does whatever renews the worker's lease
+after a crash: each worker journals what its shutdown would hand back, and the
+[lease service of the Rust master](/use/laravel/supervisors#lease-renewal-in-the-master), or the
+worker's PHP lease helper, sends it when the worker exits holding its lease. The jobs that never
+started keep their attempt, the job that was running counts its run, and they return at once
+instead of after `retry_after`.
+
+Some crashes are still charged: each job of the batch returns with one more attempt after a lost
+node, after a crash that takes the lease helper with the worker, and for a batch popped ahead whose
+answer the worker had not read yet. There, a job that crashes its worker every time also uses up
+the attempts of the jobs prefetched with it: in the
+[failure test](/benchmarks/laravel-supervisors#failures-replicas-a-soak-and-laravel-features-2026-10-02),
+before the hand-back, with `tries` 2, one such job sent a job that never ran to `failed_jobs`. Keep
+`tries` at 2 or more with `prefetch` above 1 or `pop_ahead`: the dashboard and both supervisors at
+start warn about a pool with `tries` 1 on such a connection. A job class that sets `$tries = 1` is
+not checked.
 
 Prefetch needs renewal because Laravel can pause a worker that still holds prefetched jobs, for
 example in maintenance mode or with `queue:pause`. On a dedicated Linux server, 32 workers with

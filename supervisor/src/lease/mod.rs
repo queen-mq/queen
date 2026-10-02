@@ -23,13 +23,19 @@
 //! for any reason but a `shutdown` or the worker's exit, kills the worker:
 //! fail closed, as the helper's watchdog does.
 //!
+//! A worker that exits or is killed while it holds a lease, without a
+//! `shutdown`, hands back nothing itself: this service sends the transaction
+//! the worker journaled for that lease, if any (see `hand_back`), while the
+//! lease is still the worker's. `"hand_back":true` in `ready` tells the
+//! worker to journal.
+//!
 //! Protocol, one JSON object per line (the helper's, over the socket):
 //!
 //! ```text
 //! worker -> master  {"command":"init","client":{"urls":[..],"bearerToken":..,"headers":{..},"timeoutMillis":N},
 //!                    "lease_seconds":N,"interval_millis":N,"request_budget_millis":N,
 //!                    "kill_grace_millis":N,"safety_margin_millis":N,"monotonic_millis":N}
-//! master -> worker  {"event":"ready"} | {"event":"startup_failed","error":".."}
+//! master -> worker  {"event":"ready","hand_back":true} | {"event":"startup_failed","error":".."}
 //! worker -> master  {"command":"track","lease_id":"..","deadline_monotonic_millis":N}
 //! master -> worker  {"event":"tracked","lease_id":".."} | {"event":"unsafe","lease_id":"..","error":".."}
 //! worker -> master  {"command":"forget","lease_id":".."} | {"command":"shutdown"}
@@ -37,9 +43,11 @@
 
 mod broker;
 mod connection;
+mod hand_back;
 
 use broker::{Broker, ClientConfig};
 use connection::Connection;
+use hand_back::Journal;
 use serde::Deserialize;
 use std::io::ErrorKind;
 use std::os::fd::RawFd;
@@ -65,6 +73,9 @@ const CLOCK_TOLERANCE_MILLIS: i64 = 1000;
 const INIT_TIMEOUT_MILLIS: i64 = 5000;
 /// A worker thread only waits on its socket and its deadlines.
 const THREAD_STACK_BYTES: usize = 256 * 1024;
+/// How long a worker just sent SIGKILL may take to exit before its jobs are
+/// left to lease expiry.
+const EXIT_WAIT_MILLIS: i32 = 1000;
 
 /// The process behind a connection.
 pub(crate) struct Peer {
@@ -89,6 +100,12 @@ impl Peer {
     /// Whether the worker has exited; a child that inherited the socket must
     /// not keep a dead worker's lease alive.
     fn exited(&self) -> bool {
+        self.exits_within(0)
+    }
+
+    /// Whether the worker exits within `millis`. Only a pidfd can tell, so
+    /// elsewhere the answer is always no.
+    fn exits_within(&self, millis: i32) -> bool {
         self.exit_fd().is_some_and(|fd| {
             let mut poll = libc::pollfd {
                 fd,
@@ -96,7 +113,7 @@ impl Peer {
                 revents: 0,
             };
             // SAFETY: one valid pollfd for the duration of the call.
-            unsafe { libc::poll(&mut poll, 1, 0) > 0 }
+            unsafe { libc::poll(&mut poll, 1, millis) > 0 }
         })
     }
 }
@@ -181,19 +198,26 @@ pub(crate) fn start(state_directory: &Path, fence: Fence) -> std::io::Result<Str
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    hand_back::remove_all(state_directory);
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(std::io::Error::other)?;
+    let directory = state_directory.to_path_buf();
     thread::Builder::new()
         .name("queen-lease-accept".into())
-        .spawn(move || accept(&listener, &client, &fence))?;
+        .spawn(move || accept(&listener, &client, &fence, &directory))?;
     Ok(path.to_string_lossy().into_owned())
 }
 
-fn accept(listener: &UnixListener, client: &reqwest::blocking::Client, fence: &Fence) {
+fn accept(
+    listener: &UnixListener,
+    client: &reqwest::blocking::Client,
+    fence: &Fence,
+    directory: &Path,
+) {
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(stream) => stream,
@@ -212,10 +236,11 @@ fn accept(listener: &UnixListener, client: &reqwest::blocking::Client, fence: &F
         };
         let pid = peer.pid;
         let (client, fence) = (client.clone(), Arc::clone(fence));
+        let journal = Journal::of(directory, pid);
         let spawned = thread::Builder::new()
             .name(format!("queen-lease-{pid}"))
             .stack_size(THREAD_STACK_BYTES)
-            .spawn(move || serve(stream, &peer, client, &fence));
+            .spawn(move || serve(stream, &peer, client, &fence, &journal));
         // The worker sees the connection close and falls back to a helper.
         if let Err(error) = spawned {
             log(format_args!(
@@ -411,28 +436,93 @@ struct Held {
 
 /// How a session ended.
 enum End {
-    /// The worker asked to stop, or it exited: nothing to fence.
+    /// The worker asked to stop, or never started: nothing to fence.
     Left,
+    /// The worker exited without a `shutdown`.
+    Exited,
     /// The worker may still run a leased job that nobody renews.
     Fence(String),
 }
 
-fn serve(stream: UnixStream, peer: &Peer, client: reqwest::blocking::Client, fence: &Fence) {
+fn serve(
+    stream: UnixStream,
+    peer: &Peer,
+    client: reqwest::blocking::Client,
+    fence: &Fence,
+    journal: &Journal,
+) {
     let mut held: Option<Held> = None;
+    let mut renewal: Option<(Broker, Timing)> = None;
     let end = catch_unwind(AssertUnwindSafe(|| match Connection::new(stream) {
-        Ok(mut connection) => session(&mut connection, client, &mut held, peer, fence),
+        Ok(mut connection) => session(
+            &mut connection,
+            client,
+            &mut held,
+            &mut renewal,
+            peer,
+            fence,
+        ),
         Err(error) => End::Fence(error.to_string()),
     }))
     .unwrap_or_else(|_| End::Fence("the renewal thread panicked".into()));
-    if let (End::Fence(reason), Some(lease)) = (end, held) {
-        // Nobody renews this lease any more: the job must not outlive it.
-        // Signal first: nothing, not even a log line, may stand in the way.
-        fence_worker(fence, peer, libc::SIGKILL);
+    let exited = match end {
+        End::Left => return,
+        End::Exited => true,
+        // A worker that holds no lease may live on, or be exiting: the
+        // socket can close before its pidfd says so.
+        End::Fence(_) if held.is_none() => peer.exits_within(EXIT_WAIT_MILLIS),
+        End::Fence(reason) => {
+            let lease = held.as_ref().map_or("", |lease| lease.id.as_str());
+            // Nobody renews this lease any more: the job must not outlive it.
+            // Signal first: nothing, not even a log line, may stand in the way.
+            fence_worker(fence, peer, libc::SIGKILL);
+            log(format_args!(
+                "lease service: killed worker {} holding lease {}: {reason}",
+                peer.pid,
+                bounded(lease)
+            ));
+            peer.exits_within(EXIT_WAIT_MILLIS)
+        }
+    };
+    if let (true, Some(lease), Some((broker, timing))) = (exited, &held, &renewal) {
+        hand_back(journal, peer, lease, broker, timing);
+    }
+    // The worker is gone: nothing reads its journal again.
+    if exited {
+        journal.remove();
+    }
+}
+
+/// Send what the exited worker journaled for its lease, while the broker
+/// still holds that lease for it; otherwise its jobs return on expiry.
+fn hand_back(journal: &Journal, peer: &Peer, lease: &Held, broker: &Broker, timing: &Timing) {
+    let left = |error: &str| {
         log(format_args!(
-            "lease service: killed worker {} holding lease {}: {reason}",
+            "lease service: worker {} exited; its jobs return when lease {} expires: {error}",
             peer.pid,
             bounded(&lease.id)
         ));
+    };
+    let transaction = match journal.transaction(&lease.id) {
+        Ok(Some(transaction)) => transaction,
+        Ok(None) => return,
+        Err(error) => return left(&error),
+    };
+    // The renewal's own bound: an attempt that might outlive the lease.
+    if lease.kill_at.is_some()
+        || monotonic_millis() + timing.budget + timing.margin >= lease.expires
+    {
+        return left("too little of the lease is left");
+    }
+    match broker.transaction(&transaction.body) {
+        Ok(()) => log(format_args!(
+            "lease service: worker {} exited holding lease {}; handed back {} job(s) that never started (no attempt charged) and {} running job(s) (run counted)",
+            peer.pid,
+            bounded(&lease.id),
+            transaction.unstarted,
+            transaction.running
+        )),
+        Err(error) => left(&bounded(&error)),
     }
 }
 
@@ -440,6 +530,7 @@ fn session(
     connection: &mut Connection,
     client: reqwest::blocking::Client,
     held: &mut Option<Held>,
+    renewal: &mut Option<(Broker, Timing)>,
     peer: &Peer,
     fence: &Fence,
 ) -> End {
@@ -454,8 +545,10 @@ fn session(
             return End::Left;
         }
     };
+    let (broker, timing) = renewal.insert((broker, timing));
     if connection
-        .emit(&serde_json::json!({"event": "ready"}))
+        // Only a pidfd tells when a worker has exited.
+        .emit(&serde_json::json!({"event": "ready", "hand_back": cfg!(target_os = "linux")}))
         .is_err()
     {
         return End::Left;
@@ -467,12 +560,16 @@ fn session(
             return End::Fence("its lease reached the safety margin after SIGTERM".into());
         }
         if peer.exited() {
-            return End::Left;
+            // What it wrote before exiting: a last `forget` or `shutdown`.
+            return match apply_commands(connection, held, timing) {
+                Some(End::Left) => End::Left,
+                _ => End::Exited,
+            };
         }
-        if let Some(end) = apply_commands(connection, held, &timing) {
+        if let Some(end) = apply_commands(connection, held, timing) {
             return end;
         }
-        if let Some(end) = renew_if_due(connection, &broker, held, peer, fence, &timing) {
+        if let Some(end) = renew_if_due(connection, broker, held, peer, fence, timing) {
             return end;
         }
         let wait = held

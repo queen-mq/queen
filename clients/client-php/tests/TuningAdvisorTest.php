@@ -90,7 +90,7 @@ final class TuningAdvisorTest extends TestCase
             $this->assertStringContainsString($variable, $advice[0]['action']);
         }
         $this->assertStringEndsWith(
-            'Keep tries at 2 or more: a worker that crashes charges one attempt to each job it had prefetched.',
+            'Keep tries at 2 or more: after a crash that is not handed back, such as a lost node, each job a worker had prefetched comes back with one attempt more.',
             $advice[0]['action'],
         );
         $this->assertSame('https://queenmq.com/use/laravel#asynchronous-acknowledgements', $advice[0]['doc']);
@@ -125,6 +125,48 @@ final class TuningAdvisorTest extends TestCase
             config: $this->config([], ['pop_ahead' => true, 'lease_renewal' => true]),
             metrics: $this->metrics([['class' => 'App\Jobs\Ping', 'average_ms' => 5, 'max_ms' => 9, 'processed' => 900]]),
         ));
+    }
+
+    public function testAPoolWithOneTryOnAPrefetchingConnectionIsWarned(): void
+    {
+        $advice = $this->advise(
+            config: $this->config([], ['prefetch' => 4, 'pop_ahead' => true, 'lease_renewal' => true]),
+            snapshot: $this->snapshot(['configuration' => ['shutdown_grace' => 75, 'poll_interval' => 3, 'supervisors' => [
+                $this->publishedPool(['tries' => 1]),
+                $this->publishedPool(['name' => 'reports', 'tries' => 2]),
+            ]]]),
+        );
+
+        $this->assertSame(['warning'], array_column($advice, 'severity'));
+        $this->assertSame('Pool default can fail a job that never ran', $advice[0]['title']);
+        $this->assertStringContainsString(
+            'its connection queen prefetches 4 jobs and pops the next batch ahead',
+            $advice[0]['evidence'],
+        );
+        $this->assertStringContainsString('Set tries to 2 or more for pool default', $advice[0]['action']);
+    }
+
+    public function testOneTryWithoutPrefetchOrPopAheadIsFine(): void
+    {
+        $snapshot = $this->snapshot(['configuration' => ['shutdown_grace' => 75, 'poll_interval' => 3, 'supervisors' => [
+            $this->publishedPool(['tries' => 1]),
+        ]]]);
+
+        $this->assertSame([], $this->advise(snapshot: $snapshot));
+        $popAhead = $this->advise(config: $this->config([], ['pop_ahead' => true, 'lease_renewal' => true]), snapshot: $snapshot);
+        $this->assertStringContainsString('its connection queen pops the next batch ahead.', $popAhead[0]['evidence']);
+    }
+
+    public function testASupervisorWarnsAtStartFromTheConfigurationAlone(): void
+    {
+        $config = $this->config(['supervisor' => ['supervisors' => ['default' => ['tries' => 1]]]], ['prefetch' => 4, 'lease_renewal' => true]);
+
+        $warnings = TuningAdvisor::startupWarnings($config);
+
+        $this->assertCount(1, $warnings);
+        $this->assertStringStartsWith('Pool default can fail a job that never ran. It has tries 1', $warnings[0]);
+        $this->assertStringContainsString('for job classes that set $tries = 1', $warnings[0]);
+        $this->assertSame([], TuningAdvisor::startupWarnings($this->config()));
     }
 
     public function testWorkersThatBootLaravelOneByOneAreToldAboutPrefork(): void

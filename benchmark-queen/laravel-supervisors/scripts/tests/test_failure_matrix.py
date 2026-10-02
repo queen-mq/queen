@@ -111,7 +111,7 @@ class FailureMatrixChecksTest(unittest.TestCase):
         names = [s.name for s in matrix.SCENARIOS]
 
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual({"horizon", "queen-php", "queen-rust", "queen-rust-fast"}, set(matrix.PROFILES))
+        self.assertEqual({"horizon", "queen-php", "queen-rust", "queen-rust-fast", "queen-php-fast"}, set(matrix.PROFILES))
         self.assertEqual(("horizon", "queen-php", "queen-rust"), matrix.DEFAULT_PROFILES)
 
     def test_a_soak_report_with_empty_php_arrays_reads_as_maps(self) -> None:

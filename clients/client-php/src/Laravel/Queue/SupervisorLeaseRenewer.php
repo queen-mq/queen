@@ -38,6 +38,11 @@ final class SupervisorLeaseRenewer implements LeaseRenewer
 
     private bool $closedByMaster = false;
 
+    /** Whether the master sends a crashed worker's journal (its `ready` says so). */
+    private bool $handsBack = false;
+
+    private ?HandBackJournal $journal = null;
+
     public function __construct(
         private string $socketPath,
         private array $clientConfig,
@@ -148,13 +153,30 @@ final class SupervisorLeaseRenewer implements LeaseRenewer
             $this->reset();
             return;
         }
-        if ($this->owner === getmypid() && !$this->closedByMaster) {
-            try {
-                $this->send(['command' => 'shutdown']);
-            } catch (\Throwable) {
+        if ($this->owner === getmypid()) {
+            // A clean exit owes nothing; a fork's journal is its parent's.
+            $this->journal?->discard();
+            if (!$this->closedByMaster) {
+                try {
+                    $this->send(['command' => 'shutdown']);
+                } catch (\Throwable) {
+                }
             }
         }
         $this->abandonConnection();
+    }
+
+    /**
+     * Next to the master's socket, where it finds the journal by this
+     * process's PID once the process has exited.
+     */
+    public function handBackJournal(): ?HandBackJournal
+    {
+        if (!$this->handsBack || $this->owner !== getmypid() || !is_resource($this->socket)) {
+            return null;
+        }
+
+        return $this->journal ??= new HandBackJournal(dirname($this->socketPath) . '/hand-back-' . getmypid());
     }
 
     private function connect(): void
@@ -189,6 +211,7 @@ final class SupervisorLeaseRenewer implements LeaseRenewer
         while (self::monotonicMillis() < $deadline) {
             $event = $this->nextEvent();
             if (($event['event'] ?? null) === 'ready') {
+                $this->handsBack = ($event['hand_back'] ?? false) === true;
                 return;
             }
             if (($event['event'] ?? null) === 'startup_failed') {
@@ -342,6 +365,8 @@ final class SupervisorLeaseRenewer implements LeaseRenewer
 
     private function reset(): void
     {
+        $this->handsBack = false;
+        $this->journal = null;
         $this->tracked = [];
         $this->failures = [];
         $this->buffer = '';

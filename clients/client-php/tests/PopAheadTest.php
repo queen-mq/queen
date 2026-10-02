@@ -370,4 +370,9 @@ class PopAheadLeaseRenewer implements LeaseRenewer
     public function close(): void
     {
     }
+
+    public function handBackJournal(): ?\Queen\Laravel\Queue\HandBackJournal
+    {
+        return null;
+    }
 }

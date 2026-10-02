@@ -56,6 +56,15 @@ class QueenQueue extends BaseQueue implements QueueContract
     private ?string $settlingLease = null;
 
     /**
+     * Where a crash's debt for the leased batch is journaled, for the lease
+     * service to hand back; null when nothing is journaled.
+     */
+    private ?HandBackJournal $journal = null;
+
+    /** @var array<string, int> Delivery key to its entry in the journal. */
+    private array $journaled = [];
+
+    /**
      * The ack_async ACK on the wire, settled before the next ACK, release or
      * broker pop, and at shutdown.
      *
@@ -160,6 +169,9 @@ class QueenQueue extends BaseQueue implements QueueContract
         $this->shutDown = true;
 
         try {
+            // This worker hands back now: a crash during it must not have the
+            // lease service send the same jobs again.
+            $this->journal?->withdraw();
             // Bounded like the hand-back below, and not retried: a lost
             // answer leaves the job to lease expiry.
             $this->settlePendingAck(self::SHUTDOWN_ACK_TIMEOUT_MILLIS, retry: false);
@@ -629,6 +641,122 @@ class QueenQueue extends BaseQueue implements QueueContract
             $this->registerPopBatch($messages);
         }
         $this->prefetched[$queue] = ['messages' => $messages, 'next' => 0];
+        $this->journalBatch($queue, $messages);
+    }
+
+    /**
+     * Journal the batch just leased, owing every job, where the lease service
+     * finds it if this worker dies holding the lease: it then hands the jobs
+     * back as shutdown() would, instead of leaving them to lease expiry,
+     * which charges each one an attempt. Only a batch of two or more jobs
+     * can owe a job that never started.
+     *
+     * @param list<array> $messages
+     */
+    private function journalBatch(string $queue, array $messages): void
+    {
+        $this->journaled = [];
+        $this->journal = count($messages) > 1 ? $this->leaseRenewer?->handBackJournal() : null;
+        if ($this->journal === null) {
+            return;
+        }
+        try {
+            $entries = [];
+            foreach ($messages as $index => $message) {
+                $entries[] = $this->journalEntry($queue, $message);
+                $this->journaled[$this->deliveryKey($message)] = $index;
+            }
+            $planned = $this->journal->plan($this->leaseId($messages[0]), $entries);
+        } catch (\Throwable) {
+            // A delivery without a Laravel payload: lease expiry, as before.
+            $planned = false;
+            $this->journal->withdraw();
+        }
+        if (!$planned) {
+            $this->journal = null;
+            $this->journaled = [];
+            return;
+        }
+        $this->journalDebt();
+    }
+
+    /**
+     * A delivery's completed ACK, fenced by its lease, and the copies that
+     * hand it back, as handBack() pushes them: unstarted, or counting a run.
+     *
+     * @return array{ack: array, unstarted: array, ran: array}
+     */
+    private function journalEntry(string $queue, array $message): array
+    {
+        $transactionId = $message['transactionId'] ?? $message['id'] ?? null;
+        $partitionId = $message['partitionId'] ?? null;
+        if (!is_string($transactionId) || !is_string($partitionId)) {
+            throw new UnexpectedValueException('Queen returned a delivery without a transaction or partition ID.');
+        }
+        $copyId = Uuid::v7();
+        $copy = function (bool $ran) use ($queue, $message, $copyId): array {
+            [$partition, $payload] = $this->handBackCopy($message, $ran);
+
+            return ['type' => 'push', 'items' => [[
+                'queue' => $queue,
+                'payload' => $payload,
+                'transactionId' => $copyId,
+                'partition' => $partition,
+            ]]];
+        };
+
+        return [
+            'ack' => [
+                'type' => 'ack',
+                'transactionId' => $transactionId,
+                'partitionId' => $partitionId,
+                'status' => 'completed',
+                'consumerGroup' => $this->consumerGroup,
+                'leaseId' => $this->leaseId($message),
+            ],
+            'unstarted' => $copy(false),
+            'ran' => $copy(true),
+        ];
+    }
+
+    /**
+     * Journal what a crash would owe now: what shutdown() would hand back,
+     * and the deferred completions. Called before anything that may settle
+     * a delivery at the broker is sent, and after, so the journal never
+     * hands back a job the broker may have settled.
+     */
+    private function journalDebt(): void
+    {
+        if ($this->journal === null || ($this->consumerPid !== null && $this->consumerPid !== getmypid())) {
+            return;
+        }
+        $codes = str_repeat('-', count($this->journaled));
+        foreach ($this->pendingAcknowledgements as $entry) {
+            $index = $this->journaled[$this->deliveryKey($entry['message'])] ?? null;
+            if ($index !== null) {
+                $codes[$index] = 'c';
+            }
+        }
+        foreach ($this->unhandledDeliveries() as $entry) {
+            $index = $this->journaled[$this->deliveryKey($entry['message'])] ?? null;
+            if ($index !== null) {
+                $codes[$index] = $entry['ran'] ? 'r' : 'u';
+            }
+        }
+        $this->journal->owe($codes);
+    }
+
+    /** A delivery's ACK or release is about to be sent. */
+    private function beginSettling(array $message): void
+    {
+        $this->settlingLease = $this->partitionLeaseKey($message);
+        $this->journalDebt();
+    }
+
+    private function endSettling(): void
+    {
+        $this->settlingLease = null;
+        $this->journalDebt();
     }
 
     /**
@@ -809,6 +937,8 @@ class QueenQueue extends BaseQueue implements QueueContract
             $key = $this->deliveryKey($message);
             $this->activeDeliveries[$queue] = ['key' => $key, 'message' => $message];
             $this->deliveryQueues[$key] = $queue;
+            // It runs from now on: a crash counts its run.
+            $this->journalDebt();
         }
 
         $job = new QueenJob(
@@ -862,6 +992,8 @@ class QueenQueue extends BaseQueue implements QueueContract
                 'affinity_key' => $affinityKey,
             ];
             $batchComplete = $this->markDeliveryHandled($message);
+            // Done: a crash completes it instead of running it again.
+            $this->journalDebt();
 
             if (count($this->pendingAcknowledgements) >= $this->ackBatch || $batchComplete) {
                 $this->flushAcknowledgements();
@@ -869,7 +1001,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             return;
         }
 
-        $this->settlingLease = $this->partitionLeaseKey($message);
+        $this->beginSettling($message);
         try {
             // A failed job must reach the DLQ synchronously. Flush earlier
             // success acknowledgements first so a later batch failure cannot
@@ -892,11 +1024,11 @@ class QueenQueue extends BaseQueue implements QueueContract
             $this->assertSuccessful($result, $failed ? 'dead-letter job' : 'acknowledge job');
         } catch (\Throwable $acknowledgementFailure) {
             $this->abandonDelivery($message);
-            $this->settlingLease = null;
+            $this->endSettling();
             throw $acknowledgementFailure;
         }
         $this->markDeliveryHandled($message);
-        $this->settlingLease = null;
+        $this->endSettling();
         $this->settleLeaseMessage($message);
     }
 
@@ -906,18 +1038,18 @@ class QueenQueue extends BaseQueue implements QueueContract
             ['group' => $group, 'affinityKey' => $affinityKey],
             static fn (mixed $value): bool => $value !== null,
         );
-        $this->settlingLease = $this->partitionLeaseKey($message);
+        $this->beginSettling($message);
         try {
             $promise = $this->queen->ackDetached($message, 'completed', $context);
         } catch (\Throwable) {
             // Nothing was sent: the synchronous path acknowledges, or reports
             // why it cannot.
-            $this->settlingLease = null;
+            $this->endSettling();
             return false;
         }
         $this->pendingAck = ['promise' => $promise, 'message' => $message, 'context' => $context];
         $this->markDeliveryHandled($message);
-        $this->settlingLease = null;
+        $this->endSettling();
         // The job is done: its lease needs no renewal on its account. After
         // the lease's last ACK the broker closes it, and renewing a closed
         // lease would fence an idle worker.
@@ -1030,7 +1162,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         int $attempts,
     ): void {
         $this->settlePendingAck();
-        $this->settlingLease = $this->partitionLeaseKey($message);
+        $this->beginSettling($message);
         try {
             $this->flushAcknowledgements();
 
@@ -1064,14 +1196,14 @@ class QueenQueue extends BaseQueue implements QueueContract
             // The transaction outcome is ambiguous. Never execute a locally
             // buffered sibling whose partition lease may already have moved.
             $this->abandonDelivery($message);
-            $this->settlingLease = null;
+            $this->endSettling();
             throw $releaseFailure;
         }
 
         // A successful completed ACK advances only through this message and
         // keeps the remaining same-partition lease valid.
         $this->markDeliveryHandled($message);
-        $this->settlingLease = null;
+        $this->endSettling();
         $this->settleLeaseMessage($message);
         $this->settlePendingPop();
     }
@@ -1385,6 +1517,8 @@ class QueenQueue extends BaseQueue implements QueueContract
         $this->pendingAck = null;
         $this->pendingPop = null;
         $this->settlingLease = null;
+        $this->journal = null;
+        $this->journaled = [];
     }
 
     private function assertJobTimeoutIsSafe(QueenJob $job): void
@@ -1498,6 +1632,7 @@ class QueenQueue extends BaseQueue implements QueueContract
                 $this->prefetched[$queue] = ['messages' => $kept, 'next' => 0];
             }
         }
+        $this->journalDebt();
     }
 
     /** @param list<array> $messages */
@@ -1600,6 +1735,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             fn (array $entry): bool => $this->leaseIdOrNull($entry['message']) !== $leaseId,
         ));
         $this->markDeliveryHandled($message);
+        $this->journalDebt();
     }
 
     /**

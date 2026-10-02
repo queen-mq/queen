@@ -58,6 +58,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): the panel retries a failed job from its detail page, and the failed-jobs row and the richer-dashboard section say so; the max_ms JobMetricsRecorder now records and the redacted URL error of SupervisorConfiguration change no comparison.
 # sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): the Crash-loop control row now says which exits restart at once (Laravel's job timeout and --memory after a job, both through WorkerExitMarker, and an exit after stable_after); the unstarted hand-back that keeps its attempt, the SIGTERM before the broker calls, the fork-server and lease-service fixes, the bounded metrics client and the Rust CA store change nothing else this page states.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-02 (crash hand-back): the prefetch-4 profile paragraph says the Rust master or the PHP helper now hands back a crashed worker's prefetched jobs, and that memory-fatal passed in the local-hand-back rerun on both engines.
 ---
 
 Horizon and Queen both run ordinary Laravel jobs and both supervise their workers, but on different
@@ -464,7 +465,9 @@ at the same time.
 | 45 minutes of mixed jobs, with a worker killed every 10 minutes and a deploy | Pass | Pass | Pass |
 
 A fourth profile, the Rust engine with prefetch 4, `ack_async` and `pop_ahead`, passed every lane
-except one: a job that crashes its worker also charges an attempt to the jobs prefetched with it
+except one: a job that crashes its worker also charged an attempt to the jobs prefetched with it.
+The worker's lease renewer, the Rust master or the PHP helper, now hands those jobs back after a
+worker crash, and that lane passed in a rerun on both engines
 ([prefetch](/use/laravel/concepts#prefetch-ack_async-and-pop_ahead)). The first run of these lanes
 found three defects in the Queen PHP client and supervisors, fixed in this release; the
 [benchmark page](/benchmarks/laravel-supervisors#failures-replicas-a-soak-and-laravel-features-2026-10-02)

@@ -69,6 +69,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (soak): the soak paragraph, its table and the laravel-soak-memory figure come from raw/soak, soak-memory.csv and tables.md of the failure-matrix dataset.
 # sourceOfTruth re-read 2026-10-02 (through c916fe67): soak_memory.py only writes its CSVs with LF line ends; the figure and the soak table are unchanged.
 # sourceOfTruth re-read 2026-10-02 (release-candidate soak): the second soak table comes from raw/soak-pr-* of the failure-matrix dataset; the README now records the 2.5-hour run that has no verdict and the 1 GiB the matrix tools run with.
+# sourceOfTruth re-read 2026-10-02 (crash hand-back): the memory-fatal row and the crash bullet now cite raw/local-hand-back of the failure-matrix dataset, where the Rust master or the PHP lease helper hands back a crashed worker's journal, against worker-kill in final-b.
+# sourceOfTruth re-read 2026-10-02 (031d4044): the failure-matrix README now cites the commits of the local-hand-back run; the crash bullet still matches it.
 ---
 
 This qualification asks whether Queen can replace the **process control plane** of Laravel
@@ -571,7 +573,7 @@ of 2026-10-01, found these:
 | `memory-limit` | 1 of 6 jobs failed instead of completing | Pass |
 | `stop-long` | 1 of 2 jobs completed twice | Pass |
 | `stop-long-batch` | The job done before the deploy ran again | Pass |
-| `memory-fatal` | Both jobs failed after one run | 1 of 2 jobs failed without running: the limit below |
+| `memory-fatal` | Both jobs failed after one run | 1 of 2 jobs failed without running; passed with the crash hand-back below |
 
 With the supervisor fix, the four jobs of `job-timeout` reached `failed_jobs` after 44 s on both Queen
 engines, against 126 to 147 s before, while the crash circuit held the pool back. An audit of the
@@ -582,11 +584,18 @@ failed before its fix; the changelog lists them.
   prefetched batch, and a deploy kills it during the second. With the client before the fix, the
   first job, finished before the deploy, ran again; with the fix it ran once, on all three Queen
   profiles.
-- **A crash still charges an attempt to a prefetched job.** When a worker dies without a shutdown
-  (SIGKILL, a PHP fatal error, a lost node), the unstarted jobs of its batch return when the lease
-  expires, and each counts one delivery. In `memory-fatal` with prefetch 4 and `tries` 2, a job that
-  never ran reached `failed_jobs` because the job before it crashed the worker twice. With prefetch
-  above 1, keep prefetch 1 on queues whose jobs can crash a worker, or give their jobs more `tries`.
+- **A crash charged an attempt to a prefetched job; the lease renewer now hands those jobs back.**
+  When a worker died without a shutdown (SIGKILL, a PHP fatal error), the unstarted jobs of its
+  batch returned when the lease expired, and each counted one delivery. In `memory-fatal` with
+  prefetch 4 and `tries` 2, a job that never ran reached `failed_jobs` because the job before it
+  crashed the worker twice, and in `worker-kill` the jobs the killed worker had not started ran 31 s
+  later as their second attempt. With the
+  [crash hand-back](/use/laravel/concepts#prefetch-ack_async-and-pop_ahead), the Rust master or the
+  PHP lease helper sends what the dead worker journaled. A rerun of five lanes on Docker Desktop,
+  on both engines with prefetch 1 and with prefetch 4, passed all twenty: in `worker-kill` those
+  jobs ran a few seconds after the kill as their first attempt, and in `memory-fatal` both jobs ran
+  twice. A lost node, a crash that takes the lease helper with the worker, and a batch popped ahead
+  and not read yet still charge the attempt.
 - **Horizon ran 2 of 300 jobs twice after a Redis restart.** They finished while Redis restarted.
   The worker could not remove them from Redis's reserved set, so their reservation expired after
   `retry_after`, and they ran again 30 s later. Both stacks deliver at least once. The Queen client

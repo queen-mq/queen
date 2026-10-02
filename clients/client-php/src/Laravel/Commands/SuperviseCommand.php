@@ -4,6 +4,7 @@ namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Queue\QueueManager;
+use Queen\Laravel\Dashboard\TuningAdvisor;
 use Queen\Laravel\Supervisor\PhpSupervisor;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
 
@@ -20,6 +21,9 @@ class SuperviseCommand extends Command
             queueConnections: $this->laravel['config']->get('queue.connections', []),
         );
 
+        foreach (TuningAdvisor::startupWarnings($this->application()) as $warning) {
+            $this->components->warn($warning);
+        }
         $this->components->info('Queen PHP supervisor started');
         $supervisor = new PhpSupervisor(
             $queues,
@@ -31,5 +35,15 @@ class SuperviseCommand extends Command
         $supervisor->run((bool) $this->option('once'));
 
         return self::SUCCESS;
+    }
+
+    /** @return array<string, mixed> as TuningAdvisor reads it */
+    private function application(): array
+    {
+        return [
+            'queen' => $this->laravel['config']->get('queen', []),
+            'queue' => ['connections' => $this->laravel['config']->get('queue.connections', [])],
+            'env' => [],
+        ];
     }
 }

@@ -1,4 +1,7 @@
 use super::broker::test_server;
+use super::hand_back::tests::journal;
+#[cfg(target_os = "linux")]
+use super::hand_back::tests::{ack, copy};
 use super::*;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -68,7 +71,23 @@ impl Worker {
         kill_grace_millis: i64,
         clock_offset: i64,
     ) -> Self {
-        let stream = UnixStream::connect(&service.socket).unwrap();
+        Self::connect_to(
+            &service.socket,
+            url,
+            interval_millis,
+            kill_grace_millis,
+            clock_offset,
+        )
+    }
+
+    fn connect_to(
+        socket: &std::path::Path,
+        url: &str,
+        interval_millis: i64,
+        kill_grace_millis: i64,
+        clock_offset: i64,
+    ) -> Self {
+        let stream = UnixStream::connect(socket).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -318,4 +337,107 @@ fn the_socket_is_private_to_the_supervisor_user() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+/// Run `exiting_worker_helper` as a worker that holds a lease, journals a
+/// hand-back for it, and then exits after `how`.
+#[cfg(target_os = "linux")]
+fn run_exiting_worker(service: &Service, url: &str, how: &str) {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "lease::tests::exiting_worker_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("QUEEN_LEASE_TEST_SOCKET", &service.socket)
+        .env("QUEEN_LEASE_TEST_DIRECTORY", &service.directory)
+        .env("QUEEN_LEASE_TEST_URL", url)
+        .env("QUEEN_LEASE_TEST_EXIT", how)
+        .status()
+        .unwrap();
+    assert!(status.success(), "the worker helper failed: {status}");
+}
+
+#[test]
+#[ignore = "subprocess helper for the hand-back tests"]
+fn exiting_worker_helper() {
+    let Some(socket) = std::env::var_os("QUEEN_LEASE_TEST_SOCKET") else {
+        return;
+    };
+    let directory = PathBuf::from(std::env::var_os("QUEEN_LEASE_TEST_DIRECTORY").unwrap());
+    let url = std::env::var("QUEEN_LEASE_TEST_URL").unwrap();
+    let mut worker = Worker::connect_to(std::path::Path::new(&socket), &url, 1000, 200, 0);
+    let ready = worker.event();
+    assert_eq!(
+        ready,
+        serde_json::json!({"event": "ready", "hand_back": true})
+    );
+    assert_eq!(worker.track("held", 30_000), tracked("held"));
+    // The job of entry 0 was running, entry 1 had not started, entry 2 was done.
+    journal(&directory, std::process::id(), "held", 3, "ru-");
+    match std::env::var("QUEEN_LEASE_TEST_EXIT").unwrap().as_str() {
+        "shutdown" => worker.send(&serde_json::json!({"command": "shutdown"})),
+        "forget" => worker.send(&serde_json::json!({"command": "forget", "lease_id": "held"})),
+        _ => {}
+    }
+    // As a crash would: no destructor, no goodbye.
+    std::process::exit(0);
+}
+
+#[cfg(target_os = "linux")]
+fn transactions(requests: &test_server::Log) -> Vec<String> {
+    requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.starts_with("POST /api/v1/transaction "))
+        .cloned()
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_worker_that_exits_holding_a_lease_has_its_journal_handed_back() {
+    let (url, requests) = test_server::start(vec![(200, r#"{"success":true,"results":[]}"#)]);
+    let service = Service::start("hand-back");
+
+    run_exiting_worker(&service, &url, "crash");
+
+    wait_until("the hand-back", || !transactions(&requests).is_empty());
+    let sent = transactions(&requests);
+    assert_eq!(sent.len(), 1);
+    let parts: Vec<&str> = sent[0].splitn(3, " | ").collect();
+    assert_eq!(parts[1], "authorization: Bearer secret");
+    let body: serde_json::Value = serde_json::from_str(parts[2]).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "operations": [ack(0, "held"), copy(0, 1), ack(1, "held"), copy(1, 0)],
+            "requiredLeases": ["held"],
+        })
+    );
+    wait_until("the journal removed", || {
+        std::fs::read_dir(&service.directory).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("hand-back-")
+        })
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_worker_that_shuts_down_or_forgets_its_lease_hands_back_nothing() {
+    let (url, requests) = test_server::start(vec![(200, r#"{"success":true,"results":[]}"#)]);
+    let service = Service::start("no-hand-back");
+
+    run_exiting_worker(&service, &url, "shutdown");
+    run_exiting_worker(&service, &url, "forget");
+    thread::sleep(Duration::from_millis(500));
+
+    assert!(transactions(&requests).is_empty());
+    assert!(service.signals().is_empty());
 }

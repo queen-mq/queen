@@ -1,0 +1,118 @@
+{
+ "scenario": "memory-fatal",
+ "profile": "queen-php",
+ "run_id": "memory-fatal-queen-php-830c7913",
+ "checks": [
+  {
+   "name": "two attempts, both died",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "failed() ran once",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "never completed",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "one failed-job row each",
+   "passed": true,
+   "detail": "['000000', '000001']"
+  },
+  {
+   "name": "one dead-letter entry each",
+   "passed": true,
+   "detail": "2 entries"
+  }
+ ],
+ "passed": true,
+ "report": {
+  "run_id": "memory-fatal-queen-php-830c7913",
+  "jobs": {
+   "000000": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938586.318,
+      null
+     ],
+     [
+      "started",
+      2,
+      1790938616.424,
+      null
+     ],
+     [
+      "failed_hook",
+      null,
+      1790938647.283,
+      "Illuminate\\Queue\\MaxAttemptsExceededException"
+     ]
+    ],
+    "pids": [
+     30,
+     47,
+     57
+    ]
+   },
+   "000001": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938586.32,
+      null
+     ],
+     [
+      "started",
+      2,
+      1790938622.698,
+      null
+     ],
+     [
+      "failed_hook",
+      null,
+      1790938652.692,
+      "Illuminate\\Queue\\MaxAttemptsExceededException"
+     ]
+    ],
+    "pids": [
+     29,
+     52,
+     57
+    ]
+   }
+  },
+  "failed_store": {
+   "available": true,
+   "job_ids": [
+    "000000",
+    "000001"
+   ]
+  },
+  "dead_letter": {
+   "available": true,
+   "entries": 2
+  }
+ },
+ "extra": {},
+ "timeline": [
+  [
+   4.42,
+   "ready"
+  ],
+  [
+   4.59,
+   "dispatched 2 x memory (exit 0)"
+  ],
+  [
+   71.67,
+   "all failed: reached"
+  ]
+ ]
+}

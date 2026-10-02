@@ -75,54 +75,111 @@ impl Broker {
     /// One renewal, trying each endpoint in turn; a definitive answer from
     /// one endpoint is final.
     pub(super) fn renew(&self, lease_id: &str, seconds: u64) -> Result<(), String> {
+        let (status, body) = self.post(
+            &["api", "v1", "lease", lease_id, "extend"],
+            serde_json::json!({ "seconds": seconds }).to_string(),
+            "lease renewal",
+            true,
+        )?;
+        renewed(status, &body)
+    }
+
+    /// One transaction. It moves to the next endpoint only when this one
+    /// could not be reached: once a request may have reached a broker, its
+    /// outcome is unknown, and sending it again could push its copies twice.
+    pub(super) fn transaction(&self, body: &serde_json::Value) -> Result<(), String> {
+        let (status, answer) = self.post(
+            &["api", "v1", "transaction"],
+            body.to_string(),
+            "the transaction",
+            false,
+        )?;
+        committed(status, &answer)
+    }
+
+    /// The first definitive answer. An endpoint that cannot be reached passes
+    /// the request to the next; so does one that times out, fails to answer
+    /// or answers with a server error, when `resend` allows sending the
+    /// request again.
+    fn post(
+        &self,
+        path: &[&str],
+        body: String,
+        what: &str,
+        resend: bool,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), String> {
         let mut last = String::from("no broker URL");
         for base in &self.urls {
             let mut url = base.clone();
             // Checked in new(): every URL can be a base.
             if let Ok(mut segments) = url.path_segments_mut() {
-                segments
-                    .pop_if_empty()
-                    .extend(["api", "v1", "lease", lease_id, "extend"]);
+                segments.pop_if_empty().extend(path);
             }
             let response = self
                 .client
                 .post(url)
                 .timeout(self.timeout)
                 .headers(self.headers.clone())
-                .body(serde_json::json!({ "seconds": seconds }).to_string())
+                .body(body.clone())
                 .send();
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    last = describe(error);
-                    continue;
+                    let unreached = error.is_connect();
+                    last = describe(error, what);
+                    if unreached || resend {
+                        continue;
+                    }
+                    return Err(last);
                 }
             };
             let status = response.status();
-            let mut body = Vec::new();
-            if let Err(error) = response.take(MAX_RESPONSE_BYTES).read_to_end(&mut body) {
+            let mut answer = Vec::new();
+            if let Err(error) = response.take(MAX_RESPONSE_BYTES).read_to_end(&mut answer) {
                 last = format!("reading the answer failed: {}", error.kind());
+                if resend {
+                    continue;
+                }
+                return Err(last);
+            }
+            if status.is_server_error() && resend {
+                last = format!("{what} answered {status}");
                 continue;
             }
-            if status.is_server_error() {
-                last = format!("lease renewal answered {status}");
-                continue;
-            }
-            return renewed(status, &body);
+            return Ok((status, answer));
         }
         Err(last)
     }
 }
 
 /// The cause without the URL, which would crowd out the bounded diagnostic.
-fn describe(error: reqwest::Error) -> String {
+fn describe(error: reqwest::Error, what: &str) -> String {
     if error.is_timeout() {
-        "the renewal request timed out".into()
+        format!("{what} timed out")
     } else if error.is_connect() {
         "the broker connection failed".into()
     } else {
         error.without_url().to_string()
     }
+}
+
+/// Only `success: true` proves the broker applied every operation; the
+/// transaction is all or nothing.
+pub(super) fn committed(status: reqwest::StatusCode, body: &[u8]) -> Result<(), String> {
+    let answer: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| format!("the transaction answered {status}"))?;
+    if status.is_success()
+        && answer.get("success").and_then(serde_json::Value::as_bool) == Some(true)
+    {
+        return Ok(());
+    }
+    Err(answer
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(
+            || format!("the broker refused the transaction ({status})"),
+            str::to_owned,
+        ))
 }
 
 /// Only an affected-row count proves the broker still owned and extended the
@@ -286,6 +343,50 @@ mod tests {
             log.lock().unwrap()[0],
             r#"POST /api/v1/lease/lease%2F1/extend HTTP/1.1 | authorization: Bearer secret | {"seconds":30}"#
         );
+    }
+
+    #[test]
+    fn a_transaction_carries_the_workers_token_and_only_success_commits_it() {
+        let (url, log) = test_server::start(vec![
+            (200, r#"{"success":true,"results":[]}"#),
+            (
+                200,
+                r#"{"success":false,"error":"ack_rejected","results":[]}"#,
+            ),
+        ]);
+        let body = serde_json::json!({"operations": [], "requiredLeases": ["l"]});
+        assert_eq!(broker(vec![url.clone()]).transaction(&body), Ok(()));
+        assert_eq!(
+            log.lock().unwrap()[0],
+            format!("POST /api/v1/transaction HTTP/1.1 | authorization: Bearer secret | {body}")
+        );
+        assert_eq!(
+            broker(vec![url]).transaction(&body),
+            Err("ack_rejected".to_owned())
+        );
+
+        // Unreachable: the next endpoint. Reached, outcome unknown: never again.
+        let (unavailable, unavailable_log) = test_server::start(vec![(503, "{}")]);
+        let (healthy, healthy_log) = test_server::start(vec![(200, r#"{"success":true}"#)]);
+        let refused = "http://127.0.0.1:9".to_owned();
+        assert_eq!(
+            broker(vec![refused, healthy.clone()]).transaction(&body),
+            Ok(())
+        );
+        assert!(broker(vec![unavailable, healthy])
+            .transaction(&body)
+            .is_err());
+        assert_eq!(unavailable_log.lock().unwrap().len(), 1);
+        assert_eq!(
+            healthy_log.lock().unwrap().len(),
+            1,
+            "a transaction was sent twice"
+        );
+
+        let ok = reqwest::StatusCode::OK;
+        assert!(committed(ok, br#"{"success":true}"#).is_ok());
+        assert!(committed(ok, br#"{"results":[]}"#).is_err());
+        assert!(committed(reqwest::StatusCode::BAD_REQUEST, br#"{"success":true}"#).is_err());
     }
 
     #[test]

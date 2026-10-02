@@ -22,7 +22,8 @@ engines. The protocol is the Queen team's; the results are diagnostic.
   settings: prefetch 1, synchronous ACKs, no `pop_ahead`, lease renewal in the
   supervisor, prefork workers, the command-line opcache and the cURL
   transport. The `queen-rust-fast` lanes add prefetch 4, `ack_async` and
-  `pop_ahead` to the Rust supervisor.
+  `pop_ahead` to the Rust supervisor, and the `queen-php-fast` lanes (only in
+  `local-hand-back`) to the PHP supervisor.
 - Every lane: 2 workers unless it says otherwise, a pool `timeout` of 20 s,
   `retry_after` 30 s, `shutdown_grace` 35 s, a worker `--memory` of 128 MiB and
   PHP's `memory_limit` of 128 MiB.
@@ -48,6 +49,7 @@ engines. The protocol is the Queen team's; the results are diagnostic.
 | `soak-pr-<profile>` | the 45-minute soak again, on the four profiles at once: PR #69's head, the release candidate | `eb9703b5` (image built at `fe2e8941`; only the harness changed) |
 | `local-soak-prefetch` | a 15-minute soak of the prefetch-4 profile on Docker Desktop, with every client fix | `cfd04eed` |
 | `local-compat-prefix` | the 32 Laravel features on Docker Desktop, before the client fixes | harness `bbb8ed7e`, the client of 2026-10-01 |
+| `local-hand-back` | `job-timeout`, `memory-limit`, `memory-fatal`, `worker-kill` and `stop-long-batch` on the two Rust and two PHP profiles, on Docker Desktop, with the crash hand-back: the master's lease service, or the worker's PHP lease helper, sends the transaction a crashed worker journaled. `queen-php-fast` is the PHP engine with prefetch 4, `ack_async` and `pop_ahead` | `b18871cd`, `52e8e219` and `68d48cb4` (the harness); the image was built before the final wording of the dashboard's advice and of one docblock |
 
 The first runs (`failure-matrix`, `failure-matrix-php`, `replicas`, `compat`, `batch-prefix`) found
 the defects that the later runs show fixed. The tables report the last run of each lane.
@@ -116,7 +118,7 @@ What the first runs found, all fixed in the release candidate:
 | --- | --- | --- | --- |
 | `job-timeout` | Rust, prefetch 4 | 3 of 4 jobs reached `failed_jobs` after one run | the hand-back keeps the attempt (`ac99ce9c`) |
 | `memory-limit` | Rust, prefetch 4 | 1 of 6 jobs failed instead of completing | the same |
-| `memory-fatal` | Rust, prefetch 4 | both jobs failed after one run | the same; 1 of 2 still fails, the crash limit |
+| `memory-fatal` | Rust, prefetch 4 | both jobs failed after one run | the same; 1 of 2 still failed, the crash limit; passed with the crash hand-back (`local-hand-back`, Rust and PHP) |
 | `stop-long` | Rust, prefetch 4 | 1 of 2 jobs completed twice | the detached ACK is written before the next job (`324bf6d0`) |
 | `stop-long-batch` | Rust, prefetch 4 | the job done before the deploy ran again (`batch-prefix`) | the same (`batch-fixed`: passed on the four profiles) |
 | `job-timeout` | PHP and Rust | passed, but the crash circuit held the pool: 126 to 147 s | a job timeout is not a crash (`e62efc05`, `e174964e`): 44 s |
@@ -126,7 +128,21 @@ Known limits:
 
 - **A crash charges an attempt to every unstarted prefetched job.** In `memory-fatal` with prefetch 4
   and `tries` 2, job `000001` never ran: job `000000` crashed the worker twice, and each crash
-  returned `000001` with one more delivery.
+  returned `000001` with one more delivery. In `worker-kill` (`final-b`), the three jobs the killed
+  worker had not started waited for its lease to expire and ran 31 s later as their second attempt.
+  With the crash hand-back (`local-hand-back`), the 20 lanes passed on the four profiles:
+  - `memory-fatal`, Rust, prefetch 4: the master logged the hand-back of the job that never started
+    10 ms after the fatal error; both jobs then ran twice, as `tries` 2 says.
+  - `worker-kill`, Rust, prefetch 4: the master handed back the three jobs that never started, and
+    they ran 4 to 12 s after the kill as their first attempt.
+  - `worker-kill`, PHP, prefetch 4: the PHP helper logs nothing once its worker is gone, but none of
+    the jobs the killed worker had not started waited for its lease: they ran from 2.5 s after the
+    kill as their first attempt.
+  - The job that was running when its worker died was alone in its partition lease in each of
+    these runs, so it returned when the lease expired, 30 s later, with its run counted.
+
+  Still charged: a lost node, a crash that takes the lease helper with the worker, and a batch
+  popped ahead and not read yet, which no lane here exercises.
 - **Horizon after a Redis restart.** Jobs `000066` and `000067` finished while Redis restarted; the
   worker could not remove them from the reserved set, so they ran again when their reservation
   expired 30 s later (`retry_after`), in both runs.

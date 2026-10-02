@@ -276,4 +276,9 @@ class AsyncAckLeaseRenewer implements LeaseRenewer
     {
         $this->closed++;
     }
+
+    public function handBackJournal(): ?\Queen\Laravel\Queue\HandBackJournal
+    {
+        return null;
+    }
 }
