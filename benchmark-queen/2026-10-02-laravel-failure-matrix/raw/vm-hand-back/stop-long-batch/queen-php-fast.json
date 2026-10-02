@@ -1,0 +1,122 @@
+{
+ "scenario": "stop-long-batch",
+ "profile": "queen-php-fast",
+ "run_id": "stop-long-batch-queen-php-fast-37033f3b",
+ "checks": [
+  {
+   "name": "attempts per job (information)",
+   "passed": true,
+   "detail": "000000: 1; 000001: 2"
+  },
+  {
+   "name": "the job done before the deploy ran once",
+   "passed": true,
+   "detail": "1 starts"
+  },
+  {
+   "name": "every job completed",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no two attempts overlapped",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no job completed twice",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no failed-job row",
+   "passed": true,
+   "detail": "[]"
+  }
+ ],
+ "passed": true,
+ "report": {
+  "run_id": "stop-long-batch-queen-php-fast-37033f3b",
+  "jobs": {
+   "000000": {
+    "events": [
+     [
+      "started",
+      1,
+      1790942624.001,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790942684.002,
+      null
+     ]
+    ],
+    "pids": [
+     29
+    ]
+   },
+   "000001": {
+    "events": [
+     [
+      "started",
+      1,
+      1790942684.007,
+      null
+     ],
+     [
+      "started",
+      2,
+      1790942804.043,
+      null
+     ],
+     [
+      "completed",
+      2,
+      1790942864.043,
+      null
+     ]
+    ],
+    "pids": [
+     29
+    ]
+   }
+  },
+  "failed_store": {
+   "available": true,
+   "job_ids": []
+  },
+  "dead_letter": {
+   "available": true,
+   "entries": 0
+  }
+ },
+ "extra": {},
+ "timeline": [
+  [
+   5.84,
+   "ready"
+  ],
+  [
+   6.23,
+   "dispatched 2 x ok (exit 0)"
+  ],
+  [
+   67.61,
+   "first done, second started: reached"
+  ],
+  [
+   102.92,
+   "app stopped (SIGTERM, 90 s grace)"
+  ],
+  [
+   107.06,
+   "app up again"
+  ],
+  [
+   247.91,
+   "all completed: reached"
+  ]
+ ]
+}
