@@ -71,6 +71,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (release-candidate soak): the second soak table comes from raw/soak-pr-* of the failure-matrix dataset; the README now records the 2.5-hour run that has no verdict and the 1 GiB the matrix tools run with.
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): the memory-fatal row and the crash bullet now cite raw/local-hand-back of the failure-matrix dataset, where the Rust master or the PHP lease helper hands back a crashed worker's journal, against worker-kill in final-b.
 # sourceOfTruth re-read 2026-10-02 (031d4044): the failure-matrix README now cites the commits of the local-hand-back run; the crash bullet still matches it.
+# sourceOfTruth re-read 2026-10-02 (vm-hand-back): the crash bullet now cites the rerun on the droplet, raw/vm-hand-back of the failure-matrix dataset.
 ---
 
 This qualification asks whether Queen can replace the **process control plane** of Laravel
@@ -591,10 +592,10 @@ failed before its fix; the changelog lists them.
   crashed the worker twice, and in `worker-kill` the jobs the killed worker had not started ran 31 s
   later as their second attempt. With the
   [crash hand-back](/use/laravel/concepts#prefetch-ack_async-and-pop_ahead), the Rust master or the
-  PHP lease helper sends what the dead worker journaled. A rerun of five lanes on Docker Desktop,
-  on both engines with prefetch 1 and with prefetch 4, passed all twenty: in `worker-kill` those
-  jobs ran a few seconds after the kill as their first attempt, and in `memory-fatal` both jobs ran
-  twice. A lost node, a crash that takes the lease helper with the worker, and a batch popped ahead
+  PHP lease helper sends what the dead worker journaled. A rerun of five lanes on the same server,
+  on both engines with prefetch 1 and with prefetch 4, passed all twenty, as on Docker Desktop: in
+  `worker-kill` the master handed those jobs back as the worker died, the first ran 5 ms later as
+  its first attempt, and in `memory-fatal` both jobs ran twice. A lost node, a crash that takes the lease helper with the worker, and a batch popped ahead
   and not read yet still charge the attempt.
 - **Horizon ran 2 of 300 jobs twice after a Redis restart.** They finished while Redis restarted.
   The worker could not remove them from Redis's reserved set, so their reservation expired after
