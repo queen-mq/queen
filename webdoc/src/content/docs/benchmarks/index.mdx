@@ -1,80 +1,97 @@
 ---
 title: Benchmarks
-description: "Every published figure with its conditions, and the hardware behind it: archived runs of Queen 1.x, whose storage was PostgreSQL."
-type: overview
+description: "Queen MQ 2.0 on three 16-vCPU nodes: 1M msg/s on one queue, 10M partitions in one queue, and a 500k msg/s soak through restarts, with every condition."
+type: reference
+tier: operate
 sidebar:
   order: 1
-sourceOfTruth:
-  - benchmark-queen/2026-07-23-3test-report/results.md
-  - benchmark-queen/2026-07-29-vm-campaign/results.md
-  - benchmark-queen/2026-07-30-1h-soak/soak1h.json
-  - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
-  - benchmark-queen/laravel-supervisors/QUALIFICATION_SUMMARY_20260829.md
-  - benchmark-queen/laravel-supervisors/QUALIFICATION_REPORT_20260829.md
 digest: >-
-  Every run on these pages measured Queen 1.x, whose storage was PostgreSQL; 2.0 replaced that
-  storage with a replicated log, so the figures describe the 1.x engine and not 2.0, and no 2.0
-  figure is published here. The two headline 1.x figures, each with the conditions that make it
-  true. Sustained throughput: 86,369,975,300 messages in 24 hours, about 1,000,000 msg/s per
-  side, 0 restarts and broker
-  resident memory flat near 4.1 GB, on Queen 1.0.0 with explicit acks on leased pops,
-  deduplication on with a 60 second window, 200 partitions, 600 consumers, push batch 100 and
-  256-byte payloads, broker and PostgreSQL 18 co-located on one 32 vCPU / 62 GiB machine, loaders
-  on separate hosts, fdatasync about 70 microseconds. Cardinality: 1,000,000 ordered partitions in
-  one queue, created during the run at 1,000 a second, serving 200,000 msg/s with zero push, pop
-  or ack errors, on the same machine with retention on at RETENTION_PARALLELISM=16, deduplication
-  off, 300 consumers, over one hour. Both are single-shape runs, and neither is a claim about a
-  shape that was not measured.
+  Queen MQ 2.0 was measured on a raft cluster of three DigitalOcean nodes with 16 vCPU and 31 GB
+  each in one VPC, every write replicated, driven by three loaders running goload in open loop
+  with 256-byte JSON payloads, push batches of 100, deduplication on and explicit acks. One queue
+  of 500,000 partitions sustained 1.00M msg/s pushed and consumed with e2e p99 ~270 ms in 90 s
+  runs, and averaged 990.7k msg/s over an 8-minute soak of the same shape (2026-09-29). One queue
+  of 10,000,000 partitions ran at 913k msg/s in and 905k out with e2e p99 4.7 s in a 60 s run
+  (2026-09-29). 1,000 queues of 1,000 partitions ran at 500k msg/s for hours with a fault every
+  90 minutes (kill -9 or SIGTERM of the leader, kill -9 of a follower) at e2e p50 ~19 ms and p99
+  ~80-90 ms (2026-09-30). All of these measure push, pop and ack: no published run measures
+  POST /api/v1/transaction, and Queen 1.x (PostgreSQL) results are not 2.0 numbers.
 ---
 
-<Aside type="caution">
-Every run on these pages measured **Queen 1.x**, whose storage was PostgreSQL. 2.0 replaced that
-storage with a replicated log, so these figures describe the 1.x engine and not 2.0. They are kept
-as records of what 1.x did under stated conditions.
-</Aside>
+Three runs of Queen MQ 2.0 on a three-node cluster: a throughput ceiling on one queue, a
+partition-count stress, and a soak through restarts. Every figure carries its conditions.
+**None of them measures `POST /api/v1/transaction`:** they push, pop and ack.
 
-A number appears here only when an archived artifact under `benchmark-queen/` records what
-produced it: the loader's stdout, the configuration line it printed, the host shape, the broker
-build.
+## The rig
 
-## The runs
+- **Brokers:** three DigitalOcean droplets, 16 vCPU and 31 GB RAM each, in one VPC, as one raft
+  cluster of three nodes. Every write is replicated before it is answered.
+- **Load:** three loader droplets running goload in open loop, so the offered rate does not slow
+  down when the broker does, and latency includes any queueing.
+- **Messages:** 256-byte JSON payloads, pushed in batches of 100, deduplication on.
+- **Consumers:** long-polling pops in batches, explicit acks sent asynchronously. e2e latency is
+  measured by goload from push to delivery.
+- **CPU:** the droplets do not all have the same CPU model. Each run started with the leader on a
+  node with the newer CPU, because the leader's CPU sets the ceiling.
 
-| Run | Headline | The conditions that make it true |
-| --- | --- | --- |
-| [Throughput 24h 1M](/benchmarks/soak-24h) | 86,369,975,300 messages in 24 hours, about 1,000,000 msg/s per side, 0 restarts, broker resident memory flat at ~4.1 GB | **Explicit acks** (leased pops), **deduplication on** (60 s window), 200 partitions, 600 consumers, push batch 100, 256-byte payloads, 32 vCPU / 62 GiB, Queen 1.0.0 |
-| [A million ordered partitions](/benchmarks/cardinality-1m) | 1,000,000 ordered partitions in one queue, created during the run at 1,000/s, serving 200,000 msg/s with 0 push, pop or ack errors | **Explicit acks** (leased pops), retention on with `RETENTION_PARALLELISM=16`, **deduplication off**, 1,000 partitions active per second rotating through the space, 300 consumers, 32 vCPU / 62 GiB, Queen 1.0.0. One hour, of which 43 minutes on the completed space |
-| [Ordered pipeline](/benchmarks/ordered-pipeline) | 88,503,408 messages verified across 4 stages and 1000 partitions with 0 duplicates, 0 gaps and 0 order violations | 25,000 events/s for 600 s, deduplication window 300 s, explicit bulk acks, per-stage verifier over per-property logs |
-| [Multi-tenant cell](/benchmarks/multitenant-cell) | A 2-core cell behind the proxy holding above 2400 msg/s with zero loss; 12 tenants for 1 hour with zero cross-tenant deliveries | **Deduplication off**, **429 retry disabled**, enforcement on, all tenants sharing one queue and one consumer group |
-| [Laravel supervisors](/benchmarks/laravel-supervisors) | Queen Rust master PSS 2.9 MiB against Horizon's 65.0 MiB; 307.67 against 294.30 completed jobs/s | **Diagnostic only:** Docker Desktop arm64, four workers, 2,000 jobs with 10 ms work, three runs per engine, prefetch 4 without the renewal helper now required for production |
+## 1,000,000 msg/s on one queue
 
-Also: [cross-broker comparison](/benchmarks/comparison) and
-[method, rig and archive](/benchmarks/method/).
+One queue of 500,000 partitions, created by a prefill before the timed run, nine goloads (three per
+loader). The cluster sustained 1.00M msg/s pushed and consumed, e2e p99 ~270 ms, in 90 s runs
+(2026-09-29, raft at `e3456a48`, `benchmark-queen/2026-09-29-1m-3node/README.md`). Later that day
+an 8-minute soak of the same shape averaged 990.7k msg/s, ramp included, past the point where
+retention starts deleting completed messages; it set `QUEEN_RAFT_PIPELINE=8` and
+`QUEEN_RAFT_RT_THREADS=4`, which are the defaults now (`harness-sz-latest/run-0929q.sh` in the
+same folder).
 
-## The other evidence
+- **It shows** that one raft group carries a million replicated messages a second, in and out,
+  with half a million partitions in one queue.
+- **It does not show** hours at that rate (the longest run was 8 minutes), many queues, larger
+  payloads, or transactions.
 
-How fast one shape goes is one kind of evidence. Whether the clients and the broker agree about
-what the API means, on more than one topology, is the other.
-[Conformance](/benchmarks/conformance) is the 1.x record of that matrix: six client suites on
-three PostgreSQL topologies each, the broker's own unit tests, an HA mesh assertion and a
-two-tenant isolation suite recorded at 45 assertions and 0 failures, every cell in its own
-throwaway stack. The harness itself, and
-how to run a subset of it, is [Testing](/internals/contributing/testing/).
+## 10,000,000 partitions in one queue
 
-## How to read a figure
+One queue of 10,000,000 partitions, prefilled, with 1M msg/s offered. The cluster ran at 913k msg/s
+in and 905k out, e2e p99 4.7 s, in a 60 s run (2026-09-29 grid, scripts in
+`benchmark-queen/2026-09-29-1m-3node/harness-sz-latest/`).
 
-Producers are open-loop: each push leaves at its scheduled instant and is shed over the in-flight
-cap rather than queued behind it, so a pacer that falls behind shows up as latency. Every
-archived run reports `shed=0`. Consumers are closed-loop drainers: their throughput is a result,
-not an offered load.
+- **It shows** that the partition count is not a cliff: ten million partitions in one queue,
+  every one ordered, on three nodes.
+- **It does not show** a latency you would run at (a 4.7 s p99 means messages waited in the
+  queue), more than a minute of load, or the same total spread over many queues: in the same grid,
+  throughput fell as the queue count rose.
 
-Broker-side p99 is the time the broker spent on a request it accepted. End-to-end p99 also spans
-the network, the commit and the wait in the partition, so it belongs to the workload. The
-multi-tenant hour recorded both: a broker-side median p99 of about 2.9 ms against an end-to-end
-p99 of 133,693 ms, the rate-limited tenants' backlog in the same histogram.
+## 500,000 msg/s for hours, through restarts
 
-## Hardware
+1,000 queues of 1,000 partitions (a million partitions, prefilled), 500k msg/s offered by nine
+goloads, pop sizing left to the SDK defaults, completed-message retention of 300 s. A fault every
+90 minutes, the first 10 minutes in: kill -9 of the leader, SIGTERM of the leader, kill -9 of a
+follower, in turn. In steady windows, e2e p50 was ~19 ms and p99 ~80-90 ms (the night of
+2026-09-30, the builds committed as `7a2a1711`, 2.0.0-beta.1,
+`benchmark-queen/2026-09-30-stage03-3node/`).
 
-| Rig | Used by | Shape |
-| --- | --- | --- |
-| Single-node bench | Throughput 24h 1M, the ordered pipeline | Broker and PostgreSQL 18 co-located on 32 vCPU / 62 GiB, loaders on separate machines, three of 16 vCPU for the soak. `fdatasync` about 70 µs on the soak host, 68 µs on the pipeline host |
-| Cell rig | the multi-tenant runs | 8 vCPU / 15 GiB with NVMe, `fdatasync` average 95.5 µs and p99 about 396 µs. PostgreSQL, the proxy's state database, the broker and the proxy share **one CPU-capped systemd slice**: a free-tier shape is 2 cores for all four, loader outside it |
+- **It shows** latency at half the ceiling with retention running, and a cluster that keeps
+  serving through kill -9 and rolling restarts of its leader.
+- **It does not show** the minutes after each fault, when throughput dips while the restarted node
+  catches up, or runs of days.
+
+## What none of these show
+
+- **Transaction throughput.** No published run measures `POST /api/v1/transaction`. Do not read
+  these rates as transaction rates.
+- **Your workload.** One tenant, one raft group, three nodes, 256-byte payloads, one rig. Five-node
+  clusters, larger payloads and other hardware are unmeasured.
+- **The current build.** Each run names its commit, and the engine has changed since. Treat the
+  figures as what those builds did on this rig.
+
+## Reproduce
+
+Each folder holds the scripts and the goload source that ran. In `2026-09-29-1m-3node/harness/`,
+`setup.sh <b1 b2 b3 l1 l2 l3>` provisions the droplets, then
+`env SECS=90 NL=3 AVOID=3 CONS=33 PARTS=500000 PREFILL=1 LANES=8 ./sz9.sh <tag> 1000000` runs the
+1M shape; in `2026-09-30-stage03-3node/`, `setup30.sh` provisions and `soak.sh <tag>` runs the
+soak, read with `soak-status.sh <tag>`.
+
+Results measured on Queen 1.x, whose storage was PostgreSQL, stay in the git history of this site.
+They are not 2.0 numbers. For what the cluster guarantees under faults, see
+[guarantees](/concepts/guarantees/).

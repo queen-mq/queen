@@ -142,6 +142,7 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/api/v1/ephemeral/pop` |
 | `POST` | `/api/v1/ephemeral/push` |
 | `DELETE` | `/api/v1/ephemeral/queue/:queue` |
+| `DELETE` | `/api/v1/ephemeral/queue/:queue` |
 | `GET` | `/api/v1/ephemeral/queues` |
 | `GET` | `/api/v1/ephemeral/queues/:queue/depth` |
 | `POST` | `/api/v1/ephemeral/reset` |
@@ -161,6 +162,8 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 
 | Method | Path |
 | --- | --- |
+| `POST` | `/api/v1/ephemeral/_adopt` |
+| `POST` | `/api/v1/ephemeral/_leaving` |
 | `GET` | `/api/v1/pop` |
 | `GET` | `/api/v1/raft/liveness` |
 | `POST` | `/api/v1/resources/quota` |
@@ -181,4 +184,4 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/metrics` |
 | `GET` | `/status` |
 
-74 of the broker's 99 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.
+75 of the broker's 102 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.

@@ -1,0 +1,121 @@
+---
+title: The model
+description: "Entity, partition, step and replicated log: how Queen MQ's primitives fit together, with a glossary of every term these docs use."
+type: concept
+tier: use
+sidebar:
+  order: 1
+sourceOfTruth:
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/consume/pop.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/groups.rs
+digest: >-
+  In Queen MQ every entity (a customer, an order, a conversation) gets its own partition in a
+  queue, created by the first push that names it, and each consumer group reads one partition in
+  offset order with one leased batch at a time. A step is what a worker does with one event: it
+  acks the event, writes KV state, pushes the next events, schedules timers and makes a retry
+  harmless with a transactionId or a once marker. One POST /api/v1/transaction writes every part
+  of a step as one entry of a replicated log, and either all parts apply or none does. Delivery is
+  at-least-once; effects inside Queen are exactly-once through transactions and transactionId
+  deduplication, and stop at calls a worker makes to other systems.
+---
+
+Queen MQ has one model: every entity gets an ordered partition, a worker handles one event of it
+as a step, and the step commits as one entry in a replicated log. Read this page first. Every
+other concept page zooms into one part of it.
+
+## Entity, partition, step, log
+
+<pre class="mermaid">{`
+flowchart LR
+  E["entity: order 9137"] --> P["partition order-9137"]
+  P --> S["step: one worker call"]
+  S --> L[("one log entry")]
+`}</pre>
+
+- An entity is what you think in: a customer, an order, a conversation.
+- A partition is the entity's ordered input. You name it on push (`partition: 'order-9137'`)
+  and the first push creates it. See [partitions](/concepts/partitions/).
+- A step is what a worker does with one event of that partition.
+- The replicated log is where every write lands. Raft copies each entry to a majority of
+  nodes, and each of them fsyncs it, before you get an answer.
+
+**One step is one entry, so a step is never half done.**
+
+## The five roles of a step
+
+| Role | What the worker does | Primitive | Page |
+|---|---|---|---|
+| Events | emits the next events | queues, one partition per entity | [partitions](/concepts/partitions/) |
+| Progress | takes the event and acks it | consumer groups, leases, acks, retries, DLQ, replay | [consuming](/concepts/consuming/) |
+| State | changes the entity's state | KV | [KV](/concepts/kv/) |
+| Time | schedules what comes later | timers, delayed delivery | [timers](/concepts/timers/) |
+| Identity | makes a retry harmless | `transactionId` dedup, `once` | [dedup and once](/concepts/dedup/) |
+
+The commit that holds them together is `POST /api/v1/transaction`
+([transactions](/concepts/transactions/)). This body does all five in one entry:
+
+```json
+{
+  "operations": [
+    { "type": "ack", "transactionId": "order-9137-created", "partitionId": "1042",
+      "consumerGroup": "billing", "leaseId": "019a3c1e-...", "status": "completed" },
+    { "type": "push", "items": [{ "queue": "receipts", "partition": "customer-42",
+      "transactionId": "receipt-9137", "payload": { "orderId": 9137 } }] }
+  ],
+  "kv": [
+    { "op": "put", "ns": "orders", "key": "9137", "value": { "status": "paid" }, "ttlSeconds": 2592000 },
+    { "op": "putIfAbsent", "ns": "paid", "key": "order-9137-created", "value": true,
+      "ttlSeconds": 86400, "required": true }
+  ],
+  "timers": [
+    { "op": "schedule", "queue": "reminders", "timerKey": "9137", "delayMs": 86400000,
+      "txn": "remind-9137", "payload": "eyJvcmRlcklkIjo5MTM3fQ==" }
+  ]
+}
+```
+
+`kv` and `timers` are top-level arrays beside `operations`, never elements of it.
+
+## Stateless workers, one state machine per entity
+
+Per-entity order plus a one-entry commit let you run every entity as a small state machine: its
+partition is the input, its KV entry is the state, a transaction is one transition, and a timer
+is a transition that time triggers. Workers keep nothing between events, so any worker can take
+any partition. See [one state machine per entity](/guides/state-machines/).
+
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| Queue | A named set of partitions with one configuration (lease time, retries, dedup window, retention). Created by the first push that names it, or by `POST /api/v1/configure`. |
+| Partition | One entity's ordered stream inside a queue. Offsets start at 0 and have no gaps. |
+| Consumer group | A name that reads a queue at its own pace, with one cursor per partition. A pop without a group uses the shared group `__QUEUE_MODE__`. |
+| Cursor, offset | The offset is a message's position in its partition. The cursor is the last offset a group acked there; the group's next message is the one after it. |
+| Lease | A pop's claim on one partition for one group: a `leaseId`, the end of the batch and an expiry. One lease per partition and group at a time. |
+| Ack, nack | An ack (`completed`) moves the cursor past a message. A nack (`failed`) releases the lease and spends one retry. `retry` and `dlq` are the other two statuses. |
+| Transaction | One `POST /api/v1/transaction`: acks, pushes, KV writes and timer operations written as one log entry, all or nothing. |
+| `transactionId` | A message's idempotency key. A second push of the same id to the same partition inside the dedup window writes nothing. |
+| KV namespace | A named set of keys inside a tenant, such as `orders`. |
+| Timer | A message promised for later, keyed by queue and `timerKey`, pushed into its queue through the log when it fires. |
+| Tenant | An isolated set of queues, KV namespaces and timers. With `QUEEN_TENANCY_HEADER` off, every request uses the default tenant. |
+| Raft group | One replicated log with its own leader. A node runs `QUEEN_RAFT_GROUPS` of them (default 1), and a tenant lives in exactly one. |
+
+## Limits
+
+- **Delivery is at-least-once.** Effects inside Queen are exactly-once through transactions and
+  dedup; a call your worker makes to another system is outside any commit.
+- **Order holds inside a partition, not across partitions.**
+- **One leased batch per partition and group at a time.** A hot partition is sequential;
+  parallelism comes from many partitions.
+- **A transaction is one call inside one tenant.** There is no interactive BEGIN and COMMIT.
+
+## Next
+
+<CardGrid>
+  <LinkCard title="Partitions" href="/concepts/partitions/" description="Push, order, queue options and replay." />
+  <LinkCard title="Transactions" href="/concepts/transactions/" description="What one call can hold, and why it rolls back." />
+  <LinkCard title="Guarantees" href="/concepts/guarantees/" description="What was Jepsen-tested, under which faults, with which limits." />
+</CardGrid>

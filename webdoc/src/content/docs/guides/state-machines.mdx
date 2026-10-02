@@ -1,0 +1,202 @@
+---
+title: One state machine per entity
+description: "Run each order as a state machine: its partition is the input, one KV entry is the state, and one transaction is one transition."
+type: how-to
+tier: use
+sourceOfTruth:
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+  - clients/client-js/client-v2/builders/TimerBuilder.js
+  - clients/client-js/client-v2/kv/Kv.js
+  - server/src/rsm/consume/ack.rs
+  - server/src/rsm/consume/txn.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/timers.rs
+verifiedBy:
+  - examples/apps/js/saga.mjs
+  - examples/apps/py/saga.py
+  - examples/apps/go/saga/main.go
+  - examples/apps/http/saga.sh
+sidebar:
+  order: 2
+---
+
+Give every entity its own partition, keep its state in one KV entry, and write each transition as
+one transaction. Stateless workers in one consumer group then run any number of entities as state
+machines, with no locks, no outbox and no scheduler. This page builds an order that goes
+`created` → `paid` → `shipped`, and cancels itself if nobody pays within 30 minutes.
+
+## The machine
+
+Every event of an order lands in the order's partition, in the order it was pushed. A worker reads
+the order's state, decides, and commits one transaction:
+
+| Event arrives | State in KV | The one transaction |
+|---|---|---|
+| `order_created` | none | ack, put `created`, schedule `payment_timeout` in 30 min into this partition |
+| `payment_succeeded` | `created` | ack, put `paid`, cancel the timer, push `ship_order` to `shipping` |
+| `payment_timeout` | `created` | ack, put `cancelled`, push `order_cancelled` to `notifications` |
+| `payment_succeeded` | `cancelled` | ack, push `refund` to `refunds` (paid after the deadline) |
+| `shipped` | `paid` | ack, put `shipped` |
+| anything else | any | ack only: a duplicate or a late event changes nothing |
+
+Events enter like any message. The partition name is the order id, and `transactionId` makes a
+producer's retry harmless:
+
+```js
+await queen.queue('orders').partition('ord-1042').push([
+  { transactionId: 'ord-1042:created', data: { type: 'order_created', total: 4200 } },
+])
+```
+
+## The worker
+
+The table becomes a pure function, and the worker turns its answer into one transaction:
+
+```js
+import { Queen } from 'queen-mq'
+
+const queen = new Queen({ url: 'http://localhost:6632' })
+const ORDERS = 'orders'          // one partition per order: the input
+const STATE = 'order-state'      // KV namespace: the state
+const timeoutKey = (orderId) => `payment-timeout:${orderId}`
+
+// Pure: no I/O. Given the state and the event, say what this step does.
+function transition(state, event) {
+  switch (`${state?.status ?? 'none'}/${event.type}`) {
+    case 'none/order_created':
+      return { state: { status: 'created', total: event.total }, startTimeout: '30m' }
+    case 'created/payment_succeeded':
+      return { state: { ...state, status: 'paid' }, cancelTimeout: true,
+               emit: [{ queue: 'shipping', data: { type: 'ship_order' } }] }
+    case 'created/payment_timeout':
+      return { state: { ...state, status: 'cancelled' },
+               emit: [{ queue: 'notifications', data: { type: 'order_cancelled' } }] }
+    case 'cancelled/payment_succeeded':
+      return { state, emit: [{ queue: 'refunds', data: { type: 'refund', amount: event.amount } }] }
+    case 'paid/shipped':
+      return { state: { ...state, status: 'shipped' } }
+    default:
+      return { state }           // a duplicate or a late event: ack it, change nothing
+  }
+}
+
+await queen.queue(ORDERS)
+  .group('order-machine')
+  .subscriptionMode('all')       // a new group starts at the tail unless told otherwise
+  .autoAck(false)                // the ack rides the transaction below
+  .concurrency(10)
+  .each()
+  .consume(async (msg) => {
+    const orderId = msg.partition                     // the partition is the entity
+    const row = await queen.kv.get(STATE, orderId)    // { found, value, version }
+    const state = row.found ? row.value : null
+    const step = transition(state, msg.data)
+
+    const tx = queen.transaction()
+      .ack(msg, 'completed', { consumerGroup: msg.consumerGroup })
+    if (step.state !== state) {
+      tx.kv.put(STATE, orderId, step.state, { ttl: '90d' })
+    }
+    for (const e of step.emit ?? []) {
+      tx.queue(e.queue).partition(orderId).push([{ data: { orderId, ...e.data } }])
+    }
+    if (step.startTimeout) {
+      tx.timer(ORDERS).key(timeoutKey(orderId)).partition(orderId)
+        .delay(step.startTimeout).payload({ type: 'payment_timeout' }).schedule()
+    }
+    if (step.cancelTimeout) {
+      tx.timer(ORDERS).key(timeoutKey(orderId)).cancel()
+    }
+
+    try {
+      await tx.commit()
+    } catch (err) {
+      if (err.reason === 'rejected_ack') return       // lease lost: nothing was written
+      await queen.ack(msg, 'failed', { group: msg.consumerGroup, error: err.message })
+    }
+  })
+```
+
+The ack names `consumerGroup`: without it, a transaction acks in queue mode, not for this group.
+Every KV write needs `ttl` (or `ttlSeconds`, `until`) or `forever: true`. The timer's
+`.partition(orderId)` is what sends the timeout into the order's own partition; without it the
+timer fires into `Default`. A failed commit is nacked so the event comes back; after `retryLimit`
+nacks it goes to the dead-letter queue when the queue has `dlqAfterMaxRetries: true`, and is
+skipped when it does not. See
+[transactions](/concepts/transactions/), [KV](/concepts/kv/) and [timers](/concepts/timers/).
+
+## Why it is safe without locks
+
+**One partition, one group, one leased batch at a time.** While a worker holds the lease on an
+order's partition for `order-machine`, no other worker of that group receives that order's next
+event. The read with `kv.get` and the write in the transaction cannot interleave with another step
+of the same order, because the next step's read happens after this commit, and single-key KV reads
+are linearizable.
+
+**An expired lease makes the ack fail, and the whole step with it.** If the worker stalls past the
+queue's `leaseTime`, the partition goes to another worker. The stalled worker's commit still
+carries its old lease: the ack is refused with `rejected_ack` and the KV write, the pushes and the
+timer roll back with it. The new worker reads the old state and runs the step once. A
+compare-and-set on the state cannot give you this, because a version that still matches succeeds
+even for a worker that no longer owns the event. To have the assumption checked as well, add
+`expect: row.found ? row.version : 0` and `required: true` to the put: a second writer then gets
+`kv_precondition` back instead of overwriting.
+
+**A late timeout is an event the machine ignores.** The timer fires into the order's partition,
+so it takes its place in the order's sequence like any other event. If the payment lands first, its
+step cancels the timer; if the timer had already fired, the cancel answers `absent` without failing
+the transaction, and `payment_timeout` arrives in state `paid`, where the table says ack only. If
+the timeout lands first, the order is cancelled and the payment behind it is refunded. Every worker
+sees one order of events per partition, so every worker decides the same way.
+
+## A full program
+
+The booking saga below is the same pattern with three states (`held`, `confirmed`, `expired`),
+run end to end by the examples suite. Its timer fires into a separate `expiries` queue, so its
+compensator re-reads the state before acting, which is the check the table above gets for free by
+firing into the entity's own partition.
+
+<Tabs>
+
+<TabItem label="JavaScript">
+
+<Render file="snippets/app-js-saga" />
+
+</TabItem>
+
+<TabItem label="Python">
+
+<Render file="snippets/app-py-saga" />
+
+</TabItem>
+
+<TabItem label="Go">
+
+<Render file="snippets/app-go-saga" />
+
+</TabItem>
+
+<TabItem label="curl">
+
+<Render file="snippets/app-http-saga" />
+
+</TabItem>
+
+</Tabs>
+
+## Limits
+
+- **Queen does not know your states.** The table is your code. Queen orders the events and commits
+  the step; a wrong transition commits as faithfully as a right one.
+- **One machine per consumer group.** Leases fence workers inside a group, not across groups. Other
+  groups may read the same queue (projections, audit), but only one group should write the
+  machine's KV keys.
+- **A hot entity is sequential.** One order runs one step at a time. Throughput comes from many
+  orders, not from splitting one.
+- **Side effects in your code are at-least-once.** An email sent or an API called inside the
+  handler can repeat on redelivery. Emit it as an event and handle it with a marker, as in
+  [charge a card once](/guides/exactly-once/).
+- **State is one KV value**, 64 KiB by default (`QUEEN_KV_MAX_VALUE_BYTES`). A timer can be at most
+  90 days out by default (`QUEEN_TIMERS_MAX_HORIZON_S`).
+- **Timer firing is not part of the Jepsen pass**; the transaction and the queue are. See
+  [guarantees](/concepts/guarantees/).

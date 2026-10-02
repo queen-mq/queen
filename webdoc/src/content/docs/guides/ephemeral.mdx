@@ -1,0 +1,99 @@
+---
+title: Ephemeral queues
+description: "In-memory queues with no disk and no log in the path, for request/reply, signals, presence and cache invalidation. Contents survive no crash."
+type: how-to
+tier: use
+sourceOfTruth:
+  - server/src/ephemeral.rs
+  - server/src/handlers/ephemeral.rs
+  - server/src/config.rs
+  - clients/client-js/client-v2/ephemeral/Ephemeral.js
+sidebar:
+  order: 6
+---
+
+An ephemeral queue keeps its messages in the memory of one node: a push is a memory write and a
+wake, with no disk, no raft entry and no polling in the path. Use it for traffic whose value ends
+in seconds (request/reply, signals, presence, cache invalidation), where losing what is in flight
+on a crash is acceptable. **Contents survive no crash and no restart.** Only a declared queue's
+configuration is durable.
+
+## Request and reply
+
+The requester names a throw-away inbox, the responder pushes the answer into it. Neither queue is
+declared: the first push or pop that names a queue creates it, and an idle implicit queue is
+collected after `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S` (300).
+
+```js
+import { randomUUID } from 'node:crypto'
+
+// Responder: competing consumers share the group.
+const { messages } = await queen.ephemeral.pop('rpc-requests', { group: 'workers', batch: 10, wait: true })
+for (const m of messages) {
+  await queen.ephemeral.push(m.payload.replyTo, [{ squared: m.payload.n ** 2 }])
+}
+await queen.ephemeral.ack('rpc-requests', messages, { group: 'workers' })
+
+// Requester: push, then park on the inbox until the answer arrives.
+const inbox = `rpc-inbox-${randomUUID()}`
+await queen.ephemeral.push('rpc-requests', [{ n: 7, replyTo: inbox }])
+const reply = await queen.ephemeral.pop(inbox, { wait: true, timeout: 5000, autoAck: true })
+if (reply.messages.length === 0) throw new Error('no reply within 5 s')
+```
+
+The same over HTTP:
+
+```bash
+curl -X POST localhost:6632/api/v1/ephemeral/push -H 'content-type: application/json' \
+  -d '{"queue":"presence","partition":"room-7","messages":[{"payload":{"user":"ada","typing":true}}]}'
+curl 'localhost:6632/api/v1/ephemeral/pop?queue=presence&partition=room-7&group=ui-1&wait=true&timeout=5000'
+```
+
+A message is `{ id, partition, payload, attempts }`. Order holds per partition. The pop's `group`
+is the whole of the consumption model, as on durable queues: one group competes, a group per
+subscriber fans out, no group is queue mode. Without `autoAck`, an unacked message comes back when
+its lease expires, up to `retryLimit` times, and is then dropped and counted. With `autoAck: true`
+it is at-most-once.
+
+## Bounds
+
+```js
+await queen.ephemeral.configure('presence', {
+  maxLength: 1000,        // messages; default 10,000
+  maxBytes: 1024 * 1024,  // default 16 MiB
+  policy: 'dropOldest',   // or 'reject' (default): 429 queue_full
+  ttlSeconds: 30,         // drop what nobody consumed
+  leaseSeconds: 15,       // default 30
+  retryLimit: 3,          // default 5
+})
+```
+
+A node holds at most `QUEEN_EPHEMERAL_MAX_BYTES` (256 MiB) of ephemeral messages and answers 503
+`ephemeral_unavailable` past it. The configuration of a declared queue is written to the log, so
+it comes back after a restart, configured and empty.
+
+## In a cluster
+
+Each `(queue, partition)` lives on exactly one node, chosen by a rendezvous hash over the live
+members. Every node computes the same owner, so any node accepts a push, pop or ack and forwards
+it to the owner. There is no lease row and no replication.
+
+When membership changes (a node joins, leaves, or has not been heard from for
+`QUEEN_EPHEMERAL_MEMBER_TTL_MS`, 4000), the partitions that moved are handed over: the old owner
+ships the messages and every group's position to the new one, and a message that was leased comes
+back as a redelivery. A node stopping on SIGTERM hands over everything before it exits. An ack
+for a message delivered before the move answers `stale`, which is information, not an error.
+
+## Limits
+
+- **A crash loses the crashed node's share.** Hand-over needs the old owner alive. A kill -9, a
+  power loss or a failed hand-over drops those partitions' contents, counted in the node's
+  metrics.
+- **Not replicated, not in the Jepsen pass.** None of the [guarantees](/concepts/guarantees/)
+  apply.
+- **No transactions, no DLQ, no replay, no `subscriptionMode`.** An ephemeral push cannot ride a
+  `/transaction`. Use a durable queue when the message is part of a step.
+- **A pop without a partition sees one node's share.** In a cluster it serves the partitions the
+  answering node owns, or routes on `Default`. Name the partition, or keep one partition per queue
+  (as inboxes do).
+- **Delivery is at-least-once without `autoAck`.** Consumers still need to tolerate repeats.

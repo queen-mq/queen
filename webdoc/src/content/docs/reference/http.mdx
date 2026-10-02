@@ -1,0 +1,125 @@
+---
+title: HTTP API
+description: "Base URL, authentication headers, status-code conventions and every route the broker serves, with links to the OpenAPI documents."
+type: reference
+tier: use
+sidebar:
+  order: 2
+sourceOfTruth:
+  - server/src/handlers/raft.rs
+  - server/src/handlers/data.rs
+  - server/src/auth.rs
+  - server/src/tenant.rs
+  - server/src/config.rs
+  - server/src/rsm/facade/mod.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/proxy_embed.rs
+  - proxy/src/auth.rs
+---
+
+Every Queen node serves the whole API over HTTP with JSON bodies, on port 6632 by default. Any
+node of a cluster answers: a follower forwards the request to the leader. This page lists the
+conventions every route shares and then every route.
+
+## Base URL
+
+```bash
+curl -s http://localhost:6632/health
+```
+
+| Setting | Default | Effect |
+|---|---|---|
+| `PORT` | `6632` | The HTTP port. |
+| `QUEEN_BIND_ADDR` | `0.0.0.0` | The address the listener binds. |
+| `QUEEN_MAX_BODY_BYTES` | `67108864` (64 MiB) | Larger request bodies are refused with 413 before they are parsed. |
+
+- **Any node.** A follower forwards every `/api/` and `/streams/` request to the leader and relays
+  the answer. It answers `/api/v1/raft/*` itself (those describe the node asked). With no leader
+  known it answers 503 `no_leader`; with the leader unreachable, 503 `retry`.
+- **Plain HTTP.** The bare broker has no TLS listener. TLS (`QUEEN_TLS_CERT`, `QUEEN_TLS_KEY`) is
+  served by the proxy built into the same binary (`QUEEN_PROXY_EMBEDDED=true`). See
+  [security](/operate/security/).
+
+## Requests and responses
+
+- Request bodies are JSON. Send `Content-Type: application/json`.
+- Responses are `application/json`, except `GET /metrics/prometheus` (Prometheus text format) and
+  an empty pop, which is `204 No Content` with no body.
+- A message `payload` is any JSON value.
+- Query parameters are camelCase, as in the body: `consumerGroup`, `subscriptionMode`,
+  `leaseSeconds`.
+
+## Authentication
+
+The broker's own authentication is off by default (`JWT_ENABLED=false`): every route is open, so a
+bare broker belongs on a trusted network.
+
+| Credential | Header | Enabled by |
+|---|---|---|
+| JWT | `Authorization: Bearer <jwt>` | `JWT_ENABLED=true`, plus `JWT_SECRET`, `JWT_PUBLIC_KEY` or `JWT_JWKS_URL` |
+| Proxy API key | `Authorization: Bearer qk_...` | the proxy built into the binary (`QUEEN_PROXY_EMBEDDED=true`), which issues the keys |
+| Proxy session | the proxy's session cookie, or `Authorization: Bearer <session token>` | signing in to the proxy (`queenctl login`, the console) |
+
+With JWT on, each route requires an access level, listed in the route table below. A token's
+role comes from the `role` claim (`JWT_ROLES_CLAIM`) or the `roles` array (`JWT_ROLES_ARRAY_CLAIM`):
+
+| Role (default name) | Grants |
+|---|---|
+| `admin` | every level |
+| `read-write` | read-write, read-only and write-only routes |
+| `read-only` | read-only routes |
+| `write-only` | write-only routes (`POST /api/v1/push`, `POST /api/v1/timers`, `POST /api/v1/ephemeral/push`) |
+
+A missing or invalid token answers 401, a valid token with too little access 403. `/health`,
+`/metrics`, `/metrics/prometheus` and `/` skip authentication (`JWT_SKIP_PATHS`).
+
+### Tenancy header
+
+With `QUEEN_TENANCY_HEADER=true` the broker reads the tenant from `x-queen-tenant`, a UUID. A
+malformed value answers 400; an absent one uses the default tenant,
+`00000000-0000-0000-0000-000000000001`. With the setting off (the default) every request uses the
+default tenant.
+
+<Aside type="caution">
+The broker trusts `x-queen-tenant` as given. It is meant to be set by the proxy, which
+authenticates the caller first. Never let clients reach a broker that has
+`QUEEN_TENANCY_HEADER=true` directly. See [tenants](/operate/tenants/).
+</Aside>
+
+## Status codes
+
+Most routes follow plain HTTP. A few carry their verdict in the body, and a client must read it:
+
+| Answer | Meaning |
+|---|---|
+| `201` from `POST /api/v1/push` | The request was handled. Each item has its own `status`: `queued`, `duplicate` (its `transactionId` is already in the partition's dedup window, or repeated in the request) or `error`. |
+| `200` from `POST /api/v1/transaction` with `success: false` | Rolled back: nothing was written. `reason` says why; a lost `required` KV precondition is `kv_precondition`. See [transaction](/reference/transaction/). |
+| `200` from the KV and timers routes | A business verdict, not a failure: `applied: false` (a lost `putIfAbsent`, a version mismatch), `ok: false` (cancel of an absent timer). |
+| `204` from a pop | No message was available before the long-poll ended. |
+| `503` `outcome_unknown` | The leader changed while an ack, nack or DLQ move was being made durable. It may or may not have applied. |
+| `503` `retry`, `no_leader`, `timeout` | The call did not complete. Retry after `Retry-After` (1 s); a write may still have applied, so make it safe to repeat. |
+| `429` `overloaded` | The node's admission budget for writes (pushes, transactions) is full. Retry after `Retry-After`. |
+| `507` `storage_full` | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Writes that grow storage are refused; acks and deletes still work. |
+
+An engine error body is `{"error": "<message>", "code": "<code>"}`, plus `"leader"` on a 503
+`retry` when the leader is known. The KV and timers routes, the transaction route and the
+authentication layer use their own shapes. Every code, and what to do with it:
+[errors](/reference/errors/).
+
+## Routes
+
+<Render file="generated/broker-routes" />
+
+## OpenAPI
+
+Two OpenAPI documents are generated from the same router and published with the site:
+
+- [`/openapi/queen-broker.json`](/openapi/queen-broker.json): the broker, every route above.
+- [`/openapi/queen-proxy.json`](/openapi/queen-proxy.json): the proxy's own routes (console,
+  sign-in, operator, control plane).
+
+Most broker request bodies are not derived from a Rust type yet, so the documents describe paths
+and parameters more completely than bodies. For a body, this site's pages are the contract, above
+all [transaction](/reference/transaction/).
+
+<Render file="generated/openapi-coverage" />

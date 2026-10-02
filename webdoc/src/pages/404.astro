@@ -8,13 +8,13 @@ import Header from "../components/Header.astro";
 // on a dead URL can jump straight to the section they were after. Trailing
 // slashes match the canonical form the pages declare.
 const sections = [
-  { href: "/start/", label: "Start here", blurb: "What Queen is, and the first message" },
-  { href: "/use/", label: "Use Queen", blurb: "Queues, partitions, consumer groups, streams" },
-  { href: "/full-examples/", label: "Full examples", blurb: "Whole programs you can run" },
-  { href: "/reference/", label: "Reference", blurb: "HTTP API, queenctl, configuration" },
-  { href: "/selfhost/", label: "Self-hosting", blurb: "Running the broker and sizing it" },
+  { href: "/start/", label: "Start", blurb: "What Queen is, the quickstart, clients" },
+  { href: "/concepts/", label: "Concepts", blurb: "Partitions, consuming, transactions, KV, timers" },
+  { href: "/guides/", label: "Guides", blurb: "State machines, exactly-once, webhooks, Kafka" },
+  { href: "/operate/", label: "Operate", blurb: "A node, a cluster, Kubernetes, tenants, monitoring" },
+  { href: "/reference/", label: "Reference", blurb: "HTTP API, configuration, metrics, errors, limits" },
   { href: "/internals/", label: "Internals", blurb: "How the broker works underneath" },
-  { href: "/benchmarks/", label: "Benchmarks", blurb: "Measured runs and the rigs behind them" },
+  { href: "/benchmarks/", label: "Benchmarks", blurb: "Measured runs and their conditions" },
 ];
 ---
 

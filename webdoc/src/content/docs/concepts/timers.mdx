@@ -1,0 +1,107 @@
+---
+title: Timers
+description: "A timer is a message promised now and delivered later: an upsert by queue and timerKey that fires a real message into a real queue through the log."
+type: concept
+tier: use
+sidebar:
+  order: 6
+sourceOfTruth:
+  - server/src/rsm/planner/timers.rs
+  - server/src/handlers/timers.rs
+  - server/src/rsm/batcher.rs
+  - server/src/quota.rs
+  - clients/client-js/client-v2/builders/TimerBuilder.js
+verifiedBy:
+  - clients/client-js/test-v2/timers.js
+---
+
+A timer schedules a message for later. When it fires, the broker pushes the message into a real
+queue through the log, like any other push, and your consumers read it like any other message.
+Use it for what a step must do later: a reminder, a timeout, the expiry of a reservation.
+
+## Schedule, reschedule, cancel
+
+```js
+const t = queen.timer('reminders').key('order-9137')
+await t.delay('24h').payload({ orderId: 9137 }).schedule()   // { ok, status: 'scheduled', deliverAt, txn }
+await t.delay('48h').payload({ orderId: 9137 }).schedule()   // same key: status 'rescheduled'
+await t.peek()                                               // { found, deliverAt, ... }
+await t.cancel()                                             // { ok, status: 'cancelled' | 'absent', txn }
+await queen.timer('reminders').list({ limit: 50 })           // { rows, truncated, nextAfter }
+```
+
+```bash
+curl -X POST http://localhost:6632/api/v1/timers -H 'content-type: application/json' -d '{
+  "operations": [{ "op": "schedule", "queue": "reminders", "timerKey": "order-9137",
+    "delayMs": 86400000, "txn": "remind-9137", "payload": "eyJvcmRlcklkIjo5MTM3fQ==" }] }'
+curl -X DELETE http://localhost:6632/api/v1/timers/reminders/order-9137
+```
+
+A timer is identified by its queue and `timerKey`; scheduling an existing key replaces it (an
+upsert). `delayMs` is relative, in milliseconds, and a delay in the past fires on the next cycle;
+there is no absolute time on the wire. `txn` is the `transactionId` the fired message carries
+(the JS SDK mints one). `payload` is base64 (the JS SDK encodes JSON for you). `partition` picks
+the destination partition, `Default` when absent.
+
+## What a fire does
+
+Every 50 ms (`QUEEN_RAFT_TIMER_TICK_MS`) the leader takes the timers that are due. A fire writes
+the message, appended to its queue and partition, and the timer's deletion in the same log entry,
+so it is never half done. The append goes through the push path: the queue and partition are
+created if needed, and the dedup check runs, so a `txn` already in the partition's dedup window
+appends nothing and the timer is done.
+
+**`deliverAt` means not before, never exactly at.** The message is appended on a tick after it,
+then waits for a consumer like any message.
+
+## `absent` may mean already delivered
+
+A fired timer leaves no trace behind it. A later cancel answers HTTP 200 with `ok: false`,
+`status: "absent"` and the `txn` you passed, which is the `transactionId` to look for in the
+queue. A cancel and a fire never race into a half state: the cancel lands before the fire and
+nothing is delivered, or after it and answers `absent`. A handler for a compensating timer must
+therefore check the entity's KV state before it acts.
+
+## Cancel inside a transaction or on its own
+
+`queen.transaction().timer(q).key(k).cancel()` rides the transaction and shares its fate: a
+rolled-back transaction keeps the timer. The standalone `DELETE /api/v1/timers/:queue/:timerKey`
+is never refused by a quota, a rate limit or the operator's kill switch. Cancel inside a
+transaction when the cancel must be atomic with an ack; cancel on its own when it must land no
+matter what.
+
+## Delayed delivery is a queue option
+
+`delayedProcessing: N` on a queue holds every message N seconds after its push
+([queue options](/concepts/partitions/)). Use it when every message waits the same time. Use a
+timer when one message needs its own time, a reschedule or a cancel.
+
+## Time in a state machine
+
+A timer is a transition that time triggers. Schedule it in the transaction that enters a state,
+with the entity id as `timerKey` and the entity's partition as `partition`, so the fired message
+is ordered with the entity's other events. Reschedule or cancel it in the transaction that
+leaves the state. See [one state machine per entity](/guides/state-machines/).
+
+```js
+await queen.transaction()
+  .ack(message, 'completed', { consumerGroup: 'bookings' })
+  .kv.put('bookings', bookingId, { state: 'held' }, { ttl: '7d' })
+  .timer('bookings').key(bookingId).partition(bookingId).delay('15m')
+    .payload({ type: 'hold-expired', bookingId }).schedule()
+  .commit()
+```
+
+## Limits
+
+- **Not before, not at.** A fire comes on the leader's next tick after `deliverAt`, in one raft
+  group's log.
+- **No tombstone.** `absent` cannot tell "cancelled earlier" from "already delivered".
+- **A reschedule after the fire is a new message,** unless it keeps the same `txn` inside the
+  destination partition's dedup window.
+- **The standalone route** (`POST /api/v1/timers`) refuses a delay beyond 90 days
+  (`QUEEN_TIMERS_MAX_HORIZON_S`, 403) and a payload above 1 MiB
+  (`QUEEN_TIMERS_MAX_PAYLOAD_BYTES`), takes at most 256 ops per call, and counts schedules
+  against the tenant's KV write rate.
+- **One op per queue and `timerKey`** in one call.
+- **Timer firing was not part of the Jepsen pass** the [guarantees](/concepts/guarantees/) cite.

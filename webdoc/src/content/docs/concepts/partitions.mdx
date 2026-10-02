@@ -1,0 +1,121 @@
+---
+title: Queues and partitions
+description: "A queue holds one ordered partition per entity, created by the first push that names it. Order holds inside a partition and nowhere else."
+type: concept
+tier: use
+sidebar:
+  order: 2
+sourceOfTruth:
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/consume/pop.rs
+verifiedBy:
+  - clients/client-js/test-v2/docs.js
+---
+
+A queue is a named set of partitions, and a partition is one entity's ordered stream of events.
+You never declare either: the first push that names them creates both, in the same log entry
+that stores the message. Use one partition per entity whose order matters.
+
+## Push
+
+<Render file="snippets/js-push" />
+
+```bash
+curl -X POST http://localhost:6632/api/v1/push -H 'content-type: application/json' -d '{
+  "items": [{ "queue": "orders", "partition": "customer-42",
+              "transactionId": "order-9137-created", "payload": { "orderId": 9137 } }]
+}'
+```
+
+The answer is HTTP 201 with one verdict per item, in input order:
+`{ index, message_id, transaction_id, queueName, status, offset }`. `status` is `queued`
+(stored), `duplicate` (wrote nothing, see [dedup](/concepts/dedup/)) or `error` (refused, wrote
+nothing). **HTTP 201 does not mean stored: read every item's `status`.**
+
+A push without a partition lands in `Default`. One request may name several queues and
+partitions; each item gets its own verdict, so a plain push is not atomic across partitions.
+When pushes must land together, put them in one [transaction](/concepts/transactions/).
+
+## Order and parallelism
+
+- Offsets in a partition start at 0 and have no gaps. Every reader sees the same order.
+- A consumer group holds one leased batch per partition at a time. A slow partition delays only
+  itself: there is no head-of-line blocking across partitions.
+- A hot partition is sequential by design. Twenty workers on one partition do the work of one;
+  twenty partitions with work keep twenty workers busy.
+- A partition is a row in the replicated state plus one cursor per consumer group that reads it,
+  not a file or a process. One queue with 10,000,000 partitions ran at about 910,000 msg/s on
+  three 16-vCPU nodes (60 s run, e2e p99 4.7 s, 2026-09-29, [benchmarks](/benchmarks/)).
+
+A queue created by a push takes its `namespace` and `task` labels from the first two dotted parts
+of its name (`billing.invoices` gives namespace `billing`, task `invoices`). A
+[discovery pop](/concepts/consuming/) reads every queue that matches them.
+
+## Queue options
+
+A pushed queue starts with the defaults below. `POST /api/v1/configure` creates or changes a
+queue and merges by default: an option you leave out keeps its value.
+
+```bash
+curl -X POST http://localhost:6632/api/v1/configure -H 'content-type: application/json' \
+  -d '{"queue":"orders","options":{"leaseTime":30,"retryLimit":5,"dedupWindowSeconds":86400}}'
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `leaseTime` | 60 s (300 s if `/configure` created the queue) | How long a pop's lease lasts unless the pop sends `leaseSeconds`. |
+| `retryLimit` | 3 | `failed` acks a partition and group may spend before the message is dead-lettered. |
+| `deadLetterQueue`, `dlqAfterMaxRetries` | `true` | File a message that ran out of retries in the DLQ. With both off, drop it and move on. |
+| `dedupWindowSeconds` | 3600 | How long a partition remembers `transactionId`s. `0` turns dedup off. |
+| `delayedProcessing` | 0 | Seconds after its push before a message can be delivered. |
+| `windowBuffer` | 0 | A partition delivers nothing until it has been quiet this many seconds, so a burst arrives as one batch. |
+| `retentionEnabled` | `false` | Must be `true` for the two options below to act. |
+| `retentionSeconds` | 0 | Remove messages older than this, consumed or not. |
+| `completedRetentionSeconds` | 0 | Remove messages older than this that every group's cursor has passed. |
+| `maxWaitTimeSeconds` | 0 | Remove messages older than this, consumed or not, with no `retentionEnabled` needed. |
+| `encryptionEnabled` | `false` | Encrypt payloads at rest. Needs `QUEEN_ENCRYPTION_KEY` (64 hex characters) on every node. |
+
+`priority`, `retryDelay`, `ttl`, `maxSize` and `minPopWaitTime` are accepted and stored, and
+have no effect on the 2.0 engine.
+
+<Aside type="caution">
+The JS SDK's `queen.queue(name).config(options).create()` sends your options merged over the
+SDK's own defaults, so every option you leave out is reset to the SDK default (for example
+`leaseTime: 300`). Name every option you care about.
+</Aside>
+
+## Replay from retained history
+
+An ack moves a cursor. It removes nothing. Until retention removes them, the messages stay in the
+partition, and any group can read them again:
+
+```js
+// A new group reads from the oldest retained message.
+await queen.queue('orders').group('audit-2026-10').subscriptionMode('all')
+  .each().consume(async (message) => { /* rebuild a projection */ })
+
+// Or from a point in time.
+await queen.queue('orders').group('audit-since-sept')
+  .subscriptionFrom('2026-09-01T00:00:00Z').each().consume(handler)
+```
+
+An existing group moves with a seek. See [consuming](/concepts/consuming/).
+
+## Limits
+
+- **A partition is sequential for each group.** Parallelism comes from partitions, not workers.
+- **Order holds inside a partition only.** Two partitions have no order between them.
+- **Retention is off by default.** Every message is kept, and disk grows, until you set
+  `retentionEnabled` with a retention option, or `maxWaitTimeSeconds`.
+- **Without `QUEEN_ENCRYPTION_KEY`, an encrypted queue stores plaintext.** The node logs a
+  warning and does not refuse the push.
+- **A partition that retention has emptied is deleted after 30 days** with no write, lease or
+  dead letter.
+- **Names share a budget:** tenant, queue and the longer of partition or group name fit in 447
+  bytes, or the call answers 413.
+- **One request body is at most 64 MiB** (`QUEEN_MAX_BODY_BYTES`), and one planned entry at
+  most 96 MiB (`QUEEN_RAFT_ENTRY_MAX_BYTES`).

@@ -1,0 +1,104 @@
+---
+title: Monitoring
+description: "The dashboard in the binary, what /health reports and when it is 503, the Prometheus metrics to alert on, and the log lines that mean something is wrong."
+type: how-to
+tier: operate
+sidebar:
+  order: 6
+sourceOfTruth:
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/mod.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/obs.rs
+  - server/src/obs/panic_policy.rs
+  - app/src/router/index.js
+---
+
+Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
+`/metrics/prometheus`, all on port 6632. Each describes the node that answered, so scrape and
+probe every node, not a load-balanced address.
+
+## The dashboard
+
+The dashboard is compiled into the binary (its source is `app/`), so there is nothing to deploy.
+Open `http://<node>:6632/`. Its pages: Overview, Queue operations, Queues and each queue, Consumer
+groups, Messages, Dead letter, KV, Timers, Traces, Ephemeral queues, Analytics, Workload, and
+System, which shows the replicated log: each node's role, term, indexes, disk gate and the
+members. With the [proxy](/operate/tenants/) on, the same dashboard is served on the proxy's port
+behind a login, with Members and API keys pages, and System and Users for operators; the copy on
+port 6632 follows the broker's own JWT setting.
+
+## /health
+
+```bash
+curl -s http://queen-2:6632/health
+```
+
+```json
+{"status":"healthy","engine":"raft","version":"2.0.0-beta.3","raft":{"role":"follower","leader":true,"term":7,"applied":918244,"commit":918244,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"apply":{"failure":null,"skipped":[]}}}
+```
+
+**It answers `200 healthy` when the node knows a leader and its `lag` is at most
+`QUEEN_RAFT_READY_LAG_MS` (2000), and `503 settling` otherwise.** `lag` is 0 on the leader and on
+a single node. On a follower it is the age, in ms, of the last entry it applied, once it is more
+than 1000 entries (`QUEEN_RAFT_READY_LAG_ENTRIES`) behind the leader's commit index, read every
+second. So a node that restarted far behind reports `settling` until it caught up, and readiness
+keeps clients off it.
+
+| Field | Meaning |
+|---|---|
+| `role` | `leader`, `follower`, `learner`, `candidate` or `stopped`. With several raft groups, group 0's role, plus `+leader` when this node leads another group |
+| `leader` | Whether the node knows a leader |
+| `term`, `applied`, `commit` | The Raft term and this node's applied and committed indexes |
+| `apply.failure` | The entry that stopped apply on this node, with its class and the exact skip setting. `null` when apply runs |
+| `clusterVersion`, `kinds` | The format version the cluster writes, and the highest this build reads |
+
+With several raft groups the node is ready only when every group is.
+
+## Metrics
+
+`GET /metrics/prometheus` is the Prometheus text format, public on port 6632; every family is in
+[metrics](/reference/metrics/). The signals worth an alert:
+
+| Alert when | Query |
+|---|---|
+| The disk gate is closed (writes answer `507`) | `queen_raft_storage_full == 1` |
+| Apply falls behind | `queen_raft_index{kind="committed"} - queen_raft_index{kind="applied"}` keeps growing |
+| Pushes are refused for admission (`429`) | `rate(queen_raft_admit_total{outcome="refused"}[5m]) > 0` |
+| Commands are slow | `rate(queen_raft_slow_commands_total[5m]) > 0` (over 50 ms, `QUEEN_RAFT_SLOW_COMMAND_MS`) |
+| Dead letters accumulate | `queen_dlq_depth_by_queue` rises (exported by the leader) |
+| Consumers fall behind | `queen_queue_pop_lag_milliseconds{stat="max"}` |
+| Memory grows | `queen_process_resident_memory_bytes` against the container limit |
+
+With `QUEEN_RAFT_GROUPS` above 1 the replicated-log series carry a `group` label.
+
+## Log lines to alert on
+
+Lines are `<RFC 3339 UTC> <LEVEL> <target> <message> key=value ...`, or one JSON object per line
+with `QUEEN_LOG_JSON=true`. `LOG_LEVEL` (or `RUST_LOG`) takes the full filter syntax, e.g.
+`info,rsm=debug`.
+
+| Line | Means |
+|---|---|
+| `FATAL: ...` (target `boot`) | The process exits 1: a bad setting, or a store that will not open. The line names the cause |
+| `APPLY FAILED at entry N` (ERROR) | The node stopped applying. `DETERMINISTIC`: every node stops on it, and the line prints the `QUEEN_RAFT_APPLY_SKIP` value. `NODE-LOCAL`: this node's disk or files |
+| `raft log write failed` | The log write failed (disk full, I/O) and the node stops |
+| `raft storage pressure changed` with `full=true` (WARN) | The disk gate closed |
+| `raft: no quorum acknowledgement: handing leadership to another voter` (WARN) | The leader lost its majority |
+| `refused this node's QUEEN_RAFT_TOKEN` | The nodes do not share one token |
+| `raft: the process exits to load a received snapshot` (ERROR, exit 75) | Normal once after a long absence; trouble when it repeats |
+| target `panic` (ERROR) | A task panicked. `fatal=true`: a core thread, and the process aborts and replays on restart |
+| `QUEEN_ENCRYPTION_KEY must be 64 hex chars; encryption DISABLED` (WARN) | Flagged queues are being stored in plaintext |
+
+## Limits
+
+- **`/health` can stay `200` when nothing commits.** A follower that lost its majority keeps the
+  last leader it knew, and an empty node that never applied an entry reports `lag` 0
+  (`test/recovery/FINDINGS.md`, F8 and F2). Alert on a write probe as well
+  ([recovery](/operate/cluster/#recovery)).
+- **Liveness is not `/health`.** Probe liveness with a TCP connect; a `503` during an election is
+  not a reason to restart a node ([Kubernetes](/operate/kubernetes/#the-probes)).
+- **Per-queue series name every tenant's queues** on port 6632. Scrape it from inside the network.

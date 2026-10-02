@@ -1,0 +1,124 @@
+---
+title: Connect Kafka clients
+description: "Turn on the built-in Kafka wire protocol, point an unmodified Kafka client at it, and know how topics, partitions, groups and offsets map onto Queen."
+type: how-to
+tier: use
+sourceOfTruth:
+  - server/src/kafka_inproc.rs
+  - server/src/config.rs
+  - protocols/queen-kafka/src/boot.rs
+  - protocols/queen-kafka/src/records.rs
+  - protocols/queen-kafka/src/offsets.rs
+  - protocols/queen-kafka/src/txn.rs
+  - protocols/queen-kafka/src/topic_config.rs
+  - protocols/queen-kafka/src/handlers/metadata.rs
+  - protocols/queen-kafka/src/handlers/list_offsets.rs
+sidebar:
+  order: 7
+---
+
+Every node can speak the Kafka wire protocol on a port of its own. A Kafka producer or consumer
+connects by changing `bootstrap.servers`, and its records are Queen messages: Kafka clients and
+Queen clients read and write the same queues. Use it to bring existing Kafka code onto Queen; it
+does not run Kafka Streams or Kafka Connect.
+
+## Turn it on
+
+```bash
+docker run -p 6632:6632 -p 9092:9092 \
+  -e QUEEN_KAFKA_EMBEDDED=true \
+  -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 \
+  ghcr.io/queen-mq/queen:latest
+```
+
+`QUEEN_KAFKA_EMBEDDED=true` runs the facade inside the broker process, on its own threads
+(`QUEEN_KAFKA_THREADS`, default `min(4, cores / 2)`). It binds `QUEEN_KAFKA_ADDR`
+(`0.0.0.0:9092`). **`QUEEN_KAFKA_ADVERTISED_ADDR` has no default and the node does not boot
+without it**: it is the address clients reconnect to after their first Metadata call, so it must
+be one they can reach. `GET /status` reports the facade under `kafka`, with `"mode":
+"in-process"`. TLS (`QUEEN_KAFKA_TLS_CERT`, `QUEEN_KAFKA_TLS_KEY`) and SASL/PLAIN
+(`QUEEN_KAFKA_SASL=plain`, where the password is a Queen token) are off by default.
+
+## Point a client at it
+
+Nothing changes in the client but the bootstrap address:
+
+```bash
+echo 'customer-123:{"total":4200}' | kcat -P -b localhost:9092 -t orders -K:
+kcat -C -b localhost:9092 -t orders -o beginning -e
+```
+
+The topic is the Queen queue `orders`, so a Queen client reads the same record:
+
+```bash
+curl 'localhost:6632/api/v1/pop/queue/orders?batch=10&autoAck=true'
+# "data": {"k":"Y3VzdG9tZXItMTIz","v":"eyJ0b3RhbCI6NDIwMH0=","t":1790812800000}
+```
+
+## How Kafka maps onto Queen
+
+| Kafka | Queen |
+|---|---|
+| topic | queue of the same name, created on first use |
+| partition `n` | the partition named `"n"` |
+| partition count | `max(live partitions, floor)`: the floor is CreateTopics' `numPartitions`, else `QUEEN_KAFKA_DEFAULT_PARTITIONS` (1024) |
+| record | one message; key, value and headers base64 in `{"k","v","h","t"}` |
+| offset | the partition's offset, gap-free |
+| consumer group | Queen consumer group of the same name (default offset store) |
+| committed offset | the group's position on the partition (`QUEEN_KAFKA_OFFSET_STORE=positions`, the default) or KV rows (`kv`) |
+
+A Kafka client hashes keys onto a fixed partition count, so a Kafka-produced topic has numbered
+partitions, not one partition per entity. A Queen partition with a name that is not a number
+(`customer-123`, `Default`) is counted but cannot be addressed by a Kafka client. A Kafka consumer
+reading a queue that Queen clients wrote gets each payload's JSON as the value, with no key.
+
+With the default offset store, a Kafka group is a Queen consumer group: the dashboard shows its
+lag, and a Queen consumer of the same group name resumes where the Kafka consumer committed.
+
+## What works and what does not
+
+Produce (acks 0, 1 and all; gzip, snappy, lz4, zstd; the idempotent producer), Fetch up to v6,
+ListOffsets earliest and latest, classic consumer groups, the topic, config, partition and group
+admin APIs, and transactional producers all work. The full table of APIs and version windows is
+[the Kafka reference](/reference/kafka/). Refused, by design:
+
+- **Log compaction.** `cleanup.policy=compact` is refused with `INVALID_CONFIG`. Kafka Connect's
+  internal topics and Kafka Streams' changelog topics are compacted, so neither starts.
+- **ListOffsets by timestamp.** Queen has no time index; a timestamp lookup answers offset `-1`
+  ("no match"), so `offsetsForTimes` returns null for that partition.
+- **The KIP-848 group protocol and static membership** (`group.protocol=consumer`,
+  `group.instance.id`). Groups use the classic JoinGroup and SyncGroup protocol.
+- **DeleteRecords, delegation tokens, partition reassignment.** There is nothing in Queen behind
+  them; the request closes the connection, as Apache Kafka does for a request it cannot parse.
+
+**Transactions are a stage held by one facade process.** Records are kept in that node's memory
+until `commitTransaction`, which writes them and the offsets as one `POST /api/v1/transaction`;
+abort writes nothing. A transaction is capped at 8 MiB and 50,000 records by default
+(`QUEEN_KAFKA_TXN_MAX_BYTES`, `QUEEN_KAFKA_TXN_MAX_RECORDS`), and a stage is lost if the node
+restarts. A commit that must finish from another process (Flink's exactly-once Kafka sink) fails
+with `INVALID_TXN_STATE`.
+
+## On a cluster
+
+Each node runs its own facade. Without more configuration each one is a separate one-broker Kafka
+cluster that coordinates groups by itself, so the consumers of one group must all connect to the
+same node. To present the nodes as one Kafka cluster, set on every node:
+
+```bash
+QUEEN_KAFKA_NODE_ID=1                                  # 1 to 64, distinct per node
+QUEEN_KAFKA_ADVERTISED_ADDR=queen-1.internal:9092      # this node's own address
+QUEEN_TOKEN=...                                        # required with a node id
+```
+
+Groups are then coordinated by one node per group, and any node serves produce and fetch for any
+partition. Give each node its own address; one load-balancer address for all of them makes a
+client loop on `NOT_COORDINATOR`.
+
+## Limits
+
+- **Clustered facades refuse transactions.** With `QUEEN_KAFKA_NODE_ID` set, `initTransactions()`
+  fails with `TransactionalIdAuthorizationException`.
+- **The idempotent producer's sequence window is in memory, per node.** A restart, an eviction or a
+  connection moving to another node costs at-least-once for at most five in-flight batches.
+- **Preview.** The facade is not in release CI, and its client matrix was last measured before the
+  raft engine. It is not part of the Jepsen pass; see [guarantees](/concepts/guarantees/).

@@ -16,16 +16,18 @@
  * ## Why the copy is duplicated here
  *
  * The right shape is one shared module that `index.astro` and this route both
- * import. That means editing `index.astro`, which is outside this change's
- * scope, so the copy below is a second transcription of the arrays and the
- * prose in `src/pages/index.astro`. That is a drift risk, and it is held closed
- * by `scripts/check-markdown.mjs`: it parses `index.astro` and fails the build
- * when a headline, a differentiator, a proof figure or the limits paragraph in
- * the page is missing from `dist/index.md`. Edit the page and this file
- * together, or the check will tell you which one you forgot.
+ * import. Until that exists, the copy below is a second transcription of the
+ * arrays and the prose in `src/pages/index.astro`. That is a drift risk, and it
+ * is held closed by `scripts/check-markdown.mjs`: it parses `index.astro` and
+ * fails the build when the headline, the hero paragraph, a differentiator, a
+ * proof figure or the limits paragraph in the page is missing from
+ * `dist/index.md`. Edit the page and this file together, or the check will
+ * tell you which one you forgot.
  *
- * The code samples are the exception, and they cannot drift: this file lifts
- * them out of the same generated snippet partials the page imports.
+ * The produce and consume samples cannot drift: this file lifts them out of
+ * the same generated snippet partials the page imports. The anatomy-of-a-step
+ * sample is inline in three places (this file, `index.astro` and
+ * `start/index.mdx`): edit all three together.
  *
  * `index.astro` stays the source of truth. Copy from it, not into it.
  */
@@ -46,8 +48,7 @@ function snippet(raw: string, id: string): string {
 }
 
 /** The page's `<h1>`, verbatim. */
-export const HOME_HEADLINE =
-  "High-performance transactional messaging, with an ordered stream per entity.";
+export const HOME_HEADLINE = "A message queue is the smallest thing Queen MQ does.";
 
 /**
  * One line describing the page, for the index and corpus rows that list it.
@@ -55,114 +56,94 @@ export const HOME_HEADLINE =
  * description, and repeating it there says nothing about this page.
  */
 export const HOME_SUMMARY =
-  "The landing page: what Queen MQ is, the entity-per-partition model it is built on, how " +
-  "partitions, nodes and cells scale differently, and the measured numbers with the " +
-  "conditions they were measured under.";
+  "The landing page: what Queen MQ is, the step that commits as one entry, one partition " +
+  "per entity, what runs it, and the measured numbers with the conditions they were " +
+  "measured under.";
 
 /** The eyebrow above the headline. */
 const HOME_EYEBROW = "Queen MQ · Apache 2.0";
 
-/**
- * The hero paragraph, with the page's `<strong>` spans as markdown emphasis
- * and its JSX line wrapping collapsed.
- */
+/** The hero paragraph, with its JSX line wrapping collapsed. */
 const HOME_LEAD =
-  "You can offload most of your complex application logic to Queen.\n\n" +
-  "Queen is a message broker written in Rust: one binary per node, keeping its state in a " +
-  "replicated log on its own disk. Its defining abstraction is **one logical ordered partition per application " +
-  "entity**, a customer, an account, a conversation, a device, a workflow, a session or a " +
-  "job, created by the first push that names it and never provisioned in advance.";
+  "It's a transactional event broker. Every customer, order or conversation gets its own " +
+  "ordered partition, created by the first message that names it. No partition count to " +
+  "choose. The ack, the state change, the next events and the timer commit as one entry. " +
+  "Nothing happens halfway.";
 
 /** The line of capabilities under the calls to action. */
 const HOME_FEATURES = [
+  "One partition per entity",
+  "One-entry transactions",
   "Consumer groups",
   "Replay and seek",
   "Dead-letter queue",
-  "Exact deduplication",
-  "Transactional ack + state + push",
-  "Key/value state",
-  "Cancellable timers",
-  "Windowed aggregation",
+  "transactionId dedup",
+  "KV",
+  "Timers",
+  "Streams",
   "Ephemeral queues",
-  "Multi-tenancy",
+  "Tenants and quotas",
   "Kafka wire protocol",
   "Raft replication",
 ];
 
-/**
- * The positioning figure's own description. The map is an inlined SVG, so its
- * `<desc>` is the only form of it that reaches a reader who cannot see it,
- * which is exactly the reader this file is for.
- */
-const HOME_MAP =
-  "A map of sustained message rate against ordered entities. Both axes are logarithmic, " +
-  "unnumbered, and carry the same range and the same scale, so a system that reaches the " +
-  "same figure on both draws a square. Kafka holds a low lane ceiling, because entities " +
-  "hash onto a partition set sized in advance, and its region runs off the right of the " +
-  "map. RabbitMQ closes a small corner, one live queue per entity. pgmq reaches higher in " +
-  "entities at modest rate, its reads rescanning the standing backlog. SQS FIFO closes a " +
-  "dashed corner at its published rate quota and its in-flight cap. Queen's region is the " +
-  "largest, and it is a square: a million messages a second sustained for 24 hours, and a " +
-  "million ordered lanes in one queue, from two separate runs of Queen 1.x, whose storage " +
-  "was PostgreSQL.";
+/** The anatomy of a step, verbatim from the page and from start/index.mdx. */
+const HOME_STEP = `await queen.transaction()
+  .ack(message)                                                    // the event is done
+  .kv.put('orders', orderId, { status: 'paid' }, { ttl: '30d' })   // state
+  .queue('receipts').partition(customerId)
+    .push([{ transactionId: \`receipt-\${orderId}\`, data: receipt }]) // the next event, once
+  .timer('reminders').key(orderId).delay('24h')
+    .payload({ orderId }).schedule()                               // what comes later
+  .commit()`;
 
-const HOME_MAP_CAPTION =
-  "Each frontier is where a system stops keeping one ordered lane per entity: measured on " +
-  "matched hardware for Kafka, RabbitMQ and pgmq, taken from the published quotas for SQS, " +
-  "and dashed wherever the edge is one we did not measure.";
+/** The five roles of a step, plus the call that commits them. */
+const roles = [
+  { role: "Events", primitive: "Queues, one partition per entity", href: "/concepts/partitions/" },
+  {
+    role: "Progress",
+    primitive: "Consumer groups, leases, acks, retries, dead letters, replay",
+    href: "/concepts/consuming/",
+  },
+  { role: "State", primitive: "KV", href: "/concepts/kv/" },
+  { role: "Time", primitive: "Timers and delayed delivery", href: "/concepts/timers/" },
+  { role: "Identity", primitive: "transactionId dedup and once", href: "/concepts/dedup/" },
+  { role: "The commit", primitive: "POST /api/v1/transaction", href: "/concepts/transactions/" },
+];
 
+/** "What runs it", transcribed from the page's `differentiators`. */
 const differentiators = [
   {
-    title: "The entity is the partition",
-    body: "Most brokers give you ordering per shard, and your requirement is ordering per entity. Hash entities onto a fixed partition count and the ones that collide block each other. Give each entity its own queue and broker-side objects grow with your customer list. Queen removes the bridge: a partition is created by the first push that names it, and a slow customer delays only itself.",
+    title: "One binary",
+    body: "A node keeps its state in a replicated log on its own disk. No database, no ZooKeeper, no sidecars. The dashboard, Prometheus metrics, API keys, JWT, quotas and payload encryption ship in the same binary.",
+    href: "/operate/",
   },
   {
-    title: "The partition key is your ordering boundary",
-    body: "customer_id, account_id, conversation_id, device_id, workflow_id. You choose it, and it is an application decision rather than an infrastructure sizing decision. Do not pick a key because it has high cardinality: pick the boundary your application genuinely requires.",
+    title: "One node, or a cluster of three or five",
+    body: "Raft replicates every entry, and the cluster keeps serving while a majority of its nodes is up. Any node serves any client: a follower forwards writes to the leader, and a leader that stops gracefully hands leadership over first.",
+    href: "/operate/cluster/",
   },
   {
-    title: "Ack the input, write the state and push the output in one commit",
-    body: "One transaction bundles acknowledgements, pushes, key/value writes and timer operations, across any number of partitions, queues and consumer groups, into one entry of the replicated log. That is what replaces transactional outbox tables, a separate store for idempotency markers, and the reconciliation code that exists only because the broker's commit and the application store's commit were two different commits.",
+    title: "Tenants in raft groups",
+    body: "Each tenant lives in exactly one raft group, so a transaction is one entry with no coordinator and no two-phase commit. You scale out with more raft groups and more clusters, not by spreading one tenant's writes.",
+    href: "/internals/",
   },
   {
-    title: "Application scale is not infrastructure scale",
-    body: "In most brokers a per-entity ordering guarantee means a per-entity infrastructure object, either a topic partition with its own files and replicas or a live server-side queue. In Queen a partition is an entry in the node's ordered store and a range of offsets in its queue's log: not a file, a process or a replica set of its own.",
+    title: "Any client",
+    body: "HTTP with JSON bodies, so curl is a client. Six SDKs: JavaScript, Python, Go, Rust, C++, and PHP with Laravel. A Rust program can also run the broker inside its own process.",
+    href: "/start/clients/",
   },
   {
-    title: "Partitions, nodes and cells scale different things",
-    body: "Partitions scale application cardinality. Nodes buy availability: three voters survive one failure and five survive two, and any node serves any client. Cells scale the deployment: capacity grows by adding cells, not by growing one system, and there is no global cluster to join and no cross-cell coordination in the message path.",
-  },
-  {
-    title: "One binary, no external database",
-    body: "Each node keeps its state in a replicated log on its own disk. One leader orders every write, a write is answered once a majority of the voters have it on disk, and every node applies the same entries to its own full copy. Messaging state and application state share that log, which is the whole reason for the design.",
-  },
-  {
-    title: "Any node serves any client",
-    body: "Messages, offsets, leases, deduplication state, queue configuration and dead letters are the state the log produces, so every node holds all of it. A follower forwards writes to the leader and holds reads until it has applied what was committed when they began, and a leader that stops gracefully hands leadership over first.",
-  },
-  {
-    title: "Key/value state, timers and windows are part of the engine",
-    body: "A key/value write can share the transaction with a push and an ack, which a store standing beside the broker cannot do at any price. A timer is a scheduled message you can cancel and reprogram until it fires. Tumbling, sliding, session and cron windows commit their state, their output and their acks together. None of it is a flag you turn on.",
-  },
-  {
-    title: "Many tenants on one cell, isolation enforced in the broker",
-    body: "The broker scopes queue identity natively as (tenant, name), so two tenants both owning a queue called orders own different queues. The proxy is the tenant-facing boundary that makes the identity driving that scoping trustworthy. Neither half is sufficient alone.",
-  },
-  {
-    title: "Plain HTTP, six SDKs, one binary",
-    body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper, no database to run beside it. Anything that can make an HTTP request is a first-class client, and curl is one.",
-  },
-  {
-    title: "Kafka clients reach it by changing one line",
-    body: "The Kafka facade runs inside the broker process and stays off until you switch it on. It advertises 32 Kafka API keys, transactions included, so an unmodified producer or consumer moves across by changing bootstrap.servers and nothing else. It stores nothing durable of its own: offsets and records are Queen's, and what it deliberately does not do is written down.",
+    title: "Kafka clients, unchanged",
+    body: "A Kafka wire-protocol facade runs inside the same process, off until you set QUEEN_KAFKA_EMBEDDED=true. Existing producers and consumers connect to it on port 9092.",
+    href: "/guides/kafka/",
   },
 ];
 
 /** The dashboard section, and the screenshot's alt text with it. */
 const HOME_DASHBOARD =
-  "Queue health, per-group lag, message inspection and dead-letter replay. Nothing was " +
-  "installed to get this: it is the same binary, on the port you already opened, and it " +
-  "grows logins and roles when it runs behind the proxy.";
+  "Queues, partitions, consumer groups, lag and dead letters. Nothing was installed to get " +
+  "this: it is the same binary, on the port you already opened.";
 
 const HOME_DASHBOARD_IMAGE =
   "The bundled dashboard's overview: stored messages, queues, partitions, consumer groups, " +
@@ -171,46 +152,35 @@ const HOME_DASHBOARD_IMAGE =
 
 const proof = [
   {
-    figure: "86.4B",
-    unit: "messages in 24 hours",
-    body: "About 1,000,000 a second in each direction, pushed, popped and acknowledged, with explicit acks and deduplication on. Zero restarts, and broker memory flat near 4.1 GB for the whole run.",
-    href: "/benchmarks/soak-24h",
+    figure: "1,000,000",
+    unit: "msg/s pushed and consumed",
+    body: "One queue, 500,000 partitions, deduplication on, e2e p99 ~270 ms, in 90 s runs on three nodes with 16 vCPU each, every write replicated.",
+    href: "/benchmarks/",
   },
   {
-    figure: "1M",
-    unit: "ordered partitions",
-    body: "A million FIFO lanes in one queue, none preallocated, created during the run at a thousand a second while serving 200,000 messages a second. Zero push, pop or ack errors over 722 million messages.",
-    href: "/benchmarks/cardinality-1m",
+    figure: "10,000,000",
+    unit: "partitions in one queue",
+    body: "913,000 msg/s in and 905,000 out on the same three nodes, e2e p99 4.7 s, in a 60 s run. No partition count was chosen: each partition was created by a push.",
+    href: "/benchmarks/",
   },
   {
-    figure: "0",
-    unit: "order violations",
-    body: "1,000 partitions through a four-stage pipeline at 25,000 events a second: 88,503,408 messages verified by a per-stage checker, with zero duplicates and zero gaps.",
-    href: "/benchmarks/ordered-pipeline",
-  },
-  {
-    figure: "0",
-    unit: "cross-tenant deliveries",
-    body: "Twelve tenants sharing one queue name and one consumer group name for an hour, with enforcement on. Not one message crossed a tenant boundary. Isolation is the clean result of that run, not throughput.",
-    href: "/benchmarks/multitenant-cell",
+    figure: "Jepsen",
+    unit: "tested",
+    body: "No acked message lost or duplicated, and one order per partition, through kill -9, network partitions, clock jumps and power loss on five nodes. Testing, not proof.",
+    href: "/concepts/guarantees/",
   },
 ];
 
 /**
- * The limits paragraph. It used to be a list on the page and is a paragraph
- * now; `scripts/check-markdown.mjs` reads it out of the page's Limits section
- * rather than out of an array, and looks for it here.
+ * The limits paragraph. `scripts/check-markdown.mjs` reads it out of the
+ * page's Limits section and looks for it here.
  */
 const HOME_LIMITS =
-  "Queen has real limits, and some workloads are better served elsewhere. One ordered " +
-  "lane is sequential, so if your ordering boundary is everything, the core idea does " +
-  "nothing for you. In-group parallelism is bounded by how many distinct entities you " +
-  "push to. Every write goes through one leader and every voter holds a full copy, so one " +
-  "node's disk bounds retention, there is no tiered object storage and no cross-region " +
-  "replication, and the Kafka facade " +
-  "speaks the wire protocol but not the ecosystem around it, so log compaction, Kafka " +
-  "Streams, Connect's exactly-once source and the Schema Registry's compacted topic all " +
-  "stay out.";
+  "Queen has real limits. Delivery is at-least-once: exactly-once holds for effects inside " +
+  "Queen, not for a call your worker makes to another system. A hot partition is " +
+  "sequential by design. A transaction is one call inside one tenant, with no interactive " +
+  "BEGIN and COMMIT. One leader orders every write of a raft group. And there is no " +
+  "routing: no exchanges, bindings or header matching.";
 
 /**
  * The landing page as markdown, from the eyebrow down. The `# ` headline is
@@ -221,70 +191,60 @@ export function homepageBody(): string {
   const lines: string[] = [HOME_EYEBROW, "", HOME_LEAD, ""];
 
   lines.push(HOME_FEATURES.map((f) => `**${f}**`).join(" · "), "");
-
-  // The README's opening argument, transcribed from index.astro. Two
-  // transcriptions, like the rest of this file; edit both together.
-  lines.push("## The problem", "");
   lines.push(
-    "Most brokers give you ordering per *shard*. Your requirement is ordering per *entity*: " +
-      "this customer's events processed in order, this conversation's messages not overtaking " +
-      "each other, this account's transactions settling in sequence.",
-    "",
-    "Bridging the two is where the pain lives. Hash your entities onto a fixed partition " +
-      "count and the ones that collide block each other: a slow customer stalls every customer " +
-      "sharing its shard. Give each entity its own queue instead and broker-side objects grow " +
-      "with your customer list.",
-    "",
-    "Queen removes the bridge: **the entity is the partition.**",
+    `[Run it in five minutes](${url("/start/quickstart/")}) · ` +
+      `[Pick a client](${url("/start/clients/")}) · ` +
+      `[The model, in one page](${url("/concepts/")}) · ` +
+      `[Compared to Kafka, SQS and Temporal](${url("/start/compare/")})`,
     "",
   );
 
-  lines.push("## One entity, one ordered partition", "");
+  lines.push("## One step, one commit", "");
   lines.push(
-    "Each partition is an independent ordered lane, created by the push that first names it. " +
-      "Nothing is preallocated, nothing is assigned, nothing rebalances when a consumer restarts.",
+    "When a service handles an event, it takes the event, changes state, emits the next " +
+      "events, schedules what comes later and makes a retry harmless. In most stacks those " +
+      "live in four systems, and each commits on its own. Queen keeps all five in one " +
+      "replicated log, so one call writes them as one entry.",
     "",
-    "```text",
-    "customer A  ──►  A1 ──► A2 ──► A3     strict FIFO within a lane",
-    "customer B  ──►  B1 ──► B2            B is not held up by A",
-    "customer C  ──►  C1 ──► C2 ──► C3     C is not held up by A or B",
+    "```js",
+    HOME_STEP,
     "```",
     "",
-    "A single hot partition stays sequential, by design. Parallelism comes from many active " +
-      `partitions, not from splitting one. [The model, in one page](${url("/use/model/")})`,
+  );
+  for (const r of roles) lines.push(`- **[${r.role}](${url(r.href)})**: ${r.primitive}`);
+  lines.push(
+    "",
+    "If the lease has expired, if this receipt was already pushed by an earlier try, or if any " +
+      "part is refused, nothing in the call is written. The outbox table, the idempotency table and the cron " +
+      "job that exist only to stitch separate commits together are not needed. Atomicity " +
+      "covers state inside Queen: a call your worker makes to another system is outside any " +
+      `commit. [Transactions](${url("/concepts/transactions/")})`,
     "",
   );
 
-  lines.push("## Transactional processing", "");
+  lines.push("## One partition per entity", "");
   lines.push(
-    "The second reason Queen exists. A single call bundles acknowledgements, pushes, " +
-      "key/value writes and timer operations into one entry of the replicated log, which " +
-      "applies whole or not at all.",
+    "Most brokers order messages per *shard*: a fixed number of partitions, chosen up front, " +
+      "with your entities hashed onto them. Entities that share a shard wait for each other.",
+    "",
+    "In Queen the partition is the entity. You name it on push (`customer-123`), and it " +
+      "exists from that message on. Order holds inside it, and there is no partition count " +
+      "to choose.",
+    "",
+    "**A slow entity delays only itself.**",
     "",
     "```text",
-    "consume input",
-    "     │",
-    "     ├── update application state   (kv rider)",
-    "     ├── produce output             (push, any queue, any partition)",
-    "     ├── schedule / cancel a timer  (timers rider)",
-    "     └── acknowledge input          (cursor advance)",
-    "                │",
-    "             COMMIT          all of it, or none of it",
+    "customer A  ──► A1 ──► A2 ──► A3   in order",
+    "customer B  ──► B1 ──► B2          waits for no one",
+    "customer C  ──► C1 ──► C2 ──► C3   waits for no one",
     "```",
     "",
-    "Atomicity covers broker state, not the network. Queen does not make an external HTTP " +
-      "call exactly-once, and no broker can. The one case that is exactly-once end to end is " +
-      "when the effect is itself state in this broker, written through the key/value " +
-      "rider: marker, effect, output and cursor advance become a single commit. " +
-      `[The bundle shape and every rollback cause](${url("/reference/http/transaction/")})`,
+    "A hot partition stays sequential, by design: parallelism comes from many partitions, " +
+      `not from splitting one. [Partitions](${url("/concepts/partitions/")})`,
     "",
-  );
-
-  lines.push("## Where it sits", "", HOME_MAP, "");
-  lines.push(
-    `${HOME_MAP_CAPTION} The conditions behind every figure are in ` +
-      `[the comparison](${url("/start/compare/")}) and in ` +
-      `[the measured runs](${url("/benchmarks/comparison")}).`,
+    "With the one-entry commit, every entity can run as a small state machine: its partition " +
+      "is the input, its KV entry is the state, each transaction is one transition, and the " +
+      `workers stay stateless. [One state machine per entity](${url("/guides/state-machines/")})`,
     "",
   );
 
@@ -297,78 +257,42 @@ export function homepageBody(): string {
   lines.push("Produce:", "", "```js", snippet(pushRaw, "js-push"), "```", "");
   lines.push("Consume:", "", "```js", snippet(consumeRaw, "js-consume"), "```", "");
   lines.push(
-    `There are [SDKs for JavaScript, Python, Go, Rust, PHP and C++](${url("/use/js-client")}), ` +
+    `There are [SDKs for JavaScript, Python, Go, Rust, C++ and PHP](${url("/start/clients/")}), ` +
       `[an operator CLI](${url("/reference/queenctl/")}), and a ` +
-      `[plain HTTP API](${url("/reference/http")}) for everything else.`,
+      `[plain HTTP API](${url("/reference/http/")}) that curl speaks.`,
     "",
   );
 
-  lines.push("## What makes it different", "");
+  lines.push("## What runs it", "");
   for (const item of differentiators) {
-    lines.push(`### ${item.title}`, "", item.body, "");
+    lines.push(`### ${item.title}`, "", item.body, "", `[More](${url(item.href)})`, "");
   }
-
-  lines.push("## Three kinds of scale", "");
-  lines.push(
-    "Three axes, frequently confused, not interchangeable. Confusing them is the most common " +
-      "way to mis-size a deployment.",
-    "",
-    "- **Partitions scale application cardinality.** Add entities freely. Nothing is " +
-      "provisioned, no process is created, no rebalance runs. Millions of logical entity " +
-      "streams do not require millions of infrastructure objects.",
-    "- **Nodes buy availability inside a cell.** Three or five voters of one binary, each " +
-      "with a full copy on its own disk, covering a process dying, a rolling restart, one " +
-      "node's network. Every write goes through one leader, so more nodes buy availability, " +
-      "not write throughput.",
-    "- **Cells scale the deployment.** A cell is one Queen node or a raft cluster of them, " +
-      "with the proxy optionally running in the same process. Capacity grows by adding " +
-      "cells, not by growing one system: no global cluster to join, no cross-cell " +
-      "coordination in the message path.",
-    "",
-    "```text",
-    "                         Queen Cell",
-    "     ┌──────────────────────────────────────────────┐",
-    "     │  Queen node (leader)    ──► local disk       │",
-    "     │  Queen node (follower)  ──► local disk       │  one replicated log,",
-    "     │  Queen node (follower)  ──► local disk       │  a full copy on each",
-    "     │  proxy, Kafka facade: in the same process    │  optional",
-    "     └──────────────────────────────────────────────┘",
-    "```",
-    "",
-    "A cell is at once the scaling boundary, the failure boundary and the unit of upgrade and " +
-      "operational ownership. The failure domain is the majority: a cluster keeps serving " +
-      "while most of its voters are up, and stops taking writes when they are not. " +
-      `[Voters, quorum, failover and replacing a node](${url("/deploy/ha/")})`,
-    "",
-  );
 
   lines.push("## The dashboard is already in there", "", HOME_DASHBOARD, "");
   lines.push(HOME_DASHBOARD_IMAGE, "");
+  lines.push(`[Monitoring](${url("/operate/monitoring/")})`, "");
 
   lines.push("## Measured, with the conditions attached", "");
   lines.push(
-    "Every number on this site names the run that produced it. A figure without an " +
-      "archived artifact recording its configuration does not get published here. The runs " +
-      "below measured Queen 1.x, whose storage was PostgreSQL; 2.0 replaced that storage with " +
-      "the replicated log, so they describe the 1.x engine. They are single-shape runs: they " +
-      "say nothing about your throughput, latency, sizing or retention capacity, which follow " +
-      "from your workload, payloads and hardware.",
+    "Queen MQ 2.0 on three nodes, 16 vCPU each, every write replicated. These runs measure " +
+      "push, pop and ack, not transactions. Every figure names its run, and 1.x results, " +
+      "measured when Queen's storage was PostgreSQL, are not repeated here.",
     "",
   );
   for (const item of proof) {
-    lines.push(`### ${item.figure} ${item.unit}`, "", item.body, "", `[The run](${url(item.href)})`, "");
+    lines.push(`### ${item.figure} ${item.unit}`, "", item.body, "", `[Conditions](${url(item.href)})`, "");
   }
 
   lines.push("## The limits worth knowing first", "");
   lines.push(HOME_LIMITS, "");
-  lines.push(`[Read the full list before you design around it](${url("/reference/limits")})`, "");
+  lines.push(`[Read the full list before you design around it](${url("/reference/limits/")})`, "");
 
   lines.push("## Start", "");
   lines.push(
-    `- [Use it](${url("/start/quickstart")}): the model in one page, the SDKs, and worked examples.`,
-    `- [Pick your SDK](${url("/use/js-client")}): JavaScript, Python, Go, Rust, PHP and C++, plus queenctl and plain HTTP.`,
-    `- [Host it](${url("/deploy")}): deployment, high availability, security, operations.`,
-    `- [Understand it](${url("/internals")}): the replicated log, offsets, the push and pop paths, the storage underneath.`,
+    `- [Quickstart](${url("/start/quickstart/")}): run a node and commit your first step in five minutes.`,
+    `- [Pick a client](${url("/start/clients/")}): six SDKs, curl, queenctl and the embedded Rust broker.`,
+    `- [The model](${url("/concepts/")}): partitions, progress, state, time and identity, and the commit that joins them.`,
+    `- [Run it](${url("/operate/")}): a node, a cluster of three or five, Kubernetes, tenants and monitoring.`,
     "- [Source on GitHub](https://github.com/queen-mq/queen)",
     "",
   );

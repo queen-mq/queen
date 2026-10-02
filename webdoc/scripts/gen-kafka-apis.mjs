@@ -289,10 +289,26 @@ function main() {
     description:
       "Every Kafka API the queen-kafka facade advertises, its version window, and the APIs it deliberately does not offer.",
     sources: [`${VERSIONS} (ADVERTISED)`],
-    body: lines.join("\n"),
+    body: lines.map(noEmDash).join("\n"),
     check,
   });
   return res;
+}
+
+/**
+ * The "why" texts mirror Rust doc comments, which use em dashes; the site's
+ * house style bans them in anything a reader sees (scripts/check-prose.mjs).
+ * Per table cell: a pair becomes a parenthesis, a single one a colon.
+ */
+function noEmDash(line) {
+  return line
+    .split(" | ")
+    .map((cell) => {
+      const n = (cell.match(/ — /g) || []).length;
+      if (n === 2) return cell.replace(/ — (.*?) — /, " ($1) ");
+      return cell.replace(/ — /g, ": ");
+    })
+    .join(" | ");
 }
 
 const result = main();

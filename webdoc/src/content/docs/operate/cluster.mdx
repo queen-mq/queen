@@ -1,0 +1,194 @@
+---
+title: Three or five nodes
+description: "A Raft cluster of three or five nodes: the settings that wire it, what it survives, rolling upgrades, membership changes, raft groups and recovery."
+type: how-to
+tier: operate
+sidebar:
+  order: 2
+sourceOfTruth:
+  - server/src/rsm/replicator/node.rs
+  - server/src/rsm/replicator/raft/cluster.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/admin.rs
+  - server/src/rsm/replicator/raft/repair.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/effect.rs
+  - server/src/main.rs
+  - test/compose/docker-compose.ha.yml
+  - test/recovery/README.md
+  - test/recovery/FINDINGS.md
+---
+
+A cluster is three or five nodes running the same binary, each with its own data directory. One
+leader orders every write into one log, Raft (the `openraft` crate) replicates it, and a write is
+answered once a majority of the voters have it on disk. Any node serves clients, and the cluster
+keeps serving while a majority is up.
+
+## Wire it
+
+Every node gets the single-node settings ([run a node](/operate/)) plus four:
+
+```bash
+QUEEN_RAFT_REPLICATOR=openraft
+QUEEN_RAFT_NODE_ID=1            # 2 and 3 on the others
+QUEEN_RAFT_PEERS=1=queen-1:7400/queen-1:6632,2=queen-2:7400/queen-2:6632,3=queen-3:7400/queen-3:6632
+QUEEN_RAFT_TOKEN=...            # openssl rand -hex 32, the same on every node
+```
+
+| Variable | Default | What it does |
+|---|---|---|
+| `QUEEN_RAFT_REPLICATOR` | `local` | `openraft` (or `raft`) talks to peers. A peer list without it fails the boot |
+| `QUEEN_RAFT_NODE_ID` | `1` | A number from 1, distinct per node. `ordinal` reads the trailing number of `HOSTNAME` plus one (pod `queen-0` is node 1) |
+| `QUEEN_RAFT_PEERS` | unset | Every voter as `id=raft_addr/http_addr`, the same list on every node. Raft RPCs and the commands a follower sends the leader go to `raft_addr`; `http_addr` is the node's client port |
+| `QUEEN_RAFT_LISTEN` | `0.0.0.0:<own raft port>` | Where this node's Raft RPC server binds |
+| `QUEEN_RAFT_TOKEN` | unset | The secret every Raft RPC carries (`x-queen-raft-token`). Unset, anything that reaches the raft port can vote and append |
+| `QUEEN_RAFT_DIR` | `/var/lib/queen/raft` | This node's data directory. Never shared between nodes |
+
+Start all three on empty directories. Each initializes the cluster from the same list, they elect
+a leader, and one `/health` reports `"role":"leader"`, the others `"follower"`. A runnable
+three-node file is `test/compose/docker-compose.ha.yml`. Point clients at every node, with no
+affinity:
+
+```js
+const queen = new Queen({ urls: ['http://queen-1:6632', 'http://queen-2:6632', 'http://queen-3:6632'] })
+```
+
+A follower serves its own clients: it prepares the command, sends it to the leader, and answers
+once the entry commits (a pop, once this node has applied it). **A read on a follower waits until that node has applied everything the
+cluster had committed when the read began**, so no client reads behind a write it was already
+answered for.
+
+## What it survives
+
+| Event | Result |
+|---|---|
+| One voter of three (two of five) crashes or restarts | The rest elect a leader and keep serving. Heartbeat 100 ms, election timeout 1–2 s (`QUEEN_RAFT_HEARTBEAT_MS`, `QUEEN_RAFT_ELECTION_MS`) |
+| The leader gets SIGTERM | It hands leadership to the most caught-up voter first: one transfer, no election |
+| A leader that hears no quorum for 3 s | It hands leadership to another voter |
+| A majority is down | Nothing commits. Requests wait out their deadline and fail with `503` (`no_leader` or `timeout`) and `Retry-After: 1` until a majority is back |
+| A node was away more than 10 min (`QUEEN_RAFT_PURGE_HOLD_S`, 600) | It receives a snapshot, exits with code 75, and catches up on its next start |
+| A majority of disks is lost for good | Only `QUEEN_RAFT_FORCE_RECOVER` brings the cluster back, and it can lose acked writes ([recovery](#recovery)) |
+
+In the 2026-10-01 rehearsals (three nodes in Docker under load, `test/recovery/README.md`), kill -9
+of the leader or a follower and SIGTERM of the leader gave a new leader within 4 s and lost 0 of
+3,300 acked writes. The guarantees and the fault matrix behind them are
+[Jepsen-tested](/concepts/guarantees/).
+
+A command in flight when the leader changes can come back `503 outcome_unknown`: it may have
+applied. Send it again: a repeated plain ack is answered as the first one was, and a push repeated
+with the same `transactionId` is deduplicated ([dedup](/concepts/dedup/)).
+
+## Stop, restart and upgrade
+
+On SIGTERM a node hands its ephemeral partitions to their next owners, lets the acks it already
+answered commit (at most 500 ms), transfers leadership if it leads (waiting up to 3 s), and only
+then drains its listener as a follower.
+
+A rolling upgrade is one node at a time: stop it, start the new release on the same directory,
+**wait until its `/health` answers 200 before the next node.** A node more than 1000 entries
+behind the leader (`QUEEN_RAFT_READY_LAG_ENTRIES`) reports `settling` until its apply lag is under
+2 s (`QUEEN_RAFT_READY_LAG_MS`).
+
+Format changes roll with the cluster version gate. The leader raises the cluster version only once
+every member reports it reads the new one, so old nodes never see an entry they cannot decode. A
+node whose build reads less than the cluster's version refuses to boot, and the leader refuses to
+add it as a learner. `/health` shows both numbers as `clusterVersion` and `kinds`. The gate exists
+from 2.0.0-beta.2 on; the upgrade to 2.0.0-beta.1 was stop-all (every node stopped, then started).
+
+## Change the membership
+
+`QUEEN_RAFT_PEERS` is read once, at the first boot. From then on the membership is an entry in the
+log and changes only through these routes (access level admin; through the proxy they are blocked,
+so call them on `PORT`):
+
+| Route | Body |
+|---|---|
+| `GET /api/v1/system/raft/membership` | The leader, the term, voters, learners, and each member's `lag` and `live` |
+| `POST /api/v1/system/raft/membership/learners` | `{"id": 4, "raft": "queen-4:7400", "http": "queen-4:6632"}` |
+| `POST /api/v1/system/raft/membership/promote` | `{"ids": [4]}` |
+| `PUT /api/v1/system/raft/membership/voters` | `{"voters": [1, 2, 4]}` |
+| `DELETE /api/v1/system/raft/membership/members/:id` | none |
+
+The leader checks every change before writing it: one change at a time, a live majority before and
+after (`409 no_quorum` otherwise), never the last voter, and a learner is promoted only within 1000
+entries of the leader (`QUEEN_RAFT_PROMOTE_MAX_LAG`; `409 learner_behind`, or `"force": true`).
+Every change is idempotent, so a lost answer is safe to repeat.
+
+To replace node 3 whose disk is gone:
+
+```bash
+curl -X DELETE http://queen-1:6632/api/v1/system/raft/membership/members/3
+# wipe node 3's directory, then start it with QUEEN_RAFT_JOIN=true: it serves 503 until added
+curl -X POST http://queen-1:6632/api/v1/system/raft/membership/learners \
+  -H 'content-type: application/json' -d '{"id":3,"raft":"queen-3:7400","http":"queen-3:6632"}'
+curl -X POST http://queen-1:6632/api/v1/system/raft/membership/promote \
+  -H 'content-type: application/json' -d '{"ids":[3]}'
+```
+
+**Remove a member before you wipe its disk.** A voter that comes back empty under its old id is
+never repaired: it looks healthy and its clients hang.
+
+## Raft groups
+
+`QUEEN_RAFT_GROUPS=3` (default 1, at most 64, the same on every node) runs that many raft groups
+per node, each with its own log, leader and data directory (`groups/g<N>/`). A tenant lives in
+exactly one group, picked by a stable hash of its id or pinned with
+`QUEEN_TENANT_GROUPS=<tenant>=<group>,...`, so a transaction stays one entry in one log. Group N
+listens on the raft port plus N and prefers the member at position N mod n as its leader: with as
+many groups as nodes, every node leads one. It needs `QUEEN_RAFT_CLIENT_OFFLOAD` on (the default).
+
+<Aside type="caution">
+Raft groups were not part of the Jepsen pass, which ran one group. A tenant's group cannot change
+while it has data: there is no migration, so pin a large tenant before it writes.
+</Aside>
+
+## Clocks
+
+Leases are timed on the leader's clock. `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (default 500) is how long a
+lease another node timed is held past its expiry, and how long a new leader waits before it serves
+consumption. **Lease exclusivity across a leader change holds only while the nodes' clocks agree
+within that bound**: run NTP or chrony on every node.
+
+## Recovery
+
+Start with a write probe, not `/health`: a node that lost its quorum can keep answering `200`.
+
+```bash
+curl -m 10 -X PUT http://queen-1:6632/api/v1/kv/ops/probe \
+  -H 'content-type: application/json' -d '{"value":"probe","ttlSeconds":60}'
+```
+
+An answer within a second means the cluster commits; nothing after 10 s means it does not.
+
+| What you see | Do |
+|---|---|
+| A node restarted and is ready again | Nothing |
+| A node exited with code 75 after a long absence | Nothing: it loaded a snapshot |
+| One node refuses to boot (`FATAL` naming a damaged file), or stays far behind | Replace it, as above |
+| One node's disk is full: `507` on its writes, then `stopped` | Grow its volume, restart it, grow the others to the same size |
+| A majority is down, disks intact | Bring them back. Do not wipe, do not force-recover |
+| A majority of disks is gone for good | On exactly one survivor: `QUEEN_RAFT_FORCE_RECOVER=<its id>`, restart, remove the variable, rebuild the others one at a time |
+| Every node `stopped` with `APPLY FAILED ... DETERMINISTIC` | Set the `QUEEN_RAFT_APPLY_SKIP=<index>:<digest>` the log line prints on every node, restart them all |
+
+The rules that keep it from getting worse: one node at a time; never restore an old copy onto one
+node while the others run; never force-recover two nodes (that makes two clusters); never change
+`QUEEN_ENCRYPTION_KEY`. Replication is not a backup: take crash-consistent volume snapshots of one
+node on a schedule. Each procedure has a rehearsal script in `test/recovery/`, and the known
+gaps are in `test/recovery/FINDINGS.md`.
+
+## Limits
+
+- **Three or five voters.** Four tolerate one failure, like three.
+- **Losing a majority stops writes**, and losing a majority of disks for good can lose acked data.
+- **`/health` can stay `200` on a node that lost its quorum**, and on an empty node that never
+  caught up (findings F8 and F2). Alert on the write probe.
+- **The raft port is plain HTTP** with a shared token: keep it on a private network
+  ([security](/operate/security/)).
+- **Peer addresses are fixed at the first boot.** Renaming hosts, ports or namespaces on a live
+  cluster means a force-recover under the new names.
+- **Ephemeral queues are not replicated**: each partition lives on one node
+  ([ephemeral](/guides/ephemeral/)).
+- **One leader orders every write of a group.** More groups and more clusters scale out; more
+  nodes in one group do not.

@@ -1,0 +1,202 @@
+---
+title: Kubernetes
+description: "A StatefulSet of three voters, a headless Service for raft, a client Service and a disruption budget: the manifest, the probes, upgrades and what is fixed at the first boot."
+type: how-to
+tier: operate
+sidebar:
+  order: 3
+sourceOfTruth:
+  - Dockerfile
+  - server/src/main.rs
+  - server/src/rsm/replicator/raft/cluster.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/handlers/raft.rs
+  - server/src/proxy_embed.rs
+---
+
+On Kubernetes a cluster is a StatefulSet of three (or five) pods, each with its own volume, behind
+a headless Service the pods find each other through. A client Service carries the HTTP port, and a
+disruption budget keeps voluntary evictions to one pod at a time. The repository ships no Helm
+chart: the manifest below is the complete deployment, for namespace `queen`, to adapt or template
+in your own chart. The fields that are not obvious are explained after it.
+
+```bash
+kubectl -n queen create secret generic queen \
+  --from-literal=QUEEN_RAFT_TOKEN="$(openssl rand -hex 32)" \
+  --from-literal=QUEEN_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+```
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata: { name: queen }
+spec:
+  selector: { app: queen }
+  ports: [{ name: http, port: 6632, targetPort: http }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: queen-headless }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: queen }
+  ports:
+    - { name: http, port: 6632, targetPort: http }
+    - { name: raft, port: 7400, targetPort: raft }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: queen }
+spec:
+  maxUnavailable: 1
+  selector: { matchLabels: { app: queen } }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: queen }
+spec:
+  replicas: 3
+  serviceName: queen-headless
+  podManagementPolicy: Parallel
+  minReadySeconds: 30
+  selector: { matchLabels: { app: queen } }
+  template:
+    metadata: { labels: { app: queen } }
+    spec:
+      terminationGracePeriodSeconds: 90
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532 }
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector: { matchLabels: { app: queen } }
+      containers:
+        - name: queen
+          image: ghcr.io/queen-mq/queen:<version>
+          ports:
+            - { name: http, containerPort: 6632 }
+            - { name: raft, containerPort: 7400 }
+          env:
+            - { name: QUEEN_RAFT_REPLICATOR, value: openraft }
+            - { name: QUEEN_RAFT_DIR, value: /var/lib/queen/raft }
+            - { name: QUEEN_RAFT_NODE_ID, value: ordinal }
+            - name: QUEEN_RAFT_PEERS
+              value: "1=queen-0.queen-headless.queen.svc.cluster.local:7400/queen-0.queen-headless.queen.svc.cluster.local:6632,2=queen-1.queen-headless.queen.svc.cluster.local:7400/queen-1.queen-headless.queen.svc.cluster.local:6632,3=queen-2.queen-headless.queen.svc.cluster.local:7400/queen-2.queen-headless.queen.svc.cluster.local:6632"
+            - name: QUEEN_RAFT_TOKEN
+              valueFrom: { secretKeyRef: { name: queen, key: QUEEN_RAFT_TOKEN } }
+            - name: QUEEN_ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: queen, key: QUEEN_ENCRYPTION_KEY } }
+            - name: QUEEN_SERVER_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: QUEEN_LOG_JSON, value: "true" }
+          resources:
+            requests: { cpu: "1", memory: 4Gi }
+            limits: { memory: 4Gi }
+          startupProbe:   { tcpSocket: { port: http }, periodSeconds: 5, failureThreshold: 360 }
+          readinessProbe: { httpGet: { path: /health, port: http }, periodSeconds: 5, failureThreshold: 3 }
+          livenessProbe:  { tcpSocket: { port: http }, periodSeconds: 20, failureThreshold: 3 }
+          lifecycle: { preStop: { exec: { command: ["/bin/sleep", "5"] } } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/queen/raft }
+            - { name: tmp, mountPath: /tmp }
+      volumes: [{ name: tmp, emptyDir: {} }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 50Gi } }
+```
+
+```bash
+kubectl -n queen rollout status statefulset/queen
+kubectl -n queen exec queen-0 -- curl -s localhost:6632/api/v1/system/raft/membership
+```
+
+The membership answer names the leader and the term and lists three voters, each with `live` and
+`lag`.
+
+## The probes
+
+- **Startup and liveness are a TCP connect on 6632.** The node binds its port only after the store
+  and the replicator have opened, so an open port means the boot finished. 360 × 5 s gives a long
+  log replay 30 minutes.
+- **Readiness is `/health`.** It answers `503 settling` while the node knows no leader, or while it
+  is more than 1000 entries behind the leader with an apply lag over 2 s. The Service then stops
+  sending it clients, and `minReadySeconds` gives a rollout catch-up time before the next pod.
+- **Never point liveness at `/health`.** An election or a lost majority would restart every pod at
+  once, which is the one thing that cannot help.
+
+## The fields that are not obvious
+
+- `podManagementPolicy: Parallel` and `publishNotReadyAddresses: true` go together. Without both a
+  full restart deadlocks: no pod is ready without a leader, and no leader is elected until the
+  peers' names resolve.
+- `QUEEN_RAFT_NODE_ID=ordinal` makes pod `queen-0` node 1. The peer list is
+  `id=<pod>.<headless service>.<namespace>.svc.cluster.local:<port>` for every pod, the same string
+  on all of them.
+- No CPU limit. The heartbeat and the commit path are latency-sensitive, and CFS throttling turns
+  a burst into a missed heartbeat. Memory request equals limit.
+- Hard anti-affinity puts each voter on its own machine: two voters on one machine turn one
+  machine's failure into a lost majority. Spread over zones where you have them.
+- `terminationGracePeriodSeconds` must cover the longest long-poll pop (30 s by default) plus the
+  leadership hand-off. A leader that gets SIGTERM hands leadership to a caught-up voter before it
+  drains.
+- A pod that exits with code 75 loaded a snapshot after a long absence; the kubelet restarts it in
+  place and the volume stays.
+- The disk gate answers `507` above 85% of the volume. Size the claim for retention, and give every
+  pod the same size: a smaller volume fills from replication anyway.
+
+## Upgrade
+
+Change the image tag and apply. The RollingUpdate replaces one pod at a time and waits for it to
+be Ready plus `minReadySeconds` before the next: the order the cluster needs
+([rolling upgrades](/operate/cluster/#stop-restart-and-upgrade)).
+
+```bash
+kubectl -n queen set image statefulset/queen queen=ghcr.io/queen-mq/queen:<new-version>
+kubectl -n queen rollout status statefulset/queen
+```
+
+For a repair that changes an environment variable on some pods only (`QUEEN_RAFT_FORCE_RECOVER`,
+`QUEEN_RAFT_APPLY_SKIP`), switch `updateStrategy` to `OnDelete` first and delete exactly the pods
+that must take the change: a RollingUpdate waits forever for pods that cannot become Ready.
+
+## Fixed at the first boot
+
+The peer addresses are stored in the raft log. Scaling the StatefulSet does not add a voter, and
+these cannot change on a live cluster without a [recovery](/operate/cluster/#recovery):
+
+- `replicas` (add or remove voters with the membership API, one at a time);
+- the StatefulSet, the headless Service and the namespace names, which are inside the peer names;
+- the raft port and the HTTP port.
+
+A bigger volume is a PVC expansion per pod, then a pod restart. The `volumeClaimTemplates` of a
+StatefulSet cannot be edited in place: delete the StatefulSet with `--cascade=orphan` and apply it
+again with the new size, so new pods get it too.
+
+## The proxy and Kafka
+
+- **Tenants and API keys:** add `QUEEN_PROXY_EMBEDDED=true`, `QUEEN_PROXY_PORT=6711`, a
+  `QUEEN_PROXY_JWT_SECRET` shared by every pod, and `QUEEN_PROXY_SPOOL_DIR=/var/lib/queen/raft/proxy-spool`
+  (the default is on the read-only root). Expose 6711 through its own Service and your Ingress;
+  **6632 never goes behind an Ingress**, it has no authentication. See
+  [tenants](/operate/tenants/).
+- **Kafka clients:** `QUEEN_KAFKA_EMBEDDED=true` and, per pod,
+  `QUEEN_KAFKA_ADVERTISED_ADDR=$(QUEEN_SERVER_ID).queen-headless.queen.svc.cluster.local:9092`.
+  Across several pods, run the facade in cluster mode: an integer `QUEEN_KAFKA_NODE_ID` from 1 to
+  64 per pod (it does not take `ordinal`, so derive it from the pod name in a wrapper) and a
+  `QUEEN_TOKEN`. See [Kafka](/guides/kafka/).
+
+## Limits
+
+- **Ready is not proof of a quorum.** A pod that lost its quorum, and an empty pod that never
+  caught up, can keep answering `/health` with `200`; alert on a write probe
+  ([recovery](/operate/cluster/#recovery)).
+- **Delete one PVC at a time, and remove the member first.** Deleting two voters' volumes at once
+  left a rehearsal cluster that could not commit while every pod was Ready
+  (`test/recovery/FINDINGS.md`, F11).
+- **Port 7400 belongs to the pods only.** Keep it off the client Service and close it with a
+  NetworkPolicy ([security](/operate/security/)).

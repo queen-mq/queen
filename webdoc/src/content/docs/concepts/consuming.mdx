@@ -1,0 +1,124 @@
+---
+title: Consuming
+description: "Consumer groups read partitions through leases: one cursor and one leased batch per partition and group, acks that move the cursor, retries and a DLQ."
+type: concept
+tier: use
+sidebar:
+  order: 3
+sourceOfTruth:
+  - server/src/rsm/consume/pop.rs
+  - server/src/rsm/consume/ack.rs
+  - server/src/handlers/data.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/autopilot.rs
+  - server/src/config.rs
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+verifiedBy:
+  - clients/client-js/test-v2/docs.js
+---
+
+A consumer group reads a queue at its own pace: it holds one cursor per partition. A pop leases a
+batch from a partition, and an ack moves the cursor past it. Use `consume` for a worker loop and
+`pop` when you drive the loop yourself.
+
+## Consume and pop
+
+<Render file="snippets/js-consume" />
+
+`consume` long-polls, calls your handler, acks when it returns and nacks (`failed`) when it
+throws. Call `.autoAck(false)` when the handler acks inside a
+[transaction](/concepts/transactions/). `pop` returns leased messages and leaves the ack to you:
+
+<Render file="snippets/js-pop" />
+
+```bash
+curl 'http://localhost:6632/api/v1/pop/queue/orders?consumerGroup=billing&batch=10&wait=true&timeout=30000'
+```
+
+A pop answers 200 with `leaseId` and `messages`, each carrying `transactionId`, `partitionId`,
+`offset`, `deliveryAttempt` and `data`. An empty pop answers 204 with no body.
+
+## Groups, cursors and leases
+
+- A group has one cursor per partition: the last offset it acked. Two groups read the same
+  messages without touching each other. A pop with no group uses the shared group
+  `__QUEUE_MODE__`, and its workers compete for messages.
+- **A pop leases one batch per partition and group, and no other worker of that group gets the
+  partition until the lease ends.** That is what keeps order inside a partition.
+- The lease lasts `leaseSeconds` from the pop, else the queue's `leaseTime`, else 60 s. Renew
+  it with `POST /api/v1/lease/:leaseId/extend` and `{"seconds": 60}` (JS: `queen.renew(message)`,
+  or `.renewLease(true, 10000)` on `consume`). A lease that already expired cannot be renewed.
+- When a lease expires, the partition is claimable again and the batch is redelivered from the
+  cursor, with `deliveryAttempt` one higher.
+
+## Ack, nack and the retry budget
+
+```bash
+curl -X POST http://localhost:6632/api/v1/ack -H 'content-type: application/json' -d '{
+  "transactionId": "order-9137-created", "partitionId": "1042", "consumerGroup": "billing",
+  "leaseId": "019a3c1e-...", "status": "completed" }'
+```
+
+| Status | Effect |
+|---|---|
+| `completed` | Moves the cursor to this message. Every earlier message of the batch is done too. |
+| `failed` | Releases the lease, redelivers from this message and spends one retry. With `retryLimit` spent, files the message in the DLQ (or drops it if the DLQ is off). |
+| `retry` | Releases the lease and redelivers, without spending a retry. |
+| `dlq` | Files the message in the DLQ now and moves on. |
+
+In one ack, the cursor never passes the lowest `failed` or `retry`: a `completed` above it is
+redelivered too. The retry budget is one counter per partition and group; only an explicit
+`failed` spends it, never an expired lease. `POST /api/v1/ack/batch` takes
+`{"acknowledgments": [...], "consumerGroup": "billing"}`. An ack answers 200 even when an item is
+refused, so read each item's `success`.
+
+Dead letters keep their payload and error, and stay until you replay or delete them:
+`GET /api/v1/dlq?queue=orders`, `POST /api/v1/dlq/:id/replay`.
+
+## Where a new group starts
+
+A group's start is decided on its first pop and stored; sending another mode later changes
+nothing.
+
+- `subscriptionMode=new` (the default, `DEFAULT_SUBSCRIPTION_MODE`): only messages pushed after
+  the group first popped.
+- `subscriptionMode=all`: everything retained, from the oldest message.
+- `subscriptionFrom=<ISO time>`: messages pushed from that time on.
+
+A pop with no group ignores these and always starts from the oldest retained message.
+
+To move a group that already read, seek it. A seek releases any live lease:
+
+<Render file="snippets/js-seek" />
+
+## Pop options
+
+- **Long poll.** `wait=true&timeout=30000` parks the pop until a message arrives or the timeout
+  passes (default `DEFAULT_TIMEOUT`, 30 s; one request is capped at 60 s).
+- **Several partitions per pop.** `partitions=N` (1 to 64) claims up to N partitions in one pop.
+  `batch` is the budget of the whole pop, and every claimed partition shares one `leaseId`.
+- **Pop autopilot.** `autopilot=true` on a queue pop lets the broker choose `batch` (100 to
+  1,000, from how fast the group acks) and `partitions` (the ready partitions shared among waiting
+  pops). A value you send is never changed. The JS SDK turns it on by default;
+  `.autopilot(false)` turns it off.
+- **Discovery.** `GET /api/v1/pop?namespace=billing&task=invoices` pops across every queue with
+  those labels.
+- **Conflation.** `conflation=true` on a group delivers only the newest message of a partition
+  and skips the older ones. The group's first pop decides it; it needs a group and refuses
+  `autoAck`.
+- **Server-side auto-ack.** `autoAck=true` commits the cursor when the messages are claimed. That
+  is at-most-once delivery: a crash after the pop loses the batch.
+
+## Limits
+
+- **Delivery is at-least-once.** An expired lease, a nack or a crash redelivers. Make the step
+  idempotent with a [transaction](/concepts/transactions/) and [dedup](/concepts/dedup/).
+- **Parallelism inside a group is bounded by partitions with work**, not by workers.
+- **An expired lease never spends the retry budget.** A worker that dies on a message every
+  time, without a nack, gets it redelivered forever; it never reaches the DLQ.
+- **An ack without `leaseId` is not fenced.** It is accepted even from a worker whose lease
+  expired. Send the `leaseId` the pop returned (the SDKs do).
+- **Lease exclusivity across a leader change** needs node clocks within
+  `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other.
+- **A new group skips the backlog by default.** Pass `subscriptionMode('all')` to read what was
+  pushed before it existed.

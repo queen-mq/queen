@@ -1,0 +1,33 @@
+---
+title: Configuration
+description: "Every environment variable the broker reads, with the default the code applies."
+type: reference
+tier: operate
+sidebar:
+  order: 4
+sourceOfTruth:
+  - server/src/config.rs
+  - server/src/proxy_embed.rs
+---
+
+A node reads its whole configuration from environment variables when it starts. There is no
+configuration file: change a variable and restart the node. In a cluster, give every node the same
+values except the per-node ones (`QUEEN_RAFT_NODE_ID`, `QUEEN_RAFT_LISTEN`, `QUEEN_SERVER_ID`,
+`QUEEN_KAFKA_ADVERTISED_ADDR`).
+
+```bash
+docker run -p 6632:6632 -v queen-data:/var/lib/queen/raft \
+  -e QUEEN_KV_MAX_VALUE_BYTES=262144 -e LOG_LEVEL=info \
+  ghcr.io/queen-mq/queen:latest
+```
+
+The booleans in the table accept `true`/`false`, `1`/`0`, `yes`/`no` and `on`/`off`. Unset or
+empty takes the default; any other value stops the node at boot with the variable's name.
+
+## All variables
+
+<Render file="generated/broker-config" />
+
+The proxy built into the binary (`QUEEN_PROXY_EMBEDDED=true`) reads its own `QUEEN_PROXY_*`,
+`QUEEN_EDGE_*` and `QUEEN_TLS_*` variables; see [tenants](/operate/tenants/) and
+[security](/operate/security/).

@@ -1,0 +1,84 @@
+---
+title: Guarantees
+description: "What Queen MQ guarantees for each API, which faults the Jepsen tests injected, what an answered write means on disk, and where exactly-once stops."
+type: concept
+tier: use
+sidebar:
+  order: 8
+sourceOfTruth:
+  - server/src/rsm/replicator/mod.rs
+  - server/src/rsm/replicator/raft/log_store.rs
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/planner/txn.rs
+  - test/jepsen/src/jepsen/queen/nemesis.clj
+  - test/jepsen/src/jepsen/queen/workload/log.clj
+  - test/jepsen/src/jepsen/queen/workload/queue.clj
+  - test/jepsen/src/jepsen/queen/workload/register.clj
+  - test/jepsen/src/jepsen/queen/workload/elle.clj
+  - test/jepsen/src/jepsen/queen/workload/pipeline.clj
+  - test/jepsen/src/jepsen/queen/workload/dedup.clj
+---
+
+Queen MQ is Jepsen-tested: no acked message lost or duplicated, KV linearizable, transactions
+atomic, through kill -9, network partitions, clock jumps and power loss. This page lists each
+guarantee per API, the faults behind it, and the limits that bound it. Read the limits before you
+quote a guarantee.
+
+## Per API
+
+| API | Guarantee | Jepsen workload |
+|---|---|---|
+| KV, one key | Linearizable. | W3 `register` |
+| KV, several keys in one call | Strict serializable. | W4 `elle` |
+| KV `putIfAbsent` | One winner. | W3c `claim` |
+| KV `incr` | No lost and no doubled increments. | W3b `counter` |
+| Log (push, read by offset) | No acked record lost or duplicated. One order per partition for every reader. Offsets without gaps. A transaction over several partitions is never partly visible. | W1 `log` |
+| Queue (pop, ack) | No acked message lost, none acked twice, no redelivery after a successful ack. Leases exclusive in real time. Order per partition without skips. | W2 `queue` |
+| `POST /api/v1/transaction` (ack, push, KV) | Atomic. | W5 `pipeline` |
+| `transactionId` dedup | Idempotent across failover: a retry gets the original offset. | W6 `dedup` |
+| Every answered write | Survives kill -9 and power loss. | all, with `lazyfs` |
+
+The workloads are in `test/jepsen/src/jepsen/queen/workload/`.
+
+## Faults injected
+
+The cluster had 5 nodes. The tests injected graceful, rolling and kill -9 restarts; SIGSTOP
+pauses; network partitions (minority, majority, ring, bridge); clock jumps of up to about 250 s;
+power loss (a kill that drops what was not fsynced); membership changes; and file corruption.
+
+The pass cited here is P10 of 2026-09-26: 82 of 82 tests valid, over two full passes, on commit
+`ec9d88c4`. **The engine has changed since, so these are Jepsen-tested properties, not a claim
+about the build you run.**
+
+## What an answered write means
+
+- A write is answered only after its entry is committed: a majority of nodes have written it to
+  their logs and fsynced it. Each node fsyncs an entry before it counts toward the majority. A
+  single node fsyncs before it answers.
+- No setting answers a write before its fsync.
+- A 503 with `outcome_unknown` or `timeout` means the entry may still commit. Retry with the same
+  ids; [dedup](/concepts/dedup/) makes the retry safe.
+
+## What exactly-once means here
+
+| Layer | What holds |
+|---|---|
+| Delivery | At-least-once. An expired lease, a nack or a crash delivers a message again. |
+| Effects inside Queen | Exactly-once, through [`/api/v1/transaction`](/concepts/transactions/) (the ack and the writes are one entry, fenced by the lease the ack carries) and through [`transactionId` dedup and `once`](/concepts/dedup/). |
+| The response | A lost response is a retry with the same ids, which writes nothing twice. |
+| Side effects outside Queen | Not covered. An HTTP call to a payment provider is outside any commit. See [exactly-once](/guides/exactly-once/). |
+
+## Limits
+
+- **Testing, not proof.** Jepsen finds bugs; it cannot show there are none.
+- **One raft group, native HTTP API only.** The Kafka facade, streams, timers firing and the DLQ
+  were not in that pass.
+- **Lease exclusivity across a leader change** needs node clocks within
+  `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other.
+- **Transactions are single-call,** not interactive.
+- **Losing a majority of disks for good can lose acked data.** Raft survives a minority of
+  failures, not the loss of most copies.
+- **Delivery is at-least-once.** Exactly-once holds only through `/api/v1/transaction` or dedup.
+- **An external side effect is outside any commit.**
+- **The pass ran on commit `ec9d88c4`.** The engine has changed since, and no pass is claimed for
+  the current build. The suite is in `test/jepsen/`.

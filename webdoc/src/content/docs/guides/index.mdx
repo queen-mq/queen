@@ -1,0 +1,47 @@
+---
+title: Guides
+description: "Task-shaped pages: what to build with Queen MQ, each with the code, the reason it is safe, and its limits."
+type: overview
+tier: use
+sourceOfTruth:
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+digest: >-
+  The core Queen MQ pattern is one state machine per entity: the entity's partition is its input,
+  one KV entry is its state, and one POST /api/v1/transaction per event acks the event, writes the
+  state, pushes the next events and schedules or cancels timers; the lease makes a stalled
+  worker's commit fail as a whole. Exactly-once effects inside Queen come from a putIfAbsent
+  marker with required: true committed in the same transaction as the ack; an external call such
+  as a card charge can still repeat if the worker dies between the call and the commit. Streams
+  run in the client process and commit the source ack, window state and sink push as one entry;
+  ephemeral queues keep messages in one node's memory and lose them on a crash. Kafka clients
+  connect through the built-in wire protocol (QUEEN_KAFKA_EMBEDDED=true), which refuses log
+  compaction and so does not run Kafka Streams or Connect; Laravel uses the PHP client as a queue
+  connection.
+sidebar:
+  order: 1
+---
+
+Each guide is one thing to build, with the code, why it holds, and what it does not do.
+
+## Patterns
+
+- [One state machine per entity](/guides/state-machines/): an order that is created, paid,
+  shipped, or cancelled by its own timer, run by stateless workers with no locks.
+- [Charge a card once](/guides/exactly-once/): make a redelivered message harmless with a marker
+  that commits with the ack.
+- [Deliver webhooks](/guides/webhooks/): ordered per endpoint, a retry budget, and a dead-letter
+  queue for what never succeeds.
+
+## Features
+
+- [Streams](/guides/streams/): windows and aggregates in your own process, with the state in
+  Queen and one commit per cycle.
+- [Ephemeral queues](/guides/ephemeral/): in-memory queues for request/reply, signals and
+  presence, where losing what is in flight is acceptable.
+
+## Integrations
+
+- [Connect Kafka clients](/guides/kafka/): the built-in Kafka wire protocol, and how topics,
+  groups and offsets map onto Queen.
+- [Laravel](/guides/laravel/): Queen as a Laravel queue connection, with per-entity ordering and an
+  optional supervisor.

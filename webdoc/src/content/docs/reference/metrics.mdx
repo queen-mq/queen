@@ -1,0 +1,45 @@
+---
+title: Metrics
+description: "Every Prometheus metric family a node exposes on GET /metrics/prometheus, with its type and help text."
+type: reference
+tier: operate
+sidebar:
+  order: 5
+sourceOfTruth:
+  - server/src/metrics.rs
+  - server/src/rsm/timing.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/admit.rs
+  - server/src/handlers/raft.rs
+  - server/src/proxy_embed.rs
+  - proxy/src/cp.rs
+---
+
+Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`, with no
+authentication on the broker port. Each node describes itself, so scrape every node of a cluster.
+What to alert on is on [monitoring](/operate/monitoring/).
+
+```bash
+curl -s http://localhost:6632/metrics/prometheus | grep '^queen_raft_index'
+```
+
+```yaml
+scrape_configs:
+  - job_name: queen
+    metrics_path: /metrics/prometheus
+    static_configs:
+      - targets: ["queen-0:6632", "queen-1:6632", "queen-2:6632"]
+```
+
+- `GET /metrics` is a JSON summary for the dashboard (uptime, request totals, the node's raft
+  role), not Prometheus.
+- Per-queue series carry a `queue` label, and a `tenant` label for every tenant but the default
+  one.
+- With the embedded proxy (`QUEEN_PROXY_EMBEDDED=true`) the public port answers `/metrics*` only to
+  the control-plane token (`x-queen-cp-token`, or `Authorization: Bearer` with the same value,
+  set by `QUEEN_PROXY_CP_TOKEN`), and 404 to everyone else. Or give the proxy its own port with
+  `QUEEN_PROXY_PORT` and scrape `PORT` directly, from inside the network.
+
+## Families
+
+<Render file="generated/broker-metrics" />

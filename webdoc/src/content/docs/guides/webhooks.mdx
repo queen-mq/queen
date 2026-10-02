@@ -1,0 +1,147 @@
+---
+title: Deliver webhooks
+description: "Deliver webhooks in order per endpoint, with a bounded retry budget and a dead-letter queue, so one dead endpoint slows down nobody else."
+type: how-to
+tier: use
+sourceOfTruth:
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+  - server/src/rsm/consume/ack.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+verifiedBy:
+  - examples/apps/js/webhooks.mjs
+  - examples/apps/py/webhooks.py
+  - examples/apps/go/webhooks/main.go
+  - examples/apps/rust/src/bin/webhooks.rs
+  - examples/apps/php/webhooks.php
+  - examples/apps/cpp/webhooks.cpp
+  - examples/apps/http/webhooks.sh
+sidebar:
+  order: 4
+---
+
+Put every delivery in the partition of the endpoint it is for, let the broker's retry budget do the
+retrying, and send what never succeeds to the dead-letter queue. Deliveries to one endpoint arrive
+in order, and an endpoint that is down backs up its own partition and no other.
+
+## The shape
+
+```js
+await queen.queue('webhooks')
+  .config({ leaseTime: 30, retryLimit: 5, dlqAfterMaxRetries: true })
+  .create()
+
+// Producer: one partition per endpoint, the event id as transactionId.
+await queen.queue('webhooks').partition(endpoint).push([
+  { transactionId: event.id, data: { url, event } },
+])
+
+// Sender: return to ack, throw to spend one retry.
+await queen.queue('webhooks')
+  .group('sender')
+  .subscriptionMode('all')        // a new group starts at the tail unless told otherwise
+  .concurrency(20)
+  .each()
+  .consume(async (msg) => {
+    const res = await fetch(msg.data.url, { method: 'POST', body: JSON.stringify(msg.data.event) })
+    if (!res.ok) throw new Error(`${msg.data.url} answered ${res.status}`)
+  })
+```
+
+- **One partition per endpoint.** The first push that names an endpoint creates its partition.
+  Order holds inside it, and the 20 senders spread over endpoints, never over one endpoint.
+- **The retry budget is the broker's.** With `autoAck` on (the default), a handler that returns
+  acks the delivery and a handler that throws nacks it with the error. Each nack spends one unit
+  of `retryLimit`, and the delivery comes back. The retries survive the sender dying, which a loop
+  inside the handler would not.
+- **The dead-letter queue keeps what failed.** With `dlqAfterMaxRetries: true`, a delivery whose
+  budget is spent moves to the dead-letter queue with its last error, and the endpoint's next
+  delivery goes out. The transactionId makes the enqueue idempotent: an application that retries
+  its own emit does not create a second delivery.
+
+Read the dead letters, and re-queue them once the endpoint is fixed:
+
+```js
+const dlq = await queen.queue('webhooks').dlq().limit(50).get()
+for (const row of dlq.messages) {
+  console.log(row.partition, row.errorMessage, row.retryCount)
+  await queen.admin.retryMessage(row.partitionId, row.transactionId)
+}
+```
+
+A re-queued delivery is a new message at the tail of its partition (transactionId
+`dlq:<row id>`), and the dead-letter row is removed in the same transaction.
+
+A sender that recognises a permanent error (a 410, a deleted subscription) can skip the remaining
+budget: switch to `.autoAck(false)` and call `queen.ack(msg, 'dlq', { group: msg.consumerGroup,
+error: reason })`. See [consuming](/concepts/consuming/).
+
+## The verified programs
+
+Each program queues three events for three endpoints, one of which answers 500. It checks that the
+two healthy endpoints received their events in order, that the dead one was retried and not
+dropped, and that its three deliveries sit in the dead-letter queue with the error attached.
+
+<Tabs>
+
+<TabItem label="JavaScript">
+
+<Render file="snippets/app-js-webhooks" />
+
+</TabItem>
+
+<TabItem label="Python">
+
+<Render file="snippets/app-py-webhooks" />
+
+</TabItem>
+
+<TabItem label="Go">
+
+<Render file="snippets/app-go-webhooks" />
+
+</TabItem>
+
+<TabItem label="Rust">
+
+<Render file="snippets/app-rust-webhooks" />
+
+</TabItem>
+
+<TabItem label="PHP">
+
+<Render file="snippets/app-php-webhooks" />
+
+</TabItem>
+
+<TabItem label="C++">
+
+<Render file="snippets/app-cpp-webhooks" />
+
+</TabItem>
+
+<TabItem label="curl">
+
+<Render file="snippets/app-http-webhooks" />
+
+</TabItem>
+
+</Tabs>
+
+## Limits
+
+- **A failing delivery holds up its own endpoint.** Later deliveries to that endpoint wait until it
+  succeeds or is dead-lettered. That is the price of order; other endpoints are not affected.
+- **Retries are immediate.** A nacked delivery comes back on the next pop. `retryDelay` is accepted
+  by `/configure` and stored, but the 2.0 consumption engine does not apply it. For a pause between
+  attempts, ack the delivery and schedule it again as a timer into the same partition in one
+  [transaction](/concepts/transactions/); it then goes out behind newer deliveries to that endpoint.
+- **Only a nack spends the budget.** A sender that dies mid-delivery costs nothing: the lease
+  expires and the delivery comes back. A delivery that crashes its sender every time is retried
+  forever; every message carries `deliveryAttempt`, so the handler can dead-letter it past a
+  threshold.
+- **Without a dead-letter queue, a spent delivery is skipped.** If the queue has neither
+  `dlqAfterMaxRetries` nor `deadLetterQueue`, the cursor moves past it and it is gone.
+- **Delivery is at-least-once.** The endpoint can receive a delivery twice (a lease that expired
+  after the POST, before the ack). Send the event id in a header so the receiver can drop repeats.
+- **The DLQ path is not part of the Jepsen pass.** See [guarantees](/concepts/guarantees/).

@@ -1,0 +1,152 @@
+---
+title: Laravel
+description: "Use Queen as a Laravel queue connection: install it, keep your jobs and workers, order jobs per entity, and run the optional supervisor and dashboard."
+type: how-to
+tier: use
+sourceOfTruth:
+  - clients/client-php/config/queen.php
+  - clients/client-php/src/Laravel/QueenServiceProvider.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Queue/QueenConnector.php
+  - clients/client-php/src/Laravel/Contracts/QueenPartitionable.php
+  - clients/client-php/src/Laravel/Http/Middleware/AuthorizeDashboard.php
+  - clients/client-php/README.md
+sidebar:
+  order: 8
+---
+
+The PHP client ships a Laravel queue connection. Your jobs stay ordinary Laravel jobs and
+`queue:work` stays the worker; the backlog moves into Queen, where a job can have its own ordered
+partition per entity. A supervisor that replaces Horizon's master and a local dashboard come with
+it: the connection is usable on its own, the supervisor and the dashboard are previews.
+
+## Install
+
+Package discovery registers the service provider, the `Queen` facade and a `queen` connection.
+
+```bash
+composer require queen-mq/php-client
+php artisan vendor:publish --tag=queen-config
+```
+
+```dotenv
+QUEUE_CONNECTION=queen
+QUEEN_URL=http://127.0.0.1:6632
+QUEEN_QUEUE=default
+QUEEN_CONSUMER_GROUP=laravel
+QUEEN_RETRY_AFTER=90
+```
+
+Dispatch and work exactly as before:
+
+```php
+GenerateInvoice::dispatch($invoiceId);
+```
+
+```bash
+php artisan queue:work queen --queue=default --timeout=60 --tries=3
+```
+
+**`QUEEN_RETRY_AFTER` is the Queen lease.** It must be longer than the worker timeout and the
+slowest job, or a job is redelivered while it is still running. Give each application and
+environment its own `QUEEN_CONSUMER_GROUP`: two applications in one group share one cursor and
+split the work. Add `QUEEN_BEARER_TOKEN` when the broker requires a token.
+
+## Order jobs per entity
+
+By default jobs spread over 64 partitions (`laravel-0000` to `laravel-0063`, `QUEEN_PARTITIONS`),
+picked by a hash of the job id. A job that implements `QueenPartitionable` names its own:
+
+```php
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Queen\Laravel\Contracts\QueenPartitionable;
+
+final class RebuildCustomer implements ShouldQueue, QueenPartitionable
+{
+    public function __construct(public string $customerId) {}
+
+    public function queenPartition(): string
+    {
+        return 'customer:' . $this->customerId;
+    }
+}
+```
+
+Every `RebuildCustomer` for one customer runs in dispatch order, and customers never wait for each
+other. See [partitions](/concepts/partitions/).
+
+## What Laravel keeps
+
+| Laravel | With Queen |
+|---|---|
+| `dispatch()`, middleware, `--timeout`, `--tries` | unchanged |
+| delayed dispatch (`later`) | a Queen [timer](/concepts/timers/) |
+| `release()` and backoff | ack plus re-push (or timer) in one [transaction](/concepts/transactions/) |
+| `failed_jobs` | the index you use; Queen keeps a dead-letter copy in sync (`QUEEN_SYNC_FAILED_JOBS`) |
+| `Queue::size()`, `pendingSize()`, `reservedSize()` | the consumer group's depth in the broker, plus pending timers |
+| `queue:clear` | not supported |
+
+Retry a failed job with `queue:retry`, which moves the Laravel row and the Queen copy together.
+
+## Throughput
+
+The defaults claim and ack one job per request (`QUEEN_PREFETCH=1`, `QUEEN_ACK_BATCH=1`). Raising
+them saves round trips and widens the redelivery window, so the connector refuses
+`QUEEN_PREFETCH > 1` unless `QUEEN_LEASE_RENEWAL=true`, which starts one small PHP helper per
+worker to keep the shared lease alive:
+
+```dotenv
+QUEEN_PREFETCH=16
+QUEEN_ACK_BATCH=16
+QUEEN_LEASE_RENEWAL=true
+```
+
+## Supervisor
+
+The optional replacement for Horizon's master: one configuration (`supervisor` in
+`config/queen.php`), two engines. PHP is the reference; Rust is the one to deploy.
+
+```bash
+php artisan queen:supervise                            # PHP engine
+
+php artisan queen:supervisor-install                   # Rust engine: explicit, version-pinned
+vendor/bin/queen-supervisor --php php --artisan artisan
+
+php artisan queen:supervisor status --check            # live, with minimum serving capacity
+php artisan queen:supervisor pause                     # continue | terminate
+```
+
+A pool sets `queues`, `balance` (`auto`, `simple`, `off`), `strategy` (`size` scales on depth,
+`time` on depth times observed runtime), and `min_processes` / `max_processes`. Every key and its
+`QUEEN_SUPERVISOR_*` variable is in the published `config/queen.php`.
+
+## Dashboard
+
+A local panel at `/queen` with supervisor health, pools, restart state, sampled depth and
+failed-job metadata. It is off until you enable it, and outside `local` and `testing` it denies
+everyone until the application defines the ability:
+
+```php
+Gate::define('viewQueenDashboard', fn ($user) => $user?->canOperateQueues() === true);
+```
+
+```dotenv
+QUEEN_DASHBOARD_ENABLED=true
+```
+
+It reads one host's supervisor state. Backlog across the cluster and the dead-letter queue are in
+the broker's own dashboard.
+
+## Limits
+
+- **Delivery is at-least-once.** A lease expiry or a crash can run a job twice; handlers still need
+  an idempotency key.
+- **A retried job goes to the back of its partition**, behind jobs dispatched after it for the same
+  entity.
+- **One supervisor master per application and consumer group.** There is no distributed leader
+  lease: two masters on two hosts both scale to the maximum. On Kubernetes, run one replica with
+  the `Recreate` strategy. Workers can be as many as you like.
+- **The supervisor and the dashboard are Unix only** (`pcntl`, `posix`), and previews.
+- **Horizon features Queen does not have:** job tags, silencing, retained throughput graphs and
+  long-wait notifications.
+- PHP 8.3 or later. The client without Laravel is in [clients](/start/clients/).
