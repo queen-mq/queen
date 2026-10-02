@@ -1,0 +1,122 @@
+{
+ "scenario": "stop-long-batch",
+ "profile": "queen-rust-fast",
+ "run_id": "stop-long-batch-queen-rust-fast-6d8cb76e",
+ "checks": [
+  {
+   "name": "attempts per job (information)",
+   "passed": true,
+   "detail": "000000: 1; 000001: 2"
+  },
+  {
+   "name": "the job done before the deploy ran once",
+   "passed": true,
+   "detail": "1 starts"
+  },
+  {
+   "name": "every job completed",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no two attempts overlapped",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no job completed twice",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no failed-job row",
+   "passed": true,
+   "detail": "[]"
+  }
+ ],
+ "passed": true,
+ "report": {
+  "run_id": "stop-long-batch-queen-rust-fast-6d8cb76e",
+  "jobs": {
+   "000000": {
+    "events": [
+     [
+      "started",
+      1,
+      1790942101.305,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790942161.305,
+      null
+     ]
+    ],
+    "pids": [
+     38
+    ]
+   },
+   "000001": {
+    "events": [
+     [
+      "started",
+      1,
+      1790942161.311,
+      null
+     ],
+     [
+      "started",
+      2,
+      1790942281.404,
+      null
+     ],
+     [
+      "completed",
+      2,
+      1790942341.405,
+      null
+     ]
+    ],
+    "pids": [
+     38
+    ]
+   }
+  },
+  "failed_store": {
+   "available": true,
+   "job_ids": []
+  },
+  "dead_letter": {
+   "available": true,
+   "entries": 0
+  }
+ },
+ "extra": {},
+ "timeline": [
+  [
+   5.73,
+   "ready"
+  ],
+  [
+   6.11,
+   "dispatched 2 x ok (exit 0)"
+  ],
+  [
+   67.18,
+   "first done, second started: reached"
+  ],
+  [
+   102.76,
+   "app stopped (SIGTERM, 90 s grace)"
+  ],
+  [
+   106.9,
+   "app up again"
+  ],
+  [
+   247.66,
+   "all completed: reached"
+  ]
+ ]
+}

@@ -50,6 +50,7 @@ engines. The protocol is the Queen team's; the results are diagnostic.
 | `local-soak-prefetch` | a 15-minute soak of the prefetch-4 profile on Docker Desktop, with every client fix | `cfd04eed` |
 | `local-compat-prefix` | the 32 Laravel features on Docker Desktop, before the client fixes | harness `bbb8ed7e`, the client of 2026-10-01 |
 | `local-hand-back` | `job-timeout`, `memory-limit`, `memory-fatal`, `worker-kill` and `stop-long-batch` on the two Rust and two PHP profiles, on Docker Desktop, with the crash hand-back: the master's lease service, or the worker's PHP lease helper, sends the transaction a crashed worker journaled. `queen-php-fast` is the PHP engine with prefetch 4, `ack_async` and `pop_ahead` | `b18871cd`, `52e8e219` and `68d48cb4` (the harness); the image was built before the final wording of the dashboard's advice and of one docblock |
+| `vm-hand-back` | the same 20 lanes on the droplet above, with the broker image of the release candidate | `dc9dabc2`, PR #70's head |
 
 The first runs (`failure-matrix`, `failure-matrix-php`, `replicas`, `compat`, `batch-prefix`) found
 the defects that the later runs show fixed. The tables report the last run of each lane.
@@ -130,16 +131,20 @@ Known limits:
   and `tries` 2, job `000001` never ran: job `000000` crashed the worker twice, and each crash
   returned `000001` with one more delivery. In `worker-kill` (`final-b`), the three jobs the killed
   worker had not started waited for its lease to expire and ran 31 s later as their second attempt.
-  With the crash hand-back (`local-hand-back`), the 20 lanes passed on the four profiles:
-  - `memory-fatal`, Rust, prefetch 4: the master logged the hand-back of the job that never started
-    10 ms after the fatal error; both jobs then ran twice, as `tries` 2 says.
+  With the crash hand-back, the 20 lanes passed on the four profiles on the droplet (`vm-hand-back`)
+  and on Docker Desktop (`local-hand-back`). On the droplet:
+  - `memory-fatal`, Rust, prefetch 4: the master handed back the job that never started 11 ms after
+    the fatal error, and it ran 6 ms later as its first attempt; both jobs then ran twice, as
+    `tries` 2 says.
   - `worker-kill`, Rust, prefetch 4: the master handed back the three jobs that never started, and
-    they ran 4 to 12 s after the kill as their first attempt.
+    the first one ran 5 ms later as its first attempt. In `final-b` they waited 31 s and ran as
+    their second attempt.
   - `worker-kill`, PHP, prefetch 4: the PHP helper logs nothing once its worker is gone, but none of
-    the jobs the killed worker had not started waited for its lease: they ran from 2.5 s after the
-    kill as their first attempt.
+    the jobs the killed worker had not started waited for its lease: they ran from 4 s after the
+    kill, when a new worker started, as their first attempt.
   - The job that was running when its worker died was alone in its partition lease in each of
     these runs, so it returned when the lease expired, 30 s later, with its run counted.
+  - Docker Desktop gave the same results (`local-hand-back`).
 
   Still charged: a lost node, a crash that takes the lease helper with the worker, and a batch
   popped ahead and not read yet, which no lane here exercises.
