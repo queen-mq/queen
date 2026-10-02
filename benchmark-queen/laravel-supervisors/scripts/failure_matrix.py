@@ -190,7 +190,10 @@ class Lane:
         return subprocess.run(["docker", *args], check=check, capture_output=True, text=True, timeout=600)
 
     def artisan(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        return self.compose("exec", "--no-TTY", "producer", "php", "artisan", "--no-ansi", *args, check=check)
+        # The producer runs the matrix's own tools: bench:matrix-report reads a whole attempt log, and
+        # a soak of 2.5 hours (about 100,000 events) passes PHP's default 128 MiB.
+        return self.compose("exec", "--no-TTY", "producer", "php", "-d", "memory_limit=1G", "artisan", "--no-ansi",
+                            *args, check=check)
 
     def app_artisan(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         """Artisan in the supervisor's own container, beside its workers."""
