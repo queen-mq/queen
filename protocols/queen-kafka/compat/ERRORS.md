@@ -113,11 +113,21 @@ tenant cannot afford.
 | `NOT_LEADER_OR_FOLLOWER` (6) | yes (+metadata) | no answer; 429; 502–504 | |
 | `UNKNOWN_SERVER_ERROR` (-1) | no | an unmapped probe marker, an unreadable body, a misaligned answer | |
 
-Two non-error answers are load-bearing here. A **concrete timestamp** answers
-offset `-1` with error 0 — Queen has no time index — and, **changed in M6**, it
-is still probed first, so a concrete timestamp against a topic that does not
-exist answers UNKNOWN_TOPIC_OR_PARTITION instead of claiming the topic is there
-with no record at that time.
+Two non-error answers are load-bearing here. A **concrete timestamp** (KIP-79,
+`offsetsForTimes`, Flink's timestamp start mode) is answered, **since
+2026-10-01**, with the first offset the partition APPENDED at or after it and
+that append's time, from Queen's `POST /api/v1/fetch/offsets`; a time past the
+newest append answers offset `-1` with error 0, and so does every time against
+a broker without the route, as before. The clock is the BROKER's append time,
+not the producer's CreateTime a fetched record carries: the two agree to within
+linger and network for a producer that stamps records as it sends them, and
+not for one that sets them itself (a replay, Kafka Streams forwarding an input
+record's time) — for that one the answer is where the log was at that time. A
+lookup that FAILS is answered with the probe's retriable codes above, never
+`-1`, because `-1` sends a consumer to the end of the log. And, **changed in
+M6**, a concrete timestamp is still probed first, so against a topic that does
+not exist it answers UNKNOWN_TOPIC_OR_PARTITION instead of claiming the topic is
+there with no record at that time.
 
 ## FindCoordinator (v0–v3) — top level
 
@@ -226,7 +236,7 @@ only correct behaviour for a group that has never committed.
 | `TOPIC_ALREADY_EXISTS` (36) | no | the catalog already has a queue of that name | And `POST /api/v1/configure` is **not** called for it. The stored procedure is an upsert that rewrites every config column to its defaults, so a create over a live queue would silently reset its leaseTime, retention, retry policy and dedup window. |
 | `INVALID_PARTITIONS` (37) | no | `numPartitions` above `MAX_ADVERTISED_PARTITIONS` (100000) | A declared count is stored as the topic's own width floor, so a number this facade would then clamp is REFUSED rather than accepted and quietly answered as something else. `QUEEN_KAFKA_DEFAULT_PARTITIONS` gets a hard boot error for the same number; this is the wire's version of it. `-1` (KIP-464's "I do not care") and `0` declare nothing and are not errors. |
 | `INVALID_REPLICA_ASSIGNMENT` (39) | no | a non-empty `assignments` | A manual assignment names broker ids to place partitions on; this facade places nothing anywhere. Accepting it would be silently discarding an explicit operator instruction. |
-| `INVALID_CONFIG` (40) | no | `cleanup.policy=compact` (or `compact,delete`); `retention.ms` under 1000 ms or below -1; any config name outside the mapping | The mapping is `src/topic_config.rs`. Compaction is refused because it is a stated non-goal and nothing compacts — which is what makes Kafka Connect fail at startup instead of losing its connector configuration on a later restart. A sub-second retention is refused rather than rounded to zero, which would mean "delete everything". |
+| `INVALID_CONFIG` (40) | no | `retention.ms` under 1000 ms or below -1; a recorded key outside Kafka's own range for it; `message.timestamp.type=LogAppendTime`; `min.insync.replicas` above the raft majority; a `cleanup.policy` that is not `delete`/`compact`; any config name outside the mapping | The mapping is `src/topic_config.rs`. **Since 2026-10-01 `cleanup.policy=compact` is accepted**: the queue keeps every record (retention off, explicitly), which is what Kafka Connect's internal topics and Kafka Streams' changelogs need from a compacted topic; `compact,delete` keeps the retention. The keys Streams and Connect create topics with (`segment.bytes`, `segment.ms`, `retention.bytes`, `max.message.bytes`, `min.compaction.lag.ms`, `max.compaction.lag.ms`, `delete.retention.ms`, `min.cleanable.dirty.ratio`) are accepted in Kafka's range and recorded and reported back as set, each with a documentation line saying nothing enforces it. A sub-second retention is refused rather than rounded to zero, which would mean "delete everything". |
 | `INVALID_REQUEST` (42) | no | the same topic name appears more than once in one request | Apache Kafka's own answer, and none of the entries is created. It is also what stops the second configure for one name being an upsert over the queue the first one just made. |
 | `TOPIC_AUTHORIZATION_FAILED` (29) | no | Queen answered 401 or 403 | The connection's credential may not create queues. |
 | `THROTTLING_QUOTA_EXCEEDED` (89) | yes | **v6 only**: Queen answered 429, or the request asked for more than 100 topics | KIP-599, and the whole reason v6 is in the advertised window: it is the version at which a client understands the code. The wait rides `throttle_time_ms` beside it. |
@@ -347,7 +357,7 @@ with key 33 and it is why Kafka deprecated it.
 | Code | Retriable | When | Notes |
 |---|---|---|---|
 | `UNKNOWN_TOPIC_OR_PARTITION` (3) | yes (+metadata) | a TOPIC resource the catalog does not have, or a `__`/illegal name | The same `not_a_topic_here` rule as every read path, so a client can tell "there is nothing to change" from "you cannot change this". |
-| `INVALID_CONFIG` (40) | no | a topic this facade did not create (or whose queue has been replaced since); an unknown key; a value the facade cannot honour; `cleanup.policy=compact`; any BROKER config | The Java AdminClient turns 40 into a non-retriable `InvalidConfigurationException` whose message `kafka-configs.sh` prints verbatim, which is where each of these sentences has to land to be read at all. |
+| `INVALID_CONFIG` (40) | no | a topic this facade did not create (or whose queue has been replaced since); an unknown key; a value the facade cannot honour; any BROKER config | The Java AdminClient turns 40 into a non-retriable `InvalidConfigurationException` whose message `kafka-configs.sh` prints verbatim, which is where each of these sentences has to land to be read at all. |
 | `INVALID_REQUEST` (42) | no | a BROKER resource named anything but `` or this node's id; any resource type other than topic (2) and broker (4) | Identical to DescribeConfigs' rule, because it is the same fact. |
 | `TOPIC_AUTHORIZATION_FAILED` (29) | no | Queen answered 401 or 403 | |
 | `REQUEST_TIMED_OUT` (7) | yes | Queen was unreachable, answered 429 (with the wait on `throttle_time_ms`) or 5xx; the queue list or the config record could not be read; the record could not be written after a successful configure | KIP-599's `THROTTLING_QUOTA_EXCEEDED` is deliberately NOT used: neither of these APIs has a version at which a client is required to understand it, and a code outside the closed set the client accepts ends the application instead of making it retry. |
@@ -390,7 +400,7 @@ operation:
 | Code | Retriable | When | Notes |
 |---|---|---|---|
 | `INVALID_CONFIG` (40) | no | `APPEND` or `SUBTRACT` on `retention.ms` or `min.insync.replicas` | Those operations are legal only for LIST-typed configs and neither of those is one. |
-| `INVALID_CONFIG` (40) | no | `SUBTRACT delete` from `cleanup.policy` | It computes an empty policy, and a topic with no cleanup policy is not a thing this facade or Kafka will have. `APPEND compact` computes `[delete,compact]` and meets the ordinary compaction refusal, which is the message an operator needs. |
+| `INVALID_CONFIG` (40) | no | `SUBTRACT delete` from a `cleanup.policy` of `[delete]` | It computes an empty policy, and a topic with no cleanup policy is not a thing this facade or Kafka will have. `APPEND compact` computes `[delete,compact]` and is accepted; `SUBTRACT delete` from THAT leaves `[compact]`, and the topic stops expiring records. |
 | `INVALID_REQUEST` (42) | no | a `config_operation` that is not SET (0), DELETE (1), APPEND (2) or SUBTRACT (3) | Named rather than silently treated as a SET. |
 
 `DELETE` resets a key to its default by dropping it out of the bag, which leaves
@@ -591,7 +601,7 @@ real owner's offsets.
 |---|---|---|---|
 | `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` (53) | no | a non-empty `transactional_id` **in cluster mode** | The same code and the same sentence `handlers::find_coordinator` gives, so a user meets ONE message about transactions and not two. Fatal in the Java client, out of `InitProducerIdHandler`. An EMPTY id is **not** a transactional id and is granted normally: brod's hand-rolled encoder writes a null one as `""` (`idempotent::transactional_id`). |
 | `INVALID_REQUEST` (42) | no | a `transactional_id` longer than the key column it is stored in | **M9.** Refused before anything is minted, so an id this facade could not store leaves no state behind. |
-| `INVALID_TRANSACTION_TIMEOUT` (50) | no | `transaction.timeout.ms` above `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS` (default 900 000) or not positive | **M9.** Kafka's own answer for exactly this, with Kafka's own default, so a producer that meets it on a real broker meets it here. |
+| `INVALID_TRANSACTION_TIMEOUT` (50) | no | `transaction.timeout.ms` above `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS` (default 3 600 000) or not positive | **M9.** Kafka's own answer for exactly this, never a silently shorter timeout. The default cap is one hour, Flink's `KafkaSink` default, where Kafka's broker default is 15 minutes (2026-10-01): an exactly-once Flink job starts without an operator raising it, and every other producer still gets the timeout it asks for. DescribeConfigs reports it as the broker config `transaction.max.timeout.ms`. |
 | `CONCURRENT_TRANSACTIONS` (51) | yes | a third producer moved the key between this facade's claim and its epoch bump, or the process is at `QUEEN_KAFKA_TXN_MAX_OPEN` | **M9.** Retriable and literally true. ONE retry happens inside the facade and then the backoff is the client's — a CAS loop in a request handler is what 024_kv.sql:585-587 forbids. |
 | `COORDINATOR_NOT_AVAILABLE` (15) | yes | the transaction store could not be reached for the claim | **M9.** A 429 becomes `CONCURRENT_TRANSACTIONS` instead, and NOT a throttle: the throttle belongs on calls whose volume is what a cap is about, and `initTransactions()` happens once per producer lifetime. |
 

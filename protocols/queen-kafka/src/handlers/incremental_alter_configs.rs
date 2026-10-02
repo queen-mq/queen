@@ -11,21 +11,20 @@
 //!
 //! AlterConfigs replaces a resource's whole configuration; this one names a
 //! DELTA and everything it does not name is left exactly as it is. Here that
-//! becomes `stored ∪ delta`, posted as one whole `/configure` bag — the merge is
-//! [`crate::topic_record::merge`] and the completeness of `stored` is what makes
-//! it lossless. Everything else — the untracked refusal, the broker refusal, the
-//! ordering of the write and the record, cluster mode, the error taxonomy — is
-//! shared with [`super::alter_configs`] and lives there.
+//! becomes `stored ∪ delta`, posted as one whole `/configure` bag, and the
+//! completeness of `stored` is what makes it lossless. Everything else — the
+//! untracked refusal, the broker refusal, the ordering of the write and the
+//! record, cluster mode, the error taxonomy — is shared with
+//! [`super::alter_configs`] and lives there.
 //!
 //! ## The four operations
 //!
 //! `AlterableConfig::config_operation` is SET(0), DELETE(1), APPEND(2) or
 //! SUBTRACT(3). APPEND and SUBTRACT are legal only for LIST-typed configs, and
-//! of the three keys this facade has only `cleanup.policy` is a list in Kafka —
-//! so they are refused on the two scalars by name and computed on
-//! `cleanup.policy`, whose value is always the single-element `[delete]`. That
-//! makes `APPEND compact` the compaction refusal (which is where it should land)
-//! and `SUBTRACT delete` an empty policy, which is refused for its own reason.
+//! of this facade's keys only `cleanup.policy` is a list in Kafka — so they are
+//! refused on every scalar by name and computed on the topic's own policy:
+//! `APPEND compact` makes a deleting topic `delete,compact`, and `SUBTRACT
+//! delete` from `delete` empties it, which is refused for its own reason.
 
 use kafka_protocol::error::ResponseError;
 use kafka_protocol::messages::incremental_alter_configs_request::AlterableConfig;
@@ -33,11 +32,10 @@ use kafka_protocol::messages::incremental_alter_configs_response::AlterConfigsRe
 use kafka_protocol::messages::{IncrementalAlterConfigsRequest, IncrementalAlterConfigsResponse};
 
 use crate::handlers::alter_configs::{
-    broker, commit, context, other_resource, outcome_fields, topic_names, Context, Verdict,
-    RESOURCE_BROKER, RESOURCE_TOPIC,
+    broker, commit, context, other_resource, outcome_fields, topic_names, verdict, Context,
+    Verdict, RESOURCE_BROKER, RESOURCE_TOPIC,
 };
-use crate::topic_config::{self, CLEANUP_DELETE, CLEANUP_POLICY};
-use crate::topic_record;
+use crate::topic_config::{self, CLEANUP_POLICY};
 use crate::{throttle, Facade};
 
 /// Kafka's `AlterConfigOp.OpType`, the numbers the wire carries.
@@ -75,21 +73,9 @@ pub async fn handle(
             Verdict::Refuse(code, why) => Some((code, why)),
             Verdict::Unchanged => None,
             // `validate_only` (v0-v1), honoured the same way key 33 honours it.
-            Verdict::Write { .. } if req.validate_only => None,
-            Verdict::Write {
-                qid,
-                bag,
-                partitions,
-            } => {
-                let landed = commit(
-                    facade,
-                    resource.resource_name.as_str(),
-                    qid,
-                    bag,
-                    partitions,
-                    token,
-                )
-                .await;
+            Verdict::Write(_) if req.validate_only => None,
+            Verdict::Write(write) => {
+                let landed = commit(facade, resource.resource_name.as_str(), write, token).await;
                 throttle_ms = throttle::longest(throttle_ms, landed.throttle_ms);
                 landed.error
             }
@@ -111,36 +97,34 @@ pub async fn handle(
 
 /// The delta, merged onto what the facade last applied.
 fn plan_topic(ctx: &Context, topic: &str, configs: &[AlterableConfig]) -> Verdict {
-    let (qid, stored, partitions) = match ctx.tracked(topic) {
+    let tracked = match ctx.tracked(topic) {
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
 
-    let mut delta: topic_config::Delta = Vec::new();
+    // Merged onto the STORED maps and not onto empty ones: this is the whole
+    // difference between key 44 and key 33, and it is the reason a client may
+    // set `retention.ms` here without losing whatever else the facade had
+    // applied. One operation at a time, so an APPEND reads the policy the
+    // operations before it left.
+    let mut bag = tracked.set.clone();
+    let mut kafka = tracked.kafka.clone();
     for config in configs {
-        match one(config, ctx.isr) {
-            Ok(mut entries) => delta.append(&mut entries),
+        match one(config, ctx.isr, &kafka) {
+            Ok(change) => topic_config::absorb_change(&mut bag, &mut kafka, &change),
             Err(refusal) => return refusal,
         }
     }
-
-    // `merge` and not `absorb` onto an empty bag: this is the whole difference
-    // between key 44 and key 33, and it is the reason a client may set
-    // `retention.ms` here without losing whatever else the facade had applied.
-    let desired = topic_record::merge(&stored, &delta);
-    if desired == stored {
-        Verdict::Unchanged
-    } else {
-        Verdict::Write {
-            qid,
-            bag: desired,
-            partitions,
-        }
-    }
+    verdict(tracked, bag, kafka)
 }
 
-/// What one `(name, operation, value)` triple contributes to the delta.
-fn one(config: &AlterableConfig, isr: u32) -> Result<topic_config::Delta, Verdict> {
+/// What one `(name, operation, value)` triple changes, given the topic's
+/// Kafka-side values so far.
+fn one(
+    config: &AlterableConfig,
+    isr: u32,
+    kafka: &serde_json::Map<String, serde_json::Value>,
+) -> Result<topic_config::Change, Verdict> {
     let name = config.name.as_str();
     let value = config.value.as_ref().map(|v| v.as_str());
     let refuse = |why: String| Verdict::Refuse(ResponseError::InvalidConfig, why);
@@ -150,7 +134,7 @@ fn one(config: &AlterableConfig, isr: u32) -> Result<topic_config::Delta, Verdic
         // The request's `value` is IGNORED for a DELETE, which is what Kafka
         // does: the operation names the key to reset, not a value to remove.
         OP_DELETE => topic_config::reset(name).map_err(refuse),
-        op @ (OP_APPEND | OP_SUBTRACT) => list_op(name, value, op).map_err(refuse),
+        op @ (OP_APPEND | OP_SUBTRACT) => list_op(name, value, op, kafka).map_err(refuse),
         other => Err(Verdict::Refuse(
             ResponseError::InvalidRequest,
             format!(
@@ -163,13 +147,18 @@ fn one(config: &AlterableConfig, isr: u32) -> Result<topic_config::Delta, Verdic
 
 /// APPEND and SUBTRACT, which are legal only on a LIST-typed config.
 ///
-/// Of this facade's three keys only `cleanup.policy` is a list in Kafka, and its
-/// value is always the single-element `[delete]` — there is no other policy and
-/// no way to reach one. So the resulting list is computed and run through the
-/// SAME rule a SET would use, which puts `APPEND compact` on the compaction
-/// refusal (where an operator needs to meet it) rather than on a generic "not a
-/// list" message.
-fn list_op(name: &str, value: Option<&str>, op: i8) -> Result<topic_config::Delta, String> {
+/// Of this facade's keys only `cleanup.policy` is a list in Kafka. The list is
+/// the topic's own, as the operations before this one left it
+/// ([`topic_config::policies`]), and the result is run through the SAME rule a
+/// SET would use — so `APPEND compact` on a deleting topic is
+/// `delete,compact`, `SUBTRACT delete` from it leaves `compact` and the
+/// topic stops expiring records, and an emptied policy meets its own refusal.
+fn list_op(
+    name: &str,
+    value: Option<&str>,
+    op: i8,
+    kafka: &serde_json::Map<String, serde_json::Value>,
+) -> Result<topic_config::Change, String> {
     let verb = if op == OP_APPEND {
         "append"
     } else {
@@ -181,19 +170,15 @@ fn list_op(name: &str, value: Option<&str>, op: i8) -> Result<topic_config::Delt
              LIST-typed configs and `{name}` is not one. Set it outright instead"
         ));
     }
-    // The current list, which is the only list there is.
-    let mut policies: Vec<&str> = vec![CLEANUP_DELETE];
-    let asked = value.unwrap_or_default().trim();
+    let mut policies = topic_config::policies(kafka);
+    let asked = value.unwrap_or_default().trim().to_ascii_lowercase();
     if op == OP_APPEND {
-        if !policies.iter().any(|p| p.eq_ignore_ascii_case(asked)) {
+        if !policies.contains(&asked) {
             policies.push(asked);
         }
     } else {
-        policies.retain(|p| !p.eq_ignore_ascii_case(asked));
+        policies.retain(|p| *p != asked);
     }
-    // ...and the result goes through the SET vocabulary, so an appended
-    // `compact` meets the refusal that stops Kafka Connect at startup and an
-    // emptied policy meets its own.
     topic_config::alter(CLEANUP_POLICY, Some(&policies.join(",")))
 }
 
@@ -202,6 +187,7 @@ mod tests {
     use super::*;
     use crate::handlers::alter_configs::tests::track;
     use crate::handlers::testing::facade_and_queen;
+    use crate::topic_record;
     use kafka_protocol::messages::incremental_alter_configs_request::AlterConfigsResource;
     use kafka_protocol::protocol::StrBytes;
     use serde_json::json;
@@ -296,9 +282,27 @@ mod tests {
         .await;
 
         assert_eq!(r.responses[0].error_code, 0, "{}", message(&r.responses[0]));
+        // The two keys the delete took out go as explicit nulls: "the default"
+        // to `/configure`, which a raft broker that MERGES a configure needs to
+        // hear, or the deleted retention would go on deleting.
         assert_eq!(
             api.configured(),
-            [("orders".to_string(), json!({"dedupWindowSeconds": 86_400}))]
+            [(
+                "orders".to_string(),
+                json!({
+                    "dedupWindowSeconds": 86_400,
+                    "retentionEnabled": null,
+                    "retentionSeconds": null
+                })
+            )]
+        );
+        assert_eq!(
+            api.kv_get(
+                crate::offsets::NAMESPACE,
+                &crate::topic_record::key("orders")
+            )
+            .unwrap()["set"],
+            json!({"dedupWindowSeconds": 86_400})
         );
     }
 
@@ -334,23 +338,6 @@ mod tests {
             assert!(why.contains(name) && why.contains("LIST-typed"), "{why}");
         }
 
-        // `APPEND compact` on the one list config: the compaction refusal.
-        let r = handle(
-            &f,
-            &request(vec![resource(
-                RESOURCE_TOPIC,
-                "orders",
-                vec![op("cleanup.policy", OP_APPEND, Some("compact"))],
-            )]),
-            None,
-        )
-        .await;
-        assert_eq!(
-            r.responses[0].error_code,
-            ResponseError::InvalidConfig.code()
-        );
-        assert!(message(&r.responses[0]).contains("compaction"));
-
         // `APPEND delete` computes the list it already is: a no-op.
         let r = handle(
             &f,
@@ -364,8 +351,8 @@ mod tests {
         .await;
         assert_eq!(r.responses[0].error_code, 0, "{}", message(&r.responses[0]));
 
-        // `SUBTRACT delete` empties it, and a topic with no cleanup policy is
-        // not a thing this facade will have.
+        // `SUBTRACT delete` from `[delete]` empties it, and a topic with no
+        // cleanup policy is not a thing this facade will have.
         let r = handle(
             &f,
             &request(vec![resource(
@@ -381,10 +368,50 @@ mod tests {
             ResponseError::InvalidConfig.code()
         );
         assert!(message(&r.responses[0]).contains("cannot be emptied"));
-
         assert!(
             api.configured().is_empty(),
             "a refused list operation reached Queen"
+        );
+
+        // `APPEND compact` on a deleting topic: `delete,compact`, and the
+        // retention it has keeps running, so the queue is not touched.
+        let r = handle(
+            &f,
+            &request(vec![resource(
+                RESOURCE_TOPIC,
+                "orders",
+                vec![op("cleanup.policy", OP_APPEND, Some("compact"))],
+            )]),
+            None,
+        )
+        .await;
+        assert_eq!(r.responses[0].error_code, 0, "{}", message(&r.responses[0]));
+        assert_eq!(
+            api.kv_get(
+                crate::offsets::NAMESPACE,
+                &crate::topic_record::key("orders")
+            )
+            .unwrap()["kafka"]["cleanup.policy"],
+            json!("delete,compact")
+        );
+        assert!(api.configured().is_empty());
+
+        // ...and `SUBTRACT delete` from THAT leaves `compact`: retention goes
+        // off on the queue, explicitly, and the topic keeps every record.
+        let r = handle(
+            &f,
+            &request(vec![resource(
+                RESOURCE_TOPIC,
+                "orders",
+                vec![op("cleanup.policy", OP_SUBTRACT, Some("delete"))],
+            )]),
+            None,
+        )
+        .await;
+        assert_eq!(r.responses[0].error_code, 0, "{}", message(&r.responses[0]));
+        assert_eq!(
+            api.configured(),
+            [("orders".to_string(), json!({"retentionEnabled": false}))]
         );
     }
 

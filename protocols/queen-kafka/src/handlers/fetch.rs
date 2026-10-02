@@ -109,7 +109,7 @@ use kafka_protocol::protocol::StrBytes;
 use kafka_protocol::records::{Record, TimestampType, NO_PRODUCER_EPOCH, NO_PRODUCER_ID};
 
 use crate::handlers::metadata;
-use crate::queen::{self, FetchEntry, Fetched};
+use crate::queen::{self, FetchEntry, RawFetched, RawRecord};
 use crate::records as envelope;
 use crate::throttle;
 use crate::wire;
@@ -414,7 +414,7 @@ async fn read_all(
     min_bytes: i64,
     budget: usize,
     token: Option<&str>,
-) -> Vec<queen::Result<Fetched>> {
+) -> Vec<queen::Result<RawFetched>> {
     let mut out = Vec::with_capacity(entries.len());
     let mut carried = 0usize;
     for chunk in entries.chunks(queen::MAX_FETCH_ENTRIES) {
@@ -455,10 +455,10 @@ async fn call(
     max_wait_ms: i64,
     min_bytes: i64,
     token: Option<&str>,
-) -> Vec<queen::Result<Fetched>> {
+) -> Vec<queen::Result<RawFetched>> {
     match facade
         .queen
-        .fetch(chunk, max_wait_ms, min_bytes, token)
+        .fetch_raw(chunk, max_wait_ms, min_bytes, token)
         .await
     {
         Ok(answers) if answers.len() == chunk.len() => answers.into_iter().map(Ok).collect(),
@@ -492,7 +492,7 @@ async fn bounds_only(
     facade: &Facade,
     chunk: &[FetchEntry],
     token: Option<&str>,
-) -> Vec<queen::Result<Fetched>> {
+) -> Vec<queen::Result<RawFetched>> {
     let probes: Vec<FetchEntry> = chunk
         .iter()
         .map(|e| FetchEntry {
@@ -512,7 +512,7 @@ async fn bounds_only(
                 }
                 other => other.map(str::to_string),
             };
-            *f = Fetched {
+            *f = RawFetched {
                 // Belt on braces: the probe is a zero-read, so there is nothing
                 // to drop here — but a record served past the budget is a record
                 // the response cannot carry.
@@ -528,25 +528,11 @@ async fn bounds_only(
 
 /// What one entry's answer costs to hold, near enough to spend a budget on.
 ///
-/// The payloads are walked as the JSON they arrived as rather than re-serialised
-/// or decoded twice; base64 makes that about a third larger than the record
-/// bytes [`render`] will actually count, so the read side stops slightly EARLY,
-/// which is the safe direction.
-fn carried_bytes(f: &Fetched) -> usize {
-    fn json_bytes(v: &serde_json::Value) -> usize {
-        match v {
-            serde_json::Value::String(s) => s.len(),
-            serde_json::Value::Array(a) => a.iter().map(json_bytes).sum::<usize>() + 2,
-            serde_json::Value::Object(o) => {
-                o.iter()
-                    .map(|(k, v)| k.len() + json_bytes(v))
-                    .sum::<usize>()
-                    + 2
-            }
-            _ => 8,
-        }
-    }
-    f.records.iter().map(|r| json_bytes(&r.payload)).sum()
+/// The payloads as the stored JSON they are; base64 makes that about a third
+/// larger than the record bytes [`render`] will actually count, so the read
+/// side stops slightly EARLY, which is the safe direction.
+fn carried_bytes(f: &RawFetched) -> usize {
+    f.records.iter().map(|r| r.payload.len()).sum()
 }
 
 // -------------------------------------------------------------------- answers
@@ -563,7 +549,7 @@ fn carried_bytes(f: &Fetched) -> usize {
 fn render(
     req: &FetchRequest,
     slots: &[Vec<Slot>],
-    read: &[queen::Result<Fetched>],
+    read: &[queen::Result<RawFetched>],
     budget: usize,
 ) -> FetchResponse {
     // Spent in request order across every topic of the response, because the
@@ -658,7 +644,7 @@ impl Failures {
             .get_or_insert_with(|| (partition, why.to_string()));
     }
 
-    fn refused_by_log(&mut self, partition: i32, marker: &str, f: &Fetched) {
+    fn refused_by_log(&mut self, partition: i32, marker: &str, f: &RawFetched) {
         self.from_log += 1;
         self.unmapped_marker |= !matches!(
             marker,
@@ -765,7 +751,7 @@ impl Failures {
 /// the partition is answered as an empty read — error-free, with its true
 /// watermarks, so the consumer knows exactly where it stands and comes back for
 /// the records on its next poll.
-fn served(topic: &str, index: i32, f: &Fetched, left: &mut usize) -> PartitionData {
+fn served(topic: &str, index: i32, f: &RawFetched, left: &mut usize) -> PartitionData {
     let records = if *left == 0 {
         Bytes::new()
     } else {
@@ -860,7 +846,7 @@ fn rejected(index: i32, error: ResponseError) -> PartitionData {
 /// for ever. Truncating is safe for the same reason the gap handling above is:
 /// records are contiguous from the fetch offset, so the consumer resumes at the
 /// first offset it did not get.
-fn batch(topic: &str, index: i32, records: &[queen::FetchedRecord], budget: usize) -> Bytes {
+fn batch(topic: &str, index: i32, records: &[RawRecord], budget: usize) -> Bytes {
     if records.is_empty() {
         return Bytes::new();
     }
@@ -889,7 +875,7 @@ fn batch(topic: &str, index: i32, records: &[queen::FetchedRecord], budget: usiz
             );
             break;
         }
-        let decoded = envelope::decode(&r.payload, r.timestamp_ms());
+        let decoded = envelope::decode_bytes(&r.payload, r.timestamp_ms);
         let cost = record_bytes(&decoded);
         if !out.is_empty() && cost > room {
             // The response is full. Everything from here is this consumer's
@@ -1027,6 +1013,7 @@ fn kafka_error(e: &queen::Error) -> ResponseError {
 mod tests {
     use super::*;
     use crate::queen::testing::FakeQueen;
+    use crate::queen::Fetched;
     use crate::queen::{Error, FetchedRecord};
     use crate::records::Decoded;
     use bytes::BytesMut;
@@ -2119,7 +2106,12 @@ mod tests {
             });
         }
 
-        let encoded = batch("orders", 0, &records, usize::MAX);
+        let raw = RawFetched::from_fetched(Fetched {
+            records,
+            ..Fetched::default()
+        })
+        .records;
+        let encoded = batch("orders", 0, &raw, usize::MAX);
         assert!(
             encoded.len() <= estimate,
             "the estimate ({estimate}) is below the encoding ({})",

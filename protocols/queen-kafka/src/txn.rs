@@ -64,6 +64,14 @@
 //! meets no binding and is answered `INVALID_TXN_STATE` (48), which is fatal in
 //! the Java transactional producer.
 //!
+//! A crash of THIS PROCESS, that is. A producer's connection closing is not
+//! one: the stage stays committable until its own timeout, by whoever resumes
+//! it with its producer id and epoch ([`Txns::drop_connection`]), which is what
+//! Flink's exactly-once sink needs across a TaskManager failover. Across a
+//! restart of the facade the stage is gone, and that resumed commit is the
+//! INVALID_TXN_STATE above: Flink drops such a committable and its records are
+//! lost. Closing that needs the stage in the replicated log, not in RAM.
+//!
 //! **A client can see `error_code = 0` on `EndTxn(commit)` only if this facade
 //! held the stage and the bundle committed. A false positive — the application
 //! believes committed while nothing landed — is unreachable.** The reverse (a
@@ -154,8 +162,26 @@ pub const DEFAULT_MAX_STAGED_BYTES: usize = 128 * 1024 * 1024;
 /// misconfiguration.
 pub const DEFAULT_MAX_OPEN: usize = 1_024;
 
-/// `transaction.max.timeout.ms`, Kafka's own default and its own refusal code.
-pub const DEFAULT_MAX_TIMEOUT_MS: u64 = 900_000;
+/// `transaction.max.timeout.ms` — `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS`. A
+/// `transaction.timeout.ms` above it is refused at InitProducerId with Kafka's
+/// own code, INVALID_TRANSACTION_TIMEOUT, and never silently shortened.
+///
+/// ONE HOUR, where Apache Kafka's broker default is fifteen minutes, and the
+/// difference is deliberate. Flink's `KafkaSink` asks for exactly one hour by
+/// default (`transaction.timeout.ms` must outlive a checkpoint interval plus a
+/// restart), and against a stock Kafka broker that is a refusal at
+/// `initTransactions()` until an operator raises the broker's cap — the first
+/// thing Flink's own documentation tells a user to do. A cap is a ceiling and
+/// not a timeout: every other producer still gets the timeout IT asks for
+/// (60 s for a plain one, 10 s for Kafka Streams), so the only transactions
+/// this raises are the ones that asked for longer.
+///
+/// What it costs is the time an abandoned stage holds memory, which since
+/// [`Txns::drop_connection`] keeps a stage past its connection is the stage's
+/// own timeout. That is bounded in bytes by
+/// [`DEFAULT_MAX_STAGED_BYTES`], and an orphaned stage gives way to a live
+/// producer when that budget is full ([`Txns::stage_records`]).
+pub const DEFAULT_MAX_TIMEOUT_MS: u64 = 3_600_000;
 
 /// How often the sweep walks the registry. A transaction timeout is measured in
 /// tens of seconds at least, so a second of granularity costs nothing and one
@@ -271,7 +297,8 @@ pub struct Txn {
     /// it advances every time this facade writes the row.
     pub version: i64,
     pub state: TxnState,
-    /// The connection that ran InitProducerId. A disconnect drops its stages.
+    /// The connection that ran InitProducerId. Its disconnect ORPHANS the
+    /// binding rather than dropping it ([`Txns::drop_connection`]).
     pub owner: ConnId,
     /// Registered by AddPartitionsToTxn, in arrival order.
     pub partitions: Vec<(String, i32)>,
@@ -294,9 +321,31 @@ pub struct Txn {
     /// The timeout the client asked for, kept so a re-open sets the same
     /// deadline without another request.
     timeout: Duration,
+    /// When [`Txn::owner`] closed, or `None` while it is open. An orphaned
+    /// binding outlives its connection by its own timeout and no longer
+    /// ([`Txn::lingered`]).
+    orphaned_at: Option<Instant>,
+    /// Whether the last transaction this binding DECIDED was an abort, which
+    /// is what makes a commit that follows it, of nothing, a refusal rather
+    /// than a success ([`Txns::begin_commit`]).
+    last_aborted: bool,
 }
 
 impl Txn {
+    /// Whether an orphaned binding has outlived what a resumed producer could
+    /// still need from it: its own timeout since the owner closed, and, for a
+    /// stage somebody reopened in the meantime, that stage's deadline too.
+    /// Never true while the owner is connected.
+    fn lingered(&self, now: Instant) -> bool {
+        self.orphaned_at
+            .is_some_and(|at| now >= at + self.timeout && !self.holds_stage_at(now))
+    }
+
+    /// An open stage before its deadline: what a commit could still land.
+    fn holds_stage_at(&self, now: Instant) -> bool {
+        self.state == TxnState::Open && now < self.deadline
+    }
+
     /// Is this request's `(producer_id, epoch)` the one this binding holds?
     fn check(&self, pid: i64, epoch: i16) -> Option<Fault> {
         if pid != self.pid {
@@ -502,6 +551,23 @@ impl Txns {
     ///
     /// `Err(())` is the open-transaction cap; the caller answers
     /// CONCURRENT_TRANSACTIONS, which is retriable and literally true.
+    ///
+    /// ## What a bind takes away besides the old epoch
+    ///
+    /// **The same connection's other IDLE bindings.** A Kafka producer drives
+    /// one `transactional.id` at a time over its own connections, so an owner
+    /// that binds a second id has moved off the first one for good — and that
+    /// is not a corner case, it is how Flink's `KafkaSink` runs: one pooled
+    /// producer re-initialised under a fresh id for every checkpoint
+    /// (`FlinkKafkaInternalProducer.initTransactionId`). Kept, those bindings
+    /// would fill [`Limits::max_open`] one checkpoint at a time and then refuse
+    /// every new id CONCURRENT_TRANSACTIONS. Only bindings holding no stage go:
+    /// an open one keeps its stage until it is decided or its deadline passes.
+    ///
+    /// **At the cap, ORPHANED idle bindings**, oldest first. They linger only
+    /// so a resumed producer's repeated commit finds its answer
+    /// ([`Txns::drop_connection`]), which is worth less than a live producer
+    /// being able to begin at all.
     // Eight arguments, and they are eight because a binding IS eight
     // independent facts a claim decided. A parameter struct would move the same
     // list one file away and stop the compiler naming the one a caller forgot.
@@ -518,7 +584,25 @@ impl Txns {
     ) -> Result<(), ()> {
         let mut inner = self.lock();
         let at = (tenant.clone(), id.to_string());
-        if !inner.txns.contains_key(&at) && inner.txns.len() >= self.limits.max_open {
+        inner.txns.retain(|key, t| {
+            *key == at
+                || t.owner != owner
+                || !matches!(t.state, TxnState::Empty | TxnState::Abortable)
+        });
+        while !inner.txns.contains_key(&at) && inner.txns.len() >= self.limits.max_open {
+            let oldest = inner
+                .txns
+                .iter()
+                .filter(|(_, t)| {
+                    t.orphaned_at.is_some()
+                        && matches!(t.state, TxnState::Empty | TxnState::Abortable)
+                })
+                .min_by_key(|(_, t)| t.orphaned_at)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = oldest {
+                inner.txns.remove(&key);
+                continue;
+            }
             if let Some(suppressed) = CAPPED.tick_now() {
                 tracing::warn!(
                     target: "kafka",
@@ -550,6 +634,8 @@ impl Txns {
                 seq: 0,
                 deadline: Instant::now() + timeout,
                 timeout,
+                orphaned_at: None,
+                last_aborted: false,
             },
         );
         Ok(())
@@ -613,6 +699,7 @@ impl Txns {
             if txn.state == TxnState::Empty {
                 txn.state = TxnState::Open;
                 txn.deadline = Instant::now() + txn.timeout;
+                txn.last_aborted = false;
             }
             Ok(wanted
                 .iter()
@@ -658,6 +745,7 @@ impl Txns {
                 TxnState::Empty => {
                     txn.state = TxnState::Open;
                     txn.deadline = Instant::now() + txn.timeout;
+                    txn.last_aborted = false;
                 }
                 TxnState::Open => {}
             }
@@ -743,7 +831,6 @@ impl Txns {
         }
         let mut inner = self.lock();
         let at = (tenant.clone(), id.to_string());
-        let staged_bytes = inner.staged_bytes;
         let txn = inner.txns.get_mut(&at).ok_or(Fault::Unknown)?;
         if txn.bytes.saturating_add(bytes) > limits.max_txn_bytes
             || txn.staged.len().saturating_add(items.len()) > limits.max_txn_records
@@ -764,6 +851,13 @@ impl Txns {
             }
             return Ok(Err(Full::Transaction));
         }
+        if inner.staged_bytes.saturating_add(bytes) > limits.max_staged_bytes {
+            // An orphaned stage is held for a producer that MIGHT come back to
+            // commit it; this one is here now. The orphans give way first,
+            // oldest first, and only what this entry needs.
+            shed_orphans(&mut inner, limits.max_staged_bytes.saturating_sub(bytes));
+        }
+        let staged_bytes = inner.staged_bytes;
         if staged_bytes.saturating_add(bytes) > limits.max_staged_bytes {
             // NOT `Abortable`: the transaction is fine and the PROCESS is full,
             // so the producer is answered something retriable and the same
@@ -780,6 +874,7 @@ impl Txns {
             }
             return Ok(Err(Full::Process));
         }
+        let txn = inner.txns.get_mut(&at).ok_or(Fault::Unknown)?;
         txn.bytes += bytes;
         txn.staged.extend(items);
         inner.staged_bytes += bytes;
@@ -801,6 +896,15 @@ impl Txns {
         self.with(tenant, id, pid, epoch, |txn| match txn.state {
             TxnState::Committing => Err(Fault::InFlight),
             TxnState::Abortable => Err(Fault::Abortable),
+            // Kafka's CompleteAbort-then-commit: INVALID_TXN_STATE, not a
+            // commit of nothing. With a stage that outlives its connection a
+            // RESUMED producer can send exactly this — commit a transaction
+            // that was aborted while it was away — and answering it 0 would be
+            // the one answer the module header calls unreachable. A commit
+            // after a COMMIT is still answered 0, which is Kafka's answer to a
+            // repeated commit and what a resumed commit of a transaction that
+            // had already landed must hear.
+            TxnState::Empty if txn.last_aborted => Err(Fault::NotOpen),
             TxnState::Empty | TxnState::Open => {
                 txn.state = TxnState::Committing;
                 Ok(Bundle {
@@ -824,6 +928,7 @@ impl Txns {
             txn.clear();
             txn.version = version;
             txn.seq += 1;
+            txn.last_aborted = false;
             inner.staged_bytes = inner.staged_bytes.saturating_sub(freed);
         }
     }
@@ -852,6 +957,7 @@ impl Txns {
         let (version, seq) = (txn.version, txn.seq);
         txn.clear();
         txn.seq += 1;
+        txn.last_aborted = true;
         inner.staged_bytes = inner.staged_bytes.saturating_sub(freed);
         Some((version, seq))
     }
@@ -874,21 +980,42 @@ impl Txns {
         }
     }
 
-    /// Drop every stage owned by one connection.
+    /// One connection closed: ORPHAN every binding it owns, and drop nothing.
     ///
-    /// The ordinary path for a producer that closes, and the crash path for one
-    /// that does not: either way a lost stage IS an aborted transaction,
-    /// because nothing of it was ever written.
+    /// Until 2026-10-01 this dropped the stages, on the argument that a lost
+    /// stage IS an aborted transaction. That is still true, and it is what made
+    /// Flink's exactly-once sink lose data: `KafkaSink` pre-commits a
+    /// transaction at a checkpoint (every record flushed and acknowledged here)
+    /// and commits it once the checkpoint completes, and when the TaskManager
+    /// fails in between, the restarted job RESUMES the transaction from its
+    /// checkpoint — a new connection, no InitProducerId, the same producer id
+    /// and epoch through `FlinkKafkaInternalProducer.resumeTransaction` — and
+    /// sends `EndTxn(commit)`. With the stage gone that commit met
+    /// INVALID_TXN_STATE, and Flink's committer drops a committable it is told
+    /// is in an invalid state: the checkpoint's records were lost while the job
+    /// carried on. Apache Kafka keeps a transaction until its
+    /// `transaction.timeout.ms` whoever disconnects, and so does this now.
+    ///
+    /// So a closed owner starts the binding's linger instead:
+    ///
+    ///   * an OPEN stage stays committable by anyone holding its producer id
+    ///     and epoch until its own deadline, which the sweep enforces exactly as
+    ///     it does for a connected producer;
+    ///   * every orphaned binding is removed once its own timeout has passed
+    ///     since the owner closed ([`Txn::lingered`]). An idle one lingers for
+    ///     the resumed commit of a transaction that HAD landed, which Kafka
+    ///     answers 0 and this answers 0 instead of INVALID_TXN_STATE.
+    ///
+    /// The memory is bounded as before: by the byte caps, by the timeout cap,
+    /// and by orphans giving way first when the process budget is full.
+    /// Nothing changes in the safety property: a resumed commit lands only a
+    /// stage this facade still holds, and an expired or aborted one is refused.
     pub fn drop_connection(&self, owner: ConnId) {
+        let now = Instant::now();
         let mut inner = self.lock();
-        let freed: usize = inner
-            .txns
-            .values()
-            .filter(|t| t.owner == owner)
-            .map(|t| t.bytes)
-            .sum();
-        inner.txns.retain(|_, t| t.owner != owner);
-        inner.staged_bytes = inner.staged_bytes.saturating_sub(freed);
+        for txn in inner.txns.values_mut().filter(|t| t.owner == owner) {
+            txn.orphaned_at.get_or_insert(now);
+        }
     }
 
     /// Drop the stage of every open transaction past its deadline.
@@ -902,19 +1029,30 @@ impl Txns {
     /// The binding and the durable marker are left alone. The next request
     /// naming the transaction is answered INVALID_TXN_STATE, which is what the
     /// client needs to hear.
+    ///
+    /// The one binding that does go is an ORPHAN that has lingered its whole
+    /// timeout ([`Txns::drop_connection`]): nobody holds the connection it was
+    /// bound on, and a resumed producer that comes back later than its own
+    /// `transaction.timeout.ms` meets the same INVALID_TXN_STATE an unknown id
+    /// does. An `Abortable` binding is not swept twice: it holds nothing.
     pub fn sweep(&self) -> usize {
         let now = Instant::now();
         let mut inner = self.lock();
         let mut swept = 0;
         let mut freed = 0;
         for txn in inner.txns.values_mut() {
-            if txn.state == TxnState::Empty || now < txn.deadline {
+            if matches!(txn.state, TxnState::Empty | TxnState::Abortable) || now < txn.deadline {
                 continue;
             }
             freed += txn.bytes;
             txn.expire();
             swept += 1;
         }
+        inner.txns.retain(|_, t| {
+            let gone = t.lingered(now);
+            freed += if gone { t.bytes } else { 0 };
+            !gone
+        });
         inner.staged_bytes = inner.staged_bytes.saturating_sub(freed);
         if swept > 0 {
             if let Some(suppressed) = SWEPT.tick_now() {
@@ -930,6 +1068,48 @@ impl Txns {
         }
         swept
     }
+}
+
+/// Expire ORPHANED stages, oldest orphan first, until the process charge is at
+/// or below `target` or no orphan holds anything. Answers how many it expired.
+///
+/// The price is paid by the one party that is not here: a producer that may
+/// come back to resume a commit ([`Txns::drop_connection`]) meets
+/// INVALID_TXN_STATE instead, which is what it met before stages outlived
+/// their connections. A connected producer's stage is never taken this way.
+fn shed_orphans(inner: &mut Inner, target: usize) -> usize {
+    let mut orphans: Vec<(Instant, (TenantKey, String))> = inner
+        .txns
+        .iter()
+        .filter(|(_, t)| t.bytes > 0 && t.state == TxnState::Open)
+        .filter_map(|(key, t)| t.orphaned_at.map(|at| (at, key.clone())))
+        .collect();
+    orphans.sort_by_key(|(at, _)| *at);
+    let mut shed = 0;
+    for (_, key) in orphans {
+        if inner.staged_bytes <= target {
+            break;
+        }
+        if let Some(txn) = inner.txns.get_mut(&key) {
+            let freed = txn.bytes;
+            txn.expire();
+            inner.staged_bytes = inner.staged_bytes.saturating_sub(freed);
+            shed += 1;
+        }
+    }
+    if shed > 0 {
+        if let Some(suppressed) = SWEPT.tick_now() {
+            tracing::warn!(
+                target: "kafka",
+                shed,
+                suppressed,
+                "QUEEN_KAFKA_TXN_MAX_STAGED_BYTES is full: transactions whose producer had \
+                 disconnected gave their stages up to a connected one; a resumed commit of \
+                 them is answered INVALID_TXN_STATE"
+            );
+        }
+    }
+    shed
 }
 
 /// Everything `EndTxn(commit)` needs, taken out of the stage.
@@ -1234,10 +1414,14 @@ mod tests {
             max_open: 2,
             ..Limits::default()
         });
-        bound(&t, "a");
-        bound(&t, "b");
+        // Two producers, so two connections: one connection's second id takes
+        // its first idle one away ([`Txns::bind`]).
+        t.bind(&tenant(), "a", 7, 0, 1, 1, Duration::from_secs(60))
+            .unwrap();
+        t.bind(&tenant(), "b", 7, 0, 1, 2, Duration::from_secs(60))
+            .unwrap();
         assert!(t
-            .bind(&tenant(), "c", 7, 0, 1, 1, Duration::from_secs(60))
+            .bind(&tenant(), "c", 7, 0, 1, 3, Duration::from_secs(60))
             .is_err());
         // An id already bound is a REBIND, which allocates nothing.
         assert!(t
@@ -1493,37 +1677,214 @@ mod tests {
         );
     }
 
+    /// Open `id` and stage one record of `bytes` into it.
+    fn open_with(t: &Txns, id: &str, pid: i64, bytes: usize) {
+        t.add_partitions(&tenant(), id, pid, 0, &[("orders".into(), 0)])
+            .unwrap();
+        t.stage_records(
+            &tenant(),
+            id,
+            pid,
+            0,
+            "orders",
+            0,
+            vec![item("orders", 0)],
+            bytes,
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    /// THE Flink case. A disconnect ORPHANS the stage instead of dropping it,
+    /// so a restarted job that resumes the transaction on a new connection —
+    /// same producer id and epoch, no InitProducerId — commits exactly what the
+    /// old connection staged. Before 2026-10-01 this commit met
+    /// INVALID_TXN_STATE and Flink dropped the checkpoint's records.
     #[test]
-    fn a_disconnect_drops_only_that_connections_stages() {
+    fn a_disconnect_orphans_the_stage_and_a_resumed_commit_finds_it() {
         let t = txns();
         t.bind(&tenant(), "a", 7, 0, 1, 11, Duration::from_secs(60))
             .unwrap();
         t.bind(&tenant(), "b", 8, 0, 1, 22, Duration::from_secs(60))
             .unwrap();
-        for (id, pid) in [("a", 7), ("b", 8)] {
-            t.add_partitions(&tenant(), id, pid, 0, &[("orders".into(), 0)])
-                .unwrap();
+        open_with(&t, "a", 7, 100);
+        open_with(&t, "b", 8, 100);
+        t.drop_connection(11);
+        assert_eq!(t.len(), 2, "the orphan is still bound");
+        assert_eq!(t.staged_bytes(), 200, "and still holds its stage");
+        let bundle = t.begin_commit(&tenant(), "a", 7, 0).expect("resumed");
+        assert_eq!(bundle.items.len(), 1);
+        t.commit_landed(&tenant(), "a", 2);
+        assert_eq!(t.staged_bytes(), 100);
+    }
+
+    /// An orphan outlives its connection by its own timeout and no longer: an
+    /// open stage expires at its deadline exactly as a connected one does, and
+    /// the binding itself goes once the timeout has passed since the owner
+    /// closed. Bounded in time, like everything else here.
+    #[tokio::test(start_paused = true)]
+    async fn an_orphan_lingers_its_own_timeout_and_no_longer() {
+        let t = txns();
+        t.bind(&tenant(), "staged", 7, 0, 1, 11, Duration::from_secs(30))
+            .unwrap();
+        open_with(&t, "staged", 7, 100);
+        t.bind(&tenant(), "idle", 8, 0, 1, 22, Duration::from_secs(30))
+            .unwrap();
+        t.drop_connection(11);
+        t.drop_connection(22);
+
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert_eq!(t.sweep(), 0);
+        assert_eq!(t.len(), 2, "inside the timeout both linger");
+        assert!(t.begin_commit(&tenant(), "staged", 7, 0).is_ok());
+        t.commit_failed(&tenant(), "staged");
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        t.sweep();
+        assert_eq!(t.len(), 0, "past it both are gone");
+        assert_eq!(t.staged_bytes(), 0);
+        assert_eq!(
+            t.begin_commit(&tenant(), "staged", 7, 0)
+                .unwrap_err()
+                .code(),
+            ResponseError::InvalidTxnState
+        );
+    }
+
+    /// A connected producer's bindings never linger out: the timeout is the
+    /// orphan's, and an idle binding on a live connection is the producer's
+    /// between two transactions.
+    #[tokio::test(start_paused = true)]
+    async fn a_connected_binding_never_lingers_out() {
+        let t = txns();
+        bound(&t, "tx");
+        tokio::time::advance(Duration::from_secs(3_600)).await;
+        t.sweep();
+        assert_eq!(t.len(), 1);
+    }
+
+    /// A resumed commit of a transaction that had ALREADY landed is Kafka's
+    /// repeated commit, answered 0 and writing nothing; one of a transaction
+    /// that was ABORTED is INVALID_TXN_STATE, and never a commit of nothing.
+    /// The difference is the whole safety property once a stage can be
+    /// committed by a producer that was away while it was decided.
+    #[test]
+    fn a_commit_after_an_abort_is_refused_and_after_a_commit_is_not() {
+        let t = txns();
+        bound(&t, "tx");
+        open_with(&t, "tx", 7, 100);
+        t.begin_commit(&tenant(), "tx", 7, 0).unwrap();
+        t.commit_landed(&tenant(), "tx", 101);
+        let again = t.begin_commit(&tenant(), "tx", 7, 0).expect("repeated");
+        assert!(again.items.is_empty() && again.offsets.is_empty());
+        t.commit_landed(&tenant(), "tx", 101);
+
+        open_with(&t, "tx", 7, 100);
+        t.discard(&tenant(), "tx");
+        assert_eq!(
+            t.begin_commit(&tenant(), "tx", 7, 0).unwrap_err(),
+            Fault::NotOpen
+        );
+        assert_eq!(Fault::NotOpen.code(), ResponseError::InvalidTxnState);
+        // ...and the next transaction the producer opens commits as usual.
+        open_with(&t, "tx", 7, 100);
+        assert_eq!(
+            t.begin_commit(&tenant(), "tx", 7, 0).unwrap().items.len(),
+            1
+        );
+    }
+
+    /// Flink re-initialises one pooled producer under a fresh id per
+    /// checkpoint. The connection's previous idle binding goes with each bind,
+    /// or the open-transaction cap would fill one checkpoint at a time; a
+    /// binding still holding a stage stays.
+    #[test]
+    fn a_bind_takes_away_the_same_connections_idle_bindings() {
+        let t = txns();
+        t.bind(&tenant(), "ckpt-1", 7, 0, 1, 11, Duration::from_secs(60))
+            .unwrap();
+        t.bind(&tenant(), "ckpt-2", 8, 0, 1, 11, Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(t.len(), 1);
+        assert_eq!(
+            t.with(&tenant(), "ckpt-1", 7, 0, |_| ()).unwrap_err(),
+            Fault::Unknown
+        );
+        open_with(&t, "ckpt-2", 8, 100);
+        t.bind(&tenant(), "ckpt-3", 9, 0, 1, 11, Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(t.len(), 2, "an open stage is not idle");
+        // Another connection's idle binding is not this connection's to take.
+        t.bind(&tenant(), "other", 10, 0, 1, 22, Duration::from_secs(60))
+            .unwrap();
+        t.bind(&tenant(), "ckpt-4", 11, 0, 1, 11, Duration::from_secs(60))
+            .unwrap();
+        assert!(t.with(&tenant(), "other", 10, 0, |_| ()).is_ok());
+    }
+
+    /// At the open-transaction cap an ORPHANED idle binding gives way to a new
+    /// producer; with none to give, the cap refuses as it always did.
+    #[test]
+    fn at_the_cap_an_orphaned_idle_binding_gives_way() {
+        let t = Txns::new(Limits {
+            max_open: 2,
+            ..Limits::default()
+        });
+        let bind = |id: &str, owner: ConnId| {
+            t.bind(&tenant(), id, 7, 0, 1, owner, Duration::from_secs(60))
+        };
+        bind("a", 1).unwrap();
+        bind("b", 2).unwrap();
+        assert!(bind("c", 3).is_err(), "no orphan to give way");
+        t.drop_connection(1);
+        bind("c", 3).expect("the orphan gave way");
+        assert_eq!(t.len(), 2);
+        assert!(t.with(&tenant(), "b", 7, 0, |_| ()).is_ok());
+    }
+
+    /// A full process budget takes an ORPHAN's stage before it refuses a
+    /// connected producer, and the orphan's resumed commit is then refused
+    /// rather than answered as a commit of nothing.
+    #[test]
+    fn a_full_budget_takes_an_orphans_stage_first() {
+        let t = Txns::new(Limits {
+            max_staged_bytes: 1_000,
+            max_txn_bytes: 1_000,
+            ..Limits::default()
+        });
+        t.bind(&tenant(), "gone", 7, 0, 1, 11, Duration::from_secs(60))
+            .unwrap();
+        t.bind(&tenant(), "here", 8, 0, 1, 22, Duration::from_secs(60))
+            .unwrap();
+        open_with(&t, "gone", 7, 600);
+        t.drop_connection(11);
+        open_with(&t, "here", 8, 600);
+        assert_eq!(t.staged_bytes(), 600);
+        assert_eq!(
+            t.begin_commit(&tenant(), "gone", 7, 0).unwrap_err().code(),
+            ResponseError::InvalidTxnState
+        );
+        // A connected producer's stage is never taken: with no orphan left the
+        // budget refuses retriably, as before.
+        t.bind(&tenant(), "third", 9, 0, 1, 33, Duration::from_secs(60))
+            .unwrap();
+        t.add_partitions(&tenant(), "third", 9, 0, &[("orders".into(), 0)])
+            .unwrap();
+        assert_eq!(
             t.stage_records(
                 &tenant(),
-                id,
-                pid,
+                "third",
+                9,
                 0,
                 "orders",
                 0,
                 vec![item("orders", 0)],
-                100,
+                600
             )
-            .unwrap()
-            .unwrap();
-        }
-        assert_eq!(t.staged_bytes(), 200);
-        t.drop_connection(11);
-        assert_eq!(t.len(), 1);
-        assert_eq!(t.staged_bytes(), 100);
-        assert_eq!(
-            t.with(&tenant(), "a", 7, 0, |_| ()).unwrap_err(),
-            Fault::Unknown
+            .unwrap(),
+            Err(Full::Process)
         );
+        assert_eq!(t.staged_bytes(), 600);
     }
 
     // ----------------------------------------------------------- the sweep

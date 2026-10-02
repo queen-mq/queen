@@ -361,8 +361,10 @@ public class QueenKafkaTxn {
         // --- transaction.timeout.ms above QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS.
         // 50 = INVALID_TRANSACTION_TIMEOUT, which is Kafka's own answer to
         // exactly this and the only cap in the table with a Kafka analogue.
+        // One millisecond past the default cap, which is one hour since
+        // 2026-10-01 (Flink's KafkaSink default; Kafka's own is 15 minutes).
         String tooLong = "no exception at all";
-        Properties props = producerProps("qkt-" + RUN + "-s6-timeout", 1_000_000);
+        Properties props = producerProps("qkt-" + RUN + "-s6-timeout", 3_600_001);
         props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "20000");
         try (Producer<String, String> p = new KafkaProducer<>(props)) {
             p.initTransactions();

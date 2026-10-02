@@ -580,6 +580,135 @@ pub async fn kv_month_msgs(kv: &dyn KvBackend, cluster: Uuid, now_us: i64) -> Re
 }
 
 // ---------------------------------------------------------------------------
+// KV: the control plane's activity read (`POST /api/cp/activity`)
+// ---------------------------------------------------------------------------
+
+/// The op classes that count as a tenant's TRAFFIC (the 1.x
+/// `tenant.activity`): `configure` is administration, not use.
+pub const TRAFFIC_OPS: [&str; 4] = ["push", "delivery", "txn", "read"];
+
+/// One cluster's activity, read from its usage rows (every node's).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Activity {
+    /// The newest instant with traffic, epoch microseconds: a minute's start,
+    /// or the last second of a rolled day (a day row has no time of day, and
+    /// rounding it down would make a tenant that was busy all afternoon look a
+    /// day more idle than it is).
+    pub last_traffic_us: Option<i64>,
+    /// The start of the oldest minute still kept with pushed messages.
+    pub first_push_us: Option<i64>,
+}
+
+fn is_traffic(op: &str, d: &UsageDoc) -> bool {
+    TRAFFIC_OPS.contains(&op) && (d.reqs > 0 || d.msgs > 0)
+}
+
+/// [`Activity`] over the KV, as of `now_us`, minutes being kept `keep_days`
+/// ([`minute_ttl_secs`]). The day rows (a few per day, kept forever) say
+/// which days had traffic and pushes. The minutes read are the ones no day
+/// row covers yet (from the day before the last rolled one, the rollup's own
+/// re-roll window) and, while they are kept, those of the newest traffic day
+/// before that window and of the oldest days that pushed: a cluster with 90
+/// days of history never has 90 days of minutes read.
+pub async fn kv_activity(
+    kv: &dyn KvBackend,
+    cluster: Uuid,
+    keep_days: u64,
+    now_us: i64,
+) -> Result<Activity, String> {
+    // Every minute of day `d` expires at the start of day `d + keep_days + 2`.
+    let today = day_of(now_us);
+    let kept = |d: i64| d + keep_days.max(1) as i64 + 2 > today;
+    let mut last_rolled: Option<i64> = None;
+    let mut last_traffic_day: Option<i64> = None;
+    let mut push_days: Vec<i64> = Vec::new();
+    for (k, v) in scan_range(kv, ns::USAGE_DAY, &schema::prefix(cluster), None, None).await? {
+        let (Some((day, op)), Some(doc)) = (parse_day_key(&k), doc_of(&v)) else {
+            continue;
+        };
+        last_rolled = last_rolled.max(Some(day));
+        if is_traffic(op, &doc) {
+            last_traffic_day = last_traffic_day.max(Some(day));
+        }
+        // Keys sort by day: the list comes out ascending.
+        if op == "push" && doc.msgs > 0 && push_days.last() != Some(&day) {
+            push_days.push(day);
+        }
+    }
+
+    // The minutes a day row does not cover yet (all of them before a first
+    // rollup).
+    let tail_day = last_rolled.map(|d| d - 1);
+    let mut last_minute: Option<i64> = None;
+    let mut tail_first_push: Option<i64> = None;
+    for (minute, op, doc) in
+        kv_minutes(kv, cluster, tail_day.map_or(0, |d| d * DAY_US), None).await?
+    {
+        if is_traffic(&op, &doc) {
+            last_minute = last_minute.max(Some(minute));
+        }
+        if op == "push" && doc.msgs > 0 && tail_first_push.is_none() {
+            tail_first_push = Some(minute);
+        }
+    }
+    // The newest traffic is the exact minute wherever one is kept: a minute
+    // the tail found is at least as new as any rolled traffic day before it.
+    // A rolled traffic day newer than every minute found speaks through its
+    // own minutes while they are kept, and as its last second once they are
+    // gone (a day row has no time of day, and rounding it down would make a
+    // tenant that was busy all afternoon look a day more idle than it is).
+    let last_traffic_us = match last_traffic_day {
+        Some(d) if last_minute.is_none_or(|m| day_of(m) < d) => {
+            // Inside the tail window the tail has already read that day.
+            let exact = if tail_day.is_some_and(|t| d < t) && kept(d) {
+                newest_traffic_minute(kv, cluster, d).await?
+            } else {
+                None
+            };
+            Some(exact.unwrap_or((d + 1) * DAY_US - 1_000_000)).max(last_minute)
+        }
+        _ => last_minute,
+    };
+
+    // The oldest push: in the oldest rolled push day before the tail whose
+    // minutes are still kept, else in the tail.
+    let mut first_push_us = None;
+    for d in push_days
+        .into_iter()
+        .filter(|d| tail_day.is_some_and(|t| *d < t) && kept(*d))
+    {
+        first_push_us = kv_minutes(kv, cluster, d * DAY_US, Some((d + 1) * DAY_US))
+            .await?
+            .into_iter()
+            .find(|(_, op, doc)| op == "push" && doc.msgs > 0)
+            .map(|(minute, _, _)| minute);
+        if first_push_us.is_some() {
+            break;
+        }
+    }
+    Ok(Activity {
+        last_traffic_us,
+        first_push_us: first_push_us.or(tail_first_push),
+    })
+}
+
+/// The newest minute of UTC day `day` with traffic, from every node.
+async fn newest_traffic_minute(
+    kv: &dyn KvBackend,
+    cluster: Uuid,
+    day: i64,
+) -> Result<Option<i64>, String> {
+    Ok(
+        kv_minutes(kv, cluster, day * DAY_US, Some((day + 1) * DAY_US))
+            .await?
+            .into_iter()
+            .filter(|(_, op, doc)| is_traffic(op, doc))
+            .map(|(minute, _, _)| minute)
+            .max(),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // KV: rollup
 // ---------------------------------------------------------------------------
 
@@ -818,6 +947,15 @@ pub async fn cluster_usage_by_day(
     match store {
         Store::Kv(kv) => kv_usage_by_day(kv.as_ref(), cluster, from, to).await,
         Store::None => Ok(Vec::new()),
+    }
+}
+
+/// A cluster's [`Activity`] (`POST /api/cp/activity`); nothing without a
+/// store.
+pub async fn cluster_activity(store: &Store, cluster: Uuid) -> Result<Activity, String> {
+    match store {
+        Store::Kv(kv) => kv_activity(kv.as_ref(), cluster, keep_days_from_env(), now_us()).await,
+        Store::None => Ok(Activity::default()),
     }
 }
 
@@ -1182,6 +1320,190 @@ mod tests {
             ]
         );
         assert!(cluster_usage_by_day(&store, c1(), "2026-13-01", "2026-09-01").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn activity_is_the_newest_traffic_and_the_oldest_kept_push() {
+        let kv = MemKv::new();
+        let today = day_of(noon_0924());
+        assert_eq!(
+            kv_activity(&kv, c1(), 90, noon_0924()).await.unwrap(),
+            Activity::default(),
+            "no rows: absent, never zero"
+        );
+
+        // Minutes only (nothing rolled yet): the newest traffic minute and the
+        // oldest push; a configure is administration, not traffic.
+        put_min(&kv, c1(), today * DAY_US + 5 * MINUTE_US, "push", "n1", 3).await;
+        put_min(&kv, c1(), today * DAY_US + 9 * MINUTE_US, "read", "n2", 0).await;
+        put_min(
+            &kv,
+            c1(),
+            today * DAY_US + 30 * MINUTE_US,
+            "configure",
+            "n1",
+            0,
+        )
+        .await;
+        let a = kv_activity(&kv, c1(), 90, noon_0924()).await.unwrap();
+        assert_eq!(a.last_traffic_us, Some(today * DAY_US + 9 * MINUTE_US));
+        assert_eq!(a.first_push_us, Some(today * DAY_US + 5 * MINUTE_US));
+
+        // Rolled days: the oldest push day whose minutes are still kept wins
+        // over the tail; one whose minutes expired gives way to the next.
+        put_day(&kv, c1(), today - 40, "push", 5).await;
+        put_day(&kv, c1(), today - 20, "push", 4).await;
+        put_min(
+            &kv,
+            c1(),
+            (today - 20) * DAY_US + 61 * MINUTE_US,
+            "push",
+            "n1",
+            4,
+        )
+        .await;
+        put_day(&kv, c1(), today - 2, "delivery", 1).await;
+        let a = kv_activity(&kv, c1(), 90, noon_0924()).await.unwrap();
+        assert_eq!(
+            a.first_push_us,
+            Some((today - 20) * DAY_US + 61 * MINUTE_US)
+        );
+        assert_eq!(
+            a.last_traffic_us,
+            Some(today * DAY_US + 9 * MINUTE_US),
+            "today is newer than any rolled day"
+        );
+    }
+
+    /// Rolled up yesterday, its minutes still kept: the exact minute, not
+    /// the day's last second.
+    #[tokio::test]
+    async fn a_rolled_day_whose_minutes_are_kept_reports_the_exact_minute() {
+        let kv = MemKv::new();
+        let now = noon_0924();
+        let today = day_of(now);
+        put_day(&kv, c1(), today - 1, "push", 3).await;
+        put_min(
+            &kv,
+            c1(),
+            (today - 1) * DAY_US + 600 * MINUTE_US,
+            "push",
+            "n1",
+            3,
+        )
+        .await;
+        let a = kv_activity(&kv, c1(), 90, now).await.unwrap();
+        assert_eq!(
+            a.last_traffic_us,
+            Some((today - 1) * DAY_US + 600 * MINUTE_US)
+        );
+        assert_eq!(
+            iso_minute(a.last_traffic_us.unwrap()),
+            format!("{}T10:00:00Z", day_str(today - 1))
+        );
+
+        // Traffic that stopped before the tail window (later days carry only
+        // a configure): that day's own minutes, while they are kept...
+        let kv = MemKv::new();
+        put_day(&kv, c1(), today - 10, "read", 0).await;
+        put_min(
+            &kv,
+            c1(),
+            (today - 10) * DAY_US + 75 * MINUTE_US,
+            "read",
+            "n1",
+            0,
+        )
+        .await;
+        put_min(
+            &kv,
+            c1(),
+            (today - 10) * DAY_US + 80 * MINUTE_US,
+            "configure",
+            "n1",
+            0,
+        )
+        .await;
+        put_day(&kv, c1(), today - 1, "configure", 0).await;
+        let a = kv_activity(&kv, c1(), 90, now).await.unwrap();
+        assert_eq!(
+            a.last_traffic_us,
+            Some((today - 10) * DAY_US + 75 * MINUTE_US)
+        );
+        // ...and the day's last second once the keep window has passed it
+        // (the row is still in this store; the rule does not read it).
+        let a = kv_activity(&kv, c1(), 5, now).await.unwrap();
+        assert_eq!(a.last_traffic_us, Some((today - 9) * DAY_US - 1_000_000));
+    }
+
+    /// A push day past the keep window is not read for its minutes: the
+    /// oldest push is the oldest one still kept.
+    #[tokio::test]
+    async fn push_days_past_the_keep_window_are_skipped() {
+        let kv = MemKv::new();
+        let now = noon_0924();
+        let today = day_of(now);
+        put_day(&kv, c1(), today - 100, "push", 1).await;
+        put_min(
+            &kv,
+            c1(),
+            (today - 100) * DAY_US + MINUTE_US,
+            "push",
+            "n1",
+            1,
+        )
+        .await;
+        put_day(&kv, c1(), today - 20, "push", 2).await;
+        put_min(
+            &kv,
+            c1(),
+            (today - 20) * DAY_US + 2 * MINUTE_US,
+            "push",
+            "n1",
+            2,
+        )
+        .await;
+        put_day(&kv, c1(), today - 1, "push", 1).await;
+        let a = kv_activity(&kv, c1(), 90, now).await.unwrap();
+        assert_eq!(a.first_push_us, Some((today - 20) * DAY_US + 2 * MINUTE_US));
+        let a = kv_activity(&kv, c1(), 200, now).await.unwrap();
+        assert_eq!(
+            a.first_push_us,
+            Some((today - 100) * DAY_US + MINUTE_US),
+            "kept with a longer window"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rolled_day_reports_its_last_second_and_a_zero_row_is_no_traffic() {
+        let kv = MemKv::new();
+        let today = day_of(noon_0924());
+        put_day(&kv, c1(), today - 3, "txn", 2).await;
+        put_day(&kv, c1(), today - 1, "configure", 9).await;
+        let zero = UsageDoc::default();
+        kv::write(
+            &kv,
+            vec![kv::put_op(
+                ns::USAGE_MIN,
+                &minute_key(c1(), today * DAY_US, "push", "n1"),
+                &zero,
+                Expect::Any,
+                Ttl::Forever,
+                false,
+            )],
+        )
+        .await
+        .unwrap();
+        let a = kv_activity(&kv, c1(), 90, noon_0924()).await.unwrap();
+        assert_eq!(a.last_traffic_us, Some((today - 2) * DAY_US - 1_000_000));
+        assert!(iso_minute(a.last_traffic_us.unwrap()).ends_with("T23:59:59Z"));
+        assert_eq!(a.first_push_us, None, "a push row of zeros pushed nothing");
+        let store = Store::Kv(std::sync::Arc::new(kv));
+        assert_eq!(cluster_activity(&store, c1()).await.unwrap(), a);
+        assert_eq!(
+            cluster_activity(&Store::None, c1()).await.unwrap(),
+            Activity::default()
+        );
     }
 
     #[tokio::test]

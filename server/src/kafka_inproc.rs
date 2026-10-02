@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt;
 use queen_kafka::boot;
 use queen_kafka::queen::{
-    BoxFuture, HttpQueen, LocalDispatch, LocalRequest, LocalResponse, QueenApi,
+    BoxFuture, HttpQueen, LocalAnswer, LocalDispatch, LocalRequest, LocalResponse, QueenApi,
 };
 use tower::ServiceExt;
 
@@ -138,7 +138,178 @@ async fn direct_kv(
     crate::handlers::facade_kv(rsm, tenant, ops, KV_BUDGET).await
 }
 
+/// The deadline of a typed push, the route's default (`DEFAULT_TIMEOUT`,
+/// 30 s): the facade's own 10-second budget for a call ends it first anyway.
+const RECORDS_BUDGET: Duration = Duration::from_secs(30);
+
+/// The answer the route would have given for `e`: [`crate::handlers::raft::err_response`]
+/// read back into the facade's shape, so a typed call fails exactly as the
+/// route does (status, `Retry-After`, body).
+async fn refusal(e: crate::rsm::facade::RsmError) -> LocalResponse {
+    let response = crate::handlers::raft::err_response(e);
+    let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    LocalResponse {
+        status,
+        retry_after,
+        body,
+    }
+}
+
+/// The route's authorization for a typed call: `Ok(sub)` with the JWT subject,
+/// or the refusal the router would have answered.
+async fn authorize(
+    auth: &crate::auth::Authenticator,
+    path: &str,
+    bearer: Option<&str>,
+) -> Result<Option<String>, LocalResponse> {
+    crate::auth::authorize_route(auth, &axum::http::Method::POST, path, bearer)
+        .await
+        .map_err(|(status, why)| LocalResponse {
+            status: status.as_u16(),
+            retry_after: None,
+            body: format!("{{\"error\":\"{why}\"}}"),
+        })
+}
+
 impl LocalDispatch for RouterDispatch {
+    /// The record path is the state machine's own push and fetch
+    /// ([`Rsm::push_records`], [`Rsm::fetch_records`]): the commands, the
+    /// admission budget and the reads of the two routes, without their JSON.
+    fn serves_records(&self) -> bool {
+        self.kv.is_some()
+    }
+
+    fn push_records(
+        &self,
+        bearer: Option<String>,
+        items: Vec<queen_kafka::queen::RawPush>,
+    ) -> BoxFuture<'static, Result<LocalAnswer<Vec<queen_kafka::queen::Pushed>>, String>> {
+        let Some((rsm, auth)) = self.kv.clone() else {
+            return Box::pin(async { Err("no state machine for the record path".to_string()) });
+        };
+        let task = self.broker.spawn(async move {
+            let sub = match authorize(&auth, "/api/v1/push", bearer.as_deref()).await {
+                Ok(sub) => sub,
+                Err(refused) => return LocalAnswer::Refused(refused),
+            };
+            let tenant = crate::tenant::Tenant::default_tenant().as_str().to_string();
+            let ctx = crate::rsm::facade::ReqCtx::new(
+                tenant,
+                crate::rsm::facade::Deadline::after(RECORDS_BUDGET),
+            )
+            .with_producer_sub(sub);
+            let records = items
+                .into_iter()
+                .map(|i| crate::rsm::facade::RecordPush {
+                    queue: i.queue,
+                    partition: i.partition,
+                    payload: i.payload,
+                })
+                .collect();
+            match rsm.push_records(ctx, records).await {
+                Ok(out) => LocalAnswer::Done(
+                    out.into_iter()
+                        .map(|o| queen_kafka::queen::Pushed {
+                            status: o.status.to_string(),
+                            offset: o.offset.map(|v| v as i64),
+                        })
+                        .collect(),
+                ),
+                Err(e) => LocalAnswer::Refused(refusal(e).await),
+            }
+        });
+        Box::pin(async move {
+            task.await
+                .map_err(|e| format!("the broker task serving an in-process push ended: {e}"))
+        })
+    }
+
+    fn fetch_records(
+        &self,
+        bearer: Option<String>,
+        entries: Vec<queen_kafka::queen::FetchEntry>,
+        max_wait_ms: i64,
+        min_bytes: i64,
+    ) -> BoxFuture<'static, Result<LocalAnswer<Vec<queen_kafka::queen::RawFetched>>, String>> {
+        let Some((rsm, auth)) = self.kv.clone() else {
+            return Box::pin(async { Err("no state machine for the record path".to_string()) });
+        };
+        let task = self.broker.spawn(async move {
+            if let Err(refused) = authorize(&auth, "/api/v1/fetch", bearer.as_deref()).await {
+                return LocalAnswer::Refused(refused);
+            }
+            let max_wait_ms = max_wait_ms.clamp(0, 30_000) as u64;
+            let tenant = crate::tenant::Tenant::default_tenant().as_str().to_string();
+            let ctx = crate::rsm::facade::ReqCtx::new(
+                tenant,
+                crate::rsm::facade::Deadline::after(
+                    RECORDS_BUDGET + Duration::from_millis(max_wait_ms),
+                ),
+            );
+            // The route's bounds: a negative offset refuses the whole read, as
+            // a 400 does there; a budget is clamped to 1 B..8 MiB.
+            if entries.iter().any(|e| e.offset < 0) {
+                return LocalAnswer::Refused(LocalResponse {
+                    status: 400,
+                    retry_after: None,
+                    body: "{\"error\":\"offset must be non-negative\"}".to_string(),
+                });
+            }
+            let asks = entries
+                .into_iter()
+                .map(|e| crate::rsm::facade::RecordFetch {
+                    queue: e.queue,
+                    partition: e.partition,
+                    offset: e.offset as u64,
+                    max_bytes: e.max_bytes.clamp(1, 8 << 20) as usize,
+                })
+                .collect();
+            match rsm
+                .fetch_records(ctx, asks, max_wait_ms, min_bytes.max(0) as usize)
+                .await
+            {
+                Ok(read) => LocalAnswer::Done(
+                    read.into_iter()
+                        .map(|f| queen_kafka::queen::RawFetched {
+                            records: f
+                                .records
+                                .into_iter()
+                                .map(|r| queen_kafka::queen::RawRecord {
+                                    offset: r.offset as i64,
+                                    // `null` for an empty payload, as the
+                                    // route renders one.
+                                    payload: if r.payload.is_empty() {
+                                        bytes::Bytes::from_static(b"null")
+                                    } else {
+                                        r.payload
+                                    },
+                                    timestamp_ms: Some(r.created_at_us.div_euclid(1000)),
+                                })
+                                .collect(),
+                            high_watermark: f.high_watermark as i64,
+                            log_start_offset: f.log_start_offset as i64,
+                            error: f.error.map(str::to_string),
+                        })
+                        .collect(),
+                ),
+                Err(e) => LocalAnswer::Refused(refusal(e).await),
+            }
+        });
+        Box::pin(async move {
+            task.await
+                .map_err(|e| format!("the broker task serving an in-process fetch ended: {e}"))
+        })
+    }
+
     fn call(&self, req: LocalRequest) -> BoxFuture<'static, Result<LocalResponse, String>> {
         let router = self.router.clone();
         let kv = self.kv.clone();
@@ -942,6 +1113,261 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+
+        drop(client);
+        drop(rsm);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The record path ([`LocalDispatch::push_records`] /
+    /// [`LocalDispatch::fetch_records`]) is the routes' push and fetch minus the
+    /// JSON: what it writes the route reads back byte for byte, what it reads
+    /// is what the route answers, its refusals are the route's, and its long
+    /// poll wakes on an append.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_record_path_is_the_routes_push_and_fetch() {
+        use queen_kafka::queen::{FetchEntry, QueenApi, RawPush};
+        std::env::set_var("QUEEN_RAFT_MAP_BYTES", (256usize << 20).to_string());
+        let dir = std::env::temp_dir().join(format!(
+            "queen-kinproc-records-{}-{}",
+            std::process::id(),
+            crate::util::uuidv7_bytes()[15]
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("QUEEN_RAFT_DIR", dir.join("cfg").display().to_string());
+        let cfg = crate::config::load();
+        let facade = crate::rsm::facade::real::RaftFacade::open(&crate::rsm::facade::RsmBuildCtx {
+            data_dir: dir.display().to_string(),
+            notifier: crate::notify::Notifier::new(false),
+            disk_high_pct: 85.0,
+            disk_low_pct: 80.0,
+        })
+        .expect("open facade");
+        let rsm: Arc<dyn Rsm> = Arc::new(facade);
+        let state = crate::handlers::raft::build_raft_state_with(&cfg, Some(Arc::clone(&rsm)))
+            .expect("raft state");
+        let router = crate::handlers::raft::build_raft_router(state, auth_off(), false);
+        // Typed, and the same broker over its routes only (no state machine
+        // handed to the dispatch: every call is the router's).
+        let typed = Arc::new(HttpQueen::local(Arc::new(RouterDispatch {
+            router: router.clone(),
+            broker: tokio::runtime::Handle::current(),
+            kv: Some((Arc::clone(&rsm), auth_off())),
+        })));
+        let routed = HttpQueen::local(Arc::new(RouterDispatch {
+            router,
+            broker: tokio::runtime::Handle::current(),
+            kv: None,
+        }));
+
+        let item = |p: &str, payload: &str| RawPush {
+            queue: "orders".into(),
+            partition: p.into(),
+            payload: payload.as_bytes().to_vec(),
+        };
+        let envelope = r#"{"h":[{"k":"x","v":null}],"k":"azE=","t":1756000000000,"v":"dmFsdWU="}"#;
+        let pushed = typed
+            .push_raw(
+                vec![
+                    item("0", envelope),
+                    item("0", r#"{"k":null,"v":"dg=="}"#),
+                    item("1", r#"{"native":true}"#),
+                    item("0", r#"{"k":null,"t":5,"v":null}"#),
+                ],
+                None,
+            )
+            .await
+            .expect("typed push");
+        let offsets: Vec<_> = pushed
+            .iter()
+            .map(|p| (p.status.as_str(), p.offset))
+            .collect();
+        assert_eq!(
+            offsets,
+            vec![
+                ("queued", Some(0)),
+                ("queued", Some(1)),
+                ("queued", Some(0)),
+                ("queued", Some(2))
+            ]
+        );
+        // The route's push of the same shape lands after them.
+        let routed_push = routed
+            .push_raw(vec![item("0", r#"{"k":null,"v":"cm91dGVk"}"#)], None)
+            .await
+            .expect("routed push");
+        assert_eq!(routed_push[0].offset, Some(3));
+
+        let entries = vec![
+            FetchEntry {
+                queue: "orders".into(),
+                partition: "0".into(),
+                offset: 0,
+                max_bytes: 1 << 20,
+            },
+            FetchEntry {
+                queue: "orders".into(),
+                partition: "1".into(),
+                offset: 0,
+                max_bytes: 1 << 20,
+            },
+            FetchEntry {
+                queue: "orders".into(),
+                partition: "7".into(),
+                offset: 0,
+                max_bytes: 1 << 20,
+            },
+            FetchEntry {
+                queue: "nope".into(),
+                partition: "0".into(),
+                offset: 0,
+                max_bytes: 1 << 20,
+            },
+            FetchEntry {
+                queue: "orders".into(),
+                partition: "0".into(),
+                offset: 9,
+                max_bytes: 1 << 20,
+            },
+        ];
+        let a = typed.fetch_raw(&entries, 0, 0, None).await.expect("typed");
+        let b = routed
+            .fetch_raw(&entries, 0, 0, None)
+            .await
+            .expect("routed");
+        assert_eq!(a, b, "the record path answers what the route answers");
+        assert_eq!(a[0].records.len(), 4);
+        assert_eq!(&a[0].records[0].payload[..], envelope.as_bytes());
+        assert_eq!(a[0].high_watermark, 4);
+        assert_eq!(a[1].records.len(), 1);
+        assert!(a[2].records.is_empty() && a[2].error.is_none());
+        assert_eq!(a[3].error.as_deref(), Some("UNKNOWN_TOPIC_OR_PARTITION"));
+        assert_eq!(a[4].error.as_deref(), Some("OFFSET_OUT_OF_RANGE"));
+        assert!(a[0].records.iter().all(|r| r.timestamp_ms.is_some()));
+
+        // A byte budget stops after the record that crosses it, as the route's.
+        let small = vec![FetchEntry {
+            max_bytes: 10,
+            ..entries[0].clone()
+        }];
+        let a = typed.fetch_raw(&small, 0, 0, None).await.unwrap();
+        let b = routed.fetch_raw(&small, 0, 0, None).await.unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a[0].records.len(), 1);
+
+        // The route's refusal, read the same way.
+        let bad = vec![FetchEntry {
+            offset: -1,
+            ..entries[0].clone()
+        }];
+        let refused = typed.fetch_raw(&bad, 0, 0, None).await;
+        assert!(
+            matches!(
+                refused,
+                Err(queen_kafka::queen::Error::Status { code: 400, .. })
+            ),
+            "{refused:?}"
+        );
+
+        // The long poll parks at the end of the log and wakes on an append.
+        let tail = vec![FetchEntry {
+            offset: 4,
+            ..entries[0].clone()
+        }];
+        let waiter = {
+            let typed = Arc::clone(&typed);
+            tokio::spawn(async move {
+                let started = std::time::Instant::now();
+                let got = typed.fetch_raw(&tail, 5_000, 1, None).await;
+                (got, started.elapsed())
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        typed
+            .push_raw(vec![item("0", r#"{"k":null,"v":"d2FrZQ=="}"#)], None)
+            .await
+            .expect("wake push");
+        let (got, took) = waiter.await.unwrap();
+        let got = got.expect("long poll");
+        assert_eq!(got[0].records.len(), 1, "{got:?}");
+        assert_eq!(got[0].records[0].offset, 4);
+        assert!(took < Duration::from_millis(4_000), "parked {took:?}");
+
+        drop(typed);
+        drop(rsm);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// KIP-79 end to end over the REAL raft router: the facade's
+    /// `offsets_for_times` reaches `POST /api/v1/fetch/offsets` in-process and
+    /// reads back the first offset appended at or after each time, on the
+    /// clock the fetch route reports.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_time_is_looked_up_in_process_through_the_route() {
+        use queen_kafka::queen::{FetchEntry, PushItem, QueenApi, TimeLookup};
+        std::env::set_var("QUEEN_RAFT_MAP_BYTES", (256usize << 20).to_string());
+        let dir = std::env::temp_dir().join(format!(
+            "queen-kinproc-times-{}-{}",
+            std::process::id(),
+            crate::util::uuidv7_bytes()[15]
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("QUEEN_RAFT_DIR", dir.join("cfg").display().to_string());
+        let cfg = crate::config::load();
+        let facade = crate::rsm::facade::real::RaftFacade::open(&crate::rsm::facade::RsmBuildCtx {
+            data_dir: dir.display().to_string(),
+            notifier: crate::notify::Notifier::new(false),
+            disk_high_pct: 85.0,
+            disk_low_pct: 80.0,
+        })
+        .expect("open facade");
+        let rsm: Arc<dyn Rsm> = Arc::new(facade);
+        let state = crate::handlers::raft::build_raft_state_with(&cfg, Some(Arc::clone(&rsm)))
+            .expect("raft state");
+        let router = crate::handlers::raft::build_raft_router(state, auth_off(), false);
+        let client = HttpQueen::local(Arc::new(RouterDispatch {
+            router,
+            broker: tokio::runtime::Handle::current(),
+            kv: Some((Arc::clone(&rsm), auth_off())),
+        }));
+
+        let item = || PushItem {
+            queue: "orders".into(),
+            partition: "0".into(),
+            payload: serde_json::json!({"k": null, "v": "YQ=="}),
+        };
+        client.push(&[item(), item()], None).await.expect("push");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        client.push(&[item()], None).await.expect("push");
+        let fetched = client
+            .fetch(
+                &[FetchEntry {
+                    queue: "orders".into(),
+                    partition: "0".into(),
+                    offset: 0,
+                    max_bytes: 1 << 20,
+                }],
+                0,
+                0,
+                None,
+            )
+            .await
+            .expect("fetch");
+        let second = fetched[0].records[2].timestamp_ms().expect("stamped");
+
+        let at = |ms: i64| TimeLookup {
+            queue: "orders".into(),
+            partition: "0".into(),
+            timestamp_ms: ms,
+        };
+        let found = client
+            .offsets_for_times(&[at(0), at(second), at(second + 60_000)], None)
+            .await
+            .expect("lookup")
+            .expect("the route answers");
+        let offsets: Vec<Option<i64>> = found.iter().map(|f| f.offset).collect();
+        assert_eq!(offsets, [Some(0), Some(2), None], "{found:?}");
+        assert_eq!(found[1].timestamp_ms, Some(second));
 
         drop(client);
         drop(rsm);

@@ -352,6 +352,9 @@ impl Budget {
         if n <= 0 {
             return;
         }
+        // fetch_update is deprecated from Rust 1.99 (renamed try_update), but
+        // try_update needs Rust 1.95 and the crate's MSRV is 1.88.
+        #[allow(deprecated)]
         let _ = self
             .used
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
@@ -2600,6 +2603,7 @@ impl Ephemeral {
             // per-tenant queue COUNT is what has to come down.
             let (tenant, _) = crate::handlers::split_tenant_queue(k);
             let _ = self.with_tenant(tenant, |t| {
+                #[allow(deprecated)] // fetch_update: see Budget::refund
                 let _ = t
                     .queues
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -2761,6 +2765,7 @@ impl Ephemeral {
         };
         if gone {
             let _ = self.with_tenant(tenant, |t| {
+                #[allow(deprecated)] // fetch_update: see Budget::refund
                 let _ = t
                     .queues
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {

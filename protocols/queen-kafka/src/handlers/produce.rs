@@ -106,7 +106,7 @@ use kafka_protocol::records::{BatchDecodeInfo, RecordBatchDecoder};
 use crate::decompress::{self, Refusal};
 use crate::handlers::metadata::{self, Plan};
 use crate::idempotent;
-use crate::queen::{self, PushItem, Pushed};
+use crate::queen::{self, PushItem, Pushed, RawPush};
 use crate::records as envelope;
 use crate::throttle;
 use crate::wire;
@@ -296,30 +296,7 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
         txn: transactional,
         txns: facade.txns.as_ref(),
     };
-
-    let mut items: Vec<PushItem> = Vec::new();
-    let mut slots: Vec<Vec<Slot>> = Vec::with_capacity(req.topic_data.len());
-    {
-        // ONE budget for the request, not one per batch or one per partition: a
-        // request carries as many of both as it likes, and a ceiling that reset
-        // between them would multiply by their number.
-        let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
-        for topic in &req.topic_data {
-            let name = topic.name.0.as_str();
-            let plan = plans
-                .get(name)
-                .copied()
-                // Unreachable: `topic_plans` covers every name in the request.
-                .unwrap_or(Plan::Reject(ResponseError::UnknownServerError));
-            slots.push(
-                topic
-                    .partition_data
-                    .iter()
-                    .map(|p| stage(&mut items, name, plan, p, &budget, &idem))
-                    .collect(),
-            );
-        }
-    }
+    let (items, slots) = stage_request(req, &plans, &idem);
 
     // One push for the whole request, or none at all when nothing survived the
     // staging. A TRANSACTIONAL request never reaches it: its entries answer
@@ -328,10 +305,144 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
     let pushed = if items.is_empty() {
         None
     } else {
-        Some(facade.queen.push(&items, token).await)
+        Some(facade.queen.push_raw(items, token).await)
     };
 
-    render(req, &slots, pushed.as_ref(), &idem)
+    let response = render(req, &slots, pushed.as_ref(), &idem);
+    end_inflight(&slots, &idem);
+    response
+}
+
+/// Stage every entry of the request: the push items, and one [`Slot`] per
+/// (topic, partition) entry saying how it is answered.
+fn stage_request(
+    req: &ProduceRequest,
+    plans: &HashMap<&str, Plan>,
+    idem: &Idem<'_>,
+) -> (Vec<RawPush>, Vec<Vec<Slot>>) {
+    let mut items: Vec<RawPush> = Vec::new();
+    let slots = stage_into(&mut items, req, plans, idem);
+    (items, slots)
+}
+
+/// [`stage_request`] into `items`, which may already hold earlier requests'
+/// records: each [`Slot::Push`] names its run in the SHARED vector.
+fn stage_into(
+    items: &mut Vec<RawPush>,
+    req: &ProduceRequest,
+    plans: &HashMap<&str, Plan>,
+    idem: &Idem<'_>,
+) -> Vec<Vec<Slot>> {
+    let mut slots: Vec<Vec<Slot>> = Vec::with_capacity(req.topic_data.len());
+    // ONE budget for the request, not one per batch or one per partition: a
+    // request carries as many of both as it likes, and a ceiling that reset
+    // between them would multiply by their number.
+    let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
+    for topic in &req.topic_data {
+        let name = topic.name.0.as_str();
+        let plan = plans
+            .get(name)
+            .copied()
+            // Unreachable: `topic_plans` covers every name in the request.
+            .unwrap_or(Plan::Reject(ResponseError::UnknownServerError));
+        slots.push(
+            topic
+                .partition_data
+                .iter()
+                .map(|p| stage(items, name, plan, p, &budget, idem))
+                .collect(),
+        );
+    }
+    slots
+}
+
+/// Several Produce requests of ONE connection, in the order they were sent, as
+/// ONE push: each is staged after the one before it (so an idempotent
+/// producer's next batch is judged against the batch before it, in flight —
+/// [`idempotent::Producers::begin`]), every record of all of them goes to Queen
+/// in a single write, and each request is answered from its own runs of that
+/// write's answer, exactly as [`handle`] would answer it alone.
+///
+/// This is how a connection keeps up with a client that has several requests
+/// in flight (`max.in.flight.requests.per.connection`, 5 by default): served
+/// one write each, the fifth waits for four round trips before its own; served
+/// together they cost one. ONE write is also what keeps them in order — the
+/// records of request N precede those of N+1 in every partition, in the same
+/// command — so nothing here depends on how writes from one node are ordered
+/// against each other in the cluster. A failure fails the requests together,
+/// which is what a write that never happened is.
+///
+/// One answer per request, in request order; `None` is acks=0's "no frame".
+pub async fn handle_coalesced(
+    facade: &Facade,
+    reqs: &[ProduceRequest],
+    token: Option<&str>,
+) -> Vec<Option<ProduceResponse>> {
+    let tenant = facade.catalog.tenant_key(token);
+    let mut items: Vec<RawPush> = Vec::new();
+    // Per request: its slots, or the answer it already has (an invalid acks).
+    let mut staged: Vec<Result<Vec<Vec<Slot>>, ProduceResponse>> = Vec::with_capacity(reqs.len());
+    for req in reqs {
+        if !matches!(req.acks, ACKS_NONE | ACKS_LEADER | ACKS_ALL) {
+            staged.push(Err(build(facade, req, token).await));
+            continue;
+        }
+        let transactional =
+            idempotent::transactional_id(req.transactional_id.as_ref().map(|id| id.0.as_str()));
+        let plans = topic_plans(facade, req, token).await;
+        let idem = Idem {
+            producers: &facade.producers,
+            tenant: &tenant,
+            txn: transactional,
+            txns: facade.txns.as_ref(),
+        };
+        staged.push(Ok(stage_into(&mut items, req, &plans, &idem)));
+    }
+    let pushed = if items.is_empty() {
+        None
+    } else {
+        Some(facade.queen.push_raw(items, token).await)
+    };
+    reqs.iter()
+        .zip(staged)
+        .map(|(req, staged)| {
+            let response = match staged {
+                Err(answered) => answered,
+                Ok(slots) => {
+                    let transactional = idempotent::transactional_id(
+                        req.transactional_id.as_ref().map(|id| id.0.as_str()),
+                    );
+                    let idem = Idem {
+                        producers: &facade.producers,
+                        tenant: &tenant,
+                        txn: transactional,
+                        txns: facade.txns.as_ref(),
+                    };
+                    let response = render(req, &slots, pushed.as_ref(), &idem);
+                    end_inflight(&slots, &idem);
+                    response
+                }
+            };
+            if req.acks == ACKS_NONE {
+                log_silent_failures(&response);
+                None
+            } else {
+                Some(response)
+            }
+        })
+        .collect()
+}
+
+/// Every run the request accepted from an idempotent producer is no longer in
+/// flight ([`idempotent::Producers::end`]). After [`render`], which commits
+/// the runs that landed, so the window holds them before they leave the
+/// in-flight list.
+fn end_inflight(slots: &[Vec<Slot>], idem: &Idem<'_>) {
+    for slot in slots.iter().flatten() {
+        if let Slot::Push { seq: Some(p), .. } = slot {
+            idem.producers.end(p);
+        }
+    }
 }
 
 // --------------------------------------------------------------------- topics
@@ -414,7 +525,7 @@ async fn topic_plans<'a>(
 /// Decode one partition entry and stage its records as push items. `budget` is
 /// the request's remaining decompression allowance, and it is spent here.
 fn stage(
-    items: &mut Vec<PushItem>,
+    items: &mut Vec<RawPush>,
     topic: &str,
     plan: Plan,
     p: &PartitionProduceData,
@@ -597,8 +708,8 @@ fn stage(
     // A transactional entry builds its items in a buffer of its own: they are
     // charged and moved into the stage together, so a partition's answer is one
     // error code rather than "some of your records".
-    let mut staged: Vec<PushItem> = Vec::new();
-    let items: &mut Vec<PushItem> = if idem.txn.is_some() {
+    let mut staged: Vec<RawPush> = Vec::new();
+    let items: &mut Vec<RawPush> = if idem.txn.is_some() {
         &mut staged
     } else {
         items
@@ -612,6 +723,9 @@ fn stage(
     // request's own `decompress::Budget`) and the bytes are charged here, as
     // they are measured.
     let mut bytes = 0usize;
+    // The Queen partition NAME is the Kafka partition index written out — the
+    // mapping the whole facade rests on.
+    let partition = p.index.to_string();
     for batch in &batches {
         // The headers as the producer sent them: in order, and with any name it
         // repeated still there. `Record.headers` is a map and has already lost
@@ -637,12 +751,10 @@ fn stage(
         }
         for (i, record) in batch.set.records.iter().enumerate() {
             bytes = bytes.saturating_add(record_bytes(record));
-            items.push(PushItem {
+            items.push(RawPush {
                 queue: topic.to_string(),
-                // The Queen partition NAME is the Kafka partition index written
-                // out — the mapping the whole facade rests on.
-                partition: p.index.to_string(),
-                payload: envelope::encode(
+                partition: partition.clone(),
+                payload: envelope::encode_bytes(
                     record,
                     lists.as_ref().and_then(|l| l.get(i)).map(Vec::as_slice),
                 ),
@@ -653,7 +765,14 @@ fn stage(
     let Some(id) = idem.txn else {
         return match produced {
             0 => Slot::Empty,
-            len => Slot::Push { start, len, seq },
+            len => {
+                // In flight from here until the push answers: a pipelined
+                // producer's next batch follows this one.
+                if let Some(pending) = &seq {
+                    idem.producers.begin(pending);
+                }
+                Slot::Push { start, len, seq }
+            }
         };
     };
 
@@ -669,10 +788,19 @@ fn stage(
     // HEADER, not in the request: the request carries only the id. They were
     // already checked to agree across the entry by `producers::check`.
     let (pid, epoch) = (infos[0].producer_id, infos[0].producer_epoch);
-    match idem
-        .txns
-        .stage_records(idem.tenant, id, pid, epoch, topic, p.index, staged, bytes)
-    {
+    match idem.txns.stage_records(
+        idem.tenant,
+        id,
+        pid,
+        epoch,
+        topic,
+        p.index,
+        staged
+            .iter()
+            .map(RawPush::to_item)
+            .collect::<Vec<PushItem>>(),
+        bytes,
+    ) {
         Ok(Ok(())) => {
             // The sequence window advances at STAGE time for a transactional
             // batch, because the stage IS the append as far as this producer's
@@ -1717,6 +1845,38 @@ mod tests {
             3,
             "a duplicate batch was written to the log a second time"
         );
+    }
+
+    /// Coalesced: an idempotent producer's consecutive batches, sent back to
+    /// back, are ONE push in order — the second judged against the first, in
+    /// flight — each answered at its own offsets; a resend of the first in the
+    /// same coalesced run is a duplicate of the batch it repeats.
+    #[tokio::test]
+    async fn coalesced_idempotent_batches_land_in_order_in_one_push() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        let first = simple(
+            "orders",
+            0,
+            &[idempotent_record(7, 0, 0), idempotent_record(7, 0, 1)],
+        );
+        let second = simple("orders", 0, &[idempotent_record(7, 0, 2)]);
+        let answers = handle_coalesced(&f, &[first.clone(), second], None).await;
+        let bases: Vec<(i16, i64)> = answers
+            .iter()
+            .map(|a| {
+                let p = answer(a.as_ref().unwrap(), "orders", 0);
+                (p.error_code, p.base_offset)
+            })
+            .collect();
+        assert_eq!(bases, vec![(0, 0), (0, 2)]);
+        assert_eq!(api.pushes.lock().unwrap().len(), 1, "not one push");
+        assert_eq!(api.pushed().len(), 3);
+
+        // The first batch again: already in the window, answered as itself.
+        let again = handle_coalesced(&f, &[first], None).await;
+        let p = answer(again[0].as_ref().unwrap(), "orders", 0);
+        assert_eq!((p.error_code, p.base_offset), (0, 0));
+        assert_eq!(api.pushed().len(), 3, "a duplicate was written again");
     }
 
     /// The other half, and just as load-bearing: a batch that would leave a hole

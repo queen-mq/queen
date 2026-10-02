@@ -118,7 +118,7 @@ struct FetchBody {
 
 /// The partition NAME a fetch entry addresses: a string, a number spelled in
 /// decimal, or `Default`.
-fn fetch_partition_name(p: Option<&Value>) -> String {
+pub(super) fn fetch_partition_name(p: Option<&Value>) -> String {
     match p {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
@@ -241,61 +241,118 @@ impl RaftFacade {
     pub(super) async fn api_fetch(&self, ctx: ReqCtx, body: &[u8]) -> Result<ApiOut, RsmError> {
         let request: FetchBody =
             serde_json::from_slice(body).map_err(|e| super::rejected("bad_body", e))?;
+        if request.entries.len() > 1024 {
+            return Ok(ApiOut::json(
+                400,
+                json!({"error":"too many entries"}).to_string(),
+            ));
+        }
+        if request.entries.iter().any(|e| e.offset < 0) {
+            return Ok(ApiOut::json(
+                400,
+                json!({"error":"offset must be non-negative"}).to_string(),
+            ));
+        }
         let max_wait = request.max_wait_ms.unwrap_or(0).min(30_000);
         let min_bytes = request.min_bytes.unwrap_or(1).max(0) as usize;
+        let asks: Vec<crate::rsm::facade::RecordFetch> = request
+            .entries
+            .into_iter()
+            .map(|e| crate::rsm::facade::RecordFetch {
+                partition: fetch_partition_name(e.partition.as_ref()),
+                queue: e.queue,
+                offset: e.offset as u64,
+                max_bytes: e.max_bytes.unwrap_or(1 << 20).clamp(1, 8 << 20) as usize,
+            })
+            .collect();
+        let answers = self
+            .fetch_wait(&ctx, &asks, max_wait, min_bytes, true)
+            .await?;
+        let entries: Vec<Value> = asks
+            .into_iter()
+            .zip(answers)
+            .map(|(ask, a)| {
+                let mut entry = json!({
+                    "queue": ask.queue,
+                    "partition": ask.partition,
+                    "records": a.records.into_iter().map(|rec| json!({
+                        "offset": rec.offset,
+                        "transactionId": rec.txn.unwrap_or_default(),
+                        "payload": payload_json(&rec.payload),
+                        "ts": crate::rsm::planner::timers::iso_us(rec.created_at_us),
+                    })).collect::<Vec<_>>(),
+                    "highWatermark": a.high_watermark,
+                    "logStartOffset": a.log_start_offset,
+                });
+                if let Some(error) = a.error {
+                    entry["error"] = Value::from(error);
+                }
+                entry
+            })
+            .collect();
+        Ok(ApiOut::json(200, json!({"entries":entries}).to_string()))
+    }
+
+    /// [`crate::rsm::facade::Rsm::fetch_records`]: the read of `POST
+    /// /api/v1/fetch`, answered as records. The entries are already bounded
+    /// (`partition`, a non-negative offset, a clamped `max_bytes`); the count
+    /// ceiling of the route applies the same.
+    pub(in crate::rsm::facade::real) async fn fetch_records_impl(
+        &self,
+        ctx: ReqCtx,
+        entries: Vec<crate::rsm::facade::RecordFetch>,
+        max_wait_ms: u64,
+        min_bytes: usize,
+    ) -> Result<Vec<crate::rsm::facade::RecordsFetched>, RsmError> {
+        if entries.len() > 1024 {
+            return Err(RsmError::Rejected {
+                code: "bad_body".into(),
+                message: "too many entries".into(),
+            });
+        }
+        self.fetch_wait(&ctx, &entries, max_wait_ms.min(30_000), min_bytes, false)
+            .await
+    }
+
+    /// The long poll of a fetch: read, and while the answer carries fewer than
+    /// `min_bytes` payload bytes and no entry errored, park on the partitions
+    /// read until an append to one of them or `max_wait` (re-reading at least
+    /// every second, the floor for a missed wake). The bytes are counted as the
+    /// records are read, never by re-reading the answer.
+    async fn fetch_wait(
+        &self,
+        ctx: &ReqCtx,
+        asks: &[crate::rsm::facade::RecordFetch],
+        max_wait: u64,
+        min_bytes: usize,
+        want_txn: bool,
+    ) -> Result<Vec<crate::rsm::facade::RecordsFetched>, RsmError> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(max_wait);
         // A long-poll watches exactly the partitions it reads, registered
         // BEFORE the first read: apply wakes it on an append to one of them,
         // whether or not a consumer group subscribes the queue, and an append
         // landing between a read and the park is a permit rather than a lost
-        // wake. Before this it parked on the tenant's gate, which only native
-        // group wakes reach: a fetch of a queue nobody pops re-read on a
-        // 200 ms timer, and every append woke every fetch of the tenant.
+        // wake.
         let watch = (max_wait > 0 && min_bytes > 0).then(|| {
-            let parts: Vec<(String, String)> = request
-                .entries
+            let parts: Vec<(String, String)> = asks
                 .iter()
                 .map(|e| {
                     (
                         crate::handlers::tenant_queue_key(&ctx.tenant, &e.queue),
-                        fetch_partition_name(e.partition.as_ref()),
+                        e.partition.clone(),
                     )
                 })
                 .collect();
             self.notifier.watch_partitions(&parts)
         });
         loop {
-            let out = self.api_fetch_once(ctx.clone(), body).await?;
-            if out.status != 200 || max_wait == 0 || min_bytes == 0 {
-                return Ok(out);
+            let (answers, bytes) = self.fetch_once(ctx, asks, want_txn).await?;
+            if max_wait == 0 || min_bytes == 0 {
+                return Ok(answers);
             }
-            let parsed: Value = serde_json::from_str(&out.body).unwrap_or(Value::Null);
-            let mut bytes = 0usize;
-            let mut error = false;
-            for entry in parsed
-                .get("entries")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                error |= entry.get("error").is_some();
-                for record in entry
-                    .get("records")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    bytes = bytes.saturating_add(
-                        record
-                            .get("payload")
-                            .map(|v| v.to_string().len())
-                            .unwrap_or(0)
-                            .max(1),
-                    );
-                }
-            }
+            let error = answers.iter().any(|a| a.error.is_some());
             if error || bytes >= min_bytes || std::time::Instant::now() >= deadline {
-                return Ok(out);
+                return Ok(answers);
             }
             // Capped at a second: the wake is the fast path, and the re-read on
             // the cap is the floor if one is ever missed.
@@ -308,98 +365,127 @@ impl RaftFacade {
         }
     }
 
-    async fn api_fetch_once(&self, ctx: ReqCtx, body: &[u8]) -> Result<ApiOut, RsmError> {
-        let body: FetchBody =
-            serde_json::from_slice(body).map_err(|e| super::rejected("bad_body", e))?;
-        if body.entries.len() > 1024 {
-            return Ok(ApiOut::json(
-                400,
-                json!({"error":"too many entries"}).to_string(),
-            ));
-        }
-        if body.entries.iter().any(|e| e.offset < 0) {
-            return Ok(ApiOut::json(
-                400,
-                json!({"error":"offset must be non-negative"}).to_string(),
-            ));
-        }
-        let asks: Vec<(String, String, u64, usize)> = body
-            .entries
-            .into_iter()
-            .map(|e| {
-                let partition = fetch_partition_name(e.partition.as_ref());
-                (
-                    e.queue,
-                    partition,
-                    e.offset as u64,
-                    e.max_bytes.unwrap_or(1 << 20).clamp(1, 8 << 20) as usize,
-                )
-            })
-            .collect();
+    /// One read of every entry, in ONE blocking task: the partition rows from
+    /// one store transaction, then each entry's records from the queue log.
+    /// Answers the entries in order, and the payload bytes they carry (each
+    /// record counted as at least one byte), which is what `min_bytes` is
+    /// measured in.
+    async fn fetch_once(
+        &self,
+        ctx: &ReqCtx,
+        asks: &[crate::rsm::facade::RecordFetch],
+        want_txn: bool,
+    ) -> Result<(Vec<crate::rsm::facade::RecordsFetched>, usize), RsmError> {
+        use crate::rsm::facade::{RecordRead, RecordsFetched};
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
-        let asks2 = asks.clone();
-        let parts = tokio::task::spawn_blocking(move || {
-            store.read(|r| {
-                let mut out = Vec::with_capacity(asks2.len());
-                for (queue, part, _, _) in &asks2 {
-                    let queue_exists = r.queue(&tenant, queue)?.is_some();
-                    let p = match r.pid_of(&tenant, queue, part)? {
-                        Some(pid) => {
-                            let row = r.partition(pid)?;
-                            let mut sealed = Vec::new();
-                            r.scan_partition_files(pid, usize::MAX, &mut |f| {
-                                sealed.push(f);
-                                true
-                            })?;
-                            row.map(|row| Part { pid, row, sealed })
-                        }
-                        None => None,
-                    };
-                    out.push((queue_exists, p));
-                }
-                Ok(out)
-            })
-        })
-        .await
-        .map_err(|e| RsmError::Internal(format!("fetch read: {e}")))?
-        .map_err(read_error)?;
-
         let qlog = self.qlog_reader.clone();
         let reader = self.reader.clone();
         let encryption = self.encryption.clone();
-        let tenant2 = ctx.tenant.clone();
-        let entries = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, RsmError> {
+        let asks: Vec<(String, String, u64, usize)> = asks
+            .iter()
+            .map(|a| (a.queue.clone(), a.partition.clone(), a.offset, a.max_bytes))
+            .collect();
+        tokio::task::spawn_blocking(move || -> Result<_, RsmError> {
+            // The sealed segment files are the segment reader's index; the
+            // queue log finds a record by itself, so a qlog node lists none.
+            let list_sealed = qlog.is_none();
+            let parts = store
+                .read(|r| {
+                    let mut out = Vec::with_capacity(asks.len());
+                    for (queue, part, _, _) in &asks {
+                        let p = match r.pid_of(&tenant, queue, part)? {
+                            Some(pid) => {
+                                let row = r.partition(pid)?;
+                                let mut sealed = Vec::new();
+                                if list_sealed {
+                                    r.scan_partition_files(pid, usize::MAX, &mut |f| {
+                                        sealed.push(f);
+                                        true
+                                    })?;
+                                }
+                                row.map(|row| Part { pid, row, sealed })
+                            }
+                            None => None,
+                        };
+                        // The queue row is read only to tell an unknown queue
+                        // from a partition nobody has written yet.
+                        let queue_exists = p.is_some() || r.queue(&tenant, queue)?.is_some();
+                        out.push((queue_exists, p));
+                    }
+                    Ok(out)
+                })
+                .map_err(read_error)?;
             let mut out = Vec::with_capacity(asks.len());
-            for ((queue, partition, offset, max_bytes), (queue_exists, part)) in asks.into_iter().zip(parts) {
+            let mut bytes = 0usize;
+            for ((queue, _partition, offset, max_bytes), (queue_exists, part)) in
+                asks.into_iter().zip(parts)
+            {
                 let Some(part) = part else {
-                    out.push(if queue_exists {
-                        json!({"queue":queue,"partition":partition,"records":[],"highWatermark":0,"logStartOffset":0})
-                    } else {
-                        json!({"queue":queue,"partition":partition,"records":[],"highWatermark":0,"logStartOffset":0,"error":"UNKNOWN_TOPIC_OR_PARTITION"})
+                    out.push(RecordsFetched {
+                        error: (!queue_exists).then_some("UNKNOWN_TOPIC_OR_PARTITION"),
+                        ..RecordsFetched::default()
                     });
                     continue;
                 };
                 let high = (part.row.last_offset + 1).max(0) as u64;
-                if offset < part.row.log_start || offset > high {
-                    out.push(json!({"queue":queue,"partition":partition,"records":[],"highWatermark":high,"logStartOffset":part.row.log_start,"error":"OFFSET_OUT_OF_RANGE"}));
+                let log_start = part.row.log_start;
+                if offset < log_start || offset > high {
+                    out.push(RecordsFetched {
+                        records: Vec::new(),
+                        high_watermark: high,
+                        log_start_offset: log_start,
+                        error: Some("OFFSET_OUT_OF_RANGE"),
+                    });
                     continue;
                 }
-                let mut records = Vec::new();
+                let mut records: Vec<RecordRead> = Vec::new();
                 let mut used = 0usize;
-                walk_records(&reader, qlog.as_ref(), &tenant2, &part, offset, high, 10_000, |mut rec| {
-                    decrypt_record(&encryption, &mut rec);
-                    let weight = rec.payload.len().max(1);
-                    if !records.is_empty() && used.saturating_add(weight) > max_bytes { return false; }
-                    used = used.saturating_add(weight);
-                    records.push(json!({"offset":rec.offset,"transactionId":rec.txn,"payload":payload_json(&rec.payload),"ts":crate::rsm::planner::timers::iso_us(rec.created_at_us)}));
-                    true
-                })?;
-                out.push(json!({"queue":queue,"partition":partition,"records":records,"highWatermark":high,"logStartOffset":part.row.log_start}));
+                walk_payloads(
+                    &reader,
+                    qlog.as_ref(),
+                    &tenant,
+                    &queue,
+                    &part,
+                    offset,
+                    high,
+                    FETCH_RECORDS_PER_ENTRY,
+                    want_txn,
+                    |offset, created_at_us, txn, payload, encrypted| {
+                        let payload = if encrypted {
+                            match encryption.decrypt_payload_bytes(&payload) {
+                                Some(p) => bytes::Bytes::from(p),
+                                None => payload,
+                            }
+                        } else {
+                            payload
+                        };
+                        let weight = payload.len().max(1);
+                        if !records.is_empty() && used.saturating_add(weight) > max_bytes {
+                            return false;
+                        }
+                        used = used.saturating_add(weight);
+                        records.push(RecordRead {
+                            offset,
+                            created_at_us,
+                            payload,
+                            txn,
+                        });
+                        true
+                    },
+                )?;
+                bytes = bytes.saturating_add(used);
+                out.push(RecordsFetched {
+                    records,
+                    high_watermark: high,
+                    log_start_offset: log_start,
+                    error: None,
+                });
             }
-            Ok(out)
-        }).await.map_err(|e| RsmError::Internal(format!("fetch payload task: {e}")))??;
-        Ok(ApiOut::json(200, json!({"entries":entries}).to_string()))
+            Ok((out, bytes))
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("fetch read task: {e}")))?
     }
 
     pub(super) async fn api_partitions_changed(
@@ -1318,6 +1404,71 @@ pub(super) fn walk_records(
                 };
                 n += 1;
                 if !cb(rec) {
+                    return Ok(());
+                }
+                if n >= limit {
+                    break;
+                }
+            }
+        }
+        off = base.saturating_add(count as u64).max(off + 1)
+    }
+    Ok(())
+}
+
+/// The most records one fetch entry answers, whatever its byte budget.
+const FETCH_RECORDS_PER_ENTRY: usize = 10_000;
+
+/// [`walk_records`] for a reader that wants only the payloads: each record's
+/// offset, its segment's write time, its transaction id when `want_txn`, its
+/// payload as a slice of the segment it was read from (no copy) and whether that
+/// payload is encrypted. Same walk, same bounds, same gaps.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn walk_payloads(
+    reader: &crate::rsm::segments::Reader,
+    qlog: Option<&QLogReader>,
+    tenant: &str,
+    queue: &str,
+    part: &Part,
+    mut off: u64,
+    high: u64,
+    limit: usize,
+    want_txn: bool,
+    mut cb: impl FnMut(u64, i64, Option<String>, bytes::Bytes, bool) -> bool,
+) -> Result<(), RsmError> {
+    let qid = qlog.map(|_| QLogReader::queue_id_of(tenant, queue));
+    let mut n = 0usize;
+    while off < high && n < limit {
+        let got = match (qlog, qid) {
+            (Some(q), Some(id)) => q
+                .read_owned(id, part.pid, off)
+                .map_err(|e| RsmError::Internal(format!("qlog read: {e}")))?
+                .map(|r| (r.base_offset, r.created_at_us, r.count, r.payload)),
+            _ => reader
+                .read_at_within(
+                    bucket_of(tenant, &part.row.queue, &part.row.partition),
+                    part.pid,
+                    off,
+                    &part.sealed,
+                    None,
+                )
+                .map_err(|e| RsmError::Internal(format!("segment read: {e}")))?
+                .map(|r| (r.base_offset, r.created_at_us, r.count, r.blob)),
+        };
+        let Some((base, created, count, blob)) = got else {
+            off += 1;
+            continue;
+        };
+        let blob = bytes::Bytes::from(blob);
+        if let Some(frames) = unpack_frames_ref(&blob) {
+            for (i, f) in frames.into_iter().enumerate() {
+                let pos = base + i as u64;
+                if pos < off || pos >= high {
+                    continue;
+                }
+                n += 1;
+                let txn = want_txn.then(|| f.txn.to_string());
+                if !cb(pos, created, txn, blob.slice_ref(f.payload), f.encrypted) {
                     return Ok(());
                 }
                 if n >= limit {

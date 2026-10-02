@@ -68,10 +68,13 @@
 //!
 //! ## What is refused
 //!
-//! See `compat/ERRORS.md` for the table. The one worth naming here is
-//! `cleanup.policy=compact` ([`crate::topic_config`]): it is refused
-//! INVALID_CONFIG, which is what makes Kafka Connect fail at startup instead of
-//! losing its connector configuration on a later restart.
+//! See `compat/ERRORS.md` for the table. What is NOT refused any more is worth
+//! naming: `cleanup.policy=compact` and the configs Kafka Streams and Kafka
+//! Connect create their internal topics with ([`crate::topic_config`]). A
+//! compacted topic is created as a queue that keeps every record — retention
+//! off, explicitly — which is what lets Connect start and replay its config
+//! topic after a restart rather than lose it; the other configs are recorded
+//! and reported back as set.
 
 use kafka_protocol::error::ResponseError;
 use kafka_protocol::messages::create_topics_request::CreatableTopic;
@@ -197,19 +200,15 @@ pub async fn handle(
     };
 
     let mut created = 0usize;
-    let mut results = Vec::with_capacity(planned.len());
-    // The bags that actually landed, for the config records written after the
-    // loop. See [`record_what_was_created`].
-    let mut recordable: Vec<(
-        String,
-        serde_json::Map<String, serde_json::Value>,
-        Option<u32>,
-    )> = Vec::new();
+    // In request order. A topic to create holds a slot here until its queue's
+    // create has answered, because those run after the write-ahead below.
+    let mut results: Vec<Option<CreatableTopicResult>> = Vec::with_capacity(planned.len());
+    let mut to_create: Vec<ToCreate> = Vec::new();
     for (topic, plan) in planned {
         let name = topic.name.clone();
         let applied = match plan {
             Plan::Reject(code, why) => {
-                results.push(errored(name, code, why));
+                results.push(Some(errored(name, code, why)));
                 continue;
             }
             Plan::Create(applied) => applied,
@@ -219,7 +218,7 @@ pub async fn handle(
             .as_ref()
             .is_some_and(|live| live.contains(name.as_str()))
         {
-            results.push(errored(
+            results.push(Some(errored(
                 name,
                 ResponseError::TopicAlreadyExists,
                 // Named rather than generic: the whole reason this branch does
@@ -229,7 +228,7 @@ pub async fn handle(
                 "a Queen queue of this name already exists; its configuration was left exactly \
                  as it is (POST /api/v1/configure is an upsert that would rewrite every column)"
                     .to_string(),
-            ));
+            )));
             continue;
         }
 
@@ -239,7 +238,7 @@ pub async fn handle(
         // for the life of the topic. `QUEEN_KAFKA_DEFAULT_PARTITIONS` gets a
         // hard boot error for the same number (boot.rs); this is the wire's.
         if i64::from(topic.num_partitions) > i64::from(facade.max_partitions) {
-            results.push(errored(
+            results.push(Some(errored(
                 name,
                 ResponseError::InvalidPartitions,
                 format!(
@@ -247,7 +246,7 @@ pub async fn handle(
                      (QUEEN_KAFKA_MAX_PARTITIONS)",
                     topic.num_partitions, facade.max_partitions
                 ),
-            ));
+            )));
             continue;
         }
 
@@ -266,61 +265,164 @@ pub async fn handle(
         // `validate_only`: everything above ran, nothing below does. The answer
         // says what WOULD have happened, which is the whole point of the flag.
         if req.validate_only {
-            results.push(made(name, width, &applied));
+            results.push(Some(made(name, width, &applied)));
             continue;
         }
 
         if created >= MAX_CREATES_PER_REQUEST {
             let code = throttled(version);
             throttle_ms = throttle::longest(throttle_ms, Some(throttle::DEFAULT_MS));
-            results.push(errored(
+            results.push(Some(errored(
                 name,
                 code,
                 format!(
                     "this request asked for more than {MAX_CREATES_PER_REQUEST} topics; the rest \
                      are answered with a retriable code and are created as the client retries"
                 ),
-            ));
+            )));
             continue;
         }
         created += 1;
 
-        let options = serde_json::Value::Object(applied.options.clone());
-        match facade
+        to_create.push(ToCreate {
+            slot: results.len(),
+            name,
+            applied,
+            floor,
+            width,
+        });
+        results.push(None);
+    }
+
+    // The widths go first ([`topic_record`]'s module header): committed before
+    // any queue below is created, every node that can list one of these topics
+    // has already applied its floor. A topic that declared no width has nothing
+    // to race, so it writes nothing here.
+    let ahead = write_ahead(facade, &to_create, token).await;
+
+    // The bags that actually landed, for the config records written after the
+    // loop. See [`record_what_was_created`].
+    let mut recordable: Vec<Created> = Vec::new();
+    // Pending records whose queue was never made, taken back below.
+    let mut orphaned: Vec<String> = Vec::new();
+    for c in to_create {
+        let mut options = c.applied.options.clone();
+        options
+            .entry(queen::DEDUP_WINDOW_SECONDS)
+            .or_insert(serde_json::json!(queen::KAFKA_DEDUP_WINDOW_SECONDS));
+        let options = serde_json::Value::Object(options);
+        let result = match facade
             .catalog
-            .create_with(name.as_str(), &options, token)
+            .create_with(c.name.as_str(), &options, token)
             .await
         {
             Ok(()) => {
                 tracing::info!(
                     target: "kafka",
-                    topic = name.as_str(),
-                    partitions = width,
-                    configs = applied.options.len(),
+                    topic = c.name.as_str(),
+                    partitions = c.width,
+                    configs = c.applied.options.len(),
                     "created a queue for a Kafka topic (CreateTopics)"
                 );
-                recordable.push((name.to_string(), applied.options.clone(), floor));
-                results.push(made(name, width, &applied));
+                recordable.push(Created {
+                    name: c.name.to_string(),
+                    options: c.applied.options.clone(),
+                    kafka: c.applied.kafka.clone(),
+                    floor: c.floor,
+                });
+                made(c.name, c.width, &c.applied)
             }
             Err(e) => {
                 tracing::error!(
                     target: "kafka",
-                    topic = name.as_str(),
+                    topic = c.name.as_str(),
                     error = %e,
                     "CreateTopics could not create the queue"
                 );
                 throttle_ms = throttle::longest(throttle_ms, throttle::for_error(&e));
+                if ahead && c.floor.is_some() {
+                    orphaned.push(c.name.to_string());
+                }
                 let (code, why) = failed(&e, version);
-                results.push(errored(name, code, why));
+                errored(c.name, code, why)
             }
-        }
+        };
+        results[c.slot] = Some(result);
     }
 
     record_what_was_created(facade, &recordable, token).await;
+    take_back(facade, &orphaned, token).await;
 
     CreateTopicsResponse::default()
         .with_throttle_time_ms(throttle_ms.unwrap_or(0))
-        .with_topics(results)
+        .with_topics(results.into_iter().flatten().collect())
+}
+
+/// One topic this request will create, holding its place in the response.
+struct ToCreate {
+    slot: usize,
+    name: TopicName,
+    applied: Box<Applied>,
+    floor: Option<u32>,
+    width: i32,
+}
+
+/// Write the pending width record of every topic in `to_create` that declared
+/// one, in ONE call, before any of their queues exists ([`topic_record`]'s
+/// module header). Whether it landed.
+///
+/// **A create is never failed by this**, for [`record_what_was_created`]'s
+/// reason: without it the topics are created exactly as they were before the
+/// write-ahead existed, and another node may advertise the default width for
+/// the moments until the pinned record reaches it.
+async fn write_ahead(facade: &Facade, to_create: &[ToCreate], token: Option<&str>) -> bool {
+    let records: Vec<(String, topic_record::Record)> = to_create
+        .iter()
+        .filter(|c| c.floor.is_some())
+        .map(|c| {
+            (
+                c.name.to_string(),
+                topic_record::Record::new(None, c.applied.options.clone())
+                    .with_kafka(c.applied.kafka.clone())
+                    .with_partitions(c.floor)
+                    .pending(),
+            )
+        })
+        .collect();
+    if records.is_empty() {
+        return false;
+    }
+    match topic_record::store_many(facade.queen.as_ref(), &records, token).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                target: "kafka",
+                error = %e,
+                topics = records.len(),
+                "could not write the topics' widths ahead of their queues; creating them anyway, \
+                 and another node may advertise the default width until their records land"
+            );
+            false
+        }
+    }
+}
+
+/// Remove the pending records of topics whose queue was never created, so a
+/// later queue of the same name does not inherit their width. Best effort: a
+/// record left behind stops counting after [`topic_record::PENDING_FLOOR_MS`].
+async fn take_back(facade: &Facade, topics: &[String], token: Option<&str>) {
+    if topics.is_empty() {
+        return;
+    }
+    if let Err(e) = topic_record::remove_many(facade.queen.as_ref(), topics, token).await {
+        tracing::warn!(
+            target: "kafka",
+            error = %e,
+            topics = topics.len(),
+            "could not remove the pending widths of topics that were not created; they expire \
+             on their own"
+        );
+    }
 }
 
 /// Write the facade's own record of what each create applied
@@ -340,15 +442,7 @@ pub async fn handle(
 /// is missing, and the topic simply behaves as untracked until the next alter
 /// re-establishes it. Bookkeeping that can fail a create is worse than
 /// bookkeeping that can be absent.
-async fn record_what_was_created(
-    facade: &Facade,
-    created: &[(
-        String,
-        serde_json::Map<String, serde_json::Value>,
-        Option<u32>,
-    )],
-    token: Option<&str>,
-) {
+async fn record_what_was_created(facade: &Facade, created: &[Created], token: Option<&str>) {
     if created.is_empty() {
         return;
     }
@@ -371,11 +465,13 @@ async fn record_what_was_created(
         .collect();
     let records: Vec<(String, topic_record::Record)> = created
         .iter()
-        .map(|(name, options, floor)| {
-            let qid = ids.get(name.as_str()).cloned().flatten();
+        .map(|c| {
+            let qid = ids.get(c.name.as_str()).cloned().flatten();
             (
-                name.clone(),
-                topic_record::Record::new(qid, options.clone()).with_partitions(*floor),
+                c.name.clone(),
+                topic_record::Record::new(qid, c.options.clone())
+                    .with_kafka(c.kafka.clone())
+                    .with_partitions(c.floor),
             )
         })
         .collect();
@@ -388,7 +484,7 @@ async fn record_what_was_created(
         // the client's next Metadata will disagree with the create it just made,
         // which is the one contract CreateTopics otherwise keeps. There is no
         // repair but to delete the topic and create it again.
-        let declared = created.iter().filter(|(_, _, f)| f.is_some()).count();
+        let declared = created.iter().filter(|c| c.floor.is_some()).count();
         tracing::warn!(
             target: "kafka",
             error = %e,
@@ -416,9 +512,20 @@ async fn record_what_was_created(
     // Only when a floor was actually declared: a plain create changes no width,
     // and forcing every tenant's next list to re-scan for nothing would put an
     // admin path's cost on the whole fleet.
-    if created.iter().any(|(_, _, floor)| floor.is_some()) {
+    if created.iter().any(|c| c.floor.is_some()) {
         facade.catalog.invalidate(token).await;
     }
+}
+
+/// What one create landed, for the config record written after the loop.
+struct Created {
+    name: String,
+    /// The bag posted to `/configure` (without the create-only dedup window,
+    /// which the record never carried).
+    options: serde_json::Map<String, serde_json::Value>,
+    /// The Kafka-side values ([`topic_record::Record::kafka`]).
+    kafka: serde_json::Map<String, serde_json::Value>,
+    floor: Option<u32>,
 }
 
 /// Everything decidable about one requested topic without touching Queen: the
@@ -603,7 +710,7 @@ fn note_declared_width(name: &TopicName, floor: Option<u32>) {
 mod tests {
     use super::*;
     use crate::handlers::testing::{facade, facade_and_queen};
-    use crate::queen::Error;
+    use crate::queen::{Error, KvOp};
     use kafka_protocol::messages::create_topics_request::{
         CreatableReplicaAssignment, CreatableTopicConfig,
     };
@@ -661,12 +768,15 @@ mod tests {
         // The FACADE's width (the fixture configures 4), not the -1 asked for.
         assert_eq!(t.num_partitions, 4);
         assert_eq!(t.replication_factor, 1);
-        // One configure, with an EMPTY bag — the same body the auto-create
-        // path sends, which is what keeps a create from writing defaults it was
-        // not asked for.
+        // One configure, with nothing but the dedup window a Kafka topic has no
+        // use for (`queen::KAFKA_DEDUP_WINDOW_SECONDS`) — the same body the
+        // auto-create path sends: a create writes no defaults it was not asked for.
         assert_eq!(api.configured().len(), 1);
         assert_eq!(api.configured()[0].0, "events");
-        assert_eq!(api.configured()[0].1, serde_json::json!({}));
+        assert_eq!(
+            api.configured()[0].1,
+            serde_json::json!({"dedupWindowSeconds": 0})
+        );
         // ...and NOT through the auto-create method.
         assert!(api.created().is_empty());
     }
@@ -690,14 +800,42 @@ mod tests {
     /// The configs the mapping refuses take the topic with them, and nothing is
     /// written for it.
     #[tokio::test]
-    async fn compaction_is_refused_and_nothing_is_written() {
+    async fn a_refused_config_writes_nothing() {
+        let (f, api) = facade_and_queen(&[]);
+        let r = handle(
+            &f,
+            &request(vec![with_configs(
+                "events",
+                &[("message.timestamp.type", Some("LogAppendTime"))],
+            )]),
+            6,
+            None,
+        )
+        .await;
+
+        assert_eq!(code(&r, "events"), ResponseError::InvalidConfig.code());
+        assert!(message(&r, "events").contains("producer's timestamp"));
+        assert!(api.configured().is_empty());
+        assert!(api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("events"))
+            .is_none());
+    }
+
+    /// Kafka Connect's internal topic, exactly as `TopicAdmin` creates it: a
+    /// single partition, `cleanup.policy=compact`. The queue is created with
+    /// retention OFF — explicitly, so nothing ever expires a record of it —
+    /// the record keeps `compact`, and the echo says `compact`, which is the
+    /// value Connect checks before it will start.
+    #[tokio::test]
+    async fn a_compacted_topic_is_a_queue_that_keeps_every_record() {
         let (f, api) = facade_and_queen(&[]);
         let r = handle(
             &f,
             &request(vec![with_configs(
                 "connect-configs",
                 &[("cleanup.policy", Some("compact"))],
-            )]),
+            )
+            .with_num_partitions(1)]),
             6,
             None,
         )
@@ -705,10 +843,68 @@ mod tests {
 
         assert_eq!(
             code(&r, "connect-configs"),
-            ResponseError::InvalidConfig.code()
+            0,
+            "{}",
+            message(&r, "connect-configs")
         );
-        assert!(message(&r, "connect-configs").contains("compaction"));
-        assert!(api.configured().is_empty());
+        assert_eq!(
+            api.configured()[0].1,
+            serde_json::json!({"retentionEnabled": false, "dedupWindowSeconds": 0})
+        );
+        let stored = api
+            .kv_get(
+                crate::offsets::NAMESPACE,
+                &topic_record::key("connect-configs"),
+            )
+            .unwrap();
+        assert_eq!(stored["kafka"]["cleanup.policy"], "compact");
+        assert_eq!(stored["partitions"], 1);
+        let echoed: Vec<(String, String)> = r.topics[0]
+            .configs
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| (c.name.to_string(), c.value.as_ref().unwrap().to_string()))
+            .collect();
+        assert!(echoed.contains(&("cleanup.policy".into(), "compact".into())));
+    }
+
+    /// Kafka Streams' repartition topic, as `RepartitionTopicConfig` creates
+    /// it: every config accepted, the layout knob recorded and echoed back.
+    #[tokio::test]
+    async fn a_streams_repartition_topic_is_created_with_its_configs() {
+        let (f, api) = facade_and_queen(&[]);
+        let r = handle(
+            &f,
+            &request(vec![with_configs(
+                "app-KSTREAM-AGGREGATE-repartition",
+                &[
+                    ("cleanup.policy", Some("delete")),
+                    ("segment.bytes", Some("52428800")),
+                    ("retention.ms", Some("-1")),
+                    ("message.timestamp.type", Some("CreateTime")),
+                ],
+            )]),
+            6,
+            None,
+        )
+        .await;
+        let name = "app-KSTREAM-AGGREGATE-repartition";
+        assert_eq!(code(&r, name), 0, "{}", message(&r, name));
+        let stored = api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key(name))
+            .unwrap();
+        assert_eq!(stored["kafka"]["segment.bytes"], "52428800");
+        assert_eq!(stored["kafka"]["message.timestamp.type"], "CreateTime");
+        let echoed: Vec<String> = r.topics[0]
+            .configs
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| c.name.to_string())
+            .collect();
+        assert!(echoed.contains(&"segment.bytes".to_string()), "{echoed:?}");
+        assert!(echoed.contains(&"retention.ms".to_string()), "{echoed:?}");
     }
 
     /// A retention the mapping accepts reaches Queen as Queen's own options,
@@ -731,7 +927,7 @@ mod tests {
         assert_eq!(code(&r, "sessions"), 0);
         assert_eq!(
             api.configured()[0].1,
-            serde_json::json!({"retentionEnabled": true, "retentionSeconds": 604_800})
+            serde_json::json!({"retentionEnabled": true, "retentionSeconds": 604_800, "dedupWindowSeconds": 0})
         );
         let echoed: Vec<(String, String)> = r.topics[0]
             .configs
@@ -743,10 +939,10 @@ mod tests {
         assert!(echoed.contains(&("retention.ms".into(), "604800000".into())));
         assert!(echoed.contains(&("cleanup.policy".into(), "delete".into())));
         assert!(echoed.contains(&("min.insync.replicas".into(), "1".into())));
-        // `read_only` is per row since M7 F4: the two rows whose only legal
-        // value is the one already reported cannot be changed, and the
-        // retention this create just applied can — the record written below is
-        // what makes an alter of it land.
+        // `read_only` is per row: every row of the topic this create is about
+        // to track is writable — the record written below is what makes an
+        // alter of any of them land (since 2026-10-01 the policy and the
+        // in-sync count can be set too).
         let flags: Vec<(String, bool)> = r.topics[0]
             .configs
             .as_ref()
@@ -755,11 +951,11 @@ mod tests {
             .map(|c| (c.name.to_string(), c.read_only))
             .collect();
         assert!(
-            flags.contains(&("cleanup.policy".into(), true)),
+            flags.contains(&("cleanup.policy".into(), false)),
             "{flags:?}"
         );
         assert!(
-            flags.contains(&("min.insync.replicas".into(), true)),
+            flags.contains(&("min.insync.replicas".into(), false)),
             "{flags:?}"
         );
         assert!(flags.contains(&("retention.ms".into(), false)), "{flags:?}");
@@ -786,6 +982,80 @@ mod tests {
                 .unwrap()["partitions"],
             serde_json::json!(64)
         );
+    }
+
+    /// The width is written AHEAD of the queue (`topic_record`'s module
+    /// header): a KV write carrying the pending floor precedes the configure,
+    /// and the pinned record then replaces it. The 2026-10-01 Kafka Connect
+    /// failure was another node listing the new queue before its width.
+    #[tokio::test]
+    async fn the_width_is_written_before_the_queue_exists() {
+        let (f, api) = facade_and_queen(&[]);
+        let r = handle(
+            &f,
+            &request(vec![topic("status").with_num_partitions(5), topic("plain")]),
+            6,
+            None,
+        )
+        .await;
+        assert_eq!(code(&r, "status"), 0);
+        assert_eq!(code(&r, "plain"), 0);
+        assert_eq!(r.topics[0].name.as_str(), "status", "request order is kept");
+
+        let calls = api.kv_calls.lock().unwrap().clone();
+        let marks = api.kv_calls_at_configure.lock().unwrap().clone();
+        assert_eq!(marks.len(), 2, "two creates");
+        let wrote_ahead = |c: &Vec<KvOp>| {
+            c.iter().any(|op| {
+                matches!(op, KvOp::Put { key, value, .. }
+                    if key == &topic_record::key("status") && value["pending"] == serde_json::json!(true)
+                        && value["partitions"] == serde_json::json!(5))
+            })
+        };
+        let ahead = calls
+            .iter()
+            .position(wrote_ahead)
+            .expect("a pending width record was written");
+        assert!(
+            ahead < marks[0],
+            "the width landed before the queue's create"
+        );
+        assert!(
+            !calls
+                .iter()
+                .flatten()
+                .any(|op| matches!(op, KvOp::Put { key, value, .. }
+                if key == &topic_record::key("plain") && value.get("pending").is_some())),
+            "a topic that declared no width writes nothing ahead"
+        );
+
+        let stored = api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("status"))
+            .unwrap();
+        assert_eq!(stored["partitions"], serde_json::json!(5));
+        assert!(
+            stored.get("pending").is_none(),
+            "the pinned record replaced it"
+        );
+    }
+
+    /// A queue that could not be created takes its pending width back, so a
+    /// later queue of that name does not inherit it.
+    #[tokio::test]
+    async fn a_failed_create_takes_its_pending_width_back() {
+        let (f, api) = facade_and_queen(&[]);
+        api.fail_create(Error::Transport("refused".into()));
+        let r = handle(
+            &f,
+            &request(vec![topic("status").with_num_partitions(5)]),
+            6,
+            None,
+        )
+        .await;
+        assert_eq!(code(&r, "status"), ResponseError::RequestTimedOut.code());
+        assert!(api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("status"))
+            .is_none());
     }
 
     /// `-1` is KIP-464's "I do not care", which is what a modern AdminClient

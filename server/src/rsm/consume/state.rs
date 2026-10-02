@@ -530,6 +530,7 @@ impl Group {
 
     /// One part fewer in the ready lists.
     pub fn unready(&self) {
+        #[allow(deprecated)] // fetch_update: deprecated in 1.99; try_update is 1.95+, MSRV 1.88
         let _ = self
             .ready_n
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {

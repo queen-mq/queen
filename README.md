@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/queen-sunflower-bee.svg" alt="" width="120" height="120">
+<img src="assets/queen-badge.svg" alt="" width="120" height="120">
 
 # Queen MQ
 

@@ -217,13 +217,10 @@
       <text class="qm-ink" fill="#181818" x="578" y="210" text-anchor="start" font-weight="700">Queen MQ</text>
     </g>
 
-    <!-- the mark, sized to sit with the name -->
-    <g class="qm-ink" fill="#181818" transform="translate(556,196) scale(0.0625) translate(-2.01,-2.01)">
-      <path d="M 166.295 209.709 A 105.0 105.0 0 1 1 209.709 166.295 L 175.275 147.985 A 66.0 66.0 0 1 0 147.985 175.275 Z"/>
-      <g transform="translate(43.134,43.134) translate(177.458,177.458) scale(0.85) translate(-177.458,-177.458)">
-        <path d="M 209.709 166.295 A 105.0 105.0 0 0 1 166.295 209.709 L 147.985 175.275 A 66.0 66.0 0 0 0 175.275 147.985 Z"/>
-      </g>
-    </g>
+    <!-- the mark, sized to sit with the name: the site's own /queen-mark.svg,
+         so it follows assets/generate-brand.py (this map is inlined into the
+         docs homepage, where that path resolves) -->
+    <image href="/queen-mark.svg" x="556" y="196" width="16" height="16"/>
 
     <g font-size="12">
       <!-- Queen's two figures: two runs, said as two lines so the corner is

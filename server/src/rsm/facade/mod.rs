@@ -399,6 +399,61 @@ pub struct PushOut {
     pub body: String,
 }
 
+/// One record of [`Rsm::push_records`]: the typed twin of one `POST /api/v1/push`
+/// item that carries neither `transactionId` nor `traceId`, so the broker mints
+/// the message id and uses it as the transaction id, exactly as it does for
+/// such an item. `payload` must be one JSON document; it is stored as these
+/// bytes, as the route stores an item's raw `payload`.
+#[derive(Clone, Debug)]
+pub struct RecordPush {
+    pub queue: String,
+    pub partition: String,
+    pub payload: Vec<u8>,
+}
+
+/// What [`Rsm::push_records`] did with one [`RecordPush`]: the per-item
+/// `status` and `offset` the JSON answer of the same push carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordPushed {
+    pub status: &'static str,
+    pub offset: Option<u64>,
+}
+
+/// One partition to read with [`Rsm::fetch_records`]: the typed twin of one
+/// `POST /api/v1/fetch` entry, already validated (a non-negative offset, a
+/// clamped byte budget).
+#[derive(Clone, Debug)]
+pub struct RecordFetch {
+    pub queue: String,
+    pub partition: String,
+    pub offset: u64,
+    pub max_bytes: usize,
+}
+
+/// One stored record as [`Rsm::fetch_records`] reads it: its offset, when its
+/// segment was written, and its payload as stored (decrypted).
+#[derive(Clone, Debug)]
+pub struct RecordRead {
+    pub offset: u64,
+    pub created_at_us: i64,
+    pub payload: bytes::Bytes,
+    /// The record's transaction id: read for the JSON route only, `None` in a
+    /// [`Rsm::fetch_records`] answer.
+    pub txn: Option<String>,
+}
+
+/// One entry of a [`Rsm::fetch_records`] answer: the twin of one entry of the
+/// `POST /api/v1/fetch` answer.
+#[derive(Clone, Debug, Default)]
+pub struct RecordsFetched {
+    pub records: Vec<RecordRead>,
+    pub high_watermark: u64,
+    pub log_start_offset: u64,
+    /// `UNKNOWN_TOPIC_OR_PARTITION` or `OFFSET_OUT_OF_RANGE`, as the route
+    /// spells them.
+    pub error: Option<&'static str>,
+}
+
 /// A pop outcome: the rendered response body, and whether the claim came back
 /// empty (so the long-poll path knows to park, §9.5).
 #[derive(Clone, Debug)]
@@ -716,6 +771,31 @@ pub trait Rsm: Send + Sync {
     }
     /// `POST /api/v1/push`.
     async fn push(&self, ctx: ReqCtx, req: PushReq) -> Result<PushOut, RsmError>;
+
+    /// `POST /api/v1/push` for an in-process caller (the Kafka facade): the
+    /// same admission, the same commands and the same per-item answers, minus
+    /// the JSON body on the way in and the rendered answer on the way out.
+    /// `Unsupported` where it is not served; the caller then takes the route.
+    async fn push_records(
+        &self,
+        _ctx: ReqCtx,
+        _items: Vec<RecordPush>,
+    ) -> Result<Vec<RecordPushed>, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+
+    /// `POST /api/v1/fetch` for an in-process caller: the same read and the same
+    /// long poll (`max_wait_ms`, `min_bytes`), answered as records rather than
+    /// rendered JSON. `Unsupported` where it is not served.
+    async fn fetch_records(
+        &self,
+        _ctx: ReqCtx,
+        _entries: Vec<RecordFetch>,
+        _max_wait_ms: u64,
+        _min_bytes: usize,
+    ) -> Result<Vec<RecordsFetched>, RsmError> {
+        Err(RsmError::Unsupported)
+    }
     /// `GET /api/v1/pop/queue/:queue` (wildcard over the queue's partitions).
     async fn pop_wildcard(&self, ctx: ReqCtx, req: PopReq) -> Result<PopOut, RsmError>;
     /// `GET /api/v1/pop/queue/:queue/partition/:partition` (pinned).

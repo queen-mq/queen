@@ -9,7 +9,6 @@ package compat
 
 import (
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -231,9 +230,11 @@ func TestCreateTopicsRefusesAnExistingTopic(t *testing.T) {
 	}
 }
 
-// The refusal that decides whether Kafka Connect can run, and the reason
-// CreateTopics does not unlock it: Connect's internal topics are compacted.
-func TestCreateTopicsRefusesCompaction(t *testing.T) {
+// What decides whether Kafka Connect can run: its internal topics are created
+// compacted, and the worker then checks through DescribeConfigs that they are
+// exactly `compact`. Since 2026-10-01 a compacted topic is created as a queue
+// that keeps every record (topic_config.rs), and it says `compact` back.
+func TestCreateTopicsKeepsACompactedTopic(t *testing.T) {
 	cl := newClient(t)
 	topic := newTopic(t)
 
@@ -243,17 +244,17 @@ func TestCreateTopicsRefusesCompaction(t *testing.T) {
 		withConfig(newCreate(topic, 1, 1), "cleanup.policy", "compact"))
 	resp := createTopics(t, cl, createTopicsV, req)
 
-	if resp.Topics[0].ErrorCode != errInvalidConfig {
-		t.Fatalf("compacted create: error code %d, want %d",
-			resp.Topics[0].ErrorCode, errInvalidConfig)
+	if resp.Topics[0].ErrorCode != errNone {
+		t.Fatalf("compacted create: error code %d (%v), want 0",
+			resp.Topics[0].ErrorCode, resp.Topics[0].ErrorMessage)
 	}
-	if resp.Topics[0].ErrorMessage == nil ||
-		!strings.Contains(*resp.Topics[0].ErrorMessage, "compaction") {
-		t.Fatalf("the refusal does not name compaction: %v", resp.Topics[0].ErrorMessage)
+	t.Cleanup(func() { deleteTopics(t, cl, topic) })
+	r := describeConfigs(t, cl, resourceTopic, topic)
+	if v, ok := configValue(r, "cleanup.policy"); !ok || v != "compact" {
+		t.Fatalf("cleanup.policy = %q (present=%v), want compact", v, ok)
 	}
-	// Nothing was created.
-	if listedTopics(t, newClient(t))[topic] {
-		t.Fatalf("%s was refused and exists anyway", topic)
+	if v, ok := configValue(r, "retention.ms"); !ok || v != "-1" {
+		t.Fatalf("retention.ms = %q (present=%v), want -1: a compacted topic keeps every record", v, ok)
 	}
 }
 
@@ -509,11 +510,16 @@ func TestDescribeConfigsOnATopic(t *testing.T) {
 	if v, ok := configValue(r, "retention.ms"); !ok || v != "-1" {
 		t.Fatalf("retention.ms = %q (present=%v), want -1 for a topic this facade created", v, ok)
 	}
-	// `read_only` is PER ROW now. The two rows whose only legal value is the one
-	// already reported cannot be changed and say so; retention can be, because
-	// AlterConfigs and IncrementalAlterConfigs land on it. A UI that greys out
-	// its edit button on this flag is still being told the truth.
-	writable := map[string]bool{"retention.ms": true}
+	// `read_only` is PER ROW. On a topic this facade created every row an alter
+	// lands on says so: retention, and since 2026-10-01 the cleanup policy
+	// (delete, compact or both) and min.insync.replicas (up to the raft
+	// majority). A UI that greys out its edit button on this flag is still
+	// being told the truth.
+	writable := map[string]bool{
+		"retention.ms":        true,
+		"cleanup.policy":      true,
+		"min.insync.replicas": true,
+	}
 	for _, c := range r.Configs {
 		if c.ReadOnly == writable[c.Name] {
 			t.Fatalf("%s: read_only=%v, want %v", c.Name, c.ReadOnly, !writable[c.Name])
@@ -642,7 +648,7 @@ func TestCreateTopicsRefusalDoesNotTakeItsNeighboursWithIt(t *testing.T) {
 	req := kmsg.NewPtrCreateTopicsRequest()
 	req.TimeoutMillis = 30_000
 	req.Topics = append(req.Topics,
-		withConfig(newCreate(bad, 1, 1), "cleanup.policy", "compact"),
+		withConfig(newCreate(bad, 1, 1), "message.timestamp.type", "LogAppendTime"),
 		newCreate(good, -1, -1))
 	resp := createTopics(t, cl, createTopicsV, req)
 

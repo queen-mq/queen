@@ -134,11 +134,11 @@ pub struct Api {
 /// `1..=5` for ListOffsets, where the schema goes to 10 and its own floor is 1.
 /// v6 is the flexible encoding and v7 adds the MAX_TIMESTAMP sentinel (-3),
 /// which asks for the offset of the record with the highest timestamp — a
-/// time-index question this facade answers for no version (see
-/// `handlers::list_offsets`), so advertising the version that makes it askable
-/// would be advertising a refusal. v5 is the last version whose whole surface is
-/// the two watermark sentinels, which is exactly the surface Queen answers
-/// exactly.
+/// question about the records' OWN timestamps, which the broker does not read
+/// (see `handlers::list_offsets`), so advertising the version that makes it
+/// askable would be advertising a refusal. v5's surface is the two watermark
+/// sentinels and a concrete time, and since 2026-10-01 Queen answers all three:
+/// a time from the broker's append stamps (`POST /api/v1/fetch/offsets`).
 ///
 /// THE TOPICS-ADMIN APIS (M7 F1) are the three an AdminClient object needs
 /// before any of it works, and their ceilings are all the same boundary the

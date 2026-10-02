@@ -1845,8 +1845,8 @@ padding:8px 10px;border-radius:6px;font-size:13px;margin-bottom:14px}}\
 }
 
 /// The brand mark as a `data:` URI — the SAME built asset the sidebar shows
-/// (`app/public/queen-sunflower.webp`, the sunflower-and-bee scene without the
-/// badge's rim), pulled out of the embedded webapp so the sign-in page and the
+/// (`app/public/queen-sunflower.webp`, the small sunflower mark), pulled out
+/// of the embedded webapp so the sign-in page and the
 /// app it fronts can never drift apart, and so replacing it (+ `npm run build`)
 /// updates this page too.
 ///
@@ -1866,9 +1866,9 @@ fn brand_badge_data_uri() -> &'static str {
     })
 }
 
-/// The tab icon: the webapp's own favicon, the sunflower badge as vector
-/// (`assets/queen-sunflower-bee.svg`). It carries its own ground, so it reads
-/// on a light or a dark tab strip without a second file.
+/// The tab icon: the webapp's own favicon, the small sunflower mark as vector
+/// (`assets/queen-mark.svg`). The flower reads on a light or a dark tab strip
+/// as it is, without a second file.
 fn favicon_data_uri() -> &'static str {
     static URI: OnceLock<String> = OnceLock::new();
     URI.get_or_init(|| match crate::webapp::embedded_asset(BRAND_FAVICON) {

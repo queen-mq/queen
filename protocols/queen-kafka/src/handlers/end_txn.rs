@@ -699,6 +699,45 @@ mod tests {
         assert!(api.transactions.lock().unwrap().is_empty());
     }
 
+    /// Flink's recovery, end to end: the connection that staged the
+    /// transaction is gone, and a NEW one resumes it with the same producer id
+    /// and epoch and commits. The stage outlived its connection, so the commit
+    /// writes exactly the records the old one staged — and a second resumed
+    /// commit, which a job restarted twice from the same checkpoint sends, is
+    /// Kafka's repeated commit: 0, and no second write.
+    #[tokio::test]
+    async fn a_resumed_commit_after_the_owner_disconnected_lands_the_stage_once() {
+        let (f, api) = staged(3, 1).await;
+        // The fixture bound on connection 1.
+        f.txns.drop_connection(1);
+        let resp = handle(&f, &request("tx", PID, 0, true), None).await;
+        assert_eq!(resp.error_code, 0);
+        let sent = api.transactions.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0.len(), 3, "every staged record, in one bundle");
+
+        let again = handle(&f, &request("tx", PID, 0, true), None).await;
+        assert_eq!(again.error_code, 0);
+        assert_eq!(api.transactions.lock().unwrap().len(), 1, "nothing twice");
+    }
+
+    /// ...and a resumed commit of a transaction that was ABORTED while its
+    /// producer was away is refused, never answered as a commit of nothing.
+    #[tokio::test]
+    async fn a_resumed_commit_of_an_aborted_transaction_is_refused() {
+        let (f, api) = staged(3, 0).await;
+        f.txns.drop_connection(1);
+        assert_eq!(
+            handle(&f, &request("tx", PID, 0, false), None)
+                .await
+                .error_code,
+            0
+        );
+        let resp = handle(&f, &request("tx", PID, 0, true), None).await;
+        assert_eq!(resp.error_code, ResponseError::InvalidTxnState.code());
+        assert!(api.transactions.lock().unwrap().is_empty());
+    }
+
     /// A commit for a transaction this facade never held. Fatal, and it has to
     /// be: this is the crash path, and the only answer that cannot let an
     /// application believe an uncommitted commit.

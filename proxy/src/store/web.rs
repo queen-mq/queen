@@ -111,6 +111,7 @@ impl From<crate::store::data::DataError> for WebError {
             D::Conflict(m) => WebError::Conflict(m),
             D::Unavailable(m) => WebError::Unavailable(m),
             D::NoStore => WebError::NotConfigured,
+            D::Refused { msg, .. } => WebError::Raised(msg),
         }
     }
 }

@@ -47,7 +47,7 @@ The advertised table is 33 API keys. The thirteen admin keys,
 
 | API | key | versions | Notes |
 | --- | --- | --- | --- |
-| CreateTopics | 19 | v2-v6 | `--partitions` is stored as the topic's own width FLOOR (`max(live lanes, it)`) and reported back; `--replication-factor` is accepted and reported as 1; `cleanup.policy=compact` is refused |
+| CreateTopics | 19 | v2-v6 | `--partitions` is stored as the topic's own width FLOOR (`max(live lanes, it)`) and reported back; `--replication-factor` is accepted and reported as 1; `cleanup.policy=compact` keeps every record (retention off, phase 1 of compaction), and the configs Kafka Streams and Connect create topics with are accepted and reported back as set |
 | DeleteTopics | 20 | v1-v5 | deletes the underlying Queen queue, which native producers may share |
 | DescribeConfigs | 32 | v1-v4 | topics and this broker; `retention.ms` round-trips for topics this facade created |
 | AlterConfigs | 33 | v0-v2 | the deprecated FULL-REPLACEMENT form: a key the request does not name is reset to its default. Prefer key 44 |
@@ -80,20 +80,22 @@ and the commit that leaves 200 records, 200 distinct keys, 0 duplicates and 0
 missing.
 
 **The boundary is one sentence: a transaction here is a STAGE held by one
-facade process, on the connection that opened it.** That is enough for a
-transactional producer and for a consume-transform-produce loop in one process,
-which is Spring's `KafkaTransactionManager` and every stock Java or franz-go EOS
-loop. It is not enough for a two-phase commit that finishes somewhere else:
-Flink's `KafkaSink EXACTLY_ONCE` and Spark's structured-streaming writer commit
-after a failover from a DIFFERENT process, that `EndTxn` reaches a facade
-holding no stage, and it is answered `INVALID_TXN_STATE` — fatal, so the job
-cannot recover. **Transactions also change nothing for Kafka Streams**, whose
-dependency is log compaction and not transactions.
+facade process.** That is enough for a transactional producer and for a
+consume-transform-produce loop in one process, which is Spring's
+`KafkaTransactionManager` and every stock Java or franz-go EOS loop. Since
+2026-10-01 it is also enough for a two-phase commit that finishes on another
+CONNECTION: a stage outlives the connection that opened it until its own
+`transaction.timeout.ms`, so Flink's `KafkaSink EXACTLY_ONCE` resuming its
+checkpoint's transaction after a TaskManager failover commits it. It is not
+enough across a restart of the facade itself: that resumed `EndTxn` reaches a
+process holding no stage and is answered `INVALID_TXN_STATE`, and Flink drops
+the checkpoint's records. **Transactions also change nothing for Kafka
+Streams**, whose dependency is log compaction and not transactions.
 
 Three things to know before you meet them. Records are STAGED in memory until
 the commit, so a transaction is capped in five places with no Kafka analogue
 (`QUEEN_KAFKA_TXN_MAX_*`, defaults 8 MiB / 50 000 records / 128 MiB per process
-/ 1024 open / 900 s), and past a cap the producer must abort. A transactional
+/ 1024 open / 3600 s, Flink's default timeout), and past a cap the producer must abort. A transactional
 produce answers `base_offset = -1`, because no offset exists until the commit
 allocates them. And **cluster mode refuses transactions outright**: with
 `QUEEN_KAFKA_NODE_ID` set, `initTransactions()` raises
@@ -101,9 +103,12 @@ allocates them. And **cluster mode refuses transactions outright**: with
 
 ## What it refuses, loudly
 
-Log compaction (which is what keeps Kafka Streams and Kafka Connect's
-exactly-once source support out), KIP-848 and static membership. Unsupported
-requests fail fast with clear error codes, never hangs.
+Real log compaction, KIP-848 and static membership. A topic created or altered
+with `cleanup.policy=compact` is accepted and KEEPS EVERY RECORD — retention is
+off on its queue — which is what a compacted topic's reader needs (the last
+value of every key is there) at the price of unbounded growth; see
+[`COMPACTION.md`](COMPACTION.md). Unsupported requests fail fast with clear
+error codes, never hangs.
 
 The ALTER half of the admin surface is no longer on that list, and the shape of
 what is left changed on 2026-08-30. AlterConfigs and IncrementalAlterConfigs

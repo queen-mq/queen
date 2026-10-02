@@ -63,19 +63,9 @@ pub(crate) const RESOURCE_BROKER: i8 = 4;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Verdict {
     /// Post this whole bag to `/configure` and store it as the topic's new
-    /// record, pinned to `qid`. The bag is complete, never a fragment — that is
-    /// the invariant the whole module exists to keep.
-    Write {
-        qid: Option<String>,
-        bag: Map<String, Value>,
-        /// The topic's stored width floor, carried through UNCHANGED.
-        ///
-        /// An alter rewrites the whole record, so a floor this path did not
-        /// carry would be erased by the next `retention.ms` change — silently
-        /// narrowing the topic, which is the one failure the width rule exists
-        /// to prevent. No config key sets this: CreateTopics is the only writer.
-        partitions: Option<u32>,
-    },
+    /// record. The bag is complete, never a fragment — that is the invariant
+    /// the whole module exists to keep.
+    Write(Write),
     /// The bag the request computes is the bag already stored, so there is
     /// nothing to do. Answered 0 with no call to Queen, which also narrows the
     /// one window the record has: a `/configure` that would rewrite the same
@@ -84,6 +74,63 @@ pub(crate) enum Verdict {
     Unchanged,
     /// Answer this code and this sentence, and touch nothing.
     Refuse(ResponseError, String),
+}
+
+/// One write a plan decided ([`verdict`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Write {
+    /// The queue id the new record is pinned to.
+    qid: Option<String>,
+    /// The whole `/configure` bag.
+    bag: Map<String, Value>,
+    /// Whether `bag` differs from the stored one. An alter that only changes
+    /// what the record keeps beside the bag — a recorded key, a lower
+    /// `min.insync.replicas` — writes the record and does NOT rewrite the
+    /// queue's configuration, so a value changed in the Queen console survives
+    /// it.
+    bag_changed: bool,
+    /// The keys the stored bag had and `bag` does not: a DELETE, or a full
+    /// replacement that did not name them. Posted as explicit `null`s, which is
+    /// "the default" to `/configure` — a raft broker MERGES a configure, so a
+    /// key that is simply absent would keep the value the alter meant to take
+    /// away (a deleted `retention.ms` would go on deleting).
+    cleared: Vec<String>,
+    /// The Kafka-side values ([`Record::kafka`]).
+    kafka: Map<String, Value>,
+    /// The topic's stored width floor, carried through UNCHANGED.
+    ///
+    /// An alter rewrites the whole record, so a floor this path did not carry
+    /// would be erased by the next `retention.ms` change — silently narrowing
+    /// the topic, which is the one failure the width rule exists to prevent.
+    /// No config key sets this: CreateTopics is the only writer.
+    partitions: Option<u32>,
+}
+
+/// The verdict on a topic whose desired maps are `bag` and `kafka`: settled
+/// ([`topic_config::settle`]), then compared with what is stored.
+pub(crate) fn verdict(
+    tracked: Tracked,
+    mut bag: Map<String, Value>,
+    mut kafka: Map<String, Value>,
+) -> Verdict {
+    topic_config::settle(&mut bag, &mut kafka);
+    if bag == tracked.set && kafka == tracked.kafka {
+        return Verdict::Unchanged;
+    }
+    let cleared = tracked
+        .set
+        .keys()
+        .filter(|k| !bag.contains_key(*k))
+        .cloned()
+        .collect();
+    Verdict::Write(Write {
+        qid: tracked.qid,
+        bag_changed: bag != tracked.set,
+        bag,
+        cleared,
+        kafka,
+        partitions: tracked.partitions,
+    })
 }
 
 /// Everything one request needs to read before it may decide anything: which
@@ -176,8 +223,14 @@ pub(crate) async fn context(facade: &Facade, topics: &[String], token: Option<&s
 }
 
 /// What a tracked topic's record yields to a plan: the queue id it is pinned to,
-/// the config bag to merge onto, and the width floor to carry through untouched.
-pub(crate) type Tracked = (Option<String>, Map<String, Value>, Option<u32>);
+/// the config bag and the Kafka-side values to merge onto, and the width floor
+/// to carry through untouched.
+pub(crate) struct Tracked {
+    pub(crate) qid: Option<String>,
+    pub(crate) set: Map<String, Value>,
+    pub(crate) kafka: Map<String, Value>,
+    pub(crate) partitions: Option<u32>,
+}
 
 impl Context {
     /// The bag the facade last applied to `topic` and the queue id it is pinned
@@ -228,9 +281,12 @@ impl Context {
             }
         };
         match records.get(topic) {
-            Some(record) if record.describes(live_id.as_deref()) => {
-                Ok((live_id.clone(), record.set.clone(), record.partitions))
-            }
+            Some(record) if record.describes(live_id.as_deref()) => Ok(Tracked {
+                qid: live_id.clone(),
+                set: record.set.clone(),
+                kafka: record.kafka.clone(),
+                partitions: record.partitions,
+            }),
             _ => Err(Verdict::Refuse(
                 ResponseError::InvalidConfig,
                 untracked(topic),
@@ -332,31 +388,40 @@ impl Landed {
 /// deliberately done — its own doc warns against it, and this is the exception
 /// it was warning for: the bag is complete by construction
 /// ([`crate::topic_record`]), so the upsert rewrites every column to the value
-/// the facade intends rather than to a stored-procedure default.
+/// the facade intends rather than to a stored-procedure default. The keys the
+/// alter took out of the bag go as explicit `null`s ([`Write::cleared`]), and
+/// a write that leaves the bag as it was makes no `/configure` at all
+/// ([`Write::bag_changed`]).
 pub(crate) async fn commit(
     facade: &Facade,
     topic: &str,
-    qid: Option<String>,
-    bag: Map<String, Value>,
-    partitions: Option<u32>,
+    write: Write,
     token: Option<&str>,
 ) -> Landed {
-    let options = Value::Object(bag.clone());
-    if let Err(e) = facade.catalog.create_with(topic, &options, token).await {
-        tracing::error!(
-            target: "kafka",
-            topic = topic,
-            error = %e,
-            "an alter could not write the queue configuration"
-        );
-        let (code, why) = failed(&e);
-        return Landed {
-            error: Some((code, why)),
-            throttle_ms: throttle::for_error(&e),
-        };
+    if write.bag_changed {
+        let mut options = write.bag.clone();
+        for key in &write.cleared {
+            options.entry(key.clone()).or_insert(Value::Null);
+        }
+        let options = Value::Object(options);
+        if let Err(e) = facade.catalog.create_with(topic, &options, token).await {
+            tracing::error!(
+                target: "kafka",
+                topic = topic,
+                error = %e,
+                "an alter could not write the queue configuration"
+            );
+            let (code, why) = failed(&e);
+            return Landed {
+                error: Some((code, why)),
+                throttle_ms: throttle::for_error(&e),
+            };
+        }
     }
 
-    let record = Record::new(qid, bag).with_partitions(partitions);
+    let record = Record::new(write.qid, write.bag)
+        .with_kafka(write.kafka)
+        .with_partitions(write.partitions);
     if let Err(e) = topic_record::store(facade.queen.as_ref(), topic, &record, token).await {
         tracing::error!(
             target: "kafka",
@@ -476,21 +541,9 @@ pub async fn handle(
             // built the same way, and nothing below runs. That is the whole
             // point of the flag — a client uses it to find out what WOULD
             // happen.
-            Verdict::Write { .. } if req.validate_only => None,
-            Verdict::Write {
-                qid,
-                bag,
-                partitions,
-            } => {
-                let landed = commit(
-                    facade,
-                    resource.resource_name.as_str(),
-                    qid,
-                    bag,
-                    partitions,
-                    token,
-                )
-                .await;
+            Verdict::Write(_) if req.validate_only => None,
+            Verdict::Write(write) => {
+                let landed = commit(facade, resource.resource_name.as_str(), write, token).await;
                 throttle_ms = throttle::longest(throttle_ms, landed.throttle_ms);
                 landed.error
             }
@@ -520,40 +573,34 @@ pub async fn handle(
 /// with this key, and it is the reason `compat/ERRORS.md` says to prefer
 /// IncrementalAlterConfigs.
 ///
-/// The resulting bag REPLACES the record's `set` outright rather than merging
-/// onto it: full replacement on the wire is full replacement in the record.
+/// The resulting maps REPLACE the record's outright rather than merging onto
+/// it: full replacement on the wire is full replacement in the record. A key
+/// the request did not name is at its default — `cleanup.policy` back to
+/// `delete`, a recorded key gone.
 fn plan_topic(
     ctx: &Context,
     topic: &str,
     configs: &[kafka_protocol::messages::alter_configs_request::AlterableConfig],
 ) -> Verdict {
-    let (qid, stored, partitions) = match ctx.tracked(topic) {
+    let tracked = match ctx.tracked(topic) {
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
 
-    let mut desired = Map::new();
+    let mut bag = Map::new();
+    let mut kafka = Map::new();
     for config in configs {
-        let delta = match topic_config::alter_with(
+        let change = match topic_config::alter_with(
             config.name.as_str(),
             config.value.as_ref().map(|v| v.as_str()),
             ctx.isr,
         ) {
-            Ok(delta) => delta,
+            Ok(change) => change,
             Err(why) => return Verdict::Refuse(ResponseError::InvalidConfig, why),
         };
-        topic_config::absorb(&mut desired, &delta);
+        topic_config::absorb_change(&mut bag, &mut kafka, &change);
     }
-
-    if desired == stored {
-        Verdict::Unchanged
-    } else {
-        Verdict::Write {
-            qid,
-            bag: desired,
-            partitions,
-        }
-    }
+    verdict(tracked, bag, kafka)
 }
 
 /// `pub(crate)` for [`super::incremental_alter_configs`]'s tests: the two APIs
@@ -745,9 +792,24 @@ pub(crate) mod tests {
         .await;
 
         assert_eq!(r.responses[0].error_code, 0, "{}", message(&r.responses[0]));
-        // The bag is EMPTY, which is what leaves `configure_queue_v1`'s own
-        // default — retention off — in force.
-        assert_eq!(api.configured(), [("orders".to_string(), json!({}))]);
+        // The bag is EMPTY, and the two keys it lost go as explicit nulls —
+        // "the default" to `/configure`, which a raft broker that MERGES a
+        // configure needs to hear, or retention would stay on.
+        assert_eq!(
+            api.configured(),
+            [(
+                "orders".to_string(),
+                json!({"retentionEnabled": null, "retentionSeconds": null})
+            )]
+        );
+        let stored = api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("orders"))
+            .unwrap();
+        assert_eq!(
+            stored["set"],
+            json!({}),
+            "the record keeps the bag, not the nulls"
+        );
     }
 
     /// A topic the facade did not create is refused by name, with the sentence
@@ -840,7 +902,7 @@ pub(crate) mod tests {
             &request(vec![resource(
                 RESOURCE_TOPIC,
                 "orders",
-                vec![config("segment.bytes", Some("1073741824"))],
+                vec![config("preallocate", Some("true"))],
             )])
             .with_validate_only(true),
             None,
@@ -852,28 +914,94 @@ pub(crate) mod tests {
         );
     }
 
-    /// The refusal that stops Kafka Connect at startup instead of losing its
-    /// config topic later, reached through the alter path too.
+    /// An existing topic altered to `compact` stops losing records: its
+    /// retention is switched OFF on the queue — explicitly — and kept on the
+    /// record as set and not applied, and the record says `compact`. Altered
+    /// back to `delete`, the kept retention is in force again.
     #[tokio::test]
-    async fn compaction_is_still_refused_loudly() {
+    async fn compaction_turns_retention_off_and_back() {
         let (f, api) = facade_and_queen(&[("orders", 2)]);
-        track(&api, "orders", &[]);
+        track(
+            &api,
+            "orders",
+            &[
+                ("retentionEnabled", json!(true)),
+                ("retentionSeconds", json!(60)),
+            ],
+        );
+        let alter = |policy: &'static str| {
+            request(vec![resource(
+                RESOURCE_TOPIC,
+                "orders",
+                vec![
+                    config("cleanup.policy", Some(policy)),
+                    config("retention.ms", Some("60000")),
+                ],
+            )])
+        };
+        let r = handle(&f, &alter("compact"), None).await;
+        assert_eq!(r.responses[0].error_code, 0, "{}", message(&r.responses[0]));
+        assert_eq!(
+            api.configured(),
+            [(
+                "orders".to_string(),
+                json!({"retentionEnabled": false, "retentionSeconds": null})
+            )]
+        );
+        let stored = api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("orders"))
+            .unwrap();
+        assert_eq!(stored["kafka"]["cleanup.policy"], "compact");
+        assert_eq!(stored["kafka"]["retention.ms"], "60000");
+
+        let r = handle(&f, &alter("delete"), None).await;
+        assert_eq!(r.responses[0].error_code, 0, "{}", message(&r.responses[0]));
+        assert_eq!(
+            api.configured()[1],
+            (
+                "orders".to_string(),
+                json!({"retentionEnabled": true, "retentionSeconds": 60})
+            )
+        );
+        let stored = api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("orders"))
+            .unwrap();
+        assert!(stored.get("kafka").is_none(), "{stored}");
+    }
+
+    /// A recorded key changes the record and NOT the queue: no `/configure`,
+    /// so nothing set on the queue outside this facade is rewritten by it.
+    #[tokio::test]
+    async fn a_recorded_key_writes_the_record_and_not_the_queue() {
+        let (f, api) = facade_and_queen(&[("orders", 2)]);
+        track(
+            &api,
+            "orders",
+            &[
+                ("retentionEnabled", json!(true)),
+                ("retentionSeconds", json!(60)),
+            ],
+        );
         let r = handle(
             &f,
             &request(vec![resource(
                 RESOURCE_TOPIC,
                 "orders",
-                vec![config("cleanup.policy", Some("compact"))],
+                vec![
+                    config("retention.ms", Some("60000")),
+                    config("segment.bytes", Some("1048576")),
+                ],
             )]),
             None,
         )
         .await;
-        assert_eq!(
-            r.responses[0].error_code,
-            ResponseError::InvalidConfig.code()
-        );
-        assert!(message(&r.responses[0]).contains("compaction"));
-        assert!(api.configured().is_empty());
+        assert_eq!(r.responses[0].error_code, 0, "{}", message(&r.responses[0]));
+        assert!(api.configured().is_empty(), "{:?}", api.configured());
+        let stored = api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("orders"))
+            .unwrap();
+        assert_eq!(stored["kafka"]["segment.bytes"], "1048576");
+        assert_eq!(stored["set"]["retentionSeconds"], 60);
     }
 
     /// An unknown key is refused by name rather than dropped, which is what
@@ -887,7 +1015,7 @@ pub(crate) mod tests {
             &request(vec![resource(
                 RESOURCE_TOPIC,
                 "orders",
-                vec![config("segment.bytes", Some("1073741824"))],
+                vec![config("preallocate", Some("true"))],
             )]),
             None,
         )
@@ -896,7 +1024,7 @@ pub(crate) mod tests {
             r.responses[0].error_code,
             ResponseError::InvalidConfig.code()
         );
-        assert!(message(&r.responses[0]).contains("segment.bytes"));
+        assert!(message(&r.responses[0]).contains("preallocate"));
     }
 
     /// A broker resource is INVALID_CONFIG and names the environment, which is
@@ -1021,7 +1149,15 @@ pub(crate) mod tests {
         ]
         .into_iter()
         .collect();
-        let landed = commit(&f, "orders", None, bag, None, None).await;
+        let write = Write {
+            qid: None,
+            bag,
+            bag_changed: true,
+            cleared: Vec::new(),
+            kafka: Map::new(),
+            partitions: None,
+        };
+        let landed = commit(&f, "orders", write, None).await;
 
         assert_eq!(
             landed.error.as_ref().map(|(code, _)| *code),

@@ -19,6 +19,7 @@ use crate::rsm::store::{Keyspace, Reads, Store, StoreError, TypedReads};
 
 mod admin;
 mod dash;
+mod offsets;
 mod positions;
 mod reads;
 mod stats;
@@ -73,6 +74,7 @@ impl RaftFacade {
             | ("POST", "/api/v1/system/quota")
             | ("POST", "/api/v1/system/quotas") => self.api_quota_set(ctx, &req.body).await,
             ("POST", "/api/v1/fetch") => self.api_fetch(ctx, &req.body).await,
+            ("POST", "/api/v1/fetch/offsets") => self.api_fetch_offsets(ctx, &req.body).await,
             ("POST", "/api/v1/partitions/changed") => {
                 self.api_partitions_changed(ctx, &req.body).await
             }

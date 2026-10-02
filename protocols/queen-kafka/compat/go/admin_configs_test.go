@@ -211,8 +211,9 @@ func TestIncrementalAlterConfigsRefusals(t *testing.T) {
 	}{
 		{"a sub-second retention", incOp("retention.ms", opSet, str("500")), errInvalidConfig},
 		{"a retention that is not a number", incOp("retention.ms", opSet, str("later")), errInvalidConfig},
-		{"an unknown key", incOp("segment.bytes", opSet, str("1073741824")), errInvalidConfig},
-		{"compaction", incOp("cleanup.policy", opSet, str("compact")), errInvalidConfig},
+		{"an unknown key", incOp("preallocate", opSet, str("true")), errInvalidConfig},
+		{"a recorded key outside Kafka's range", incOp("segment.bytes", opSet, str("13")), errInvalidConfig},
+		{"a timestamp type the facade does not serve", incOp("message.timestamp.type", opSet, str("LogAppendTime")), errInvalidConfig},
 		{"append on a scalar", incOp("retention.ms", opAppend, str("1000")), errInvalidConfig},
 		{"subtracting the only cleanup policy", incOp("cleanup.policy", opSubtract, str("delete")), errInvalidConfig},
 		{"an operation that is not one of the four", incOp("retention.ms", 9, str("-1")), errInvalidRequest},
@@ -328,8 +329,8 @@ func TestAlterConfigsIsFullReplacement(t *testing.T) {
 
 	// ...and the deprecated key refuses what the incremental one refuses.
 	if got := alterConfigs(t, cl, resourceTopic, topic, false,
-		alterConfig("cleanup.policy", str("compact"))); got.ErrorCode != errInvalidConfig {
-		t.Fatalf("compaction through key 33: error code %d, want %d", got.ErrorCode, errInvalidConfig)
+		alterConfig("preallocate", str("true"))); got.ErrorCode != errInvalidConfig {
+		t.Fatalf("an unknown key through key 33: error code %d, want %d", got.ErrorCode, errInvalidConfig)
 	}
 }
 

@@ -350,15 +350,11 @@ impl Conn {
 }
 
 impl Drop for Conn {
-    /// A closed connection has no open transaction, so its stage is dropped
-    /// here.
-    ///
-    /// This is the ORDINARY path for a producer that closes and the CRASH path
-    /// for one that does not, and both are safe for the same reason: a lost
-    /// stage IS an aborted transaction, because nothing of it was ever written
-    /// to the log. What it buys is the memory, immediately, instead of at the
-    /// timeout sweep — which matters most for the producer that opened a large
-    /// transaction and then died.
+    /// A closed connection ORPHANS the transactions it bound: their stages are
+    /// kept until their own `transaction.timeout.ms`, so a producer that
+    /// resumes one on another connection — Flink's restarted job committing
+    /// its checkpoint — finds it, as it would on Apache Kafka. The time and
+    /// memory bounds are the registry's ([`txn::Txns::drop_connection`]).
     fn drop(&mut self) {
         self.facade.txns.drop_connection(self.id);
     }
@@ -372,8 +368,140 @@ fn kafka_host(peer: &std::net::SocketAddr) -> String {
     format!("/{}", peer.ip())
 }
 
-/// One connection, serial: decode a frame, handle it, write the response, and
-/// only then look for the next frame. Returns `Ok` on a clean close.
+/// Write one reply: nothing for [`Reply::Silent`]; for a close, the answer
+/// first (when there is one) and then the error that ends the connection.
+async fn write_reply<W>(
+    wr: &mut W,
+    codec: &mut LengthDelimitedCodec,
+    outbuf: &mut BytesMut,
+    reply: Reply,
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match reply {
+        Reply::Send(body) => {
+            outbuf.clear();
+            codec.encode(body, outbuf)?;
+            wr.write_all(outbuf).await?;
+            wr.flush().await
+        }
+        Reply::Silent => Ok(()),
+        Reply::SendThenClose(body, why) => {
+            outbuf.clear();
+            codec.encode(body, outbuf)?;
+            wr.write_all(outbuf).await?;
+            wr.flush().await?;
+            Err(std::io::Error::new(std::io::ErrorKind::InvalidData, why))
+        }
+        Reply::Close(why) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, why)),
+    }
+}
+
+/// `QUEEN_KAFKA_COALESCE`: how many Produce requests of one connection that are
+/// already buffered — the client sent them back to back, as every client with
+/// more than one request in flight does — are written to Queen as ONE push
+/// ([`produce::handle_coalesced`]). Default 5, Kafka's
+/// `max.in.flight.requests.per.connection`; 1 is one push per request. It only
+/// ever takes what has already arrived: nothing waits for a request to come.
+pub fn coalesce_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("QUEEN_KAFKA_COALESCE")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(5)
+            .clamp(1, 64)
+    })
+}
+
+/// Whether `frame` is a Produce this connection may have coalesced: an
+/// admitted connection, an advertised Produce version. Anything else is
+/// dispatched on its own, in its turn.
+fn coalescible(conn: &Conn, frame: &[u8]) -> bool {
+    conn.sasl != SaslState::AwaitingRawToken
+        && conn.sasl.admitted()
+        && frame.len() >= 4
+        && i16::from_be_bytes([frame[0], frame[1]]) == ApiKey::Produce as i16
+        && matches!(
+            versions::classify(
+                ApiKey::Produce as i16,
+                i16::from_be_bytes([frame[2], frame[3]])
+            ),
+            Support::Advertised(ApiKey::Produce)
+        )
+}
+
+/// The next whole frame ALREADY in `inbuf`, when `take` accepts it; the socket
+/// is not read. A frame past `limit` is left for [`next_frame`] to refuse.
+fn buffered_frame(
+    inbuf: &mut BytesMut,
+    limit: usize,
+    take: impl Fn(&[u8]) -> bool,
+) -> Option<Bytes> {
+    if inbuf.len() < LENGTH_PREFIX {
+        return None;
+    }
+    let declared = u32::from_be_bytes([inbuf[0], inbuf[1], inbuf[2], inbuf[3]]) as usize;
+    if declared > limit || inbuf.len() < LENGTH_PREFIX + declared {
+        return None;
+    }
+    if !take(&inbuf[LENGTH_PREFIX..LENGTH_PREFIX + declared]) {
+        return None;
+    }
+    inbuf.advance(LENGTH_PREFIX);
+    Some(inbuf.split_to(declared).freeze())
+}
+
+/// Coalescible Produce frames ([`coalescible`]), answered in order by ONE
+/// push. A frame that does not decode is answered as [`dispatch`] answers it,
+/// so the requests before it are handled on their own first.
+async fn dispatch_produces(conn: &mut Conn, frames: Vec<Bytes>) -> Vec<Reply> {
+    let mut decoded = Vec::with_capacity(frames.len());
+    for frame in &frames {
+        let api_version = i16::from_be_bytes([frame[2], frame[3]]);
+        let mut buf = frame.clone();
+        let header_version = ApiKey::Produce.request_header_version(api_version);
+        let Ok(header) = RequestHeader::decode(&mut buf, header_version) else {
+            break;
+        };
+        let Ok(req) = ProduceRequest::decode(&mut buf, api_version) else {
+            break;
+        };
+        decoded.push((header.correlation_id, api_version, req));
+    }
+    if decoded.len() < frames.len() {
+        // One of them is malformed: every frame on its own, in order, so the
+        // bad one closes the connection exactly where it would have.
+        let mut replies = Vec::with_capacity(frames.len());
+        for frame in frames {
+            let reply = dispatch(conn, frame).await;
+            let close = matches!(reply, Reply::Close(_) | Reply::SendThenClose(..));
+            replies.push(reply);
+            if close {
+                break;
+            }
+        }
+        return replies;
+    }
+    let (ids, reqs): (Vec<(i32, i16)>, Vec<ProduceRequest>) = decoded
+        .into_iter()
+        .map(|(id, version, req)| ((id, version), req))
+        .unzip();
+    let answers = produce::handle_coalesced(&conn.facade, &reqs, conn.facade.token()).await;
+    ids.into_iter()
+        .zip(answers)
+        .map(|((correlation_id, version), answer)| match answer {
+            Some(body) => respond(ApiKey::Produce, correlation_id, &body, version),
+            None => Reply::Silent,
+        })
+        .collect()
+}
+
+/// One connection, serial: decode a frame, handle it — together with the
+/// Produce requests already buffered behind it, if it is one
+/// ([`dispatch_produces`]) — write the response(s), and only then look for the
+/// next frame. Returns `Ok` on a clean close.
 ///
 /// Generic over the stream so the plaintext and TLS listeners are the same
 /// loop: everything above the socket — framing, muting, dispatch — is
@@ -399,6 +527,35 @@ where
         let Some(frame) = next_frame(&mut stream, &mut inbuf, limit).await? else {
             return Ok(());
         };
+        // Produce requests the client already sent behind this one are written
+        // to Queen together with it ([`produce::handle_coalesced`]).
+        let max = coalesce_limit();
+        if max > 1 && coalescible(&conn, &frame) {
+            let mut frames = vec![frame];
+            while frames.len() < max {
+                match buffered_frame(&mut inbuf, limit, |f| coalescible(&conn, f)) {
+                    Some(next) => frames.push(next),
+                    None => break,
+                }
+            }
+            if frames.len() > 1 {
+                for reply in dispatch_produces(&mut conn, frames).await {
+                    write_reply(&mut stream, &mut codec, &mut outbuf, reply).await?;
+                }
+                continue;
+            }
+            let frame = frames.pop().expect("one frame");
+            match dispatch(&mut conn, frame).await {
+                Reply::Send(body) => {
+                    outbuf.clear();
+                    codec.encode(body, &mut outbuf)?;
+                    stream.write_all(&outbuf).await?;
+                    stream.flush().await?;
+                }
+                other => write_reply(&mut stream, &mut codec, &mut outbuf, other).await?,
+            }
+            continue;
+        }
         match dispatch(&mut conn, frame).await {
             Reply::Send(body) => {
                 outbuf.clear();
@@ -2256,6 +2413,46 @@ mod tests {
         assert_eq!(got[1].0, 101);
         assert_eq!(got[0].1.error_code, 0);
         assert_eq!(got[1].1.error_code, 0);
+    }
+
+    /// Produce requests a client sent back to back are written to Queen as ONE
+    /// push and answered one by one, in order, at the offsets their records
+    /// got; the request behind them that is not a Produce is answered after.
+    #[tokio::test]
+    async fn buffered_produces_are_one_push_answered_in_order() {
+        use kafka_protocol::messages::ProduceResponse;
+        let (f, api) = crate::handlers::testing::facade_and_queen(&[("orders", 2)]);
+        let (client, server) = tokio::io::duplex(1 << 20);
+        tokio::spawn(connection(
+            server,
+            Conn::new(&f, None, TEST_PEER.to_string()),
+        ));
+        let mut peer = Peer::new(client);
+        let mut wire = BytesMut::new();
+        let mut codec = codec();
+        for frame in [
+            produce_request(9, 1, -1),
+            produce_request(9, 2, 0),
+            produce_request(9, 3, -1),
+            api_versions_request(3, 4),
+        ] {
+            codec.encode(frame, &mut wire).unwrap();
+        }
+        peer.stream.write_all(&wire).await.unwrap();
+
+        let produced = |mut b: Bytes| {
+            let header =
+                ResponseHeader::decode(&mut b, ApiKey::Produce.response_header_version(9)).unwrap();
+            let body = ProduceResponse::decode(&mut b, 9).unwrap();
+            let p = &body.responses[0].partition_responses[0];
+            (header.correlation_id, p.error_code, p.base_offset)
+        };
+        assert_eq!(produced(peer.recv().await.unwrap()), (1, 0, 0));
+        // 2 was acks=0: written (offset 1) and never answered.
+        assert_eq!(produced(peer.recv().await.unwrap()), (3, 0, 2));
+        assert_eq!(decode_response(peer.recv().await.unwrap(), 3).0, 4);
+        assert_eq!(api.pushes.lock().unwrap().len(), 1, "not one push");
+        assert_eq!(api.pushed().len(), 3);
     }
 
     // ------------------------------------------------- M5: TLS, SNI and SASL

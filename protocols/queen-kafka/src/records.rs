@@ -204,6 +204,217 @@ fn as_envelope(payload: &Value) -> Option<Decoded> {
     })
 }
 
+// ------------------------------------------------------------------ in bytes
+//
+// The hot path writes and reads the envelope as bytes rather than through a
+// `Value`: a map, a key string per field and a value string per base64 field on
+// the way in, a full parse into a tree on the way out — per record, at a
+// million records a second. The bytes are EXACTLY what `serde_json` writes for
+// [`encode`]'s `Value` (keys in its order, `h` and `t` omitted as there; pinned
+// by `encode_bytes_is_byte_for_byte_the_value_encoding`), so a payload written
+// by either path is the same payload. Reading accepts exactly that shape and
+// hands anything else — another key order, whitespace, an escape, a native
+// payload — to [`decode`], so the two readers cannot disagree.
+
+/// [`encode`], written straight into JSON bytes.
+pub fn encode_bytes(record: &Record, headers: Option<&[Header]>) -> Vec<u8> {
+    let from_the_map: Vec<Header>;
+    let headers = match headers {
+        Some(headers) => headers,
+        None => {
+            from_the_map = record
+                .headers
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.clone()))
+                .collect();
+            &from_the_map
+        }
+    };
+    let b64_len = |b: Option<&Bytes>| b.map_or(4, |b| b.len().div_ceil(3) * 4 + 2);
+    let mut out = Vec::with_capacity(
+        32 + b64_len(record.key.as_ref())
+            + b64_len(record.value.as_ref())
+            + headers
+                .iter()
+                .map(|(n, v)| 16 + n.len() + b64_len(v.as_ref()))
+                .sum::<usize>(),
+    );
+    // `serde_json`'s map is ordered by key: h, k, t, v.
+    out.push(b'{');
+    if !headers.is_empty() {
+        out.extend_from_slice(b"\"h\":[");
+        for (i, (name, value)) in headers.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(b"{\"k\":");
+            // A header name is any string: serde_json's own escaping.
+            let _ = serde_json::to_writer(&mut out, name.as_str());
+            out.extend_from_slice(b",\"v\":");
+            b64_or_null_into(&mut out, value.as_ref());
+            out.push(b'}');
+        }
+        out.extend_from_slice(b"],");
+    }
+    out.extend_from_slice(b"\"k\":");
+    b64_or_null_into(&mut out, record.key.as_ref());
+    if record.timestamp != NO_TIMESTAMP {
+        out.extend_from_slice(b",\"t\":");
+        out.extend_from_slice(record.timestamp.to_string().as_bytes());
+    }
+    out.extend_from_slice(b",\"v\":");
+    b64_or_null_into(&mut out, record.value.as_ref());
+    out.push(b'}');
+    out
+}
+
+fn b64_or_null_into(out: &mut Vec<u8>, bytes: Option<&Bytes>) {
+    match bytes {
+        Some(b) => {
+            out.push(b'"');
+            let start = out.len();
+            out.resize(start + b.len().div_ceil(3) * 4, 0);
+            // The buffer was sized for exactly this encoding: it cannot fail.
+            let n = B64.encode_slice(b, &mut out[start..]).unwrap_or(0);
+            out.truncate(start + n);
+            out.push(b'"');
+        }
+        None => out.extend_from_slice(b"null"),
+    }
+}
+
+/// [`decode`] of a stored payload's bytes: the envelope's own shape is read
+/// in one pass; anything else is parsed and handed to [`decode`]. An empty
+/// payload reads as `null` and one that is not JSON as the JSON string of its
+/// text, which is how `POST /api/v1/fetch` renders both.
+pub fn decode_bytes(payload: &[u8], stored_timestamp: Option<i64>) -> Decoded {
+    if let Some(mut decoded) = Fast::new(payload).envelope() {
+        if decoded.timestamp == NO_TIMESTAMP {
+            decoded.timestamp = stored_timestamp.unwrap_or(NO_TIMESTAMP);
+        }
+        return decoded;
+    }
+    let value = if payload.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(payload)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(payload).into_owned()))
+    };
+    decode(&value, stored_timestamp)
+}
+
+/// The one-pass reader of [`encode_bytes`]'s shape. Every method answers
+/// `None` at the first byte that is not that shape, and the caller falls back.
+struct Fast<'a> {
+    b: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Fast<'a> {
+    fn new(b: &'a [u8]) -> Fast<'a> {
+        Fast { b, at: 0 }
+    }
+
+    fn eat(&mut self, lit: &[u8]) -> Option<()> {
+        if self.b.get(self.at..self.at + lit.len())? == lit {
+            self.at += lit.len();
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.b.get(self.at).copied()
+    }
+
+    /// A string with no escapes, as its raw bytes.
+    fn plain_str(&mut self) -> Option<&'a [u8]> {
+        self.eat(b"\"")?;
+        let start = self.at;
+        let len = self.b[start..].iter().position(|&c| c == b'"')?;
+        let s = &self.b[start..start + len];
+        if s.contains(&b'\\') {
+            return None;
+        }
+        self.at = start + len + 1;
+        Some(s)
+    }
+
+    /// `null`, or a base64 string decoded.
+    fn b64_or_null(&mut self) -> Option<Option<Bytes>> {
+        if self.peek()? == b'n' {
+            self.eat(b"null")?;
+            return Some(None);
+        }
+        let s = self.plain_str()?;
+        Some(Some(Bytes::from(B64.decode(s).ok()?)))
+    }
+
+    fn int(&mut self) -> Option<i64> {
+        let start = self.at;
+        let negative = self.peek()? == b'-';
+        if negative {
+            self.at += 1;
+        }
+        let digits = self.b[self.at..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        // JSON has no leading zeros (`serde_json` refuses `007`), and it reads
+        // `-0` as a float, which is not an envelope timestamp: both go to the
+        // full parser, which says so.
+        if digits == 0 || (self.b[self.at] == b'0' && (digits > 1 || negative)) {
+            return None;
+        }
+        self.at += digits;
+        std::str::from_utf8(&self.b[start..self.at])
+            .ok()?
+            .parse()
+            .ok()
+    }
+
+    fn envelope(mut self) -> Option<Decoded> {
+        self.eat(b"{")?;
+        let mut headers = Vec::new();
+        if self.eat(b"\"h\":[").is_some() {
+            if self.peek()? != b']' {
+                loop {
+                    self.eat(b"{\"k\":")?;
+                    let name = std::str::from_utf8(self.plain_str()?).ok()?.to_string();
+                    self.eat(b",\"v\":")?;
+                    let value = self.b64_or_null()?;
+                    self.eat(b"}")?;
+                    headers.push((name, value));
+                    if self.eat(b",").is_none() {
+                        break;
+                    }
+                }
+            }
+            self.eat(b"],")?;
+        }
+        self.eat(b"\"k\":")?;
+        let key = self.b64_or_null()?;
+        let timestamp = if self.eat(b",\"t\":").is_some() {
+            self.int()?
+        } else {
+            NO_TIMESTAMP
+        };
+        self.eat(b",\"v\":")?;
+        let value = self.b64_or_null()?;
+        self.eat(b"}")?;
+        if self.at != self.b.len() {
+            return None;
+        }
+        Some(Decoded {
+            key,
+            value,
+            headers,
+            timestamp,
+        })
+    }
+}
+
 fn b64_or_null(bytes: Option<&Bytes>) -> Value {
     match bytes {
         Some(b) => Value::String(B64.encode(b)),
@@ -541,5 +752,105 @@ mod tests {
                 timestamp: 5,
             }
         );
+    }
+
+    fn byte_cases() -> Vec<Record> {
+        vec![
+            record(
+                Some(b"user-42"),
+                Some(br#"{"amount":10}"#),
+                &[("trace-id", Some(b"abc".as_slice()))],
+                1_756_000_000_000,
+            ),
+            record(None, Some(b"v"), &[], 1),
+            record(Some(b""), Some(b""), &[], 0),
+            record(None, None, &[], NO_TIMESTAMP),
+            record(
+                Some(&[0xff, 0x00, 0x80]),
+                Some(&[1, 2, 3, 4, 5]),
+                &[("a\"b\\c\n\u{1}\u{7f}é", None), ("x", Some(b""))],
+                -5,
+            ),
+            record(
+                Some(b"k"),
+                Some(&[7u8; 1000]),
+                &[
+                    ("h1", Some(b"1".as_slice())),
+                    ("h2", Some(b"22".as_slice())),
+                    ("h3", Some(b"333".as_slice())),
+                ],
+                i64::MAX,
+            ),
+            record(Some(b"ab"), Some(b"abcd"), &[], i64::MIN),
+        ]
+    }
+
+    /// The byte encoder IS the `Value` encoder, byte for byte, so a payload
+    /// written by either is the same stored payload.
+    #[test]
+    fn encode_bytes_is_byte_for_byte_the_value_encoding() {
+        let repeated: Vec<Header> = vec![
+            ("x".into(), Some(Bytes::from_static(b"1"))),
+            ("x".into(), None),
+        ];
+        for r in &byte_cases() {
+            for lists in [None, Some(repeated.as_slice()), Some(&[][..])] {
+                let want = serde_json::to_vec(&encode(r, lists)).unwrap();
+                assert_eq!(
+                    String::from_utf8_lossy(&encode_bytes(r, lists)),
+                    String::from_utf8_lossy(&want)
+                );
+            }
+        }
+    }
+
+    /// The one-pass reader answers what [`decode`] answers, for the envelope it
+    /// reads itself and for every shape it hands back.
+    #[test]
+    fn decode_bytes_reads_what_decode_reads() {
+        for r in &byte_cases() {
+            let bytes = encode_bytes(r, None);
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            for ts in [None, Some(42)] {
+                assert_eq!(decode_bytes(&bytes, ts), decode(&value, ts));
+            }
+            // Only an escaped header name leaves the one-pass reader.
+            assert_eq!(
+                Fast::new(&bytes).envelope().is_some(),
+                !bytes.contains(&b'\\'),
+                "fast path"
+            );
+        }
+        for text in [
+            r#"{"k":null,"v":"dg=="}"#,
+            r#"{"v":"dg==","k":null}"#,
+            r#"{ "k": null, "v": "dg==" }"#,
+            r#"{"h":[{"k":"a\"b","v":null}],"k":null,"v":"dg=="}"#,
+            r#"{"h":[],"k":null,"v":"dg=="}"#,
+            r#"{"k":null,"t":1.5,"v":"dg=="}"#,
+            r#"{"k":null,"t":007,"v":"dg=="}"#,
+            r#"{"k":null,"t":-0,"v":"dg=="}"#,
+            r#"{"k":null,"t":99999999999999999999,"v":"dg=="}"#,
+            r#"{"k":"not base64!","v":"dg=="}"#,
+            r#"{"k":null,"v":"dg=="} "#,
+            r#"{"k":null,"v":"dg=="}x"#,
+            r#"{"amount":10}"#,
+            r#""a string""#,
+            "[1,2]",
+            "null",
+            "",
+            "not json",
+        ] {
+            let value = if text.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string()))
+            };
+            assert_eq!(
+                decode_bytes(text.as_bytes(), Some(9)),
+                decode(&value, Some(9)),
+                "{text}"
+            );
+        }
     }
 }
