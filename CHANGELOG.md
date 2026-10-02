@@ -5,15 +5,31 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Laravel: a crashed worker's prefetched jobs keep their attempt.** With `prefetch` above 1 and
+lease renewal, a worker that dies without a shutdown (SIGKILL, the kernel's OOM killer, a PHP
+fatal error such as `memory_limit`) no longer leaves its unstarted jobs to lease expiry, which
+charged each one an attempt: with `tries = 1` they failed without running, and a job that crashed
+its worker every time used up the attempts of the jobs prefetched with it. The worker now journals
+the transaction its shutdown would send, and rewrites one small record of it before each ACK or
+release. Whatever renews its lease sends that transaction once the worker has exited holding the
+lease, while the lease is still the worker's: the Rust supervisor's master on Linux, whose journal
+sits next to its lease socket, or the worker's PHP lease helper, whose journal sits in a private
+temporary directory. Each unstarted job is completed and copied to its partition with the runs so
+far, the job that was running counts its run, and the jobs return at once instead of after
+`retry_after`. Every ACK in it names the lease, so the broker refuses the whole transaction once
+the lease is no longer the worker's. Still charged one attempt: a lost node, a crash that takes
+the lease helper with the worker, and a batch popped ahead whose answer the worker had not read.
+The dashboard's Configuration page, `queen:supervise` and the Rust supervisor (through
+`queen:supervisor-config`) now warn at start about a pool with `tries` 1 on a connection with
+`prefetch` above 1 or `pop_ahead`.
+
 **Laravel: a job handed back unstarted keeps its attempt.** A worker that stopped with a
 prefetched tail (`--memory`, `--max-jobs`, a deploy, Laravel's timeout handler), or that could
 not track a batch popped ahead, handed the jobs back with a `retry` ACK. The broker counts the
 next pop of such a position as a redelivery, so each hand-back charged an attempt to jobs that
 never ran, and with `tries = 1` they failed with `MaxAttemptsExceeded` on their next delivery.
 The hand-back is now one transaction that completes each unstarted job and pushes a copy to its
-partition with the runs so far, as a release does. A crash (SIGKILL, out of memory, node loss)
-still returns the tail by lease expiry, charged one attempt: keep `tries` at 2 or more with
-`prefetch` above 1.
+partition with the runs so far, as a release does. A crash is handled by the entry above.
 
 **Laravel: a forked child no longer kills its worker.** With the PHP lease-renewal helper, a
 child forked by a job (Laravel's fork concurrency driver, `pcntl_fork()`) stopped the parent's

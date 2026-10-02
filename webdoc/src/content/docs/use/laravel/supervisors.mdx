@@ -31,7 +31,11 @@ sourceOfTruth:
   - supervisor/src/prefork.rs
   - supervisor/src/watch.rs
   - supervisor/src/lease/mod.rs
+  - supervisor/src/lease/hand_back.rs
   - clients/client-php/src/Laravel/Queue/SupervisorLeaseRenewer.php
+  - clients/client-php/src/Laravel/Queue/HandBackJournal.php
+  - clients/client-php/src/Laravel/Queue/ProcessLeaseRenewer.php
+  - clients/client-php/src/Laravel/Queue/LeaseRenewalWorker.php
   - clients/client-php/src/Laravel/Queue/QueenConnector.php
   - .github/workflows/release-supervisor.yml
 verifiedBy:
@@ -49,6 +53,9 @@ verifiedBy:
   - clients/client-php/tests/PreforkTest.php
   - clients/client-php/tests/EventDrivenScalingTest.php
   - clients/client-php/tests/WorkerExitMarkerTest.php
+  - clients/client-php/tests/HandBackJournalTest.php
+  - clients/client-php/tests/ProcessLeaseRenewerTest.php
+  - supervisor/src/lease/tests.rs
 # sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds PHP-only remote status publication and its heartbeat budget; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through cd2c7135): the config change is a dashboard comment only and changes no supervisor setting; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through e54bb5b3): SupervisorConfiguration gains readOnlyConnection for the dashboard and changes no supervisor setting; page matches the code.
@@ -63,6 +70,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): pop_ahead pops ahead only after a full batch; the supervisor behavior this page states is unchanged.
 # sourceOfTruth re-read 2026-10-02 (through 79204459): config/queen.php only gains dashboard.console_url, and SupervisorConfiguration names a refused URL by scheme, host and port only; no supervisor setting or behavior this page states changes.
 # sourceOfTruth re-read 2026-10-02 (through b602eea2 + this patch): an exit after stable_after, after Laravel's job timeout or at --memory after a job no longer counts toward the backoff (WorkerExitMarker and the exits/ directory are new), workers get SIGTERM before the master calls the broker, the engine table no longer lists the circuit breaker as Rust-only, and the restart paragraph, the state directory and Terminate say so; the fork server's failed-fork, --quiet and stalled-fetch fixes, the CA store and the lease service's fence order change nothing else this page states.
+# sourceOfTruth re-read 2026-10-02 (crash hand-back): the lease service now sends the hand-back a crashed worker journaled next to lease.sock, and the PHP helper the one in its private temporary directory; the Lease renewal in the master section describes both, and SuperviseCommand and the --for-engine export print the tries-1 warning on standard error.
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel
@@ -462,9 +470,24 @@ worker still dies with the master, as before. In the
 [benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-raft-2026-10-01), eight workers
 with prefetch 4 and their master used 161 MiB with a helper per worker and 70 MiB without.
 
+A worker with `prefetch` above 1 also journals, next to `lease.sock`, what its shutdown would hand
+back: one file with the transaction for its leased batch, written once per batch, and one small
+record of which jobs it still owes, rewritten before each ACK or release. When the worker exits or
+is killed while it holds a lease, without a shutdown, the master sends that transaction while the
+lease is still the worker's: the jobs that never started go back to their partitions without an
+extra attempt, the job that was running counts its run, and none waits for `retry_after`. Every
+ACK in it names the lease, so the broker refuses the whole transaction once the lease is no longer
+the worker's. The master logs each hand-back, and the worker or the master removes the journal
+when the worker exits. It holds the batch's job payloads, in the state directory, which only the
+supervisor's user can read
+([prefetch](/use/laravel/concepts#prefetch-ack_async-and-pop_ahead) says which crashes are still
+charged an attempt).
+
 A worker that cannot reach the master, or that the master refuses, logs the reason and starts its
-own helper, so renewal never stops. The PHP engine and macOS always use helpers. To use helpers
-under the Rust supervisor too, set this variable in the master's environment:
+own helper, so renewal never stops. The PHP engine and macOS always use helpers. A helper hands back
+a crashed worker's journal too: the worker keeps it in a private directory of the system's temporary
+directory, `queen-hand-back-` and a random name, which the helper or the worker removes. To use
+helpers under the Rust supervisor too, set this variable in the master's environment:
 
 ```dotenv
 QUEEN_SUPERVISOR_LEASE_SERVICE=false

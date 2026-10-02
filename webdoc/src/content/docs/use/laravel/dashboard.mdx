@@ -75,6 +75,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through ad0f816b + this patch): SupervisorState gains the workers' exit markers, and the provider registers their listener and gives job metrics and tags a bounded client; the restart and circuit state the panel shows, and its reads, are unchanged.
 # sourceOfTruth re-read 2026-10-02 (screenshots): three screenshots of the real dashboard, taken during a benchmark workload on the release candidate, show the queue card, a failed job with Retry now and the tuning advice; the text is unchanged.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid console_url instead of failing the boot, and DashboardController shows the card without links and a note; FailedJobRetryController reports an exception and shows only its class, and refuses the id all.
+# sourceOfTruth re-read 2026-10-02 (crash hand-back): TuningAdvisor warns about a pool with tries 1 on a prefetching or pop_ahead connection, and the short-jobs advice says only a crash that is not handed back charges an attempt; the advice table says so.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
@@ -385,7 +386,8 @@ to do and a **Read more** link to these pages. When nothing calls for a change, 
 | Warning | The longest run of a job class is longer than `shutdown_grace`: a deploy kills that job, and it runs again. |
 | Warning | A pool with `max_processes` 1 serves two or more queues, and one of them has a backlog. |
 | Warning | Several running supervisors autoscale one queue without [coordination](/use/laravel/supervisors#several-replicas). |
-| Info | `prefetch` is 1, `pop_ahead` is off, and job classes that ran at least 60 times take under 100 ms on average. A warning when a pool has `tries` 1: a worker that crashes charges one attempt to each job it had prefetched. |
+| Warning | A pool has `tries` 1 and its connection has `prefetch` above 1 or `pop_ahead` on: a crash that is not [handed back](/use/laravel/concepts#prefetch-ack_async-and-pop_ahead) fails each job the worker held but had not started. `queen:supervise` and the Rust supervisor print the same warning when they start. |
+| Info | `prefetch` is 1, `pop_ahead` is off, and job classes that ran at least 60 times take under 100 ms on average. A warning when a pool has `tries` 1, since a crash that is not handed back charges one attempt to each job a worker had prefetched. |
 | Info | [Prefork](/use/laravel/supervisors#prefork-workers) is off. |
 | Info | Lease renewal is on, but `QUEEN_SUPERVISOR_LEASE_SERVICE=false` turns off [lease renewal in the master](/use/laravel/supervisors#lease-renewal-in-the-master). |
 | Info | A pool follows the backlog (`balance` `auto`) without [event-driven scaling](/use/laravel/supervisors#event-driven-scaling). |
