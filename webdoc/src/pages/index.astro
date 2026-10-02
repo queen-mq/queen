@@ -141,12 +141,12 @@ const featureLine = [
 
 <BaseLayout title={HOME_TITLE} description={config.description}>
   <div class="flex flex-col min-h-screen">
-    <Header />
+    <Header transparentTop />
 
     <main class="flex-1 w-full">
       {/* Hero. The headline and the paragraph are Alice's approved frame; the
           same words open start/index.mdx and index.md.ts. */}
-      <section class="mb-16 lg:mb-20 lg:grid lg:min-h-[calc(100svh-3.5rem-1px)] lg:grid-cols-[minmax(0,1fr)_42%]">
+      <section class="mb-16 lg:mb-20 lg:-mt-[calc(3.5rem+1px)] lg:grid lg:min-h-svh lg:grid-cols-[minmax(0,1fr)_42%]">
         {/* The text column. Below lg it is the page's own column (max-w-5xl,
             px-6). From lg the hero is two halves, full width and full height
             under the header, and the text sits in the middle of the left half,
@@ -217,7 +217,11 @@ const featureLine = [
 
         {/* The sunflower scene: the queen bee flying to the sunflower, filling
             the right 42% edge to edge, from the header to the bottom of the
-            screen. A 1200 x 1536 picture composed for that column (0.55 to 0.85
+            screen, and from lg up under the header, which stays clear until the
+            page scrolls (Header transparentTop; the section is pulled up by the
+            bar's 3.5rem + 1px). The scene is plum in the light theme and cream in
+            the dark one, so it stands off the page either way. A 1200 x 1536
+            picture composed for that column (0.55 to 0.85
             wide on real screens) and cropped by object-fit at its edges, where
             there is only sky and field; the crop leans left (35%) so the bee and
             its trail survive the narrowest column, at the cost of petal tips on
@@ -231,7 +235,15 @@ const featureLine = [
             alt=""
             width="1200"
             height="1536"
-            class="absolute inset-0 h-full w-full object-cover"
+            class="hero-scene-light absolute inset-0 h-full w-full object-cover"
+            style="object-position: 35% 50%;"
+          />
+          <img
+            src="/queen-scene-cream.svg"
+            alt=""
+            width="1200"
+            height="1536"
+            class="hero-scene-dark absolute inset-0 h-full w-full object-cover"
             style="object-position: 35% 50%;"
           />
         </div>
@@ -493,3 +505,18 @@ customer C  ──► C1 ──► C2 ──► C3   waits for no one</code></pr
     </main>
   </div>
 </BaseLayout>
+
+<style>
+  /* The hero's two scenes, one per theme. BaseLayout stamps data-mode="dark"
+     on <html> for the dark theme only (light is its absence), the same switch
+     globals.css uses for the charts. */
+  .hero-scene-dark {
+    display: none;
+  }
+  :global(:root[data-mode="dark"]) .hero-scene-light {
+    display: none;
+  }
+  :global(:root[data-mode="dark"]) .hero-scene-dark {
+    display: block;
+  }
+</style>

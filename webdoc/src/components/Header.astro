@@ -18,12 +18,17 @@ interface Props {
    * shouldn't show a button that opens an empty dialog. Default `true`.
    */
   showSidebar?: boolean;
+  /**
+   * Over a full-bleed hero: no background, border or blur until the page
+   * scrolls, so the hero runs up under the bar. Only the homepage sets it.
+   */
+  transparentTop?: boolean;
 }
 
 // `entryId` is part of Props as a forward-compat hook (the version-switcher
 // recipe reads it) but the base Header doesn't use it, so leave it off the
 // destructure to avoid an unused-var warning.
-const { collection, showSidebar = true } = Astro.props;
+const { collection, showSidebar = true, transparentTop = false } = Astro.props;
 
 // Normalize trailing slash so isActive matches sidebar hrefs.
 const currentSlug = Astro.url.pathname.replace(/\/$/, "") || "/";
@@ -31,7 +36,20 @@ const sections = await getSidebarSections(currentSlug, { collection });
 const showSections = sections.length >= 2;
 ---
 
-<header class="sticky top-0 z-30 border-b border-border bg-card/80 backdrop-blur-lg">
+<header
+  class="sticky top-0 z-30 border-b border-border bg-card/80 backdrop-blur-lg"
+  data-transparent-top={transparentTop ? "" : undefined}
+>
+  {transparentTop && (
+    <script is:inline>
+      (() => {
+        const bar = document.currentScript.parentElement;
+        const sync = () => bar.toggleAttribute("data-scrolled", window.scrollY > 4);
+        sync();
+        addEventListener("scroll", sync, { passive: true });
+      })();
+    </script>
+  )}
   <div class="mx-auto flex items-center justify-between h-14 px-4 lg:px-6">
     <div class="flex items-center gap-3">
       <a href="/" class="group flex items-center gap-2">
@@ -73,7 +91,7 @@ const showSections = sections.length >= 2;
       )}
     </div>
 
-    <div class="flex items-center gap-2">
+    <div class="flex items-center gap-2" data-hdr-actions>
       {config.search !== false && <SearchTrigger />}
       {config.github && (
         <LinkButton
@@ -104,3 +122,44 @@ const showSections = sections.length >= 2;
     </div>
   </div>
 </header>
+
+<style>
+  header[data-transparent-top] {
+    transition:
+      background-color 200ms ease,
+      border-color 200ms ease,
+      backdrop-filter 200ms ease;
+  }
+  /* The blur goes through Tailwind's own variable: a plain `backdrop-filter:
+     none` here is dropped by the CSS build, and the blur left on smears the
+     page/picture boundary under a clear bar. */
+  header[data-transparent-top]:not([data-scrolled]) {
+    background-color: transparent;
+    border-bottom-color: transparent;
+    --tw-backdrop-blur: blur(0);
+  }
+  /* From lg the homepage's picture runs up under the right end of the bar, so
+     while the bar is clear the controls there sit on the picture and take its
+     ink: white on the plum scene (light theme), plum on the cream one (dark).
+     The Tailwind colour variables are what the controls' utilities read. */
+  @media (min-width: 1024px) {
+    header[data-transparent-top]:not([data-scrolled]) [data-hdr-actions] {
+      --color-foreground: #ffffff;
+      --color-muted-foreground: rgb(255 255 255 / 0.82);
+      --color-card: rgb(255 255 255 / 0.08);
+      --color-muted: rgb(255 255 255 / 0.1);
+      --color-border: rgb(255 255 255 / 0.28);
+      --color-border-strong: rgb(255 255 255 / 0.5);
+      --color-accent: rgb(255 255 255 / 0.14);
+    }
+    :global(:root[data-mode="dark"]) header[data-transparent-top]:not([data-scrolled]) [data-hdr-actions] {
+      --color-foreground: #4a2330;
+      --color-muted-foreground: rgb(74 35 48 / 0.85);
+      --color-card: rgb(74 35 48 / 0.05);
+      --color-muted: rgb(74 35 48 / 0.08);
+      --color-border: rgb(74 35 48 / 0.3);
+      --color-border-strong: rgb(74 35 48 / 0.55);
+      --color-accent: rgb(74 35 48 / 0.1);
+    }
+  }
+</style>

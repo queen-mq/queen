@@ -316,7 +316,7 @@ def _leaf_on_stem(stem, t, dx, dy, ang, length, mirror):
     return pet + f'<g transform="translate({nx:.1f},{ny:.1f}) rotate({ang}){flip}">{leaf(length)}</g>'
 
 
-def scene_svg(sky=PLUM):
+def scene_svg(sky=PLUM, trail=CREAM):
     W, H = SCENE
     sx = (W + 24) / 1044  # stretch the badge's hills (x from -10 to 1034) to the panel's width
     o = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}">'
@@ -336,7 +336,7 @@ def scene_svg(sky=PLUM):
     dots = _even(SCENE_TRAIL, 26)
     for k, (x, y) in enumerate(dots):
         t = k / (len(dots) - 1)
-        o.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{3.5 + 5.5 * t:.1f}" fill="{CREAM}" opacity="{0.30 + 0.62 * t:.2f}"/>')
+        o.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{3.5 + 5.5 * t:.1f}" fill="{trail}" opacity="{0.30 + 0.62 * t:.2f}"/>')
     o.append(f'<g transform="translate(9,13)" opacity="0.25"><g transform="{SCENE_BEE_AT}">{bee(shadow=True)}</g></g>')
     o.append(f'<g transform="{SCENE_BEE_AT}">{bee()}</g>')
     return "".join(o) + "</g></svg>"
