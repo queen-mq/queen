@@ -56,6 +56,12 @@ PROFILES = {
         "BENCH_QUEEN_ACK_ASYNC": "true",
         "BENCH_QUEEN_POP_AHEAD": "true",
     }, "queen-supervisor"),
+    # The same on the PHP engine, whose workers renew through a PHP helper each.
+    "queen-php-fast": Profile("queen-php-fast", "queen-php", "queen", {
+        "QUEEN_PREFETCH": "4",
+        "BENCH_QUEEN_ACK_ASYNC": "true",
+        "BENCH_QUEEN_POP_AHEAD": "true",
+    }, "artisan queen:supervise"),
 }
 DEFAULT_PROFILES = ("horizon", "queen-php", "queen-rust")
 

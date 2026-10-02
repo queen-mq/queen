@@ -1,0 +1,175 @@
+{
+ "scenario": "job-timeout",
+ "profile": "queen-php",
+ "run_id": "job-timeout-queen-php-4f599b69",
+ "checks": [
+  {
+   "name": "two attempts, both cut short",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "timed-out workers replaced",
+   "passed": true,
+   "detail": "before [28, 29] after [82, 83]"
+  },
+  {
+   "name": "failed() ran once",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "never completed",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "one failed-job row each",
+   "passed": true,
+   "detail": "['000000', '000001', '000002', '000003']"
+  },
+  {
+   "name": "one dead-letter entry each",
+   "passed": true,
+   "detail": "4 entries"
+  }
+ ],
+ "passed": true,
+ "report": {
+  "run_id": "job-timeout-queen-php-4f599b69",
+  "jobs": {
+   "000000": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938210.763,
+      null
+     ],
+     [
+      "started",
+      2,
+      1790938241.477,
+      null
+     ],
+     [
+      "failed_hook",
+      null,
+      1790938244.488,
+      "Illuminate\\Queue\\TimeoutExceededException"
+     ]
+    ],
+    "pids": [
+     29,
+     62
+    ]
+   },
+   "000001": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938210.763,
+      null
+     ],
+     [
+      "started",
+      2,
+      1790938241.477,
+      null
+     ],
+     [
+      "failed_hook",
+      null,
+      1790938244.488,
+      "Illuminate\\Queue\\TimeoutExceededException"
+     ]
+    ],
+    "pids": [
+     28,
+     63
+    ]
+   },
+   "000002": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938216.555,
+      null
+     ],
+     [
+      "started",
+      2,
+      1790938247.207,
+      null
+     ],
+     [
+      "failed_hook",
+      null,
+      1790938250.223,
+      "Illuminate\\Queue\\TimeoutExceededException"
+     ]
+    ],
+    "pids": [
+     53,
+     73
+    ]
+   },
+   "000003": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938216.555,
+      null
+     ],
+     [
+      "started",
+      2,
+      1790938247.207,
+      null
+     ],
+     [
+      "failed_hook",
+      null,
+      1790938250.223,
+      "Illuminate\\Queue\\TimeoutExceededException"
+     ]
+    ],
+    "pids": [
+     52,
+     72
+    ]
+   }
+  },
+  "failed_store": {
+   "available": true,
+   "job_ids": [
+    "000000",
+    "000001",
+    "000002",
+    "000003"
+   ]
+  },
+  "dead_letter": {
+   "available": true,
+   "entries": 4
+  }
+ },
+ "extra": {},
+ "timeline": [
+  [
+   4.38,
+   "ready"
+  ],
+  [
+   4.63,
+   "dispatched 4 x ok (exit 0)"
+  ],
+  [
+   44.9,
+   "all failed: reached"
+  ]
+ ]
+}
