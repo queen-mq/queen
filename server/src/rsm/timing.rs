@@ -632,6 +632,7 @@ pub fn apply_channel_recv() -> u64 {
     metrics().apply_receives.fetch_add(1, Ordering::Relaxed);
     let prev = APPLY_DEPTH.load(Ordering::Relaxed);
     if prev > 0 {
+        #[allow(deprecated)] // fetch_update: deprecated in 1.99; try_update is 1.95+, MSRV 1.88
         let _ = APPLY_DEPTH.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| {
             Some(d.saturating_sub(1))
         });
