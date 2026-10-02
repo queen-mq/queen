@@ -18,8 +18,9 @@ return [
     'queue' => env('QUEEN_QUEUE', 'default'),
     'consumer_group' => env('QUEEN_CONSUMER_GROUP', 'laravel'),
     // Fixed stripes preserve concurrency without creating one partition per
-    // job. Jobs implementing QueenPartitionable override the stripe with an
-    // explicit per-entity ordering key.
+    // job: 1 to 1024, each run by one worker at a time. A pop checks out at
+    // most 64 of them. Jobs implementing QueenPartitionable override the
+    // stripe with an explicit per-entity ordering key.
     'partitions' => env('QUEEN_PARTITIONS', 64),
     'partition_prefix' => env('QUEEN_PARTITION_PREFIX', 'laravel'),
     // Must be longer than the Laravel worker/job timeout.

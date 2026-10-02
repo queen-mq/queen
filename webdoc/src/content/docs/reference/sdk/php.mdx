@@ -81,6 +81,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): the restart paragraph now says both engines open the circuit (the PHP engine already did) and which exits do not count (stable_after, Laravel's job timeout, --memory after a job, through WorkerExitMarker), and the state directory paragraph names the exit markers, says pause drains (no SIGUSR2/SIGCONT is sent) and gives the stop order; the unstarted hand-back that keeps its attempt, the forked child and the renewal helper, the detached request written before the next job, CURLOPT_QUICK_EXIT, the bounded metrics client and the Rust CA store change nothing else this reference states.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot, and CurlTransport waits at most 250 ms to write a detached request without a body; the console_url row and the Transport section still hold.
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): the Laravel driver's prefetch paragraph says the renewer hands back a crashed worker's journal, and the supervisor section the start-up warnings; TransactionBuilder::wire() is @internal and stays undocumented.
+# sourceOfTruth re-read 2026-10-02 (stripes): the partitions row gives the 1 to 1,024 range and the 64-wide pop.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -502,7 +503,7 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `headers` | none | `[]` |
 | `queue` | `QUEEN_QUEUE` | `default` |
 | `consumer_group` | `QUEEN_CONSUMER_GROUP` | `laravel` |
-| `partitions` | `QUEEN_PARTITIONS` | `64` (clamped to the broker maximum) |
+| `partitions` | `QUEEN_PARTITIONS` | `64` stripes, 1 to 1,024; a pop asks for at most 64 |
 | `partition_prefix` | `QUEEN_PARTITION_PREFIX` | `laravel` |
 | `retry_after` | `QUEEN_RETRY_AFTER` | `90` seconds |
 | `block_for` | `QUEEN_BLOCK_FOR` | `0` seconds |

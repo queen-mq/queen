@@ -3,6 +3,7 @@
 namespace Queen\Laravel\Supervisor;
 
 use InvalidArgumentException;
+use Queen\Laravel\Queue\QueenQueue;
 
 final class SupervisorConfiguration
 {
@@ -669,8 +670,10 @@ final class SupervisorConfiguration
         if (is_string($count) && ctype_digit($count)) {
             $count = (int) $count;
         }
-        if (!is_int($count) || $count < 1 || $count > 64) {
-            throw new InvalidArgumentException("Queen connection [{$name}] partitions must be 1 to 64 for event_driven.");
+        if (!is_int($count) || $count < 1 || $count > QueenQueue::MAX_PARTITIONS) {
+            throw new InvalidArgumentException(
+                "Queen connection [{$name}] partitions must be 1 to " . QueenQueue::MAX_PARTITIONS . ' for event_driven.',
+            );
         }
         $prefix = $connection['partition_prefix'] ?? 'laravel';
         if (!is_string($prefix) || trim($prefix) === '' || preg_match('/[\x00-\x1F\x7F]/', $prefix) === 1) {

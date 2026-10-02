@@ -54,6 +54,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): the shutdown section already gives the SIGTERM before the broker calls, and the prefetch section the unstarted hand-back that keeps its attempt; which exits restart without backoff (WorkerExitMarker), the forked child and the renewal helper, the bounded metrics client and the Rust CA store change nothing this page explains.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): the prefetch section now says which crashes the Rust master's lease service or the PHP lease helper hands back from the worker's journal, which are still charged, and the warning about a pool with tries 1.
+# sourceOfTruth re-read 2026-10-02 (stripes): QueenConnector accepts 1 to 1,024 stripes and QueenQueue pops at most 64; the Queues and stripes section and its settings say so, with the 2026-10-02 stripes campaign.
 ---
 
 This page explains how a Laravel job travels through Queen, one idea at a time. Each section ends
@@ -80,8 +81,13 @@ A Laravel queue name becomes a Queen queue with the same name. The driver spread
 the queue's stripes, `laravel-0000` to `laravel-0063` by default, by a hash of each job's UUID. The
 broker leases a stripe to one worker of a consumer group at a time, so a job waits until the job
 ahead of it in its stripe has ended ([pop reference](/reference/http/pop#leases-and-concurrency)).
-The stripe count, 64 at most, also caps how many workers can run the queue's ordinary jobs at once.
-Give long jobs a queue of their own, so that they do not hold the stripes of short jobs.
+The stripe count, 64 by default and up to 1,024, therefore also caps how many workers can run the
+queue's ordinary jobs at once. A pop checks out at most 64 stripes; with more, the broker serves the
+next ready ones in turn. On the Linux benchmark server, 128 workers drained 50,000 jobs 96% faster
+with 256 stripes than with 64, with no measured cost at 50 jobs/s
+([benchmark](/benchmarks/laravel-supervisors#more-partition-stripes-2026-10-02)). Raise the count for
+a queue that more than 64 workers serve. Give long jobs a queue of their own, so that they do not
+hold the stripes of short jobs.
 
 A job that implements `QueenPartitionable` names its own partition. The jobs of one entity then run
 one at a time, in dispatch order, and never wait for the jobs of another entity:
@@ -112,7 +118,7 @@ application and environment its own queue names or its own broker, and one group
 other job, and nothing keeps the order of one entity's jobs.
 
 **Settings:** `QUEEN_QUEUE` (`queue`, default `default`), `QUEEN_PARTITIONS` (`partitions`, 1 to
-64, default 64), `QUEEN_PARTITION_PREFIX` (`partition_prefix`, default `laravel`),
+1,024, default 64), `QUEEN_PARTITION_PREFIX` (`partition_prefix`, default `laravel`),
 `QUEEN_CONSUMER_GROUP` (`consumer_group`, default `laravel`).
 
 ## The job lifecycle

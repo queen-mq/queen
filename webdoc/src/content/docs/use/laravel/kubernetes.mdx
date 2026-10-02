@@ -33,6 +33,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through 79204459): config/queen.php only gains dashboard.console_url, and SupervisorConfiguration names a refused URL by scheme, host and port only; the pod settings, terminationGracePeriodSeconds above shutdown_grace, and the figures are unchanged.
 # sourceOfTruth re-read 2026-10-02 (through b602eea2 + this patch): the workers now get SIGTERM before the coordination leave and the remote status publish, and the shutdown paragraph says so; the backoff that job timeouts and memory stops no longer trigger, the stalled-fetch fix, the lease service's fence order and the Rust CA store change nothing else this page states.
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): the lease service now hands back a crashed worker's journal from the state directory; the memory figures and the pod settings this page states are unchanged.
+# sourceOfTruth re-read 2026-10-02 (stripes, f5d20737): the wider stripe range changes no pod setting or figure this page states.
 ---
 
 This guide puts the supervisor features together for one common setup: Laravel workers in a

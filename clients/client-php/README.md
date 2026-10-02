@@ -229,8 +229,8 @@ helper) hands back the jobs it had not started, without an extra attempt; a lost
 one, so keep `tries` at 2 or more with `QUEEN_PREFETCH > 1` or `QUEEN_POP_AHEAD=true`.
 
 `QUEEN_AUTOPILOT` is off here even though the SDK client enables pop autopilot by default: the
-queue driver keeps sending the fixed `QUEEN_PARTITIONS` width, so an upgrade changes nothing on its
-own. Turn it on to let the broker size the sweep width per `(queue, group)` from ready-partition
+queue driver keeps sending the fixed `QUEEN_PARTITIONS` width, at most 64, so an upgrade changes
+nothing on its own. Turn it on to let the broker size the sweep width per `(queue, group)` from ready-partition
 pressure and ready age. The pop batch stays pinned to `QUEEN_PREFETCH`. It needs a broker on 1.2 or
 later; an older one ignores the parameter and applies its own default width.
 
@@ -515,7 +515,7 @@ ones worth knowing on day one:
 | `QUEEN_BEARER_TOKEN` | broker authentication |
 | `QUEEN_CONSUMER_GROUP` | the cursor identity; give each application its own |
 | `QUEEN_RETRY_AFTER` | lease seconds; must exceed the worker timeout |
-| `QUEEN_PARTITIONS` | default fan-out for jobs without `QueenPartitionable` (64) |
+| `QUEEN_PARTITIONS` | default fan-out for jobs without `QueenPartitionable` (64, up to 1024; one worker per stripe at a time) |
 | `QUEEN_SYNC_FAILED_JOBS` | keep `true` so Laravel commands clean the Queen DLQ too |
 
 Behind the Queen proxy, HTTP 429 is retried transparently with jitter and a cap; HTTP 403 is

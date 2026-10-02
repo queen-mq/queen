@@ -272,8 +272,12 @@ final class EventDrivenScalingTest extends TestCase
             ['stripes' => ['queen' => ['prefix' => 'orders', 'count' => 8]]],
             SupervisorConfiguration::resolve($queen(['event_driven' => true], ['partitions' => '8', 'partition_prefix' => 'orders']), '/app')['event_driven'],
         );
+        $this->assertSame(
+            ['stripes' => ['queen' => ['prefix' => 'laravel', 'count' => 256]]],
+            SupervisorConfiguration::resolve($queen(['event_driven' => true], ['partitions' => 256]), '/app')['event_driven'],
+        );
         $this->expectException(\InvalidArgumentException::class);
-        SupervisorConfiguration::resolve($queen(['event_driven' => true], ['partitions' => 65]), '/app');
+        SupervisorConfiguration::resolve($queen(['event_driven' => true], ['partitions' => 1025]), '/app');
     }
 
     /** @param list<string> $urls */

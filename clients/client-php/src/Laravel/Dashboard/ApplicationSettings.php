@@ -47,7 +47,7 @@ final class ApplicationSettings
         'lease_renewal_safety_margin' => ['QUEEN_LEASE_RENEWAL_SAFETY_MARGIN', 'seconds', 1, 1, null, 'Time kept free before the lease deadline.'],
         'retry_after' => ['QUEEN_RETRY_AFTER', 'seconds', 90, 1, null, 'How long a lease lasts: a job not acknowledged by then is delivered again.'],
         'block_for' => ['QUEEN_BLOCK_FOR', 'seconds', 0, 0, null, 'How long a pop on an empty queue waits for a job.'],
-        'partitions' => ['QUEEN_PARTITIONS', 'count', 64, 1, 64, 'Partition stripes that ordinary jobs are spread over.'],
+        'partitions' => ['QUEEN_PARTITIONS', 'count', 64, 1, 1024, 'Partition stripes that ordinary jobs are spread over.'],
         'bulk_batch' => ['QUEEN_BULK_BATCH', 'count', 100, 1, 1000, 'Jobs in one push request of Queue::bulk().'],
         'after_commit' => ['QUEEN_AFTER_COMMIT', 'switch', false, 0, null, 'Dispatch a job only after the open database transaction commits.'],
     ];
