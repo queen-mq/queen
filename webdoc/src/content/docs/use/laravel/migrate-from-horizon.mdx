@@ -48,6 +48,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through 79204459): the dashboard's Retry now button runs the same queue:retry this runbook names, and dashboard.console_url, the queue-contents reader and the redacted URL error of SupervisorConfiguration change nothing in the runbook; page matches the code.
 # sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): which exits restart without backoff, the SIGTERM before the broker calls, the unstarted hand-back that keeps its attempt, the bounded metrics client and the Rust CA store change nothing this runbook states; its deploy and shutdown_grace steps still hold.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-02 (crash hand-back): with lease renewal, retry_after now sets how soon the job a crashed worker was running runs again, since the renewer hands back the jobs it had not started; the retry_after bullet says so.
 ---
 
 Moving from Horizon changes two things, not one:
@@ -347,7 +348,7 @@ value. On Queen, choose one of two profiles:
 
 | | Without lease renewal, the default | With lease renewal |
 | --- | --- | --- |
-| What `retry_after` sets | The longest time a job may run | How soon the jobs of a crashed worker run again |
+| What `retry_after` sets | The longest time a job may run | How soon the job a crashed worker was running runs again |
 | Checked at startup | A pool's `timeout` is shorter than `retry_after` | The same, and the renewal timing fits inside `retry_after` |
 | A job class whose own `$timeout` exceeds `retry_after` | Refused, see below | Runs, and its lease is renewed every third of `retry_after` |
 | Prefetch | 1 only | Up to 1,000, and `pop_ahead` |
@@ -360,8 +361,8 @@ Laravel's own timeout still stops a job in both profiles. A job that must run lo
   refused again: it never runs and never reaches `tries`. Lower the job's `$timeout`, raise
   `retry_after`, or turn renewal on.
 - A large `retry_after` costs more on Queen than on Redis. When a worker dies, its lease holds the
-  whole stripe, so the jobs behind its job wait up to `retry_after` seconds. With renewal on, keep
-  the default of 90 seconds.
+  whole stripe, so the jobs behind its job wait up to `retry_after` seconds, unless its renewer
+  hands its prefetched batch back at once. With renewal on, keep the default of 90 seconds.
 
 ### A long job delays its stripe
 

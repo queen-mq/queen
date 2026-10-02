@@ -36,6 +36,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through ad0f816b + this patch): the Queen Rust choice row no longer gives crash-loop circuit breaking as a reason to pick Rust, since both engines have it; the unstarted hand-back that keeps its attempt, the forked child and the renewal helper, the bounded metrics client and the provider's exit-marker listener change nothing else this overview states.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-02 (failure tests): the Start here list gains the failure, replica, soak and Laravel-feature results of the 2026-10-02 dataset, as the comparison page reports them.
+# sourceOfTruth re-read 2026-10-02 (crash hand-back): the safe-profile section says a crashed worker's renewer hands back its unstarted prefetched jobs; ProcessLeaseRenewer's journal directory changes nothing else this overview states.
 ---
 
 ## Start here
@@ -186,7 +187,9 @@ fits inside `retry_after`.
 Values above one reduce broker round trips, but they widen the at-least-once redelivery window. A
 Laravel worker may also pause while it still owns a prefetched tail. The Queen connector therefore
 rejects `prefetch > 1` unless lease renewal is enabled, whether workers are started by Queen or by
-another process manager.
+another process manager. When a worker crashes, its renewer hands back the prefetched jobs it had
+not started, without an extra attempt
+([prefetch](/use/laravel/concepts#prefetch-ack_async-and-pop_ahead)).
 
 ```dotenv
 QUEEN_PREFETCH=4
