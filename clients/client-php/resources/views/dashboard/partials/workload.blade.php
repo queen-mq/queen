@@ -11,6 +11,7 @@
     $scale = $throughput['peak'] > 0 ? $chartHeight / $throughput['peak'] : 0;
     $failedQueues = count(array_filter($throughput['queues'], fn (array $row): bool => !$row['available']));
 @endphp
+@include('queen::dashboard.partials.queue-contents')
 <section id="throughput" class="card" aria-labelledby="throughput-title">
     <div class="card-header">
         <div>

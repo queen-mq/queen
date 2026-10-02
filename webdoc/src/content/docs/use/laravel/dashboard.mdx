@@ -5,7 +5,7 @@ type: how-to
 tier: operate
 status: preview
 sidebar:
-  order: 3
+  order: 5
 sourceOfTruth:
   - clients/client-php/config/queen.php
   - clients/client-php/routes/dashboard.php
@@ -22,6 +22,7 @@ sourceOfTruth:
   - clients/client-php/resources/views/dashboard/partials/supervisor-pool-row.blade.php
   - clients/client-php/resources/views/dashboard/partials/supervisor.blade.php
   - clients/client-php/resources/views/dashboard/partials/workload.blade.php
+  - clients/client-php/resources/views/dashboard/partials/queue-contents.blade.php
   - clients/client-php/src/Laravel/QueenServiceProvider.php
   - clients/client-php/src/Laravel/Dashboard/DashboardRepository.php
   - clients/client-php/src/Laravel/Dashboard/DashboardSections.php
@@ -33,6 +34,10 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Http/Controllers/DashboardScriptController.php
   - clients/client-php/src/Laravel/Dashboard/FailedJobsReadModel.php
   - clients/client-php/src/Laravel/Dashboard/ThroughputReader.php
+  - clients/client-php/src/Laravel/Dashboard/QueueContentsReader.php
+  - clients/client-php/src/Laravel/Dashboard/ConsoleLinks.php
+  - clients/client-php/src/Laravel/Dashboard/ApplicationSettings.php
+  - clients/client-php/src/Laravel/Dashboard/TuningAdvisor.php
   - clients/client-php/src/Admin.php
   - clients/client-php/src/Laravel/Dashboard/RemoteStatusReader.php
   - clients/client-php/src/Laravel/Supervisor/RemoteStatusDocument.php
@@ -41,6 +46,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
   - clients/client-php/src/Laravel/Http/Controllers/DashboardController.php
   - clients/client-php/src/Laravel/Http/Controllers/FailedJobController.php
+  - clients/client-php/src/Laravel/Http/Controllers/FailedJobRetryController.php
   - clients/client-php/src/Laravel/Http/Controllers/DashboardStylesheetController.php
   - clients/client-php/src/Laravel/Http/Middleware/AuthorizeDashboard.php
   - clients/client-php/src/Laravel/Http/Middleware/SecureDashboardResponse.php
@@ -52,6 +58,9 @@ verifiedBy:
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
   - clients/client-php/tests/RemoteStatusReaderTest.php
+  - clients/client-php/tests/QueueContentsReaderTest.php
+  - clients/client-php/tests/ApplicationSettingsTest.php
+  - clients/client-php/tests/TuningAdvisorTest.php
 # sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): adds the published assets with route fallback, the in-place refresh script with its pause control, one page per section, keyset-paged failed jobs and the failed-job detail page with its bounded SQL read; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through 109b23c2 + this patch): adds the jobs-processed chart read from the broker's queue-ops counters, and the failed-job drawer; page matches the code.
 # sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): the Rust engine publishes the same remote status format from supervisor 0.2.0; page matches the code.
@@ -62,13 +71,18 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through this patch): config/queen.php adds ack_async and pop_ahead and rewords the lease_renewal comment; nothing this page describes changes.
 # sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): the config/queen.php pop_ahead comment states the full-batch rule; nothing this page describes changes.
+# sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): adds the Retry now button of the failed-job detail, the In the queue now card of the Workload page with QUEEN_DASHBOARD_CONSOLE_URL, and the tuning advice and settings of the Configuration page; SupervisorConfiguration's refused-URL error no longer repeats credentials; page matches the code.
+# sourceOfTruth re-read 2026-10-02 (through ad0f816b + this patch): SupervisorState gains the workers' exit markers, and the provider registers their listener and gives job metrics and tags a bounded client; the restart and circuit state the panel shows, and its reads, are unchanged.
+# sourceOfTruth re-read 2026-10-02 (screenshots): three screenshots of the real dashboard, taken during a benchmark workload on the release candidate, show the queue card, a failed job with Retry now and the tuning advice; the text is unchanged.
+# sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid console_url instead of failing the boot, and DashboardController shows the card without links and a note; FailedJobRetryController reports an exception and shows only its class, and refuses the id all.
 ---
 
 The Laravel panel answers one question: **what is this application's Queen supervisor doing?** It
 reads the private supervisor state already written by the PHP or Rust engine on this host. When
 supervisors run on other hosts or pods, it can also read the copy each engine
-[publishes to the broker](#a-supervisor-on-another-host). It does not poll queue depth again and it
-is not a replacement for Queen's global broker dashboard.
+[publishes to the broker](#a-supervisor-on-another-host). The Workload, Jobs, Tags and
+Configuration pages also read the broker for their own figures. The panel is not a replacement for
+Queen's global broker dashboard.
 
 The route is absent by default.
 
@@ -97,6 +111,8 @@ Each sidebar section is its own page, so a reload or a shared link lands on the 
 | Overview | `/queen` |
 | Workload | `/queen/workload` |
 | Supervisors | `/queen/supervisors` |
+| Jobs | `/queen/jobs` |
+| Tags | `/queen/tags` |
 | Failed jobs | `/queen/failed-jobs` |
 | Configuration | `/queen/configuration` |
 
@@ -164,6 +180,8 @@ control actions.
   coordinating, and each coordinated pool's share of its replicas;
 - pools, queues, worker counts and workers currently draining;
 - last queue depth already sampled by the supervisor;
+- on the **Workload** page, [what is in each queue now](#in-the-queue-now): the jobs waiting, the
+  jobs running and the age of the oldest unfinished one, with links to the Queen console;
 - [jobs completed, failed and dispatched](#jobs-processed) per queue over the last hour, six hours,
   day or week, from the broker's own counters;
 - on the **Jobs** page, [throughput, failures and runtime per job class](/use/laravel/monitoring#jobs-per-class)
@@ -171,14 +189,16 @@ control actions.
 - on the **Tags** page, [monitored tags](/use/laravel/monitoring#monitored-tags) and the recent jobs
   carrying them;
 - restart and circuit state;
-- a safe allowlist of worker settings;
-- paged metadata from supported Laravel database or file failed-job stores, and the reason each
-  job failed.
+- on the **Configuration** page, [tuning advice](#tuning-advice-and-settings) and every Queen
+  setting of this application with its default and meaning;
+- paged metadata from supported Laravel database or file failed-job stores, the reason each job
+  failed, and a button to [retry](#failed-jobs-and-the-broker-dashboard) it.
 
 The read model never returns broker endpoints, bearer tokens, custom headers, job payloads or raw
 backend errors. Exception text appears only on the [detail page](#why-a-job-failed) of a failed job.
-Unsupported or unavailable failed stores are shown as unavailable instead of falling back to an
-unbounded read.
+The Configuration page shows each broker endpoint as scheme, host and port only, and a credential
+only as set or not set. Unsupported or unavailable failed stores are shown as unavailable instead
+of falling back to an unbounded read.
 
 ## What the panel controls
 
@@ -208,6 +228,54 @@ redirect or return `401`, depending on the application's guard and request forma
 Control TTL and heartbeat timeout are values published by the active supervisor generation. A
 newly deployed Laravel configuration cannot silently reinterpret an old master's liveness or run an
 expired command. Restart the supervisor to activate timing changes.
+
+## In the queue now
+
+The Workload page opens with **In the queue now**: one row per supervised queue, with its consumer
+group, the jobs waiting for a worker, the jobs running now, and how long the oldest unfinished job
+has been in the queue, waiting or running. It is a summary, not a list of jobs: the Queen console
+browses the messages themselves.
+
+<Screenshot
+  src="laravel-dashboard-queue-now"
+  alt="The In the queue now card of the Workload page: one row for the queue benchmark of the consumer group benchmark, with 399 jobs waiting, 4 running and the oldest unfinished job under a minute old, read from the broker."
+  caption="The real dashboard during a benchmark workload on a Raft broker: four workers, a backlog of short jobs."
+/>
+
+| Column | Read from the broker |
+| --- | --- |
+| Waiting | `ready` of the consumer group's depth, [`GET /api/v1/resources/queues/:queue/depth`](/reference/http/queues#get-apiv1resourcesqueuesqueuedepth) |
+| Running | `processing` of the same depth: jobs a worker holds a lease on |
+| Oldest unfinished | the queue's oldest partition for the consumer group in [`GET /api/v1/consumer-groups/lagging`](/reference/http/consumer-groups#get-apiv1consumer-groupslagging) |
+
+The broker lists a partition as lagging once its oldest unacknowledged job is a minute old, so a
+younger age shows as **under a minute**. An age of 10 minutes or more has a warning badge, and an
+hour or more a danger badge. A broker without the lease-aware depth fields reports only its pending
+total, which shows as waiting. A queue the broker does not answer for is marked **Unavailable**, and
+an age the broker could not report shows as a dash, not as under a minute.
+
+Only the Workload page reads these figures: one depth request per queue and one lag request per
+connection, in parallel, with the supervisor's `read_bearer_token` when one is set, one attempt and
+a timeout of at most five seconds. The result is cached for five seconds in Laravel's default cache
+store. The card shows at most 32 queues.
+
+### Links to the Queen console
+
+Set the address of the [Queen web console](/deploy/dashboard), which the broker serves on its own
+port, and every row links to it:
+
+```dotenv
+QUEEN_DASHBOARD_CONSOLE_URL=https://queen.example.com
+```
+
+**Open in console** opens the queue's page, `/queues/{queue}`. The waiting and running numbers open
+its messages filtered to `pending` and to `processing`, `/messages?queue={queue}&status=pending`.
+The queue name is URL-encoded, and every link opens in a new tab with `rel="noopener noreferrer"`.
+One console address serves one broker, so when the supervised queues use more than one connection,
+the card shows no links and says why. The value must be an `http` or `https` URL without user info,
+query or fragment; a path is kept, for a console behind a prefix. Any other value is reported to
+the application's log when it boots, and the card shows no links and says why: the workers boot the
+same service provider, and a link setting must not stop them.
 
 ## Jobs processed
 
@@ -247,9 +315,14 @@ php artisan queue:forget <id>
 php artisan queue:prune-failed
 ```
 
-The Queen panel displays failed-job metadata but does not provide web actions for retry, forget,
-flush or prune. When failed-job synchronization is enabled, those Laravel commands also coordinate
-the matching Queen DLQ snapshot.
+The detail page of a failed job has a **Retry now** button. It runs Laravel's `queue:retry` for
+that one job, as the command does, so a Queen job keeps its retry fence and its DLQ snapshot is
+cleared. The button posts to `/queen/failed-jobs/{id}/retry`, which needs the CSRF token and the
+same authorization as the rest of the panel. A job that goes back onto its queue leaves the list,
+and the panel returns to it. A retry that cannot run keeps the job and shows Laravel's reason,
+without paths of this host. Forget, flush and prune have no web action: use the Laravel commands.
+When failed-job synchronization is enabled, those commands also coordinate the matching Queen DLQ
+snapshot.
 
 The failed-jobs page shows `QUEEN_DASHBOARD_FAILED_JOBS_LIMIT` jobs, newest first, with **Older**
 and **Newest** links. The pages use a keyset cursor instead of an offset: on a database store each
@@ -261,14 +334,20 @@ positions: a new failure or a retry while you read an older page shifts that pag
 
 ### Why a job failed
 
+<Screenshot
+  src="laravel-dashboard-failed-job"
+  alt="A failed-job page: a RuntimeException of App Jobs FailureMatrixJob on the queue benchmark, with its ID, connection, maximum tries 1 and timeout 60 s, the message under Why it failed, a collapsed stack trace, the Retry now button and the From a terminal command."
+  caption="The real failed-job page of a benchmark job that throws on purpose. Retry now runs queue:retry for this job."
+/>
+
 Each row of the failed-jobs page ends with an arrow and opens that job in a drawer beside the
 list; **Open as page** shows the same detail at `/queen/failed-jobs/{id}`, which is also where the
 row leads without JavaScript. Automatic refresh pauses while the drawer is open. The detail shows
 the job class, the queue and connection, the maximum tries and timeout read from the payload, the
-exception class and message in red under **Why it failed**, the stack trace, and the `queue:retry`
-command for that job. Each of the last three has a **Copy** button; where the browser offers no
-clipboard access, for example on a plain `http://` origin, the button copies through a selection
-instead. The payload itself is never displayed. Paths under the application root are shown relative
+exception class and message in red under **Why it failed**, the stack trace, the **Retry now**
+button, and the `queue:retry` command for that job under **From a terminal**. The message, the
+stack trace and the command each have a **Copy** button; where the browser offers no clipboard
+access, for example on a plain `http://` origin, the button copies through a selection instead. The payload itself is never displayed. Paths under the application root are shown relative
 to it, and the page does not refresh itself. The exception and the payload are read from the
 store cut to 1 MiB, in SQL on a database store, so a row of many megabytes costs no more memory
 than that. The page does not show an attempt count: Laravel's payload counter is only kept current
@@ -285,6 +364,56 @@ two dashboards intentionally cover different scopes:
 | Worker processes and restart state | Backlog, partitions, lag, messages and system metrics |
 | Laravel failed-job metadata | Queen DLQ records |
 | Pause, continue and terminate the local master | Broker and queue administration |
+
+## Tuning advice and settings
+
+The Configuration page opens with **Tuning advice**. It reads this application's settings, what the
+running supervisor published, the failed-job count and the last hour of
+[job metrics](/use/laravel/monitoring#jobs-per-class). Each item has a severity, the evidence, what
+to do and a **Read more** link to these pages. When nothing calls for a change, the page says so.
+
+<Screenshot
+  src="laravel-dashboard-tuning"
+  alt="The Tuning advice card of the Configuration page with two items: a warning that deploys interrupt App Jobs FailureMatrixJob, because its longest run in the last hour took 45 s while shutdown_grace is 35 s, with what to do; and an info item for 6 failed jobs, with links to the failed jobs and to these pages."
+  caption="Advice computed from the running supervisor and the last hour of job metrics, during a benchmark workload."
+/>
+
+| Severity | Advice when |
+| --- | --- |
+| Critical | Lease renewal is off and a pool's `timeout` is at least its `retry_after`: a job still running when its lease ends goes to a second worker. |
+| Critical | Lease renewal is on and a pool's `timeout` is at least its `retry_after`: the supervisor does not start with that pool. |
+| Warning | The longest run of a job class is longer than `shutdown_grace`: a deploy kills that job, and it runs again. |
+| Warning | A pool with `max_processes` 1 serves two or more queues, and one of them has a backlog. |
+| Warning | Several running supervisors autoscale one queue without [coordination](/use/laravel/supervisors#several-replicas). |
+| Info | `prefetch` is 1, `pop_ahead` is off, and job classes that ran at least 60 times take under 100 ms on average. A warning when a pool has `tries` 1: a worker that crashes charges one attempt to each job it had prefetched. |
+| Info | [Prefork](/use/laravel/supervisors#prefork-workers) is off. |
+| Info | Lease renewal is on, but `QUEEN_SUPERVISOR_LEASE_SERVICE=false` turns off [lease renewal in the master](/use/laravel/supervisors#lease-renewal-in-the-master). |
+| Info | A pool follows the backlog (`balance` `auto`) without [event-driven scaling](/use/laravel/supervisors#event-driven-scaling). |
+| Info | Laravel's failed-job store holds jobs. The item also opens the Failed jobs page. |
+
+The pools and `shutdown_grace` are the running supervisor's when one published its status, otherwise
+this application's. The critical advice always reads this application's pools: the supervisor does
+not start with such a pool, so only a worker started another way runs it. The longest run of a
+class comes from the job metrics, which record it from this release on; a class recorded only by
+earlier workers gets no deploy advice.
+
+Below the advice, **Settings** lists every Queen setting of this application as this host resolves
+it, with its value, its default, what it does and its environment variable:
+
+- **Connection**: the `queen` queue connection over `config('queen')`, as the workers read it;
+- **Supervisor**: `queen.supervisor`, and `QUEEN_SUPERVISOR_LEASE_SERVICE` from this host's
+  environment;
+- **Pools**: the pools the running supervisor published, or this application's when none did. The
+  supervisor does not publish backoff, max jobs, max time and sleep, so those come from this
+  application's pool of the same name.
+
+A changed value is in bold. A value of the wrong type or out of range shows as **invalid**, never as
+itself. A value that the queue connection refuses with another setting, such as `prefetch` above 1
+without `lease_renewal`, shows the reason, and so does a pool with `min_processes` above
+`max_processes`. `php artisan queen:supervisor-config` checks the whole supervisor configuration. A
+supervisor started with other environment variables, such as a worker pod, runs with its own values. Credentials never reach the page: a setting whose name
+contains `token`, `secret`, `password` or `key` shows only **set** or **not set**, a broker URL only
+its scheme, host and port, and the headers only how many there are.
 
 ## A supervisor on another host
 

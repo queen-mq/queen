@@ -44,6 +44,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/PhpSupervisor.php
   - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
   - clients/client-php/src/Laravel/Supervisor/WorkerTelemetry.php
+  - clients/client-php/src/Laravel/Supervisor/WorkerExitMarker.php
   - clients/client-php/src/Laravel/Dashboard/DashboardRepository.php
   - clients/client-php/src/Laravel/Dashboard/FailedJobsReadModel.php
   - clients/client-php/src/Laravel/Http/Middleware/AuthorizeDashboard.php
@@ -57,6 +58,7 @@ verifiedBy:
   - clients/client-php/tests/CurlTransportTest.php
   - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
   - clients/client-php/tests/LaravelDashboardTest.php
+  - clients/client-php/tests/WorkerExitMarkerTest.php
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): QUEUE_DEFAULTS is nine keys, the configure paragraph is rewritten for the merge rule, and retryMessage carries the move primitive's consequences.
 # sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds the supervisor.remote_status keys and the dashboard's published-status source.
@@ -75,6 +77,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through the cURL transport): HttpClient sends synchronous and detached requests over CurlTransport; the Transport subsection and the Errors section say so.
 # sourceOfTruth re-read 2026-10-01 (through the TCP keep-alive change): CurlTransport sets TCP keep-alive on every connection; the Transport subsection says so.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; the pop_ahead option row is unchanged.
+# sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): Admin gains getLaggingConsumersAsync, config/queen.php gains dashboard.console_url, and the dashboard routes add the failed-job retry; the consumer-group table, the configuration table and the Supervisor dashboard section say so. SupervisorConfiguration's refused-URL error, which no section quotes, no longer repeats credentials.
+# sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): the restart paragraph now says both engines open the circuit (the PHP engine already did) and which exits do not count (stable_after, Laravel's job timeout, --memory after a job, through WorkerExitMarker), and the state directory paragraph names the exit markers, says pause drains (no SIGUSR2/SIGCONT is sent) and gives the stop order; the unstarted hand-back that keeps its attempt, the forked child and the renewal helper, the detached request written before the next job, CURLOPT_QUICK_EXIT, the bounded metrics client and the Rust CA store change nothing else this reference states.
+# sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot, and CurlTransport waits at most 250 ms to write a detached request without a body; the console_url row and the Transport section still hold.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -443,6 +448,7 @@ upgrade.
 | `listConsumerGroups()` | `GET /api/v1/consumer-groups` |
 | `getConsumerGroup(string $name)` | `GET /api/v1/consumer-groups/:name` |
 | `getLaggingConsumers(int $minLagSeconds = 60)` | `GET /api/v1/consumer-groups/lagging?minLagSeconds=` |
+| `getLaggingConsumersAsync(int $minLagSeconds = 60, ?int $timeoutMillis = null)` | Same route through the failover-aware async client. |
 | `deleteConsumerGroupForQueue(string $consumerGroup, string $queueName, bool $deleteMetadata = true)` | `DELETE /api/v1/consumer-groups/:group/queues/:queue` |
 | `seekConsumerGroup(string $consumerGroup, string $queueName, array $options = [])` | `POST /api/v1/consumer-groups/:group/queues/:queue/seek` |
 | `refreshConsumerStats()` | `POST /api/v1/stats/refresh` |
@@ -557,6 +563,7 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `dashboard.refresh_seconds` | `QUEEN_DASHBOARD_REFRESH_SECONDS` | `5` seconds |
 | `dashboard.allow_local` | `QUEEN_DASHBOARD_ALLOW_LOCAL` | `true` |
 | `dashboard.failed_jobs_limit` | `QUEEN_DASHBOARD_FAILED_JOBS_LIMIT` | `50` rows per page |
+| `dashboard.console_url` | `QUEEN_DASHBOARD_CONSOLE_URL` | unset; an `http` or `https` URL without user info, query or fragment |
 | `supervisor_binary.install_path` | `QUEEN_SUPERVISOR_INSTALL_PATH` | `storage/queen-supervisor-bin` |
 | `supervisor_binary.release_base_url` | `QUEEN_SUPERVISOR_RELEASE_BASE_URL` | unset |
 | `supervisor_binary.manifest` | `QUEEN_SUPERVISOR_MANIFEST` | unset |
@@ -725,10 +732,11 @@ an ordered `queues` list, Laravel worker options and its scaling policy.
 | `stable_after` | Runtime after which the crash backoff resets. |
 | `default_runtime_seconds` | Time-strategy fallback before worker telemetry exists. |
 
-Both engines use capped exponential restart backoff. Only the Rust engine opens
-a circuit after five consecutive crashes and permits one probe after the
-cooldown; the PHP engine has no open/probe phase and continues at
-`restart_backoff_max`.
+Both engines use capped exponential restart backoff, open a circuit after five
+consecutive crashes and permit one probe after the cooldown. A worker that ran
+for `stable_after`, that Laravel killed after a job timeout, or that stopped at
+`--memory` after a job is not a crash; for the last two, the worker leaves a
+marker in the state directory before it exits.
 
 The local control command is shared by both engines:
 
@@ -740,10 +748,11 @@ php artisan queen:supervisor continue
 php artisan queen:supervisor terminate
 ```
 
-Status, commands, the exclusive PID lock and duration telemetry live below
-`state_directory`. Pause/continue map to `SIGUSR2`/`SIGCONT`; termination sends
-`SIGTERM` and enforces `shutdown_grace`. This surface targets Unix and requires
-PHP `pcntl`.
+Status, commands, the exclusive PID lock, duration telemetry and the workers'
+exit markers live below `state_directory`. Pause drains every worker and starts
+none until continue; termination sends `SIGTERM` to every worker before it
+calls the broker, then enforces `shutdown_grace`. This surface targets Unix and
+requires PHP `pcntl`.
 
 `QUEEN_URLS` supplies failover broker endpoints for depth reads. Both v2 engines
 read the selected pool's resolved Queen `connections` entry directly and build
@@ -774,7 +783,9 @@ production, enabling the route without defining an allowing Gate still returns `
 key/value store, one slot per supervisor instance, and a panel on another host lists every instance
 read-only. Failed jobs are paged with a
 keyset cursor, and each has a detail page with its exception and stack trace, never its
-payload.
+payload, and a button that retries it. The Workload page shows the jobs waiting and running in
+each queue, with links to the Queen console when `dashboard.console_url` is set, and the
+Configuration page gives tuning advice beside every resolved setting, credentials never shown.
 
 The complete authorization example, route-cache procedure and local-versus-global scope are in
 [Supervisor dashboard](/use/laravel/dashboard).

@@ -20,6 +20,8 @@ sourceOfTruth:
   - webdoc/scripts/gen-kafka-apis.mjs
   - webdoc/scripts/gen-charts.mjs
   - webdoc/scripts/charts.py
+  - webdoc/scripts/chartlib.py
+  - webdoc/scripts/charts_laravel.py
   - webdoc/scripts/gen-snippets.mjs
   - webdoc/scripts/lib/source.mjs
   - .github/workflows/docs.yml
@@ -29,6 +31,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-09-30 (through d188eb7d): charts.py gained the event-driven figure; the workflow and the three rules are unchanged; page matches the code.
 # sourceOfTruth re-read 2026-10-01 (through 9c8b0772): charts.py gained four Horizon-against-Queen figures read from one runs.csv; the workflow and the three rules are unchanged; page matches the code.
 # sourceOfTruth re-read 2026-10-01 (through 220d1acf): charts.py gained three Linux-server figures and a paired-bar helper, read from the new dataset's runs.csv; the workflow and the three rules are unchanged; page matches the code.
+# sourceOfTruth re-read 2026-10-02 (through e1fc2cf8): charts.py gained the laravel-headline figure, read from the Linux-server runs.csv, and the workflow and the three rules are unchanged; components.ts registers six schematics (JobLifecycle, LeaseTimeline, PreforkMemory, RollingUpdate, SupervisorTopology, WorkerTimeline) that the registered-set sentence under the MDX facts does not list yet.
+# sourceOfTruth re-read 2026-10-02 (charts split): charts.py keeps the general figures and main(); chartlib.py holds the theme, style, SVG writer and readers, and charts_laravel.py the Laravel figures, with byte-identical output; the registered-set sentence now lists the six schematics.
+# sourceOfTruth re-read 2026-10-02 (soak figure): charts_laravel.py gained the laravel-soak-memory figure, read from the failure-matrix dataset's soak-memory.csv and soak-events.csv; the workflow and the three rules are unchanged.
 ---
 
 This site exists because the previous one drifted far enough from the implementation to
@@ -61,6 +66,8 @@ by `astro-og-canvas`; icons are Phosphor through `astro-icon`.
     - gen-openapi.mjs
     - gen-charts.mjs
     - charts.py
+    - chartlib.py
+    - charts_laravel.py
     - gen-snippets.mjs
     - lib/
       - source.mjs
@@ -158,9 +165,10 @@ Three more are warnings rather than errors: `nimbus/duplicate-heading-text`,
 Beyond the linter, two MDX facts bite regularly. Components must be PascalCase **and**
 registered in `src/components.ts`. The registered set is `Accordion`, `AccordionContent`,
 `AccordionGroup`, `AccordionTrigger`, `Aside`, `Badge`, `Card`, `CardGrid`, `Code`, `CodeGroup`,
-`Chart`, `FileTree`, `Frame`, `LinkButton`, `LinkCard`, `PackageManagers`, `Partition`, `Render`,
-`Screenshot`, `Step`, `Steps`, `TabItem` and `Tabs`, and nothing else is available without
-importing it. And remark or rehype
+`Chart`, `FileTree`, `Frame`, `JobLifecycle`, `LeaseTimeline`, `LinkButton`, `LinkCard`,
+`PackageManagers`, `Partition`, `PreforkMemory`, `Render`, `RollingUpdate`, `Screenshot`, `Step`,
+`Steps`, `SupervisorTopology`, `TabItem`, `Tabs` and `WorkerTimeline`, and nothing else is
+available without importing it. And remark or rehype
 plugins attached through the MDX integration are dropped, so Mermaid is not wired in as a
 build-time plugin: diagrams are `<pre class="mermaid">` blocks in the page source, rendered in
 the browser by `src/scripts/mermaid.ts`, which the base layout loads on every page.
@@ -279,10 +287,11 @@ advertised API with no sentence written for it is a hard error too.
 A chart is a claim, so the figures are derived like everything else:
 `gen-charts.mjs` shells out to `charts.py`, which reads the archived CSV and
 stdout artifacts under `benchmark-queen/` and renders one SVG per theme into
-`public/charts/`. `--check` re-renders into a temporary directory and compares, so
+`public/charts/`. The Laravel figures live in `charts_laravel.py`, and the theme,
+style and SVG writer that every figure shares in `chartlib.py`. `--check` re-renders into a temporary directory and compares, so
 a changed artifact fails CI until the figure is regenerated. Rendering needs
 python3 with matplotlib; the workflow installs it. The output does not depend on
-the host: `charts.py` strips the render date and numbers the clip-path and marker
+the host: `chartlib.py` strips the render date and numbers the clip-path and marker
 ids, which matplotlib derives from coordinates whose last bits differ between
 machines.
 

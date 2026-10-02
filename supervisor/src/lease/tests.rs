@@ -223,6 +223,44 @@ fn a_connection_lost_while_holding_a_lease_kills_the_worker_and_a_shutdown_does_
     assert_eq!(service.signals().len(), 1);
 }
 
+/// A fence must not depend on stderr: a write to a broken pipe fails, and
+/// `eprintln!` panics on a failed write.
+#[test]
+fn a_lost_connection_fences_its_worker_even_when_stderr_is_a_broken_pipe() {
+    let mut helper = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "lease::tests::broken_stderr_fence_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("QUEEN_LEASE_BROKEN_STDERR", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Close the read end: every write to the helper's stderr now fails.
+    drop(helper.stderr.take());
+    let status = helper.wait().unwrap();
+    assert!(status.success(), "the worker was not fenced: {status}");
+}
+
+#[test]
+#[ignore = "subprocess helper for a_lost_connection_fences_its_worker_even_when_stderr_is_a_broken_pipe"]
+fn broken_stderr_fence_helper() {
+    if std::env::var_os("QUEEN_LEASE_BROKEN_STDERR").is_none() {
+        return;
+    }
+    let (url, _requests) = test_server::start(vec![(200, RENEWED)]);
+    let service = Service::start("broken-stderr");
+    let mut lost = Worker::connect(&service, &url, 1000, 200).ready();
+    assert_eq!(lost.track("held", 30_000), tracked("held"));
+    drop(lost);
+    wait_until("SIGKILL", || {
+        service.signals() == vec![(std::process::id(), libc::SIGKILL)]
+    });
+}
+
 #[test]
 fn a_worker_holds_one_lease_at_a_time() {
     let (url, _requests) = test_server::start(vec![(200, RENEWED)]);

@@ -700,7 +700,10 @@ final class SupervisorConfiguration
                 || isset($parts['pass'])
                 || isset($parts['query'])
                 || isset($parts['fragment'])) {
-                throw new InvalidArgumentException("Invalid Queen supervisor URL [{$url}].");
+                throw new InvalidArgumentException(
+                    'Invalid Queen supervisor URL [' . self::redactedUrl($url) . ']: use http or https with a host,'
+                    . ' and no user info, query or fragment.',
+                );
             }
         }
         unset($url);
@@ -737,6 +740,20 @@ final class SupervisorConfiguration
             'bearer_token' => $bearerToken,
             'headers' => $headers,
         ];
+    }
+
+    /**
+     * Scheme, host and port of a refused URL. The error reaches logs and error
+     * pages, and the user info or query is often why the URL was refused.
+     */
+    private static function redactedUrl(string $url): string
+    {
+        $parts = parse_url($url);
+        if (!is_array($parts) || !is_string($parts['host'] ?? null) || $parts['host'] === '') {
+            return 'unreadable URL';
+        }
+
+        return ($parts['scheme'] ?? '') . '://' . $parts['host'] . (isset($parts['port']) ? ':' . $parts['port'] : '');
     }
 
     private static function connectionBackendCount(array $connection): int

@@ -92,10 +92,18 @@ class QueenJob extends Job implements JobContract
 
     public function attempts(): int
     {
-        $payload = $this->payload();
+        return self::attemptsOf($this->payload(), $this->message);
+    }
+
+    /**
+     * @internal The attempt a delivery is: the runs its payload records, plus
+     *           the broker's count of deliveries of the current copy.
+     */
+    public static function attemptsOf(array $payload, array $message): int
+    {
         $completedAttempts = (int) ($payload['_queen']['attempts'] ?? 0);
-        $deliveryAttempt = max(1, (int) ($this->message['deliveryAttempt']
-            ?? $this->message['delivery_attempt']
+        $deliveryAttempt = max(1, (int) ($message['deliveryAttempt']
+            ?? $message['delivery_attempt']
             ?? 1));
 
         return $completedAttempts + $deliveryAttempt;

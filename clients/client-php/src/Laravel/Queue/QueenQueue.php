@@ -32,7 +32,7 @@ class QueenQueue extends BaseQueue implements QueueContract
     /** @var array<string, string> Delivery key to local pop-batch id. */
     private array $deliveryBatches = [];
 
-    /** @var array<string, string> Queue name to the delivery currently handed to Laravel. */
+    /** @var array<string, array{key: string, message: array}> Queue name to the delivery currently handed to Laravel. */
     private array $activeDeliveries = [];
 
     /** @var array<string, string> Delivery key to its Laravel queue name. */
@@ -46,6 +46,14 @@ class QueenQueue extends BaseQueue implements QueueContract
 
     /** @var array<string, int> Locally unsettled deliveries per broker lease. */
     private array $leaseOutstanding = [];
+
+    /**
+     * The partition lease of the delivery whose ACK or release is on the
+     * wire. Laravel's timeout handler can stop the worker as that request
+     * returns, before the answer is read: the job may already be settled, so
+     * shutdown leaves this partition lease to expire rather than copy it.
+     */
+    private ?string $settlingLease = null;
 
     /**
      * The ack_async ACK on the wire, settled before the next ACK, release or
@@ -87,7 +95,8 @@ class QueenQueue extends BaseQueue implements QueueContract
 
     /**
      * @param (\Closure(string, \Closure(): mixed): mixed)|null $failedJobRetryHandler
-     * @param (\Closure(list<array>, string, ?string): array)|null $shutdownTailReleaser
+     * @param (\Closure(): Queen)|null $shutdownClient The client for the one
+     *        bounded shutdown request; the ordinary client when null.
      */
     public function __construct(
         private Queen $queen,
@@ -104,7 +113,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         private bool $popAutopilot = false,
         private ?LeaseRenewer $leaseRenewer = null,
         private ?\Closure $failedJobRetryHandler = null,
-        private ?\Closure $shutdownTailReleaser = null,
+        private ?\Closure $shutdownClient = null,
         private bool $ackAsync = false,
         private bool $popAhead = false,
     ) {
@@ -138,10 +147,10 @@ class QueenQueue extends BaseQueue implements QueueContract
     }
 
     /**
-     * Settle completed deferred ACKs and explicitly retry one representative
-     * from every unhandled prefetched partition. The connector supplies a
-     * single-attempt, two-second client for this final request. Any skipped,
-     * rejected, or ambiguous item falls back to durable lease expiry.
+     * Complete the deferred ACKs and hand back every unhandled prefetched
+     * delivery, in one transaction on the connector's single-attempt,
+     * two-second client. If it fails, everything falls back to durable lease
+     * expiry.
      */
     public function shutdown(): void
     {
@@ -151,40 +160,26 @@ class QueenQueue extends BaseQueue implements QueueContract
         $this->shutDown = true;
 
         try {
-            // Bounded like the tail release below, and not retried: a lost
+            // Bounded like the hand-back below, and not retried: a lost
             // answer leaves the job to lease expiry.
             $this->settlePendingAck(self::SHUTDOWN_ACK_TIMEOUT_MILLIS, retry: false);
-            // Jobs popped ahead join the tail released below.
+            // Jobs popped ahead join the tail handed back below.
             $this->settlePendingPop(self::SHUTDOWN_ACK_TIMEOUT_MILLIS, track: false);
-            $groups = $this->shutdownAcknowledgementGroups();
-            if ($groups !== []) {
-                // A synchronous Laravel worker can own a prefetched tail for
-                // only one queue. Limit this best-effort path to one HTTP call
-                // even if direct, re-entrant API use created several groups.
-                $entries = reset($groups);
-                $messages = array_column($entries, 'wire');
-                $group = $entries[0]['group'];
-                $affinityKey = $entries[0]['affinity_key'];
-                $result = $this->shutdownTailReleaser !== null
-                    ? ($this->shutdownTailReleaser)($messages, $group, $affinityKey)
-                    : $this->queen->ack($messages, true, array_filter([
-                        'group' => $group,
-                        'affinityKey' => $affinityKey,
-                    ], static fn (mixed $value): bool => $value !== null));
-                $this->assertBatchAcknowledged($result, count($messages));
-
-                foreach ($entries as $entry) {
-                    if ($entry['type'] === 'completed') {
-                        $this->settleLeaseMessage($entry['message']);
-                    } else {
-                        $this->discardPrefetchedSiblings($entry['message']);
-                    }
+            $handedBack = $this->unhandledDeliveries();
+            if ($this->pendingAcknowledgements !== [] || $handedBack !== []) {
+                $this->handBack(
+                    $this->shutdownClient !== null ? ($this->shutdownClient)() : $this->queen,
+                    $this->pendingAcknowledgements,
+                    $handedBack,
+                );
+                foreach ([...$this->pendingAcknowledgements, ...$handedBack] as $entry) {
+                    $this->settleLeaseMessage($entry['message']);
                 }
             }
         } catch (\Throwable $exception) {
-            // A shutdown ACK is deliberately best effort. Its transaction may
-            // be ambiguous, so never retry it locally; expiry/redelivery is the
-            // only safe at-least-once fallback.
+            // A shutdown transaction is deliberately best effort. Its outcome
+            // may be ambiguous, so never retry it locally; expiry/redelivery is
+            // the only safe at-least-once fallback.
             error_log('Queen Laravel worker could not release its prefetched tail during shutdown: '
                 . $exception->getMessage());
         } finally {
@@ -682,19 +677,14 @@ class QueenQueue extends BaseQueue implements QueueContract
         }
     }
 
-    /** Hand back jobs that were never started, one ACK for the batch. */
+    /** Hand back jobs that were never started, in one transaction. */
     private function releaseUnstarted(array $messages, string $queue, \Throwable $reason): void
     {
-        $wire = [];
-        foreach ($this->partitionRepresentatives($messages) as $message) {
-            $wire[] = self::retryWire($message, 'Laravel worker could not track this delivery before its lease ran short.');
-        }
         try {
-            $result = $this->queen->ack($wire, true, [
-                'group' => $this->consumerGroup,
-                'affinityKey' => $this->affinityKey($queue),
-            ]);
-            $this->assertBatchAcknowledged($result, count($wire));
+            $this->handBack($this->queen, [], array_map(
+                static fn (array $message): array => ['queue' => $queue, 'message' => $message, 'ran' => false],
+                $messages,
+            ));
         } catch (\Throwable $failure) {
             $this->reportQuietly(new RuntimeException(
                 'Queen Laravel could not hand back jobs it popped ahead, which will run after their lease expires: '
@@ -706,26 +696,101 @@ class QueenQueue extends BaseQueue implements QueueContract
     }
 
     /**
-     * One message per lease and partition: a retry ACK of the first unstarted
-     * message returns that partition's whole local tail.
+     * Complete $completed, and hand back $handedBack without charging an
+     * attempt to a job that never ran, in one transaction.
      *
-     * @param list<array> $messages
-     * @return list<array>
+     * A retry ACK would leave the broker's cursor on a handed-back job, and
+     * the broker counts the next pop of that position as a redelivery: one
+     * attempt more for nothing, and with tries = 1 a job that fails without
+     * running. So each one is completed, and a copy pushed to its partition
+     * records the runs so far, as releaseReserved() does for a job that ran.
+     * The transaction is all or nothing: if it fails, lease expiry hands the
+     * jobs back.
+     *
+     * @param list<array{message: array, group: string}> $completed
+     * @param list<array{queue: string, message: array, ran: bool}> $handedBack
      */
-    private function partitionRepresentatives(array $messages): array
+    private function handBack(Queen $queen, array $completed, array $handedBack): void
     {
-        $represented = [];
-        $representatives = [];
-        foreach ($messages as $message) {
-            $partitionKey = ($this->leaseIdOrNull($message) ?? '') . "\0"
-                . (string) ($message['partitionId'] ?? $message['partition_id'] ?? '');
-            if (!isset($represented[$partitionKey])) {
-                $represented[$partitionKey] = true;
-                $representatives[] = $message;
+        $transaction = $queen->transaction();
+        foreach ($completed as $entry) {
+            $transaction->ack($entry['message'], 'completed', ['consumerGroup' => $entry['group']]);
+        }
+        foreach ($handedBack as $entry) {
+            [$partition, $payload] = $this->handBackCopy($entry['message'], $entry['ran']);
+            $transaction->ack($entry['message'], 'completed', ['consumerGroup' => $this->consumerGroup]);
+            $transaction->queue($entry['queue'])
+                ->partition($partition)
+                ->push([['data' => $payload, 'transactionId' => Uuid::v7()]]);
+        }
+        $transaction->commit();
+    }
+
+    /**
+     * The copy that replaces a handed-back delivery: same partition, and the
+     * runs so far as its completed attempts, so its first delivery reports
+     * the attempt this one does (one more if this one ran).
+     *
+     * @return array{0: string, 1: array}
+     */
+    private function handBackCopy(array $message, bool $ran): array
+    {
+        $data = $message['data'] ?? $message['payload'] ?? null;
+        $payload = is_string($data) ? $this->decodePayload($data) : $data;
+        if (!is_array($payload)) {
+            throw new UnexpectedValueException('Queen returned a delivery without a Laravel payload.');
+        }
+        $runs = QueenJob::attemptsOf($payload, $message) - ($ran ? 0 : 1);
+        $partition = (string) ($message['partition'] ?? $this->partitionForPayload($payload));
+        $payload['_queen'] = array_replace(
+            is_array($payload['_queen'] ?? null) ? $payload['_queen'] : [],
+            ['partition' => $partition, 'attempts' => $runs],
+        );
+
+        return [$partition, $payload];
+    }
+
+    /**
+     * Every prefetched delivery Laravel has not started, after the started
+     * delivery ahead of them in a partition lease, if any. The broker
+     * completes every position up to the last one acknowledged, so handing
+     * back the tail alone would complete that job too: Laravel's timeout
+     * handler stops the worker while the job that timed out is current. It
+     * ran, so its copy counts the run. A started job alone in its partition
+     * lease is left to lease expiry, and so is the partition lease of a job
+     * whose ACK or release was interrupted on the wire.
+     *
+     * @return list<array{queue: string, message: array, ran: bool}>
+     */
+    private function unhandledDeliveries(): array
+    {
+        $unstarted = [];
+        $tailLeases = [];
+        foreach ($this->prefetched as $queue => $state) {
+            foreach (array_slice($state['messages'], $state['next']) as $message) {
+                $partitionLease = $this->partitionLeaseKey($message);
+                if ($partitionLease === $this->settlingLease) {
+                    continue;
+                }
+                $unstarted[] = ['queue' => $queue, 'message' => $message, 'ran' => false];
+                $tailLeases[$partitionLease] = true;
             }
         }
 
-        return $representatives;
+        $started = [];
+        foreach ($this->activeDeliveries as $queue => $active) {
+            if (isset($tailLeases[$this->partitionLeaseKey($active['message'])])) {
+                $started[] = ['queue' => $queue, 'message' => $active['message'], 'ran' => true];
+            }
+        }
+
+        return [...$started, ...$unstarted];
+    }
+
+    private function partitionLeaseKey(array $message): string
+    {
+        return ($this->leaseIdOrNull($message) ?? '') . "\0"
+            . (string) ($message['partitionId'] ?? $message['partition_id'] ?? '');
     }
 
     private function makeJob(array $message, string $queue): QueenJob
@@ -742,7 +807,7 @@ class QueenQueue extends BaseQueue implements QueueContract
 
         if ($this->prefetch > 1) {
             $key = $this->deliveryKey($message);
-            $this->activeDeliveries[$queue] = $key;
+            $this->activeDeliveries[$queue] = ['key' => $key, 'message' => $message];
             $this->deliveryQueues[$key] = $queue;
         }
 
@@ -804,6 +869,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             return;
         }
 
+        $this->settlingLease = $this->partitionLeaseKey($message);
         try {
             // A failed job must reach the DLQ synchronously. Flush earlier
             // success acknowledgements first so a later batch failure cannot
@@ -826,9 +892,11 @@ class QueenQueue extends BaseQueue implements QueueContract
             $this->assertSuccessful($result, $failed ? 'dead-letter job' : 'acknowledge job');
         } catch (\Throwable $acknowledgementFailure) {
             $this->abandonDelivery($message);
+            $this->settlingLease = null;
             throw $acknowledgementFailure;
         }
         $this->markDeliveryHandled($message);
+        $this->settlingLease = null;
         $this->settleLeaseMessage($message);
     }
 
@@ -838,15 +906,18 @@ class QueenQueue extends BaseQueue implements QueueContract
             ['group' => $group, 'affinityKey' => $affinityKey],
             static fn (mixed $value): bool => $value !== null,
         );
+        $this->settlingLease = $this->partitionLeaseKey($message);
         try {
             $promise = $this->queen->ackDetached($message, 'completed', $context);
         } catch (\Throwable) {
             // Nothing was sent: the synchronous path acknowledges, or reports
             // why it cannot.
+            $this->settlingLease = null;
             return false;
         }
         $this->pendingAck = ['promise' => $promise, 'message' => $message, 'context' => $context];
         $this->markDeliveryHandled($message);
+        $this->settlingLease = null;
         // The job is done: its lease needs no renewal on its account. After
         // the lease's last ACK the broker closes it, and renewing a closed
         // lease would fence an idle worker.
@@ -959,6 +1030,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         int $attempts,
     ): void {
         $this->settlePendingAck();
+        $this->settlingLease = $this->partitionLeaseKey($message);
         try {
             $this->flushAcknowledgements();
 
@@ -992,12 +1064,14 @@ class QueenQueue extends BaseQueue implements QueueContract
             // The transaction outcome is ambiguous. Never execute a locally
             // buffered sibling whose partition lease may already have moved.
             $this->abandonDelivery($message);
+            $this->settlingLease = null;
             throw $releaseFailure;
         }
 
         // A successful completed ACK advances only through this message and
         // keeps the remaining same-partition lease valid.
         $this->markDeliveryHandled($message);
+        $this->settlingLease = null;
         $this->settleLeaseMessage($message);
         $this->settlePendingPop();
     }
@@ -1005,6 +1079,18 @@ class QueenQueue extends BaseQueue implements QueueContract
     public function getQueen(): Queen
     {
         return $this->queen;
+    }
+
+    /**
+     * The client for writes that may fail, such as job metrics: one attempt,
+     * two seconds, no failover, no 429 retry. They run in a worker's job
+     * events and in WorkerStopping, where the ordinary client's retries would
+     * hold the worker; the ordinary client when the connector did not build
+     * this queue.
+     */
+    public function getBestEffortQueen(): Queen
+    {
+        return $this->shutdownClient !== null ? ($this->shutdownClient)() : $this->queen;
     }
 
     public function getConsumerGroup(): string
@@ -1274,51 +1360,6 @@ class QueenQueue extends BaseQueue implements QueueContract
     }
 
     /**
-     * @return array<string, list<array{
-     *     type: 'completed'|'retry',
-     *     message: array,
-     *     wire: array,
-     *     group: string,
-     *     affinity_key: ?string
-     * }>>
-     */
-    private function shutdownAcknowledgementGroups(): array
-    {
-        $groups = [];
-
-        foreach ($this->pendingAcknowledgements as $entry) {
-            $wire = $entry['message'];
-            $wire['_status'] = 'completed';
-            $key = json_encode([$entry['group'], $entry['affinity_key']], JSON_THROW_ON_ERROR);
-            $groups[$key][] = [
-                'type' => 'completed',
-                'message' => $entry['message'],
-                'wire' => $wire,
-                'group' => $entry['group'],
-                'affinity_key' => $entry['affinity_key'],
-            ];
-        }
-
-        foreach ($this->prefetched as $queue => $state) {
-            $unstarted = array_slice($state['messages'], $state['next']);
-            foreach ($this->partitionRepresentatives($unstarted) as $message) {
-                $affinityKey = $this->affinityKey($queue);
-                $key = json_encode([$this->consumerGroup, $affinityKey], JSON_THROW_ON_ERROR);
-                $wire = self::retryWire($message, 'Laravel worker stopped before processing this prefetched delivery.');
-                $groups[$key][] = [
-                    'type' => 'retry',
-                    'message' => $message,
-                    'wire' => $wire,
-                    'group' => $this->consumerGroup,
-                    'affinity_key' => $affinityKey,
-                ];
-            }
-        }
-
-        return $groups;
-    }
-
-    /**
      * Forget every helper-side lease before closing it and erase local buffers.
      *
      * No network operation is attempted here. Anything not durably settled by
@@ -1343,6 +1384,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         $this->leaseOutstanding = [];
         $this->pendingAck = null;
         $this->pendingPop = null;
+        $this->settlingLease = null;
     }
 
     private function assertJobTimeoutIsSafe(QueenJob $job): void
@@ -1401,7 +1443,7 @@ class QueenQueue extends BaseQueue implements QueueContract
     {
         $key = $this->deliveryKey($message);
         $queue = $this->deliveryQueues[$key] ?? null;
-        if ($queue !== null && ($this->activeDeliveries[$queue] ?? null) === $key) {
+        if ($queue !== null && ($this->activeDeliveries[$queue]['key'] ?? null) === $key) {
             unset($this->activeDeliveries[$queue]);
         }
         unset($this->deliveryQueues[$key]);
@@ -1577,15 +1619,6 @@ class QueenQueue extends BaseQueue implements QueueContract
     private function affinityKey(string $queue, ?string $group = null): string
     {
         return "{$queue}:Default:" . ($group ?? $this->consumerGroup);
-    }
-
-    /** An unstarted message as a retry ACK entry, with the reason the broker records. */
-    private static function retryWire(array $message, string $reason): array
-    {
-        $message['_status'] = 'retry';
-        $message['_error'] = $reason;
-
-        return $message;
     }
 
     private function leaseId(array $message): string

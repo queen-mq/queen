@@ -6,7 +6,7 @@
         </div>
         <span class="header-meta">@if (!($failedJobs['available'] ?? false))Backend unavailable@elseif ($failedJobs['cursor'] === null){{ $failedLabel }} total@else Older page @endif</span>
     </div>
-    <p class="failed-help">Select a job to see why it failed; payloads are never displayed. Use Laravel's queue commands to retry, forget, flush or prune jobs.</p>
+    <p class="failed-help">Select a job to see why it failed and to retry it; payloads are never displayed. Use Laravel's queue commands to forget, flush or prune jobs.</p>
     @if (!($failedJobs['available'] ?? false))
         <div class="empty"><span class="badge warning">Unavailable</span> Failed-job metadata could not be read safely.</div>
     @elseif ($failedJobs['items'] === [])

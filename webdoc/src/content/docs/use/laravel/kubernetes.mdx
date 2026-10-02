@@ -30,6 +30,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): pop_ahead pops ahead only after a full batch; the tuning table and its figures are unchanged.
 # sourceOfTruth re-read 2026-10-01 (Linux server campaign): the What to expect table adds the server rows for lease renewal in the master and for ack_async with pop_ahead.
+# sourceOfTruth re-read 2026-10-02 (through 79204459): config/queen.php only gains dashboard.console_url, and SupervisorConfiguration names a refused URL by scheme, host and port only; the pod settings, terminationGracePeriodSeconds above shutdown_grace, and the figures are unchanged.
+# sourceOfTruth re-read 2026-10-02 (through b602eea2 + this patch): the workers now get SIGTERM before the coordination leave and the remote status publish, and the shutdown paragraph says so; the backoff that job timeouts and memory stops no longer trigger, the stalled-fetch fix, the lease service's fence order and the Rust CA store change nothing else this page states.
 ---
 
 This guide puts the supervisor features together for one common setup: Laravel workers in a
@@ -152,9 +154,10 @@ spec:
             failureThreshold: 3
 ```
 
-On `SIGTERM` the supervisor stops starting workers, leaves the coordination so the other pods take
-its share at their next poll, and drains its workers for up to `shutdown_grace` seconds before it
-forces them down. Keep `terminationGracePeriodSeconds` above `shutdown_grace`, or Kubernetes kills
+On `SIGTERM` the supervisor stops starting workers and sends `SIGTERM` to each of them. While they
+drain, for up to `shutdown_grace` seconds, it leaves the coordination so the other pods take its
+share at their next poll; then it forces the rest down. A slow broker therefore cannot delay the
+workers' `SIGTERM`. Keep `terminationGracePeriodSeconds` above `shutdown_grace`, or Kubernetes kills
 jobs that were still finishing. A pod that crashes still counts in the coordination until its key
 expires, so capacity can be short by its share for up to one control-loop bound.
 

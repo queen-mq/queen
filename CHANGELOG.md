@@ -3,6 +3,93 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Laravel: a job handed back unstarted keeps its attempt.** A worker that stopped with a
+prefetched tail (`--memory`, `--max-jobs`, a deploy, Laravel's timeout handler), or that could
+not track a batch popped ahead, handed the jobs back with a `retry` ACK. The broker counts the
+next pop of such a position as a redelivery, so each hand-back charged an attempt to jobs that
+never ran, and with `tries = 1` they failed with `MaxAttemptsExceeded` on their next delivery.
+The hand-back is now one transaction that completes each unstarted job and pushes a copy to its
+partition with the runs so far, as a release does. A crash (SIGKILL, out of memory, node loss)
+still returns the tail by lease expiry, charged one attempt: keep `tries` at 2 or more with
+`prefetch` above 1.
+
+**Laravel: a forked child no longer kills its worker.** With the PHP lease-renewal helper, a
+child forked by a job (Laravel's fork concurrency driver, `pcntl_fork()`) stopped the parent's
+helper when it exited, and the parent's watchdog then SIGKILLed the parent mid-job; the child
+was also fenced as soon as a subprocess of its own ended.
+
+**PHP client: a detached request is written before the next job runs.** With `ack_async` or
+`pop_ahead`, a request on a new connection (a worker's first detached request, or one after the
+broker closed an idle keep-alive connection) was only started when it was sent: cURL wrote it
+when the request was settled, which with `prefetch` above 1 is after the next job. A hard kill
+during that job (shutdown grace exceeded, out of memory, node loss) lost the ACK, and the
+acknowledged job ran again when its lease expired. `postDetached()` and `getDetached()` now
+return once the whole request is written, the connection included; on the Guzzle transport
+(behind a proxy, or with `QUEEN_SDK_HTTP_TRANSPORT=guzzle`) this holds for a request with a
+body, the ACK. A request that cannot be written within the 5-second connect timeout throws at
+once, and the Laravel queue then acknowledges synchronously. A pop sent ahead, which carries no
+body, is waited for at most 250 ms, so a slow or dead backend does not hold up the next job.
+
+**PHP client: a process forked by a job exits.** libcurl's resolver threads do not survive
+`fork()`, and recent libcurl keeps them alive for a moment after each name resolution (2 seconds
+on the multi handle that carries detached requests). A child forked in that window, by Laravel's
+fork concurrency driver or by `pcntl_fork()` in a job, waited for them forever when its exit
+freed the cURL handles it inherited, so the job hung until its timeout and left the child stuck.
+The cURL transport now sets `CURLOPT_QUICK_EXIT` and shares one DNS cache between its handles,
+so detached requests reuse the synchronous handle's resolution and never start a resolver
+thread of their own.
+
+**Laravel: job metrics and tag records make one bounded attempt.** They are written from every
+worker's job events and on `WorkerStopping`, and used the queue's ordinary client, whose
+retries held the worker on a slow or rate-limiting broker and could spend the shutdown grace
+before the prefetched tail was handed back. They now use one 2-second attempt.
+
+**Laravel dashboard: retry a failed job in one click.** The failed-job page has a *Retry now*
+button. It runs `queue:retry` for that job, so the broker's dead-letter entry and the
+`failed_jobs` row stay in step, and the page still shows the command for a terminal. Forgetting,
+flushing and pruning stay with Laravel's commands. An exception during the retry is reported to
+the application's log, and the page shows only its class: its message can quote the job's
+payload. The id `all` is refused, since `queue:retry all` retries every failed job.
+
+**Laravel dashboard: what each queue holds now.** The Workload page shows, for every supervised
+queue, the jobs waiting and running and how long the oldest unfinished job has waited, from one
+broker read per queue, cached for 5 seconds. `QUEEN_DASHBOARD_CONSOLE_URL` links each queue to
+the Queen console, which lists the messages themselves. An invalid value is reported to the
+application's log and turns the links off; it never stops the application or its workers.
+
+**Laravel dashboard: the Configuration page is a tuning guide.** It shows every resolved setting
+of the connection and the supervisor with its environment variable, each pool as the running
+supervisor published it, and advice from the supervisor's state and the job metrics: job classes
+whose longest run exceeds `shutdown_grace`, one worker for several queues, short jobs on
+`prefetch` 1, prefork off, a lease helper per worker, polling instead of event-driven scaling,
+and pools that could run a job twice. A setting that can hold a credential shows only whether it
+is set. Job metrics now record each class's longest run.
+
+**Laravel: a rejected broker URL no longer leaks its password.** The supervisor configuration
+printed an invalid broker URL, credentials included, into logs and error pages; it now redacts
+them.
+
+**Supervisors (both engines).** A worker that ran at least `stable_after` and exits non-zero
+(`queue:work` exits 12 at `--memory`, a job timeout kills the worker) is restarted at once: it
+no longer holds its pool at a single probe for `stable_after`. On stop, the workers get SIGTERM
+before the coordination leave and the remote status publish, which a slow broker could stretch
+past the platform's stop deadline. The PHP engine's event-driven watcher can no longer freeze
+the master loop on an answer that stalls mid-body, its fork server survives a failed
+`pcntl_fork()`, and preforked workers honour `--quiet`. The Rust engine trusts the platform's
+CA store (and `SSL_CERT_FILE`), so a broker behind a private CA works, and its lease service
+fences a worker before it logs why, so a broken stderr pipe cannot skip the fence.
+
+**Supervisors: a job timeout is not a crash.** Laravel SIGKILLs a worker whose job outlives its
+timeout, and both engines counted that exit as a crash: with job timeouts shorter than
+`stable_after`, a burst of them opened the restart circuit and left the pool at one probe worker
+for every job on its queue, the healthy ones included. The worker now leaves a marker in the state directory's `exits/` before it dies, and
+the master restarts it without backoff and without counting it. A worker that stops at `--memory`
+after it handled a job counts as a clean exit too; one that stops before any job still backs off,
+since its boot alone passes the limit. Every other non-zero exit counts as before, a `SIGKILL`
+without a marker included (the OOM killer, a lease fence, `kill -9`).
+
 ## 1.6.0 - 2026-09-11
 
 **A read-scoped credential could replay a dead letter through the proxy. It cannot now.**

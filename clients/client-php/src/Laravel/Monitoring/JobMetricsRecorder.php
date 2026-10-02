@@ -10,7 +10,10 @@ use Queen\Queen;
  * key/value store, so the dashboard shows them for every worker of every
  * host or pod, whichever engine supervises it.
  *
- *   jobs/v1/<bucket>/<worker>   {"classes": {"App\\Jobs\\Send": {"processed": 4, "failed": 1, "runtime_ms": 820}}}
+ *   jobs/v1/<bucket>/<worker>   {"classes": {"App\\Jobs\\Send": {"processed": 4, "failed": 1, "runtime_ms": 820, "max_ms": 410}}}
+ *
+ * `max_ms` is the longest single run, so the dashboard can compare a class
+ * with the supervisor's shutdown grace; a sum or an average hides the tail.
  *
  * A bucket is a five-minute window (its start, zero-padded epoch seconds, so
  * keys sort by time). A worker keeps its counts in memory and overwrites its
@@ -39,7 +42,7 @@ final class JobMetricsRecorder
 
     private ?int $bucket = null;
 
-    /** @var array<string, array{processed: int, failed: int, runtime_ms: int}> */
+    /** @var array<string, array{processed: int, failed: int, runtime_ms: int, max_ms: int}> */
     private array $classes = [];
 
     /** @var array<int, int> job object id => start in nanoseconds */
@@ -83,10 +86,12 @@ final class JobMetricsRecorder
         if (!isset($this->classes[$class]) && count($this->classes) >= self::MAX_CLASSES) {
             $class = self::OTHER_CLASS;
         }
-        $counts = $this->classes[$class] ?? ['processed' => 0, 'failed' => 0, 'runtime_ms' => 0];
+        $counts = $this->classes[$class] ?? ['processed' => 0, 'failed' => 0, 'runtime_ms' => 0, 'max_ms' => 0];
         $counts[$failed ? 'failed' : 'processed']++;
         if ($started !== null) {
-            $counts['runtime_ms'] += intdiv(hrtime(true) - $started, 1_000_000);
+            $runtime = intdiv(hrtime(true) - $started, 1_000_000);
+            $counts['runtime_ms'] += $runtime;
+            $counts['max_ms'] = max($counts['max_ms'], $runtime);
         }
         $this->classes[$class] = $counts;
         $this->dirty = true;

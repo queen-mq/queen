@@ -36,12 +36,19 @@ sourceOfTruth:
   - benchmark-queen/2026-10-01-linux-vm-horizon-raft/scripts/drain.sh
   - benchmark-queen/2026-10-01-linux-vm-horizon-raft/scripts/popfix.sh
   - benchmark-queen/2026-10-01-linux-vm-horizon-raft/scripts/extract.py
+  - benchmark-queen/2026-10-02-laravel-failure-matrix/README.md
+  - benchmark-queen/2026-10-02-laravel-failure-matrix/scripts/tables.py
+  - benchmark-queen/2026-10-02-laravel-failure-matrix/scripts/soak_memory.py
+  - benchmark-queen/laravel-supervisors/scripts/failure_matrix.py
+  - benchmark-queen/laravel-supervisors/app/app/Console/Commands/CompatCommand.php
+  - benchmark-queen/laravel-supervisors/app/app/Console/Commands/CompatMoreCommand.php
 verifiedBy:
   - benchmark-queen/laravel-supervisors/scripts/tests/test_campaign_stats.py
   - benchmark-queen/laravel-supervisors/scripts/tests/test_container_isolation.py
   - benchmark-queen/laravel-supervisors/scripts/tests/test_feature_parity_harness.py
   - benchmark-queen/laravel-supervisors/scripts/tests/test_fault_recovery_harness.py
   - benchmark-queen/laravel-supervisors/scripts/tests/test_run_options.py
+  - benchmark-queen/laravel-supervisors/scripts/tests/test_failure_matrix.py
   - clients/client-php/tests/LaravelSupervisorTest.php
   - clients/client-php/tests/LaravelSupervisorProductionTest.php
   - clients/client-php/tests/LaravelSupervisorCommandTest.php
@@ -58,6 +65,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-01 (through eaf37ad0): run.sh and the compose files gain an HTTP transport switch for the Queen lanes; the transport A/B paragraph says what it measured.
 # sourceOfTruth re-read 2026-10-01 (through 79af91ee): run.sh gains --backlog-first, off by default; every run this page reports was measured without it, so its figures and method still hold.
 # sourceOfTruth re-read 2026-10-01 (Linux server campaign): the new section reports the 2026-10-01-linux-vm-horizon-raft dataset, whose drain lanes are the ones that use --backlog-first.
+# sourceOfTruth re-read 2026-10-02 (failure matrix): the new section reports the 2026-10-02-laravel-failure-matrix dataset, read from its tables.py output; compose.yml and compose.raft.yml gained BENCH_APP_IMAGE, which changes no measurement.
+# sourceOfTruth re-read 2026-10-02 (soak): the soak paragraph, its table and the laravel-soak-memory figure come from raw/soak, soak-memory.csv and tables.md of the failure-matrix dataset.
+# sourceOfTruth re-read 2026-10-02 (through c916fe67): soak_memory.py only writes its CSVs with LF line ends; the figure and the soak table are unchanged.
+# sourceOfTruth re-read 2026-10-02 (release-candidate soak): the second soak table comes from raw/soak-pr-* of the failure-matrix dataset; the README now records the 2.5-hour run that has no verdict and the 1 GiB the matrix tools run with.
 ---
 
 This qualification asks whether Queen can replace the **process control plane** of Laravel
@@ -503,6 +514,170 @@ job.
 The limits stay: one virtual machine and its disk, one Raft node, and a protocol written by the Queen
 team. A Raft cluster and other hosts must repeat it before it becomes a release performance claim.
 
+## Failures, replicas, a soak and Laravel features, 2026-10-02
+
+The same Laravel application ran on Horizon, the Queen PHP supervisor and the Queen Rust supervisor
+through the failures that a production deployment meets, then through ordinary Laravel queue
+features. Each job writes its attempts to a log on the lane's volume, so every check reads what the
+jobs did, not what an engine reports. Scripts, every lane's result and the tables are in
+`benchmark-queen/2026-10-02-laravel-failure-matrix/`.
+
+- The Linux server of 2026-10-01. The application had 4 CPUs and 1 GiB, the broker and Redis 2 CPUs
+  and 2 GiB each, every lane on a fresh backend.
+- Horizon on Redis 7.4 with `appendfsync always`. Queen on one Raft node, server `2.0.0-beta.3`,
+  with the PHP client and supervisors of this release.
+- Queen with its production-like settings: prefetch 1, synchronous ACKs, lease renewal, prefork
+  workers. A fourth column runs the Rust engine with prefetch 4, `ack_async` and `pop_ahead`.
+- Every lane: 2 workers unless it says otherwise, a pool `timeout` of 20 s, `retry_after` 30 s and
+  `shutdown_grace` 35 s.
+
+### Failures
+
+A lane passes when every job ended as its kind says, completed once, or failed once into
+`failed_jobs` (and the dead-letter queue on Queen), and no two attempts of one job overlapped.
+
+| What happens | Expected | Horizon | Queen PHP | Queen Rust | Queen Rust, prefetch 4 |
+| --- | --- | --- | --- | --- | --- |
+| A job throws on every attempt (`tries` 3, `backoff` 2) | 3 attempts at least 2 s apart, then one failed-job row | Pass | Pass | Pass | Pass |
+| A job throws on its first attempt only | It completes on its second attempt, once | Pass | Pass | Pass | Pass |
+| `release()` once, or `fail()` | A released job completes on its second attempt; `fail()` is final | Pass | Pass | Pass | Pass |
+| A 15 s job with `timeout` 3 (`tries` 2) | The worker is killed and replaced at each attempt; one failed-job row | Pass | Pass | Pass | Pass |
+| A job takes the worker over `--memory` (110 of 96 MiB) | The job completes once, then the worker is replaced | Pass | Pass | Pass | Pass |
+| A job exceeds PHP's `memory_limit` (256 of 128 MiB, `tries` 2) | The worker dies at each attempt; one failed-job row | Pass | Pass | Pass | 1 of 2 jobs failed without running |
+| SIGKILL on a worker during a 4 s job | The killed job runs again; all 8 complete once | Pass | Pass | Pass | Pass |
+| SIGKILL on the master during 4 s jobs, then a restart | All 8 jobs complete once | Pass | Pass | Pass | Pass |
+| A deploy (SIGTERM) during 10 s jobs | The jobs finish during the grace and do not run again | Pass | Pass | Pass | Pass |
+| A deploy (SIGTERM) during 60 s jobs, longer than the grace | The killed jobs run again; each completes once | Pass | Pass | Pass | Pass |
+| One worker runs two 60 s jobs of one prefetched batch; a deploy kills it in the second | The first job, done before the deploy, does not run again | Pass | Pass | Pass | Pass |
+| The backend restarts while 300 jobs of 100 ms run | All 300 complete once | 2 of 300 jobs ran twice | Pass | Pass | Pass |
+| The backend freezes for 5 s during 10 s jobs | Nothing runs twice | Pass | Pass | Pass | Pass |
+| The backend freezes for 45 s, longer than the 30 s lease | All complete; a job may run twice (at-least-once) | Pass | Pass | Pass | Pass |
+| `dispatch()` while the backend is stopped | `dispatch()` throws, and works again once the backend is back | Pass | Pass | Pass | Pass |
+
+### What the failure lanes found
+
+**Three defects in the Queen PHP client and supervisors, fixed in this release.** With prefetch
+above 1, a graceful stop handed the unstarted jobs of a batch back with a retry ACK, which the
+broker counts as a delivery, so jobs reached `failed_jobs` before running `tries` times. With
+`ack_async`, the ACK of a finished job could stay unwritten until the next job ended, so a worker
+killed during that job ran the finished job again. And both supervisors counted a worker that
+Laravel killed after a job timeout as a crash: after five of them, the crash circuit cut the pool
+to one worker for 30 s. The table above is the run with the fixes; the first run, with the client
+of 2026-10-01, found these:
+
+| Lane, Rust engine with prefetch 4 | Before the fixes | After |
+| --- | --- | --- |
+| `job-timeout` | 3 of 4 jobs reached `failed_jobs` after one run | Pass |
+| `memory-limit` | 1 of 6 jobs failed instead of completing | Pass |
+| `stop-long` | 1 of 2 jobs completed twice | Pass |
+| `stop-long-batch` | The job done before the deploy ran again | Pass |
+| `memory-fatal` | Both jobs failed after one run | 1 of 2 jobs failed without running: the limit below |
+
+With the supervisor fix, the four jobs of `job-timeout` reached `failed_jobs` after 44 s on both Queen
+engines, against 126 to 147 s before, while the crash circuit held the pool back. An audit of the
+PHP client and both supervisors during the same night fixed ten more defects, each with a test that
+failed before its fix; the changelog lists them.
+
+- **The prefetched-batch lane is the proof of the ACK fix.** One worker runs two 60 s jobs of one
+  prefetched batch, and a deploy kills it during the second. With the client before the fix, the
+  first job, finished before the deploy, ran again; with the fix it ran once, on all three Queen
+  profiles.
+- **A crash still charges an attempt to a prefetched job.** When a worker dies without a shutdown
+  (SIGKILL, a PHP fatal error, a lost node), the unstarted jobs of its batch return when the lease
+  expires, and each counts one delivery. In `memory-fatal` with prefetch 4 and `tries` 2, a job that
+  never ran reached `failed_jobs` because the job before it crashed the worker twice. With prefetch
+  above 1, keep prefetch 1 on queues whose jobs can crash a worker, or give their jobs more `tries`.
+- **Horizon ran 2 of 300 jobs twice after a Redis restart.** They finished while Redis restarted.
+  The worker could not remove them from Redis's reserved set, so their reservation expired after
+  `retry_after`, and they ran again 30 s later. Both stacks deliver at least once. The Queen client
+  retries a failed request three times, 1 s and then 2 s apart, so the ACKs sent during the broker's
+  restart went through when it came back.
+
+### Replicas and the soak
+
+| What happens | Expected | Horizon | Queen PHP | Queen Rust | Queen Rust, prefetch 4 |
+| --- | --- | --- | --- | --- | --- |
+| Two masters on one queue; SIGKILL on one, as a node loss would | All 40 jobs complete once | Pass | Pass | Pass | Pass |
+| A rolling restart of two masters while 60 jobs run | All 60 complete once | Pass | Pass | Pass | Pass |
+
+The soak dispatched jobs at 5 per second for 45 minutes on 8 workers: 85% short jobs, 5% jobs of
+5 to 20 s, 5% that fail once and succeed on retry, 3% that always fail (`tries` 2) and 2% delayed by
+10 to 60 s. A worker was killed every 10 minutes, and a deploy restarted the application halfway.
+
+|  | Horizon | Queen PHP | Queen Rust |
+| --- | --- | --- | --- |
+| Jobs dispatched | 13,501 | 13,501 | 13,501 |
+| Jobs that ended as their kind says | All | All | All |
+| Rows in `failed_jobs`, one per permanent failure | 398 | 398 | 398 |
+| Dead-letter entries | – | 398 | 398 |
+| Master memory, first third → last third | 48.9 → 48.9 MiB | 58.3 → 57.8 MiB | 6.9 → 6.9 MiB |
+| Median worker memory, first third → last third | 50.7 → 54.7 MiB | 40.9 → 47.0 MiB | 40.5 → 45.0 MiB |
+
+<Chart
+  src="laravel-soak-memory"
+  alt="Two line panels over 45 minutes of the soak. The master's resident memory stays flat: Queen PHP about 58 MiB, Horizon about 49 MiB, Queen Rust about 7 MiB. The median worker grows slowly on every engine, from about 48 to 57 MiB on Horizon and from about 39 to 47 MiB on both Queen engines, and drops at the deploy after 23 minutes."
+  caption="Resident memory of the master and of the median worker, sampled every minute during the 45-minute soak. Dotted lines: a worker killed; dashed line: the deploy."
+  source="benchmark-queen/2026-10-02-laravel-failure-matrix/raw/soak-memory.csv"
+/>
+
+The soak ran again on the code of this release, the four profiles at once, the Rust engine with
+prefetch 4, `ack_async` and `pop_ahead` included:
+
+|  | Horizon | Queen PHP | Queen Rust | Queen Rust, prefetch 4 |
+| --- | --- | --- | --- | --- |
+| Jobs dispatched | 13,501 | 13,501 | 13,501 | 13,501 |
+| Jobs that ended as their kind says | All | All | All | All |
+| Rows in `failed_jobs`, one per permanent failure | 398 | 398 | 398 | 398 |
+| Dead-letter entries | – | 398 | 398 | 398 |
+| Master memory, first third → last third | 49.1 → 49.1 MiB | 58.5 → 58.4 MiB | 7.0 → 7.0 MiB | 7.0 → 7.0 MiB |
+| Median worker memory, first third → last third | 51.0 → 56.6 MiB | 40.5 → 44.9 MiB | 40.4 → 43.0 MiB | 41.1 → 45.0 MiB |
+
+### Laravel queue features
+
+Each scenario dispatches ordinary Laravel jobs, listeners, notifications or batches, and checks the
+behaviour that the Laravel documentation states. Horizon is the reference: a check that failed on
+Horizon was a mistake in the test, and was fixed.
+
+| Laravel feature | Horizon | Queen PHP | Queen Rust | Queen Rust, prefetch 4 |
+| --- | --- | --- | --- | --- |
+| `delay()` | Pass | Pass | Pass | Pass |
+| `Bus::chain()` | Pass | Pass | Pass | Pass |
+| a failing chain runs its `catch()` | Pass | Pass | Pass | Pass |
+| `Bus::batch()` with `then()`, `catch()` and `finally()` | Pass | Pass | Pass | Pass |
+| a batch with a failing job | Pass | Pass | Pass | Pass |
+| `ShouldBeUnique` | Pass | Pass | Pass | Pass |
+| `WithoutOverlapping` | Pass | Pass | Pass | Pass |
+| `RateLimited` | Pass | Pass | Pass | Pass |
+| `backoff` as an array | Pass | Pass | Pass | Pass |
+| `retryUntil()` | Pass | Pass | Pass | Pass |
+| `maxExceptions` | Pass | Pass | Pass | Pass |
+| `failOnTimeout` | Pass | Pass | Pass | Pass |
+| `ShouldBeEncrypted` | Pass | Pass | Pass | Pass |
+| `afterCommit()` | Pass | Pass | Pass | Pass |
+| `Queue::before()`, `after()` and `failing()` | Pass | Pass | Pass | Pass |
+| `queue:retry`, `queue:forget` and `queue:flush` | Pass | Pass | Pass | Pass |
+| `Queue::size()` | Pass | Pass | Pass | Pass |
+| a queued event listener | Pass | Pass | Pass | Pass |
+| a queued notification | Pass | Pass | Pass | Pass |
+| a queued closure with `catch()` | Pass | Pass | Pass | Pass |
+| `ThrottlesExceptions` | Pass | Pass | Pass | Pass |
+| `Skip` | Pass | Pass | Pass | Pass |
+| `ShouldBeUniqueUntilProcessing` | Pass | Pass | Pass | Pass |
+| `$deleteWhenMissingModels` | Pass | Pass | Pass | Pass |
+| `allowFailures()` | Pass | Pass | Pass | Pass |
+| `$batch->cancel()` | Pass | Pass | Pass | Pass |
+| `queue:retry-batch` | Pass | Pass | Pass | Pass |
+| `delay()` with a `DateTimeInterface` | Pass | Pass | Pass | Pass |
+| `release()` with a delay | Pass | Pass | Pass | Pass |
+| `queue:monitor` | Pass | Pass | Pass | Pass |
+| `queue:prune-failed` | Pass | Pass | Pass | Pass |
+| a job that calls `pcntl_fork()` | Pass | Pass | Pass | Pass |
+
+Laravel's Redis queue stores a due time in whole seconds, so a Horizon retry can start up to a
+second early or late: for `backoff` `[1, 3]`, Horizon's retries came 1.81 and 4.03 s after the
+failure, Queen's 1.02 to 1.04 and 3.05 s. `queue:clear` is not supported on Queen: the command fails, and
+the jobs still run.
+
 ## What remains before GA
 
 The current evidence supports a Unix release candidate within the tested single-master scope. A
@@ -514,11 +689,13 @@ general-availability claim still requires:
    Desktop host and one dedicated Linux virtual machine, repeated on more hosts and a Raft cluster;
 4. the 1, 2, 4 and 8 worker matrix, three queues, and the declared partition and pop-fusion cells;
 5. a 24-hour Laravel soak for each engine with a durable ledger and memory-slope analysis;
-6. repeated supervisor, broker, PostgreSQL, network, packet-loss, latency and full-storage faults;
+6. the failure lanes of 2026-10-02, run above on one Raft node, repeated on PostgreSQL storage and
+   a Raft cluster, with network, packet-loss, latency and full-storage faults;
 7. native installer, process-tree and provenance verification for every release target;
 8. macOS Developer ID signing and notarization before general macOS availability;
 9. a native Windows process backend and Windows end-to-end tests before any Windows asset;
-10. either web actions for the failed-job lifecycle or an explicit revision of that dashboard gate.
+10. web actions to forget, flush and prune failed jobs, or an explicit revision of that dashboard
+    gate; retry already has one, on the failed-job detail page.
 
 The historical Queen broker result near one million accepted pushes per second used Go loaders,
 200 partitions and 600 consumers on dedicated infrastructure. It did not execute Laravel jobs or

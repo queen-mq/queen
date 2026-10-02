@@ -15,7 +15,8 @@ namespace Queen\Tests\Support;
  * - `/slow`: 200 after two seconds;
  * - `/empty`: 204;
  * - `/gzip`: a gzip-encoded JSON answer, whatever the request asked;
- * - `/malformed`: 200 with a truncated JSON body.
+ * - `/malformed`: 200 with a truncated JSON body;
+ * - `/received`: the requests received so far, as "METHOD target", in order.
  */
 final class KeepAliveServer
 {
@@ -27,7 +28,8 @@ $buffers = [];
 $peers = [];
 $connections = 0;
 $flaky = 0;
-$answer = static function (string $method, string $target, array $headers, string $body, int $connection, string $peer) use (&$flaky): string {
+$received = [];
+$answer = static function (string $method, string $target, array $headers, string $body, int $connection, string $peer) use (&$flaky, &$received): string {
     $path = (string) parse_url($target, PHP_URL_PATH);
     $status = 200;
     $extra = '';
@@ -55,6 +57,8 @@ $answer = static function (string $method, string $target, array $headers, strin
         $payload = gzencode(json_encode(['compressed' => true]));
     } elseif ($path === '/malformed') {
         $payload = '{"messages": [';
+    } elseif ($path === '/received') {
+        $payload = json_encode($received);
     }
 
     return "HTTP/1.1 {$status} X\r\n{$extra}Content-Type: application/json\r\nContent-Length: "
@@ -98,6 +102,9 @@ while (true) {
             }
             $body = (string) substr($buffers[$id], $end + 4, $length);
             $buffers[$id] = (string) substr($buffers[$id], $end + 4 + $length);
+            if ($target !== '/received') {
+                $received[] = "{$method} {$target}";
+            }
             fwrite($stream, $answer($method, $target, $headers, $body, $id, $peers[$id]));
         }
     }

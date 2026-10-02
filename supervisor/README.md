@@ -116,6 +116,11 @@ another configured endpoint. Both poll queues in waves of at most 16 concurrent
 requests. Multiple endpoints do not make the supervisor active-active: the
 single-master rule below still applies.
 
+Over HTTPS the Rust engine trusts what curl, and so the PHP workers, trust:
+the platform's certificate store, or `SSL_CERT_FILE` and `SSL_CERT_DIR` when
+set, besides its bundled Mozilla roots. A broker behind a private CA needs no
+other setting.
+
 ## Local control
 
 The engine holding `state_directory/supervisor.lock` publishes status and reads

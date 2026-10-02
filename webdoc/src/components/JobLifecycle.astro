@@ -1,0 +1,262 @@
+---
+/**
+ * The life of one Laravel job: where it is held between `dispatch()` and the
+ * end of its last attempt, on Queen or on Horizon.
+ *
+ * Both engines are drawn on one geometry, so a reader who puts the two side by
+ * side compares the same box with the same box: the states are Laravel's and
+ * do not change, only what holds the job in each one does. Every label below
+ * is what the code does:
+ *
+ * - Queen (clients/client-php/src/Laravel/Queue): a push lands in one of the
+ *   `partitions` stripes (`laravel-0000`…), a pop leases it for `retry_after`
+ *   seconds, `QueenJob::release()` acknowledges the delivery and, in the same
+ *   transaction, schedules a broker timer for the delay or pushes the job back
+ *   at once when there is none, and a failure is acknowledged to the
+ *   dead-letter queue while Laravel writes `failed_jobs`; SyncedFailedJobProvider
+ *   keeps the two in step and `queue:retry` removes both as it pushes the job
+ *   back. A worker that dies leaves its lease to expire, and the job is
+ *   delivered again.
+ * - Horizon (Laravel's RedisQueue and its Lua scripts): RPUSH onto
+ *   `queues:<name>`, LPOP plus ZADD into `:reserved` scored now + retry_after,
+ *   ZREM on delete, ZADD into `:delayed` on release, and every pop first moves
+ *   the due entries of `:delayed` and `:reserved` back onto the list. Horizon
+ *   also records the failure in Redis for its dashboard.
+ */
+import Schematic from "./Schematic.astro";
+import { TOKEN, arrow } from "../lib/schematic";
+import { jobLifecycle } from "../lib/schematic-models";
+
+type Segment = string | { code: string };
+type Line = Segment[];
+
+interface Outcome {
+  /** What sends the job here, as Laravel names it. */
+  when: string;
+  title: string;
+  /** What the engine does, one line per entry. */
+  detail: Line[];
+  /** The way back to Ready, for the outcomes that have one. */
+  back?: Line;
+}
+
+interface Labels {
+  tag: string;
+  push: string;
+  ready: Line;
+  pop: Line;
+  popNote: Line;
+  crash: Line[];
+  running: Line;
+  delayed: Outcome;
+  done: Outcome;
+  failed: Outcome;
+}
+
+interface Props {
+  /** Which engine holds the job. Default `queen`. */
+  engine?: "queen" | "horizon";
+  /** Overrides the generated description. */
+  alt?: string;
+  /** One line under the figure. */
+  caption?: string;
+}
+
+const { caption } = Astro.props;
+const { engine, alt: defaultAlt } = jobLifecycle(Astro.props);
+
+const LABELS: Record<"queen" | "horizon", Labels> = {
+  queen: {
+    tag: "Queen",
+    push: "push",
+    ready: ["partition ", { code: "laravel-0042" }],
+    pop: ["pop"],
+    popNote: ["lease of ", { code: "retry_after" }],
+    crash: [["the lease expires,"], ["delivered again"]],
+    running: ["held under the worker's lease"],
+    delayed: {
+      when: "throws, tries left, or release()",
+      title: "Released",
+      detail: [["ack + broker timer;"], ["no delay: pushed at once"]],
+      back: ["pushed back after the delay"],
+    },
+    done: { when: "returns", title: "Done", detail: [["ack ", { code: "completed" }]] },
+    failed: {
+      when: "fails after its tries",
+      title: "Failed",
+      detail: [["Queen dead letter and"], [{ code: "failed_jobs" }, " row, kept in sync"]],
+      back: [{ code: "queue:retry" }, " pushes it back"],
+    },
+  },
+  horizon: {
+    tag: "Horizon",
+    push: "RPUSH",
+    ready: ["list ", { code: "queues:default" }],
+    pop: ["LPOP"],
+    popNote: ["ZADD ", { code: ":reserved" }, ", now + ", { code: "retry_after" }],
+    crash: [[{ code: "retry_after" }, " passes,"], ["a pop moves it back"]],
+    running: ["held in ", { code: ":reserved" }],
+    delayed: {
+      when: "throws, tries left, or release()",
+      title: "Released",
+      detail: [["ZADD ", { code: ":delayed" }, ","], ["scored now + delay"]],
+      back: ["a pop moves it back when due"],
+    },
+    done: { when: "returns", title: "Done", detail: [["ZREM ", { code: ":reserved" }]] },
+    failed: {
+      when: "fails after its tries",
+      title: "Failed",
+      detail: [[{ code: "failed_jobs" }, " row, and a copy"], ["in Horizon's Redis"]],
+      back: [{ code: "queue:retry" }, " pushes it back"],
+    },
+  },
+};
+
+const L = LABELS[engine];
+const alt = Astro.props.alt ?? defaultAlt;
+
+// The centre column carries the path every job takes; the outcomes that
+// return a job to Ready loop back along the outer margins.
+const W = 680;
+const CX = 340;
+const dispatch = { x: CX - 55, y: 10, w: 110, h: 30 };
+const ready = { x: 215, y: 70, w: 250, h: 70 };
+const running = { x: 240, y: 210, w: 200, h: 52 };
+const OUT_Y = 312;
+const OUT_H = 86;
+const outcomes = [
+  { key: "delayed", box: { x: 22, w: 196 }, tone: TOKEN.warning, bg: TOKEN.warningBg, ...L.delayed },
+  { key: "done", box: { x: 252, w: 176 }, tone: TOKEN.success, bg: TOKEN.successBg, ...L.done },
+  { key: "failed", box: { x: 462, w: 196 }, tone: TOKEN.danger, bg: TOKEN.dangerBg, ...L.failed },
+];
+const H = OUT_Y + OUT_H + 10;
+
+const CELL_W = 30;
+const CELL_GAP = 4;
+const CELLS = 6;
+const JOB_CELL = 3;
+const cellsLeft = CX - (CELLS * CELL_W + (CELLS - 1) * CELL_GAP) / 2;
+const cellY = ready.y + 34;
+
+const readyBottom = ready.y + ready.h;
+const runningBottom = running.y + running.h;
+const popX = CX - 22;
+const crashX = CX + 22;
+const BRANCH_Y = runningBottom + 25;
+const RETURN_Y = ready.y + 36;
+const LEFT_RAIL = 10;
+const RIGHT_RAIL = W - 10;
+const outMid = OUT_Y + OUT_H / 2;
+
+const flow = {
+  push: arrow([[CX, dispatch.y + dispatch.h], [CX, ready.y]]),
+  pop: arrow([[popX, readyBottom], [popX, running.y]]),
+  crash: arrow([[crashX, running.y], [crashX, readyBottom]]),
+};
+const branches = [
+  arrow([[CX - 40, runningBottom], [CX - 40, BRANCH_Y], [outcomes[0].box.x + outcomes[0].box.w / 2, BRANCH_Y], [outcomes[0].box.x + outcomes[0].box.w / 2, OUT_Y]]),
+  arrow([[CX, runningBottom], [CX, OUT_Y]]),
+  arrow([[CX + 40, runningBottom], [CX + 40, BRANCH_Y], [outcomes[2].box.x + outcomes[2].box.w / 2, BRANCH_Y], [outcomes[2].box.x + outcomes[2].box.w / 2, OUT_Y]]),
+];
+const returns = {
+  delayed: arrow([[outcomes[0].box.x, outMid], [LEFT_RAIL, outMid], [LEFT_RAIL, RETURN_Y], [ready.x, RETURN_Y]]),
+  failed: arrow([[outcomes[2].box.x + outcomes[2].box.w, outMid], [RIGHT_RAIL, outMid], [RIGHT_RAIL, RETURN_Y], [ready.x + ready.w, RETURN_Y]]),
+};
+---
+
+<Schematic width={W} height={H} alt={alt} caption={caption}>
+  {/* Which engine this is, for figures shown side by side. */}
+  <rect x="10" y="10" width={L.tag.length * 7.4 + 18} height="22" rx="11" fill={TOKEN.surface} stroke={TOKEN.border} />
+  <text x={10 + (L.tag.length * 7.4 + 18) / 2} y="25" text-anchor="middle" class="s-label" fill={TOKEN.fg}>{L.tag}</text>
+
+  <rect x={dispatch.x} y={dispatch.y} width={dispatch.w} height={dispatch.h} rx="6" fill={TOKEN.card} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+  <text x={CX} y={dispatch.y + 19.5} text-anchor="middle" class="s-code" fill={TOKEN.fg}>dispatch()</text>
+  <path d={flow.push.line} fill="none" stroke={TOKEN.muted} stroke-width="1.5" />
+  <path d={flow.push.head} fill={TOKEN.muted} />
+  <text x={CX + 8} y={ready.y - 11} class="s-note" fill={TOKEN.muted}>{L.push}</text>
+
+  <rect x={ready.x} y={ready.y} width={ready.w} height={ready.h} rx="8" fill={TOKEN.card} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+  <text x={ready.x + 12} y={ready.y + 21} class="s-title" fill={TOKEN.fg}>
+    Ready
+    <tspan class="s-note" fill={TOKEN.muted} dx="6">
+      {L.ready.map((s) => (typeof s === "string" ? s : <tspan class="s-code">{s.code}</tspan>))}
+    </tspan>
+  </text>
+  {
+    Array.from({ length: CELLS }, (_, i) => {
+      const x = cellsLeft + i * (CELL_W + CELL_GAP);
+      const isJob = i === JOB_CELL;
+      return (
+        <g>
+          <rect x={x} y={cellY} width={CELL_W} height="24" rx="3" fill={isJob ? TOKEN.infoBg : TOKEN.surface} stroke={isJob ? TOKEN.info : TOKEN.border} stroke-width="1.5" />
+          {isJob && <text x={x + CELL_W / 2} y={cellY + 16} text-anchor="middle" class="s-small" fill={TOKEN.info}>job</text>}
+        </g>
+      );
+    })
+  }
+
+  <path d={flow.pop.line} fill="none" stroke={TOKEN.muted} stroke-width="1.5" />
+  <path d={flow.pop.head} fill={TOKEN.muted} />
+  <text x={popX - 10} y={readyBottom + 30} text-anchor="end" class="s-label" fill={TOKEN.fg}>
+    {L.pop.map((s) => (typeof s === "string" ? s : <tspan class="s-code">{s.code}</tspan>))}
+  </text>
+  <text x={popX - 10} y={readyBottom + 46} text-anchor="end" class="s-note" fill={TOKEN.muted}>
+    {L.popNote.map((s) => (typeof s === "string" ? s : <tspan class="s-code">{s.code}</tspan>))}
+  </text>
+
+  <path d={flow.crash.line} fill="none" stroke={TOKEN.danger} stroke-width="1.5" stroke-dasharray="5 4" />
+  <path d={flow.crash.head} fill={TOKEN.danger} />
+  <text x={crashX + 10} y={readyBottom + 24} class="s-label" fill={TOKEN.danger}>worker dies:</text>
+  {
+    L.crash.map((line, i) => (
+      <text x={crashX + 10} y={readyBottom + 40 + i * 15} class="s-note" fill={TOKEN.muted}>
+        {line.map((s) => (typeof s === "string" ? s : <tspan class="s-code">{s.code}</tspan>))}
+      </text>
+    ))
+  }
+
+  <rect x={running.x} y={running.y} width={running.w} height={running.h} rx="8" fill={TOKEN.infoBg} stroke={TOKEN.info} stroke-width="1.5" />
+  <text x={running.x + 12} y={running.y + 21} class="s-title" fill={TOKEN.fg}>
+    Running
+    <tspan class="s-code" fill={TOKEN.info} dx="6">handle()</tspan>
+  </text>
+  <text x={running.x + 12} y={running.y + 40} class="s-note" fill={TOKEN.muted}>
+    {L.running.map((s) => (typeof s === "string" ? s : <tspan class="s-code">{s.code}</tspan>))}
+  </text>
+
+  {
+    branches.map((branch, i) => (
+      <g>
+        <path d={branch.line} fill="none" stroke={outcomes[i].tone} stroke-width="1.5" />
+        <path d={branch.head} fill={outcomes[i].tone} />
+      </g>
+    ))
+  }
+
+  {
+    outcomes.map((o) => (
+      <g>
+        <rect x={o.box.x} y={OUT_Y} width={o.box.w} height={OUT_H} rx="8" fill={o.bg} stroke={o.tone} stroke-width="1.5" />
+        <text x={o.box.x + 12} y={OUT_Y + 19} class="s-note" fill={TOKEN.muted}>{o.when}</text>
+        <text x={o.box.x + 12} y={OUT_Y + 39} class="s-title" fill={o.tone}>{o.title}</text>
+        {o.detail.map((line, i) => (
+          <text x={o.box.x + 12} y={OUT_Y + 58 + i * 15} class="s-note" fill={TOKEN.fg}>
+            {line.map((s) => (typeof s === "string" ? s : <tspan class="s-code">{s.code}</tspan>))}
+          </text>
+        ))}
+      </g>
+    ))
+  }
+
+  <path d={returns.delayed.line} fill="none" stroke={TOKEN.warning} stroke-width="1.5" />
+  <path d={returns.delayed.head} fill={TOKEN.warning} />
+  <text x={LEFT_RAIL + 8} y={RETURN_Y - 7} class="s-note" fill={TOKEN.fg}>
+    {L.delayed.back!.map((s) => (typeof s === "string" ? s : <tspan class="s-code">{s.code}</tspan>))}
+  </text>
+
+  <path d={returns.failed.line} fill="none" stroke={TOKEN.danger} stroke-width="1.5" />
+  <path d={returns.failed.head} fill={TOKEN.danger} />
+  <text x={RIGHT_RAIL - 8} y={RETURN_Y - 7} text-anchor="end" class="s-note" fill={TOKEN.fg}>
+    {L.failed.back!.map((s) => (typeof s === "string" ? s : <tspan class="s-code">{s.code}</tspan>))}
+  </text>
+</Schematic>

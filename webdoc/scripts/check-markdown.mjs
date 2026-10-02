@@ -95,6 +95,14 @@ const HANDLED = new Map([
   ["Chart", "src/lib/markdown-partials.ts (componentMap: alt text, caption, source)"],
   ["Screenshot", "src/lib/markdown-partials.ts (componentMap: alt text, caption)"],
   ["Partition", "src/lib/markdown-partials.ts (componentMap: alt text, caption)"],
+  // The schematics: a description computed from the same model the figure
+  // draws from (src/lib/schematic-models.ts), the caption, and any source.
+  ["JobLifecycle", "src/lib/markdown-partials.ts (componentMap: computed description, caption)"],
+  ["LeaseTimeline", "src/lib/markdown-partials.ts (componentMap: computed description, caption)"],
+  ["RollingUpdate", "src/lib/markdown-partials.ts (componentMap: computed description, caption)"],
+  ["WorkerTimeline", "src/lib/markdown-partials.ts (componentMap: computed description, caption)"],
+  ["SupervisorTopology", "src/lib/markdown-partials.ts (componentMap: computed description, caption)"],
+  ["PreforkMemory", "src/lib/markdown-partials.ts (componentMap: computed description, caption, source)"],
   ["PackageManagers", "nimbus-docs downleveler (rendered as a sh block)"],
   ["LinkCard", "nimbus-docs downleveler (rendered as a link list item)"],
 ]);
