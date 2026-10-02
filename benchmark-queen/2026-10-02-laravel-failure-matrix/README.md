@@ -49,7 +49,7 @@ engines. The protocol is the Queen team's; the results are diagnostic.
 | `soak-pr-<profile>` | the 45-minute soak again, on the four profiles at once: PR #69's head, the release candidate | `eb9703b5` (image built at `fe2e8941`; only the harness changed) |
 | `local-soak-prefetch` | a 15-minute soak of the prefetch-4 profile on Docker Desktop, with every client fix | `cfd04eed` |
 | `local-compat-prefix` | the 32 Laravel features on Docker Desktop, before the client fixes | harness `bbb8ed7e`, the client of 2026-10-01 |
-| `local-hand-back` | `job-timeout`, `memory-limit`, `memory-fatal`, `worker-kill` and `stop-long-batch` on the two Rust and two PHP profiles, on Docker Desktop, with the crash hand-back: the master's lease service, or the worker's PHP lease helper, sends the transaction a crashed worker journaled. `queen-php-fast` is the PHP engine with prefetch 4, `ack_async` and `pop_ahead` | branch `feat/crash-safe-prefetch-attempts`; the image was built before the last wording change of the dashboard's advice |
+| `local-hand-back` | `job-timeout`, `memory-limit`, `memory-fatal`, `worker-kill` and `stop-long-batch` on the two Rust and two PHP profiles, on Docker Desktop, with the crash hand-back: the master's lease service, or the worker's PHP lease helper, sends the transaction a crashed worker journaled. `queen-php-fast` is the PHP engine with prefetch 4, `ack_async` and `pop_ahead` | `b18871cd`, `52e8e219` and `68d48cb4` (the harness); the image was built before the final wording of the dashboard's advice and of one docblock |
 
 The first runs (`failure-matrix`, `failure-matrix-php`, `replicas`, `compat`, `batch-prefix`) found
 the defects that the later runs show fixed. The tables report the last run of each lane.
