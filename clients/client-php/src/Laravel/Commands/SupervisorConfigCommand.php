@@ -3,6 +3,7 @@
 namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
+use Queen\Laravel\Dashboard\TuningAdvisor;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
 
 class SupervisorConfigCommand extends Command
@@ -31,6 +32,15 @@ class SupervisorConfigCommand extends Command
             $resolved = $this->redact($resolved);
         }
         $resolved = $this->normalizeJsonMaps($resolved);
+        // Standard error: the Rust engine reads the document from standard
+        // output, and logs this.
+        foreach (TuningAdvisor::startupWarnings([
+            'queen' => $this->laravel['config']->get('queen', []),
+            'queue' => ['connections' => $this->laravel['config']->get('queue.connections', [])],
+            'env' => [],
+        ]) as $warning) {
+            $this->output->getErrorStyle()->writeln("Queen warning: {$warning}");
+        }
 
         $flags = JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR;
         if ($this->option('pretty')) {

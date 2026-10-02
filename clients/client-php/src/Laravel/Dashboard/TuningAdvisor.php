@@ -51,6 +51,7 @@ final class TuningAdvisor
             ...$this->leaseHelpers($settings),
             ...$this->pollingBursts($settings, $snapshot, $published),
             ...$this->runTwice($settings),
+            ...$this->oneTryWithPrefetch($settings, $published),
             ...$this->sharedQueues($snapshot),
             ...$this->failedJobs($snapshot),
         ];
@@ -58,6 +59,23 @@ final class TuningAdvisor
         usort($advice, static fn (array $a, array $b): int => self::SEVERITIES[$a['severity']] <=> self::SEVERITIES[$b['severity']]);
 
         return $advice;
+    }
+
+    /**
+     * The advice a supervisor prints when it starts, from this application's
+     * configuration alone, for whoever does not open the dashboard.
+     *
+     * @param array<string, mixed> $config as ApplicationSettings takes it
+     * @return list<string>
+     */
+    public static function startupWarnings(array $config): array
+    {
+        $settings = new ApplicationSettings($config);
+
+        return array_map(
+            static fn (array $item): string => "{$item['title']}. {$item['evidence']} {$item['action']}",
+            (new self())->oneTryWithPrefetch($settings, []),
+        );
     }
 
     /**
@@ -173,8 +191,9 @@ final class TuningAdvisor
         if ($settings->connectionSwitch('lease_renewal', false) !== true) {
             $action .= ' Prefetch above 1 and pop_ahead need QUEEN_LEASE_RENEWAL=true.';
         }
-        // A crash fails each prefetched job that has no try left.
-        $action .= ' Keep tries at 2 or more: a worker that crashes charges one attempt to each job it had prefetched.';
+        // A crash nobody hands back fails each prefetched job that has no try left.
+        $action .= ' Keep tries at 2 or more: after a crash that is not handed back, such as a lost node, each job'
+            . ' a worker had prefetched comes back with one attempt more.';
         $pools = $published !== [] ? $published : $settings->pools();
         $oneTry = array_values(array_column(
             array_filter($pools, static fn (array $pool): bool => ($pool['tries'] ?? null) === 1),
@@ -190,6 +209,46 @@ final class TuningAdvisor
             $action,
             '/use/laravel#asynchronous-acknowledgements',
         )];
+    }
+
+    /**
+     * With tries 1, an attempt charged to a held job that never ran fails it.
+     *
+     * @param list<array<string, mixed>> $published
+     * @return list<array<string, mixed>>
+     */
+    private function oneTryWithPrefetch(ApplicationSettings $settings, array $published): array
+    {
+        $advice = [];
+        $pools = $published !== [] ? $published : $settings->pools();
+        foreach ($pools as $pool) {
+            $connection = $pool['connection'] ?? null;
+            if (($pool['tries'] ?? null) !== 1 || !is_string($connection)) {
+                continue;
+            }
+            $prefetch = $settings->connectionInteger('prefetch', 1, $connection);
+            $popAhead = $settings->connectionSwitch('pop_ahead', false, $connection) === true;
+            $held = array_filter([
+                $prefetch !== null && $prefetch > 1 ? "prefetches {$prefetch} jobs" : null,
+                $popAhead ? 'pops the next batch ahead' : null,
+            ]);
+            if ($held === []) {
+                continue;
+            }
+            $advice[] = self::item(
+                'warning',
+                "Pool {$pool['name']} can fail a job that never ran",
+                "It has tries 1, and its connection {$connection} " . implode(' and ', $held) . '. When a worker'
+                . ' crashes, each job it held but had not started comes back with one attempt more, and with tries 1'
+                . ' it fails without running. The worker\'s lease renewer hands those jobs back without the attempt,'
+                . ' but not after a lost node, nor for a batch popped ahead whose answer the worker had not read.',
+                "Set tries to 2 or more for pool {$pool['name']}, and for job classes that set \$tries = 1; or keep"
+                . " prefetch 1 and pop_ahead off on connection {$connection}.",
+                '/use/laravel/concepts#prefetch-ack_async-and-pop_ahead',
+            );
+        }
+
+        return $advice;
     }
 
     /** @return list<array<string, mixed>> */

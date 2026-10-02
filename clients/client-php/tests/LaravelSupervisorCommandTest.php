@@ -7,6 +7,9 @@ use Queen\Laravel\Commands\SupervisorControlCommand;
 use Queen\Laravel\QueenServiceProvider;
 use Queen\Laravel\Supervisor\SupervisorState;
 use Symfony\Component\Console\Output\BufferedOutput;
+use Symfony\Component\Console\Output\ConsoleOutputInterface;
+use Symfony\Component\Console\Output\ConsoleSectionOutput;
+use Symfony\Component\Console\Output\OutputInterface;
 
 class LaravelSupervisorCommandTest extends TestCase
 {
@@ -83,6 +86,46 @@ class LaravelSupervisorCommandTest extends TestCase
         $engine = json_decode(trim($output->fetch()), true, 512, JSON_THROW_ON_ERROR);
         $this->assertSame('worker-secret', $engine['connections']['queen']['bearer_token']);
         $this->assertSame('header-secret', $engine['connections']['queen']['headers']['X-Queen-Key']);
+    }
+
+    public function testEngineConfigurationWarnsOnStandardErrorAboutAPrefetchingPoolWithOneTry(): void
+    {
+        $this->app['config']->set('queen.supervisor.supervisors', ['default' => ['queues' => ['default'], 'tries' => 1]]);
+        $this->app['config']->set('queue.connections.queen.prefetch', 4);
+        $this->app['config']->set('queue.connections.queen.lease_renewal', true);
+        $stderr = new BufferedOutput();
+        $output = new class ($stderr) extends BufferedOutput implements ConsoleOutputInterface {
+            public function __construct(private OutputInterface $stderr)
+            {
+                parent::__construct();
+            }
+
+            public function getErrorOutput(): OutputInterface
+            {
+                return $this->stderr;
+            }
+
+            public function setErrorOutput(OutputInterface $error): void
+            {
+                $this->stderr = $error;
+            }
+
+            public function section(): ConsoleSectionOutput
+            {
+                throw new \LogicException('No sections here.');
+            }
+        };
+
+        $exitCode = $this->app->make(\Illuminate\Contracts\Console\Kernel::class)
+            ->call('queen:supervisor-config', ['--for-engine' => true], $output);
+
+        $this->assertSame(0, $exitCode);
+        $document = json_decode(trim($output->fetch()), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(1, $document['supervisors']['default']['tries']);
+        $this->assertStringContainsString(
+            'Queen warning: Pool default can fail a job that never ran.',
+            $stderr->fetch(),
+        );
     }
 
     public function testEngineConfigurationExportRejectsDocumentsAboveOneMebibyte(): void
