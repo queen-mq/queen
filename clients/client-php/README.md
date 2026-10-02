@@ -224,7 +224,9 @@ starting point for a migration.
 Raising prefetch trades round trips for a wider redelivery window: a crash can redeliver the
 unflushed batch, and a paused worker can sit on prefetched jobs until the lease expires. So the
 connector **rejects `QUEEN_PREFETCH > 1` unless `QUEEN_LEASE_RENEWAL=true`**, however the worker was
-started.
+started. When a worker crashes holding a batch, its lease renewer (the Rust master or the PHP
+helper) hands back the jobs it had not started, without an extra attempt; a lost node still charges
+one, so keep `tries` at 2 or more with `QUEEN_PREFETCH > 1` or `QUEEN_POP_AHEAD=true`.
 
 `QUEEN_AUTOPILOT` is off here even though the SDK client enables pop autopilot by default: the
 queue driver keeps sending the fixed `QUEEN_PARTITIONS` width, so an upgrade changes nothing on its
