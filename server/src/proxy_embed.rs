@@ -102,6 +102,18 @@ impl KvBackend for RsmKv {
     }
 }
 
+/// The S3 sink's side of the control plane (`/api/cp/clusters/:slug/s3`):
+/// offered only where this node runs the sink (`QUEEN_S3_EMBEDDED=true` in a
+/// binary built with it), so a cell that does not answers `s3_unavailable`
+/// rather than storing a tenant sink nothing would ever run.
+fn s3_hooks() -> Option<Arc<dyn queen_proxy::s3::S3Sinks>> {
+    #[cfg(feature = "s3")]
+    if crate::config::S3SinkConfig::from_env().enabled {
+        return Some(Arc::new(crate::s3_inproc::ControlPlaneHooks::new()));
+    }
+    None
+}
+
 /// The public router of a single-binary node: the proxy in front of
 /// `broker` (the inner broker router: tenancy on, broker JWT off, no socket).
 pub fn public_router(
@@ -117,6 +129,7 @@ pub fn public_router(
                 .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(1),
         ),
+        s3: s3_hooks(),
     })?;
     let inner = queen_proxy::upstream::Upstream::InProcess(broker);
     let passthrough = move |req: Request<Body>| {

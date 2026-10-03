@@ -93,6 +93,8 @@ pub mod ns {
 
     pub const OUTBOX: &str = "px.outbox"; // #<created_us 20 digits>/<id> -> OutboxDoc
 
+    pub const S3SINKS: &str = "px.s3sinks"; // #<cluster> -> S3SinkDoc
+
     pub const META: &str = "px.meta"; // #schema -> MetaDoc
 }
 
@@ -267,6 +269,50 @@ pub struct OutboxDoc {
     pub payload: Value,
     pub created_at_us: i64,
     pub consumed_at_us: Option<i64>,
+}
+
+/// `px.s3sinks #<cluster id>`: a cluster's S3 / data-lake sink, set only
+/// through the control plane (`/api/cp/clusters/:slug/s3`) and read by the
+/// broker's sink manager (every row, one `getPrefix` over the namespace), which
+/// runs one sink per broker tenant. Deleted with its cluster's tenant and by
+/// the tenant's purge.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct S3SinkDoc {
+    pub cluster_id: Uuid,
+    /// The cluster's broker tenant, copied at write time: the tenant the sink
+    /// reads.
+    pub broker_tenant: Uuid,
+    /// Off: the row (and its sealed secret) stays, the sink does not run.
+    pub enabled: bool,
+    /// The sink config as the broker's `S3Sinks::validate` accepted it (the
+    /// request minus `secretKey` and `enabled`): never a secret.
+    pub config: Value,
+    /// The S3 secret key as `S3Sinks::seal` returned it (the cell's
+    /// `QUEEN_ENCRYPTION_KEY`): never the secret in clear, and never answered
+    /// by any route.
+    pub secret_key_sealed: String,
+    /// The row's revision: every write moves it, a re-sent secret included
+    /// (a new secret cannot be told from a repeated one), so a sink rebuilt
+    /// when it moves picks up a rotated secret.
+    pub updated_at_us: i64,
+}
+
+/// Every field but the sealed secret, whose length stands in for it: a debug
+/// print or a failed assertion never carries it into a log.
+impl std::fmt::Debug for S3SinkDoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3SinkDoc")
+            .field("cluster_id", &self.cluster_id)
+            .field("broker_tenant", &self.broker_tenant)
+            .field("enabled", &self.enabled)
+            .field("config", &self.config)
+            .field(
+                "secret_key_sealed",
+                &format_args!("<{} bytes>", self.secret_key_sealed.len()),
+            )
+            .field("updated_at_us", &self.updated_at_us)
+            .finish()
+    }
 }
 
 /// `px.meta #schema`: the layout version.

@@ -22,9 +22,10 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/rsm/replicator/node.rs
       - server/src/rsm/replicator/raft/cluster.rs
       - server/src/rsm/replicator/raft/mod.rs
+      - server/src/s3_inproc.rs
 */}
 
-The broker is configured entirely through environment variables: 97 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 100 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set.
 
@@ -166,6 +167,14 @@ The broker is configured entirely through environment variables: 97 of them, lis
 | `QUEEN_KAFKA_THREADS` | integer | `min(4, cores / 2), at least 1` |  |
 | `QUEEN_PROXY_EMBEDDED` | boolean | `false` |  |
 | `QUEEN_PROXY_PORT` | string | `(empty: the proxy fronts PORT)` |  |
+
+### S3 sink
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `QUEEN_S3_EMBEDDED` | boolean | `false` |  |
+| `QUEEN_S3_SHUTDOWN_GRACE_MS` | integer | `30000` |  |
+| `QUEEN_S3_THREADS` | integer | `cores / 4, clamped to 1..=2` |  |
 
 ### Logging
 

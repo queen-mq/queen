@@ -793,8 +793,10 @@ async fn poll_forever(
 /// tenant.status + cluster.status -> effective ClusterStatus, worst wins
 /// (PLAN §6.2 / open decision §13.b: tenant `grace` == "payment-failed" maps
 /// to the same severity as cluster `push_blocked` -- pushes blocked,
-/// consumes allowed -- rather than a full suspend).
-pub(crate) fn merge_status(tenant_status: &str, cluster_status: &str) -> ClusterStatus {
+/// consumes allowed -- rather than a full suspend). Public: the broker's S3
+/// sink manager decides with it whether a cluster's sink runs, so the sink and
+/// the data plane never disagree about a cluster.
+pub fn merge_status(tenant_status: &str, cluster_status: &str) -> ClusterStatus {
     fn tenant_severity(s: &str) -> u8 {
         match s {
             "active" => 1,

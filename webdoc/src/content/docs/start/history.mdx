@@ -37,8 +37,8 @@ rolling restart, not a rebalance.
 2.0 removes PostgreSQL. The broker keeps its messages, cursors, key/value state and timers on its
 own local disk, as a log of entries and the state those entries build, and a cluster of three or
 five nodes replicates that log with Raft, so durability and failover are the broker's own rather
-than a database's. Everything runs in one binary: the proxy that fronts tenants and the Kafka wire
-facade run inside the broker process when they are switched on. The SQS facade and the S3 sink
-were removed in the same step.
+than a database's. Everything runs in one binary: the proxy that fronts tenants, the Kafka wire
+facade and the S3 sink that mirrors queues into a data lake run inside the broker process when they
+are switched on, the sink on every node of the cluster. The SQS facade was removed in the same step.
 
 2.0 is in alpha: its first alpha was committed in September 2026.

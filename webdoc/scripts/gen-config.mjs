@@ -147,6 +147,8 @@ const GROUPS = [
   ["Security and tenancy", (n) => n.startsWith("QUEEN_ENCRYPTION") || n === "QUEEN_TENANCY_HEADER"],
   ["Ephemeral queues", (n) => n.startsWith("QUEEN_EPHEMERAL_")],
   ["Embedded proxy and Kafka facade", (n) => n === "QUEEN_PROXY_EMBEDDED" || n === "QUEEN_PROXY_PORT" || n.startsWith("QUEEN_KAFKA_")],
+  // The broker's own S3 sink knobs; the sink's QUEEN_S3_* table is deploy/s3.
+  ["S3 sink", (n) => n.startsWith("QUEEN_S3_")],
   ["Logging", (n) => n === "LOG_LEVEL" || n === "RUST_LOG" || n.startsWith("QUEEN_LOG")],
 ];
 
@@ -495,6 +497,14 @@ const EXTRA_VARS = [
     def: "positions (or kv)",
     aliases: [],
     source: "server/src/kafka_inproc.rs",
+  },
+  // --- S3 sink (the rest of QUEEN_S3_* is read by the sink: deploy/s3)
+  {
+    name: "QUEEN_S3_THREADS",
+    type: "integer",
+    def: "cores / 4, clamped to 1..=2",
+    aliases: [],
+    source: "server/src/s3_inproc.rs",
   },
 ];
 

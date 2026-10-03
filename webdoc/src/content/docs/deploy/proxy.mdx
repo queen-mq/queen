@@ -11,9 +11,11 @@ sourceOfTruth:
   - proxy/src/app.rs
   - proxy/src/config.rs
   - proxy/src/cp.rs
+  - proxy/src/s3.rs
   - proxy/src/gateway.rs
   - proxy/src/limits.rs
   - proxy/src/harden.rs
+# sourceOfTruth re-read 2026-10-02 (working tree): the control plane gains PUT/GET/DELETE /api/cp/clusters/:slug/s3, offered only where the node runs the S3 sink, and the tenant purge removes the tenant's S3 sinks first.
 ---
 
 The proxy is a front door built into the broker. It does two jobs, and most deployments want only
@@ -100,13 +102,16 @@ answers `404`, as if it did not exist.
 | `POST /api/cp/provision` | A tenancy whose user id and key a control plane chose, in one call |
 | `POST /api/cp/tenants` | A tenant |
 | `PUT /api/cp/tenants/:slug/status` | The tenant's status, for all its clusters |
-| `POST /api/cp/tenants/:slug/purge` | The broker's purge of a `deleting` tenant's data |
+| `POST /api/cp/tenants/:slug/purge` | The tenant's S3 sinks removed, then the broker's purge of a `deleting` tenant's data |
 | `DELETE /api/cp/tenants/:slug` | Deletes a `deleting` tenant and everything the proxy keeps for it |
 | `GET /api/cp/clusters` | Every cluster, or one plan's |
 | `POST /api/cp/clusters` | A cluster, creating its tenant if needed |
 | `GET /api/cp/clusters/:slug` | A cluster's ids, plan, statuses and overrides |
 | `GET /api/cp/clusters/:slug/queues` | The broker's queue listing for one cluster |
 | `POST /api/cp/clusters/:slug/configure` | The broker's queue configuration for one cluster |
+| `PUT /api/cp/clusters/:slug/s3` | The cluster's [S3 sink](/deploy/s3#a-tenants-sink-from-the-control-plane): its settings, checked by the broker, and `secretKey`, stored sealed with `QUEEN_ENCRYPTION_KEY` |
+| `GET /api/cp/clusters/:slug/s3` | The cluster's S3 sink, without its secret |
+| `DELETE /api/cp/clusters/:slug/s3` | Removes the cluster's S3 sink |
 | `PUT /api/cp/clusters/:id/overrides` | Limits above or below the plan for one cluster (`null` clears them) |
 | `PUT /api/cp/clusters/:id/status` | The cluster's status |
 | `GET /api/cp/clusters/:id/usage` | The last hour of metered minutes |

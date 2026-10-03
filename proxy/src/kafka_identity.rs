@@ -289,6 +289,7 @@ mod tests {
             meter,
             registry,
             keys,
+            s3: None,
         })
     }
 

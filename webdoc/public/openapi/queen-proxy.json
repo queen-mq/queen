@@ -763,6 +763,95 @@
         "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
       }
     },
+    "/api/cp/clusters/{slug}/s3": {
+      "put": {
+        "operationId": "put_api_cp_clusters_slug_s3",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "PUT /api/cp/clusters/:slug/s3",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "put_s3",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      },
+      "get": {
+        "operationId": "get_api_cp_clusters_slug_s3",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "GET /api/cp/clusters/:slug/s3",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "get_s3",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      },
+      "delete": {
+        "operationId": "delete_api_cp_clusters_slug_s3",
+        "tags": [
+          "Control plane"
+        ],
+        "summary": "DELETE /api/cp/clusters/:slug/s3",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "delete_s3",
+        "security": [
+          {
+            "cpToken": []
+          }
+        ],
+        "description": "Control plane. Requires QUEEN_PROXY_CP_TOKEN in the x-queen-cp-token header; with no token configured the whole surface answers 404."
+      }
+    },
     "/api/cp/clusters/{id}/usage": {
       "get": {
         "operationId": "get_api_cp_clusters_id_usage",

@@ -26,10 +26,10 @@ digest: >-
   serve.
 ---
 
-Queen 2.0 is one binary: the broker, and optionally the multi-tenant proxy and the
-Kafka facade, in one process. The JavaScript, Python, Go and Rust clients,
-`queen-protocol` and the Go command-line client are at 1.3.0 and talk to a 2.0
-broker over the same HTTP API; the PHP/Laravel source has no tagged Packagist
+Queen 2.0 is one binary: the broker, and optionally the multi-tenant proxy, the
+Kafka facade and the S3 sink, in one process. The JavaScript, Python, Go and Rust
+clients, `queen-protocol` and the Go command-line client are at 1.3.0 and talk to a
+2.0 broker over the same HTTP API; the PHP/Laravel source has no tagged Packagist
 release yet, and the C++ header is consumed at a repository revision. The broker
 reports its version on `GET /health` and in its boot log; the value is compiled in
 from a single file, so the binary, the container tag and the health document can
@@ -113,7 +113,11 @@ The move is therefore a cutover at the application level:
 
 What 2.0 no longer has, so a 1.x configuration can be cleaned up: every
 PostgreSQL, spool and mesh variable (see
-[Environment variables](/reference/config)), the SQS facade and the S3 sink.
+[Environment variables](/reference/config)), the SQS facade, and the standalone
+`queen-s3` binary with `QUEEN_S3_BIN`. The S3 sink itself runs inside the broker
+now, on every node ([S3 sink](/deploy/s3)). Its 1.5.0 commit pointers stay in the
+1.x database like every other key/value row, so a 2.0 sink starts its windows
+again from the first and belongs under a new prefix.
 
 ## Related pages
 

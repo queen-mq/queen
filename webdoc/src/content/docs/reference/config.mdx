@@ -13,6 +13,8 @@ sourceOfTruth:
   - server/src/encryption.rs
   - server/src/proxy_embed.rs
   - server/src/kafka_inproc.rs
+  - server/src/s3_inproc.rs
+  - connectors/queen-s3/src/config.rs
   - server/src/rsm/replicator/node.rs
   - server/src/rsm/replicator/raft/cluster.rs
   - server/src/rsm/replicator/raft/mod.rs
@@ -25,6 +27,8 @@ sourceOfTruth:
   - server/src/rsm/planner/timers.rs
   - server/src/rsm/dashboard/collector.rs
   - server/src/rsm/timing.rs
+# sourceOfTruth re-read 2026-10-02 (through 8a0faff0 + working tree): QUEEN_S3_* is read again, by the S3 sink run in-process (QUEEN_S3_EMBEDDED, QUEEN_S3_THREADS, QUEEN_S3_SHUTDOWN_GRACE_MS here, the rest on deploy/s3); only QUEEN_S3_BIN is gone.
+# sourceOfTruth re-read 2026-10-02, second pass (working tree): one sink per broker tenant; QUEEN_S3_QUEUES turns on the default tenant's (another per-tenant variable without it fails the boot), node-wide variables hold for every tenant, other tenants come from the control plane; THREADS and SHUTDOWN_GRACE_MS are checked strictly at boot (s3_inproc::preflight).
 digest: >-
   Every knob is an environment variable read once at boot; there is no config file and no reload.
   A node sets: QUEEN_RAFT_DIR, the data directory, default /var/lib/queen/raft, on a persistent
@@ -35,7 +39,10 @@ digest: >-
   QUEEN_RAFT_DISK_LOW_PCT, default 80, the disk gate that refuses growing writes with 507;
   QUEEN_QLOG_SHARDS, default 0 (one log per queue), fixed when the data directory is created;
   QUEEN_PROXY_EMBEDDED and QUEEN_PROXY_PORT for the proxy in the same process;
-  QUEEN_KAFKA_EMBEDDED with QUEEN_KAFKA_ADVERTISED_ADDR, which has no default; RETENTION_INTERVAL,
+  QUEEN_KAFKA_EMBEDDED with QUEEN_KAFKA_ADVERTISED_ADDR, which has no default; QUEEN_S3_EMBEDDED
+  for the S3 sink, one per broker tenant: QUEEN_S3_QUEUES turns on the default tenant's, with
+  QUEEN_S3_ENDPOINT, QUEEN_S3_REGION, QUEEN_S3_BUCKET and the keypair, which then have no default,
+  the same on every node, and other tenants' sinks come from the control plane; RETENTION_INTERVAL,
   default 5000 milliseconds; QUEEN_MAX_BODY_BYTES, default 67108864, which is 64 MiB and returns 413
   above it; QUEEN_ENCRYPTION_KEY, 64 hexadecimal characters, because a malformed or wrong-length key
   logs one warning, disables encryption and then stores plaintext on queues flagged for it; LOG_LEVEL,
@@ -63,6 +70,7 @@ variables from these groups only.
 | Turn on authentication | `JWT_ENABLED`, `JWT_ALGORITHM`, then `JWT_SECRET` or `JWT_PUBLIC_KEY` or `JWT_JWKS_URL` |
 | Run the multi-tenant proxy in the same process | `QUEEN_PROXY_EMBEDDED`, `QUEEN_PROXY_PORT`, and the proxy's own `QUEEN_PROXY_*` settings. See [the proxy](/deploy/proxy/) |
 | Serve the Kafka wire protocol | `QUEEN_KAFKA_EMBEDDED`, `QUEEN_KAFKA_ADVERTISED_ADDR`. See [Kafka](/reference/kafka/) |
+| Mirror queues into an S3 bucket | `QUEEN_S3_EMBEDDED`, the sink's own `QUEEN_S3_*` variables for the default tenant, the control plane for every other tenant. See [the S3 sink](#the-s3-sink) |
 | Change the maintenance cadence | `RETENTION_INTERVAL` |
 | Accept larger request bodies | `QUEEN_MAX_BODY_BYTES` |
 | Encrypt payloads at rest | `QUEEN_ENCRYPTION_KEY`, the same value on every node |
@@ -164,6 +172,33 @@ connect to, has no default: without it the boot fails naming the variable. The
 listener binds `QUEEN_KAFKA_ADDR` (default `0.0.0.0:9092`). The rest is in
 [Kafka](/reference/kafka/).
 
+## The S3 sink
+
+`QUEEN_S3_EMBEDDED=true` runs the S3 / data-lake sink inside the broker process,
+on every node, with the same configuration on each. There is one sink per broker
+tenant: the default tenant's comes from the `QUEEN_S3_*` variables below, and every
+other tenant's from the control plane
+([a tenant's sink](/deploy/s3#a-tenants-sink-from-the-control-plane)), whose rows
+every node reads again every 5 seconds. The broker reads three variables itself:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_S3_EMBEDDED` | `false` | Starts the sink. A strict boolean, like every one `config.rs` reads. |
+| `QUEEN_S3_THREADS` | a quarter of the cores, 1 or 2 | Threads of the sink's own runtime, 1 to 64. With the sink on, any other value stops the boot. |
+| `QUEEN_S3_SHUTDOWN_GRACE_MS` | `30000` | How long the sink has to drain, counted from the signal. 100 to 3,600,000; with the sink on, any other value stops the boot. |
+
+The sink reads every other `QUEEN_S3_*` variable once, at boot, before the state
+machine opens. They are of two kinds. The node-wide ones (`QUEEN_S3_MEMORY_MB`,
+`QUEEN_S3_LEASE_TTL_MS`, `QUEEN_S3_INSTANCE` and the rest) hold for every tenant's
+sink on the node and exist only as variables. The per-tenant ones configure the
+default tenant's sink, and `QUEEN_S3_QUEUES` is what turns that sink on: without it
+the default tenant has no sink, and setting any other per-tenant variable stops the
+boot. With it, `QUEEN_S3_ENDPOINT`, `QUEEN_S3_REGION`, `QUEEN_S3_BUCKET`,
+`QUEEN_S3_ACCESS_KEY` and `QUEEN_S3_SECRET_KEY` have no default. A tenant's sink
+from the control plane carries its secret sealed with `QUEEN_ENCRYPTION_KEY`, so
+every node needs the same key. Every variable, its default and its range is on
+[the S3 sink page](/deploy/s3#every-variable).
+
 ## Names kept from 1.x
 
 These variables kept their names because the raft node reads them with the same
@@ -195,9 +230,11 @@ hot-list, fusion, ack-fusion, pop-fusion, admission and pop-autopilot knobs
 (`QUEEN_HOTLIST_*`, `QUEEN_V2_FUSION_*`, `QUEEN_ACK_FUSION_*`,
 `QUEEN_POP_FUSION_*`, `QUEEN_ADMISSION_*`, `QUEEN_POP_AUTOPILOT*`),
 `QUEEN_APPLY_SCHEMA`, `RETENTION_PARALLELISM`, the stats refresh intervals,
-`QUEEN_STORAGE`, `QUEEN_SQS_*`, `QUEEN_S3_*` and `PXDB_*` no longer exist and are
+`QUEEN_STORAGE`, `QUEEN_SQS_*`, `QUEEN_S3_BIN` and `PXDB_*` no longer exist and are
 ignored. A 2.0 node has no database to reach and one storage class, so there is
-nothing for them to configure.
+nothing for them to configure. Two variables of the standalone 1.5.0 S3 sink,
+`QUEEN_S3_LISTEN` and `QUEEN_S3_LOG_FORMAT`, are named in a warning at boot when
+the sink runs, and otherwise ignored.
 
 ## How booleans parse
 
@@ -262,6 +299,11 @@ for. All of these exit 1:
   a `QUEEN_RAFT_PEERS` that does not parse or does not list
   `QUEEN_RAFT_NODE_ID`, or `QUEEN_RAFT_PEERS` with the `local` replicator;
 - `QUEEN_KAFKA_EMBEDDED=true` without a usable `QUEEN_KAFKA_ADVERTISED_ADDR`;
+- `QUEEN_S3_EMBEDDED=true` with `QUEEN_S3_QUEUES` set and one of the sink's
+  variables that have no default missing, a per-tenant `QUEEN_S3_*` variable set
+  without `QUEEN_S3_QUEUES`, one of the sink's values unparseable or out of range
+  (`QUEEN_S3_THREADS` and `QUEEN_S3_SHUTDOWN_GRACE_MS` included), or
+  `QUEEN_S3_PARTITIONS` set: the message names the variable;
 - failure to bind `$PORT` on `$QUEEN_BIND_ADDR`, including a `QUEEN_BIND_ADDR`
   that carries a port of its own instead of a bare host or IP, or failure to bind
   `QUEEN_PROXY_PORT`.
@@ -290,9 +332,11 @@ a pop.
 Defaults below are the ones the code applies, extracted at build time from
 `config.rs` and, for the variables read at their own call site (the cluster set,
 `QUEEN_QLOG_SHARDS`, the names kept from 1.x, the proxy and Kafka switches), from
-the file that reads each one. The proxy's own `QUEEN_PROXY_*` settings and the
-facade's `QUEEN_KAFKA_*` settings are on [the proxy](/deploy/proxy/) and
-[Kafka](/deploy/kafka/) pages. Where a variable has an alias, both names read
+the file that reads each one. The proxy's own `QUEEN_PROXY_*` settings, the
+facade's `QUEEN_KAFKA_*` settings and the sink's `QUEEN_S3_*` settings are on
+[the proxy](/deploy/proxy/), [Kafka](/deploy/kafka/) and
+[S3 sink](/deploy/s3/) pages; `QUEEN_S3_THREADS`, read where it is used, is in
+[the S3 sink](#the-s3-sink) above. Where a variable has an alias, both names read
 the same setting and the newer name wins.
 
 A few rows carry a **derivation** rather than a literal, because that is what

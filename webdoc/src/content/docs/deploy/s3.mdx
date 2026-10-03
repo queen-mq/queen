@@ -1,0 +1,621 @@
+---
+title: S3 sink
+description: "Running the S3 / data-lake sink inside the broker on every node of a cluster, one sink and one bucket per tenant: the environment for the default tenant, the control-plane route for every other one, every setting with its default and range, the per-queue lease, the bucket policy, memory and shutdown on Kubernetes, the status block, the retention hold and the lag to alarm on."
+type: how-to
+tier: operate
+sidebar:
+  order: 13
+  label: S3 sink
+sourceOfTruth:
+  - server/src/s3_inproc.rs
+  - server/src/main.rs
+  - server/src/config.rs
+  - server/src/proxy_embed.rs
+  - server/src/handlers/status.rs
+  - server/src/handlers/raft.rs
+  - server/src/rsm/maintenance.rs
+  - server/Cargo.toml
+  - Dockerfile
+  - connectors/queen-s3/src/config.rs
+  - connectors/queen-s3/src/sink.rs
+  - connectors/queen-s3/src/lease.rs
+  - connectors/queen-s3/src/driver.rs
+  - connectors/queen-s3/src/window.rs
+  - connectors/queen-s3/src/status.rs
+  - connectors/queen-s3/src/health.rs
+  - connectors/queen-s3/src/obs.rs
+  - connectors/queen-s3/src/s3/client.rs
+  - proxy/src/cp.rs
+  - proxy/src/s3.rs
+  - proxy/src/cache.rs
+  - proxy/src/store/schema.rs
+  - proxy/src/store/data.rs
+verifiedBy:
+  - server/src/s3_inproc/tests.rs
+  - connectors/queen-s3/tests/sink.rs
+  - connectors/queen-s3/tests/driver_shutdown.rs
+# sourceOfTruth re-read 2026-10-02 (through 8a0faff0 + working tree): rewritten from the 1.5.0 page for the sink run in-process on every node of a raft cluster. The standalone binary, its listener and exit codes, the child supervisor, the API-key scopes, the proxy carve-out and the PostgreSQL safeTime are gone.
+# sourceOfTruth re-read 2026-10-02, second pass (working tree): one sink per broker tenant, each to its own bucket; the default tenant's from QUEEN_S3_*, every other tenant's from PUT /api/cp/clusters/:slug/s3, re-read every 5 s; node-wide knobs env-only; tenant= in every key; claims paced by load; lag on completeThrough; the drain starts at the signal; the status block lists sinks; a tenant label on the metrics.
+---
+
+The S3 sink writes each queue's log into an S3-compatible bucket as JSONL or Parquet, under a Hive
+layout that DuckDB, Spark, Trino, ClickHouse and Snowflake read with nothing in front of them. It is a
+library linked into the broker binary (the Cargo feature `s3`, on by default, so the image carries it)
+and it runs **inside the broker process, on every node of the cluster**, with the same configuration
+on each. Every broker tenant gets a sink of its own, with its own bucket and its own credentials: the
+default tenant's comes from the `QUEEN_S3_*` environment, every other tenant's from the
+[control plane](#a-tenants-sink-from-the-control-plane). A sink reads the node's own applied copy of the
+log through the in-process twins of `POST /api/v1/fetch` and `POST /api/v1/partitions/changed`, keeps
+three small documents per queue in its tenant's key/value store, and keeps everything else in the
+bucket. Nothing connects to it and it opens no port. What it writes, and what a reader gets, is
+[the lake reference](/reference/s3).
+
+<Aside type="note">
+`QUEEN_S3_EMBEDDED=true` is the only thing that starts it. Unset, none of the sink's variables are
+read, nothing starts, the control plane answers its S3 routes with `404 s3_unavailable`, and the broker
+behaves exactly as it does without it. A binary built without the `s3` feature logs a warning for
+`QUEEN_S3_EMBEDDED=true` and starts nothing.
+</Aside>
+
+## Turning it on
+
+```bash
+QUEEN_S3_EMBEDDED=true
+QUEEN_S3_QUEUES=orders,clicks
+QUEEN_S3_ENDPOINT=https://s3.eu-central-1.amazonaws.com
+QUEEN_S3_REGION=eu-central-1
+QUEEN_S3_BUCKET=my-lake
+QUEEN_S3_ACCESS_KEY=AKIAEXAMPLE
+QUEEN_S3_SECRET_KEY=a-secret-of-your-own
+```
+
+That is the default tenant's sink, the one a single-tenant broker uses, and `QUEEN_S3_QUEUES` is what
+turns it on. Without `QUEEN_S3_QUEUES` the node runs no sink of its own environment, only the sinks the
+control plane configures for the other tenants; a bucket, a key or any other per-tenant `QUEEN_S3_*`
+set without it stops the boot, because that sink would never start.
+
+Set the same values on every node. The environment is read once, at boot, before the state machine
+opens. A variable with no default that is missing, or a value that does not parse or lies outside its
+range, stops the boot with one line that names the variable and says what it accepts, prefixed
+`QUEEN_S3_EMBEDDED=true:`. A variable that is present but empty or whitespace-only counts as unset,
+because that is how a Compose file or a Helm template spells "leave it alone". Enumerated values are
+case-insensitive.
+
+The bucket is not contacted at boot. Each sink starts once the broker's listener is bound, and before
+it touches any queue it sends its bucket a `HEAD` of the prefix. Any answer, `404` included, starts the
+queues. A `403` or a connection failure is logged with what to check (at most once every thirty
+seconds), retried behind a backoff that doubles from one second to a minute, and shown under `bucket`
+in [the status block](#the-status-block), while the broker serves as usual. That is the failure policy
+of the whole sink: **it never drops, it only lags.** A failed S3 or key/value call is retried, behind
+the same backoff and honouring a `Retry-After` the service sends, for as long as it takes. A queue that
+does not exist is looked for again every five seconds. An answer that retrying cannot fix (a `4xx`
+from the bucket other than `408` and `429`) stops that queue, which is tried again a minute later.
+
+## One sink per tenant
+
+| | Default tenant | Every other broker tenant |
+| --- | --- | --- |
+| Configured by | the `QUEEN_S3_*` environment, at boot | `PUT /api/cp/clusters/:slug/s3`, re-read every five seconds |
+| Turned on by | `QUEEN_S3_QUEUES` | a row that is `enabled`, on a cluster the data plane serves |
+| The secret key | `QUEEN_S3_SECRET_KEY` | `secretKey` in the PUT body, stored sealed with `QUEEN_ENCRYPTION_KEY` |
+| `source` in the status | `env` | `cp` |
+| Its metrics | no tenant label | `tenant="<id>"` |
+
+**What is per tenant**: the queues, the bucket, the endpoint and credentials, the prefix, the format
+and layout, the window size and age, the start rule and the sink name, everything in the
+[per-tenant table](#per-tenant-settings). **What is node-wide** stays in the environment and is shared
+by every sink of the node, whichever tenants they run for: the one memory budget, the threads, the
+fetch concurrency, the discovery interval, the safe guard, the lease TTL, the multipart threshold, the
+checkpoint cadence, the node's name in the leases and the crash point
+([node-wide settings](#node-wide-settings)). A tenant document cannot set one of those.
+
+Every key the sinks write starts with the tenant, `<prefix>/tenant=<id>/queue=<name>/…` for the data
+and `<prefix>/_queen/tenant=<id>/queue=<name>/…` for the manifests and checkpoints, so two tenants that
+share a bucket and a prefix never share a key, and a reader gets a `tenant` column from Hive discovery.
+The default tenant's id is `00000000-0000-0000-0000-000000000001`. A tenant's leases and commit pointers
+live in its own key/value store, which is where the [retention hold](#the-retention-hold) of its queues
+reads them.
+
+## A tenant's sink from the control plane
+
+On a cell that runs the [proxy](/deploy/proxy) (`QUEEN_PROXY_EMBEDDED=true`), the control plane sets one
+sink per cluster, for the cluster's own broker tenant. It needs, on every node:
+
+- `QUEEN_S3_EMBEDDED=true`: a node without it answers the three routes `404 s3_unavailable`;
+- `QUEEN_PROXY_CP_TOKEN`, sent in `x-queen-cp-token`, like every control-plane call;
+- the same `QUEEN_ENCRYPTION_KEY`. The tenant's S3 secret is stored only sealed with it (the payload
+  envelope, AES-256-GCM) in the replicated key/value store under the proxy's system tenant, so the
+  raft log and every snapshot hold it sealed. A cell with no key refuses the secret
+  (`409 encryption_required`), and a node whose key differs cannot open it: that tenant's sink shows
+  phase `error` on that node, which runs none of its queues, until the row changes or the node
+  restarts;
+- `QUEEN_PROXY_TENANT_HEADER` on, its default: with it off every cluster is the broker's default
+  tenant, which the control plane never acts on (`409 system_tenant`).
+
+```bash
+curl -s -X PUT http://127.0.0.1:6711/api/cp/clusters/acme-prod/s3 \
+  -H "x-queen-cp-token: $CP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"endpoint":"https://s3.eu-central-1.amazonaws.com","region":"eu-central-1","bucket":"acme-lake",
+       "accessKey":"AKIAEXAMPLE","secretKey":"their-secret","queues":"*","format":"parquet"}'
+```
+
+The body is the tenant's settings in camelCase ([the per-tenant table](#per-tenant-settings)), plus two
+fields that are not settings:
+
+- `secretKey`: required on the first PUT of a cluster, a non-empty string of at most 4 KiB. Omitted or
+  `null` later, the stored one is kept. It is checked, sealed and stored apart from the settings, and
+  no answer, error or log line carries it, sealed or not.
+- `enabled`: `true` by default. `false` keeps the row and its sealed secret and stops the sink.
+
+The settings are checked by the sink's own rules before anything is stored: `endpoint`, `region`,
+`bucket`, `accessKey` and `queues` are required; a field the sink does not know, a node-wide one
+(`memoryMb`, `leaseTtlMs` and the rest), or any field named like a secret other than `secretKey` is
+refused; and the settings take at most 32 KiB. The answer, and `GET` on the same path, is the sink
+with its secret left out:
+
+```json
+{"cluster": "acme-prod", "tenant": "0199a6f2-7c4d-7e1a-9b3c-5d2e8f4a6b10", "enabled": true,
+ "config": {"endpoint": "https://s3.eu-central-1.amazonaws.com", "region": "eu-central-1",
+            "bucket": "acme-lake", "accessKey": "AKIAEXAMPLE", "queues": "*", "format": "parquet"},
+ "secretKeySet": true, "updatedAt": "2026-10-02T09:14:07Z"}
+```
+
+`DELETE` removes the row and answers `{"cluster": "acme-prod", "removed": true}`, `removed: false`
+when there was none. Every route is safe to retry. A PUT that carries `secretKey` always rewrites the
+row and moves `updatedAt`, because a new secret cannot be told from a repeated one; a PUT without it
+that changes nothing writes nothing and answers the row as it is. Each write through these routes
+records an operation, `s3_sink_set` or `s3_sink_removed`, in the tenant's audit log. A tenant's sinks
+are also removed by its purge, before its data and with no audit row, and by its delete. Neither
+removes an object from the bucket.
+
+| Answer | When |
+| --- | --- |
+| `404 s3_unavailable` | The node that answered does not run the sink |
+| `404 cluster_unknown` | No cluster has that slug |
+| `404 s3_unset` | `GET` of a cluster that has no sink |
+| `400 invalid` | A body that is not a JSON object, a `secretKey` or `enabled` of the wrong shape, no `secretKey` on a cluster's first PUT, or a setting the sink refuses, with the sink's own sentence |
+| `409 system_tenant` | The cluster is bound to the broker's default tenant or to the proxy's own, or `QUEEN_PROXY_TENANT_HEADER` is off |
+| `409 deleting` | The cluster or its tenant is being deleted |
+| `409 encryption_required` | The cell has no `QUEEN_ENCRYPTION_KEY` to seal the secret with |
+
+**When a tenant's sink runs.** Every node reads the control plane's sink rows again every five
+seconds and starts, rebuilds or stops one sink per tenant to match. A sink runs while its row is
+`enabled` and its cluster's effective status, the worse of the cluster's and its owner tenant's by the
+data plane's own rule, is `active` or `push_blocked`. So a tenant in `grace` keeps its sink, and a
+`suspended` or `deleting` cluster or tenant has none: pushes may be refused, but data that is there
+still reaches the lake. A cluster moving between `active` and `push_blocked` keeps the sink it has.
+When `updatedAt` moves, the tenant's sink is rebuilt from the new row, which is how a rotated secret
+reaches it; the new sink starts only once the old one has drained, so two sinks of one tenant never run
+side by side on a node. A sink that goes away for good (deleted, disabled, its cluster no longer served)
+drains, and its status entry and every series labelled with its tenant go with it.
+
+## One writer per queue, on any node
+
+Every node runs a task for every queue each of its sinks is configured with, and each task claims the
+queue's **lease**: a key/value row, `s3:<sink>:<queue>:lease` in namespace `queen-s3` of the queue's own
+tenant, written with `putIfAbsent` and a TTL of `QUEEN_S3_LEASE_TTL_MS`. The store keeps TTLs in whole
+seconds, so the value is rounded down, to at least one second. One node wins and runs the queue. The
+others learn from the answer which node holds it, show it as `heldBy` in their status, and look again
+once a TTL has passed. The owner refreshes the row every third of the TTL, 10 seconds at the default of
+30, for as long as it runs the queue.
+
+**Claims are paced by load.** A node reads the lease row before it writes it. A queue another node holds
+costs nothing more. A free queue is claimed after a wait of one second for every queue the node already
+runs or is claiming, of every tenant, plus a jitter under 200 ms, capped at half the TTL, so when several
+nodes go for the same queue the least-loaded one gets it and the queues spread over the nodes; a node
+alone takes its k-th queue about k seconds after it starts, never later than half the TTL. A read or a
+claim that fails for a passing reason (no leader yet just after a boot, a 503, a timeout) is tried again
+after about a second, doubling up to the TTL, so a node that booted into an election still competes for
+the queues instead of sleeping a TTL while another node takes them all. A live row that names this
+node is an earlier life of it, a sink or a broker restarted inside the TTL, and is taken back at once.
+That is why each node needs a name of its own that survives its restarts, which the default
+`QUEEN_S3_INSTANCE` is.
+
+**Queues are rebalanced.** Claiming alone spreads only the queues claimed at the same moment, and a
+StatefulSet starts its pods one after another: the first pod would take every queue. So each running
+sink also keeps a presence row, `s3:<sink>:node=<instance>`, written with the lease TTL every third of
+it and deleted on a clean stop, and counts the live rows: N, the nodes running that sink. A node's fair
+share is `ceil(queues / N)`. A node that has held more than its share for a whole TTL gives ONE queue
+back, the one with the least buffered: that queue drains exactly as at a SIGTERM (the window in its
+commit sequence finished, a filling window committed if worth it) and its lease is released. The node
+gives back the next only once that one is held elsewhere, or a TTL later, and leaves the queues it gave
+back alone for two TTLs. A node below its share looks for free queues every third of a TTL and claims at
+once; a node at or above its share waits a TTL longer, so a queue given back goes to a node that is short,
+and no wait is unbounded, so no queue stays free. In a steady state nothing moves; a node joining or
+leaving moves only what the shares require, one queue at a time per node. What a move costs is a drain:
+a window too young to commit is abandoned and read again by the new owner, nothing is lost or written
+twice. The status shows each sink's `placement` (`nodes`, `queues`, `share`, `held`, `givingBack`), a
+queue given back shows the state `released`, and `queen_s3_queues_given_back_total` counts the moves.
+
+**The fence.** A window's intent and its commit pointer are each written in one key/value batch whose
+first operation is a conditional write of the lease row, marked `required`, expecting the version this
+node last wrote. A node whose lease was taken over while it stalled past the TTL, or while it was cut
+off from the leader, therefore cannot move a pointer when it comes back, however healthy it looks: the
+whole batch rolls back, `queen_s3_commit_precondition_lost_total` counts it, and the queue task stops
+and claims again after a TTL. The refresh and those batches take turns on the row, so a node never
+fences itself out. Two nodes can never commit different windows for one queue.
+
+**When the owner goes away.**
+
+- **Stopped with SIGTERM**, it gives its leases back as it stops, by deleting the row fenced on its
+  version. Another node takes each queue at its next look, about a TTL later at most, plus its turn.
+- **Killed**, it stops refreshing. Its leases expire within a TTL of the last refresh, and another node
+  takes each queue at its next look, so within about two TTLs. Restarted inside the TTL, the same node
+  takes its own queues back at once.
+- **The next owner** starts from the queue's commit pointer, and from its window intent when a window was
+  in flight. A window whose upload had finished, its manifest in the bucket naming that exact intent, is
+  committed from the manifest and not rebuilt. Any other is rebuilt from the log, and nothing is uploaded
+  until **this** node has applied the whole window: its `safeTime`, less `QUEEN_S3_SAFE_GUARD_MS`, has
+  reached the window's end. The rebuilt object has the same key and the same bytes.
+
+**Every node reads its own state.** A window closes only at or below the `safeTime` of the node that
+reads it, the greatest record stamp that node has applied
+([the window commit](/reference/s3#the-window-commit)). A follower's `safeTime` trails the leader's, so a
+follower that owns a queue closes its windows that much later, and never against log it has not applied.
+Fetches and discovery are answered by the node itself, followers included. Key/value calls go through
+the node's own state machine as well, and a follower hands the writes among them to the leader the way
+it does for its own clients.
+
+**The lease also moves the clock.** `safeTime` moves only when an entry of the log applies, so on a
+broker with no traffic it stands still, and the window holding the last records before a quiet spell
+would never reach its age. Each lease refresh is an entry of the log, so while a node runs a queue,
+every node's `safeTime` moves at least once per refresh interval.
+
+<Aside type="caution">
+One combination does not spread the queues: `QUEEN_RAFT_CLIENT_OFFLOAD=false` with `JWT_ENABLED=true`.
+A follower that does not serve its own clients sends its key/value calls through the broker's router to
+the leader, and the leader refuses them, because the sink carries no token. Those followers own no
+queue and the leader writes them all. For a tenant other than the default one, such a follower does not
+try at all. Client offload is on by default, and with it every node writes its own key/value calls.
+</Aside>
+
+## Every variable
+
+### The broker's own
+
+| Variable | Default | What it is |
+| --- | --- | --- |
+| `QUEEN_S3_EMBEDDED` | `false` | `true` starts the sink. Parsed like every broker boolean (`true/false`, `1/0`, `yes/no`, `on/off`); anything else stops the boot. |
+| `QUEEN_S3_THREADS` | a quarter of the cores, 1 or 2 | Worker threads of the sinks' own runtime, named `queen-s3`, shared by every tenant. 1 to 64; with the sink on, anything else stops the boot. |
+| `QUEEN_S3_SHUTDOWN_GRACE_MS` | `30000` | How long the sinks have to drain, counted from the stop signal. 100 to 3,600,000; with the sink on, anything else stops the boot. See [stopping](#stopping-and-the-grace). |
+
+### Node-wide settings
+
+Environment only, one value per node, whichever tenants' sinks it runs. A tenant document that names
+one (`memoryMb`, `fetchConcurrency`, `discoveryIntervalMs`, `safeGuardMs`, `leaseTtlMs`,
+`multipartThresholdMb`, `checkpointEvery`, `instance`, `crashAt`) is refused, naming the variable.
+
+| Variable | Default | What it is |
+| --- | --- | --- |
+| `QUEEN_S3_MEMORY_MB` | `512` | The one buffer budget across every queue of every sink this node runs, inside the broker's process. 1 to 1,048,576. See [memory](#memory-and-threads). |
+| `QUEEN_S3_FETCH_CONCURRENCY` | `4` | In-flight fetch calls per queue. Each is a read of this node's log on the broker's blocking pool, so this is the throttle a backfill is held back with. 1 to 256. |
+| `QUEEN_S3_DISCOVERY_INTERVAL_MS` | `2000` | How often an idle queue asks which partitions moved. 10 to 3,600,000. |
+| `QUEEN_S3_SAFE_GUARD_MS` | `5000` | Subtracted from the node's `safeTime` before a window may close. 0 to 3,600,000. The broker's `safeTime` is exact, so this is a margin paid in latency, not a correction. |
+| `QUEEN_S3_LEASE_TTL_MS` | `30000` | How long a queue lease survives without a refresh. 1000 to 3,600,000. |
+| `QUEEN_S3_MULTIPART_THRESHOLD_MB` | `64` | Objects at or below this go up as one PUT with a `Content-MD5`; larger ones as a multipart upload in 16 MiB parts. 5 to 5120. |
+| `QUEEN_S3_CHECKPOINT_EVERY` | `20` | Windows between position checkpoints. 1 to 100,000. It bounds the re-read after a restart and nothing else. |
+| `QUEEN_S3_INSTANCE` | `node-<id>@<host>` | The name this node holds leases under in every tenant's store, shown in lease rows, logs and the status. The default is the raft node id (`QUEEN_RAFT_NODE_ID`, 1 on a single node) and `HOSTNAME`, else the system host name. An explicit value gets `/node-<id>` appended, so two nodes can never share a name even when every pod has the same environment, and a node keeps its name across restarts: a live lease row with this node's own name is its earlier life, taken back at once. |
+| `QUEEN_S3_CRASH_AT` | `never` | A fault point of the crash tests: `after_intent`, `mid_upload`, `after_upload`, `before_commit` or `after_commit`. In-process it aborts the **broker**. Never set it on a node that serves anything. |
+
+### Per-tenant settings
+
+The default tenant's come from the variable, every other tenant's from the document field, with the
+same defaults, ranges and rules. In a document a string field is a JSON string, `pathStyle` a boolean,
+`targetMb` and `maxWindowMs` a number, each also accepted as a string.
+
+| Variable | Field | Default | What it is |
+| --- | --- | --- | --- |
+| `QUEEN_S3_QUEUES` | `queues` | **required** | Comma-separated queue names, or `*` for every queue of the tenant, listed again every ten discovery intervals (never more often than once a second) so a queue created later gets a task. A document may also give a JSON list of names. Queues are never dropped from the set: one that does not exist, or no longer does, is looked for again every five seconds. |
+| `QUEEN_S3_ENDPOINT` | `endpoint` | **required** | The S3 API base URL: `http://` or `https://`, a host, an optional port, and **no path**. A path would become part of every key; the field for that is the prefix. |
+| `QUEEN_S3_REGION` | `region` | **required** | The region label the SigV4 credential scope is signed with: the real region on AWS, on a gateway whatever label it accepts, commonly `us-east-1`. |
+| `QUEEN_S3_BUCKET` | `bucket` | **required** | The destination bucket: one name, no slash, no space. |
+| `QUEEN_S3_ACCESS_KEY` | `accessKey` | **required** | S3 access key id. |
+| `QUEEN_S3_SECRET_KEY` | `secretKey`, beside the document | **required** | S3 secret access key. Never logged, never in the boot line, never in an answer. |
+| `QUEEN_S3_SINK` | `sink` | `default` | The sink's name: 1 to 64 characters of `[A-Za-z0-9._-]`. A segment of every key/value key the sink writes, recorded in every manifest, and what a queue's `retentionSinkHold` names. It is **not** part of any object key: two sinks that mirror the same queue into one bucket need different prefixes. |
+| `QUEEN_S3_PREFIX` | `prefix` | `queen` | The root every object is written under, sidecars included. Leading and trailing slashes are dropped; an empty or relative segment (`//`, `.`, `..`) is refused. |
+| `QUEEN_S3_PATH_STYLE` | `pathStyle` | `false` | `true` addresses the bucket as the first path segment instead of a DNS label, which is what versitygw and most self-hosted gateways want. |
+| `QUEEN_S3_SSE` | `sse` | unset | `AES256` or `aws:kms`, sent as `x-amz-server-side-encryption` on every PUT and every multipart upload. Unset sends no header, and the bucket's own default applies. |
+| `QUEEN_S3_SSE_KMS_KEY_ID` | `sseKmsKeyId` | unset | The KMS key id, with `aws:kms` only. Beside any other value it is refused rather than ignored. The boot line shows its last four characters. |
+| `QUEEN_S3_FORMAT` | `format` | `jsonl` | `jsonl`, one JSON object per line, or `parquet`. |
+| `QUEEN_S3_COMPRESSION` | `compression` | `zstd` | `zstd`, `gzip` or `none`, for `jsonl` objects. Spark's JSONL path and pandas cannot read zstd out of the box and both read `gzip`; [the reader matrix](/reference/s3#reader-recipes) has the rest. |
+| `QUEEN_S3_PARQUET_CODEC` | `parquetCodec` | `zstd` | `zstd` or `snappy`, for `parquet` objects, which carry their codec inside the file. |
+| `QUEEN_S3_LAYOUT` | `layout` | `merged` | `merged`, one object per window with the partition as a column, or `per-partition`, one object per window per partition. `merged` is the shape that survives a million partitions. |
+| `QUEEN_S3_ALIGN` | `align` | `hour` | `hour`, `day` or `none`: the Hive bucket a window may not straddle, which keeps `dt=` and `hour=` exact for every record of an object. With `none` they name the hour the window starts in. |
+| `QUEEN_S3_START` | `start` | `latest` | Where a queue with **no commit pointer** starts: `latest`, at the `safeTime` of its first discovery, or `earliest`, everything retention still holds. Read [backfill](#scaling-and-backfill) before choosing `earliest`. |
+| `QUEEN_S3_TARGET_MB` | `targetMb` | `128` | Close a window once this many **uncompressed** megabytes are buffered for it. 1 to 5120. |
+| `QUEEN_S3_MAX_WINDOW_MS` | `maxWindowMs` | `300000` | Close a window once it is this old on the broker's clock, unless its size or an alignment boundary closed it first. 100 to 86,400,000. The lag to expect is about this. |
+| `QUEEN_S3_PARTITIONS` | none | unset | A static partition list. Set, it stops the boot: a window may close only at or below `safeTime`, which discovery answers, and a static list never discovers. |
+
+`QUEEN_S3_LISTEN` and `QUEEN_S3_LOG_FORMAT` belonged to the standalone 1.5.0 sink and mean nothing
+in-process: set, they are named in one warning at boot and otherwise ignored. `QUEEN_S3_BIN` is not
+read. The sink reads no `QUEEN_URL` and no `QUEEN_TOKEN`: it calls the broker in-process. Its log lines
+go through the broker's logging (`LOG_LEVEL`, `RUST_LOG`, `QUEEN_LOG_JSON`) under the target
+`queen-s3`.
+
+## The S3 side
+
+Any S3 API works: AWS, DigitalOcean Spaces, Cloudflare R2, and versitygw, which the tests run against.
+The sink uses **no conditional PUT, no LIST on the correctness path and no read-after-write
+assumption**: a retried upload of a window is byte-identical, and overwriting a key with the same bytes
+is the whole idempotency story. That is what makes it work on a gateway whose LIST is eventually
+consistent and on a service with no conditional PUT to offer. The one LIST it makes, of a queue's
+checkpoints when it takes the queue, is an optimisation: when it fails, the queue starts from its
+commit pointer alone.
+
+Integrity is checked both ways the protocol offers. A single PUT sends `Content-MD5` and compares the
+answer's `ETag` with the MD5 it computed; a completed multipart upload's `ETag` carries a `-<parts>`
+suffix, and the part count is compared with the number of parts sent. Two shapes are not the ones
+integrity is defined over, and both are logged at debug rather than failed: an `ETag` under SSE-KMS,
+which is opaque by an AWS rule, and a multipart `ETag` with no suffix, which some gateways answer.
+
+**Set an encryption policy on the bucket.** `AES256` puts the header on every PUT, and `aws:kms` with a
+key id makes the KMS key policy the real access control. Say plainly what that protects: **the bucket
+holds a decrypted copy of the log.** The node that runs a queue decrypts each payload with its own
+`QUEEN_ENCRYPTION_KEY` before writing it, so a queue encrypted at rest inside Queen is plaintext in the
+lake, and the key has to be the same on every node.
+
+### The bucket policy, least privilege
+
+Four verbs, and none of them a delete: the sink never deletes an object, data, manifest or checkpoint.
+Each tenant's credentials need them on that tenant's bucket and prefix.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "ListPrefix",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::my-lake",
+      "Condition": { "StringLike": { "s3:prefix": ["queen/*"] } } },
+    { "Sid": "WriteAndRead",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:AbortMultipartUpload"],
+      "Resource": "arn:aws:s3:::my-lake/queen/*" }
+  ]
+}
+```
+
+`queen/` is the prefix. Add an `AbortIncompleteMultipartUpload` lifecycle rule while you are there:
+the sink aborts a multipart upload that fails, but a node killed between two parts leaves one behind,
+and a lifecycle rule is what collects it. Checkpoints accumulate, one every
+`QUEEN_S3_CHECKPOINT_EVERY` windows per queue. They are a cache: removing any of them costs a slower
+restart and nothing else.
+
+## Memory and threads
+
+The sinks' own work, the window buffers, the encoding and the uploads, runs on one runtime whose
+threads are named `queen-s3`, shared by every tenant's sink. Every call into the broker is handed to
+the broker's runtime, so broker code never runs on a sink thread. A panic on a sink thread ends its
+task and nothing else. A queue task that panics is reported in the status and started again a minute
+later. If a tenant's sink as a whole stops on its own, it is rebuilt on a backoff that doubles from one
+second to thirty and resets after an hour of healthy running; `phase`, `restarts` and `lastExit` in its
+status entry say so.
+
+What in-process does not contain is memory. The window buffers are the broker's memory now:
+`QUEEN_S3_MEMORY_MB` bounds the records buffered across every queue of every tenant's sink on the node,
+counted uncompressed. Past it, the queue holding the most, whichever tenant's it is, closes its window
+early, at the largest boundary that is still legal. A queue that cannot close yet, because a partition
+below the boundary is still unread, keeps its buffer, so the budget is a backstop rather than a hard
+limit. On top of the buffers, closing a window builds its object in memory before the upload. An
+allocation failure, or the kernel's OOM killer, takes the whole broker: **size the container for the
+broker and the sinks together.**
+
+## Stopping, and the grace
+
+The stop signal starts every sink's drain at once, beside the broker's own (the ephemeral partitions
+handed to their next owners, the leadership handed to a caught-up voter, the HTTP listener draining):
+
+- every queue stops reading;
+- a window already in its commit sequence is finished; failing that, the window being filled is closed
+  and committed if it is worth it: at least 1 MiB buffered, or anything buffered once the window has
+  been open ten seconds on the broker's clock. One window per queue at most, then the queue stops;
+- every lease is given back, so another node takes the queue at its next look instead of waiting out
+  the TTL. On a node that leads, the drain runs while it hands its leadership over, so a release that
+  meets no leader is tried again for up to ten seconds before the lease is left to expire.
+
+The window a drain closes ends where every window ends: at the node's `safeTime`, less
+`QUEEN_S3_SAFE_GUARD_MS`. Records pushed in the last five seconds before the signal (with the
+default guard) are not in it. They are not lost either: the queue's next owner writes them in its
+first window, once.
+
+Once the listener has drained, and the Kafka facade has stopped when it runs, the broker waits for what
+is left of `QUEEN_S3_SHUTDOWN_GRACE_MS`, counted from the signal, and goes on to exit. Thirty seconds and
+not the Kafka facade's five, because a stopping sink may have an upload in flight, and a bucket that
+does not answer keeps it retrying until the grace runs out. A drain cut short loses nothing: the next
+owner finds the window's intent and writes the same object under the same key. What it costs is time,
+because a node that did not finish never gave its leases back, and its queues wait out the TTL.
+
+## On Kubernetes
+
+The repository ships no Helm chart. In a manifest like [the Kubernetes page's](/deploy/kubernetes), five
+things change.
+
+- **Every replica gets the same `QUEEN_S3_*` environment.** That is the design: the leases decide which
+  pod writes which queue, and a pod that goes away hands its queues to the others.
+- **The secrets come from a Secret**, like `QUEEN_RAFT_TOKEN`: the default tenant's S3 keypair and,
+  when tenants configure sinks through the control plane, `QUEEN_ENCRYPTION_KEY`, the same on every pod.
+- **`terminationGracePeriodSeconds` covers the sink too.** It already covers the leadership hand-off and
+  the longest long-poll pop the listener drains
+  ([the fields that are not obvious](/deploy/kubernetes#the-fields-that-are-not-obvious)). The sink's
+  grace runs beside those from the signal, so the period has to cover the longer of the two: the
+  sink's grace, or the rest of the shutdown (the hand-off, the listener's drain, and the Kafka
+  facade's grace when it runs). A pod killed before the sink finished is a redone window and a TTL of
+  waiting, not a hole in the lake.
+- **The memory request and limit cover the sink too**: the broker's own figure, plus
+  `QUEEN_S3_MEMORY_MB`, plus the object a closing window builds.
+- **Leave `QUEEN_S3_INSTANCE` unset.** With `QUEEN_RAFT_NODE_ID=ordinal` the default names the pod,
+  `node-1@queen-0` for pod `queen-0`, which is one name per pod and the same after a restart.
+
+There is nothing else to deploy, scrape or probe. The sinks' families are on the broker's own
+`/metrics/prometheus`, their state is in the broker's `GET /status`, and `/health` does not look at
+them.
+
+## The status block
+
+`GET /status` on a node running the sink carries an `s3` object describing that node's sinks. The route
+is answered by the node asked, so read it on each node.
+
+```json
+{
+  "status": "ok",
+  "engine": "segments-rust",
+  "s3": {
+    "mode": "in-process",
+    "phase": "running",
+    "threads": 2,
+    "controlPlane": { "error": null },
+    "sinks": [
+      { "tenant": "00000000-0000-0000-0000-000000000001", "source": "env", "cluster": null,
+        "phase": "running", "error": null, "restarts": 0, "lastExit": null,
+        "uptimeMs": 5400123, "backoffMs": 0,
+        "ok": true, "sink": "default", "instance": "node-2@queen-1", "version": "2.0.0",
+        "running": true,
+        "bucket": { "reachable": true, "error": null, "checkedAt": "2026-10-02T09:00:01.120000Z",
+                    "name": "my-lake", "endpoint": "https://s3.eu-central-1.amazonaws.com",
+                    "region": "eu-central-1", "prefix": "queen" },
+        "format": "jsonl", "compression": "zstd", "layout": "merged", "align": "hour",
+        "health": { "ok": true, "queues": 1 },
+        "memory": { "bufferedBytes": 1048576, "limitBytes": 536870912 },
+        "queues": [
+          { "name": "orders", "ownedHere": true, "heldBy": null, "state": "filling",
+            "k": 1842, "tEnd": "2026-10-02T10:05:00.000000Z",
+            "completeThrough": "2026-10-02T10:05:00.000000Z",
+            "safeTime": "2026-10-02T10:07:12.402113Z", "lagSeconds": 132.402113, "redo": false,
+            "bufferedBytes": 1048576, "partitions": 5183, "windowsCommitted": 18,
+            "records": 918442, "bytes": 44139012, "recordsLost": 0, "lastError": null },
+          { "name": "clicks", "ownedHere": false, "heldBy": "node-1@queen-0", "state": "held",
+            "k": 0, "tEnd": null, "completeThrough": null, "safeTime": null, "lagSeconds": null,
+            "redo": false, "bufferedBytes": 0, "partitions": 0, "windowsCommitted": 0,
+            "records": 0, "bytes": 0, "recordsLost": 0, "lastError": null }
+        ] },
+      { "tenant": "0199a6f2-7c4d-7e1a-9b3c-5d2e8f4a6b10", "source": "cp",
+        "cluster": "0199a6f2-7b11-7f02-8c44-1e6d9a2b3c55", "phase": "error",
+        "error": "the S3 secret cannot be opened on this node: QUEEN_ENCRYPTION_KEY is unset or differs from the key of the node that sealed it (every node needs the same key)",
+        "restarts": 0, "lastExit": null, "uptimeMs": 0, "backoffMs": 0 }
+    ]
+  }
+}
+```
+
+- `phase` at the top is the manager's: `starting`, `running` or `stopped`. `controlPlane.error` is the
+  last failed read of the control plane's sink rows, `null` once a read succeeds; the sinks already
+  running are kept meanwhile.
+- `sinks` has one entry per tenant sink on this node. `tenant` is the broker tenant, `source` is `env`
+  or `cp`, and `cluster` is the control-plane cluster's id (`null` for `env`). Its `phase` is
+  `starting`, `running`, `backoff` (the sink stopped on its own and is rebuilt after `backoffMs`),
+  `stopped`, or `error`, with `error` saying why nothing runs: a secret this node cannot open, or
+  settings it refuses. The rest of an entry is the sink's own report, present once it has been built.
+- `ok` is `false` when the health verdict is, or when the bucket did not answer the probe the sink makes
+  before it starts its queues (`bucket.reachable`, `bucket.error`). `version` is the sink crate's.
+- `health` is `{"ok":true,"queues":N}`, N being the queues this node runs for the tenant, or
+  `{"ok":false,"queue":…,"staleMs":…,"limitMs":…}`. It turns red when a queue this node runs lags more
+  than three times `QUEEN_S3_MAX_WINDOW_MS` (at least 30 seconds), and names the first such queue so the
+  answer is stable.
+- `memory` is the node's one budget, the same in every entry.
+- `queues` has a row for every queue of the sink, owned here or not. `state` is `claiming`, `held`
+  (another node owns it, named by `heldBy`), `restoring`, then the commit sequence (`filling`, `intent`,
+  `upload`, `commit`), or how this node's last run of the queue ended: `drained`, `fenced`, `failed`,
+  `missing` (the queue does not exist) or `crashed`. `k` and `tEnd` are the last committed window as
+  this node knows it, `completeThrough` is the stamp the lake is complete through and `lagSeconds` is
+  `safeTime` minus it, `redo` says a window is being rebuilt from its intent, and `windowsCommitted`,
+  `records`, `bytes` and `recordsLost` count what this node committed since its sink started.
+  `lastError` keeps the last failure, with this node's wall clock, until a newer one replaces it.
+
+## The lag to alarm on
+
+**`queen_s3_lag_seconds{queue}` is the number to alarm on.** It is the distance, on the owning node's
+log clock, from that node's `safeTime` to `completeThrough`: the stamp below which every record of the
+queue is in a committed window or provably absent. That is the last committed window's end, or later
+when the queue has been read to its end with nothing buffered, so an idle queue stays at about the guard
+plus a discovery interval. On a queue that is being written the lag climbs to a little past
+`QUEEN_S3_MAX_WINDOW_MS`, falls back when the window commits, and climbs again. The health verdict
+allows three windows; alarm at a multiple of the window, not at the window. A backfill, or a sink that
+was stopped for a while, lags by exactly how far behind it is until it catches up.
+`queen_s3_safe_lag_seconds` is the other half: how far the node's applied log trails its own wall
+clock, which grows on a follower that falls behind. Their sum is how far the lake trails now.
+
+A node exports a queue's gauges only while it runs the queue, and every series of a tenant other than
+the default one carries `tenant="<id>"`. Every family is listed on
+[the Prometheus page](/reference/prometheus#the-s3-sink-families).
+
+The lag is worth an alarm because of what sits behind it. If retention deletes records before the sink
+read them, that is **the one failure that loses data**, and the lag was rising for hours beforehand. The
+loss itself is never silent: the offset range goes into the window's manifest as `lost`, counts on
+`queen_s3_records_lost_total{queue}`, is logged when that window commits, and the sink resumes from the
+new start of the log and keeps committing, because a stalled sink loses more than a lagging one
+([retention overrun](/reference/s3#retention-overrun)).
+
+The rule that prevents it: **a queue's `retentionSeconds` must comfortably exceed
+`QUEEN_S3_MAX_WINDOW_MS` plus the longest outage the sink is expected to survive.** Five minutes of
+window against a day of retention is not a decision anybody has to think about; five minutes of window
+against ten minutes of retention is one bad deploy away from a hole. Or make it structural, with the
+hold.
+
+## The retention hold
+
+A queue can name the sink that has to keep up with it, in two options on `POST /api/v1/configure`:
+
+| Queue option | Default | What it does |
+| --- | --- | --- |
+| `retentionSinkHold` | `""`, off | The sink's name (`QUEEN_S3_SINK`, or `sink` in a tenant's document), matching `[A-Za-z0-9._-]{0,64}`. Retention keeps every record that sink has not committed yet. A name outside the charset is refused with `400` and the queue keeps its configuration. |
+| `retentionSinkHoldMaxSeconds` | `604800` | The ceiling on the hold, seven days. 60 to 31,536,000; outside it, refused the same way. |
+
+The floor retention applies is the later of two instants: the commit pointer's `tEnd` minus 60 seconds,
+and now minus `retentionSinkHoldMaxSeconds`. `tEnd` is read from the key/value row
+`s3:<sink>:<queue>:committed`, namespace `queen-s3`, in the queue's own tenant, which is where that
+tenant's sink writes it. The two age rules, `retentionSeconds` and `completedRetentionSeconds`, delete
+nothing stamped after the floor. The minute of slack is paid in kept bytes, never in lost ones. The cap
+is what makes the option safe: a stopped sink cannot hold retention for ever, and a queue whose sink has
+not committed yet, or whose pointer cannot be read, keeps everything younger than the cap, so the hold
+protects from the moment it is set.
+
+The hold does not cover `maxWaitTimeSeconds`, which deletes by age for every group by design, nor the
+deduplication index, nor the removal of an empty idle partition, which has nothing left to hold.
+
+<Aside type="note">
+The 1.5.0 sink wrote `tEnd` as integer microseconds, which the hold could not read, so a 1.5.0 hold
+always sat at its cap. This sink writes the ISO-8601 timestamp the hold reads, and the hold follows it.
+</Aside>
+
+## Scaling and backfill
+
+**Windows are per queue, so one queue's throughput is one node's.** More nodes spread more queues,
+least-loaded first. Several sinks with different names can mirror the same queue, each with its own
+leases and pointers, as long as each writes under its own prefix.
+
+<Aside type="caution">
+**`QUEEN_S3_START=earliest` reads everything retention still holds.** On a queue with a week of
+retention that is a week of log through the fetch path of the owning node, and an object-store bill to
+match. `QUEEN_S3_FETCH_CONCURRENCY` is the throttle. The default, `latest`, is the one that surprises
+nobody, and a backfill is a decision to take deliberately, with the concurrency turned down.
+</Aside>
+
+**Coming from the 1.5.0 sink**, point the 2.0 sink at a new prefix or a new bucket. Its commit pointers
+lived in the 1.x key/value store, which 2.0 does not read, so it starts every queue again at window 1.
+Its keys never meet the 1.5.0 ones, since they start with `tenant=`, but a reader that discovers Hive
+partitions from the root would find both layouts side by side.
+
+## What the boot log says
+
+Every sink logs one line under `queen-s3` when it is built (the default tenant's at boot, a
+control-plane tenant's when the manager starts it, and again whenever one is rebuilt), and it is the one
+to compare against what the bucket actually contains:
+
+```text
+queen-s3 2.0.0 tenant=00000000-0000-0000-0000-000000000001 sink=default instance=node-2@queen-1
+  queues=orders,clicks partitions=discovery s3=https://s3.eu-central-1.amazonaws.com bucket=my-lake
+  prefix=queen region=eu-central-1 addressing=virtual-host sse=AES256 format=jsonl compression=zstd
+  layout=merged align=hour target_mb=128 max_window_ms=300000 start=latest checkpoint_every=20
+  memory_mb=512 fetch_concurrency=4 discovery_interval_ms=2000 safe_guard_ms=5000
+  lease_ttl_ms=30000 multipart_threshold_mb=64 crash_at=never
+```
+
+Every enumerated value is printed the way the **environment** spells it, `per-partition` and not
+`PerPartition`, so the line can be pasted back into a manifest. The secret key is never printed, and an
+`aws:kms` key id is printed as its last four characters. Beside it the broker logs `config: s3_sink`
+with the shutdown grace, and `starting the S3 sink in-process` with the thread count and whether the
+environment configures a sink.
+
+The connector's unit tests, `rustfmt` and `clippy` run in a CI job of their own, `s3-sink` in
+`.github/workflows/tests.yml`, on the connector's own manifest.

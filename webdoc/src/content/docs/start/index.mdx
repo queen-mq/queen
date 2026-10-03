@@ -21,8 +21,9 @@ digest: >-
   does. A deployment is one node, or a raft cluster of three or five voters that keeps serving
   through the loss of a minority; one leader orders every write and every node holds a full copy.
   Partitions scale application cardinality, nodes buy availability, raft groups spread tenants over
-  leaders, and cells scale the deployment. The proxy (API keys, tenants, quotas) and the Kafka
-  facade run inside the same process when switched on. Apache 2.0, ghcr.io/queen-mq/queen.
+  leaders, and cells scale the deployment. The proxy (API keys, tenants, quotas), the Kafka
+  facade and the S3 data-lake sink run inside the same process when switched on. Apache 2.0,
+  ghcr.io/queen-mq/queen.
 ---
 
 **High-performance transactional messaging for applications that need an ordered stream per
@@ -231,6 +232,12 @@ the physical deployment it runs on. A cluster lives on exactly one cell and neve
   advertises 32 Kafka API keys, so an unmodified Kafka producer or consumer reaches Queen by
   changing `bootstrap.servers` and nothing else. The contract is [reference/kafka](/reference/kafka),
   running it is [deploy/kafka](/deploy/kafka).
+- **A data-lake sink**, in the same process and off until you switch it on. Each queue's log is
+  written into an S3-compatible bucket as JSONL or Parquet under a Hive layout, exactly once, by
+  whichever node of the cluster holds the queue's lease, and a queue's retention can wait for it.
+  Each tenant can have a sink and a bucket of its own.
+  What lands in the bucket is [reference/s3](/reference/s3), running it is
+  [deploy/s3](/deploy/s3).
 
 ## When something else is the better tool
 

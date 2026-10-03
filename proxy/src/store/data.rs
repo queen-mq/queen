@@ -1,5 +1,6 @@
 //! W3 data plane repositories (PLAN_SINGLE_BINARY.md W3): tenants, cells,
-//! plans, clusters, cluster_roles, api_keys, revoked_tokens, queues.
+//! plans, clusters, cluster_roles, api_keys, revoked_tokens, queues, and each
+//! cluster's S3 sink.
 //!
 //! Every function answers from [`Store`]:
 //!
@@ -37,8 +38,8 @@ use uuid::Uuid;
 
 use super::kv::{self, Doc, Expect, KvBackend, KvError, Ttl};
 use super::schema::{
-    self, ns, ApiKeyDoc, CellDoc, ClusterDoc, IdentityDoc, OperationDoc, OutboxDoc, PlanDoc, QueueDoc, RevokedDoc,
-    RoleDoc, TenantDoc, UserDoc, K,
+    self, ns, ApiKeyDoc, CellDoc, ClusterDoc, IdentityDoc, OperationDoc, OutboxDoc, PlanDoc,
+    QueueDoc, RevokedDoc, RoleDoc, S3SinkDoc, TenantDoc, UserDoc, K,
 };
 use super::Store;
 use crate::state::{ClusterCtx, EffectiveLimits, Scopes};
@@ -2364,6 +2365,8 @@ async fn kv_delete_tenant_once(kv: &dyn KvBackend, tenant_id: Uuid, force: bool)
                 dels.push((n, k));
             }
         }
+        // its S3 sink: the broker's manager stops the sink when the row goes
+        dels.push((ns::S3SINKS, schema::key(c)));
     }
     for cl in &clusters {
         dels.push((ns::CLUSTER_SLUG, schema::key(&cl.slug)));
@@ -3437,6 +3440,267 @@ pub async fn activity_clusters(
 }
 
 // ===========================================================================
+// S3 sinks (`/api/cp/clusters/:slug/s3`, cp.rs)
+// ===========================================================================
+//
+// One row per cluster (`px.s3sinks #<cluster>`), read by the broker's sink
+// manager with one getPrefix. The secret arrives here only as the broker
+// sealed it (`S3Sinks::seal`, the cell's QUEEN_ENCRYPTION_KEY): nothing in
+// this module sees it in clear, and no message names the sealed string.
+
+/// The largest sink config one row takes, serialized: the row stays well under
+/// the broker's KV value ceiling (64 KiB by default) with the sealed secret
+/// beside it, so a config too big is a 400, never a write the KV refuses.
+pub const S3_CONFIG_MAX_BYTES: usize = 32 * 1024;
+
+/// A sink config as a row stores it: a JSON object of at most
+/// [`S3_CONFIG_MAX_BYTES`], with no field named like a secret (the one secret
+/// is `secretKey`, which never reaches the config: it is sealed apart). Its
+/// fields are the broker's to check (`S3Sinks::validate`), not this one's.
+pub fn check_s3_config(v: &Value) -> Result<(), DataError> {
+    let Some(o) = v.as_object() else {
+        return Err(DataError::Invalid(
+            "s3 sink: the config must be a JSON object".into(),
+        ));
+    };
+    if let Some(k) = o.keys().find(|k| k.to_ascii_lowercase().contains("secret")) {
+        return Err(DataError::Invalid(format!(
+            "s3 sink: {} is named like a secret: the one secret field is secretKey, which is only ever \
+             stored sealed",
+            shown(k)
+        )));
+    }
+    let n = serde_json::to_vec(v).map_or(usize::MAX, |b| b.len());
+    if n > S3_CONFIG_MAX_BYTES {
+        return Err(DataError::Invalid(format!(
+            "s3 sink: the config is {n} bytes, more than the {S3_CONFIG_MAX_BYTES} one sink row holds"
+        )));
+    }
+    Ok(())
+}
+
+/// A cluster's S3 sink row, if it has one.
+pub async fn s3_sink(store: &Store, cluster_id: Uuid) -> Result<Option<S3SinkDoc>, DataError> {
+    match store {
+        Store::Kv(kv) => Ok(
+            read1::<S3SinkDoc>(kv.as_ref(), ns::S3SINKS, &schema::key(cluster_id))
+                .await?
+                .map(|d| d.value),
+        ),
+        Store::None => Ok(None),
+    }
+}
+
+/// What [`put_s3_sink`] writes.
+#[derive(Clone)]
+pub struct S3SinkPut {
+    /// Whether the broker runs the sink.
+    pub enabled: bool,
+    /// The sink config as `S3Sinks::validate` accepted it.
+    pub config: Value,
+    /// The request's secret as `S3Sinks::seal` returned it; `None` keeps the
+    /// stored one.
+    pub secret_key_sealed: Option<String>,
+}
+
+/// The stored row as a write finds it: its version, and its document when it
+/// decodes (a row that does not is overwritten or removed, never a 503 that
+/// no retry gets past).
+fn s3_row(r: Option<&Value>) -> Result<Option<(u64, Option<S3SinkDoc>)>, DataError> {
+    Ok(got::<Value>(r)?.map(|d| (d.version, serde_json::from_value::<S3SinkDoc>(d.value).ok())))
+}
+
+/// Set a cluster's S3 sink -> the row as it now is; `None` for no such
+/// cluster. Refused: a cluster or tenant being deleted ([`DataError::Refused`]
+/// `deleting`; the batch carries both documents' versions, so a wipe that
+/// begins between the read and the write is what the retry reads), a config
+/// [`check_s3_config`] refuses, and no secret while the cluster has no row
+/// to keep one from.
+///
+/// Idempotent: a call without a secret that changes nothing writes nothing and
+/// answers the row as it is. A given secret is always written (its sealed
+/// bytes differ per seal, so a new secret cannot be told from a repeated
+/// one), and every write moves `updated_at_us`, the row's revision: the
+/// broker's sink manager rebuilds a tenant's sink when it moves, which is how
+/// a rotated secret reaches the sink.
+pub async fn put_s3_sink(
+    store: &Store,
+    cluster_id: Uuid,
+    p: &S3SinkPut,
+) -> Result<Option<S3SinkDoc>, DataError> {
+    match store {
+        Store::Kv(kv) => {
+            let kv = kv.as_ref();
+            check_s3_config(&p.config)?;
+            if p.secret_key_sealed.as_deref().is_some_and(str::is_empty) {
+                return Err(DataError::Invalid(
+                    "s3 sink: the sealed secret is empty".into(),
+                ));
+            }
+            attempts!(kv_put_s3_sink_once(kv, cluster_id, p).await)
+        }
+        Store::None => Err(DataError::NoStore),
+    }
+}
+
+/// [`put_s3_sink`]'s refusal of a first sink without a secret.
+fn secret_required(slug: &str) -> DataError {
+    DataError::Invalid(format!(
+        "s3 sink: secretKey is required: cluster {slug} has no S3 sink yet, so there is no stored \
+         secret to keep"
+    ))
+}
+
+async fn kv_put_s3_sink_once(
+    kv: &dyn KvBackend,
+    cluster_id: Uuid,
+    p: &S3SinkPut,
+) -> Result<Option<S3SinkDoc>, WriteErr> {
+    let key = schema::key(cluster_id);
+    let out = gets(
+        kv,
+        &[(ns::CLUSTERS, key.clone()), (ns::S3SINKS, key.clone())],
+    )
+    .await?;
+    let Some(c) = got::<ClusterDoc>(out.first())? else {
+        return Ok(None);
+    };
+    let row = s3_row(out.get(1))?;
+    let deleting = || {
+        WriteErr::Fail(DataError::Refused {
+            code: "deleting",
+            msg: format!(
+                "s3 sink: cluster {} or its tenant is deleting: no sink is set during a wipe",
+                c.value.slug
+            ),
+        })
+    };
+    // A tenant document already gone is a wipe in progress too.
+    let Some(t) = read1::<TenantDoc>(kv, ns::TENANTS, &schema::key(c.value.tenant_id)).await?
+    else {
+        return Err(deleting());
+    };
+    if c.value.status == "deleting" || t.value.status == "deleting" {
+        return Err(deleting());
+    }
+    let old = row.as_ref().and_then(|(_, d)| d.as_ref());
+    let sealed = match (&p.secret_key_sealed, old) {
+        (Some(s), _) => s.clone(),
+        (None, Some(o)) => o.secret_key_sealed.clone(),
+        (None, None) => return Err(secret_required(&c.value.slug).into()),
+    };
+    let unchanged = old.filter(|o| {
+        p.secret_key_sealed.is_none()
+            && o.enabled == p.enabled
+            && o.config == p.config
+            && o.broker_tenant == c.value.broker_tenant_uuid
+    });
+    if let Some(o) = unchanged {
+        return Ok(Some(o.clone()));
+    }
+    let now = now_us();
+    let doc = S3SinkDoc {
+        cluster_id,
+        broker_tenant: c.value.broker_tenant_uuid,
+        enabled: p.enabled,
+        config: p.config.clone(),
+        secret_key_sealed: sealed,
+        updated_at_us: now,
+    };
+    let mut b = Batch::default();
+    match &row {
+        Some((version, _)) => b.put_at(ns::S3SINKS, &key, &doc, *version),
+        None => b.put_new(ns::S3SINKS, &key, &doc),
+    }
+    // The cluster and its tenant as read, rewritten under their versions (the
+    // KV has no check-only op): a status set between the read and this batch
+    // fails it, and the retry reads the wipe.
+    b.put_at(ns::CLUSTERS, &key, &c.value, c.version);
+    b.put_at(ns::TENANTS, &schema::key(t.value.id), &t.value, t.version);
+    let secret = if p.secret_key_sealed.is_some() {
+        "set"
+    } else {
+        "kept"
+    };
+    record_op(
+        &mut b,
+        now,
+        t.value.id,
+        Some(cluster_id),
+        "control_plane",
+        None,
+        "s3_sink_set",
+        Some(cluster_id.to_string()),
+        json!({"enabled": p.enabled, "secret": secret}),
+    );
+    commit(kv, b).await?;
+    Ok(Some(doc))
+}
+
+/// Remove a cluster's S3 sink -> whether it had one. Idempotent.
+pub async fn delete_s3_sink(store: &Store, cluster_id: Uuid) -> Result<bool, DataError> {
+    match store {
+        Store::Kv(kv) => {
+            let kv = kv.as_ref();
+            attempts!(
+                async {
+                    let key = schema::key(cluster_id);
+                    let out = gets(
+                        kv,
+                        &[(ns::S3SINKS, key.clone()), (ns::CLUSTERS, key.clone())],
+                    )
+                    .await?;
+                    let Some((version, _)) = s3_row(out.first())? else {
+                        return Ok(false);
+                    };
+                    let mut b = Batch::default();
+                    b.del_at(ns::S3SINKS, &key, version);
+                    if let Some(c) = got::<ClusterDoc>(out.get(1))? {
+                        record_op(
+                            &mut b,
+                            now_us(),
+                            c.value.tenant_id,
+                            Some(cluster_id),
+                            "control_plane",
+                            None,
+                            "s3_sink_removed",
+                            Some(cluster_id.to_string()),
+                            json!({}),
+                        );
+                    }
+                    commit(kv, b).await.map(|_| true)
+                }
+                .await
+            )
+        }
+        Store::None => Err(DataError::NoStore),
+    }
+}
+
+/// Remove the S3 sinks of `clusters` (a tenant's, before its purge) -> how
+/// many there were. Idempotent.
+pub async fn delete_s3_sinks(store: &Store, clusters: &[Uuid]) -> Result<usize, DataError> {
+    match store {
+        Store::Kv(kv) => {
+            let kv = kv.as_ref();
+            let keys: BTreeSet<String> = clusters.iter().map(schema::key).collect();
+            let keys: Vec<String> = keys.into_iter().collect();
+            let mut removed = 0;
+            for chunk in keys.chunks(CHUNK_OPS) {
+                let ops = chunk
+                    .iter()
+                    .map(|k| kv::delete_op(ns::S3SINKS, k, Expect::Any, false))
+                    .collect();
+                let written = kv::write(kv, ops).await.map_err(DataError::kv)?;
+                removed += written.iter().filter(|w| w.applied).count();
+            }
+            Ok(removed)
+        }
+        Store::None => Ok(0),
+    }
+}
+
+// ===========================================================================
 // catalog seeding
 // ===========================================================================
 
@@ -4272,6 +4536,14 @@ mod tests {
         revoke_session(&s, "j", now_us() / 1_000_000 + 60, "user", u)
             .await
             .unwrap();
+        for cluster in [c, other_c] {
+            let sink = S3SinkPut {
+                enabled: true,
+                config: json!({"bucket": "lake"}),
+                secret_key_sealed: Some("sealed".into()),
+            };
+            put_s3_sink(&s, cluster, &sink).await.unwrap().unwrap();
+        }
 
         let err = delete_tenant(&s, t, false).await.unwrap_err();
         assert!(
@@ -4323,6 +4595,7 @@ mod tests {
         assert_eq!(kv.0.keys(ns::KEY_CLUSTER).len(), 1);
         assert_eq!(kv.0.keys(ns::QUEUES).len(), 1);
         assert_eq!(kv.0.keys(ns::QUEUE_NAME).len(), 1);
+        assert_eq!(kv.0.keys(ns::S3SINKS), vec![schema::key(other_c)]);
         assert!(kv.0.keys(ns::OPS).iter().all(|k| !k.starts_with(&schema::prefix(t))));
         assert!(kv
             .0
@@ -5014,6 +5287,150 @@ mod tests {
                 self.inner.kv(ops).await
             })
         }
+    }
+
+    fn sink_put(sealed: Option<&str>, enabled: bool) -> S3SinkPut {
+        S3SinkPut {
+            enabled,
+            config: json!({"bucket": "lake"}),
+            secret_key_sealed: sealed.map(str::to_string),
+        }
+    }
+
+    /// A sink row: no secret until there is one to keep, kept when omitted,
+    /// nothing written for a repeat, a row that does not decode overwritten
+    /// or removed rather than stuck, and no sink for a tenant being wiped.
+    #[tokio::test]
+    async fn s3_sink_rows_keep_their_secret_and_refuse_a_wipe() {
+        let (s, kv) = store();
+        let (t, c, _, _) = world(&s).await;
+        let err = put_s3_sink(&s, c, &sink_put(None, true)).await.unwrap_err();
+        assert!(
+            matches!(&err, DataError::Invalid(m) if m.contains("secretKey is required")),
+            "{err}"
+        );
+        let nobody = put_s3_sink(&s, Uuid::new_v4(), &sink_put(Some("x"), true)).await;
+        assert_eq!(nobody, Ok(None), "no such cluster");
+        for bad in [
+            json!([1]),
+            json!({"bucket": "lake", "awsSecret": "x"}),
+            json!({"bucket": "a".repeat(S3_CONFIG_MAX_BYTES)}),
+        ] {
+            let p = S3SinkPut {
+                config: bad,
+                ..sink_put(Some("x"), true)
+            };
+            assert!(matches!(
+                put_s3_sink(&s, c, &p).await,
+                Err(DataError::Invalid(_))
+            ));
+        }
+        assert!(kv.0.keys(ns::S3SINKS).is_empty());
+
+        let first = put_s3_sink(&s, c, &sink_put(Some("sealed-1"), true))
+            .await
+            .unwrap()
+            .unwrap();
+        let kept = put_s3_sink(&s, c, &sink_put(None, false))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (kept.secret_key_sealed.as_str(), kept.enabled),
+            ("sealed-1", false)
+        );
+        assert!(kept.updated_at_us >= first.updated_at_us);
+        assert_eq!(s3_sink(&s, c).await.unwrap(), Some(kept.clone()));
+        let key = schema::key(c);
+        let v1 = kv::get::<Value>(&kv.0, ns::S3SINKS, &key)
+            .await
+            .unwrap()
+            .unwrap()
+            .version;
+        let again = put_s3_sink(&s, c, &sink_put(None, false)).await.unwrap();
+        assert_eq!(again, Some(kept));
+        let v2 = kv::get::<Value>(&kv.0, ns::S3SINKS, &key)
+            .await
+            .unwrap()
+            .unwrap()
+            .version;
+        assert_eq!(v2, v1, "a repeat writes nothing");
+
+        let garbage = || {
+            let junk = json!({"v": 0});
+            kv::put_op(ns::S3SINKS, &key, &junk, Expect::Any, Ttl::Forever, false)
+        };
+        kv::write(&kv.0, vec![garbage()]).await.unwrap();
+        assert!(matches!(
+            s3_sink(&s, c).await,
+            Err(DataError::Unavailable(_))
+        ));
+        assert!(matches!(
+            put_s3_sink(&s, c, &sink_put(None, true)).await,
+            Err(DataError::Invalid(_))
+        ));
+        let fixed = put_s3_sink(&s, c, &sink_put(Some("sealed-2"), true))
+            .await
+            .unwrap();
+        assert_eq!(s3_sink(&s, c).await.unwrap(), fixed);
+        kv::write(&kv.0, vec![garbage()]).await.unwrap();
+        assert!(delete_s3_sink(&s, c).await.unwrap());
+        assert!(!delete_s3_sink(&s, c).await.unwrap());
+
+        set_tenant_status(&s, t, "deleting").await.unwrap();
+        let err = put_s3_sink(&s, c, &sink_put(Some("sealed-3"), true))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DataError::Refused {
+                    code: "deleting",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(kv.0.keys(ns::S3SINKS).is_empty());
+        assert_eq!(delete_s3_sinks(&s, &[c, c, Uuid::new_v4()]).await, Ok(0));
+        assert_eq!(delete_s3_sinks(&Store::None, &[c]).await, Ok(0));
+        assert_eq!(
+            put_s3_sink(&Store::None, c, &sink_put(Some("x"), true)).await,
+            Err(DataError::NoStore)
+        );
+    }
+
+    /// A wipe that begins between the read and the write of a sink is what
+    /// the retry reads: the batch carries the tenant's version.
+    #[tokio::test]
+    async fn an_s3_sink_set_as_a_wipe_begins_is_refused() {
+        let inner = Arc::new(StrictKv(MemKv::new()));
+        let racing = Arc::new(Racing {
+            inner: inner.clone(),
+            armed: std::sync::atomic::AtomicBool::new(false),
+        });
+        let r = Store::Kv(racing.clone());
+        let (_, c, _, _) = world(&r).await;
+        racing
+            .armed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = put_s3_sink(&r, c, &sink_put(Some("sealed"), true))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DataError::Refused {
+                    code: "deleting",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(
+            inner.0.keys(ns::S3SINKS).is_empty(),
+            "the refused batch wrote nothing"
+        );
     }
 
     /// The override document is checked wherever it is written.

@@ -490,6 +490,12 @@ pub(crate) async fn handle_prometheus(
     // QUEEN_RAFT_METRICS is off.
     crate::rsm::timing::render_prometheus(&mut body);
     body.push_str(&st.rsm.prometheus());
+    // The in-process S3 sink's `queen_s3_*` families (s3_inproc.rs), when it
+    // runs: per node, like every family above.
+    #[cfg(feature = "s3")]
+    if let Some(sink) = crate::s3_inproc::prometheus_text() {
+        body.push_str(&sink);
+    }
     // The in-process Postgres connectors' `queen_pg_*` families (pg_inproc.rs),
     // where they run: per node, like every family above.
     #[cfg(feature = "pg")]

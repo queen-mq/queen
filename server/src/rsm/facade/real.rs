@@ -569,6 +569,43 @@ impl RaftFacade {
         self.repl.clone()
     }
 
+    /// `(meta.last_now_us, meta.max_created_at_us)` as this node has applied
+    /// them: what `safeTime` is built from, read straight from the store.
+    #[cfg(test)]
+    pub(crate) fn applied_stamps_for_test(&self) -> (i64, i64) {
+        self.store
+            .read(|r| Ok((r.last_now_us()?, r.max_created_at_us()?)))
+            .expect("read the applied stamps")
+    }
+
+    /// The retention cutoffs of `(tenant, queue)` at `now_us` as the retention
+    /// walk computes them ([`crate::rsm::maintenance::queue_cutoffs`], default
+    /// knobs) from this node's state — the S3 sink's retention hold included.
+    /// `None` for an unknown queue.
+    #[cfg(test)]
+    pub(crate) fn retention_cutoffs_for_test(
+        &self,
+        tenant: &str,
+        queue: &str,
+        now_us: i64,
+    ) -> Option<crate::rsm::maintenance::Cutoffs> {
+        self.store
+            .read(|r| {
+                let Some(q) = r.queue(tenant, queue)? else {
+                    return Ok(None);
+                };
+                Ok(Some(crate::rsm::maintenance::queue_cutoffs(
+                    r,
+                    now_us,
+                    &crate::rsm::maintenance::Config::default(),
+                    tenant,
+                    queue,
+                    &q,
+                )))
+            })
+            .expect("read the retention cutoffs")
+    }
+
     /// As if a pop's answer had waited in vain for this node to apply `index`.
     #[cfg(test)]
     pub(crate) fn hold_pops_until_for_test(&self, index: u64) {
@@ -5042,6 +5079,25 @@ impl Rsm for RaftFacade {
     ) -> Result<Vec<super::RecordsFetched>, RsmError> {
         self.fetch_records_impl(ctx, entries, max_wait_ms, min_bytes)
             .await
+    }
+
+    async fn fetch_log(
+        &self,
+        ctx: ReqCtx,
+        entries: Vec<super::RecordFetch>,
+        max_wait_ms: u64,
+        min_bytes: usize,
+    ) -> Result<Vec<super::RecordsFetched>, RsmError> {
+        self.fetch_log_impl(ctx, entries, max_wait_ms, min_bytes)
+            .await
+    }
+
+    async fn partitions_changed(
+        &self,
+        ctx: ReqCtx,
+        asks: Vec<super::ChangedAsk>,
+    ) -> Result<super::PartitionsChanged, RsmError> {
+        self.partitions_changed_impl(ctx, asks).await
     }
 
     async fn pop_wildcard(&self, ctx: ReqCtx, req: PopReq) -> Result<PopOut, RsmError> {

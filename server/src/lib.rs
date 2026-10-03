@@ -53,6 +53,11 @@ mod quota;
 // single-node deployment, which is exactly the topology the LocalReplicator
 // serves (O15).
 mod rsm;
+// Twin of the `mod s3_inproc;` in main.rs: the S3 sink run IN-PROCESS (feature
+// `s3`). Compiled, never started here, and its process-global reads `None` for
+// `handlers::status`.
+#[cfg(feature = "s3")]
+mod s3_inproc;
 mod switches;
 mod syscollect;
 mod tenant;

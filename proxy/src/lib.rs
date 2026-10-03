@@ -27,6 +27,8 @@ pub mod obs;
 pub mod operator;
 pub mod registry;
 pub mod routes;
+/// The S3 sink's hook into the control plane, provided by the broker.
+pub mod s3;
 pub mod spool;
 pub mod state;
 /// Where the proxy keeps its state: the broker's replicated KV.

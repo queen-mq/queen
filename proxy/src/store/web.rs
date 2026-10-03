@@ -1906,7 +1906,7 @@ async fn kv_bootstrap_once(
 /// order keeps a partial failure safe to re-run: the `tenant_deleted` outbox
 /// event (with the uuids) FIRST, then keys (hash index first: the data plane
 /// stops authenticating them at once), roles, users + identities, queues,
-/// usage, audit rows, outbox redaction, clusters, and the tenant row LAST —
+/// usage, S3 sinks, audit rows, outbox redaction, clusters, and the tenant row LAST —
 /// so a re-run finds the tenant and finishes the job (its counts are then
 /// what was left, and the event is emitted again: at-least-once).
 pub async fn delete_tenant(store: &Store, tenant_id: Uuid, force: bool) -> Result<Value, WebError> {
@@ -2031,6 +2031,8 @@ async fn kv_delete_tenant(kv: &dyn KvBackend, tenant_id: Uuid, force: bool) -> R
                 dead.push((n, k));
             }
         }
+        // its S3 sink: the broker's manager stops the sink when the row goes
+        dead.push((ns::S3SINKS, schema::key(c)));
     }
     // operations: the GDPR-relevant delete (meta/target carry addresses).
     let op_keys = kv::scan_keys(kv, ns::OPS, &schema::prefix(tenant_id)).await?;
@@ -3399,6 +3401,25 @@ mod tests {
         )
         .await
         .unwrap();
+        for c in [ca, cb] {
+            let sink = schema::S3SinkDoc {
+                cluster_id: c,
+                broker_tenant: Uuid::new_v4(),
+                enabled: true,
+                config: json!({"bucket": "lake"}),
+                secret_key_sealed: "sealed".into(),
+                updated_at_us: 1,
+            };
+            let op = kv::put_op(
+                ns::S3SINKS,
+                &schema::key(c),
+                &sink,
+                Expect::Any,
+                Ttl::Forever,
+                false,
+            );
+            kv::write(m.as_ref(), vec![op]).await.unwrap();
+        }
 
         // The two-step order is enforced.
         let e = delete_tenant(&st, ta, false).await.unwrap_err();
@@ -3450,6 +3471,7 @@ mod tests {
             ns::USAGE_DAY,
             ns::OPS,
             ns::OPS_CLUSTER,
+            ns::S3SINKS,
         ] {
             let keys = m.keys(n);
             assert!(
@@ -3500,6 +3522,7 @@ mod tests {
         let r = delete_tenant(&st, tb, true).await.unwrap();
         assert_eq!((r["forced"].clone(), r["status_was"].clone()), (json!(true), json!("active")));
         assert!(m.keys(ns::TENANTS).is_empty() && m.keys(ns::KEY_HASH).is_empty() && m.keys(ns::OPS).is_empty());
+        assert!(m.keys(ns::S3SINKS).is_empty(), "B's sink went with B");
     }
 
     // ---- usage reads ---------------------------------------------------------------------

@@ -22,11 +22,16 @@ sourceOfTruth:
   - server/src/rsm/planner/pop.rs
   - server/src/rsm/planner/ack.rs
   - server/src/rsm/planner/timers.rs
+  - crates/queen-protocol/src/partitions.rs
 verifiedBy:
   - clients/client-js/test-v2/queue.js
   - clients/client-js/test-v2/retention.js
   - test/runners/tenancy/tenancy-check.sh
   - server/src/rsm/tests/facade.rs
+  - server/src/rsm/tests/partitions_changed.rs
+  - server/src/s3_inproc/tests.rs
+# sourceOfTruth re-read 2026-10-02 (through 8a0faff0 + working tree): partitions/changed answers the applied safeTime, pages by creation order under a p|<pid> cursor, carries each partition's id and refuses a malformed since; the sink hold follows the commit pointer of the in-process S3 sink, and a merge of a push-created queue reads its stored 0 cap as the default.
+# sourceOfTruth re-read 2026-10-02, second pass (working tree): one S3 sink per broker tenant; the hold reads the commit pointer in the queue's own tenant (maintenance.rs sink_floor), and a control-plane sink names itself with its sink setting.
 ---
 
 A queue does not have to be created before it is used. The first push to a queue
@@ -194,22 +199,26 @@ the first message still there. Use it only where dropping stale work is the inte
 
 #### retentionSinkHold and retentionSinkHoldMaxSeconds
 
-These two options were the retention hold of the S3 sink, which 2.0 does not ship. The
-broker still validates and stores them, and the retention pass still reads them:
+These two options make retention wait for the [S3 sink](/deploy/s3#the-retention-hold), so
+it cannot delete what the lake does not have yet. `retentionSinkHold` names the sink
+(`QUEEN_S3_SINK` for the default tenant's, the `sink` setting for a sink the control plane
+configured; `default` unless set); `""`, the default, is no hold.
 
 - `retentionSinkHold` must match `[A-Za-z0-9._-]{0,64}` and `retentionSinkHoldMaxSeconds`
-  must be between 60 and 31,536,000. Outside either, the call is a `400` (code
-  `bad_request`) and **the queue keeps the configuration it had**; nothing partial is
-  written. The check applies to the value the queue ends up with, not only to a value
-  the body sends. A queue created implicitly stores `retentionSinkHoldMaxSeconds: 0`,
-  so a merging edit of such a queue answers `400`
-  (`retentionSinkHoldMaxSeconds must be between 60 and 31536000`) unless the body sets
-  `retentionSinkHoldMaxSeconds` or sends `"mode": "replace"`.
-- With a non-empty `retentionSinkHold`, rules 1 and 2 remove nothing younger than
-  `retentionSinkHoldMaxSeconds`: the hold waits for a sink commit pointer that nothing in
-  2.0 writes. `maxWaitTimeSeconds` is not held.
-
-Leave `retentionSinkHold` empty.
+  must be between 60 and 31,536,000 (default 604800, seven days). Outside either, the call
+  is a `400` (code `bad_request`) and **the queue keeps the configuration it had**; nothing
+  partial is written. The check applies to the value the queue ends up with, not only to a
+  value the body sends. A queue created implicitly stores `retentionSinkHoldMaxSeconds: 0`;
+  a merging edit reads that stored `0` as the default, so it is not refused over a value
+  nobody set. An explicit `0` in the body is refused.
+- With a non-empty `retentionSinkHold`, rules 1 and 2 remove nothing stamped after the later
+  of two instants: the end of the last window that sink committed for the queue, less 60
+  seconds, and now less `retentionSinkHoldMaxSeconds`. The end is the `tEnd` of the key/value
+  row `s3:<sink>:<queue>:committed` in namespace `queen-s3` of the queue's own tenant, the
+  commit pointer that tenant's sink writes. Before the sink has committed anything, or when the row cannot be read, the cap
+  alone applies, so the hold protects from the moment it is set and a stopped sink cannot
+  hold retention past the cap.
+- `maxWaitTimeSeconds` is not held, and neither is the deduplication index.
 
 #### How retention runs
 
@@ -536,11 +545,12 @@ a push is listed as a namespace of its own.
 ## POST /api/v1/partitions/changed
 
 Lists a queue's partitions by **name**, a page at a time, optionally only those written
-since an instant, with the offsets a reader needs. It is the discovery half of what
-[`POST /api/v1/fetch`](#post-apiv1fetch) is the read half of: each name comes with
-`lastOffset` and `logStart`, so a caller can start fetching without a second round
-trip. It serves a queue partitioned by entity, where the names are order ids or
-customer ids and a per-queue count is not enough.
+since an instant, with the offsets a reader needs and each partition's id. It is the
+discovery half of what [`POST /api/v1/fetch`](#post-apiv1fetch) is the read half of: each
+name comes with `lastOffset` and `logStart`, so a caller can start fetching without a
+second round trip. It serves a queue partitioned by entity, where the names are order ids
+or customer ids and a per-queue count is not enough. The [S3 sink](/deploy/s3) reads every
+queue it mirrors through its in-process twin.
 
 Like the fetch, it is **not a pop**: no lease, no cursor, no claim, nothing written.
 Two callers asking the same question get the same answer and neither disturbs a
@@ -551,17 +561,19 @@ consumer group. Its access level is `read-only`.
 ```json
 { "entries": [ { "queue": "orders",
                  "since": "2026-09-04T10:00:00.000000Z",
-                 "after": "t|1788515700123456|cust-0419",
+                 "after": "p|1027",
                  "limit": 1000 } ] }
 ```
 
 | Field | Required | What it is |
 | --- | --- | --- |
-| `entries` | yes | At most **1024**; more is a `400` (`{"error":"too many entries"}`), not a truncation. An entry is a *queue*, not a partition, and each one can cost 1000 rows. A missing `entries` is an empty list. |
+| `entries` | yes | At most **1024**; more is a `400` (`{"error":"too many entries"}`), not a truncation. An entry is a *queue*, not a partition. A missing or empty `entries` answers `safeTime` alone. |
 | `queue` | yes | The queue name. A missing name is looked up as `""`, which is a valid queue name, so it answers like any other name. |
-| `since` | no | Absent or `null` enumerates the queue's whole partition set, ordered by name. An ISO 8601 instant returns only partitions written at or after it, ordered by `(lastWriteAt, name)`. It is read to millisecond precision; a value that does not parse is treated as absent. |
-| `after` | no | The opaque cursor from a previous answer's `next`, echoed back unmodified. |
+| `since` | no | Absent or `null` lists every partition of the queue. A timestamp lists only the partitions whose `lastWriteAt` is at or after it, read to the microsecond: `YYYY-MM-DD`, optionally followed by a time, then `Z` or a `±HH:MM` offset, UTC when there is neither. Anything else, a number or an empty string included, refuses the **whole request** with `400`, naming the entry, rather than turning an incremental pass into a full listing without a word. |
+| `after` | no | The `next` of the previous page, echoed back unmodified. Absent, `null` or `""` starts the pass. |
 | `limit` | no | Partitions for this entry. Default 1000, clamped to 1 to 1000, never rejected. A caller that asks for more learns the real bound from `next` being non-null. |
+
+A body that is not JSON is a `400` (code `bad_body`).
 
 ### The answer
 
@@ -570,46 +582,78 @@ consumer group. Its access level is `read-only`.
   "safeTimeDegraded": false,
   "entries": [ { "queue": "orders",
                  "partitions": [ { "name": "cust-0420",
+                                   "id": "0199a6f2-5c1e-7b3a-9d4e-2f6a8c0b1d3e",
                                    "lastOffset": 1811,
                                    "logStart": 1400,
                                    "lastWriteAt": "2026-09-04T10:04:12.000000Z" } ],
                  "next": null } ] }
 ```
 
-`lastOffset` is the last offset written, so the high watermark is `lastOffset + 1`.
-`logStart` is the oldest offset retention still holds. Timestamps are rendered UTC at
-microsecond precision.
+`id` is the partition's uuid, the same in every answer for the partition's whole life. A
+partition can be deleted, by retention once it is empty and idle for
+`PARTITION_CLEANUP_DAYS` or with its queue, and created again under the same name; the new
+one has a new `id` and its offsets start again at 0, which is how a reader tells the two
+apart. `lastOffset` is the last offset written, so the high watermark is `lastOffset + 1`.
+`logStart` is the oldest offset retention still holds. `lastWriteAt` is the stamp of the
+partition's newest record, on the clock of `safeTime`, and only moves forward. Timestamps
+are rendered UTC at microsecond precision.
 
-`next` is non-null **only when the page filled**, which is the rule to page on: a
-short page is the end of the sweep. The cost is one extra empty round trip when
-the partition count is an exact multiple of the limit.
+**Pages run in partition creation order**, `limit` at a time, with and without `since`.
+`next` is non-null **exactly when the page filled**, which is the rule to page on: echo it
+as `after` until it comes back `null`. The cost is one extra empty round trip when the
+partition count is an exact multiple of the limit. A **pass** is every page of one entry,
+from no cursor until `next` is `null`.
 
-**The cursor is opaque and mode-tagged. Do not parse it.** Its shape is the
-broker's, and it carries which kind of sweep produced it, so a cursor from an
-enumeration sent with a `since` (or the reverse) is answered `BAD_CURSOR` for that
-entry rather than paging silently against the wrong column. Restarting quietly
-would loop a paging client for ever on its own first page.
+An answer costs what it lists, and a complete pass reads each of the queue's partitions
+once, whatever the page size, because each page resumes where the previous one stopped. A
+`since` pass reads all of them too, to find the ones that moved: 2.0 keeps no index on
+`lastWriteAt`.
+
+**The cursor is opaque. Do not parse, build or compare it.** It names a position in the
+creation order and means the same with or without `since`. Anything the broker did not
+issue, including a cursor from a 1.x broker, is answered `BAD_CURSOR` for that entry; drop
+it and start the pass again. Restarting quietly instead would loop a paging client for ever
+on its own first page.
 
 Two per-entry errors replace `partitions` and `next`:
 
 | `error` | When |
 | --- | --- |
-| `UNKNOWN_TOPIC_OR_PARTITION` | The queue does not exist **for this tenant**. Identical to the answer for a queue that exists nowhere, so this route cannot be used to discover another tenant's queue names. |
-| `BAD_CURSOR` | The `after` cursor does not parse, or does not belong to the sweep it was sent with. |
+| `UNKNOWN_TOPIC_OR_PARTITION` | The queue does not exist **for this tenant**, checked before the cursor. Identical to the answer for a queue that exists nowhere, so this route cannot be used to discover another tenant's queue names. |
+| `BAD_CURSOR` | The `after` cursor is not one this broker issued. |
 
-**Paging is sound because `lastWriteAt` only moves up.** Every write to a partition
-stamps it with a time later than the previous write, so a partition written between two
-pages of one sweep moves *forward* past the cursor and is seen a second time on a later
-page. Seen twice is free, since the caller re-reads bounds it already had; missed would
-be a silent hole in whatever the caller is mirroring.
+**What a pass guarantees.** A partition is listed at most once per pass. One created during
+a pass sorts after every partition that existed when the pass started, so the pass still
+meets it unless it had already ended. One written to after its page was served is not
+listed again by that pass, and does not need to be: its new records are stamped above that
+page's `safeTime`, so the next pass, with `since` at or below the `safeTime` of this one,
+lists it.
 
 ### `safeTime`
 
-On 2.0, `safeTime` is the answering node's clock when it builds the answer, and
-`safeTimeDegraded` is always `false`. Both keys are kept so the answer's shape does not
-change. `safeTime` is not derived from the writes in flight: a write stamped shortly
-before it can still become visible after the answer, so do not treat a time range just
-below `safeTime` as closed. It is answered even for an **empty** `entries` array.
+`safeTime` is the greatest record stamp the answering node has **applied**, read before
+anything else in the answer. Two facts of the write path make it a bound: a record is
+stamped at or above the clock of the log entry that carries it, and an entry's clock is
+above every stamp before it in the log. So every record this node has not applied yet will
+be stamped strictly above `safeTime`, and every record stamped at or below it is already
+counted in the bounds of this answer and readable by a fetch served by the same node. A
+time window that ends at or below `safeTime` is complete there, and reading it again yields
+the same records: that is what a sink closes a window against.
+
+- **It is per node.** A follower's trails the leader's. Pair it with reads served by the
+  same node, and over a pass take the minimum of its pages: one node answers them in
+  non-decreasing order, several nodes need not. In a cluster a follower answers this route
+  and the fetch from its own state (with `QUEEN_RAFT_CLIENT_OFFLOAD`, the default), so a
+  reader behind a load balancer that spreads its calls over the nodes gets pages and
+  fetches from several of them.
+- **It moves only when an entry applies.** While nothing is written, a node answers the same
+  `safeTime`, however much time passes. Re-arm `since` from data, the `safeTime` of the pass
+  just finished, never from a local clock: nothing on this route is stamped by the caller's
+  clock.
+- **It is never degraded.** `safeTimeDegraded` is always `false`, kept from the 1.x answer,
+  whose `safeTime` could fall back to a fixed floor.
+
+It is answered even for an **empty** `entries` array.
 
 ## POST /api/v1/fetch
 
@@ -684,6 +728,8 @@ listings.
 
 Every route here resolves a tenant from the request, so with
 `QUEEN_TENANCY_HEADER` on they are scoped to the caller's tenant. In a cluster any node
-answers them: a follower forwards the request to the leader. The full route table,
+answers them: a follower serves its own clients and hands the writes to the leader
+(`QUEEN_RAFT_CLIENT_OFFLOAD`, on by default), and with that off it forwards the request to
+the leader ([any node serves clients](/internals#any-node-serves-clients)). The full route table,
 generated from the router and the authorization function, is in the
 [reference index](/reference).

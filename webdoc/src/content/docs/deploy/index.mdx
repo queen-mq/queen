@@ -22,9 +22,9 @@ digest: >-
   is three or five voters: one leader orders every write into a replicated log, a write is
   answered once it is committed on a majority, and every node applies the log to its own full
   copy of the state, so three voters keep serving through one failure and five through two. Any
-  node serves any client. The proxy (`QUEEN_PROXY_EMBEDDED=true`) and the Kafka facade
-  (`QUEEN_KAFKA_EMBEDDED=true`) run inside the same process when switched on, and the dashboard
-  is always served on the broker port.
+  node serves any client. The proxy (`QUEEN_PROXY_EMBEDDED=true`), the Kafka facade
+  (`QUEEN_KAFKA_EMBEDDED=true`) and the S3 sink (`QUEEN_S3_EMBEDDED=true`) run inside the same
+  process when switched on, and the dashboard is always served on the broker port.
 ---
 
 A Queen deployment is one process per node and a directory on that node's disk. The broker is a
@@ -48,6 +48,9 @@ The rest ships inside the same binary and stays off until you switch it on:
 - the proxy, `QUEEN_PROXY_EMBEDDED=true`: API keys, tenants, plan quotas, metering and human
   logins, with its own state in the broker's replicated key/value store
 - the Kafka facade, `QUEEN_KAFKA_EMBEDDED=true`: Kafka clients connect to the broker directly
+- the S3 sink, `QUEEN_S3_EMBEDDED=true`: each queue's log written into an S3-compatible bucket as
+  JSONL or Parquet, exactly once, by whichever node holds the queue's lease; each tenant can have
+  a sink and a bucket of its own
 
 The dashboard is always on, served on the broker port, and `queenctl` travels in the image.
 
@@ -139,6 +142,11 @@ Every variable the broker reads, with the default the code applies, is in
     href="/deploy/kafka"
     title="Kafka facade"
     description="Kafka clients against the same process: the advertised-address footgun, TLS and SASL, and cluster mode."
+  />
+  <LinkCard
+    href="/deploy/s3"
+    title="S3 sink"
+    description="Each queue's log in a data lake, written by the broker itself: the per-queue lease, the bucket policy, the retention hold and the lag to alarm on."
   />
 </CardGrid>
 

@@ -76,6 +76,10 @@ COPY crates /usr/build/crates
 # like queen-protocol, so it has to be in the context here too.
 COPY protocols/queen-kafka/Cargo.toml /usr/build/protocols/queen-kafka/Cargo.toml
 COPY protocols/queen-kafka/src /usr/build/protocols/queen-kafka/src
+# ...and the S3 / data-lake sink library, linked in by the default `s3` feature
+# (server/src/s3_inproc.rs runs it in-process). A path dependency too.
+COPY connectors/queen-s3/Cargo.toml /usr/build/connectors/queen-s3/Cargo.toml
+COPY connectors/queen-s3/src /usr/build/connectors/queen-s3/src
 # ...and the Postgres connectors library, linked in by the default `pg` feature
 # (server/src/pg_inproc.rs runs every connector in-process). A path dependency
 # like the Kafka facade; its own Cargo.lock is not needed here, the broker's

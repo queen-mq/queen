@@ -139,6 +139,10 @@ pub struct Embedded {
     /// This node's stable label (its per-node usage rows): the broker passes
     /// its raft node's name.
     pub node: String,
+    /// The S3 sink's side of `/api/cp/clusters/:slug/s3` (config check,
+    /// secret sealing). `None`: a broker built without the sink, and those
+    /// routes answer 404 `s3_unavailable`.
+    pub s3: Option<std::sync::Arc<dyn crate::s3::S3Sinks>>,
 }
 
 /// The single binary: the proxy's state over the broker's KV, relaying
@@ -183,6 +187,7 @@ pub fn build_embedded(e: Embedded) -> Result<(St, Router), String> {
         meter,
         registry,
         keys,
+        s3: e.s3,
     });
     start_background(&st);
     // First boot: plans, this cell, the layout version (store/seed.rs). The

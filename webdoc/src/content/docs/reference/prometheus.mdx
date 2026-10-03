@@ -15,6 +15,10 @@ sourceOfTruth:
   - server/src/auth.rs
   - server/src/proxy_embed.rs
   - proxy/src/cp.rs
+  - server/src/s3_inproc.rs
+  - connectors/queen-s3/src/obs.rs
+# sourceOfTruth re-read 2026-10-02 (through 8a0faff0 + working tree): the in-process S3 sink appends its queen_s3_* families after the state-machine block when QUEEN_S3_EMBEDDED=true; their table is hand-written below, since the generator reads only the broker's own metrics module.
+# sourceOfTruth re-read 2026-10-02, second pass (working tree): one registry per node for every tenant's sink, a tenant label first on a control-plane sink's series, the two node-wide gauges unlabelled, per-queue gauges dropped when the node stops running the queue, a removed tenant's series dropped, the discovery gauge counting the full sweep, lag = safeTime - completeThrough.
 ---
 
 `GET /metrics/prometheus` returns exposition text with content type
@@ -78,6 +82,9 @@ fixed order, with no call to another node:
 3. The state-machine families of this node: store operations and map use,
    raft indexes, entries in flight, proposals, queue-log files and bytes, and
    the disk gate.
+4. The S3 sink's `queen_s3_*` families, only while the sink runs on this node
+   (`QUEEN_S3_EMBEDDED=true`), once for every tenant's sink it runs.
+   [Their table](#the-s3-sink-families) is below.
 
 ## The state-machine families
 
@@ -113,12 +120,60 @@ quantile is the upper bound of the histogram bucket it falls in, so read it as
 `queen_raft_planner_plan_seconds`, carries `kind` next to `quantile`. These
 families are process-wide: with several raft groups they have no `group` label.
 
+## The S3 sink families
+
+Present only on a node running the [S3 sink](/deploy/s3), and not in the generated
+table at the foot of this page, which is read from the broker's own metrics module.
+A node has one registry for every tenant's sink it runs, so each family below carries
+its `# HELP` and `# TYPE` lines once, with or without a sample. The values count what
+this node's sinks did since the process started: a sink rebuilt with a new
+configuration, or restarted after stopping on its own, carries on from its totals; a
+restarted process starts again from zero.
+
+**The `tenant` label.** The series of a sink the control plane configured carry
+`tenant="<broker tenant>"` as their first label, ahead of the ones in the table; the
+default tenant's sink writes no tenant label. The two node-wide gauges,
+`queen_s3_buffer_bytes` and `queen_s3_safe_lag_seconds`, never carry one: there is one
+memory budget and one applied clock per node, whichever tenant's queue measured them.
+The label's values are bounded by the sinks the control plane configured, one per
+cluster, not by anyone's request rate. When a tenant's sink is removed (deleted,
+disabled, or its cluster no longer served), every series labelled with that tenant,
+counters and histograms included, is dropped once the sink has drained.
+
+| Family | Type | Labels | What it says |
+| --- | --- | --- | --- |
+| `queen_s3_lag_seconds` | gauge | `queue` | This node's `safeTime` minus the stamp the queue's lake is complete through (`completeThrough` in [the status block](/deploy/s3#the-status-block)), in seconds. **The one to alarm on.** |
+| `queen_s3_safe_lag_seconds` | gauge | none, ever | This node's wall clock minus its `safeTime`: how far its applied log trails real time. |
+| `queen_s3_windows_committed_total` | counter | `queue` | Windows this node committed. |
+| `queen_s3_records_written_total` | counter | `queue` | Records written into objects. |
+| `queen_s3_bytes_written_total` | counter | `queue`, `format` = `jsonl` or `parquet` | Object bytes written, after compression. |
+| `queen_s3_records_lost_total` | counter | `queue` | Records that went away before the sink read them. Should stay flat. |
+| `queen_s3_window_records` | histogram | none | Records per window, per sink; buckets 1 to 10,000,000 in powers of ten. |
+| `queen_s3_window_bytes` | histogram | none | Object bytes per window, per sink; buckets 1, 4, 16, 64, 128, 256 and 512 MiB and 1 GiB. |
+| `queen_s3_buffer_bytes` | gauge | none, ever | Record bytes buffered across the queues this node owns, of every tenant, against `QUEEN_S3_MEMORY_MB`. |
+| `queen_s3_fetch_calls_total` | counter | `queue`, `result` = `ok` or `error` | Fetch calls into this node's log. |
+| `queen_s3_discovery_partitions` | gauge | `queue` | Partitions of the queue the last full discovery sweep enumerated, over all its pages. |
+| `queen_s3_s3_requests_total` | counter | `op`, `code` | Requests to the bucket. `op` is `put`, `get`, `head`, `list`, `multipart_create`, `multipart_part`, `multipart_complete` or `multipart_abort`; `code` is the HTTP status, `0` when none came back. |
+| `queen_s3_commit_precondition_lost_total` | counter | none | Key/value batches rolled back because the queue's lease was no longer this node's. |
+| `queen_s3_checkpoint_age_windows` | gauge | `queue` | Windows committed since the last position checkpoint. |
+| `queen_s3_queues_given_back_total` | counter | none | Queues this node gave back to rebalance: held over its fair share for a TTL, drained and released for a node below its share. Flat in a steady state. |
+
+The two histograms are per sink rather than per queue on purpose: a histogram per
+queue is buckets times queues in series, and the per-queue number worth having is the
+lag. No family carries a `partition` label, which would be one series per entity. A
+node exports the per-queue gauges (`queen_s3_lag_seconds`,
+`queen_s3_discovery_partitions`, `queen_s3_checkpoint_age_windows`) only for the
+queues it runs, and drops them when the queue goes to another node, is released or
+stops, so the lag of a queue is the one series some node is exporting for it.
+`queen_s3_safe_lag_seconds` goes the same way when the node runs no queue at all. The
+counters stay, because a counter that disappeared would read as a reset.
+
 ## Per-queue series are not tenant-scoped
 
-No per-queue series carries a tenant label. When `QUEEN_TENANCY_HEADER` is on
-and two tenants hold the same queue name, their series collide:
-`queen_parked_long_polls` sums the per-tenant gauges into one line per queue
-name.
+Apart from the S3 sink's families above, no per-queue series carries a tenant
+label. When `QUEEN_TENANCY_HEADER` is on and two tenants hold the same queue name,
+their series collide: `queen_parked_long_polls` sums the per-tenant gauges into
+one line per queue name.
 
 <Aside type="danger">
 `/metrics/prometheus` is a cell-wide operator surface. Exposing it to a tenant
@@ -138,6 +193,11 @@ The key/value routes are the first surface in this product whose call rate is
 decided by somebody else's web traffic, so they are the first place that rule
 could really have been broken. The per-tenant view of a hot path lives in the
 broker's top-N log lines and in the JSON status endpoint, not here.
+
+The S3 sink's counters are the one place a `tenant` label sits on a counter. The
+rule's reason does not reach them: the label has one value per sink the control
+plane configured, and the operations they count are the sink's own, paced by its
+windows and its bucket, not by anyone's request rate.
 
 `queen_kv_read_rejected_total{reason="rate_limited"}` becoming non-zero is worth
 a panel even though it is not a fault. It is the earliest warning of a customer

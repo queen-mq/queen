@@ -7,7 +7,7 @@
 //!
 //! | module | documents | owner |
 //! |---|---|---|
-//! | [`data`] | tenants, cells, plans, clusters, cluster_roles, api_keys, revoked_tokens, queues | W3 data plane |
+//! | [`data`] | tenants, cells, plans, clusters, cluster_roles, api_keys, revoked_tokens, queues, s3 sinks | W3 data plane |
 //! | [`web`] | users, identities, operations, outbox | W4 web plane |
 //! | [`usage`] | usage_minutes, usage_days | W3 metering |
 //!
