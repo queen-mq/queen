@@ -16,6 +16,14 @@ import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/confla
 import { popSizing, parseAutopilotDecision } from '../utils/autopilot.js'
 import * as logger from '../utils/logger.js'
 
+// Per-item push statuses that mean the broker took the message: `queued`
+// (stored), and `buffered` (a 1.x broker wrote it to its failover file and
+// replays it into storage itself). Every other status is a rejection: `error`
+// from a 2.x broker, which carries no per-item message, and `failed` from a
+// 1.x broker, which does. Unknown statuses count as rejections too: a status
+// this client cannot read is not a message it can report as stored.
+const ACCEPTED_PUSH_STATUSES = new Set(['queued', 'buffered'])
+
 export class QueueBuilder {
   #queen
   #httpClient
@@ -849,14 +857,31 @@ class PushBuilder {
         for (let i = 0; i < results.length; i++) {
           const result = results[i]
           const originalItem = this.#formattedItems[i]
+          const status = result && typeof result === 'object' ? result.status : undefined
 
-          if (result.status === 'duplicate') {
+          if (status === 'duplicate') {
             duplicates.push({ ...originalItem, result })
-          } else if (result.status === 'failed') {
-            failed.push({ ...originalItem, result, error: result.error })
-          } else if (result.status === 'queued') {
+          } else if (ACCEPTED_PUSH_STATUSES.has(status)) {
             successful.push({ ...originalItem, result })
+          } else {
+            const error = result && typeof result.error === 'string' && result.error.length > 0
+              ? result.error
+              : `push rejected by the broker (item status: ${status === undefined ? 'missing' : JSON.stringify(status)})`
+            failed.push({ ...originalItem, result, error })
           }
+        }
+
+        // One error for the whole call, built once so the callback and the
+        // throw describe the failure the same way. `results` is the broker's
+        // per-item answer in input order: the items that did go through are
+        // in it too, which is what a caller needs to retry only the rest.
+        let failure = null
+        if (failed.length > 0) {
+          failure = new Error(failed.length === 1
+            ? failed[0].error
+            : `${failed.length} of ${results.length} pushed items rejected: ${failed[0].error}`)
+          failure.results = results
+          logger.error('PushBuilder.execute', { status: 'failed', count: failed.length, total: results.length, error: failed[0].error })
         }
 
         // Call appropriate callbacks
@@ -864,9 +889,8 @@ class PushBuilder {
           await this.#onDuplicateCallback(duplicates, new Error('Duplicate transaction IDs detected'))
         }
 
-        if (failed.length > 0 && this.#onErrorCallback) {
-          const error = new Error(failed[0].error || 'Push failed')
-          await this.#onErrorCallback(failed, error)
+        if (failure && this.#onErrorCallback) {
+          await this.#onErrorCallback(failed, failure)
         }
 
         if (successful.length > 0 && this.#onSuccessCallback) {
@@ -874,9 +898,8 @@ class PushBuilder {
         }
 
         // Only throw if no error callback is defined
-        if (failed.length > 0 && !this.#onErrorCallback) {
-          logger.error('PushBuilder.execute', { status: 'failed', count: failed.length })
-          throw new Error(failed[0].error || 'Push failed')
+        if (failure && !this.#onErrorCallback) {
+          throw failure
         }
 
         logger.log('PushBuilder.execute', { status: 'success', successful: successful.length, duplicates: duplicates.length, failed: failed.length })

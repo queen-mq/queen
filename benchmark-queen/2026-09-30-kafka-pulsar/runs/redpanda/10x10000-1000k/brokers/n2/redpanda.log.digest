@@ -1,0 +1,19 @@
+546418762 bytes, 2309545 lines: head 64 MiB + tail 128 MiB + digest collected
+     67 WARN seastar - (rate limiting dropped N similar messages) Too long queue accumulated for main (N tasks)
+     21 WARN seastar - Too long queue accumulated for main (N tasks)
+     16 WARN admin_api_server - server.cc:N - Insecure Admin API listener on N.N.N.N:N, consider enabling `admin_api_require_auth`
+     13 WARN seastar - (rate limiting dropped N similar messages) Too long queue accumulated for raft_recv (N tasks)
+     12 WARN raft - [follower: {id: N, revision: N}, term: N] [group_id:N, {kafka/rNxN-Nk-tN/N}] - recovery_stm.cc:N - recovery append entries error: rpc::errc::client_request_timeout
+     12 WARN raft - [follower: {id: N, revision: N}, term: N] [group_id:N, {kafka/rNxN-Nk-tN/N}] - recovery_stm.cc:N - Ignoring exception during recovery: boost::wrapexcept<std::__N::system_error> (error rpc::errc:N, rpc::errc::client_request_timeo
+      3 WARN storage - disk_log_appender.cc:N - Segment roll lock contested for {kafka/rNxN-Nk-tN/N}
+      2 WARN cluster - metadata_dissemination_service.cc:N - Error sending metadata update rpc::errc::client_request_timeout to N
+      2 WARN cluster - cluster_discovery.cc:N - Error registering node UUID NfNfNf-aNa-Nccc-bfNa-NeNdeNeN, retrying: std::__N::system_error (error system:N, connection to N.N.N.N:N: Connection refused)
+      1 WARN syschecks - Path: `/root/bench/data/redpanda' is on extN, not XFS. This will probably work, but Redpanda is only tested on XFS and XFS is recommended for best performance.
+      1 WARN storage - disk_log_appender.cc:N - Segment roll lock contested for {kafka/__consumer_offsets/N}
+      1 WARN seastar_memory - oversized allocation: N bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at NxNbabN NxNfefdf NxNcNca NxN NxNdeN NxN NxNaN NxNaN /opt/redpanda/lib/libc.so.N+NxNacN /opt/red
+      1 WARN seastar_memory - oversized allocation: N bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at NxNbabN NxNfefdf NxNcNca NxN NxNbNda NxNa NxNfcNbN NxNfNeN NxNffcN NxNcf NxNaN NxNaN /opt/redpa
+      1 WARN seastar_memory - oversized allocation: N bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at NxNbabN NxNfefdf NxNcNca NxN NxNaNeN NxNa NxNfcNbN NxNfNeN NxNffcN NxNcf NxNaN NxNaN /opt/redpa
+      1 WARN seastar - (rate limiting dropped N similar messages) Too long queue accumulated for produce (N tasks)
+      1 WARN raft - [group_id:N, {kafka/rNxN-Nk-tN/N}] state_machine_manager.cc:N - no progress has been made during state machine apply. Current next offset: N
+      1 WARN cluster - topic_table_probe.cc:N - leadership change for unknown topic {redpanda/controller}
+      1 WARN cluster - cluster_discovery.cc:N - Error requesting cluster bootstrap info from {host: N.N.N.N, port: N}, retrying. std::__N::system_error (error system:N, connection to N.N.N.N:N: Connection refused)

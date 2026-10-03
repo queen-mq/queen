@@ -1,0 +1,180 @@
+[2026-10-01T15:44:53Z] txn kafka/1x100000-t10-9k: start: kafka, rate=9000 over N=9 processes (3 loader hosts x 3) = 1000 msg/s each; in 100000 x out 100000 partitions; txn-size 10 (linger 1s); feeder units of 10; 33 workers + 33 readers per process (297 each in total); out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/kafka/1x100000-t10-9k
+[2026-10-01T15:44:53Z] txn kafka/1x100000-t10-9k: durability: RF 3, min.insync.replicas 2, acks=all (idempotent + transactional producers), NO fsync (page cache, Kafka's production model); transaction state log RF 3 / min ISR 2; transactions v2 (KIP-890); read_committed
+[2026-10-01T15:44:57Z] txn kafka/1x100000-t10-9k: 1. cluster reset
+    [2026-10-01T15:45:10Z] cluster: healthy in 13s: cluster id Q2jrIamOQ2JFqXOKWJiFVQ
+    [2026-10-01T15:45:12Z] cluster: features: eligible.leader.replicas.version=1 group.version=1 kraft.version=0 metadata.version=4.3-IV0 share.version=1 streams.version=1 transaction.version=2 
+[2026-10-01T15:45:13Z] txn kafka/1x100000-t10-9k: 2. samplers start (txn-kafka-1x100000-t10-9k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-01T15:45:14Z] txn kafka/1x100000-t10-9k: 3. create x1x100000-t10-9k-in (100000) + x1x100000-t10-9k-out (100000), warm on loader 1
+      [topic] t=+875s ready, holding for -topic-settle
+      [topic] t=+885s ready, holding for -topic-settle
+      [topic] t=+896s ready, holding for -topic-settle
+      [topic] READY after 918.4s: 2 topics x 100000 partitions, leaders + full ISR + every replica log on disk
+      [warm] t=+0s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 10217 with ISR < replicas
+      [warm] t=+12s ready, holding for -topic-settle
+      [warm] t=+24s ready, holding for -topic-settle
+      [warm] t=+36s ready, holding for -topic-settle
+      [warm] one record (no "ts") into each of 200000 partitions, acks=all, in 72.6s; READY again after 38.5s
+    [create] done: x1x100000-t10-9k-in, x1x100000-t10-9k-out x 100000 partitions ready
+[2026-10-01T16:02:27Z] txn kafka/1x100000-t10-9k:    topics ready after 1054s since start
+    node=1 rss_MB=11833 threads=185 maps=400810 fds=200249 data_MB=3223 part_dirs=200001 gc_pauses=2188 gc_max_ms=85.761 gc_sum_ms=44766 errors=0 warns=8 isr_shrinks=91272 isr_updates=159592 errors_since_mark=0 isr_shrin
+    node=2 rss_MB=12051 threads=181 maps=400809 fds=200260 data_MB=3243 part_dirs=200001 gc_pauses=1596 gc_max_ms=103.396 gc_sum_ms=35955 errors=0 warns=3253621 isr_shrinks=65000 isr_updates=123498 errors_since_mark=0 is
+    node=3 rss_MB=12156 threads=177 maps=400808 fds=200250 data_MB=3246 part_dirs=200001 gc_pauses=1931 gc_max_ms=78.776 gc_sum_ms=36965 errors=24725 warns=14 isr_shrinks=119275 isr_updates=174977 errors_since_mark=0 isr
+[2026-10-01T16:02:39Z] txn kafka/1x100000-t10-9k: 4. launch 9 kload processes
+    launched 0 1 2 on queen-loader-01
+    launched 6 7 8 on queen-loader-03
+    launched 3 4 5 on queen-loader-02
+[2026-10-01T16:02:48Z] txn kafka/1x100000-t10-9k:    READY 0/9
+    p2 DONE 137
+    p3 DONE 137
+    p6 DONE 137
+    --- 10.114.0.5 p0.log
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 txn workers (GroupTransactSession) in 1 groups (x1x100000-t10-9k-in-g-t0 ... ), protocol classic
+      [group] 33 consumers in 1 groups (x1x100000-t10-9k-out-g-t0 ... ), protocol classic
+      [group] t=+3.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+5.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=190 assigned=0)
+      [group] t=+7.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+9.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+11.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+13.7s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 13.9s: 1 groups, 33 local members holding 11110 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [group] t=+0.4s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+2.5s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 4.9s: 1 groups, 33 local members holding 11110 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [produce] 4 clients connected to every broker with producer IDs in 0.54s; max buffered 51024 records per client
+    READY 1790870586452
+    --- 10.114.0.5 p1.log
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 txn workers (GroupTransactSession) in 1 groups (x1x100000-t10-9k-in-g-t0 ... ), protocol classic
+      [group] 33 consumers in 1 groups (x1x100000-t10-9k-out-g-t0 ... ), protocol classic
+      [group] t=+3.5s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+5.5s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=290 assigned=0)
+      [group] t=+7.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+9.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11116/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+11.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11116/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 13.1s: 1 groups, 33 local members holding 11116 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [group] t=+1.8s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11116/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+3.8s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11116/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 4.9s: 1 groups, 33 local members holding 11116 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [produce] 4 clients connected to every broker with producer IDs in 0.49s; max buffered 51024 records per client
+    READY 1790870586452
+    --- 10.114.0.5 p2.log
+      [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.max.message.bytes = 16777216 (STATIC_BROKER_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 txn workers (GroupTransactSession) in 1 groups (x1x100000-t10-9k-in-g-t0 ... ), protocol classic
+      [group] 33 consumers in 1 groups (x1x100000-t10-9k-out-g-t0 ... ), protocol classic
+      [group] t=+3.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+5.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=277 assigned=0)
+      [group] t=+7.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+9.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11118/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+11.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11118/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 13.2s: 1 groups, 33 local members holding 11118 partitions, assignEv=33 revokeEv=0 lostEv=0
+    --- 10.114.0.6 p3.log
+      [config] topic.max.message.bytes = 16777216 (STATIC_BROKER_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 txn workers (GroupTransactSession) in 1 groups (x1x100000-t10-9k-in-g-t0 ... ), protocol classic
+      [group] 33 consumers in 1 groups (x1x100000-t10-9k-out-g-t0 ... ), protocol classic
+      [group] t=+1.8s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+3.9s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=190 assigned=0)
+      [group] t=+5.9s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+7.9s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+10.0s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11111/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 11.9s: 1 groups, 33 local members holding 11111 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [group] t=+0.8s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11111/100000 partitions (group-wide Stable members=297 assigned=100000)
+    --- 10.114.0.6 p4.log
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 txn workers (GroupTransactSession) in 1 groups (x1x100000-t10-9k-in-g-t0 ... ), protocol classic
+      [group] 33 consumers in 1 groups (x1x100000-t10-9k-out-g-t0 ... ), protocol classic
+      [group] t=+2.8s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+4.8s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=191 assigned=0)
+      [group] t=+6.9s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+8.9s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+10.9s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+13.0s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 13.2s: 1 groups, 33 local members holding 11110 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [group] t=+1.6s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+3.6s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 4.8s: 1 groups, 33 local members holding 11110 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [produce] 4 clients connected to every broker with producer IDs in 0.46s; max buffered 51024 records per client
+    READY 1790870586381
+    --- 10.114.0.6 p5.log
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 txn workers (GroupTransactSession) in 1 groups (x1x100000-t10-9k-in-g-t0 ... ), protocol classic
+      [group] 33 consumers in 1 groups (x1x100000-t10-9k-out-g-t0 ... ), protocol classic
+      [group] t=+3.0s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+5.0s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=190 assigned=0)
+      [group] t=+7.0s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+9.0s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+11.1s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11101/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+13.1s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11101/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 13.2s: 1 groups, 33 local members holding 11101 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [group] t=+0.5s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11101/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+2.5s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11101/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 4.9s: 1 groups, 33 local members holding 11101 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [produce] 4 clients connected to every broker with producer IDs in 0.53s; max buffered 51024 records per client
+    READY 1790870586452
+    --- 10.114.0.7 p6.log
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 txn workers (GroupTransactSession) in 1 groups (x1x100000-t10-9k-in-g-t0 ... ), protocol classic
+      [group] 33 consumers in 1 groups (x1x100000-t10-9k-out-g-t0 ... ), protocol classic
+      [group] t=+0.1s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+3.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+5.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=189 assigned=0)
+      [group] t=+7.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+9.6s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+11.7s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11116/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+13.8s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11116/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 13.9s: 1 groups, 33 local members holding 11116 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [group] t=+0.4s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11116/100000 partitions (group-wide Stable members=297 assigned=100000)
+    --- 10.114.0.7 p7.log
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 txn workers (GroupTransactSession) in 1 groups (x1x100000-t10-9k-in-g-t0 ... ), protocol classic
+      [group] 33 consumers in 1 groups (x1x100000-t10-9k-out-g-t0 ... ), protocol classic
+      [group] t=+3.3s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+5.3s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=190 assigned=0)
+      [group] t=+7.3s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+9.3s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+11.4s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11108/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+13.4s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11108/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 13.7s: 1 groups, 33 local members holding 11108 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [group] t=+0.4s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11108/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+2.5s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11108/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 4.8s: 1 groups, 33 local members holding 11108 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [produce] 4 clients connected to every broker with producer IDs in 0.49s; max buffered 51024 records per client
+    READY 1790870586459
+    --- 10.114.0.7 p8.log
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 txn workers (GroupTransactSession) in 1 groups (x1x100000-t10-9k-in-g-t0 ... ), protocol classic
+      [group] 33 consumers in 1 groups (x1x100000-t10-9k-out-g-t0 ... ), protocol classic
+      [group] t=+4.1s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=259 assigned=0)
+      [group] t=+6.1s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+8.1s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+      [group] t=+10.1s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+12.9s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 13.0s: 1 groups, 33 local members holding 11110 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [group] t=+1.5s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] t=+3.6s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+      [group] STABLE after 5.0s: 1 groups, 33 local members holding 11110 partitions, assignEv=33 revokeEv=0 lostEv=0
+      [produce] 4 clients connected to every broker with producer IDs in 0.49s; max buffered 51024 records per client
+    READY 1790870586458
+[2026-10-01T16:03:07Z] txn kafka/1x100000-t10-9k: FAILED: a load process exited before READY
+[2026-10-01T16:03:08Z] txn kafka/1x100000-t10-9k: 7. collect
+    node=1 rss_MB=11939 threads=186 maps=401014 fds=201323 data_MB=3238 part_dirs=200101 gc_pauses=2349 gc_max_ms=1952.194 gc_sum_ms=53659 errors=0 warns=8 isr_shrinks=91272 isr_updates=159592 errors_since_mark=0 isr_shr
+    node=2 rss_MB=12209 threads=183 maps=401013 fds=200970 data_MB=3258 part_dirs=200101 gc_pauses=1751 gc_max_ms=2045.665 gc_sum_ms=47470 errors=0 warns=3253621 isr_shrinks=65000 isr_updates=123498 errors_since_mark=0 i
+    node=3 rss_MB=12264 threads=184 maps=401014 fds=201080 data_MB=3238 part_dirs=200101 gc_pauses=2105 gc_max_ms=1420.067 gc_sum_ms=44600 errors=24727 warns=14 isr_shrinks=119275 isr_updates=174977 errors_since_mark=0 i
+[2026-10-01T16:04:20Z] txn kafka/1x100000-t10-9k:    collected 130M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/kafka/1x100000-t10-9k
+[2026-10-01T16:04:20Z] txn kafka/1x100000-t10-9k:    stopping the cluster (data kept until the next reset)

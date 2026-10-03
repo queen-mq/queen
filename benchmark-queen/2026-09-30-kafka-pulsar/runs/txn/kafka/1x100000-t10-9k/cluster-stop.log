@@ -1,0 +1,4 @@
+[2026-10-01T16:04:20Z] cluster: stop all 3
+  n1 [2026-10-01T16:05:24Z] kc.sh n1: no exit after 60s: SIGKILL 912902
+  n2 [2026-10-01T16:05:23Z] kc.sh n2: no exit after 60s: SIGKILL 794813
+  n3 [2026-10-01T16:05:22Z] kc.sh n3: no exit after 60s: SIGKILL 792885

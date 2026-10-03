@@ -1,0 +1,11 @@
+2026-10-01T23:11:02Z
+p0: msgs offered=10833200 achieved=10833200 shed=0 pushed=10833200 popped=10713500 lag=119700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=72.19/160.77/220.16 ms | e2e p50/p99/p999=173.06/296.96/362.50 ms | cpu=48.2%
+p1: msgs offered=10833000 achieved=10833000 shed=0 pushed=10833000 popped=10710300 lag=122700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=73.22/160.77/218.11 ms | e2e p50/p99/p999=173.06/296.96/362.50 ms | cpu=47.9%
+p2: msgs offered=10833300 achieved=10833300 shed=0 pushed=10833300 popped=10707600 lag=125700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=73.22/160.77/224.26 ms | e2e p50/p99/p999=173.06/296.96/366.59 ms | cpu=48.3%
+p3: msgs offered=10833300 achieved=10833300 shed=0 pushed=10833300 popped=10710300 lag=123000 errs push=0 pop=0 ack=0 | produce p50/p99/p999=73.22/160.77/216.06 ms | e2e p50/p99/p999=175.10/301.06/366.59 ms | cpu=49.4%
+p4: msgs offered=10833400 achieved=10833400 shed=0 pushed=10833400 popped=10715800 lag=117600 errs push=0 pop=0 ack=0 | produce p50/p99/p999=73.22/160.77/216.06 ms | e2e p50/p99/p999=173.06/292.86/354.30 ms | cpu=48.9%
+p5: msgs offered=10833300 achieved=10833300 shed=0 pushed=10833300 popped=11120400 lag=-287100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=73.22/160.77/214.02 ms | e2e p50/p99/p999=177.15/3981.31/5013.50 ms | cpu=49.2%
+p6: msgs offered=10833000 achieved=10833000 shed=0 pushed=10833000 popped=10711700 lag=121300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=73.22/158.72/207.87 ms | e2e p50/p99/p999=173.06/296.96/354.30 ms | cpu=48.7%
+p7: msgs offered=10833300 achieved=10833300 shed=0 pushed=10833300 popped=10707200 lag=126100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=73.22/160.77/211.97 ms | e2e p50/p99/p999=171.01/292.86/346.11 ms | cpu=49.0%
+p8: msgs offered=10833600 achieved=10833600 shed=0 pushed=10833600 popped=11115800 lag=-282200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=73.22/160.77/218.11 ms | e2e p50/p99/p999=177.15/4079.62/5210.11 ms | cpu=48.8%
+total: 9/9 processes with a final line | msgs offered=97499400 achieved=97499400 shed=0 pushed=97499400 popped=97212600 errors=0 | worst produce p99=160.77 ms | worst e2e p99=4079.62 ms

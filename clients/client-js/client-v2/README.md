@@ -444,28 +444,31 @@ When a consumer group first subscribes to a queue, should it process **all histo
 - Join a stream at a specific point in time
 - Skip historical data for new analytics consumers
 
-### Default Behavior (All Messages)
+### Default Behavior (New Messages)
 
-By default, consumer groups start from the **beginning** and process all messages:
+By default, a consumer group starts where it first pops the queue and skips the messages that were
+already there. That default is the broker's `DEFAULT_SUBSCRIPTION_MODE`, which is `new`:
 
 ```javascript
-// This consumer group gets ALL messages, including historical ones
+// This consumer group gets only messages that arrive after it first pops
 await queen
   .queue('events')
   .group('new-analytics')
+  .each()
   .consume(async (message) => {
     console.log('Processing:', message.data)
   })
 ```
 
-**Server Default:** The server can be configured to change this default behavior:
+To process the backlog too, ask for it with `.subscriptionMode('all')`, or start the broker with
+`DEFAULT_SUBSCRIPTION_MODE=all` to make that the default for every new group:
 ```bash
-# Make all new consumer groups skip history by default
-export DEFAULT_SUBSCRIPTION_MODE="new"
-./bin/queen-server
+export DEFAULT_SUBSCRIPTION_MODE="all"
+./bin/queen
 ```
 
-When `DEFAULT_SUBSCRIPTION_MODE="new"` is set, new consumer groups automatically skip historical messages unless you explicitly override with `.subscriptionMode('all')`.
+The mode is stored with the group the first time it pops; changing the default later does not move
+an existing group.
 
 ### Subscription Mode: 'new'
 
@@ -1004,8 +1007,9 @@ const message = messages[0]
 
 // Start long processing
 const timer = setInterval(async () => {
-  await queen.renew(message)  // Extend lease
-  console.log('Lease renewed!')
+  const { success, newExpiresAt, error } = await queen.renew(message)  // Extend lease
+  if (success) console.log('Lease renewed until', newExpiresAt)
+  else console.warn('Lease lost:', error)   // expired or already released: it will be redelivered
 }, 30000)  // Every 30 seconds
 
 try {
@@ -1432,6 +1436,16 @@ await queen.queue('reports').consume(async (msg) => {
 
 Sometimes you need more control over what happens when messages succeed or fail.
 
+### What a Throw Does
+
+Without callbacks, a handler that throws gets what it was given nacked (the message with `.each()`,
+otherwise the whole popped batch), and the consumer keeps going. The broker redelivers it, and moves
+it to the DLQ once the queue's `retryLimit` is spent. That holds with `.autoAck(false)` too: there
+your handler acks on success, but a handler that threw never got to settle anything.
+
+With `.onError()` the failure is yours: nothing is nacked on your behalf. Ack, nack or DLQ the
+message in the callback, or it stays leased until its lease expires.
+
 ### Success Callback
 
 ```javascript
@@ -1457,6 +1471,7 @@ await queen
   .onError(async (message, error) => {
     console.error('Failed:', error.message)
     // Log to external service, send alert, etc.
+    await queen.ack(message, false)   // with onError, nothing is nacked for you
   })
 ```
 

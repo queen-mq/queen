@@ -1,0 +1,10 @@
+p0: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7150200 lag=71900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=13.38/32.38/44.80 ms | e2e p50/p99/p999=14.78/64.26/97.79 ms | cpu=54.5%
+p1: msgs offered=7222000 achieved=7222000 shed=0 pushed=7222000 popped=7149400 lag=72600 errs push=0 pop=0 ack=0 | produce p50/p99/p999=13.25/31.87/46.85 ms | e2e p50/p99/p999=14.78/66.05/98.82 ms | cpu=54.2%
+p2: msgs offered=7222400 achieved=7222400 shed=0 pushed=7222400 popped=7150000 lag=72400 errs push=0 pop=0 ack=0 | produce p50/p99/p999=13.25/32.38/44.29 ms | e2e p50/p99/p999=14.40/67.07/97.79 ms | cpu=54.5%
+p3: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7149400 lag=72800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=13.25/32.64/45.31 ms | e2e p50/p99/p999=13.50/64.77/97.79 ms | cpu=53.9%
+p4: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7150000 lag=72300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=13.25/32.13/44.80 ms | e2e p50/p99/p999=13.50/64.26/95.74 ms | cpu=54.1%
+p5: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7474200 lag=-251900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=13.25/32.38/45.31 ms | e2e p50/p99/p999=26.24/79.36/101.89 ms | cpu=53.0%
+p6: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7149900 lag=72400 errs push=0 pop=0 ack=0 | produce p50/p99/p999=13.25/32.38/45.31 ms | e2e p50/p99/p999=15.42/68.10/100.86 ms | cpu=54.9%
+p7: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7150000 lag=72200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=13.12/32.38/45.31 ms | e2e p50/p99/p999=15.04/67.07/98.82 ms | cpu=54.7%
+p8: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7473200 lag=-251000 errs push=0 pop=0 ack=0 | produce p50/p99/p999=13.25/31.87/45.82 ms | e2e p50/p99/p999=28.54/82.43/103.94 ms | cpu=54.2%
+total: 9/9 processes with a final line | msgs offered=65000000 achieved=65000000 shed=0 pushed=65000000 popped=64996300 errors=0 | worst produce p99=32.64 ms | worst e2e p99=82.43 ms

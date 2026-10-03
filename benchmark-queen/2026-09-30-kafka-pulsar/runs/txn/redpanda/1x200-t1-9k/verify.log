@@ -1,0 +1,7 @@
+[verify] kafka 10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092: 9 ledgers from /root/bench/runs/txn/redpanda/1x200-t1-9k/verify-ids; reading x1x200-t1-9k-out from offset 0 (read_committed), then x1x200-t1-9k-in from group x1x200-t1-9k-in-g-t0's committed offsets
+[verify] out x1x200-t1-9k-out: 163504 records after 10s
+[verify] out x1x200-t1-9k-out: 163504 records, idle 10s: scan complete after 10.2s
+[verify] x1x200-t1-9k-in-g-t0: committed offsets on 200 of 200 partitions (the rest from the start)
+[verify] rest of x1x200-t1-9k-in: 421916 records after 10s
+[verify] rest of x1x200-t1-9k-in: 421916 records, idle 10s: scan complete after 10.2s
+[verify] system=kafka ledgers=9 produced=585020 ambiguous=0 out_records=163504 out_unique=163104 duplicates=0 dup_records=0 missing=0 pending_in=421916 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=400 scan=20.5s | VERDICT PASS

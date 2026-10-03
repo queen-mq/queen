@@ -1,0 +1,13 @@
+WARN max-pending 1000000 per partition producer would preallocate 22888 MB over 1000 partitions (24 B/slot); using 2796 (-pending-budget-mb 64)
+pload tag=r4-p1000 loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=2 GOGC=400(default) seed=1790753035859427113
+  topics: 1 x 1000 partitions (load..load), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=1000 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  pulsar: url=pulsar://10.202.0.2:6650,10.202.0.3:6650,10.202.0.4:6650 admin=http://10.202.0.2:8080 ns=bench/ns sub=sub type=failover compression=lz4 batch=5ms/1000 msgs/131072 B key-batching=false max-pending=2796/partition mem-limit=365 MB receiver-queue=1000 ack-group=100ms conns/broker=1
+  [admin] cluster bench, tenant bench exists
+  [admin] namespace bench/ns exists with 48 bundles
+  [admin] namespace persistence: {"bookkeeperEnsemble":3,"bookkeeperWriteQuorum":3,"bookkeeperAckQuorum":2,"managedLedgerMaxMarkDeleteRate":1.0}
+  [admin] 1 topics created, 0 existed (1000 partitions each) in 1.6s
+  [admin] subscription "sub" created in 28.2s and verified on all 1000 partitions in 1.0s (0 re-created on a partition)
+  [warm] one message (no "ts") into each of 1000 partitions in 1.3s; consumed and acked in 2.0s
+[create] done: 1 topics x 1000 partitions, subscription "sub" on every partition

@@ -1,0 +1,1 @@
+Copied 2026-10-02 from session 536e4c47 (Kafka facade perf night, worktree queen-kafka-perf, UNCOMMITTED): c3-* = binary queen-qk3 (md5 6b301d83), c5-* = queen-qk5 (final). Same kafka/run.sh TARGET=queen, kload franz-go acks=all idempotent lz4, classic groups, 9 procs on 3 loaders; fresh 3-node cluster per point (qkup.sh), leader n1.

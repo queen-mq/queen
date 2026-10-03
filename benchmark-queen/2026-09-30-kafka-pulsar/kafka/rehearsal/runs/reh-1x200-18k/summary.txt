@@ -1,0 +1,4 @@
+p0: msgs offered=330000 achieved=330000 shed=0 pushed=330000 popped=328200 lag=1800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=11.20/2039.81/2408.45 ms | e2e p50/p99/p999=11.20/1941.50/2375.68 ms | cpu=10.6%
+p1: msgs offered=330000 achieved=330000 shed=0 pushed=330000 popped=326100 lag=3900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=11.07/2007.04/2408.45 ms | e2e p50/p99/p999=11.07/2113.54/2375.68 ms | cpu=10.3%
+p2: msgs offered=330000 achieved=330000 shed=0 pushed=330000 popped=335700 lag=-5700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=11.07/2007.04/2408.45 ms | e2e p50/p99/p999=11.07/2146.30/2375.68 ms | cpu=10.8%
+total: 3/3 processes with a final line | msgs offered=990000 achieved=990000 shed=0 pushed=990000 popped=990000 errors=0 | worst produce p99=2039.81 ms | worst e2e p99=2146.3 ms

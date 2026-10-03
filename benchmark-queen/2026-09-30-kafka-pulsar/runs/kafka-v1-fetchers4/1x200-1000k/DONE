@@ -1,0 +1,11 @@
+2026-09-30T07:36:26Z
+p0: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7149900 lag=72300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.97/13.50/45.31 ms | e2e p50/p99/p999=8.16/14.02/45.31 ms | cpu=58.4%
+p1: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7150100 lag=72200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.90/13.63/43.78 ms | e2e p50/p99/p999=8.26/14.53/44.80 ms | cpu=59.1%
+p2: msgs offered=7222400 achieved=7222400 shed=0 pushed=7222400 popped=7149900 lag=72500 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.84/14.14/44.80 ms | e2e p50/p99/p999=8.16/14.02/45.31 ms | cpu=58.4%
+p3: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7150000 lag=72100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.90/14.02/45.31 ms | e2e p50/p99/p999=7.20/12.99/45.82 ms | cpu=61.0%
+p4: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7150000 lag=72200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.84/14.14/45.82 ms | e2e p50/p99/p999=7.39/13.38/46.34 ms | cpu=61.1%
+p5: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7149800 lag=72300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.90/14.14/44.80 ms | e2e p50/p99/p999=7.78/14.02/44.80 ms | cpu=61.0%
+p6: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7475000 lag=-252800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.90/14.02/45.82 ms | e2e p50/p99/p999=8.16/14.27/46.34 ms | cpu=61.2%
+p7: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7475100 lag=-252800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.90/13.89/45.31 ms | e2e p50/p99/p999=8.10/14.66/46.85 ms | cpu=60.8%
+p8: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7150000 lag=72200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.90/13.76/44.80 ms | e2e p50/p99/p999=8.26/14.14/43.78 ms | cpu=60.3%
+total: 9/9 processes with a final line | msgs offered=65000000 achieved=65000000 shed=0 pushed=65000000 popped=64999800 errors=0 | worst produce p99=14.14 ms | worst e2e p99=14.66 ms

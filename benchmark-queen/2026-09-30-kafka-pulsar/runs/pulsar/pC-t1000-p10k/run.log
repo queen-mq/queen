@@ -1,0 +1,62 @@
+[2026-10-01T08:41:44Z] run pC-t1000-p10k: pulsar 4.2.4, 1000000 msg/s total over 9 load processes (3 loaders x 3), topics=1000 x partitions=10 entities=0 mode=batch batch=100 sub=failover consumers=33/process
+[2026-10-01T08:41:45Z] 1. cluster reset: PROFILE=vm
+  [2026-10-01T08:42:21Z] brokers healthy: brokers active=3 10.114.0.2:8080=ok 10.114.0.3:8080=ok 10.114.0.4:8080=ok
+    proof persistent://bench/ns/probe-health-1790844147: ledger 9 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.4:3181, 10.114.0.3:3181, 10.114.0.
+  [2026-10-01T08:42:29Z] reset done
+[2026-10-01T08:42:29Z] 2. topics + subscription + warm: pload -create-only on loader 1
+    [admin] subscription "sub" created in 13.0s and verified on all 10000 partitions in 0.7s (0 re-created on a partition)
+    [warm] one message (no "ts") into each of 10000 partitions in 1.0s; consumed and acked in 1.6s
+  [create] done: 1000 topics x 10 partitions, subscription "sub" on every partition
+    namespace bench/ns: bundles=48 persistence=E3/Qw3/Qa2 markDeleteRate=1.0 retention=0min/0MB
+    proof persistent://bench/ns/load-t0-partition-0: ledger 316 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.3:3181, 10.114.0.2:3181, 10.114.0.4:3181] (broker intern
+      LedgerMetadata{formatVersion=3, ensembleSize=3, writeQuorumSize=3, ackQuorumSize=2, state=OPEN, digestType=CRC32C, password=base64:, ensembles={0=[10.114.0.3:3181, 10.114.0.2:3181, 10.114.0.4:3181]}, ...
+[2026-10-01T08:42:55Z] 3. balance -fix
+  balance bench/ns: 10000 topics (1000 partitioned) in 48 of 48 bundles, 3 brokers, mean 3333.3 topics/broker; hash check 4/4 lookups agree
+    10.114.0.2:8080        bundles= 16 topics=   3325 (  -0.3%)  per-bundle max/min=217/198
+    10.114.0.3:8080        bundles= 16 topics=   3339 (  +0.2%)  per-bundle max/min=221/197
+    10.114.0.4:8080        bundles= 16 topics=   3336 (  +0.1%)  per-bundle max/min=215/196
+    unowned bundles with topics: 0 (0 topics); max deviation 0.3% (target ±10%): OK
+[2026-10-01T08:42:57Z] 4. samplers on 3 brokers + 3 loaders
+  sampler pC-t1000-p10k started pid 659141 -> /root/bench/samples/pC-t1000-p10k.txt (iface=eth1 disk=vda)
+  sampler pC-t1000-p10k started pid 593822 -> /root/bench/samples/pC-t1000-p10k.txt (iface=eth1 disk=vda)
+  sampler pC-t1000-p10k started pid 592417 -> /root/bench/samples/pC-t1000-p10k.txt (iface=eth1 disk=vda)
+  sampler pC-t1000-p10k started pid 199408 -> /root/bench/samples/pC-t1000-p10k.txt (iface=eth1 disk=vda)
+  sampler pC-t1000-p10k started pid 180078 -> /root/bench/samples/pC-t1000-p10k.txt (iface=eth1 disk=vda)
+  sampler pC-t1000-p10k started pid 178768 -> /root/bench/samples/pC-t1000-p10k.txt (iface=eth1 disk=vda)
+[2026-10-01T08:43:01Z] 5. 9 load processes
+[2026-10-01T08:43:11Z]   9/9 READY after 9s
+[2026-10-01T08:43:14Z] 6. start instant 1790844203227 (loader 1 clock + 10 s); producing 70s (ramp 10s) + drain 0s
+[2026-10-01T08:43:59Z]   mid-run thread snapshot
+    n1  node=1 broker total=2.69 cores over 3s (267 threads, 267 named by jstack)
+    n1  node=1 bookie total=1.83 cores over 3s (193 threads, 160 named by jstack)
+    n1  node=1 zk total=0.00 cores over 3s (119 threads, 119 named by jstack)
+    n2  node=2 broker total=2.86 cores over 3s (240 threads, 240 named by jstack)
+    n2  node=2 bookie total=1.86 cores over 3s (187 threads, 154 named by jstack)
+    n2  node=2 zk total=0.00 cores over 3s (115 threads, 115 named by jstack)
+    n3  node=3 broker total=1.81 cores over 3s (241 threads, 241 named by jstack)
+    n3  node=3 bookie total=1.35 cores over 3s (192 threads, 159 named by jstack)
+    n3  node=3 zk total=0.00 cores over 3s (125 threads, 125 named by jstack)
+[2026-10-01T08:44:38Z] 7. loaders done
+[2026-10-01T08:44:38Z] collect -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/pulsar/pC-t1000-p10k
+  pload-0: [final] offered=72221 achieved=72221 shed=0 (msgs: offered=7222100 achieved=7222100 shed=0) pushErr=0 | pushed=7222100 popped=8583300 lag=-1361200 | popErr=0 empty=0 | overall p50=6.62 p99=19.58 p999=25.73 ms | acked=8583300 ackErr=0 ackLag=-1361200 ackAvg=0.01ms | e2e p50=7.26 p99=21.63 p999=32.13 ms
+  pload-0: load_cpu=175.0%
+  pload-1: [final] offered=72223 achieved=72223 shed=0 (msgs: offered=7222300 achieved=7222300 shed=0) pushErr=0 | pushed=7222300 popped=8583300 lag=-1361000 | popErr=0 empty=0 | overall p50=6.50 p99=19.07 p999=27.26 ms | acked=8583300 ackErr=0 ackLag=-1361000 ackAvg=0.02ms | e2e p50=7.33 p99=24.19 p999=35.58 ms
+  pload-1: load_cpu=139.0%
+  pload-2: [final] offered=72223 achieved=72223 shed=0 (msgs: offered=7222300 achieved=7222300 shed=0) pushErr=0 | pushed=7222300 popped=8583300 lag=-1361000 | popErr=0 empty=0 | overall p50=6.62 p99=19.07 p999=25.73 ms | acked=8583300 ackErr=0 ackLag=-1361000 ackAvg=0.01ms | e2e p50=7.52 p99=23.17 p999=31.10 ms
+  pload-2: load_cpu=137.8%
+  pload-3: [final] offered=72223 achieved=72223 shed=0 (msgs: offered=7222300 achieved=7222300 shed=0) pushErr=0 | pushed=7222300 popped=7092900 lag=129400 | popErr=0 empty=0 | overall p50=6.50 p99=19.33 p999=27.52 ms | acked=7092900 ackErr=0 ackLag=129400 ackAvg=0.02ms | e2e p50=7.26 p99=23.68 p999=33.02 ms
+  pload-3: load_cpu=151.6%
+  pload-4: [final] offered=72221 achieved=72221 shed=0 (msgs: offered=7222100 achieved=7222100 shed=0) pushErr=0 | pushed=7222100 popped=6444900 lag=777200 | popErr=0 empty=0 | overall p50=6.56 p99=19.33 p999=28.54 ms | acked=6444900 ackErr=0 ackLag=777200 ackAvg=0.02ms | e2e p50=7.46 p99=25.98 p999=37.12 ms
+  pload-4: load_cpu=148.1%
+  pload-5: [final] offered=72221 achieved=72221 shed=0 (msgs: offered=7222100 achieved=7222100 shed=0) pushErr=0 | pushed=7222100 popped=6444900 lag=777200 | popErr=0 empty=0 | overall p50=6.56 p99=19.07 p999=25.98 ms | acked=6444900 ackErr=0 ackLag=777200 ackAvg=0.02ms | e2e p50=7.52 p99=23.17 p999=29.82 ms
+  pload-5: load_cpu=147.8%
+  pload-6: [final] offered=72222 achieved=72222 shed=0 (msgs: offered=7222200 achieved=7222200 shed=0) pushErr=0 | pushed=7222200 popped=6436761 lag=785439 | popErr=0 empty=0 | overall p50=6.43 p99=19.07 p999=27.01 ms | acked=6436761 ackErr=0 ackLag=785439 ackAvg=0.01ms | e2e p50=7.33 p99=24.96 p999=51.97 ms
+  pload-6: load_cpu=133.8%
+  pload-7: [final] offered=72224 achieved=72224 shed=0 (msgs: offered=7222400 achieved=7222400 shed=0) pushErr=0 | pushed=7222400 popped=6415200 lag=807200 | popErr=0 empty=0 | overall p50=6.37 p99=18.82 p999=29.57 ms | acked=6415200 ackErr=0 ackLag=807200 ackAvg=0.01ms | e2e p50=7.20 p99=24.96 p999=38.14 ms
+  pload-7: load_cpu=134.4%
+  pload-8: [final] offered=72221 achieved=72221 shed=0 (msgs: offered=7222100 achieved=7222100 shed=0) pushErr=0 | pushed=7222100 popped=6415200 lag=806900 | popErr=0 empty=0 | overall p50=6.37 p99=18.56 p999=25.73 ms | acked=6415200 ackErr=0 ackLag=806900 ackAvg=0.01ms | e2e p50=7.26 p99=21.12 p999=30.08 ms
+  pload-8: load_cpu=133.6%
+[2026-10-01T08:44:51Z] DONE /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/pulsar/pC-t1000-p10k
+  run            sys     shape                                     offered  push/s  cons/s  shed/s  e2e p50  e2e p99  local p99  prod p99  brk cores  sys cores  rss GB/node  disk w MB/s/node  net rx/tx MB/s/node  errs  load cpu
+  pC-t1000-p10k  pulsar  t=1000 p=10 e=0 batch/100 failover c=297  1000000   1000k   1000k      0k        8       34         35        20       10.8        9.8         13.3               311              148/148     0      13.0
+  latencies in ms (e2e = consumer receive - scheduled send; local = same-host samples only); rates = last 30 s

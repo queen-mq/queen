@@ -1,0 +1,48 @@
+[2026-09-30T19:30:58Z] run qk-1x200-1000k-p16: start: rate=1000000 over N=9 processes (3 loader hosts x 3) = 111111 msg/s each; 1 topic(s) x 200 partitions (200 total), entities=0 mode=batch batch=100 consumers=22/process (198 total) warm=0 profile=default PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/qk-1x200-1000k-p16
+[2026-09-30T19:30:58Z] run qk-1x200-1000k-p16: note: 1000000 is not divisible by 9; offering 999999 msg/s
+[2026-09-30T19:31:05Z] run qk-1x200-1000k-p16: 1. TARGET=queen: Queen's Kafka facade on 10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 (cluster managed outside run.sh; no reset)
+[2026-09-30T19:31:05Z] run qk-1x200-1000k-p16: 2. samplers start (kafka-qk-1x200-1000k-p16, every 2s) on 3 brokers + 3 loader hosts
+[2026-09-30T19:31:06Z] run qk-1x200-1000k-p16: 3. create 1 topic(s) x 200 partitions, RF 3, min.insync 2 on loader 1
+      topics: 1 x 200 partitions (kqk-1x200-1000k-p16..kqk-1x200-1000k-p16), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 0
+      payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~319 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=1 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+      [topic] 1 topics created, 0 grown, 200 partitions each x RF 3 accepted by the controller in 0.0s (1 requests of <= 5000 partitions)
+      [topic] t=+0s 1 topics missing, 0 with != 200 partitions, 0 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 5.0s: 1 topics x 200 partitions, leaders + full ISR + every replica log on disk
+      [config] broker.compression.type = producer (DEFAULT_CONFIG)
+      [config] broker.group.initial.rebalance.delay.ms = 3000 (STATIC_BROKER_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DEFAULT_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+    [create] done: 1 topics x 200 partitions ready
+[2026-09-30T19:31:15Z] run qk-1x200-1000k-p16:    topics ready after 17s since start
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-09-30T19:31:17Z] run qk-1x200-1000k-p16: 4. launch 9 kload processes
+    launched 0 1 2 on queen-loader-01
+    launched 6 7 8 on queen-loader-03
+    launched 3 4 5 on queen-loader-02
+[2026-09-30T19:31:34Z] run qk-1x200-1000k-p16:    READY 0/9
+[2026-09-30T19:31:44Z] run qk-1x200-1000k-p16:    all 9 READY after 46s since start
+[2026-09-30T19:31:47Z] run qk-1x200-1000k-p16: 5. start instant 1790796716358 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s)
+[2026-09-30T19:31:55Z] run qk-1x200-1000k-p16:    0/9 exited | p0: 
+[2026-09-30T19:32:27Z] run qk-1x200-1000k-p16:    0/9 exited | p0: [19:32:26] offered=   111142/s achieved=   110012/s shed=        0/s inflight=   401 | p50= 362.50 p99=  536.58 p999=  610.30 ms | push=2737600 pop=2689600 lag=48000 | errs push=0 pop=0 empty=0 gor=65
+[2026-09-30T19:32:59Z] run qk-1x200-1000k-p16:    0/9 exited | p0: [19:32:56] offered=   111116/s achieved=   107366/s shed=        0/s inflight=  2087 | p50=1695.74 p99= 2211.84 p999= 2342.91 ms | push=5902600 pop=5340999 lag=561601 | errs push=0 pop=0 empty=0 gor=6
+[2026-09-30T19:33:14Z] run qk-1x200-1000k-p16:    load finished after 136s since start
+[2026-09-30T19:33:14Z] run qk-1x200-1000k-p16: 6. collect
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-09-30T19:33:57Z] run qk-1x200-1000k-p16:    collected  53M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/qk-1x200-1000k-p16
+    p0: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=6253736 lag=968464 errs push=0 pop=0 ack=0 | produce p50/p99/p999=774.14/2998.27/3293.18 ms | e2e p50/p99/p999=987.14/10813.44/11075.58 ms | cpu=33.1%
+    p1: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=6235597 lag=986703 errs push=0 pop=0 ack=0 | produce p50/p99/p999=774.14/3031.04/3325.95 ms | e2e p50/p99/p999=1073.15/10813.44/11075.58 ms | cpu=33.0%
+    p2: msgs offered=7222400 achieved=7222400 shed=0 pushed=7222400 popped=6239922 lag=982478 errs push=0 pop=0 ack=0 | produce p50/p99/p999=774.14/3031.04/3293.18 ms | e2e p50/p99/p999=946.18/10944.51/11468.80 ms | cpu=32.8%
+    p3: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=6250816 lag=971284 errs push=0 pop=0 ack=0 | produce p50/p99/p999=782.34/3031.04/3325.95 ms | e2e p50/p99/p999=954.37/10551.30/11075.58 ms | cpu=34.2%
+    p4: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=6244112 lag=977988 errs push=0 pop=0 ack=0 | produce p50/p99/p999=774.14/2998.27/3293.18 ms | e2e p50/p99/p999=995.33/10813.44/11206.66 ms | cpu=34.2%
+    p5: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=6401287 lag=821013 errs push=0 pop=0 ack=0 | produce p50/p99/p999=782.34/3031.04/3325.95 ms | e2e p50/p99/p999=1155.07/17170.43/25034.75 ms | cpu=34.2%
+    p6: msgs offered=7222000 achieved=7222000 shed=0 pushed=7222000 popped=6266844 lag=955156 errs push=0 pop=0 ack=0 | produce p50/p99/p999=782.34/3031.04/3293.18 ms | e2e p50/p99/p999=946.18/10682.37/11075.58 ms | cpu=33.6%
+    p7: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=6249702 lag=972598 errs push=0 pop=0 ack=0 | produce p50/p99/p999=782.34/3031.04/3325.95 ms | e2e p50/p99/p999=897.02/10682.37/11075.58 ms | cpu=33.4%
+    p8: msgs offered=7222000 achieved=7222000 shed=0 pushed=7222000 popped=6368205 lag=853795 errs push=0 pop=0 ack=0 | produce p50/p99/p999=782.34/2998.27/3293.18 ms | e2e p50/p99/p999=1056.77/17432.58/25296.90 ms | cpu=33.5%
+    total: 9/9 processes with a final line | msgs offered=64999700 achieved=64999700 shed=0 pushed=64999700 popped=56510221 errors=0 | worst produce p99=3031.04 ms | worst e2e p99=17432.58 ms
+[2026-09-30T19:34:00Z] run qk-1x200-1000k-p16: DONE in 182s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/qk-1x200-1000k-p16

@@ -105,6 +105,28 @@ fn is_operator_route(p: &str) -> bool {
     )
 }
 
+/// The exact shapes the broker serves under `/api/v1/connectors`: the
+/// collection (GET), one connector (GET, PUT, DELETE) and its resync (POST).
+/// A connector name is one non-empty segment.
+fn is_connectors_route(m: &axum::http::Method, p: &str) -> bool {
+    use axum::http::Method;
+    let read = *m == Method::GET || *m == Method::HEAD;
+    if p == "/api/v1/connectors" {
+        return read;
+    }
+    let Some(rest) = p.strip_prefix("/api/v1/connectors/") else {
+        return false;
+    };
+    let mut seg = rest.split('/');
+    match (seg.next(), seg.next(), seg.next()) {
+        (Some(name), None, None) if !name.is_empty() => {
+            read || *m == Method::PUT || *m == Method::DELETE
+        }
+        (Some(name), Some("resync"), None) if !name.is_empty() => *m == Method::POST,
+        _ => false,
+    }
+}
+
 /// Classify a broker-bound request. `path` is the URL path only (no query).
 pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     use axum::http::Method;
@@ -357,6 +379,32 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     }
     if p.starts_with("/api/v1/consumer-groups") && (*m == Method::DELETE || *m == Method::POST) {
         return RouteClass::QueueAdmin;
+    }
+    // PLAN_PG_CONNECTORS.md §3.1/§6 — the Postgres connectors of the cluster's
+    // broker tenant. `QueueAdmin` for EVERY verb, reads included: it is
+    // `scopes.admin` for an api key and `Role::Admin` for a user
+    // (auth.rs `authorize`). A connector document names a database, its host,
+    // its login and what the broker writes where (a source fills queues, a
+    // sink writes a table), and a delete can drop a replication slot: a
+    // cluster administrator's business on every verb. A Viewer has no use for
+    // a database address, and the reads never carry the password anyway —
+    // the broker returns neither it nor its sealed form. Never quota-blocked:
+    // `QueueAdmin` is not a class the storage blocks look at, and a connector
+    // document grows nothing a storage quota bounds (a source's pushes are
+    // the broker's own, admitted where every push is). Metered as
+    // `Configure` (`op_for`).
+    //
+    // Method- and shape-exact, the rule this file states for every family:
+    // the broker registers `GET` on the collection, `GET`/`PUT`/`DELETE` on
+    // one connector and `POST` on its resync (server/src/handlers/raft.rs,
+    // `build_raft_router`), so every other spelling fails closed here instead
+    // of travelling to a 405. HEAD rides with GET, which axum answers from it.
+    if p == "/api/v1/connectors" || p.starts_with("/api/v1/connectors/") {
+        return if is_connectors_route(m, p) {
+            RouteClass::QueueAdmin
+        } else {
+            RouteClass::Blocked
+        };
     }
 
     // --- gated features ---
@@ -647,6 +695,43 @@ mod tests {
             RouteClass::Gated(Feature::Streams, GatedOp::Open)
         );
         assert_eq!(classify(&Method::GET, "/"), RouteClass::Read);
+    }
+
+    /// PLAN_PG_CONNECTORS.md §6: the connectors are `QueueAdmin` on every verb
+    /// the broker registers — reads included — and every other shape under the
+    /// prefix fails closed.
+    #[test]
+    fn connectors_are_queue_admin_and_shape_exact() {
+        for (m, p) in [
+            (Method::GET, "/api/v1/connectors"),
+            (Method::HEAD, "/api/v1/connectors"),
+            (Method::GET, "/api/v1/connectors/orders-src"),
+            (Method::PUT, "/api/v1/connectors/orders-src"),
+            (Method::DELETE, "/api/v1/connectors/orders-src"),
+            (Method::POST, "/api/v1/connectors/orders-src/resync"),
+            // A connector may well be named `resync`.
+            (Method::PUT, "/api/v1/connectors/resync"),
+        ] {
+            assert_eq!(classify(&m, p), RouteClass::QueueAdmin, "{m} {p}");
+        }
+        for (m, p) in [
+            (Method::POST, "/api/v1/connectors"),
+            (Method::DELETE, "/api/v1/connectors"),
+            (Method::POST, "/api/v1/connectors/orders-src"),
+            (Method::PATCH, "/api/v1/connectors/orders-src"),
+            (Method::GET, "/api/v1/connectors/orders-src/resync"),
+            (Method::POST, "/api/v1/connectors/orders-src/other"),
+            (Method::POST, "/api/v1/connectors//resync"),
+            (Method::GET, "/api/v1/connectors/"),
+            (Method::GET, "/api/v1/connectors/a/b/c"),
+        ] {
+            assert_eq!(classify(&m, p), RouteClass::Blocked, "{m} {p}");
+        }
+        // Not under the prefix at all: the fail-closed `/api/` default.
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/connectorsx"),
+            RouteClass::Blocked
+        );
     }
 
     // ---- PLAN_DASHBOARD_ACTIONS.md §1.4/§2.0: the DLQ replay pair ----

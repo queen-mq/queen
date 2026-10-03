@@ -1,0 +1,4 @@
+[2026-10-01T16:42:48Z] cluster: stop all 3
+  n1 [2026-10-01T16:42:49Z] rc.sh n1: stopped pid 952465 in 0.6s
+  n2 [2026-10-01T16:42:49Z] rc.sh n2: stopped pid 827486 in 0.4s
+  n3 [2026-10-01T16:42:49Z] rc.sh n3: stopped pid 829282 in 0.4s

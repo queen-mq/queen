@@ -1,0 +1,10 @@
+  n1  [2026-10-01T21:18:04Z] node 1 broker stopped (pid 1128557)
+  n1  [2026-10-01T21:18:34Z] node 1 bookie: no exit after 30s, SIGKILL 1128110
+  n1  [2026-10-01T21:18:35Z] node 1 bookie stopped (pid 1128110)
+  n1  [2026-10-01T21:18:35Z] node 1 zk stopped (pid 1127520)
+  n2  [2026-10-01T21:18:04Z] node 2 broker stopped (pid 967418)
+  n2  [2026-10-01T21:18:05Z] node 2 bookie stopped (pid 967081)
+  n2  [2026-10-01T21:18:06Z] node 2 zk stopped (pid 966807)
+  n3  [2026-10-01T21:18:04Z] node 3 broker stopped (pid 965877)
+  n3  [2026-10-01T21:18:05Z] node 3 bookie stopped (pid 965474)
+  n3  [2026-10-01T21:18:05Z] node 3 zk stopped (pid 965213)

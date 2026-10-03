@@ -1,0 +1,23 @@
+node=1 zk     pid=1071588 up=87s cpu=10s rss=1224MB thr=118 fds=413 | gc cycles=4 (major 4) pauses=20 max=0.06ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=0.92ms | log ERROR=0 WARN=6 (since start)
+node=1 bookie pid=1072181 up=78s cpu=16s rss=3375MB thr=190 fds=842 | gc cycles=2 (major 2) pauses=10 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.41ms | log ERROR=1 WARN=2 (since start)
+node=1 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+node=1 broker pid=1072629 up=74s cpu=98s rss=6868MB thr=304 fds=703 | gc cycles=5 (major 5) pauses=25 max=0.04ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=10.67ms | log ERROR=4 WARN=18 (since start)
+node=1 broker   ERROR x2: [persistent://bench/ns/xNxN-tN-Nk-wN-in-partition-N]Transaction buffer failed to recover snapshot! {}
+node=1 broker   ERROR x1: [null] Failed to create tenant bench {}
+node=1 broker   ERROR x1: [persistent://bench/ns/xNxN-tN-Nk-wN-out-partition-N]Transaction buffer failed to recover snapshot! {}
+node=1 disk   data=169MB zk=7MB journal=12MB (1 .txn in 1 dirs) ledgers=151MB (entry logs=2, 1MB; locations=75MB ledgers-index=75MB) | fs 4% used, 375G free
+node=1 broker bench/ns metrics: producers_count=3 rate_out=0 storage_size=1227789 throughput_in=0 rate_in=0 throughput_out=2 topics_count=1222 msg_backlog=614 subscriptions_count=1837 consumers_count=3
+node=2 zk     pid=921367 up=87s cpu=16s rss=1272MB thr=116 fds=412 | gc cycles=6 (major 5) pauses=25 max=0.04ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=1.85ms | log ERROR=0 WARN=7 (since start)
+node=2 bookie pid=921636 up=79s cpu=16s rss=3400MB thr=186 fds=842 | gc cycles=2 (major 2) pauses=10 max=0.01ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=3.36ms | log ERROR=1 WARN=2 (since start)
+node=2 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+node=2 broker pid=921977 up=74s cpu=54s rss=6759MB thr=275 fds=591 | gc cycles=4 (major 4) pauses=20 max=0.03ms sum=0.4ms stalls=0 max=0.0ms safepoint_max=1.03ms | log ERROR=0 WARN=8 (since start)
+node=2 disk   data=170MB zk=7MB journal=12MB (1 .txn in 1 dirs) ledgers=151MB (entry logs=2, 1MB; locations=75MB ledgers-index=75MB) | fs 5% used, 371G free
+node=2 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=1174041 throughput_in=0 rate_in=0 throughput_out=0 topics_count=1168 msg_backlog=572 subscriptions_count=1740 consumers_count=0
+node=3 zk     pid=921132 up=87s cpu=13s rss=1290MB thr=123 fds=413 | gc cycles=5 (major 4) pauses=20 max=0.03ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=0.47ms | log ERROR=0 WARN=7 (since start)
+node=3 bookie pid=921422 up=79s cpu=13s rss=3416MB thr=193 fds=842 | gc cycles=2 (major 2) pauses=10 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=2.49ms | log ERROR=1 WARN=5 (since start)
+node=3 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+node=3 broker pid=921808 up=74s cpu=59s rss=6784MB thr=275 fds=592 | gc cycles=4 (major 4) pauses=20 max=0.02ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=0.69ms | log ERROR=4 WARN=21 (since start)
+node=3 broker   ERROR x2: [persistent://bench/ns/xNxN-tN-Nk-wN-in-partition-N]Transaction buffer failed to recover snapshot! {}
+node=3 broker   ERROR x2: [persistent://bench/ns/xNxN-tN-Nk-wN-out-partition-N]Transaction buffer failed to recover snapshot! {}
+node=3 disk   data=169MB zk=7MB journal=12MB (1 .txn in 1 dirs) ledgers=151MB (entry logs=2, 1MB; locations=75MB ledgers-index=75MB) | fs 4% used, 375G free
+node=3 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=1217385 throughput_in=0 rate_in=0 throughput_out=0 topics_count=1212 msg_backlog=616 subscriptions_count=1831 consumers_count=3

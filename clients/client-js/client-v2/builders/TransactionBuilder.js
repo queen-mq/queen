@@ -30,6 +30,7 @@ import { generateUUID } from './QueueBuilder.js'
 import { isValidUUID } from '../utils/validation.js'
 import { kvOp, materializeKvOp } from '../kv/Kv.js'
 import { TimerBuilder } from './TimerBuilder.js'
+import { consumerGroupOf } from '../utils/consumerGroup.js'
 
 export class TransactionBuilder {
   #httpClient
@@ -46,10 +47,21 @@ export class TransactionBuilder {
     this.#httpClient = httpClient
   }
 
+  /**
+   * Ack popped messages as part of this transaction.
+   *
+   * The consumer group defaults to the one each message was popped under
+   * (`message.consumerGroup`, which every pop answers with), because the lease
+   * an ack has to match belongs to that group: an ack that names no group is
+   * judged in queue mode, and a message popped by a group then fails with
+   * `rejected_ack`. Pass `{ consumerGroup }` (or `{ group }`, the key
+   * `queen.ack()` takes) to override it.
+   */
   ack(messages, status = 'completed', context = {}) {
     const msgs = Array.isArray(messages) ? messages : [messages]
-    
-    logger.log('TransactionBuilder.ack', { count: msgs.length, status, consumerGroup: context.consumerGroup })
+    const explicitGroup = context.consumerGroup || context.group || null
+
+    logger.log('TransactionBuilder.ack', { count: msgs.length, status, consumerGroup: explicitGroup })
 
     msgs.forEach(msg => {
       const transactionId = typeof msg === 'string' ? msg : (msg.transactionId || msg.id)
@@ -72,9 +84,9 @@ export class TransactionBuilder {
         status
       }
 
-      // Add consumerGroup if provided in context
-      if (context.consumerGroup) {
-        operation.consumerGroup = context.consumerGroup
+      const consumerGroup = explicitGroup || consumerGroupOf(msg)
+      if (consumerGroup) {
+        operation.consumerGroup = consumerGroup
       }
 
       this.#operations.push(operation)
@@ -303,9 +315,14 @@ export class TransactionBuilder {
 
         logger.error('TransactionBuilder.commit', { error: result.error, reason: result.reason })
         const error = new Error(result.error || 'Transaction failed')
-        // The closed-taxonomy code travels ON the error, so no caller ever has
-        // to match the message: bad_request | duplicate | ack_rejected |
-        // timer_horizon_exceeded | payload_too_large | misaligned | db_error.
+        // The broker's reason code travels ON the error, so no caller ever has
+        // to match the message. The ones worth branching on from a 2.x broker:
+        // bad_request, duplicate (a pushed transactionId is already stored),
+        // rejected_ack (an acked message is no longer leased by this worker, or
+        // was popped under a different consumer group than the ack names), and
+        // too_large. A 1.x broker spells the ack one ack_rejected, and also
+        // sends timer_horizon_exceeded, payload_too_large, misaligned and
+        // db_error.
         if (result.reason) error.reason = result.reason
         error.result = result
         throw error

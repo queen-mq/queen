@@ -948,13 +948,12 @@ fn members(
 /// nothing judged on a stale view, and alone means every partition is local.
 #[test]
 fn the_member_judge_has_hysteresis_and_ignores_stale_views() {
-    let none = std::collections::HashSet::new();
     let mut j = MemberJudge::new(4_000);
     let p = j
-        .judge(
-            &members(0, &[(1, Some(0)), (2, Some(100)), (3, Some(5_000))]),
-            &none,
-        )
+        .judge(&members(
+            0,
+            &[(1, Some(0)), (2, Some(100)), (3, Some(5_000))],
+        ))
         .unwrap()
         .unwrap();
     assert_eq!(p.nodes, ids(&["1", "2"]));
@@ -962,33 +961,227 @@ fn the_member_judge_has_hysteresis_and_ignores_stale_views() {
     assert_eq!(j.down_ids(), ids(&["3"]));
     // Heard again at 3 s: inside the ttl, but it was down — not yet.
     let p = j
-        .judge(
-            &members(0, &[(1, Some(0)), (2, Some(100)), (3, Some(3_000))]),
-            &none,
-        )
+        .judge(&members(
+            0,
+            &[(1, Some(0)), (2, Some(100)), (3, Some(3_000))],
+        ))
         .unwrap()
         .unwrap();
     assert_eq!(p.nodes, ids(&["1", "2"]));
     let p = j
-        .judge(
-            &members(0, &[(1, Some(0)), (2, Some(100)), (3, Some(1_000))]),
-            &none,
-        )
+        .judge(&members(
+            0,
+            &[(1, Some(0)), (2, Some(100)), (3, Some(1_000))],
+        ))
         .unwrap()
         .unwrap();
     assert_eq!(p.nodes, ids(&["1", "2", "3"]));
     // A view older than half the ttl decides nothing.
-    assert!(j.judge(&members(2_500, &[(1, Some(0))]), &none).is_none());
-    // A leaving notice keeps a live member out.
-    let gone: std::collections::HashSet<String> = ["2".to_string()].into();
+    assert!(j.judge(&members(2_500, &[(1, Some(0))])).is_none());
+    // Alone: no placement at all, the single-node path.
+    assert_eq!(j.judge(&members(0, &[(1, Some(0))])), Some(None));
+}
+
+/// A member the leader has no figure for is not live until it has been heard
+/// from — a partition placed on it would be handed over into the void — and
+/// one already judged keeps its judgement while the figure is missing (a
+/// leader that has just taken office).
+#[test]
+fn a_member_never_heard_from_takes_no_partition() {
+    let mut j = MemberJudge::new(4_000);
+    assert_eq!(
+        j.judge(&members(0, &[(1, Some(0)), (2, None)])),
+        Some(None),
+        "never heard from: not live"
+    );
     let p = j
-        .judge(
-            &members(0, &[(1, Some(0)), (2, Some(100)), (3, Some(100))]),
-            &gone,
-        )
+        .judge(&members(0, &[(1, Some(0)), (2, Some(100))]))
         .unwrap()
         .unwrap();
-    assert_eq!(p.nodes, ids(&["1", "3"]));
-    // Alone: no placement at all, the single-node path.
-    assert_eq!(j.judge(&members(0, &[(1, Some(0))]), &none), Some(None));
+    assert_eq!(p.nodes, ids(&["1", "2"]));
+    let p = j
+        .judge(&members(0, &[(1, Some(0)), (2, None)]))
+        .unwrap()
+        .unwrap();
+    assert_eq!(p.nodes, ids(&["1", "2"]), "judged live: stays live");
+}
+
+/// Raft liveness is not enough: a restarted node answers raft before its
+/// HTTP listener is up. A peer takes partitions only once its listener
+/// answered, at the address the view names; until then it is named for a
+/// probe, and alone means every partition is local.
+#[test]
+fn a_peer_takes_partitions_once_its_listener_answers() {
+    let a = engine(small());
+    let view = placement("1", &["1", "2", "3"]);
+    let (p, probe) = a.admit(view.clone(), 0);
+    assert_eq!(p, None, "nobody answered yet: alone");
+    assert_eq!(
+        probe,
+        vec![
+            ("2".to_string(), "http://node-2".to_string()),
+            ("3".to_string(), "http://node-3".to_string())
+        ]
+    );
+
+    assert!(a.start_probe("2"));
+    assert!(!a.start_probe("2"), "one probe in flight per peer");
+    assert!(a.probe_done("2", "http://node-2", Probe::Ready(Some(7))));
+    assert!(a.start_probe("2"), "the probe is over");
+    assert!(!a.probe_done("3", "http://node-3", Probe::NotReady));
+    let (p, probe) = a.admit(view.clone(), 0);
+    let p = p.unwrap();
+    assert_eq!(p.nodes, ids(&["1", "2"]));
+    assert_eq!(p.addrs.len(), 1);
+    assert_eq!(probe, vec![("3".to_string(), "http://node-3".to_string())]);
+
+    // A peer that answered at another address is probed at the new one.
+    let mut moved = view.clone();
+    moved.addrs.insert("2".into(), "http://node-2b".into());
+    let (p, probe) = a.admit(moved, 0);
+    assert_eq!(p, None);
+    assert!(probe.contains(&("2".to_string(), "http://node-2b".to_string())));
+
+    // Judged down (or leaving): it is probed again before it takes anything.
+    a.forget_ready("2");
+    assert_eq!(a.admit(view, 0).0, None);
+}
+
+/// A leaving notice keeps a live member out until it lapses, raft judges the
+/// member down, or — when the notice named its incarnation — another
+/// incarnation answers the probe: the restarted node is back without waiting
+/// out the notice. The incarnation that left answering keeps it out.
+#[test]
+fn a_leaving_notice_ends_when_another_incarnation_answers() {
+    let a = engine(small());
+    let view = placement("1", &["1", "2", "3"]);
+    assert!(a.probe_done("2", "http://node-2", Probe::Ready(Some(7))));
+    assert!(a.probe_done("3", "http://node-3", Probe::Ready(None)));
+    assert_eq!(
+        a.admit(view.clone(), 0).0.unwrap().nodes,
+        ids(&["1", "2", "3"])
+    );
+
+    a.exclude_peer("2", 30_000, Some(7));
+    a.exclude_peer("3", 30_000, None);
+    let (p, probe) = a.admit(view.clone(), 1);
+    assert_eq!(p, None, "both leaving: every partition is local");
+    assert_eq!(
+        probe,
+        vec![("2".to_string(), "http://node-2".to_string())],
+        "only a notice that named its incarnation can end early"
+    );
+    assert!(!a.probe_done("2", "http://node-2", Probe::Ready(Some(7))));
+    assert!(!a.probe_done("2", "http://node-2", Probe::Ready(None)));
+    assert!(!a.probe_done("3", "http://node-3", Probe::Ready(Some(9))));
+    assert!(a.excluded_peers(1).contains("2"));
+    assert!(a.probe_done("2", "http://node-2", Probe::Ready(Some(8))));
+    assert!(!a.excluded_peers(1).contains("2"));
+    assert_eq!(a.admit(view.clone(), 1).0.unwrap().nodes, ids(&["1", "2"]));
+
+    // A notice that lapsed lets the member back once its listener answers.
+    let (_, probe) = a.admit(view.clone(), 30_001);
+    assert!(probe.contains(&("3".to_string(), "http://node-3".to_string())));
+    assert!(a.probe_done("3", "http://node-3", Probe::Ready(None)));
+    assert_eq!(
+        a.admit(view, 30_001).0.unwrap().nodes,
+        ids(&["1", "2", "3"])
+    );
+}
+
+/// A hand-over waiting for a peer that dropped out is the partition's again
+/// wherever the placement now puts it: this node adopts it back — cursors and
+/// all — when it is the owner again, and a leaving node, which owns nothing,
+/// never does.
+#[test]
+fn a_hand_over_whose_partition_came_back_is_adopted_here() {
+    let a = engine(small());
+    a.push(T, "q", "Default", bodies(3), 0).unwrap();
+    assert_eq!(a.pop(T, "q", None, Some("g"), 1, true, 0).len(), 1);
+    a.set_placement(Some(placement("A", &["B"])));
+    assert_eq!(a.reap_foreign(), 1);
+    let h = a.take_outbox().pop().unwrap();
+    assert_eq!(
+        a.destination(T, "q", "Default", 0),
+        Dest::Peer("B".to_string(), "http://node-B".to_string())
+    );
+    // B dropped out while the hand-over waited.
+    a.set_placement(None);
+    assert_eq!(a.destination(T, "q", "Default", 0), Dest::Here);
+    assert!(a.take_back(h, 1));
+    let got: Vec<String> = a
+        .pop(T, "q", None, Some("g"), 10, true, 1)
+        .iter()
+        .map(payload_of)
+        .collect();
+    assert_eq!(
+        got,
+        ["{\"n\":1}", "{\"n\":2}"],
+        "the group resumes where it was"
+    );
+
+    let b = engine(small());
+    b.set_placement(Some(placement("A", &["A", "B"])));
+    b.set_leaving();
+    assert!(
+        matches!(b.destination(T, "q", "anything", 0), Dest::Peer(..)),
+        "a leaving node is never the owner"
+    );
+    b.set_placement(None);
+    assert_eq!(
+        b.destination(T, "q", "anything", 0),
+        Dest::Nobody,
+        "and with nobody else left, nobody is"
+    );
+}
+
+/// A peer that said it is leaving takes no hand-over, even before the
+/// placement catches up (a node that is leaving never re-judges): the next
+/// owner does, and when every peer is leaving — a whole cluster stopping —
+/// nobody does, at once, instead of after the drain's whole bound.
+#[test]
+fn a_hand_over_skips_the_peers_that_are_leaving() {
+    let a = engine(small());
+    a.set_placement(Some(placement("A", &["A", "B", "C"])));
+    a.set_leaving();
+    let first = match a.destination(T, "q", "p", 0) {
+        Dest::Peer(id, _) => id,
+        other => panic!("{other:?}"),
+    };
+    a.exclude_peer(&first, 30_000, None);
+    let second = match a.destination(T, "q", "p", 1) {
+        Dest::Peer(id, _) => id,
+        other => panic!("{other:?}"),
+    };
+    assert_ne!(first, second);
+    a.exclude_peer(&second, 30_000, None);
+    assert_eq!(a.destination(T, "q", "p", 2), Dest::Nobody);
+    // Notices lapse: the peers are candidates again.
+    assert!(matches!(a.destination(T, "q", "p", 30_001), Dest::Peer(..)));
+
+    // A 503 `leaving` (no incarnation) never erases the one a notice named.
+    a.exclude_peer("B", 40_000, Some(7));
+    a.exclude_peer("B", 35_000, None);
+    assert!(!a.probe_done("B", "http://node-B", Probe::Ready(Some(7))));
+    assert!(a.probe_done("B", "http://node-B", Probe::Ready(Some(8))));
+}
+
+/// Hand-overs that could not land go back in the queue, and the count of
+/// rings on their way is what a drain waits on.
+#[test]
+fn a_requeued_hand_over_ships_again_and_in_flight_rings_are_counted() {
+    let a = engine(small());
+    a.push(T, "q", "Default", bodies(2), 0).unwrap();
+    a.set_placement(Some(placement("A", &["B"])));
+    a.reap_foreign();
+    let out = a.take_outbox();
+    assert_eq!(out.len(), 1);
+    a.shipping_started(out.len());
+    assert_eq!(a.shipping(), 1);
+    a.requeue(out);
+    a.shipping_done(1);
+    assert_eq!(a.shipping(), 0);
+    a.shipping_done(5);
+    assert_eq!(a.shipping(), 0, "never below zero");
+    assert_eq!(a.take_handover(T, "q", Some("Default")).len(), 1);
 }

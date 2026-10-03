@@ -287,6 +287,63 @@ jobs:
           cargo clippy --manifest-path protocols/queen-kafka/Cargo.toml --locked \
             --all-targets -- -D warnings
 
+  # The Postgres source and sink (PLAN_PG_CONNECTORS.md), linked into the broker
+  # by its default `pg` feature. Its own manifest, so — like the Kafka facade —
+  # its tests, rustfmt and clippy would run nowhere unless a cell names it: a
+  # path dependency's `#[cfg(test)]` modules are never compiled by the broker's
+  # `cargo test`.
+  #
+  # Its live tests (the replication client, pgoutput decoding, values for every
+  # builtin type, the source and the sink end to end against the in-memory
+  # Queen) need a real PostgreSQL 17 with logical decoding, so one runs here in
+  # docker: `wal_level=logical` and room for the slots and walsenders the tests
+  # open, a role that may replicate, and a database it owns (it creates and
+  # drops its own tables, publications and slots). Without QUEEN_PG_TEST_DSN
+  # those tests skip, which is how they run on a developer's machine.
+  pg-connectors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      QUEEN_PG_TEST_DSN: postgres://queen_test:queen_test@127.0.0.1:55432/queen_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+          # See rust-unit: name the manifest, or rust-cache probes the root.
+          cache-workspaces: connectors/queen-pg
+      - name: PostgreSQL 17 with logical decoding
+        # A service container cannot take server flags, so it is started here.
+        # Ready means the FINAL server answers on TCP: the image's init phase
+        # runs a temporary server on the unix socket only, and a psql that
+        # raced it would talk to a server about to restart.
+        run: |
+          docker run -d --name pg17 -p 55432:5432 \
+            -e POSTGRES_PASSWORD=postgres \
+            postgres:17 \
+            -c wal_level=logical -c max_replication_slots=40 -c max_wal_senders=40
+          for _ in $(seq 1 90); do
+            if docker exec pg17 pg_isready -h 127.0.0.1 -p 5432 -U postgres -q; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec pg17 pg_isready -h 127.0.0.1 -p 5432 -U postgres
+          docker exec pg17 psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE queen_test LOGIN REPLICATION PASSWORD 'queen_test'" \
+            -c "CREATE DATABASE queen_test OWNER queen_test"
+      - name: cargo test
+        run: cargo test --manifest-path connectors/queen-pg/Cargo.toml --locked
+      - name: rustfmt
+        run: cargo fmt --manifest-path connectors/queen-pg/Cargo.toml --check
+      - name: clippy
+        run: |
+          cargo clippy --manifest-path connectors/queen-pg/Cargo.toml --locked \
+            --all-targets -- -D warnings
+      - name: PostgreSQL log on failure
+        if: failure()
+        run: docker logs pg17 2>&1 | tail -200
+
   # `rust-version` in the client's Cargo.toml is a promise to anyone on an older
   # toolchain. Every other job runs current stable, so without this the promise
   # is never checked — which is how it came to say 1.75 while the crate had not

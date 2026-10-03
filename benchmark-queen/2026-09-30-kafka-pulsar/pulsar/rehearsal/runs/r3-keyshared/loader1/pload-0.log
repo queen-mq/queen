@@ -1,0 +1,22 @@
+WARN max-pending 1000000 per partition producer would preallocate 274 MB over 12 partitions (24 B/slot); using 233016 (-pending-budget-mb 64)
+pload tag=r3-keyshared loader=0/3 mode=batch rate=4000 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=5s duration=40s report=10s drain=0s GOMAXPROCS=2 GOGC=400(default) seed=1790752206879551523
+  offered: 4000 msg/s = 40.0 units/s (avg 100.0 msgs/unit) across 1 pacer workers (40.00 units/s each)
+  topics: 1 x 12 partitions (load..load), entities/topic=100000 (key e<id>, system key partitioner) | picker: topics=rr entities: rr over space=100000 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.6 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 4 here (ci 0..3 of 12), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0 1 2]
+  pulsar: url=pulsar://10.202.0.2:6650,10.202.0.3:6650,10.202.0.4:6650 admin=http://10.202.0.2:8080 ns=bench/ns sub=sub type=key_shared compression=lz4 batch=5ms/1000 msgs/131072 B key-batching=true max-pending=233016/partition mem-limit=365 MB receiver-queue=1000 ack-group=100ms conns/broker=1
+  [admin] 1 topics with 12 partitions and subscription "sub" exist (checked in 0.1s)
+  [consume] 4 consumers subscribed (key_shared, 1 topics each at most) in 0.1s
+  [produce] 1 producers (one per topic, 12 partition producers each) created in 0.0s
+READY 1790752206566
+[start] waiting 4.947s for the common start 1790752213928
+[start] GO 07:10:13.928 (unix ms 1790752213928)
+[07:10:23] offered=     3000/s achieved=     3000/s shed=        0/s inflight=     0 | p50=   9.79 p99=   28.80 p999=   38.14 ms | push=30000 pop=27600 lag=2400 | errs push=0 pop=0 empty=0 gor=257 | ack=     2760/s ackErr=0 ackAvg=0.01ms | e2e p50=10.30 p99=32.64 p999=36.10 n=27600 | e2e_local p50=10.30 p99=32.64 n=27600
+[07:10:33] offered=     4000/s achieved=     3990/s shed=        0/s inflight=     1 | p50=   9.79 p99=   69.12 p999=  102.91 ms | push=69900 pop=67400 lag=2500 | errs push=0 pop=0 empty=0 gor=257 | ack=     3980/s ackErr=0 ackAvg=0.01ms | e2e p50=10.30 p99=66.05 p999=86.53 n=39800 | e2e_local p50=10.30 p99=66.05 n=39800
+[07:10:43] offered=     4000/s achieved=     4010/s shed=        0/s inflight=     0 | p50=   9.28 p99=   31.10 p999=   41.73 ms | push=110000 pop=106700 lag=3300 | errs push=0 pop=0 empty=0 gor=253 | ack=     3930/s ackErr=0 ackAvg=0.01ms | e2e p50=10.05 p99=38.14 p999=51.46 n=39300 | e2e_local p50=10.05 p99=38.14 n=39300
+[07:10:53] offered=     4000/s achieved=     4000/s shed=        0/s inflight=     0 | p50=  11.71 p99=   98.82 p999=  146.43 ms | push=150000 pop=146800 lag=3200 | errs push=0 pop=0 empty=0 gor=252 | ack=     4010/s ackErr=0 ackAvg=0.01ms | e2e p50=13.12 p99=126.46 p999=162.82 n=40100 | e2e_local p50=13.12 p99=126.46 n=40100
+time="2026-09-30T07:10:53Z" level=error msg="Failed to redeliver closing or closed consumer" consumerID=2 name=c00003 state=Closing subscription=sub topic="persistent://bench/ns/load-partition-1"
+time="2026-09-30T07:10:53Z" level=error msg="unable to send permits" consumerID=2 error="consumer closing or closed" name=c00003 subscription=sub topic="persistent://bench/ns/load-partition-1"
+[info] steady window 30s (after the ramp, before the producers stopped): offered 4000/s pushed 4000/s popped 3973/s cpu 8.8% = 2.20 cores per 100k msg/s (produce+consume)
+[final] offered=1500 achieved=1500 shed=0 (msgs: offered=150000 achieved=150000 shed=0) pushErr=0 | pushed=150000 popped=146800 lag=3200 | popErr=0 empty=0 | overall p50=10.05 p99=68.10 p999=125.44 ms | acked=146800 ackErr=0 ackLag=3200 ackAvg=0.01ms | e2e p50=10.82 p99=77.31 p999=148.48 ms
+load_cpu=7.2%

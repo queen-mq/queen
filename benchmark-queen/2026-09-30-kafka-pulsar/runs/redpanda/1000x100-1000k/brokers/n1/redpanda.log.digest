@@ -1,0 +1,21 @@
+579038610 bytes, 2441141 lines: head 64 MiB + tail 128 MiB + digest collected
+   1750 WARN tx - [{kafka/rNxN-Nk-tN/N}] - rm_stm.cc:N - replication failed: raft::errc:N
+     46 WARN storage - disk_log_impl.cc:N - Segment /root/bench/data/redpanda/kafka/rNxN-Nk-tN/N_N/N-N-vN.log exceeding Ns to close (truncate[post-translation])
+     28 WARN seastar - (rate limiting dropped N similar messages) Too long queue accumulated for raft_recv (N tasks)
+     24 WARN seastar - (rate limiting dropped N similar messages) Too long queue accumulated for main (N tasks)
+     19 WARN seastar - (rate limiting dropped N similar messages) Too long queue accumulated for produce (N tasks)
+     16 WARN admin_api_server - server.cc:N - Insecure Admin API listener on N.N.N.N:N, consider enabling `admin_api_require_auth`
+     14 WARN seastar - Too long queue accumulated for raft_recv (N tasks)
+      6 WARN storage - disk_log_appender.cc:N - Segment roll lock contested for {kafka/rNxN-Nk-tN/N}
+      5 WARN seastar - (rate limiting dropped N similar messages) Too long queue accumulated for raft_send (N tasks)
+      2 WARN storage - disk_log_appender.cc:N - Segment roll lock contested for {kafka/__consumer_offsets/N}
+      2 WARN cluster - cluster_discovery.cc:N - Error registering UUID dNfNcNb-Nb-N-aaN-NeNdbNceNb: rpc::errc::service_unavailable, retrying
+      1 WARN syschecks - Path: `/root/bench/data/redpanda' is on extN, not XFS. This will probably work, but Redpanda is only tested on XFS and XFS is recommended for best performance.
+      1 WARN seastar_memory - oversized allocation: N bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at NxNbabN NxNfefdf NxNcNca NxN NxNbacN NxNaeNd NxNaaed NxNa NxNfcNbN NxNfNeN NxNffcN NxNcf NxNaN 
+      1 WARN seastar - Too long queue accumulated for produce (N tasks)
+      1 WARN seastar - Too long queue accumulated for main (N tasks)
+      1 WARN seastar - (rate limiting dropped N similar messages) Too long queue accumulated for fetch (N tasks)
+      1 WARN raft - [group_id:N, {kafka/rNxN-Nk-tN/N}] consensus.cc:N - Cannot transfer leadership: {id: N, revision: N} needs recovery (-N, -N, N)
+      1 WARN cluster - topic_table_probe.cc:N - leadership change for unknown topic {redpanda/controller}
+      1 WARN cluster - id_allocator_frontend.cc:N - can't find {kafka_internal/id_allocator} in the metadata cache
+      1 WARN cluster - health_monitor_backend.cc:N - Failed to refresh cluster health.

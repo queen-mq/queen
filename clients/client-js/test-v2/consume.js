@@ -709,3 +709,43 @@ export async function testConsumerMultiPartitionGlobalCap(client) {
 
     return { success: true, message: 'Global batch cap respected across multi-partition consume' }
 }
+// A handler that throws under autoAck(false) (2026-10-02, 2.0.0-beta.6): the
+// consumer stopped at the first throw, consume() rejected, and the message
+// stayed leased until its lease ran out. It now nacks what the handler was
+// given and keeps consuming: the broker redelivers, the handler acks it.
+export async function manualAckHandlerErrorKeepsConsuming(client) {
+    const queueName = 'test-queue-v2-manual-ack-throw'
+    const group = 'test-manual-ack-throw'
+    const queue = await client.queue(queueName).create()
+    if (!queue.configured) {
+        return { success: false, message: 'Queue not created' }
+    }
+    await client.queue(queueName).push([{ data: { id: 1 } }, { data: { id: 2 } }])
+
+    const seen = []
+    try {
+        await client
+        .queue(queueName)
+        .group(group)
+        .subscriptionMode('all')
+        .autoAck(false)
+        .each()
+        .batch(1)
+        .wait(false)
+        .limit(3)
+        .consume(async (msg) => {
+            seen.push(`${msg.data.id}#${msg.deliveryAttempt}`)
+            if (seen.length === 1) throw new Error('first delivery fails')
+            // No { group }: the ack takes it from the message.
+            const res = await client.ack(msg, true)
+            if (!res.success) throw new Error(`ack refused: ${res.error}`)
+        })
+    } catch (error) {
+        return { success: false, message: `consume() rejected: ${error.message} (deliveries ${seen.join(', ')})` }
+    }
+
+    const leftover = await client.queue(queueName).group(group).batch(10).wait(false).pop()
+    const ids = seen.map(s => s.split('#')[0]).join(',')
+    const success = ids === '1,1,2' && leftover.length === 0
+    return { success, message: `deliveries ${seen.join(', ')} (expected 1,1,2), ${leftover.length} left unacked` }
+}

@@ -1,0 +1,5 @@
+2026-09-26T03:38:16Z start p9c-w2-clock: --workload queue --nemesis clock --time-limit 300 --rate 200
+2026-09-26T03:44:21Z done  p9c-w2-clock: INVALID store=/root/jepsen-p8/store/queen-queue-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-26T03:38:26.859026706Z log=/root/runs-p9c/p9c-w2-clock.log
+2026-09-26T03:44:24Z start p9c-w5-clock: --workload pipeline --nemesis clock --time-limit 300 --rate 200
+2026-09-26T03:50:14Z done  p9c-w5-clock: valid store=/root/jepsen-p8/store/queen-pipeline-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-26T03:44:35.376115376Z log=/root/runs-p9c/p9c-w5-clock.log
+2026-09-26T03:50:17Z start p9c-w1-clock: --workload log --nemesis clock --time-limit 300 --rate 200

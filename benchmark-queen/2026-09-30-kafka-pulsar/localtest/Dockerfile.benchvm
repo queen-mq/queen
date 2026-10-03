@@ -1,0 +1,9 @@
+# benchvm: stands in for a DigitalOcean Ubuntu 24.04 droplet when rehearsing the harness locally.
+# Same distro and JDK as the VMs (install.sh apt-installs openjdk-21-jdk-headless there; here it is pre-baked).
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      openjdk-21-jdk-headless python3 curl ca-certificates iproute2 procps psmisc sysstat \
+      netcat-openbsd less jq bc util-linux && rm -rf /var/lib/apt/lists/*
+# the VMs' private NIC is eth1; containers get eth0 — scripts must read the IP from hosts.env, never from a NIC name
+CMD ["sleep", "infinity"]

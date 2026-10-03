@@ -1,0 +1,10 @@
+total 427.8%
+tokio-rt-worker           179.6%
+queen-kafka               134.6%
+queen-raft                 32.6%
+queen-rsm-apply            28.2%
+queen-raft-log             22.0%
+queen-rsm-ckpt             19.0%
+queen-raft-sync             7.2%
+queen-qlog-drop             4.2%
+queen-rsm-dedup             0.4%

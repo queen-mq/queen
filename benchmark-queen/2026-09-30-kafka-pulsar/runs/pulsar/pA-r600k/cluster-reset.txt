@@ -1,0 +1,40 @@
+[2026-10-01T06:53:52Z] reset: stop all + wipe on 3 nodes (10.114.0.2 10.114.0.3 10.114.0.4)
+[2026-10-01T06:53:57Z] reset: render configs: PROFILE=vm
+  n1  [2026-10-01T06:53:58Z] mkconf node 1 (10.114.0.2) PROFILE=vm JOURNALS=1: 48 overrides -> /root/bench/pulsar/node | zk -Xms1g -Xmx1g | bookie -Xms3g -Xmx3g -XX:MaxDirectMemorySize=6g wcache=1536M rcache=1024M rocksdb=512M | broker -Xms6g -Xmx6g -XX:MaxDirectMemorySize=6g mlcache=2048M
+  n2  [2026-10-01T06:53:58Z] mkconf node 2 (10.114.0.3) PROFILE=vm JOURNALS=1: 48 overrides -> /root/bench/pulsar/node | zk -Xms1g -Xmx1g | bookie -Xms3g -Xmx3g -XX:MaxDirectMemorySize=6g wcache=1536M rcache=1024M rocksdb=512M | broker -Xms6g -Xmx6g -XX:MaxDirectMemorySize=6g mlcache=2048M
+  n3  [2026-10-01T06:53:58Z] mkconf node 3 (10.114.0.4) PROFILE=vm JOURNALS=1: 48 overrides -> /root/bench/pulsar/node | zk -Xms1g -Xmx1g | bookie -Xms3g -Xmx3g -XX:MaxDirectMemorySize=6g wcache=1536M rcache=1024M rocksdb=512M | broker -Xms6g -Xmx6g -XX:MaxDirectMemorySize=6g mlcache=2048M
+  n1  [2026-10-01T06:53:59Z] node 1 (10.114.0.2) zk started pid 562842 _MEM="-Xms1g -Xmx1g" nofile=1048576
+  n2  [2026-10-01T06:53:59Z] node 2 (10.114.0.3) zk started pid 523660 _MEM="-Xms1g -Xmx1g" nofile=1048576
+  n3  [2026-10-01T06:53:59Z] node 3 (10.114.0.4) zk started pid 521714 _MEM="-Xms1g -Xmx1g" nofile=1048576
+[2026-10-01T06:54:02Z] zk quorum: zk states: follower follower leader leader=1 followers=2 synced=2
+[2026-10-01T06:54:02Z] initialize-cluster-metadata (once, node 1)
+[2026-10-01T06:54:03Z] initialize-cluster-metadata --cluster bench --metadata-store zk:10.114.0.2:2181,10.114.0.3:2181,10.114.0.4:2181 --web-service-url http://10.114.0.2:8080,http://10.114.0.3:8080,http://10.114.0.4:8080 --broker-service-url pulsar://10.114.0.2:6650,pulsar://10.114.0.3:6650,pulsar://10.114.0.4:6650
+Cluster metadata for 'bench' setup correctly
+  n1  [2026-10-01T06:54:06Z] node 1 (10.114.0.2) bookie started pid 563440 _MEM="-Xms3g -Xmx3g -XX:MaxDirectMemorySize=6g" nofile=1048576
+  n2  [2026-10-01T06:54:06Z] node 2 (10.114.0.3) bookie started pid 523916 _MEM="-Xms3g -Xmx3g -XX:MaxDirectMemorySize=6g" nofile=1048576
+  n3  [2026-10-01T06:54:06Z] node 3 (10.114.0.4) bookie started pid 522006 _MEM="-Xms3g -Xmx3g -XX:MaxDirectMemorySize=6g" nofile=1048576
+[2026-10-01T06:54:10Z] bookies writable: bookies rw=3 ro=0 writable=[10.114.0.2:3181 10.114.0.3:3181 10.114.0.4:3181]
+  n1  [2026-10-01T06:54:11Z] node 1 (10.114.0.2) broker started pid 563896 _MEM="-Xms6g -Xmx6g -XX:MaxDirectMemorySize=6g" nofile=1048576
+  n2  [2026-10-01T06:54:11Z] node 2 (10.114.0.3) broker started pid 524240 _MEM="-Xms6g -Xmx6g -XX:MaxDirectMemorySize=6g" nofile=1048576
+  n3  [2026-10-01T06:54:11Z] node 3 (10.114.0.4) broker started pid 522388 _MEM="-Xms6g -Xmx6g -XX:MaxDirectMemorySize=6g" nofile=1048576
+[2026-10-01T06:54:19Z] brokers healthy: brokers active=3 10.114.0.2:8080=ok 10.114.0.3:8080=ok 10.114.0.4:8080=ok
+  [2026-10-01T06:54:20Z] created tenant bench
+  [2026-10-01T06:54:20Z] created namespace bench/ns
+  namespace bench/ns: bundles=48 persistence=E3/Qw3/Qa2 markDeleteRate=1.0 retention=0min/0MB
+  n1  node=1 ip=10.114.0.2 zk=follower/imok bookie=rw broker=ok
+  n2  node=2 ip=10.114.0.3 zk=follower/imok bookie=rw broker=ok
+  n3  node=3 ip=10.114.0.4 zk=leader/imok bookie=rw broker=ok
+  zk states: follower follower leader leader=1 followers=2 synced=2
+  bookies rw=3 ro=0 writable=[10.114.0.2:3181 10.114.0.3:3181 10.114.0.4:3181]
+  bookkeeper shell listbookies -rw:
+    ReadWrite Bookies :
+    BookieID:10.114.0.3:3181, IP:10.114.0.3, Port:3181, Hostname:10.114.0.3
+    BookieID:10.114.0.2:3181, IP:10.114.0.2, Port:3181, Hostname:10.114.0.2
+    BookieID:10.114.0.4:3181, IP:10.114.0.4, Port:3181, Hostname:10.114.0.4
+  brokers active=3 10.114.0.2:8080=ok 10.114.0.3:8080=ok 10.114.0.4:8080=ok
+  namespace bench/ns: bundles=48 persistence=E3/Qw3/Qa2 markDeleteRate=1.0 retention=0min/0MB
+  proof persistent://bench/ns/probe-health-1790837665: ledger 9 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.2:3181, 10.114.0.3:3181, 10.114.0.4:3181] (broker internalStats?metadata=true)
+  bookkeeper shell ledgermetadata -ledgerid 9:
+    ledgerID: 9
+    LedgerMetadata{formatVersion=3, ensembleSize=3, writeQuorumSize=3, ackQuorumSize=2, state=OPEN, digestType=CRC32C, password=base64:, ensembles={0=[10.114.0.2:3181, 10.114.0.3:3181, 10.114.0.4:3181]}, ...
+[2026-10-01T06:54:27Z] reset done

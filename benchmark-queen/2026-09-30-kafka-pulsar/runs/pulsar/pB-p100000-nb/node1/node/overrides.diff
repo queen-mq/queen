@@ -1,0 +1,304 @@
+--- conf-defaults/zookeeper.conf
++++ node1/zookeeper.conf
+@@ -26,7 +26,7 @@
+ # sending a request and getting an acknowledgement
+ syncLimit=5
+ # the directory where the snapshot is stored.
+-dataDir=data/zookeeper
++dataDir=/root/bench/data/pulsar/zk/data
+ # the port at which the clients will connect
+ clientPort=2181
+ 
+@@ -77,5 +77,29 @@
+ #
+ # https://prometheus.io Metrics Exporter
+ metricsProvider.className=org.apache.pulsar.metrics.prometheus.zookeeper.PrometheusMetricsProvider
+-metricsProvider.httpPort=8000
+-metricsProvider.exportJvmInfo=true
+\ No newline at end of file
++metricsProvider.httpPort=8001
++metricsProvider.exportJvmInfo=true
++
++# added by mkconf.sh (key not in the 4.2.4 default file)
++dataLogDir=/root/bench/data/pulsar/zk/txlog
++
++# added by mkconf.sh (key not in the 4.2.4 default file)
++4lw.commands.whitelist=ruok,mntr,srvr,stat,conf,isro,envi,cons,wchs
++
++# added by mkconf.sh (key not in the 4.2.4 default file)
++server.1=10.114.0.2:2888:3888
++
++# added by mkconf.sh (key not in the 4.2.4 default file)
++server.2=10.114.0.3:2888:3888
++
++# added by mkconf.sh (key not in the 4.2.4 default file)
++server.3=10.114.0.4:2888:3888
++
++# added by mkconf.sh (key not in the 4.2.4 default file)
++clientPortAddress=10.114.0.2
++
++# added by mkconf.sh (key not in the 4.2.4 default file)
++admin.serverAddress=10.114.0.2
++
++# added by mkconf.sh (key not in the 4.2.4 default file)
++metricsProvider.httpHost=10.114.0.2
+--- conf-defaults/bookkeeper.conf
++++ node1/bookkeeper.conf
+@@ -32,11 +32,11 @@
+ #   journalDirectories=/tmp/bk-journal1,/tmp/bk-journal2
+ # If journalDirectories is set, bookies will skip journalDirectory and use
+ # this setting directory.
+-# journalDirectories=/tmp/bk-journal
++journalDirectories=/root/bench/data/pulsar/bookie/journal
+ 
+ # Directory Bookkeeper outputs its write ahead log
+ # @deprecated since 4.5.0. journalDirectories is preferred over journalDirectory.
+-journalDirectory=data/bookkeeper/journal
++journalDirectory=/root/bench/data/pulsar/bookie/journal
+ 
+ # Configure the bookie to allow/disallow multiple ledger/index/journal directories
+ # in the same filesystem disk partition
+@@ -48,12 +48,12 @@
+ 
+ # Set the network interface that the bookie should listen on.
+ # If not set, the bookie will listen on all interfaces.
+-# listeningInterface=eth0
++listeningInterface=eth1
+ 
+ # Configure a specific hostname or IP address that the bookie should use to advertise itself to
+ # clients. If not set, bookie will advertised its own IP address or hostname, depending on the
+ # listeningInterface and useHostNameAsBookieID settings.
+-advertisedAddress=
++advertisedAddress=10.114.0.2
+ 
+ # Whether the bookie allowed to use a loopback interface as its primary
+ # interface(i.e. the interface it uses to establish its identity)?
+@@ -365,7 +365,7 @@
+ journalMaxBackups=5
+ 
+ # How much space should we pre-allocate at a time in the journal.
+-journalPreAllocSizeMB=16
++journalPreAllocSizeMB=128
+ 
+ # Size of the write buffers used for the journal
+ journalWriteBufferSizeKB=64
+@@ -428,7 +428,7 @@
+ # Ideally ledger dirs and journal dir are each in a different device,
+ # which reduce the contention between random i/o and sequential write.
+ # It is possible to run with a single disk, but performance will be significantly lower.
+-ledgerDirectories=data/bookkeeper/ledgers
++ledgerDirectories=/root/bench/data/pulsar/bookie/ledgers
+ # Directories to store index files. If not specified, will use ledgerDirectories to store.
+ # indexDirectories=data/bookkeeper/ledgers
+ 
+@@ -675,7 +675,7 @@
+ # -Dbookkeeper.metadata.bookie.drivers=org.apache.pulsar.metadata.bookkeeper.PulsarMetadataBookieDriver
+ # These are JVM options are set by default when BookKeeper components or tools are started with bin/pulsar or
+ # bin/bookkeeper scripts included in the the Pulsar distribution
+-metadataServiceUri=
++metadataServiceUri=zk+hierarchical://10.114.0.2:2181;10.114.0.3:2181;10.114.0.4:2181/ledgers
+ 
+ # @Deprecated - `ledgerManagerFactoryClass` is deprecated in favor of using `metadataServiceUri`
+ # Ledger Manager Class
+@@ -703,7 +703,7 @@
+ # A list of one of more servers on which Zookeeper is running.
+ # The server list can be comma separated values, for example:
+ # zkServers=zk1:2181,zk2:2181,zk3:2181
+-zkServers=localhost:2181
++zkServers=10.114.0.2:2181,10.114.0.3:2181,10.114.0.4:2181
+ 
+ # ZooKeeper client session timeout in milliseconds
+ # Bookie server will exit if it received SESSION_EXPIRED because it
+@@ -730,7 +730,7 @@
+ #############################################################################
+ 
+ # The flag enables/disables starting the admin http server. Default value is 'false'.
+-httpServerEnabled=false
++httpServerEnabled=true
+ 
+ # The http server port to listen on. Default value is 8080.
+ # Use `8000` as the port to keep it consistent with prometheus stats provider
+@@ -757,12 +757,12 @@
+ # For good performance, it should be big enough to hold a substantial amount
+ # of entries in the flush interval
+ #  By default it will be allocated to 1/4th of the available direct memory
+-dbStorage_writeCacheMaxSizeMb=
++dbStorage_writeCacheMaxSizeMb=1536
+ 
+ # Size of Read cache. Memory is allocated from JVM direct memory.
+ # This read cache is pre-filled doing read-ahead whenever a cache miss happens
+ #  By default it will be allocated to 1/4th of the available direct memory
+-dbStorage_readAheadCacheMaxSizeMb=
++dbStorage_readAheadCacheMaxSizeMb=1024
+ 
+ # How many entries to pre-fill in cache after a read cache miss
+ dbStorage_readAheadCacheBatchSize=1000
+@@ -781,7 +781,7 @@
+ # database which can reach ~2GB in some cases
+ # Default is to use 10% of the direct memory size
+ # These settings are ignored since Pulsar 2.11 / Bookkeeper 4.15
+-dbStorage_rocksDB_blockCacheSize=
++dbStorage_rocksDB_blockCacheSize=536870912
+ 
+ # Other RocksDB specific tunables
+ # These settings are ignored since Pulsar 2.11 / Bookkeeper 4.15
+@@ -792,3 +792,9 @@
+ dbStorage_rocksDB_numLevels=-1
+ dbStorage_rocksDB_numFilesInLevel0=4
+ dbStorage_rocksDB_maxSizeInLevel1MB=256
++
++# added by mkconf.sh (key not in the 4.2.4 default file)
++httpServerHost=10.114.0.2
++
++# added by mkconf.sh (key not in the 4.2.4 default file)
++entryLocationRocksdbConf=/root/bench/pulsar/node/entry_location_rocksdb.conf
+--- conf-defaults/broker.conf
++++ node1/broker.conf
+@@ -24,7 +24,7 @@
+ # * zk:my-zk-1:2181,my-zk-2:2181,my-zk-3:2181
+ # * my-zk-1:2181,my-zk-2:2181,my-zk-3:2181 (will default to ZooKeeper when the schema is not specified)
+ # * zk:my-zk-1:2181,my-zk-2:2181,my-zk-3:2181/my-chroot-path (to add a ZK chroot path)
+-metadataStoreUrl=
++metadataStoreUrl=zk:10.114.0.2:2181,10.114.0.3:2181,10.114.0.4:2181
+ 
+ # Configuration file path for metadata store. It's supported by RocksdbMetadataStore and EtcdMetadataStore for now
+ metadataStoreConfigPath=
+@@ -36,7 +36,7 @@
+ configurationMetadataSyncEventTopic=
+ 
+ # The metadata store URL for the configuration data. If empty, we fall back to use metadataStoreUrl
+-configurationMetadataStoreUrl=
++configurationMetadataStoreUrl=zk:10.114.0.2:2181,10.114.0.3:2181,10.114.0.4:2181
+ 
+ # Broker data port
+ brokerServicePort=6650
+@@ -63,14 +63,14 @@
+ webServiceTlsCiphers=
+ 
+ # Hostname or IP address the service binds on, default is 0.0.0.0.
+-bindAddress=0.0.0.0
++bindAddress=10.114.0.2
+ 
+ # Extra bind addresses for the service: <listener_name>:<scheme>://<host>:<port>,[...]
+ bindAddresses=
+ 
+ # Hostname or IP address the service advertises to the outside world.
+ # If not set, the value of InetAddress.getLocalHost().getCanonicalHostName() is used.
+-advertisedAddress=
++advertisedAddress=10.114.0.2
+ 
+ # Used to specify multiple advertised listeners for the broker.
+ # The value must format as <listener_name>:pulsar://<host>:<port>,
+@@ -132,7 +132,7 @@
+ isRunningStandalone=
+ 
+ # Name of the cluster to which this broker belongs to
+-clusterName=
++clusterName=bench
+ 
+ # The maximum number of tenants that each pulsar cluster can create
+ # This configuration is not precise control, in a concurrent scenario, the threshold will be exceeded
+@@ -193,7 +193,7 @@
+ # additionalSystemCursorNames=
+ 
+ # Enable topic auto creation if new producer or consumer connected (disable auto creation with value false)
+-allowAutoTopicCreation=true
++allowAutoTopicCreation=false
+ 
+ # The type of topic that is allowed to be automatically created.(partitioned/non-partitioned)
+ allowAutoTopicCreationType=non-partitioned
+@@ -210,7 +210,7 @@
+ 
+ # Enable the deletion of inactive topics. This parameter need to cooperate with the allowAutoTopicCreation parameter.
+ # If brokerDeleteInactiveTopicsEnabled is set to true, we should ensure that allowAutoTopicCreation is also set to true.
+-brokerDeleteInactiveTopicsEnabled=true
++brokerDeleteInactiveTopicsEnabled=false
+ 
+ # How often to check for inactive topics
+ brokerDeleteInactiveTopicsFrequencySeconds=60
+@@ -235,10 +235,10 @@
+ brokerDeleteInactiveTopicsMaxInactiveDurationSeconds=
+ 
+ # Allow you to delete a tenant forcefully.
+-forceDeleteTenantAllowed=false
++forceDeleteTenantAllowed=true
+ 
+ # Allow you to delete a namespace forcefully.
+-forceDeleteNamespaceAllowed=false
++forceDeleteNamespaceAllowed=true
+ 
+ # Max pending publish requests per connection to avoid keeping large number of pending
+ # requests in memory. Default: 1000
+@@ -311,7 +311,7 @@
+ 
+ # When a namespace is created without specifying the number of bundle, this
+ # value will be used as the default
+-defaultNumberOfNamespaceBundles=4
++defaultNumberOfNamespaceBundles=48
+ 
+ # The maximum number of namespaces that each tenant can create
+ # This configuration is not precise control, in a concurrent scenario, the threshold will be exceeded
+@@ -1250,10 +1250,10 @@
+ # Ensemble size (E), Number of bookies to use for storing entries in a ledger.
+ # Please notice that sticky reads enabled by bookkeeperEnableStickyReads=true aren’t used
+ # unless ensemble size (E) equals write quorum (Qw) size.
+-managedLedgerDefaultEnsembleSize=2
++managedLedgerDefaultEnsembleSize=3
+ 
+ # Write quorum (Qw) size, Replication factor for storing entries (messages) in a ledger.
+-managedLedgerDefaultWriteQuorum=2
++managedLedgerDefaultWriteQuorum=3
+ 
+ # Ack quorum (Qa) size, Number of guaranteed copies (acks to wait for before a write is considered completed)
+ managedLedgerDefaultAckQuorum=2
+@@ -1285,7 +1285,7 @@
+ # Amount of memory to use for caching data payload in managed ledger. This memory
+ # is allocated from JVM direct memory and it's shared across all the topics
+ # running  in the same broker. By default, uses 1/5th of available direct memory
+-managedLedgerCacheSizeMB=
++managedLedgerCacheSizeMB=2048
+ 
+ # Evicting cache data by the slowest markDeletedPosition (true) or slowest read position (false).
+ # This setting is ignored when cacheEvictionByExpectedReadCount is true."
+@@ -1532,7 +1532,7 @@
+ loadBalancerHostUsageCheckIntervalMinutes=1
+ 
+ # Enable/disable automatic bundle unloading for load-shedding
+-loadBalancerSheddingEnabled=true
++loadBalancerSheddingEnabled=false
+ 
+ # Load shedding interval. Broker periodically checks whether some traffic should be offload from
+ # some over-loaded broker to other under-loaded brokers
+@@ -1551,10 +1551,10 @@
+ loadBalancerResourceQuotaUpdateIntervalMinutes=15
+ 
+ # enable/disable namespace bundle auto split
+-loadBalancerAutoBundleSplitEnabled=true
++loadBalancerAutoBundleSplitEnabled=false
+ 
+ # enable/disable automatic unloading of split bundles
+-loadBalancerAutoUnloadSplitBundlesEnabled=true
++loadBalancerAutoUnloadSplitBundlesEnabled=false
+ 
+ # maximum topics in a bundle, otherwise bundle split will be triggered
+ loadBalancerNamespaceBundleMaxTopics=1000
+@@ -1851,7 +1851,7 @@
+ authenticateMetricsEndpoint=false
+ 
+ # Enable topic level metrics
+-exposeTopicLevelMetricsInPrometheus=true
++exposeTopicLevelMetricsInPrometheus=false
+ 
+ # Enable consumer level metrics. default is false
+ exposeConsumerLevelMetricsInPrometheus=false
+--- dist/conf/entry_location_rocksdb.conf
++++ node1/entry_location_rocksdb.conf
+@@ -59,7 +59,7 @@
+  # set by jni: tableOptions.setBlockSize
+  block_size=65536
+  # set by jni: tableOptions.setBlockCache
+- block_cache=206150041
++ block_cache=536870912
+  # set by jni: tableOptions.setFormatVersion
+  format_version=5
+  # set by jni: tableOptions.setChecksumType

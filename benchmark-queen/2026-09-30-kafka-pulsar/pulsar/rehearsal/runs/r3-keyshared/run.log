@@ -1,0 +1,48 @@
+[2026-09-30T07:09:37Z] run r3-keyshared: pulsar 4.2.4, 12000 msg/s total over 3 load processes (1 loaders x 3), topics=1 x partitions=12 entities=100000 mode=batch batch=100 sub=key_shared consumers=4/process
+[2026-09-30T07:09:37Z] 1. cluster reset: PROFILE=local JOURNALS=2
+  [2026-09-30T07:10:00Z] brokers healthy: brokers active=3 10.202.0.2:8080=ok 10.202.0.3:8080=ok 10.202.0.4:8080=ok
+    proof persistent://bench/ns/probe-health-1790752202: ledger 9 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.202.0.4:3181, 10.202.0.2:3181, 10.202.0.
+  [2026-09-30T07:10:03Z] reset done
+[2026-09-30T07:10:03Z] 2. topics + subscription + warm: pload -create-only on loader 1
+    [admin] subscription "sub" created in 0.4s and verified on all 12 partitions in 0.0s (0 re-created on a partition)
+    [warm] one message (no "ts") into each of 12 partitions in 0.0s; consumed and acked in 0.1s
+  [create] done: 1 topics x 12 partitions, subscription "sub" on every partition
+    namespace bench/ns: bundles=48 persistence=E3/Qw3/Qa2 markDeleteRate=1.0 retention=0min/0MB
+    proof persistent://bench/ns/load-partition-0: ledger 16 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.202.0.4:3181, 10.202.0.3:3181, 10.202.0.2:3181] (broker internalSt
+      LedgerMetadata{formatVersion=3, ensembleSize=3, writeQuorumSize=3, ackQuorumSize=2, state=OPEN, digestType=CRC32C, password=base64:, ensembles={0=[10.202.0.4:3181, 10.202.0.3:3181, 10.202.0.2:3181]}, ...
+[2026-09-30T07:10:05Z] 3. balance -fix
+  balance bench/ns: 12 topics (1 partitioned) in 11 of 48 bundles, 3 brokers, mean 4.0 topics/broker; hash check 4/4 lookups agree
+    10.202.0.2:8080        bundles=  3 topics=      4 (  +0.0%)  per-bundle max/min=2/1
+    10.202.0.3:8080        bundles=  4 topics=      4 (  +0.0%)  per-bundle max/min=1/1
+    10.202.0.4:8080        bundles=  4 topics=      4 (  +0.0%)  per-bundle max/min=1/1
+    unowned bundles with topics: 0 (0 topics); max deviation 0.0% (target ±10%): OK
+[2026-09-30T07:10:06Z] 4. samplers on 3 brokers + 1 loaders
+  sampler r3-keyshared started pid 5409 -> /root/bench/samples/r3-keyshared.txt (iface=eth0 disk=overlay)
+  sampler r3-keyshared started pid 3613 -> /root/bench/samples/r3-keyshared.txt (iface=eth0 disk=overlay)
+  sampler r3-keyshared started pid 3719 -> /root/bench/samples/r3-keyshared.txt (iface=eth0 disk=overlay)
+  sampler r3-keyshared started pid 523 -> /root/bench/samples/r3-keyshared.txt (iface=eth0 disk=overlay)
+[2026-09-30T07:10:06Z] 5. 3 load processes
+[2026-09-30T07:10:08Z]   3/3 READY after 2s
+[2026-09-30T07:10:09Z] 6. start instant 1790752213928 (loader 1 clock + 5 s); producing 40s (ramp 5s) + drain 0s
+[2026-09-30T07:10:34Z]   mid-run thread snapshot
+    n1  node=1 broker total=0.08 cores over 3s (104 threads, 104 named by jstack)
+    n1  node=1 bookie total=0.11 cores over 3s (125 threads, 92 named by jstack)
+    n1  node=1 zk total=0.00 cores over 3s (69 threads, 69 named by jstack)
+    n2  node=2 broker total=0.10 cores over 3s (91 threads, 91 named by jstack)
+    n2  node=2 bookie total=0.09 cores over 3s (119 threads, 86 named by jstack)
+    n2  node=2 zk total=0.00 cores over 3s (67 threads, 67 named by jstack)
+    n3  node=3 broker total=0.09 cores over 3s (90 threads, 90 named by jstack)
+    n3  node=3 bookie total=0.12 cores over 3s (124 threads, 91 named by jstack)
+    n3  node=3 zk total=0.00 cores over 3s (76 threads, 76 named by jstack)
+[2026-09-30T07:10:55Z] 7. loaders done
+[2026-09-30T07:10:55Z] collect -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/pulsar/rehearsal/runs/r3-keyshared
+  pload-0: [final] offered=1500 achieved=1500 shed=0 (msgs: offered=150000 achieved=150000 shed=0) pushErr=0 | pushed=150000 popped=146800 lag=3200 | popErr=0 empty=0 | overall p50=10.05 p99=68.10 p999=125.44 ms | acked=146800 ackErr=0 ackLag=3200 ackAvg=0.01ms | e2e p50=10.82 p99=77.31 p999=148.48 ms
+  pload-0: load_cpu=7.2%
+  pload-1: [final] offered=1500 achieved=1500 shed=0 (msgs: offered=150000 achieved=150000 shed=0) pushErr=0 | pushed=150000 popped=162300 lag=-12300 | popErr=0 empty=0 | overall p50=9.79 p99=72.19 p999=146.43 ms | acked=162300 ackErr=0 ackLag=-12300 ackAvg=0.01ms | e2e p50=10.69 p99=66.05 p999=114.18 ms
+  pload-1: load_cpu=6.7%
+  pload-2: [final] offered=1500 achieved=1500 shed=0 (msgs: offered=150000 achieved=150000 shed=0) pushErr=0 | pushed=150000 popped=140800 lag=9200 | popErr=0 empty=0 | overall p50=10.69 p99=79.36 p999=128.51 ms | acked=140800 ackErr=0 ackLag=9200 ackAvg=0.01ms | e2e p50=10.69 p99=79.36 p999=121.34 ms
+  pload-2: load_cpu=6.8%
+[2026-09-30T07:10:56Z] DONE /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/pulsar/rehearsal/runs/r3-keyshared
+  run           sys     shape                                        offered  push/s  cons/s  shed/s  e2e p50  e2e p99  local p99  prod p99  brk cores  sys cores  rss GB/node  disk w MB/s/node  net rx/tx MB/s/node  errs  load cpu
+  r3-keyshared  pulsar  t=1 p=12 e=100000 batch/100 key_shared c=12    12000     11k     12k      0k       10       78         78        77        3.5        0.8          1.0                 0                  1/1     0       0.2
+  latencies in ms (e2e = consumer receive - scheduled send; local = same-host samples only); rates = last 30 s

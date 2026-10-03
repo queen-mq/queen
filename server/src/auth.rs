@@ -378,6 +378,12 @@ fn jwk_to_decoding_key(k: &serde_json::Value) -> Option<(String, DecodingKey)> {
     }
 }
 
+/// `/api/v1/connectors` and everything under it — and nothing that merely
+/// starts with the same letters.
+fn is_connectors_path(path: &str) -> bool {
+    path == "/api/v1/connectors" || path.starts_with("/api/v1/connectors/")
+}
+
 /// Per-route required access level — a faithful port of the C++
 /// `get_route_access_level`, extended with the segments broker's `/streams/*`
 /// surface (queries/cycle = READ_WRITE, state/get = READ_ONLY).
@@ -419,9 +425,32 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     if path == "/api/v1/stats/refresh" {
         return Admin;
     }
+    // The tenant purge and the quota grant act on the tenant the request NAMES
+    // (in its query or body), not on the one the edge resolved: they are
+    // operator verbs, at the level the same quota handler already takes under
+    // `/api/v1/system/quota`. Path-exact and for EVERY verb, so no method on
+    // either path reaches a lower level by falling through. The proxy blocks
+    // both for every client (proxy/src/routes.rs) and runs the purge from its
+    // control plane (proxy/src/cp.rs).
+    if path == "/api/v1/resources/tenant" || path == "/api/v1/resources/quota" {
+        return Admin;
+    }
+    // PLAN_PG_CONNECTORS.md §3.1 — the Postgres connectors. Creating,
+    // replacing, deleting or resyncing one points the broker at a database
+    // with a password and decides what it writes where (a source's queues, a
+    // sink's table), and a delete can drop a replication slot: every verb but
+    // GET is the operator's. The reads — redacted, never a password — are in
+    // the GET block below.
+    if is_connectors_path(path) && m != "GET" {
+        return Admin;
+    }
 
     // -------- READ_ONLY (GET status / info endpoints) --------
     if m == "GET" {
+        // The connectors' reads (see the Admin arm above).
+        if is_connectors_path(path) {
+            return ReadOnly;
+        }
         // RUSTFIX item 7: the bare /status GET route (main.rs) is READ_ONLY, not
         // public and not the READ_WRITE default.
         if path == "/status" {
@@ -577,6 +606,32 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     ReadWrite
 }
 
+/// The calls one broker of this cluster makes on another with no client
+/// behind them (`handlers/ephemeral.rs`, §3.7 across raft nodes): the ring
+/// hand-over, the leaving notice and the readiness probe. They prove
+/// themselves with the cluster token ([`is_peer_call`]), never a JWT: there is
+/// no end user to present one, and a broker holds no key to mint one. Exact
+/// method and path: every other route — the relayed push, pop and ack among
+/// them, which re-present their caller's own credential — stays a client's.
+const PEER_CALLS: [(&str, &str); 3] = [
+    ("POST", "/api/v1/ephemeral/_adopt"),
+    ("POST", "/api/v1/ephemeral/_leaving"),
+    ("GET", "/api/v1/ephemeral/_ready"),
+];
+
+/// Is this one broker's call on another ([`PEER_CALLS`]), proven by the
+/// forward mark and the cluster token (`peerclient::verified_relay`, compared
+/// in constant time)? Never true on a cluster without `QUEEN_RAFT_TOKEN`: the
+/// mark alone is a header anyone can send. The token is the one every Raft
+/// RPC carries — whoever holds it can already vote and append — so believing
+/// it here grants nothing it did not.
+pub(crate) fn is_peer_call(method: &Method, path: &str, headers: &axum::http::HeaderMap) -> bool {
+    PEER_CALLS
+        .iter()
+        .any(|(m, p)| method.as_str() == *m && path == *p)
+        && crate::peerclient::verified_relay(headers)
+}
+
 fn extract_bearer(req: &Request) -> Option<String> {
     let raw = req.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
     if raw.len() > 7 && raw[..7].eq_ignore_ascii_case("bearer ") {
@@ -653,6 +708,13 @@ pub async fn auth_middleware(
 
     let level = route_access_level(&method, &path);
     if level == AccessLevel::Public {
+        req.extensions_mut().insert(AuthedSub(None));
+        return next.run(req).await;
+    }
+
+    // Another broker of this cluster handing rings over, announcing it is
+    // leaving or probing this node: proven by the cluster token, not a JWT.
+    if is_peer_call(&method, &path, req.headers()) {
         req.extensions_mut().insert(AuthedSub(None));
         return next.run(req).await;
     }
@@ -876,6 +938,79 @@ mod tests {
         assert!(off.validate().is_ok());
     }
 
+    /// The three calls between brokers — the ring hand-over, the leaving
+    /// notice, the readiness probe — pass without a JWT on the forward mark and
+    /// the cluster token, and only they, at their exact method and path: a
+    /// client route keeps its JWT check whatever headers it carries, and the
+    /// mark alone, the token alone or a wrong token proves nothing.
+    #[test]
+    fn only_the_calls_between_brokers_pass_on_the_cluster_token() {
+        use crate::peerclient::{FWD_HEADER, TOKEN_HEADER};
+        let token = crate::peerclient::test_token();
+        let h = |pairs: &[(&'static str, &str)]| {
+            let mut m = axum::http::HeaderMap::new();
+            for (k, v) in pairs {
+                m.insert(*k, axum::http::HeaderValue::from_str(v).unwrap());
+            }
+            m
+        };
+        let proven = h(&[(FWD_HEADER, "1"), (TOKEN_HEADER, token)]);
+        assert!(is_peer_call(
+            &Method::POST,
+            "/api/v1/ephemeral/_adopt",
+            &proven
+        ));
+        assert!(is_peer_call(
+            &Method::POST,
+            "/api/v1/ephemeral/_leaving",
+            &proven
+        ));
+        assert!(is_peer_call(
+            &Method::GET,
+            "/api/v1/ephemeral/_ready",
+            &proven
+        ));
+
+        assert!(!is_peer_call(
+            &Method::GET,
+            "/api/v1/ephemeral/_adopt",
+            &proven
+        ));
+        assert!(!is_peer_call(
+            &Method::POST,
+            "/api/v1/ephemeral/_ready",
+            &proven
+        ));
+        assert!(!is_peer_call(
+            &Method::POST,
+            "/api/v1/ephemeral/_adopt/",
+            &proven
+        ));
+        for path in [
+            "/api/v1/ephemeral/push",
+            "/api/v1/ephemeral/ack",
+            "/api/v1/ephemeral/reset",
+            "/api/v1/ephemeral/configure",
+            "/api/v1/push",
+            "/api/v1/system/maintenance",
+        ] {
+            assert!(!is_peer_call(&Method::POST, path, &proven), "{path}");
+        }
+        assert!(!is_peer_call(
+            &Method::GET,
+            "/api/v1/ephemeral/pop",
+            &proven
+        ));
+
+        let adopt = |hs: &axum::http::HeaderMap| {
+            is_peer_call(&Method::POST, "/api/v1/ephemeral/_adopt", hs)
+        };
+        assert!(!adopt(&h(&[(FWD_HEADER, "1")])), "the mark alone");
+        assert!(!adopt(&h(&[(TOKEN_HEADER, token)])), "the token alone");
+        assert!(!adopt(&h(&[(FWD_HEADER, "1"), (TOKEN_HEADER, "guess")])));
+        assert!(!adopt(&h(&[])));
+    }
+
     /// PLAN_QUEEN_KAFKA.md C2. `POST /api/v1/fetch` reads a log and writes
     /// nothing, so it must sit with the other message reads and NOT on the
     /// ReadWrite fallthrough — a read-only token that takes 403 on a read is
@@ -1018,5 +1153,156 @@ mod tests {
             route_access_level(&Method::GET, "/api/v1/dlq"),
             AccessLevel::ReadOnly
         );
+    }
+
+    /// PLAN_PG_CONNECTORS.md §3.1: the connectors are read with a read-only
+    /// token and written only by an admin — every write verb, on the
+    /// collection, one connector and its resync.
+    #[test]
+    fn connectors_are_read_only_to_read_and_admin_to_write() {
+        for path in [
+            "/api/v1/connectors",
+            "/api/v1/connectors/orders-src",
+            "/api/v1/connectors/orders-src/resync",
+        ] {
+            assert_eq!(
+                route_access_level(&Method::GET, path),
+                AccessLevel::ReadOnly,
+                "GET {path}"
+            );
+            for method in [Method::PUT, Method::POST, Method::DELETE, Method::PATCH] {
+                assert_eq!(
+                    route_access_level(&method, path),
+                    AccessLevel::Admin,
+                    "{method} {path}"
+                );
+            }
+        }
+        // A path that merely starts with the same letters is not one of them.
+        assert_eq!(
+            route_access_level(&Method::PUT, "/api/v1/connectorsx"),
+            AccessLevel::ReadWrite
+        );
+    }
+
+    /// The tenant purge and the quota grant name their target tenant in the
+    /// request, so they are operator verbs: Admin on every verb, and the
+    /// `/api/v1/system/quota` aliases the same handler answers under agree.
+    #[test]
+    fn tenant_purge_and_quota_grants_require_admin_access() {
+        for path in ["/api/v1/resources/tenant", "/api/v1/resources/quota"] {
+            for method in [
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+            ] {
+                assert_eq!(
+                    route_access_level(&method, path),
+                    AccessLevel::Admin,
+                    "{method} {path}"
+                );
+            }
+        }
+        for alias in ["/api/v1/system/quota", "/api/v1/system/quotas"] {
+            assert_eq!(
+                route_access_level(&Method::POST, alias),
+                route_access_level(&Method::POST, "/api/v1/resources/quota"),
+                "{alias} and /api/v1/resources/quota are one handler"
+            );
+        }
+        // Path-exact: the `/api/v1/resources/` reads keep their level.
+        assert_eq!(
+            route_access_level(&Method::GET, "/api/v1/resources/queues"),
+            AccessLevel::ReadOnly
+        );
+        assert_eq!(
+            route_access_level(&Method::POST, "/api/v1/resources/kv/list"),
+            AccessLevel::ReadOnly
+        );
+    }
+
+    /// The same rule through the middleware the router runs, with real
+    /// tokens: a read-write token is refused both verbs with 403, an admin
+    /// token reaches the handler, a missing token is a 401. The in-process
+    /// Kafka path (`authorize_route`) answers the same.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_read_write_token_is_refused_the_tenant_purge_and_the_quota_grant() {
+        use axum::body::Body;
+
+        let mut cfg = cfg_with_alg("HS256");
+        cfg.public_key = String::new();
+        cfg.jwks_url = String::new();
+        let auth = Authenticator::new(cfg);
+        let token = |role: &str| {
+            jsonwebtoken::encode(
+                &jsonwebtoken::Header::new(Algorithm::HS256),
+                &serde_json::json!({"sub": format!("t-{role}"), "role": role}),
+                &jsonwebtoken::EncodingKey::from_secret(b"secret"),
+            )
+            .expect("sign")
+        };
+        let router = axum::Router::new()
+            .fallback(|| async { "reached" })
+            .layer(axum::middleware::from_fn_with_state(
+                auth.clone(),
+                auth_middleware,
+            ));
+        let status = |method: Method, uri: &'static str, bearer: Option<String>| {
+            let router = router.clone();
+            async move {
+                let mut req = axum::http::Request::builder().method(method).uri(uri);
+                if let Some(t) = bearer {
+                    req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+                }
+                queen_proxy::upstream::Upstream::InProcess(router)
+                    .call(req.body(Body::empty()).expect("request"))
+                    .await
+                    .expect("in-process call")
+                    .status()
+            }
+        };
+        let routes = [
+            (
+                Method::DELETE,
+                "/api/v1/resources/tenant?tenant=aabbccdd-1122-3344-5566-778899aabbcc",
+            ),
+            (Method::POST, "/api/v1/resources/quota"),
+        ];
+        for (method, uri) in routes {
+            assert_eq!(
+                status(method.clone(), uri, None).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} without a token"
+            );
+            for role in ["read-only", "write-only", "read-write"] {
+                assert_eq!(
+                    status(method.clone(), uri, Some(token(role))).await,
+                    StatusCode::FORBIDDEN,
+                    "{method} {uri} as {role}"
+                );
+            }
+            assert_eq!(
+                status(method.clone(), uri, Some(token("admin"))).await,
+                StatusCode::OK,
+                "{method} {uri} as admin"
+            );
+            let path = uri.split('?').next().unwrap_or(uri);
+            assert_eq!(
+                authorize_route(&auth, &method, path, Some(&token("read-write")))
+                    .await
+                    .map_err(|(code, _)| code),
+                Err(StatusCode::FORBIDDEN),
+                "{method} {path} in-process as read-write"
+            );
+            assert!(
+                authorize_route(&auth, &method, path, Some(&token("admin")))
+                    .await
+                    .is_ok(),
+                "{method} {path} in-process as admin"
+            );
+        }
     }
 }

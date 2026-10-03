@@ -1,0 +1,30 @@
+[verify] pulsar pulsar://10.114.0.2:6650,10.114.0.3:6650,10.114.0.4:6650: 9 ledgers from /root/bench/runs/txn/pulsar/1x10000-t10-9k-v120/verify-ids; reading x1x10000-t10-9k-v120-out on subscription verify, then the rest of x1x10000-t10-9k-v120-in on sub
+[verify] out x1x10000-t10-9k-v120-out: 16 consumers on verify subscribed in 0.4s
+[verify] out x1x10000-t10-9k-v120-out: 577164 records after 10s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 20s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 30s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 40s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 50s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 60s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 70s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 80s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 90s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 100s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 110s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 120s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records after 130s
+[verify] out x1x10000-t10-9k-v120-out: 595040 records, idle 2m0s: scan complete after 136.4s
+[verify] rest of x1x10000-t10-9k-v120-in: 16 consumers on sub subscribed in 0.3s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records after 10s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records after 20s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records after 30s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records after 40s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records after 50s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records after 60s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records after 70s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records after 80s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records after 90s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records after 100s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records after 110s
+[verify] rest of x1x10000-t10-9k-v120-in: 0 records, idle 2m0s: scan complete after 120.2s
+[verify] system=pulsar ledgers=9 produced=585040 ambiguous=0 out_records=595040 out_unique=585040 duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=10000 scan=257.5s | VERDICT PASS

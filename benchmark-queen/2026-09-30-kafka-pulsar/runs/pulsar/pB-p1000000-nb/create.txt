@@ -1,0 +1,19 @@
+pload tag=pB-p1000000-nb loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=16 GOGC=400(default) seed=1790841905134993693
+  topics: 1 x 1000000 partitions (load..load), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=1000000 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.6 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  pulsar: url=pulsar://10.114.0.2:6650,10.114.0.3:6650,10.114.0.4:6650 admin=http://10.114.0.2:8080 ns=bench/ns sub=sub type=failover compression=none batch=1s/1 msgs/131072 B key-batching=false max-pending=1000/partition mem-limit=365 MB receiver-queue=1000 ack-group=100ms conns/broker=1
+  [admin] cluster bench, tenant bench exists
+  [admin] namespace bench/ns exists with 48 bundles
+  [admin] namespace persistence: {"bookkeeperEnsemble":3,"bookkeeperWriteQuorum":3,"bookkeeperAckQuorum":2,"managedLedgerMaxMarkDeleteRate":1.0}
+  [admin] 1 topics created, 0 existed (1000000 partitions each) in 17.8s
+  [admin] subscription fan-out failed on 1 of 1 topics (HTTP 5xx): creating it partition by partition
+panic: sync/atomic: compare and swap of inconsistently typed value into Value
+
+goroutine 127 [running]:
+sync/atomic.(*Value).CompareAndSwap(0x297aac2982c0, {0x0, 0x0}, {0xdbe620, 0x297aade15110})
+	sync/atomic/value.go:172 +0x150
+main.parallel.func1()
+	mqload/cmd/pload/admin.go:112 +0x125
+created by main.parallel in goroutine 1
+	mqload/cmd/pload/admin.go:104 +0x139

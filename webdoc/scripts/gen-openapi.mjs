@@ -406,7 +406,15 @@ function parseRouterChain(block) {
  * of the gap above: the whole point of the Rust arm is that a READ-ONLY token
  * can page through a namespace, so a spec that published `read-write` here
  * would tell an SDK author the opposite of the rule the route exists for.
+ * 2026-10-02: the fetch/offsets read arm, the tenant-purge / quota-grant ADMIN
+ * arm, and the connectors arms (every verb but GET is admin). The tenant/quota
+ * and the connectors writes are the DANGEROUS direction of the gap above — the
+ * Rust makes them admin, so a spec that left them read-write would tell an SDK
+ * author a destructive operator route needs only a read-write token.
  */
+function isConnectorsPath(path) {
+  return path === "/api/v1/connectors" || path.startsWith("/api/v1/connectors/");
+}
 function accessLevel(method, path) {
   const m = method.toUpperCase();
   if (path === "/health" || path === "/metrics" || path === "/metrics/prometheus") return "public";
@@ -418,7 +426,14 @@ function accessLevel(method, path) {
   if (m === "DELETE" && path.startsWith("/api/v1/resources/queues/")) return "admin";
   if (m === "DELETE" && path === "/api/v1/dlq") return "admin";
   if (path === "/api/v1/stats/refresh") return "admin";
+  // The tenant purge and the quota grant act on the tenant the request NAMES:
+  // admin on every verb (see gen-routes.mjs).
+  if (path === "/api/v1/resources/tenant" || path === "/api/v1/resources/quota") return "admin";
+  // The Postgres connectors: every verb but GET is admin.
+  if (isConnectorsPath(path) && m !== "GET") return "admin";
   if (m === "GET") {
+    // The connectors' reads (the admin arm above takes the writes).
+    if (isConnectorsPath(path)) return "read-only";
     if (path === "/status") return "read-only";
     if (path.startsWith("/api/v1/status") || path.startsWith("/api/v1/analytics")) return "read-only";
     if (path.startsWith("/api/v1/resources/")) return "read-only";
@@ -432,6 +447,9 @@ function accessLevel(method, path) {
   // PLAN_QUEEN_KAFKA.md C2: a pure read, outside the GET block because the
   // batch request is a body.
   if (m === "POST" && path === "/api/v1/fetch") return "read-only";
+  // The fetch arm's other twin: the offset a partition's log had reached at a
+  // time. Read-only, method- and path-exact.
+  if (m === "POST" && path === "/api/v1/fetch/offsets") return "read-only";
   // The fetch arm's twin (partition discovery), and read-only for the same
   // reason.
   if (m === "POST" && path === "/api/v1/partitions/changed") return "read-only";
@@ -484,7 +502,11 @@ const TAGS = [
   ["Ephemeral queues", (p) => /^\/api\/v1\/ephemeral(\/|$)/.test(p)],
   ["Operator", (p) => p.startsWith("/api/v1/system")],
   ["Cluster", (p) => p.startsWith("/api/v1/raft/")],
-  ["Reads by offset", (p) => p === "/api/v1/fetch" || p === "/api/v1/partitions/changed"],
+  ["Reads by offset", (p) =>
+    p === "/api/v1/fetch" || p === "/api/v1/fetch/offsets" || p === "/api/v1/partitions/changed"],
+  // PLAN_PG_CONNECTORS.md — the connectors config surface (feature `pg`). Same
+  // predicate as gen-routes.mjs's group of the same name.
+  ["Connectors", (p) => p === "/api/v1/connectors" || p.startsWith("/api/v1/connectors/")],
   ["Dashboard identity", (p) => p.startsWith("/auth/")],
 ];
 

@@ -1,0 +1,19 @@
+856108533 bytes, 3863883 lines: head 64 MiB + tail 128 MiB + digest collected
+     61 WARN seastar - (rate limiting dropped N similar messages) Too long queue accumulated for main (N tasks)
+     18 WARN seastar - Too long queue accumulated for main (N tasks)
+     16 WARN admin_api_server - server.cc:N - Insecure Admin API listener on N.N.N.N:N, consider enabling `admin_api_require_auth`
+      5 WARN seastar_memory - oversized allocation: N bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at NxNbabN NxNfefdf NxNcNca NxN NxNaNeN NxNa NxNfcNbN NxNfNeN NxNffcN NxNcf NxNaN NxNaN /opt/redpa
+      2 WARN storage - disk_log_appender.cc:N - Segment roll lock contested for {kafka/rNxN-Nk/N}
+      2 WARN seastar_memory - oversized allocation: N bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at NxNbabN NxNfefdf NxNcNca NxN NxNbNda NxNa NxNfcNbN NxNfNeN NxNffcN NxNcf NxNaN NxNaN /opt/redpa
+      2 WARN seastar - (rate limiting dropped N similar messages) Too long queue accumulated for produce (N tasks)
+      2 WARN raft - [follower: {id: N, revision: N}, term: N] [group_id:N, {kafka/rNxN-Nk/N}] - recovery_stm.cc:N - recovery append entries error: rpc::errc::disconnected_endpoint(node down)
+      2 WARN raft - [follower: {id: N, revision: N}, term: N] [group_id:N, {kafka/rNxN-Nk/N}] - recovery_stm.cc:N - Ignoring exception during recovery: boost::wrapexcept<std::__N::system_error> (error rpc::errc:N, rpc::errc::disconnected_endpoint(n
+      2 WARN cluster - metadata_dissemination_service.cc:N - Error sending metadata update rpc::errc::client_request_timeout to N
+      2 WARN cluster - cluster_discovery.cc:N - Error requesting cluster bootstrap info from {host: N.N.N.N, port: N}, retrying. std::__N::system_error (error system:N, connection to N.N.N.N:N: Connection refused)
+      2 WARN cluster - cluster_discovery.cc:N - Error registering node UUID N-eNaf-NcN-bdNc-NaNeNeN, retrying: std::__N::system_error (error system:N, connection to N.N.N.N:N: Connection refused)
+      1 WARN syschecks - Path: `/root/bench/data/redpanda' is on extN, not XFS. This will probably work, but Redpanda is only tested on XFS and XFS is recommended for best performance.
+      1 WARN storage - disk_log_appender.cc:N - Segment roll lock contested for {kafka/__consumer_offsets/N}
+      1 WARN seastar_memory - oversized allocation: N bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at NxNbabN NxNfefdf NxNcNca NxN NxNdeN NxN NxNaN NxNaN /opt/redpanda/lib/libc.so.N+NxNacN /opt/red
+      1 WARN seastar_memory - oversized allocation: N bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at NxNbabN NxNfefdf NxNcNca NxN NxNaN NxNa NxNfcNbN NxNfNeN NxNffcN NxNcf NxNaN NxNaN /opt/redpand
+      1 WARN raft - [group_id:N, {kafka/rNxN-Nk/N}] consensus.cc:N - transfer leadership: timed out waiting on node {id: N, revision: N} recovery
+      1 WARN cluster - id_allocator_frontend.cc:N - can't find {kafka_internal/id_allocator} in the metadata cache

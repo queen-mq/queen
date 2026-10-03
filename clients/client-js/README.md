@@ -133,19 +133,20 @@ await queen.queue('emails')
 
 ### Subscription Modes
 
-Control whether consumer groups process historical messages:
+Control whether consumer groups process historical messages. A group's mode is fixed the first
+time the group pops a queue; unset, it is the broker's `DEFAULT_SUBSCRIPTION_MODE`, which is `new`.
 
 ```javascript
-// Default: Process ALL messages (including backlog)
-await queen.queue('events')
-  .group('batch-analytics')
-  .consume(async (message) => { /* all messages */ })
-
-// Skip history, only new messages
+// Default ('new'): start where the group first pops, skip what is already there
 await queen.queue('events')
   .group('realtime-monitor')
-  .subscriptionMode('new')
   .consume(async (message) => { /* new only */ })
+
+// Process ALL messages, including the backlog
+await queen.queue('events')
+  .group('batch-analytics')
+  .subscriptionMode('all')
+  .consume(async (message) => { /* all messages */ })
 
 // Start from specific timestamp
 await queen.queue('events')
@@ -277,6 +278,51 @@ await queen.queue('tasks')
     await processTask(message.data)
   })
 ```
+
+**When the handler throws**, the consumer nacks what it was given (the message, or the whole batch)
+and keeps consuming. The broker redelivers it, and moves it to the dead letter queue once the queue's
+`retryLimit` is spent. With `.each()`, the rest of the popped batch is dropped after a nack: the
+broker redelivers it too.
+
+This is the same with `.autoAck(false)`. That setting hands the *success* path to your handler (it
+acks), not the failure path: a handler that threw never got to settle its messages. A message your
+handler acked before throwing is not affected: it is already settled, so the broker refuses
+its nack.
+
+To handle failures yourself, add `.onError(async (message, error) => { ... })`. The error then never
+reaches the consumer, nothing is nacked for you, and the message is yours to ack, nack, or leave
+until its lease expires. To stop consuming on an error, abort the `signal` you passed to
+`consume(handler, { signal })` from inside `onError`.
+
+```javascript
+// autoAck(false): the handler acks. A throw before the ack is nacked and retried.
+await queen.queue('tasks')
+  .group('workers')
+  .autoAck(false)
+  .each()                  // one message per call; without it the handler gets the popped array
+  .consume(async (message) => {
+    await processTask(message.data)
+    await queen.ack(message, true)
+  })
+
+// Your own failure policy: nack, then stop consuming.
+const stop = new AbortController()
+await queen.queue('tasks')
+  .group('workers')
+  .autoAck(false)
+  .each()
+  .consume(async (message) => {
+    await processTask(message.data)
+    await queen.ack(message, true)
+  }, { signal: stop.signal })
+  .onError(async (message, error) => {
+    await queen.ack(message, false, { error: error.message })
+    stop.abort()
+  })
+```
+
+Earlier versions stopped the consumer on a throw under `.autoAck(false)`: `consume()` rejected after
+the first failure, and the message stayed leased until its lease expired.
 
 ### Pop Messages (On-Demand Processing)
 
@@ -768,6 +814,11 @@ await queen.ack(message, false, { error: 'reason' })
 await queen.ack([msg1, msg2], true)  // Batch ack
 ```
 
+An ack is judged against the lease of the consumer group the message was popped under. `queen.ack()`
+and `transaction().ack()` take that group from the message (`message.consumerGroup`, which every pop
+returns) unless you name one: `{ group }` on `queen.ack()`, `{ consumerGroup }` or `{ group }` on a
+transaction. A batch ack carries a single group, so `queen.ack()` throws on a batch that mixes groups.
+
 ### Transactions
 
 ```javascript
@@ -816,10 +867,13 @@ await queen.timer(q).list({ limit: 50, after })                  // {rows, trunc
 ### Lease Renewal
 
 ```javascript
-await queen.renew(message)
-await queen.renew([msg1, msg2, msg3])
+await queen.renew(message)              // {leaseId, success, newExpiresAt, renewed}
+await queen.renew([msg1, msg2, msg3])   // one result per distinct lease
 await queen.queue('q').renewLease(true, 60000).consume(async (msg) => { /* auto-renew */ })
 ```
+
+`success: false` (with an `error`) means nothing was renewed: the lease expired, an ack or nack
+already released it, or it never existed. The messages it covered may already be redelivered.
 
 ### Buffering
 

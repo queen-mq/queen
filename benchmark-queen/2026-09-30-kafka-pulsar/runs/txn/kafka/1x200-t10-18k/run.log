@@ -1,0 +1,61 @@
+[2026-10-01T16:15:18Z] txn kafka/1x200-t10-18k: start: kafka, rate=18000 over N=9 processes (3 loader hosts x 3) = 2000 msg/s each; in 200 x out 200 partitions; txn-size 10 (linger 1s); feeder units of 10; 22 workers + 22 readers per process (198 each in total); out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/kafka/1x200-t10-18k
+[2026-10-01T16:15:18Z] txn kafka/1x200-t10-18k: durability: RF 3, min.insync.replicas 2, acks=all (idempotent + transactional producers), NO fsync (page cache, Kafka's production model); transaction state log RF 3 / min ISR 2; transactions v2 (KIP-890); read_committed
+[2026-10-01T16:15:24Z] txn kafka/1x200-t10-18k: 1. cluster reset
+    [2026-10-01T16:15:35Z] cluster: healthy in 11s: cluster id P0d05O3xPdy_5anj2xPCJw
+    [2026-10-01T16:15:38Z] cluster: features: eligible.leader.replicas.version=1 group.version=1 kraft.version=0 metadata.version=4.3-IV0 share.version=1 streams.version=1 transaction.version=2 
+[2026-10-01T16:15:39Z] txn kafka/1x200-t10-18k: 2. samplers start (txn-kafka-1x200-t10-18k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-01T16:15:41Z] txn kafka/1x200-t10-18k: 3. create x1x200-t10-18k-in (200) + x1x200-t10-18k-out (200), warm on loader 1
+    kload tag=1x200-t10-18k-create loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=16 GOGC=400 seed=1790871010960363189
+      topics: 1 x 200 partitions (x1x200-t10-18k..x1x200-t10-18k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 0
+      payload: goload jsonEvent target 256 B, avg 289.6 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=2 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=classic fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s | txn: x1x200-t10-18k-in -> 4 workers (GroupTransactSession, transactional.id per worker, txn-timeout 10s, concurrent-txn backoff 20ms, metadata-min-age 250ms, txn-size 10, linger 1s, read_committed) -> x1x200-t10-18k-out, 4 read_committed readers
+      [topic] 2 topics created, 0 grown, 200 partitions each x RF 3 accepted by the controller in 0.1s (1 requests of <= 5000 partitions)
+      [topic] t=+0s 2 topics missing, 0 with != 200 partitions, 0 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 5.1s: 2 topics x 200 partitions, leaders + full ISR + every replica log on disk
+      [warm] one record (no "ts") into each of 400 partitions, acks=all, in 0.8s; READY again after 0.0s
+    [create] done: x1x200-t10-18k-in, x1x200-t10-18k-out x 200 partitions ready
+[2026-10-01T16:15:50Z] txn kafka/1x200-t10-18k:    topics ready after 32s since start
+    node=1 rss_MB=6543 threads=169 maps=1571 fds=652 data_MB=7 part_dirs=401 gc_pauses=9 gc_max_ms=10.951 gc_sum_ms=32 errors=0 warns=4 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates
+    node=2 rss_MB=6551 threads=169 maps=1571 fds=653 data_MB=7 part_dirs=401 gc_pauses=8 gc_max_ms=5.760 gc_sum_ms=24 errors=0 warns=1 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_
+    node=3 rss_MB=6545 threads=170 maps=1577 fds=661 data_MB=7 part_dirs=401 gc_pauses=8 gc_max_ms=6.144 gc_sum_ms=23 errors=0 warns=9 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_
+[2026-10-01T16:15:51Z] txn kafka/1x200-t10-18k: 4. launch 9 kload processes
+    launched 6 7 8 on queen-loader-03
+    launched 3 4 5 on queen-loader-02
+    launched 0 1 2 on queen-loader-01
+[2026-10-01T16:16:04Z] txn kafka/1x200-t10-18k:    READY 0/9
+[2026-10-01T16:16:15Z] txn kafka/1x200-t10-18k:    READY 3/9
+[2026-10-01T16:16:19Z] txn kafka/1x200-t10-18k:    all 9 READY after 61s since start
+[2026-10-01T16:16:22Z] txn kafka/1x200-t10-18k: 5. start instant 1790871391718 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s), drain <= 60s
+[2026-10-01T16:16:30Z] txn kafka/1x200-t10-18k:    0/9 exited | p0: 
+[2026-10-01T16:17:00Z] txn kafka/1x200-t10-18k:    0/9 exited | p0: [16:16:51] offered=     2000/s achieved=     2000/s shed=        0/s inflight=     2 | p50=   7.97 p99=   10.69 p999=   13.89 ms | push=29970 pop=2892 [txn] 16:16:51 txn=     192/s msgs=     1920/s avg= 10.00 msg/txn | commit p50=13.25 p99=222.21 p999=252.93 ms | aborts=0 errs=0 open=7 | in=     1920 
+[2026-10-01T16:17:31Z] txn kafka/1x200-t10-18k:    0/9 exited | p0: [16:17:21] offered=     2000/s achieved=     2000/s shed=        0/s inflight=     2 | p50=   7.84 p99=    9.79 p999=   15.81 ms | push=89980 pop=8712 [txn] 16:17:21 txn=     193/s msgs=     1933/s avg= 10.00 msg/txn | commit p50=12.22 p99=142.34 p999=252.93 ms | aborts=0 errs=0 open=7 | in=     1933 
+[2026-10-01T16:18:00Z] txn kafka/1x200-t10-18k:    8/9 exited | p0: [16:17:41] offered=     2000/s achieved=     2000/s shed=        0/s inflight=     2 | p50=   7.84 p99=    9.54 p999=   15.17 ms | push=129970 pop=126 [txn] 16:17:41 txn=     196/s msgs=     1956/s avg= 10.00 msg/txn | commit p50=11.97 p99=130.56 p999=142.34 ms | aborts=0 errs=0 open=7 | in=     1956 
+[2026-10-01T16:18:15Z] txn kafka/1x200-t10-18k:    load finished after 177s since start
+[2026-10-01T16:18:16Z] txn kafka/1x200-t10-18k: 6. verifier: collect the 9 id ledgers, run kload -verify on loader 1
+    [verify] kafka 10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092: 9 ledgers from /root/bench/runs/txn/kafka/1x200-t10-18k/verify-ids; reading x1x200-t10-18k-out from offset 0 (read_committed), then x1x200-t10-18k-in from group x1x200-t10-18k-in-g-t0's committed offsets
+    [verify] out x1x200-t10-18k-out: 1170400 records after 10s
+    [verify] out x1x200-t10-18k-out: 1170400 records, idle 10s: scan complete after 10.6s
+    [verify] x1x200-t10-18k-in-g-t0: committed offsets on 200 of 200 partitions (the rest from the start)
+    [verify] rest of x1x200-t10-18k-in: 0 records, idle 10s: scan complete after 10.0s
+    [verify] system=kafka ledgers=9 produced=1170000 ambiguous=0 out_records=1170400 out_unique=1170000 duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=400 scan=20.7s | VERDICT PASS
+[2026-10-01T16:19:01Z] txn kafka/1x200-t10-18k:    verifier: PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0
+[2026-10-01T16:19:01Z] txn kafka/1x200-t10-18k: 7. collect
+    node=1 rss_MB=6751 threads=170 maps=1782 fds=768 data_MB=569 part_dirs=501 gc_pauses=38 gc_max_ms=11.326 gc_sum_ms=192 errors=0 warns=6 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_upd
+    node=2 rss_MB=6817 threads=170 maps=1786 fds=768 data_MB=569 part_dirs=501 gc_pauses=39 gc_max_ms=16.853 gc_sum_ms=247 errors=0 warns=3 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_upd
+    node=3 rss_MB=6863 threads=171 maps=1788 fds=777 data_MB=569 part_dirs=501 gc_pauses=41 gc_max_ms=11.735 gc_sum_ms=224 errors=0 warns=9 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_upd
+[2026-10-01T16:19:36Z] txn kafka/1x200-t10-18k:    collected 1.4M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/kafka/1x200-t10-18k
+    p0: in offered=130000 achieved=130000 shed=0 | out consumed=128700 errs push=0 pop=0 ack=0 | produce p99=10.43 ms | e2e p50/p99/p999=23.42/4947.97/5537.79 ms | txns=12892 msgs=128722 aborts=0 errs=0 avg=9.98 commit p50/p99/p999=12.35/140.29/522.24 ms | cpu=21.4%
+    p1: in offered=130000 achieved=130000 shed=0 | out consumed=128700 errs push=0 pop=0 ack=0 | produce p99=10.18 ms | e2e p50/p99/p999=23.68/5079.04/5668.86 ms | txns=12892 msgs=128722 aborts=0 errs=0 avg=9.98 commit p50/p99/p999=12.99/148.48/528.38 ms | cpu=21.2%
+    p2: in offered=130000 achieved=130000 shed=0 | out consumed=128700 errs push=0 pop=0 ack=0 | produce p99=10.18 ms | e2e p50/p99/p999=23.17/6127.62/6782.98 ms | txns=12892 msgs=128722 aborts=0 errs=0 avg=9.98 commit p50/p99/p999=12.74/144.38/528.38 ms | cpu=21.3%
+    p3: in offered=130000 achieved=130000 shed=0 | out consumed=128700 errs push=0 pop=0 ack=0 | produce p99=10.30 ms | e2e p50/p99/p999=24.45/5406.72/5668.86 ms | txns=12892 msgs=128722 aborts=0 errs=0 avg=9.98 commit p50/p99/p999=12.99/136.19/522.24 ms | cpu=23.2%
+    p4: in offered=130000 achieved=130000 shed=0 | out consumed=128700 errs push=0 pop=0 ack=0 | produce p99=10.18 ms | e2e p50/p99/p999=25.22/5210.11/5603.33 ms | txns=12892 msgs=128722 aborts=0 errs=0 avg=9.98 commit p50/p99/p999=13.12/140.29/528.38 ms | cpu=23.0%
+    p5: in offered=130000 achieved=130000 shed=0 | out consumed=134550 errs push=0 pop=0 ack=0 | produce p99=10.30 ms | e2e p50/p99/p999=26.24/36962.30/44302.34 ms | txns=13477 msgs=134573 aborts=2 errs=0 avg=9.99 commit p50/p99/p999=13.25/142.34/522.24 ms | cpu=21.6%
+    p6: in offered=130000 achieved=130000 shed=0 | out consumed=128700 errs push=0 pop=0 ack=0 | produce p99=10.05 ms | e2e p50/p99/p999=24.70/5668.86/6520.83 ms | txns=12892 msgs=128722 aborts=0 errs=0 avg=9.98 commit p50/p99/p999=12.61/144.38/505.86 ms | cpu=21.5%
+    p7: in offered=130000 achieved=130000 shed=0 | out consumed=128700 errs push=0 pop=0 ack=0 | produce p99=10.18 ms | e2e p50/p99/p999=25.22/5537.79/5865.47 ms | txns=12892 msgs=128722 aborts=0 errs=0 avg=9.98 commit p50/p99/p999=12.99/144.38/514.05 ms | cpu=22.1%
+    p8: in offered=130000 achieved=130000 shed=0 | out consumed=134550 errs push=0 pop=0 ack=0 | produce p99=10.43 ms | e2e p50/p99/p999=24.70/5275.65/5537.79 ms | txns=13477 msgs=134573 aborts=0 errs=0 avg=9.99 commit p50/p99/p999=13.12/148.48/509.95 ms | cpu=22.8%
+    total: 9/9 processes with a final line | input msgs offered=1170000 achieved=1170000 shed=0 | output consumed=1170000 | transactions=117198 msgs=1170200 avg=9.98 msg/txn aborts=2 txnErrors=0 | errors=0 | worst produce p99=10.43 ms | worst e2e p99=36962.3 ms | worst commit p99=148.48 ms
+    verifier: PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0
+    durability (kafka): RF 3, min.insync.replicas 2, acks=all (idempotent + transactional producers), NO fsync (page cache, Kafka's production model); transaction state log RF 3 / min ISR 2; transactions v2 (KIP-890); read_committed
+[2026-10-01T16:19:39Z] txn kafka/1x200-t10-18k:    stopping the cluster (data kept until the next reset)
+[2026-10-01T16:19:46Z] txn kafka/1x200-t10-18k: DONE in 268s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/kafka/1x200-t10-18k (PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0)

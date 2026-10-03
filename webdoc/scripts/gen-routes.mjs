@@ -72,7 +72,24 @@ const AUTH = "server/src/auth.rs";
 // published table says a read-only token cannot browse. Its GET sibling
 // (`/api/v1/resources/kv/namespaces`) needs no arm: it is already inside the
 // `m === "GET"` block's `/api/v1/resources/` read.
-const ACCESS_FINGERPRINT = "a336be99401b4b95";
+// 2026-10-02: re-read for 2.0.0-beta.6. Three new rules, mirrored below in the
+// order the Rust evaluates them:
+//   * `POST /api/v1/fetch/offsets` (the offset a partition's log had reached at
+//     a time) is read-only, the fetch arm's twin, right after it.
+//   * the tenant purge and the quota grant — `DELETE /api/v1/resources/tenant`
+//     and `POST /api/v1/resources/quota` — are ADMIN (every verb), because they
+//     act on the tenant the request NAMES, not the edge's. They were read-write
+//     by the fallthrough, which let any read-write token wipe a tenant or the
+//     embedded proxy's own system tenant; now in the admin block, path-exact.
+//   * the Postgres connectors (feature `pg`): every verb but GET is admin
+//     (a connector carries a database password and decides what it writes), the
+//     GET reads are read-only, first in the GET block.
+const ACCESS_FINGERPRINT = "e1f91361e0ec0697";
+
+/** PLAN_PG_CONNECTORS.md — the connectors config surface (feature `pg`). */
+function isConnectorsPath(path) {
+  return path === "/api/v1/connectors" || path.startsWith("/api/v1/connectors/");
+}
 
 function accessLevel(method, path) {
   const m = method;
@@ -91,8 +108,17 @@ function accessLevel(method, path) {
   // a single-row purge takes. Path-exact, mirroring the Rust.
   if (m === "DELETE" && path === "/api/v1/dlq") return "admin";
   if (path === "/api/v1/stats/refresh") return "admin";
+  // The tenant purge and the quota grant act on the tenant the request NAMES
+  // (query or body), so they are operator verbs: admin on every verb,
+  // path-exact. They were read-write by the fallthrough.
+  if (path === "/api/v1/resources/tenant" || path === "/api/v1/resources/quota") return "admin";
+  // The Postgres connectors: every verb but GET is admin (see the GET arm for
+  // the reads).
+  if (isConnectorsPath(path) && m !== "GET") return "admin";
 
   if (m === "GET") {
+    // The connectors' reads (redacted; the admin arm above takes the writes).
+    if (isConnectorsPath(path)) return "read-only";
     if (path === "/status") return "read-only";
     if (path.startsWith("/api/v1/status") || path.startsWith("/api/v1/analytics")) return "read-only";
     if (path.startsWith("/api/v1/resources/")) return "read-only";
@@ -111,6 +137,10 @@ function accessLevel(method, path) {
   // PLAN_QUEEN_KAFKA.md C2: a pure read that takes no lease and moves no
   // cursor. Outside the GET block because the batch request is a body.
   if (m === "POST" && path === "/api/v1/fetch") return "read-only";
+
+  // The fetch arm's other twin: the offset a partition's log had reached at a
+  // time. Nothing leased, nothing moved; method- and path-exact.
+  if (m === "POST" && path === "/api/v1/fetch/offsets") return "read-only";
 
   // The fetch arm's twin: partition discovery, nothing leased and nothing
   // moved, and it hands out strictly less than the fetch beside it.
@@ -195,7 +225,11 @@ const GROUPS = [
   ["Ephemeral queues", (p) => /^\/api\/v1\/ephemeral(\/|$)/.test(p)],
   ["Operator surfaces", (p) => p.startsWith("/api/v1/system")],
   ["Cluster (raft)", (p) => p.startsWith("/api/v1/raft/")],
-  ["Reads by offset", (p) => p === "/api/v1/fetch" || p === "/api/v1/partitions/changed"],
+  ["Reads by offset", (p) =>
+    p === "/api/v1/fetch" || p === "/api/v1/fetch/offsets" || p === "/api/v1/partitions/changed"],
+  // PLAN_PG_CONNECTORS.md — the connectors config surface (feature `pg`).
+  // Without this entry the family lands in "Ungrouped".
+  ["Connectors", (p) => p === "/api/v1/connectors" || p.startsWith("/api/v1/connectors/")],
   ["Dashboard identity (broker-direct)", (p) => p.startsWith("/auth/")],
 ];
 

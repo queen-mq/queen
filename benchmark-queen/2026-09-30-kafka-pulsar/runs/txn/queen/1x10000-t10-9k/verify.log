@@ -1,0 +1,6 @@
+[verify] queen http://10.114.0.2:6632: 9 ledgers from /root/bench/runs/txn/queen/1x10000-t10-9k/verify-ids; reading x1x10000-t10-9k-out (group verify, from the first message) then the rest of x1x10000-t10-9k-in
+[verify] out x1x10000-t10-9k-out: 595010 records after 10s
+[verify] out x1x10000-t10-9k-out: 595010 records, idle 10s: scan complete after 11.4s
+[verify] waiting 1s until every worker lease (10s) ran out before reading the rest of x1x10000-t10-9k-in
+[verify] rest of x1x10000-t10-9k-in: 0 records, idle 10s: scan complete after 10.0s
+[verify] system=queen ledgers=9 produced=585010 ambiguous=0 out_records=595010 out_unique=585010 duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=10000 scan=22.1s | VERDICT PASS

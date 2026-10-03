@@ -1,0 +1,3 @@
+node=1 pid=1039173 rss_MB=412 threads=118 data_MB=317 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"leader","leader":true,"term":1,"applied":62117,"commit":62117,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"app
+node=2 pid=894586 rss_MB=309 threads=81 data_MB=316 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"follower","leader":true,"term":1,"applied":62117,"commit":62117,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"a
+node=3 pid=895241 rss_MB=311 threads=81 data_MB=315 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"follower","leader":true,"term":1,"applied":62117,"commit":62117,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"a

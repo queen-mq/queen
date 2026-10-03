@@ -1,0 +1,43 @@
+kload tag=1x100000-t10-9k-p4 loader=4/9 mode=batch rate=1000 msg/s batch=10 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=1m0s GOMAXPROCS=16 GOGC=400 seed=1790870734164455146
+  offered: 1000 msg/s = 100.0 units/s (avg 10.0 msgs/unit) across 3 pacer workers (33.33 units/s each)
+  topics: 1 x 100000 partitions (x1x100000-t10-9k..x1x100000-t10-9k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=100000 starting at 44444
+  payload: goload jsonEvent target 256 B, avg 289.6 B raw, ~320 B stamped ({"ts":µs,"src":4,...}), pool 64x10
+  consumers: 33 here (ci 132..164 of 297), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[3 4 5]
+  kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=2 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=classic fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s | txn: x1x100000-t10-9k-in -> 33 workers (GroupTransactSession, transactional.id per worker, txn-timeout 10s, concurrent-txn backoff 20ms, metadata-min-age 250ms, txn-size 10, linger 1s, read_committed) -> x1x100000-t10-9k-out, 33 read_committed readers
+  [topic] READY after 0.4s: 2 topics x 100000 partitions, leaders + full ISR
+  [config] broker.compression.type = producer (STATIC_BROKER_CONFIG)
+  [config] broker.default.replication.factor = 3 (STATIC_BROKER_CONFIG)
+  [config] broker.group.consumer.assignors = uniform,range (DEFAULT_CONFIG)
+  [config] broker.group.coordinator.rebalance.protocols = classic,consumer,streams (DEFAULT_CONFIG)
+  [config] broker.group.initial.rebalance.delay.ms = 3000 (DEFAULT_CONFIG)
+  [config] broker.log.flush.interval.messages = 9223372036854775807 (DEFAULT_CONFIG)
+  [config] broker.log.flush.interval.ms = <nil> (DEFAULT_CONFIG)
+  [config] broker.max.incremental.fetch.session.cache.slots = 4000 (STATIC_BROKER_CONFIG)
+  [config] broker.min.insync.replicas = 2 (DYNAMIC_DEFAULT_BROKER_CONFIG)
+  [config] broker.num.io.threads = 16 (STATIC_BROKER_CONFIG)
+  [config] broker.num.network.threads = 8 (STATIC_BROKER_CONFIG)
+  [config] broker.num.replica.fetchers = 8 (STATIC_BROKER_CONFIG)
+  [config] topic.compression.type = producer (STATIC_BROKER_CONFIG)
+  [config] topic.flush.messages = 9223372036854775807 (DEFAULT_CONFIG)
+  [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+  [config] topic.max.message.bytes = 16777216 (STATIC_BROKER_CONFIG)
+  [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+  [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+  [group] 33 txn workers (GroupTransactSession) in 1 groups (x1x100000-t10-9k-in-g-t0 ... ), protocol classic
+  [group] 33 consumers in 1 groups (x1x100000-t10-9k-out-g-t0 ... ), protocol classic
+  [group] t=+2.8s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+  [group] t=+4.8s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=191 assigned=0)
+  [group] t=+6.9s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+  [group] t=+8.9s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 0/100000 partitions (group-wide PreparingRebalance members=297 assigned=0)
+  [group] t=+10.9s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+  [group] t=+13.0s waiting: x1x100000-t10-9k-in-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+  [group] STABLE after 13.2s: 1 groups, 33 local members holding 11110 partitions, assignEv=33 revokeEv=0 lostEv=0
+  [group] t=+1.6s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+  [group] t=+3.6s waiting: x1x100000-t10-9k-out-g-t0: local members 33/297 hold 11110/100000 partitions (group-wide Stable members=297 assigned=100000)
+  [group] STABLE after 4.8s: 1 groups, 33 local members holding 11110 partitions, assignEv=33 revokeEv=0 lostEv=0
+  [produce] 4 clients connected to every broker with producer IDs in 0.46s; max buffered 51024 records per client
+READY 1790870586381
+[drain] workers and readers keep going for up to 1m0s (ends early after 3s idle; lag now 0)

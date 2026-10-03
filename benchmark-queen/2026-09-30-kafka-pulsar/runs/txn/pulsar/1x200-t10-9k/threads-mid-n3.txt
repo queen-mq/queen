@@ -1,0 +1,45 @@
+node=3 broker total=0.87 cores over 3s (281 threads, 281 named by jstack)
+    0.42 cores    32 thr  max1=0.02  pulsar-io
+    0.22 cores    32 thr  max1=0.03  BookKeeperClientWorker-OrderedExecutor
+    0.07 cores     8 thr  max1=0.01  pulsar-ordered-OrderedExecutor
+    0.04 cores    16 thr  max1=0.01  broker-topic-workers-OrderedExecutor
+    0.03 cores     2 thr  max1=0.03  C CompilerThread
+    0.03 cores     1 thr  max1=0.03  broker-client-shared-timer
+    0.02 cores    16 thr  max1=0.00  bookkeeper-ml-scheduler-OrderedScheduler
+    0.01 cores     1 thr  max1=0.01  bookkeeper-ml-cache-eviction
+    0.01 cores     6 thr  max1=0.00  transaction_coordinator_TransactionCoordinatorID(id=)thread_factory
+    0.00 cores     1 thr  max1=0.00  metadata-store-worker-OrderedExecutor
+    0.00 cores     1 thr  max1=0.00  main-EventThread
+    0.00 cores    16 thr  max1=0.00  pulsar-transaction-executor
+    0.00 cores     1 thr  max1=0.00  ~java
+    0.00 cores     1 thr  max1=0.00  main
+node=3 bookie total=0.38 cores over 3s (191 threads, 158 named by jstack)
+    0.24 cores    32 thr  max1=0.02  bookie-io
+    0.07 cores     1 thr  max1=0.07  BookieJournal
+    0.06 cores     1 thr  max1=0.06  ForceWriteThread
+    0.01 cores     3 thr  max1=0.01  metadata-store-batch-flusher
+    0.00 cores     2 thr  max1=0.00  ~java
+    0.00 cores     1 thr  max1=0.00  main
+    0.00 cores     1 thr  max1=0.00  ZUnmapper
+    0.00 cores     1 thr  max1=0.00  ZUncommitter
+    0.00 cores     4 thr  max1=0.00  ZWorkerOld#
+    0.00 cores     4 thr  max1=0.00  ZWorkerYoung#
+    0.00 cores     1 thr  max1=0.00  ZDriverMinor
+    0.00 cores     1 thr  max1=0.00  ZDriverMajor
+    0.00 cores     1 thr  max1=0.00  ZDirector
+    0.00 cores     1 thr  max1=0.00  ZStat
+node=3 zk total=0.00 cores over 3s (127 threads, 127 named by jstack)
+    0.00 cores     1 thr  max1=0.00  Monitor Deflation Thread
+    0.00 cores     1 thr  max1=0.00  ~java
+    0.00 cores     1 thr  max1=0.00  main
+    0.00 cores     1 thr  max1=0.00  ZUnmapper
+    0.00 cores     1 thr  max1=0.00  ZUncommitter
+    0.00 cores     4 thr  max1=0.00  ZWorkerOld#
+    0.00 cores     4 thr  max1=0.00  ZWorkerYoung#
+    0.00 cores     1 thr  max1=0.00  ZDriverMinor
+    0.00 cores     1 thr  max1=0.00  ZDriverMajor
+    0.00 cores     1 thr  max1=0.00  ZDirector
+    0.00 cores     1 thr  max1=0.00  ZStat
+    0.00 cores    10 thr  max1=0.00  RuntimeWorker#
+    0.00 cores     1 thr  max1=0.00  AsyncLog Thread
+    0.00 cores     1 thr  max1=0.00  VM Periodic Task Thread

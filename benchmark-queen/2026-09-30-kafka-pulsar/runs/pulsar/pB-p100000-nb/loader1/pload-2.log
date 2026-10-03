@@ -1,0 +1,45 @@
+WARN max-pending 1000000 per partition producer would preallocate 254310 MB over 11111 partitions (24 B/slot); using 1000 (-pending-budget-mb 64)
+pload tag=pB-p100000-nb loader=2/9 mode=batch rate=111111 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=16 GOGC=400(default) seed=1790841413643512974
+  offered: 111111 msg/s = 1111.1 units/s (avg 100.0 msgs/unit) across 23 pacer workers (48.31 units/s each)
+  topics: 1 x 100000 partitions (load..load), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=11111 starting at 0 [producer shard 2/9: partitions p % 9 == 2, entity j -> partition 2 + j*9]
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":2,...}), pool 64x100
+  consumers: 33 here (ci 66..98 of 297), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0 1 2]
+  pulsar: url=pulsar://10.114.0.2:6650,10.114.0.3:6650,10.114.0.4:6650 admin=http://10.114.0.2:8080 ns=bench/ns sub=sub type=failover compression=none batch=1s/1 msgs/131072 B key-batching=false max-pending=1000/partition mem-limit=365 MB receiver-queue=1000 ack-group=100ms conns/broker=1
+  [admin] 1 topics with 100000 partitions and subscription "sub" exist (checked in 0.0s)
+  [consume] 33 consumers (ci 66..98 of 297), failover, partition slices (every partition exactly one consumer): 11121 partition registrations here, 100000 in total across all processes; idle 0 here, 0 in total; subscribed in 3.5s, settling 2s
+  [produce] producer shard 2/9: 11111 partitions per topic (p % 9 == 2) x 1 topics, per-partition producers created before READY (-producer-eager)
+  [produce] 11111 per-partition producers created in 4.9s
+READY 1790841569006
+[start] waiting 9.445s for the common start 1790841587889
+[start] GO 07:59:47.889 (unix ms 1790841587889)
+[07:59:57] offered=    55568/s achieved=    33339/s shed=        0/s inflight=  2224 | p50= 782.34 p99= 2113.54 p999= 2342.91 ms | push=333400 pop=397121 lag=-63721 | errs push=0 pop=0 empty=0 gor=100120 | ack=    39710/s ackErr=0 ackAvg=0.02ms | e2e p50=150.53 p99=1531.90 p999=1662.98 n=397121 | e2e_local p50=158.72 p99=1515.52 n=108221
+[08:00:07] offered=   111101/s achieved=    37584/s shed=    45754/s inflight=  5000 | p50=4177.92 p99= 8978.43 p999= 9109.50 ms | push=709200 pop=767106 lag=-57906 | errs push=0 pop=0 empty=0 gor=100120 | ack=    37002/s ackErr=0 ackAvg=0.01ms | e2e p50=3588.10 p99=8454.14 p999=9371.65 n=369985 | e2e_local p50=3686.40 p99=8585.22 n=98721
+[08:00:17] offered=   111135/s achieved=    16551/s shed=    94715/s inflight=  4986 | p50=12386.30 p99=18743.30 p999=18743.30 ms | push=874700 pop=1009743 lag=-135043 | errs push=0 pop=0 empty=0 gor=100120 | ack=    24265/s ackErr=0 ackAvg=0.01ms | e2e p50=10158.08 p99=16711.68 p999=17694.72 n=242637 | e2e_local p50=10027.01 p99=16711.68 n=65247
+[08:00:27] offered=   111111/s achieved=    24590/s shed=    86381/s inflight=  5000 | p50=8159.23 p99=25821.18 p999=26869.76 ms | push=1120600 pop=1280450 lag=-159850 | errs push=0 pop=0 empty=0 gor=100120 | ack=    27071/s ackErr=0 ackAvg=0.01ms | e2e p50=4489.22 p99=25821.18 p999=27131.90 n=270707 | e2e_local p50=5799.94 p99=26345.47 n=64998
+[08:00:37] offered=   111110/s achieved=    19340/s shed=    91770/s inflight=  5000 | p50=24510.46 p99=36962.30 p999=36962.30 ms | push=1314000 pop=1453224 lag=-139224 | errs push=0 pop=0 empty=0 gor=100120 | ack=    17277/s ackErr=0 ackAvg=0.01ms | e2e p50=18481.15 p99=34340.86 p999=34865.15 n=172774 | e2e_local p50=19267.58 p99=34340.86 n=46685
+[08:00:47] offered=   111085/s achieved=    31149/s shed=    79936/s inflight=  5000 | p50=19791.87 p99=44302.34 p999=44826.62 ms | push=1625500 pop=1634016 lag=-8516 | errs push=0 pop=0 empty=0 gor=100120 | ack=    18078/s ackErr=0 ackAvg=0.00ms | e2e p50=18219.01 p99=40108.03 p999=46399.49 n=180792 | e2e_local p50=17694.72 p99=42729.47 n=44881
+[08:00:57] offered=   111106/s achieved=    22595/s shed=    88521/s inflight=  4999 | p50=14090.24 p99=45875.20 p999=49545.22 ms | push=1851500 pop=1801331 lag=50169 | errs push=0 pop=0 empty=0 gor=100097 | ack=    16728/s ackErr=0 ackAvg=0.00ms | e2e p50=897.02 p99=31588.35 p999=48496.64 n=167315 | e2e_local p50=13041.66 p99=34340.86 n=37032
+[err produce #1] 08:00:59.928 message send timeout: TimeoutError
+[err produce #2] 08:00:59.928 message send timeout: TimeoutError
+[err produce #3] 08:00:59.929 message send timeout: TimeoutError
+time="2026-10-01T08:01:00Z" level=warning msg="Received ack for ledgerId:60249 entryId:134 on sequenceId 133 - expected: 134, local > remote, ignore it" producerID=3505 producer_name=bench-1-44256 topic="persistent://bench/ns/load-partition-31556"
+time="2026-10-01T08:01:00Z" level=warning msg="Received ack for ledgerId:137945 entryId:133 on sequenceId 132 - expected: 133, local > remote, ignore it" producerID=3384 producer_name=bench-1-43905 topic="persistent://bench/ns/load-partition-30422"
+time="2026-10-01T08:01:00Z" level=warning msg="Received ack for ledgerId:138041 entryId:136 on sequenceId 135 - expected: 136, local > remote, ignore it" producerID=3395 producer_name=bench-1-43923 topic="persistent://bench/ns/load-partition-30521"
+[err produce #4] 08:01:00.788 message send timeout: TimeoutError
+[err produce #5] 08:01:00.793 message send timeout: TimeoutError
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0xf8 pc=0xbd9473]
+
+goroutine 8765 [running]:
+github.com/apache/pulsar-client-go/pulsar.(*sendRequest).done(0x3c758dadef20, {0xf124f0, 0x3c7610dfc840}, {0x0, 0x0})
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/producer_partition.go:1653 +0xb3
+github.com/apache/pulsar-client-go/pulsar.(*partitionProducer).ReceivedSendReceipt(0x3c754cf8c840, 0x3c760dfeb3b0)
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/producer_partition.go:1462 +0x513
+github.com/apache/pulsar-client-go/pulsar/internal.(*connection).handleSendReceipt(0x3c75150c6000, 0x3c760dfeb3b0)
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/internal/connection.go:773 +0xcf
+github.com/apache/pulsar-client-go/pulsar/internal.(*connection).receivedCommand(0x3c75150c6000, 0x3c760e09a200, {0x0, 0x0})
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/internal/connection.go:613 +0x117
+github.com/apache/pulsar-client-go/pulsar/internal.(*connectionReader).readFromConnection(0x3c75150d2000)
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/internal/connection_reader.go:57 +0x5e
+created by github.com/apache/pulsar-client-go/pulsar/internal.(*connection).run in goroutine 1057
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/internal/connection.go:411 +0xec

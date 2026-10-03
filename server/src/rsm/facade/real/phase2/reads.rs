@@ -6,7 +6,6 @@ use std::collections::{BTreeSet, HashMap};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::positions::pct_decode;
 use super::{query_map, read_error, ApiOut, ApiReq, Effect, RaftFacade, ReqCtx, RsmError};
 use crate::frames::{unpack_frames_ref, uuid_bytes_to_string, uuid_string_to_bytes};
 use crate::rsm::effect::{Pid, TraceEvent};
@@ -136,79 +135,114 @@ struct FetchEntry {
     max_bytes: Option<i64>,
 }
 
+/// Percent-decode one path segment (`%3A` → `:`, `%2F` → `/`) the way axum's
+/// `Path` decodes the segments of the routes the router names: a `%` decodes
+/// only before two hex digits and is otherwise kept as it stands, and `+`
+/// stays `+` (a space is `+` only in a query string).
+pub(super) fn pct_decode(segment: &str) -> String {
+    if !segment.contains('%') {
+        return segment.to_string();
+    }
+    let hex = |c: u8| (c as char).to_digit(16);
+    let b = segment.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(hi), Some(lo)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 impl RaftFacade {
+    /// Every route with a name in its path: a queue, partition, consumer
+    /// group, transaction id, trace name or DLQ id. The path is split at its
+    /// slashes and only then is each segment percent-decoded, here and nowhere
+    /// else: every SDK encodes the names it writes into a path
+    /// (`encodeURIComponent`, `rawurlencode`, `url.PathEscape`), so a name is
+    /// what its segment decodes to — the name a push carried in its body, the
+    /// one axum's `Path` hands the pop — and an encoded `/` stays inside it.
     pub(super) async fn api_dynamic(
         &self,
         ctx: &ReqCtx,
         req: &ApiReq,
     ) -> Result<Option<ApiOut>, RsmError> {
-        let p: Vec<&str> = req.path.trim_matches('/').split('/').collect();
+        let raw: Vec<&str> = req.path.trim_matches('/').split('/').collect();
+        let names: Vec<String> = raw.iter().map(|s| pct_decode(s)).collect();
+        let p: Vec<&str> = names.iter().map(String::as_str).collect();
         let out = match p.as_slice() {
-            // The partition and transaction ids are percent-decoded like the
-            // names below: a transaction id is the client's string, and one
-            // like `metric-sample|<uuid>` arrives as `metric-sample%7C<uuid>`.
+            ["api", "v1", "resources", "queues", queue] if req.method == "GET" => {
+                Some(self.api_get_queue(ctx.clone(), queue).await?)
+            }
+            ["api", "v1", "resources", "queues", queue] if req.method == "DELETE" => {
+                Some(self.api_delete_queue(ctx.clone(), queue).await?)
+            }
+            ["api", "v1", "resources", "queues", queue, "depth"] if req.method == "GET" => Some(
+                self.api_queue_depth(ctx.clone(), queue, req.query.as_deref())
+                    .await?,
+            ),
+            ["api", "v1", "resources", "queues", queue, "sizes"] if req.method == "GET" => {
+                Some(self.api_queue_sizes(ctx.clone(), queue).await?)
+            }
+            ["api", "v1", "status", "queues", queue] if req.method == "GET" => Some(
+                self.api_status_queue(ctx.clone(), queue, req.query.as_deref())
+                    .await?,
+            ),
+            // A transaction id is the client's string: one like
+            // `metric-sample|<uuid>` arrives as `metric-sample%7C<uuid>`.
             ["api", "v1", "messages", pid, txn] if req.method == "GET" => {
-                let (pid, txn) = (pct_decode(pid), pct_decode(txn));
-                Some(self.api_message(ctx.clone(), &pid, &txn).await?)
+                Some(self.api_message(ctx.clone(), pid, txn).await?)
             }
             ["api", "v1", "messages", pid, txn] if req.method == "DELETE" => {
-                let (pid, txn) = (pct_decode(pid), pct_decode(txn));
-                Some(self.api_message_delete(ctx.clone(), &pid, &txn).await?)
+                Some(self.api_message_delete(ctx.clone(), pid, txn).await?)
             }
-            ["api", "v1", "messages", pid, txn, "retry"] if req.method == "POST" => {
-                let (pid, txn) = (pct_decode(pid), pct_decode(txn));
-                Some(
-                    self.api_dlq_move(ctx.clone(), None, Some((&pid, &txn)), &req.body)
-                        .await?,
-                )
-            }
+            ["api", "v1", "messages", pid, txn, "retry"] if req.method == "POST" => Some(
+                self.api_dlq_move(ctx.clone(), None, Some((pid, txn)), &req.body)
+                    .await?,
+            ),
             ["api", "v1", "dlq", id, "replay"] if req.method == "POST" => Some(
                 self.api_dlq_move(ctx.clone(), Some(id), None, &req.body)
                     .await?,
             ),
-            // The group, queue and partition segments are percent-decoded:
-            // every SDK encodes the names it puts in these paths, and a name
-            // is what the segment decodes to (see `positions::pct_decode`).
             ["api", "v1", "consumer-groups", group] if req.method == "GET" => {
-                let group = pct_decode(group);
-                Some(self.api_groups(ctx.clone(), Some(&group)).await?)
+                Some(self.api_groups(ctx.clone(), Some(group)).await?)
             }
-            ["api", "v1", "consumer-groups", group] if req.method == "DELETE" => {
-                let group = pct_decode(group);
-                Some(
-                    self.api_group_delete(ctx.clone(), &group, None, req.query.as_deref())
-                        .await?,
-                )
-            }
+            ["api", "v1", "consumer-groups", group] if req.method == "DELETE" => Some(
+                self.api_group_delete(ctx.clone(), group, None, req.query.as_deref())
+                    .await?,
+            ),
             ["api", "v1", "consumer-groups", group, "subscription"] if req.method == "POST" => {
-                let group = pct_decode(group);
                 Some(
-                    self.api_group_subscription(ctx.clone(), &group, &req.body)
+                    self.api_group_subscription(ctx.clone(), group, &req.body)
                         .await?,
                 )
             }
             ["api", "v1", "consumer-groups", group, "queues", queue] if req.method == "DELETE" => {
-                let (group, queue) = (pct_decode(group), pct_decode(queue));
                 Some(
-                    self.api_group_delete(ctx.clone(), &group, Some(&queue), req.query.as_deref())
+                    self.api_group_delete(ctx.clone(), group, Some(queue), req.query.as_deref())
                         .await?,
                 )
             }
             ["api", "v1", "consumer-groups", group, "queues", queue, "seek"]
                 if req.method == "POST" =>
             {
-                let (group, queue) = (pct_decode(group), pct_decode(queue));
                 Some(
-                    self.api_group_seek(ctx.clone(), &group, &queue, None, &req.body)
+                    self.api_group_seek(ctx.clone(), group, queue, None, &req.body)
                         .await?,
                 )
             }
             ["api", "v1", "consumer-groups", group, "queues", queue, "partitions", part, "seek"]
                 if req.method == "POST" =>
             {
-                let (group, queue, part) = (pct_decode(group), pct_decode(queue), pct_decode(part));
                 Some(
-                    self.api_group_seek(ctx.clone(), &group, &queue, Some(&part), &req.body)
+                    self.api_group_seek(ctx.clone(), group, queue, Some(part), &req.body)
                         .await?,
                 )
             }
@@ -226,12 +260,12 @@ impl RaftFacade {
                 )
                 .await?,
             ),
-            ["api", "v1", "status", "queues", queue] if req.method == "GET" => Some(
-                self.api_status_queue(ctx.clone(), queue, req.query.as_deref())
-                    .await?,
-            ),
-            ["api", "v1", "ephemeral", "queue", queue] if req.method == "DELETE" => {
-                Some(self.api_ephemeral_delete(ctx.clone(), queue).await?)
+            // Reached only from `handlers/ephemeral.rs`, which re-dispatches
+            // its DELETE here with the name axum already decoded, written into
+            // the path as it stands (`handlers::raft::apply_local_control`
+            // reads it back the same way): this segment is the name itself.
+            ["api", "v1", "ephemeral", "queue", _] if req.method == "DELETE" => {
+                Some(self.api_ephemeral_delete(ctx.clone(), raw[4]).await?)
             }
             _ => None,
         };
@@ -1910,5 +1944,24 @@ fn parse_changed_cursor(raw: Option<&str>, mode: char) -> Option<(char, i64, Str
             let (ts, name) = rest.split_once('|')?;
             Some(('t', ts.parse().ok()?, name.to_string()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pct_decode;
+
+    #[test]
+    fn a_segment_decodes_to_the_name_it_encodes() {
+        assert_eq!(pct_decode("orders-consumer"), "orders-consumer");
+        assert_eq!(pct_decode("laravel%3Adefault"), "laravel:default");
+        assert_eq!(pct_decode("a%2Fb"), "a/b");
+        assert_eq!(pct_decode("a%20b%3Ac"), "a b:c");
+        assert_eq!(pct_decode("%C3%A9t%C3%A9"), "été");
+        assert_eq!(pct_decode("50%2525"), "50%25", "decoded once");
+        assert_eq!(pct_decode("a+b"), "a+b", "`+` is a space only in a query");
+        assert_eq!(pct_decode("100%"), "100%", "a trailing % is kept");
+        assert_eq!(pct_decode("%zz%41"), "%zzA", "a bad escape is kept");
+        assert_eq!(pct_decode("%+5x"), "%+5x", "a sign is not a hex digit");
     }
 }

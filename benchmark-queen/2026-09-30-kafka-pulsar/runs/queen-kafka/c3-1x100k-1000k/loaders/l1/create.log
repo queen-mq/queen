@@ -1,0 +1,19 @@
+kload tag=c3-1x100k-1000k-create loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=16 GOGC=400 seed=1790895223493514871
+  topics: 1 x 100000 partitions (kc3-1x100k-1000k..kc3-1x100k-1000k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=100000 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.6 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=1 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+  [topic] 1 topics created, 0 grown, 100000 partitions each x RF 3 accepted by the controller in 0.0s (20 requests of <= 5000 partitions)
+  [topic] t=+0s ready, holding for -topic-settle
+  [topic] t=+11s ready, holding for -topic-settle
+  [topic] t=+22s ready, holding for -topic-settle
+  [topic] READY after 31.1s: 1 topics x 100000 partitions, leaders + full ISR + every replica log on disk
+  [warm] t=+0s ready, holding for -topic-settle
+  [warm] t=+11s ready, holding for -topic-settle
+  [warm] t=+21s ready, holding for -topic-settle
+  [warm] one record (no "ts") into each of 100000 partitions, acks=all, in 1.2s; READY again after 30.3s
+  [config] broker.compression.type = producer (DEFAULT_CONFIG)
+  [config] broker.group.initial.rebalance.delay.ms = 3000 (STATIC_BROKER_CONFIG)
+  [config] topic.min.insync.replicas = 1 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+[create] done: 1 topics x 100000 partitions ready

@@ -1,0 +1,122 @@
+flag provided but not defined: -no-such-flag
+Usage of kload:
+  -ack string
+    	Kafka offset commit per poll: async | sync | none (Pulsar: Ack per message, none = never ack) (default "async")
+  -ack-inflight int
+    	cap on in-flight async commits per process (full = block, never shed) (default 256)
+  -active int
+    	rotate/scatter: distinct entities per second (goload -active-partitions)
+  -active-policy string
+    	with -dist rr and -active N: rotate | scatter (goload -active-policy) (default "rotate")
+  -batch int
+    	messages per unit (default 100 in batch mode, 1 in keyed mode)
+  -batch-max int
+    	if > -batch: unit size drawn uniformly in [batch, batch-max]
+  -batch-max-bytes int
+    	ProducerBatchMaxBytes (default 1048576)
+  -brokers string
+    	seed brokers, comma-separated (all 3 private IPs) (default "127.0.0.1:9092")
+  -client-log string
+    	franz-go log level to stderr: none|error|warn|info|debug (default "none")
+  -compression string
+    	none|gzip|snappy|lz4|zstd (default "lz4")
+  -cons-offset int
+    	global index of this process's first consumer
+  -cons-total int
+    	consumers across all processes (0 = -consumers)
+  -consumers int
+    	consumers in this process (0 = none) (default 4)
+  -create
+    	create the topics (idempotent: existing topics are checked, not recreated) (default true)
+  -create-chunk int
+    	partitions per CreateTopics/CreatePartitions request (KRaft caps a request at 10000 records) (default 5000)
+  -create-only
+    	create (or wait for) the topics, optionally -warm, then exit
+  -delivery-timeout value
+    	RecordDeliveryTimeout (Java delivery.timeout.ms default) (a Go duration, or a bare number of seconds) (default 2m0s)
+  -dist string
+    	entity picker: rr | rotate | scatter | zipf (default "rr")
+  -drain value
+    	after -duration, consumers keep consuming this long (a Go duration, or a bare number of seconds)
+  -duration value
+    	whole producing time, ramp included (a Go duration, or a bare number of seconds) (default 1m10s)
+  -entities int
+    	entities per topic (0 = one entity per partition, entity e IS partition e; >0 = message key e<id>)
+  -fetch-max-partition-bytes int
+    	FetchMaxPartitionBytes (default 1048576)
+  -fetch-max-wait value
+    	FetchMaxWait (a Go duration, or a bare number of seconds) (default 500ms)
+  -fetch-min-bytes int
+    	FetchMinBytes (default 1)
+  -group-protocol string
+    	consumer (KIP-848, server-side uniform assignor) | classic (cooperative-sticky) (default "consumer")
+  -group-timeout value
+    	give up if the groups are not stable within this (a Go duration, or a bare number of seconds) (default 3m0s)
+  -inflight-per-broker int
+    	produce requests in flight per broker (idempotent producers: franz-go always uses 5, Kafka's max) (default 5)
+  -linger value
+    	ProducerLinger (Kafka 4.x linger.ms default) (a Go duration, or a bare number of seconds) (default 5ms)
+  -loader-index int
+    	this process's index (0..loaders-1): the "src" in every message and the rr start offset
+  -loaders int
+    	number of load processes sharing the topics (default 1)
+  -local-src string
+    	loader indices running on THIS host, e.g. 0-2 or 0,3,6 (e2e_local = messages from these srcs; default: this process only)
+  -max-inflight int
+    	in-flight UNITS; a unit scheduled while the cap is full is shed (offered+shed, never sent) (default 5000)
+  -metadata-max-age value
+    	franz-go MetadataMaxAge (periodic full metadata refresh) (a Go duration, or a bare number of seconds) (default 5m0s)
+  -min-isr int
+    	min.insync.replicas of created topics (default 2)
+  -mode string
+    	batch (a unit = -batch msgs of one entity back to back) | keyed (a unit = -batch..-batch-max msgs of one entity; the client batches across entities) (default "batch")
+  -out string
+    	write the final numbers + config as JSON to this file
+  -partitions int
+    	partitions per topic (Pulsar: 0 = non-partitioned topic) (default 200)
+  -payload int
+    	target JSON event size in bytes (goload's jsonEvent) (default 256)
+  -poll int
+    	max records per poll (Kafka PollRecords; Pulsar: drained from the receive channel per loop) (default 1000)
+  -proc-us float
+    	simulated processing time per message, µs (accumulated, slept in >= 1 ms chunks)
+  -producers int
+    	franz-go producer clients per process (unit u -> client u % producers) (default 4)
+  -ramp value
+    	linear ramp of the offered rate from 0 (goload's F^-1 schedule) (a Go duration, or a bare number of seconds) (default 10s)
+  -rate float
+    	offered msg/s for THIS process, open loop (0 = no producers)
+  -report value
+    	window line every this long (from the start instant) (a Go duration, or a bare number of seconds) (default 10s)
+  -rf int
+    	replication factor of created topics (default 3)
+  -seed int
+    	RNG seed for payloads, phases and pickers (0 = time based); the process seed is seed+loader_index
+  -session-timeout value
+    	group session timeout (classic; KIP-848 uses the broker's group.consumer.session.timeout.ms) (a Go duration, or a bare number of seconds) (default 45s)
+  -stable-wait value
+    	group stable = every partition assigned and no assignment change for this long (a Go duration, or a bare number of seconds) (default 3s)
+  -start-at int
+    	start barrier: start instant (unix ms)
+  -start-file string
+    	start barrier: after READY, poll this file every 100 ms; its content = the start instant (unix ms)
+  -tag string
+    	free-form run tag (echoed in the header and JSON)
+  -topic string
+    	topic name (T=1) or prefix (default "bench")
+  -topic-config string
+    	topic configs k=v,... for created topics (default "retention.ms=600000,segment.bytes=268435456")
+  -topic-dist string
+    	topic picker: rr | zipf (default "rr")
+  -topic-settle value
+    	the topics must stay ready (leaders, full ISR, replica logs) this long (a Go duration, or a bare number of seconds)
+  -topic-timeout value
+    	give up if the topics are not created and ready within this (a Go duration, or a bare number of seconds) (default 5m0s)
+  -topic-zipf-s float
+    	Zipf exponent over topics (-topic-dist zipf) (default 1)
+  -topics int
+    	number of topics T (names: -topic if T=1, else <topic>-t<i>) (default 1)
+  -warm
+    	after the topics are ready: write ONE message without "ts" into every partition (and consume it: Pulsar)
+  -zipf-s float
+    	Zipf exponent over entities (-dist zipf) (default 1.1)

@@ -1,0 +1,1 @@
+SUPERSEDED by 1x10000-t10-9k-v120 (PASS). This run's verifier FAIL (missing=34320) was the 10 s idle window ending the scan with ~571 partitions unread; the load processes' readers consumed all 585,020 outputs. 2026-10-01.

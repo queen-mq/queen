@@ -97,6 +97,11 @@ pub(crate) fn json(status: StatusCode, body: String) -> Response {
 // fallback to the facade, and the AppState + router builders.
 pub(crate) mod raft;
 
+// PLAN_PG_CONNECTORS.md §3.1 — the Postgres connectors' configuration routes
+// (feature `pg`): documents in the broker-internal tenant, read by every
+// node's manager (pg_inproc.rs).
+#[cfg(feature = "pg")]
+mod connectors;
 mod data;
 // PLAN_KV_TIMERS.md §8.1 — the KV and timer HTTP surfaces.
 mod kv;
@@ -116,6 +121,8 @@ mod timers;
 #[cfg(feature = "server")]
 mod static_files;
 
+#[cfg(feature = "pg")]
+pub use connectors::*;
 pub use data::*;
 pub use ephemeral::*;
 pub use kv::*;

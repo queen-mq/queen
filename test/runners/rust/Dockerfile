@@ -1,9 +1,10 @@
 # Rust broker unit tests. Build context = REPO ROOT.
 #   docker build -f test/runners/rust/Dockerfile -t queen-test-runner-rust .
 #
-# The broker crate takes three crates by relative path — queen-protocol
-# (../crates), the embedded proxy (../proxy) and the Kafka facade
-# (../protocols/queen-kafka), the last two through its default features — and
+# The broker crate takes four crates by relative path — queen-protocol
+# (../crates), the embedded proxy (../proxy), the Kafka facade
+# (../protocols/queen-kafka) and the Postgres connectors
+# (../connectors/queen-pg), the last three through its default features — and
 # cargo resolves the whole dependency graph before it compiles anything, so all
 # of them have to be in the context. Dockerfile.dockerignore keeps the root
 # context light (buildx honors it).
@@ -17,6 +18,10 @@ WORKDIR /src
 COPY crates ./crates
 COPY protocols/queen-kafka/Cargo.toml ./protocols/queen-kafka/Cargo.toml
 COPY protocols/queen-kafka/src ./protocols/queen-kafka/src
+# The Postgres connectors (../connectors/queen-pg), through the default `pg`
+# feature: the same rule, the whole graph resolves before anything compiles.
+COPY connectors/queen-pg/Cargo.toml ./connectors/queen-pg/Cargo.toml
+COPY connectors/queen-pg/src ./connectors/queen-pg/src
 COPY proxy/Cargo.toml ./proxy/Cargo.toml
 COPY proxy/src ./proxy/src
 # The proxy embeds its console's committed build (`console/dist`) with

@@ -1,0 +1,4 @@
+2026-09-27T02:45:30Z full pass 2 (82) on /root/bin/queen-nopg (raft ec9d88c4, no Postgres)
+valid:           82
+INVALID:         0
+CRASHED/UNKNOWN: 0

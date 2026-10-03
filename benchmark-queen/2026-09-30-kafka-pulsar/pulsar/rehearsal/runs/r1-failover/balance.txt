@@ -1,0 +1,11 @@
+balance bench/ns: 12 topics (1 partitioned) in 11 of 48 bundles, 3 brokers, mean 4.0 topics/broker; hash check 4/4 lookups agree
+  10.202.0.2:8080        bundles=  3 topics=      3 ( -25.0%)  per-bundle max/min=1/1
+  10.202.0.3:8080        bundles=  4 topics=      4 (  +0.0%)  per-bundle max/min=1/1
+  10.202.0.4:8080        bundles=  4 topics=      5 ( +25.0%)  per-bundle max/min=2/1
+  unowned bundles with topics: 0 (0 topics); max deviation 25.0% (target ±10%): OUT
+  fix move 1: bundle 0xcaaaaa9e_0xcffffff3 (1 topics) 10.202.0.4:8080 -> 10.202.0.2:8080 (destinationBroker): landed on 10.202.0.2:8080
+balance after fix bench/ns: 12 topics (1 partitioned) in 11 of 48 bundles, 3 brokers, mean 4.0 topics/broker; hash check 4/4 lookups agree
+  10.202.0.2:8080        bundles=  4 topics=      4 (  +0.0%)  per-bundle max/min=1/1
+  10.202.0.3:8080        bundles=  4 topics=      4 (  +0.0%)  per-bundle max/min=1/1
+  10.202.0.4:8080        bundles=  3 topics=      4 (  +0.0%)  per-bundle max/min=2/1
+  unowned bundles with topics: 0 (0 topics); max deviation 0.0% (target ±10%): OK

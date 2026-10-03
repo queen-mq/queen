@@ -1,0 +1,56 @@
+kload tag=1x100000-1000k-create loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=16 GOGC=400 seed=1790757780031032974
+  topics: 1 x 100000 partitions (k1x100000-1000k..k1x100000-1000k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=100000 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.6 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=2 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+  [topic] 1 topics created, 0 grown, 100000 partitions each x RF 3 accepted by the controller in 8.5s (20 requests of <= 5000 partitions)
+  [topic] t=+0s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+11s 30411/300000 replica logs on disk
+  [topic] t=+22s 50964/300000 replica logs on disk
+  [topic] t=+32s 68550/300000 replica logs on disk
+  [topic] t=+43s 86742/300000 replica logs on disk
+  [topic] t=+54s 105761/300000 replica logs on disk
+  [topic] t=+65s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+75s 140363/300000 replica logs on disk
+  [topic] t=+85s 159152/300000 replica logs on disk
+  [topic] t=+96s 184260/300000 replica logs on disk
+  [topic] t=+107s 206177/300000 replica logs on disk
+  [topic] t=+118s 219356/300000 replica logs on disk
+  [topic] t=+129s 233449/300000 replica logs on disk
+  [topic] t=+140s 247501/300000 replica logs on disk
+  [topic] t=+151s 259342/300000 replica logs on disk
+  [topic] t=+163s 271625/300000 replica logs on disk
+  [topic] t=+173s 283226/300000 replica logs on disk
+  [topic] t=+183s 292550/300000 replica logs on disk
+  [topic] t=+194s 297890/300000 replica logs on disk
+  [topic] t=+204s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 17719 with ISR < replicas
+  [topic] t=+215s ready, holding for -topic-settle
+  [topic] t=+225s ready, holding for -topic-settle
+  [topic] t=+235s ready, holding for -topic-settle
+  [topic] READY after 245.0s: 1 topics x 100000 partitions, leaders + full ISR + every replica log on disk
+  [warm] t=+1s ready, holding for -topic-settle
+  [warm] t=+11s ready, holding for -topic-settle
+  [warm] t=+22s ready, holding for -topic-settle
+  [warm] one record (no "ts") into each of 100000 partitions, acks=all, in 28.4s; READY again after 31.4s
+  [config] broker.compression.type = producer (STATIC_BROKER_CONFIG)
+  [config] broker.default.replication.factor = 3 (STATIC_BROKER_CONFIG)
+  [config] broker.group.consumer.assignors = uniform,range (DEFAULT_CONFIG)
+  [config] broker.group.coordinator.rebalance.protocols = classic,consumer,streams (DEFAULT_CONFIG)
+  [config] broker.group.initial.rebalance.delay.ms = 3000 (DEFAULT_CONFIG)
+  [config] broker.log.flush.interval.messages = 9223372036854775807 (DEFAULT_CONFIG)
+  [config] broker.log.flush.interval.ms = <nil> (DEFAULT_CONFIG)
+  [config] broker.max.incremental.fetch.session.cache.slots = 4000 (STATIC_BROKER_CONFIG)
+  [config] broker.min.insync.replicas = 2 (DYNAMIC_DEFAULT_BROKER_CONFIG)
+  [config] broker.num.io.threads = 16 (STATIC_BROKER_CONFIG)
+  [config] broker.num.network.threads = 8 (STATIC_BROKER_CONFIG)
+  [config] broker.num.replica.fetchers = 8 (STATIC_BROKER_CONFIG)
+  [config] topic.compression.type = producer (STATIC_BROKER_CONFIG)
+  [config] topic.flush.messages = 9223372036854775807 (DEFAULT_CONFIG)
+  [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+  [config] topic.max.message.bytes = 16777216 (STATIC_BROKER_CONFIG)
+  [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+  [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+[create] done: 1 topics x 100000 partitions ready

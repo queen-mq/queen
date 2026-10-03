@@ -1,0 +1,18 @@
+node=1 zk     pid=1119190 up=507s cpu=63s rss=1323MB thr=121 fds=416 | gc cycles=7 (major 6) pauses=30 max=0.26ms sum=1.0ms stalls=0 max=0.0ms safepoint_max=2.89ms | log ERROR=0 WARN=1 (since mark 21:03:48Z)
+node=1 bookie pid=1119765 up=499s cpu=89s rss=3899MB thr=191 fds=843 | gc cycles=1 (major 1) pauses=5 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=3.31ms | log ERROR=0 WARN=0 (since mark 21:03:48Z)
+node=1 broker pid=1120232 up=494s cpu=712s rss=7588MB thr=310 fds=641 | gc cycles=30 (major 4) pauses=20 max=0.04ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=5.08ms | log ERROR=145 WARN=3 (since mark 21:03:48Z)
+node=1 broker   ERROR x145: Read of ledger entry failed: LN EN-EN, Sent to [N.N.N.N:N, N.N.N.N:N, N.N.N.N:N], Heard from [] : bitset = {}, Error = 'Too many requests to
+node=1 disk   data=903MB zk=45MB journal=436MB (1 .txn in 1 dirs) ledgers=423MB (entry logs=2, 273MB; locations=75MB ledgers-index=75MB) | fs 5% used, 370G free
+node=1 broker bench/ns metrics: producers_count=0 throughput_in=0 rate_in=0 throughput_out=0 consumers_count=3 rate_out=0 storage_size=223381404 topics_count=6720 msg_backlog=22886 subscriptions_count=10065
+node=2 zk     pid=959731 up=507s cpu=43s rss=1333MB thr=116 fds=412 | gc cycles=4 (major 3) pauses=15 max=0.04ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=2.53ms | log ERROR=0 WARN=0 (since mark 21:03:48Z)
+node=2 bookie pid=960004 up=499s cpu=76s rss=3848MB thr=187 fds=843 | gc cycles=1 (major 1) pauses=5 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=2.64ms | log ERROR=0 WARN=0 (since mark 21:03:48Z)
+node=2 broker pid=960341 up=494s cpu=755s rss=7498MB thr=284 fds=577 | gc cycles=26 (major 3) pauses=15 max=0.03ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=4.12ms | log ERROR=102 WARN=4 (since mark 21:03:48Z)
+node=2 broker   ERROR x102: Read of ledger entry failed: LN EN-EN, Sent to [N.N.N.N:N, N.N.N.N:N, N.N.N.N:N], Heard from [] : bitset = {}, Error = 'Too many requests to
+node=2 disk   data=902MB zk=45MB journal=434MB (1 .txn in 1 dirs) ledgers=423MB (entry logs=2, 273MB; locations=75MB ledgers-index=75MB) | fs 6% used, 367G free
+node=2 broker bench/ns metrics: producers_count=3 throughput_in=0 rate_in=0 throughput_out=0 consumers_count=0 rate_out=0 storage_size=258212307 topics_count=6661 msg_backlog=22930 subscriptions_count=10010
+node=3 zk     pid=958416 up=507s cpu=27s rss=1304MB thr=123 fds=413 | gc cycles=3 (major 3) pauses=15 max=0.03ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=2.53ms | log ERROR=0 WARN=0 (since mark 21:03:48Z)
+node=3 bookie pid=958698 up=499s cpu=57s rss=3824MB thr=192 fds=843 | gc cycles=1 (major 1) pauses=5 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=2.02ms | log ERROR=0 WARN=0 (since mark 21:03:48Z)
+node=3 broker pid=959095 up=494s cpu=549s rss=7588MB thr=280 fds=577 | gc cycles=28 (major 4) pauses=20 max=0.02ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=3.36ms | log ERROR=58 WARN=3 (since mark 21:03:48Z)
+node=3 broker   ERROR x58: Read of ledger entry failed: LN EN-EN, Sent to [N.N.N.N:N, N.N.N.N:N, N.N.N.N:N], Heard from [] : bitset = {}, Error = 'Too many requests to
+node=3 disk   data=903MB zk=45MB journal=436MB (1 .txn in 1 dirs) ledgers=423MB (entry logs=2, 273MB; locations=75MB ledgers-index=75MB) | fs 5% used, 371G free
+node=3 broker bench/ns metrics: producers_count=0 throughput_in=0 rate_in=0 throughput_out=0 consumers_count=0 rate_out=0 storage_size=220177701 topics_count=6621 msg_backlog=22688 subscriptions_count=9930

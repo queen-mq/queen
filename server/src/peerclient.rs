@@ -60,10 +60,12 @@ pub const FWD_HEADER: &str = "x-queen-eph-fwd";
 /// drain notice. The proxy strips it from client requests.
 pub const TOKEN_HEADER: &str = "x-queen-raft-token";
 
+/// `QUEEN_RAFT_TOKEN`, read once ([`cluster_token`]).
+static TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
 /// `QUEEN_RAFT_TOKEN`, read once. `None` when unset or blank: a cluster without
 /// a token (a dev cluster) has no credential for broker-to-broker calls.
 fn cluster_token() -> Option<&'static str> {
-    static TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     TOKEN
         .get_or_init(|| {
             std::env::var("QUEEN_RAFT_TOKEN")
@@ -73,10 +75,10 @@ fn cluster_token() -> Option<&'static str> {
         .as_deref()
 }
 
-/// Does this request carry the cluster token? Always `false` when no token is
-/// configured. Compared in constant time: it is a credential.
-pub fn token_matches(h: &HeaderMap) -> bool {
-    let (Some(want), Some(got)) = (cluster_token(), h.get(TOKEN_HEADER)) else {
+/// Does `h` carry `want`? `false` when there is nothing to match. Compared in
+/// constant time: it is a credential.
+fn token_ok(want: Option<&str>, h: &HeaderMap) -> bool {
+    let (Some(want), Some(got)) = (want, h.get(TOKEN_HEADER)) else {
         return false;
     };
     let (a, b) = (want.as_bytes(), got.as_bytes());
@@ -84,6 +86,12 @@ pub fn token_matches(h: &HeaderMap) -> bool {
         return false;
     }
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Does this request carry the cluster token? Always `false` when no token is
+/// configured.
+pub fn token_matches(h: &HeaderMap) -> bool {
+    token_ok(cluster_token(), h)
 }
 
 /// Was this request relayed by another broker, and may it be believed?
@@ -99,6 +107,35 @@ pub fn forwarded(h: &HeaderMap) -> bool {
         Some(_) => token_matches(h),
         None => true,
     }
+}
+
+/// A relay PROVEN to come from another broker of this cluster: the forward
+/// mark and the cluster token. Unlike [`forwarded`] it is never true without a
+/// configured token, because of what it unlocks: the tenant the relay names
+/// (`tenant.rs`), believed whatever `QUEEN_TENANCY_HEADER` says, and the
+/// broker router behind a proxy that shares PORT (`proxy_embed.rs`). A
+/// client that sets the mark alone gets neither.
+pub fn verified_relay(h: &HeaderMap) -> bool {
+    relay_proven(cluster_token(), h)
+}
+
+fn relay_proven(want: Option<&str>, h: &HeaderMap) -> bool {
+    h.contains_key(FWD_HEADER) && token_ok(want, h)
+}
+
+/// The token every test that needs one shares: the first caller fixes the
+/// process's token ([`TOKEN`] is read once), so they must all agree on it.
+/// Panics when something already read an unset `QUEEN_RAFT_TOKEN`.
+#[cfg(test)]
+pub(crate) fn test_token() -> &'static str {
+    const TEST_TOKEN: &str = "test-cluster-token";
+    TOKEN.get_or_init(|| Some(TEST_TOKEN.to_string()));
+    let t = cluster_token().expect("the cluster token was read unset before a test fixed it");
+    assert_eq!(
+        t, TEST_TOKEN,
+        "the cluster token was read from the environment first"
+    );
+    t
 }
 
 /// The headers that make a request this broker sends to a peer recognisable
@@ -207,5 +244,67 @@ impl PeerClient {
 impl Default for PeerClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, HeaderValue::from_str(v).unwrap());
+        }
+        h
+    }
+
+    /// The mark proves nothing without the token, and nothing at all on a
+    /// cluster with no token: what a verified relay unlocks (the tenant it
+    /// names, the broker router behind the proxy) is never a client's to take.
+    #[test]
+    fn a_relay_is_verified_only_by_the_mark_and_the_configured_token() {
+        let both = headers(&[(FWD_HEADER, "1"), (TOKEN_HEADER, "s3cret")]);
+        assert!(relay_proven(Some("s3cret"), &both));
+        // No token configured (a dev cluster): the mark alone is never proof.
+        assert!(!relay_proven(None, &both));
+        assert!(!relay_proven(None, &headers(&[(FWD_HEADER, "1")])));
+        // The wrong token, a token of another length, no token.
+        assert!(!relay_proven(
+            Some("s3cret"),
+            &headers(&[(FWD_HEADER, "1"), (TOKEN_HEADER, "s3creT")])
+        ));
+        assert!(!relay_proven(
+            Some("s3cret"),
+            &headers(&[(FWD_HEADER, "1"), (TOKEN_HEADER, "s3cret-and-more")])
+        ));
+        assert!(!relay_proven(
+            Some("s3cret"),
+            &headers(&[(FWD_HEADER, "1")])
+        ));
+        // The token without the mark is a call, not a relay.
+        assert!(!relay_proven(
+            Some("s3cret"),
+            &headers(&[(TOKEN_HEADER, "s3cret")])
+        ));
+    }
+
+    /// What this broker sends a peer is what the peer's check accepts.
+    #[test]
+    fn internal_headers_make_a_verified_relay() {
+        let token = test_token();
+        let mut h = HeaderMap::new();
+        for (k, v) in internal_headers() {
+            h.insert(k, v);
+        }
+        assert_eq!(h.get(TOKEN_HEADER).unwrap(), token);
+        assert!(verified_relay(&h));
+        assert!(forwarded(&h));
+        h.remove(TOKEN_HEADER);
+        assert!(!verified_relay(&h));
+        assert!(
+            !forwarded(&h),
+            "with a token configured the mark alone is not believed"
+        );
     }
 }

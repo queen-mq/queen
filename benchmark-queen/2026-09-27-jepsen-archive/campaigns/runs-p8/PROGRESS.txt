@@ -1,0 +1,8 @@
+2026-09-25T12:22:19Z campaign p8-part1.txt on /root/bin/queen-6bc22551
+2026-09-25T12:28:09Z p8-w1-restart valid dur=5m50s acked=26431 ops={'ok': 54294, 'fail': 977, 'info': 11} nemesis={'rolling-restart': 4, 'restart': 16, 'restart-heal': 1} invalid=[] workload={'anomaly-count': 0, 'duplicate-count': 0, 'torn-count': 0, 'ok-count': 26431, 'fail-count': 501, 'info-count': 1} faults={}
+2026-09-25T12:34:19Z p8-w2-restart INVALID dur=6m10s acked=25992 ops={'ok': 52169, 'fail': 2035, 'info': 4} nemesis={'rolling-restart': 7, 'restart': 15, 'restart-heal': 1} invalid=[] workload={'ok-count': 25992, 'duplicated-count': 3, 'lost-count': 0, 'acknowledged-count': 25992, 'attempt-count': 27033, 'unexpected-count': 0, 'recovered-count': 0, 'acked-twice-count': 0, 'lease-overlap-count': 3, 'pop-skip-count': 0, 'redelivered-after-ack-count': 0, 'fail-count': 1038, 'info-count': 3} faults={}
+2026-09-25T12:40:00Z p8-w3-restart valid dur=5m40s acked=11313 ops={'fail': 8145, 'ok': 21035} nemesis={'restart': 12, 'rolling-restart': 3, 'restart-heal': 1} invalid=[] workload={'ok-count': 9569, 'fail-count': 54, 'info-count': 0} faults={}
+2026-09-25T12:45:45Z p8-w3b-restart valid dur=5m45s acked=14292 ops={'ok': 28841, 'fail': 296} nemesis={'restart': 9, 'rolling-restart': 6, 'restart-heal': 1} invalid=[] workload={} faults={}
+2026-09-25T12:45:48Z campaign p8-part1.txt finished
+2026-09-25T12:46:55Z campaign p8-part2.txt on /root/bin/queen-membfix
+2026-09-25T12:51:02Z campaign p8-part2.txt STOPPED by the main session (the clock-sync hook ate the matrix stdin; everything re-runs on the final binary)

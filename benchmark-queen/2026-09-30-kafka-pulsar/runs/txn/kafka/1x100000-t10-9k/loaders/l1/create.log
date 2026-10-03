@@ -1,0 +1,118 @@
+kload tag=1x100000-t10-9k-create loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=16 GOGC=400 seed=1790869276010072640
+  topics: 1 x 100000 partitions (x1x100000-t10-9k..x1x100000-t10-9k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=100000 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~319 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=2 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=classic fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s | txn: x1x100000-t10-9k-in -> 4 workers (GroupTransactSession, transactional.id per worker, txn-timeout 10s, concurrent-txn backoff 20ms, metadata-min-age 250ms, txn-size 10, linger 1s, read_committed) -> x1x100000-t10-9k-out, 4 read_committed readers
+  [topic] 2 topics created, 0 grown, 100000 partitions each x RF 3 accepted by the controller in 20.0s (40 requests of <= 5000 partitions)
+  [topic] t=+0s 0 topics missing, 2 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+10s 0 topics missing, 2 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+21s 0 topics missing, 2 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+31s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+42s 0 topics missing, 2 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+52s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+63s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+73s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+84s 0 topics missing, 2 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+94s 0 topics missing, 2 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+105s 0 topics missing, 2 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+115s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+126s 0 topics missing, 2 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+136s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+147s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+157s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+168s 0 topics missing, 2 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+178s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+189s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+200s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+211s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+222s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+233s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+243s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+254s 390040/600000 replica logs on disk
+  [topic] t=+265s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 101728 with ISR < replicas
+  [topic] t=+276s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 108436 with ISR < replicas
+  [topic] t=+287s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+297s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+308s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 122915 with ISR < replicas
+  [topic] t=+319s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 122915 with ISR < replicas
+  [topic] t=+329s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+340s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+351s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 128723 with ISR < replicas
+  [topic] t=+362s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+372s 0 topics missing, 1 with != 100000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+383s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+394s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 137380 with ISR < replicas
+  [topic] t=+405s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+416s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 80262 with ISR < replicas
+  [topic] t=+427s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 66666 with ISR < replicas
+  [topic] t=+438s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+448s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+459s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+470s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+481s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 69533 with ISR < replicas
+  [topic] t=+492s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 71695 with ISR < replicas
+  [topic] t=+503s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+514s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 74031 with ISR < replicas
+  [topic] t=+525s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+536s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+547s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 80743 with ISR < replicas
+  [topic] t=+558s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 80743 with ISR < replicas
+  [topic] t=+569s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 83013 with ISR < replicas
+  [topic] t=+580s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+591s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+602s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+613s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+624s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 99029 with ISR < replicas
+  [topic] t=+635s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+646s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+657s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 91665 with ISR < replicas
+  [topic] t=+668s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 50001 with ISR < replicas
+  [topic] t=+679s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 50001 with ISR < replicas
+  [topic] t=+690s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+701s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 50001 with ISR < replicas
+  [topic] t=+711s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+722s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+733s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 50001 with ISR < replicas
+  [topic] t=+744s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+755s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 50001 with ISR < replicas
+  [topic] t=+766s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 50001 with ISR < replicas
+  [topic] t=+776s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+787s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+798s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 50001 with ISR < replicas
+  [topic] t=+809s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 50001 with ISR < replicas
+  [topic] t=+820s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+831s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 113530 with ISR < replicas
+  [topic] t=+842s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 50001 with ISR < replicas
+  [topic] t=+852s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 50001 with ISR < replicas
+  [topic] t=+862s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 47500 with ISR < replicas
+  [topic] t=+875s ready, holding for -topic-settle
+  [topic] t=+885s ready, holding for -topic-settle
+  [topic] t=+896s ready, holding for -topic-settle
+  [topic] READY after 918.4s: 2 topics x 100000 partitions, leaders + full ISR + every replica log on disk
+  [warm] t=+0s 0 topics missing, 0 with != 100000 partitions, 0 partitions without leader, 10217 with ISR < replicas
+  [warm] t=+12s ready, holding for -topic-settle
+  [warm] t=+24s ready, holding for -topic-settle
+  [warm] t=+36s ready, holding for -topic-settle
+  [warm] one record (no "ts") into each of 200000 partitions, acks=all, in 72.6s; READY again after 38.5s
+  [config] broker.compression.type = producer (STATIC_BROKER_CONFIG)
+  [config] broker.default.replication.factor = 3 (STATIC_BROKER_CONFIG)
+  [config] broker.group.consumer.assignors = uniform,range (DEFAULT_CONFIG)
+  [config] broker.group.coordinator.rebalance.protocols = classic,consumer,streams (DEFAULT_CONFIG)
+  [config] broker.group.initial.rebalance.delay.ms = 3000 (DEFAULT_CONFIG)
+  [config] broker.log.flush.interval.messages = 9223372036854775807 (DEFAULT_CONFIG)
+  [config] broker.log.flush.interval.ms = <nil> (DEFAULT_CONFIG)
+  [config] broker.max.incremental.fetch.session.cache.slots = 4000 (STATIC_BROKER_CONFIG)
+  [config] broker.min.insync.replicas = 2 (DYNAMIC_DEFAULT_BROKER_CONFIG)
+  [config] broker.num.io.threads = 16 (STATIC_BROKER_CONFIG)
+  [config] broker.num.network.threads = 8 (STATIC_BROKER_CONFIG)
+  [config] broker.num.replica.fetchers = 8 (STATIC_BROKER_CONFIG)
+  [config] topic.compression.type = producer (STATIC_BROKER_CONFIG)
+  [config] topic.flush.messages = 9223372036854775807 (DEFAULT_CONFIG)
+  [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+  [config] topic.max.message.bytes = 16777216 (STATIC_BROKER_CONFIG)
+  [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+  [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+[create] done: x1x100000-t10-9k-in, x1x100000-t10-9k-out x 100000 partitions ready

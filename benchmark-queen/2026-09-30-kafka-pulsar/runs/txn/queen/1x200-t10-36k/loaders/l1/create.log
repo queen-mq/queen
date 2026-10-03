@@ -1,0 +1,12 @@
+qload tag=1x200-t10-36k-create loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=16 GOGC=400 seed=1790881542274993068
+  topics: 1 x 200 partitions (x1x200-t10-36k..x1x200-t10-36k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.6 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  queen: url=http://10.114.0.2:6632 (of 3) conns=2048 timeout=30s pop-width=10 pop-batch=1000 pop-timeout=2s lease=10s | configure: leaseTime=30 completedRetention=3600 dedup=0 retryLimit=1000000 | txn: x1x200-t10-36k-in -> workers (txn-size 10, linger 1s, one /transaction = acks with leases + pushes) -> x1x200-t10-36k-out, 4 read-committed readers
+  [queen] http://10.114.0.2:6632 healthy: version 2.0.0-beta.2, this node leader
+  [configure] x1x200-t10-36k-in: leaseTime=30 completedRetentionSeconds=3600 dedupWindowSeconds=0 retryLimit=1e+06 retentionSeconds=0
+  [configure] x1x200-t10-36k-out: leaseTime=30 completedRetentionSeconds=3600 dedupWindowSeconds=0 retryLimit=1e+06 retentionSeconds=0
+  [warm] x1x200-t10-36k-in: 200 partitions written and drained (200 messages)
+  [warm] x1x200-t10-36k-out: 200 partitions written and drained (200 messages)
+  [warm] one message (no "ts") into each of 200 partitions of x1x200-t10-36k-in, x1x200-t10-36k-out in 0.0s; drained in 0.1s
+[create] done: x1x200-t10-36k-in, x1x200-t10-36k-out x 200 partitions

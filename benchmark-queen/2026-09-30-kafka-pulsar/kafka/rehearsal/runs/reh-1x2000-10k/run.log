@@ -1,0 +1,48 @@
+[2026-09-30T07:02:22Z] run reh-1x2000-10k: start: rate=10000 over N=3 processes (1 loader hosts x 3) = 3333 msg/s each; 1 topic(s) x 2000 partitions (2000 total), entities=0 mode=batch batch=100 consumers=4/process (12 total) warm=1 profile=default PROFILE=local out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/reh-1x2000-10k
+[2026-09-30T07:02:22Z] run reh-1x2000-10k: note: 10000 is not divisible by 3; offering 9999 msg/s
+[2026-09-30T07:02:22Z] run reh-1x2000-10k: 1. cluster reset (profile default, PARTS=2000)
+    [2026-09-30T07:02:35Z] cluster: healthy in 13s: cluster id AFFejEGx4ifewujYY13ASg
+      n1 node=1 alive=1 leader=3 voters=3 unfenced=3 fenced=0 maxlag=0
+      n2 node=2 alive=1 leader=3 voters=3 unfenced=3 fenced=0 maxlag=0
+      n3 node=3 alive=1 leader=3 voters=3 unfenced=3 fenced=0 maxlag=0
+    [2026-09-30T07:02:35Z] cluster: versions (conf_hash must be equal: nodes differ only in node.id + listener IPs)
+      n1 node=1 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=local conf_hash=cb1d1e98 pid=26952 jvm=[-Xms384m -Xmx384m -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n2 node=2 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=local conf_hash=cb1d1e98 pid=23057 jvm=[-Xms384m -Xmx384m -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n3 node=3 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=local conf_hash=cb1d1e98 pid=23608 jvm=[-Xms384m -Xmx384m -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+    [2026-09-30T07:02:37Z] cluster: features: eligible.leader.replicas.version=1 group.version=1 kraft.version=0 metadata.version=4.3-IV0 share.version=1 streams.version=1 transaction.version=2 
+[2026-09-30T07:02:37Z] run reh-1x2000-10k: 2. samplers start (kafka-reh-1x2000-10k, every 2s) on 3 brokers + 1 loader hosts
+[2026-09-30T07:02:37Z] run reh-1x2000-10k: 3. create 1 topic(s) x 2000 partitions, RF 3, min.insync 2, warm on loader 1
+      [config] broker.num.network.threads = 8 (STATIC_BROKER_CONFIG)
+      [config] broker.num.replica.fetchers = 4 (STATIC_BROKER_CONFIG)
+      [config] topic.compression.type = producer (STATIC_BROKER_CONFIG)
+      [config] topic.flush.messages = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.max.message.bytes = 1048588 (DEFAULT_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+    [create] done: 1 topics x 2000 partitions ready
+[2026-09-30T07:02:55Z] run reh-1x2000-10k:    topics ready after 33s since start
+    node=1 rss_MB=577 threads=146 maps=4583 fds=2221 data_MB=32 part_dirs=2001 gc_pauses=40 gc_max_ms=37.512 gc_sum_ms=421 errors=2 warns=4 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=30
+    node=2 rss_MB=581 threads=146 maps=4581 fds=2221 data_MB=32 part_dirs=2001 gc_pauses=46 gc_max_ms=85.619 gc_sum_ms=582 errors=2 warns=7 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=30
+    node=3 rss_MB=580 threads=147 maps=4581 fds=2230 data_MB=32 part_dirs=2001 gc_pauses=47 gc_max_ms=70.713 gc_sum_ms=593 errors=2 warns=1 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=30
+[2026-09-30T07:02:55Z] run reh-1x2000-10k: 4. launch 3 kload processes
+    launched 0 1 2 on kl1
+[2026-09-30T07:02:56Z] run reh-1x2000-10k:    READY 0/3
+[2026-09-30T07:03:06Z] run reh-1x2000-10k:    all 3 READY after 44s since start
+[2026-09-30T07:03:07Z] run reh-1x2000-10k: 5. start instant 1790751792305 (loader-1 clock + 5s) written to 3 start files; producing 30s (ramp 5s)
+[2026-09-30T07:03:12Z] run reh-1x2000-10k:    0/3 exited | p0: 
+[2026-09-30T07:03:43Z] run reh-1x2000-10k:    load finished after 81s since start
+[2026-09-30T07:03:43Z] run reh-1x2000-10k: 6. collect
+    node=1 rss_MB=586 threads=148 maps=4691 fds=2272 data_MB=74 part_dirs=2051 gc_pauses=71 gc_max_ms=46.552 gc_sum_ms=912 errors=2 warns=5 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='2026-09-30 07:03:06' uptime_s=78
+    node=2 rss_MB=593 threads=148 maps=4691 fds=2272 data_MB=74 part_dirs=2051 gc_pauses=80 gc_max_ms=85.619 gc_sum_ms=1053 errors=2 warns=8 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='2026-09-30 07:03:06' uptime_s=78
+    node=3 rss_MB=598 threads=149 maps=4689 fds=2281 data_MB=74 part_dirs=2051 gc_pauses=120 gc_max_ms=70.713 gc_sum_ms=1368 errors=2 warns=1 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='2026-09-30 07:03:06' uptime_s=78
+[2026-09-30T07:03:45Z] run reh-1x2000-10k:    collected 1.3M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/reh-1x2000-10k
+    p0: msgs offered=91700 achieved=91700 shed=0 pushed=91700 popped=108200 lag=-16500 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.30/103.94/236.54 ms | e2e p50/p99/p999=11.58/146.43/214.02 ms | cpu=3.7%
+    p1: msgs offered=91600 achieved=91600 shed=0 pushed=91600 popped=75300 lag=16300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.05/108.03/264.19 ms | e2e p50/p99/p999=9.15/58.62/83.46 ms | cpu=3.2%
+    p2: msgs offered=91700 achieved=91700 shed=0 pushed=91700 popped=91400 lag=300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.43/114.18/195.58 ms | e2e p50/p99/p999=10.18/103.94/272.38 ms | cpu=3.3%
+    total: 3/3 processes with a final line | msgs offered=275000 achieved=275000 shed=0 pushed=275000 popped=274900 errors=0 | worst produce p99=114.18 ms | worst e2e p99=146.43 ms
+[2026-09-30T07:03:45Z] run reh-1x2000-10k:    stopping the cluster (data kept until the next reset)
+[2026-09-30T07:03:56Z] run reh-1x2000-10k: DONE in 94s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/reh-1x2000-10k

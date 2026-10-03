@@ -1,0 +1,3 @@
+node=1 rss_MB=6531 threads=168 maps=1565 fds=652 data_MB=7 part_dirs=401 gc_pauses=8 gc_max_ms=6.084 gc_sum_ms=23 errors=0 warns=1 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=18
+node=2 rss_MB=6524 threads=169 maps=1571 fds=653 data_MB=7 part_dirs=401 gc_pauses=8 gc_max_ms=5.806 gc_sum_ms=22 errors=0 warns=4 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=18
+node=3 rss_MB=6545 threads=170 maps=1572 fds=661 data_MB=7 part_dirs=401 gc_pauses=8 gc_max_ms=6.244 gc_sum_ms=23 errors=0 warns=8 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=18

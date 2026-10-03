@@ -1,0 +1,35 @@
+2026-09-26T03:58:37Z start p9d-w2-clock: --workload queue --nemesis clock --time-limit 300 --rate 200
+2026-09-26T04:05:02Z done  p9d-w2-clock: valid store=/root/jepsen-p8/store/queen-queue-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-26T03:58:47.862711996Z log=/root/runs-p9d/p9d-w2-clock.log
+2026-09-26T04:05:05Z start p9d-w5-clock: --workload pipeline --nemesis clock --time-limit 300 --rate 200
+2026-09-26T04:10:55Z done  p9d-w5-clock: valid store=/root/jepsen-p8/store/queen-pipeline-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-26T04:05:17.604783396Z log=/root/runs-p9d/p9d-w5-clock.log
+2026-09-26T04:10:58Z start p9d-w1-clock: --workload log --nemesis clock --time-limit 300 --rate 200
+2026-09-26T04:16:58Z done  p9d-w1-clock: valid store=/root/jepsen-p8/store/queen-log-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-26T04:11:09.572991641Z log=/root/runs-p9d/p9d-w1-clock.log
+2026-09-26T04:17:01Z start p9d-w3-clock: --workload register --nemesis clock --time-limit 300 --rate 100
+2026-09-26T04:22:41Z done  p9d-w3-clock: valid store=/root/jepsen-p8/store/queen-register-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-26T04:17:13.684822972Z log=/root/runs-p9d/p9d-w3-clock.log
+2026-09-26T04:22:44Z start p9d-w4-pause: --workload elle --nemesis pause --time-limit 300 --rate 100
+2026-09-26T04:28:14Z done  p9d-w4-pause: valid store=/root/jepsen-p8/store/queen-elle-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-26T04:22:55.413888429Z log=/root/runs-p9d/p9d-w4-pause.log
+2026-09-26T04:28:17Z start p9d-w4-leader-deaf: --workload elle --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-26T04:33:57Z done  p9d-w4-leader-deaf: valid store=/root/jepsen-p8/store/queen-elle-leader-deaf_offload=on_lanes=16/2026-09-26T04:28:28.684158347Z log=/root/runs-p9d/p9d-w4-leader-deaf.log
+2026-09-26T04:34:00Z start p9d-w3c-pause: --workload claim --nemesis pause --time-limit 300 --rate 100
+2026-09-26T04:39:45Z done  p9d-w3c-pause: INVALID store=/root/jepsen-p8/store/queen-claim-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-26T04:34:12.358645825Z log=/root/runs-p9d/p9d-w3c-pause.log
+2026-09-26T04:39:48Z start p9d-w3c-membership: --workload claim --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-26T04:45:23Z done  p9d-w3c-membership: valid store=/root/jepsen-p8/store/queen-claim-membership_offload=on_lanes=16/2026-09-26T04:39:58.478984947Z log=/root/runs-p9d/p9d-w3c-membership.log
+2026-09-26T04:45:25Z start p9d-w4-restart: --workload elle --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-26T04:51:21Z done  p9d-w4-restart: valid store=/root/jepsen-p8/store/queen-elle-restart_offload=on_lanes=16/2026-09-26T04:45:37.843079433Z log=/root/runs-p9d/p9d-w4-restart.log
+2026-09-26T04:51:23Z start p9d-w4-part: --workload elle --nemesis partition --time-limit 300 --rate 100
+2026-09-26T04:57:13Z done  p9d-w4-part: valid store=/root/jepsen-p8/store/queen-elle-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-09-26T04:51:36.07328756Z log=/root/runs-p9d/p9d-w4-part.log
+2026-09-26T04:57:16Z start p9d-w4-lz-kill: --workload elle --lazyfs --nemesis kill --time-limit 300 --rate 100
+2026-09-26T05:03:01Z done  p9d-w4-lz-kill: valid store=/root/jepsen-p8/store/queen-elle-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-09-26T04:57:27.044001804Z log=/root/runs-p9d/p9d-w4-lz-kill.log
+2026-09-26T05:03:04Z start p9d-w4-bridge: --workload elle --nemesis bridge --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-26T05:09:09Z done  p9d-w4-bridge: valid store=/root/jepsen-p8/store/queen-elle-bridge_offload=on_lanes=16/2026-09-26T05:03:15.802897975Z log=/root/runs-p9d/p9d-w4-bridge.log
+2026-09-26T05:09:12Z start p9d-w4-membership: --workload elle --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-26T05:15:02Z done  p9d-w4-membership: valid store=/root/jepsen-p8/store/queen-elle-membership_offload=on_lanes=16/2026-09-26T05:09:22.695769301Z log=/root/runs-p9d/p9d-w4-membership.log
+2026-09-26T05:15:05Z start p9d-w1-restart: --workload log --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-09-26T05:20:45Z done  p9d-w1-restart: valid store=/root/jepsen-p8/store/queen-log-restart_offload=on_lanes=16/2026-09-26T05:15:15.660255138Z log=/root/runs-p9d/p9d-w1-restart.log
+2026-09-26T05:20:48Z start p9d-w2-restart: --workload queue --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-09-26T05:26:53Z done  p9d-w2-restart: valid store=/root/jepsen-p8/store/queen-queue-restart_offload=on_lanes=16/2026-09-26T05:20:59.199955077Z log=/root/runs-p9d/p9d-w2-restart.log
+2026-09-26T05:26:56Z start p9d-w3-restart: --workload register --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-26T05:32:31Z done  p9d-w3-restart: valid store=/root/jepsen-p8/store/queen-register-restart_offload=on_lanes=16/2026-09-26T05:27:06.306086071Z log=/root/runs-p9d/p9d-w3-restart.log
+2026-09-26T05:32:33Z start p9d-w3b-restart: --workload counter --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-26T05:38:09Z done  p9d-w3b-restart: valid store=/root/jepsen-p8/store/queen-counter-restart_offload=on_lanes=16/2026-09-26T05:32:45.337770595Z log=/root/runs-p9d/p9d-w3b-restart.log
+2026-09-26T05:38:11Z start p9d-w3c-restart: --workload claim --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20

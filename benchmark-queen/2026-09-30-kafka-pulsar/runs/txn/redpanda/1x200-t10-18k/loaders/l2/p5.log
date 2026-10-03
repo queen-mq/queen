@@ -1,0 +1,56 @@
+kload tag=1x200-t10-18k-p5 loader=5/9 mode=batch rate=2000 msg/s batch=10 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=1m0s GOMAXPROCS=16 GOGC=400 seed=1790873529683836158
+  offered: 2000 msg/s = 200.0 units/s (avg 10.0 msgs/unit) across 5 pacer workers (40.00 units/s each)
+  topics: 1 x 200 partitions (x1x200-t10-18k..x1x200-t10-18k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 111
+  payload: goload jsonEvent target 256 B, avg 289.3 B raw, ~319 B stamped ({"ts":µs,"src":5,...}), pool 64x10
+  consumers: 22 here (ci 110..131 of 198), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[3 4 5]
+  kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=0 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=classic fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s | txn: x1x200-t10-18k-in -> 22 workers (GroupTransactSession, transactional.id per worker, txn-timeout 10s, concurrent-txn backoff 20ms, metadata-min-age 250ms, txn-size 10, linger 1s, read_committed) -> x1x200-t10-18k-out, 22 read_committed readers
+  [topic] READY after 0.0s: 2 topics x 200 partitions, leaders + full ISR
+  [config] broker.default.replication.factor = 3 (STATIC_BROKER_CONFIG)
+  [config] topic.compression.type = producer (DEFAULT_CONFIG)
+  [config] topic.flush.ms = 100 (DEFAULT_CONFIG)
+  [config] topic.max.message.bytes = 16777216 (DEFAULT_CONFIG)
+  [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+  [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+  [group] 22 txn workers (GroupTransactSession) in 1 groups (x1x200-t10-18k-in-g-t0 ... ), protocol classic
+  [group] 22 consumers in 1 groups (x1x200-t10-18k-out-g-t0 ... ), protocol classic
+  [group] t=+0.5s waiting: x1x200-t10-18k-in-g-t0: local members 22/198 hold 0/200 partitions (group-wide PreparingRebalance members=197 assigned=0)
+  [group] t=+2.5s waiting: x1x200-t10-18k-in-g-t0: local members 22/198 hold 0/200 partitions (group-wide PreparingRebalance members=198 assigned=0)
+  [group] t=+4.5s waiting: x1x200-t10-18k-in-g-t0: local members 22/198 hold 0/200 partitions (group-wide PreparingRebalance members=198 assigned=0)
+  [group] t=+6.5s waiting: x1x200-t10-18k-in-g-t0: local members 22/198 hold 23/200 partitions (group-wide PreparingRebalance members=198 assigned=0)
+  [group] t=+8.5s waiting: x1x200-t10-18k-in-g-t0: local members 22/198 hold 23/200 partitions (group-wide Stable members=198 assigned=200)
+  [group] STABLE after 10.1s: 1 groups, 22 local members holding 23 partitions, assignEv=22 revokeEv=0 lostEv=0
+  [group] t=+0.0s waiting: x1x200-t10-18k-out-g-t0: local members 22/198 hold 23/200 partitions (group-wide Stable members=198 assigned=200)
+  [group] t=+2.0s waiting: x1x200-t10-18k-out-g-t0: local members 22/198 hold 23/200 partitions (group-wide Stable members=198 assigned=200)
+  [group] STABLE after 3.0s: 1 groups, 22 local members holding 23 partitions, assignEv=22 revokeEv=0 lostEv=0
+  [produce] 4 clients connected to every broker with producer IDs in 0.01s; max buffered 51024 records per client
+READY 1790873296938
+[start] waiting 9.26s for the common start 1790873333346
+[start] GO 16:48:53.346 (unix ms 1790873333346)
+[16:49:03] offered=     1000/s achieved=      998/s shed=        0/s inflight=     2 | p50=   8.51 p99=   63.74 p999=  114.18 ms | push=9980 pop=9820 lag=160 | errs push=0 pop=0 empty=0 gor=448 | ack=      982/s ackErr=0 ackAvg=2.57ms | e2e p50=207.87 p99=856.06 p999=1220.61 n=9820 | e2e_local p50=209.92 p99=897.02 n=3390
+[txn] 16:49:03 txn=     100/s msgs=      997/s avg= 10.00 msg/txn | commit p50=33.54 p99=175.10 p999=313.34 ms | aborts=0 errs=0 open=14 | in=     1011/s | total txns=1019 msgs=9993 aborts=0 errs=0
+[16:49:13] offered=     2000/s achieved=     1997/s shed=        0/s inflight=     4 | p50=   8.90 p99=   57.09 p999=   81.41 ms | push=29950 pop=29840 lag=110 | errs push=0 pop=0 empty=0 gor=449 | ack=     2002/s ackErr=0 ackAvg=2.86ms | e2e p50=150.53 p99=4292.61 p999=5210.11 n=20020 | e2e_local p50=150.53 p99=4292.61 n=6650
+[txn] 16:49:13 txn=     200/s msgs=     2003/s avg= 10.00 msg/txn | commit p50=52.99 p99=166.91 p999=207.87 ms | aborts=0 errs=0 open=12 | in=     2001/s | total txns=3022 msgs=30023 aborts=0 errs=0
+[16:49:23] offered=     2000/s achieved=     2003/s shed=        0/s inflight=     2 | p50=   8.90 p99=   51.97 p999=   73.22 ms | push=49980 pop=49780 lag=200 | errs push=0 pop=0 empty=0 gor=444 | ack=     1993/s ackErr=0 ackAvg=2.88ms | e2e p50=148.48 p99=7569.41 p999=9895.94 n=19940 | e2e_local p50=154.62 p99=7569.41 n=6640
+[txn] 16:49:23 txn=     199/s msgs=     1989/s avg= 10.00 msg/txn | commit p50=51.97 p99=168.96 p999=195.58 ms | aborts=0 errs=0 open=14 | in=     1991/s | total txns=5011 msgs=49913 aborts=0 errs=0
+[16:49:33] offered=     2000/s achieved=     1998/s shed=        0/s inflight=     4 | p50=   8.90 p99=   55.04 p999=   84.48 ms | push=69960 pop=69830 lag=130 | errs push=0 pop=0 empty=0 gor=448 | ack=     2005/s ackErr=0 ackAvg=2.93ms | e2e p50=148.48 p99=11730.94 p999=14090.24 n=20050 | e2e_local p50=150.53 p99=11730.94 n=6710
+[txn] 16:49:33 txn=     201/s msgs=     2008/s avg= 10.00 msg/txn | commit p50=50.43 p99=156.67 p999=171.01 ms | aborts=0 errs=0 open=13 | in=     2007/s | total txns=7019 msgs=69993 aborts=0 errs=0
+[16:49:43] offered=     2000/s achieved=     2000/s shed=        0/s inflight=     4 | p50=   9.02 p99=   48.90 p999=   72.19 ms | push=89960 pop=89840 lag=120 | errs push=0 pop=0 empty=0 gor=459 | ack=     2002/s ackErr=0 ackAvg=2.96ms | e2e p50=146.43 p99=17170.43 p999=17694.72 n=20010 | e2e_local p50=148.48 p99=17170.43 n=6660
+[txn] 16:49:43 txn=     200/s msgs=     2003/s avg= 10.00 msg/txn | commit p50=51.97 p99=160.77 p999=187.39 ms | aborts=0 errs=0 open=14 | in=     2004/s | total txns=9022 msgs=90023 aborts=0 errs=0
+[16:49:53] offered=     2000/s achieved=     2001/s shed=        0/s inflight=     2 | p50=   8.90 p99=   48.38 p999=   69.12 ms | push=109970 pop=109800 lag=170 | errs push=0 pop=0 empty=0 gor=461 | ack=     1995/s ackErr=0 ackAvg=2.95ms | e2e p50=148.48 p99=20840.45 p999=20840.45 n=19960 | e2e_local p50=148.48 p99=20840.45 n=6660
+[txn] 16:49:53 txn=     200/s msgs=     1995/s avg= 10.00 msg/txn | commit p50=52.48 p99=156.67 p999=195.58 ms | aborts=0 errs=0 open=14 | in=     1995/s | total txns=11017 msgs=109973 aborts=0 errs=0
+[16:50:03] offered=     2000/s achieved=     2001/s shed=        0/s inflight=     2 | p50=   8.90 p99=   46.85 p999=   58.11 ms | push=129980 pop=129820 lag=160 | errs push=0 pop=0 empty=0 gor=440 | ack=     2003/s ackErr=0 ackAvg=2.98ms | e2e p50=150.53 p99=25821.18 p999=26083.33 n=20020 | e2e_local p50=150.53 p99=25821.18 n=6650
+[txn] 16:50:03 txn=     200/s msgs=     2002/s avg= 10.00 msg/txn | commit p50=51.97 p99=158.72 p999=205.82 ms | aborts=0 errs=0 open=13 | in=     2001/s | total txns=13019 msgs=129993 aborts=0 errs=0
+[drain] workers and readers keep going for up to 59.989s (ends early after 3s idle; lag now 140)
+[err txn-abort-rebalance #1] 16:50:09.427 aborted: the group rebalanced during the transaction (inputs consumed again)
+[16:50:13] offered=        0/s achieved=        2/s shed=        0/s inflight=     0 | p50=   7.65 p99=   10.82 p999=   10.82 ms | push=130000 pop=134550 lag=-4550 | errs push=0 pop=0 empty=0 gor=554 | ack=      473/s ackErr=0 ackAvg=2.92ms | e2e p50=13697.02 p99=24772.61 p999=24772.61 n=4730 | e2e_local p50=14352.38 p99=24510.46 n=1490
+[txn] 16:50:13 txn=      46/s msgs=      458/s avg= 10.00 msg/txn | commit p50=9.92 p99=54.53 p999=93.70 ms | aborts=1 errs=0 open=0 | in=      446/s | total txns=13477 msgs=134573 aborts=1 errs=0
+[drain] idle for 3s after 10.6s: ending the drain (lag -4550)
+[info] txn workers began 13478 transactions
+[info] steady window 60s (after the ramp, before the producers stopped): offered 2000/s pushed 2000/s popped 2000/s cpu 41.2% = 20.61 cores per 100k msg/s (produce+consume)
+[info] errors txn-abort-rebalance=1 first: aborted: the group rebalanced during the transaction (inputs consumed again)
+[info] 46 warm-up messages (no "ts") received and not counted as load
+[final] offered=13000 achieved=13000 shed=0 (msgs: offered=130000 achieved=130000 shed=0) pushErr=0 | pushed=130000 popped=134550 lag=-4550 | popErr=0 empty=0 | overall p50=8.90 p99=52.99 p999=76.29 ms | acked=134550 ackErr=0 ackLag=-4550 ackAvg=2.92ms | e2e p50=152.58 p99=21102.59 p999=25821.18 ms
+load_cpu=22.9%
+[txn-final] txns=13477 msgs=134573 aborts=1 errs=0 in=134583 avg=9.99 msg/txn | commit p50=47.36 p99=164.86 p999=321.54 max=2375.68 ms
+[ids] ledger /root/bench/runs/txn/redpanda/1x200-t10-18k/ids/p5.ids: 130000 confirmed, 0 failed, 0 unanswered

@@ -1,0 +1,139 @@
+2026-09-24T14:58:36Z start p1a-kill-on: --workload log --nemesis kill --time-limit 120 --rate 200
+2026-09-24T15:01:12Z done  p1a-kill-on: INVALID store=/root/jepsen-queen/store/queen-log-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-24T14:58:48.438554894Z log=/root/runs/p1a-kill-on.log
+2026-09-24T15:01:12Z matrix /root/runs/smoke-kill.txt finished
+2026-09-24T15:03:05Z start p1-kill-on: --workload log --nemesis kill --time-limit 300 --rate 200
+2026-09-24T15:09:46Z done  p1-kill-on: valid store=/root/jepsen-queen/store/queen-log-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-24T15:03:19.624040421Z log=/root/runs/p1-kill-on.log
+2026-09-24T15:09:46Z start p1-kill-off: --workload log --nemesis kill --time-limit 300 --rate 200 --no-offload
+2026-09-24T15:16:56Z done  p1-kill-off: valid store=/root/jepsen-queen/store/queen-log-kill_t=one,primaries,majority,all_offload=off_lanes=16/2026-09-24T15:09:59.057567501Z log=/root/runs/p1-kill-off.log
+2026-09-24T15:16:56Z start p1-pause-on: --workload log --nemesis pause --time-limit 300 --rate 200
+2026-09-24T15:23:48Z done  p1-pause-on: valid store=/root/jepsen-queen/store/queen-log-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-24T15:17:10.12954399Z log=/root/runs/p1-pause-on.log
+2026-09-24T15:23:48Z start p1-pause-off: --workload log --nemesis pause --time-limit 300 --rate 200 --no-offload
+2026-09-24T15:29:59Z done  p1-pause-off: valid store=/root/jepsen-queen/store/queen-log-pause_t=one,primaries,majority,all_offload=off_lanes=16/2026-09-24T15:24:02.751997231Z log=/root/runs/p1-pause-off.log
+2026-09-24T15:29:59Z start p1-part-on: --workload log --nemesis partition --time-limit 300 --rate 200
+2026-09-24T15:37:01Z done  p1-part-on: valid store=/root/jepsen-queen/store/queen-log-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-09-24T15:30:12.995327409Z log=/root/runs/p1-part-on.log
+2026-09-24T15:37:01Z start p1-part-off: --workload log --nemesis partition --time-limit 300 --rate 200 --no-offload
+2026-09-24T15:44:20Z done  p1-part-off: valid store=/root/jepsen-queen/store/queen-log-partition_p=one,primaries,majority,majorities-ring_offload=off_lanes=16/2026-09-24T15:37:13.072416333Z log=/root/runs/p1-part-off.log
+2026-09-24T15:44:20Z start p1-clock-on: --workload log --nemesis clock --time-limit 300 --rate 200
+2026-09-24T15:51:17Z done  p1-clock-on: valid store=/root/jepsen-queen/store/queen-log-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-24T15:44:32.030429078Z log=/root/runs/p1-clock-on.log
+2026-09-24T15:51:17Z start p1-clock-off: --workload log --nemesis clock --time-limit 300 --rate 200 --no-offload
+2026-09-24T15:58:06Z done  p1-clock-off: valid store=/root/jepsen-queen/store/queen-log-clock_t=one,primaries,majority,all_offload=off_lanes=16/2026-09-24T15:51:32.342852615Z log=/root/runs/p1-clock-off.log
+2026-09-24T15:58:06Z matrix /root/runs/p1.txt finished
+2026-09-24T15:58:09Z start p1t-none-on: --workload log --txn --nemesis none --time-limit 120 --rate 200
+2026-09-24T16:02:19Z done  p1t-none-on: valid store= log=/root/runs/p1t-none-on.log
+2026-09-24T16:02:19Z matrix /root/runs/p1t-smoke.txt finished
+2026-09-24T16:02:19Z start p1x-kill-snap-on: --workload log --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_PURGE_HOLD_S=5,QUEEN_RAFT_LOG_KEEP=64
+2026-09-24T16:09:57Z done  p1x-kill-snap-on: valid store= log=/root/runs/p1x-kill-snap-on.log
+2026-09-24T16:09:57Z start p1x-all-on: --workload log --nemesis all --time-limit 600 --rate 200
+2026-09-24T16:22:38Z done  p1x-all-on: valid store= log=/root/runs/p1x-all-on.log
+2026-09-24T16:22:38Z start p1x-all-off: --workload log --nemesis all --time-limit 600 --rate 200 --no-offload
+2026-09-24T16:34:35Z done  p1x-all-off: valid store= log=/root/runs/p1x-all-off.log
+2026-09-24T16:34:35Z start p1x-kill-lanes1-on: --workload log --nemesis kill --time-limit 300 --rate 200 --lanes 1
+2026-09-24T16:41:31Z done  p1x-kill-lanes1-on: valid store= log=/root/runs/p1x-kill-lanes1-on.log
+2026-09-24T16:41:31Z start p1x-part-lanes1-on: --workload log --nemesis partition --time-limit 300 --rate 200 --lanes 1
+2026-09-24T16:48:45Z done  p1x-part-lanes1-on: valid store= log=/root/runs/p1x-part-lanes1-on.log
+2026-09-24T16:48:45Z start p1x-kill-snap-off: --workload log --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_PURGE_HOLD_S=5,QUEEN_RAFT_LOG_KEEP=64 --no-offload
+2026-09-24T16:55:36Z done  p1x-kill-snap-off: valid store= log=/root/runs/p1x-kill-snap-off.log
+2026-09-24T16:55:36Z matrix /root/runs/p1x.txt finished
+2026-09-24T16:55:36Z start p1t-kill-on: --workload log --txn --nemesis kill --time-limit 300 --rate 200
+2026-09-24T17:04:25Z done  p1t-kill-on: INVALID store=/root/jepsen-queen-next/store/queen-log-kill_t=one,primaries,majority,all_txn_offload=on_lanes=16/2026-09-24T16:55:49.697740603Z log=/root/runs/p1t-kill-on.log
+2026-09-24T17:04:25Z start p1t-part-on: --workload log --txn --nemesis partition --time-limit 300 --rate 200
+2026-09-24T17:13:51Z done  p1t-part-on: valid store=/root/jepsen-queen-next/store/queen-log-partition_p=one,primaries,majority,majorities-ring_txn_offload=on_lanes=16/2026-09-24T17:04:38.857147994Z log=/root/runs/p1t-part-on.log
+2026-09-24T17:13:51Z start p1t-kill-off: --workload log --txn --nemesis kill --time-limit 300 --rate 200 --no-offload
+2026-09-24T17:21:47Z done  p1t-kill-off: valid store=/root/jepsen-queen-next/store/queen-log-kill_t=one,primaries,majority,all_txn_offload=off_lanes=16/2026-09-24T17:14:05.245558403Z log=/root/runs/p1t-kill-off.log
+2026-09-24T17:21:47Z start p1t-pause-on: --workload log --txn --nemesis pause --time-limit 300 --rate 200
+2026-09-24T17:30:13Z done  p1t-pause-on: valid store=/root/jepsen-queen-next/store/queen-log-pause_t=one,primaries,majority,all_txn_offload=on_lanes=16/2026-09-24T17:21:58.908563792Z log=/root/runs/p1t-pause-on.log
+2026-09-24T17:30:13Z matrix /root/runs/p1t.txt finished
+2026-09-24T17:30:21Z start p1t-kill-on-r: --workload log --txn --nemesis kill --time-limit 300 --rate 200
+2026-09-24T17:39:08Z done  p1t-kill-on-r: valid store=/root/jepsen-queen-next/store/queen-log-kill_t=one,primaries,majority,all_txn_offload=on_lanes=16/2026-09-24T17:30:36.005729838Z log=/root/runs/p1t-kill-on-r.log
+2026-09-24T17:39:08Z start p1r-clock-on: --workload log --nemesis clock --time-limit 300 --rate 200
+2026-09-24T17:46:35Z done  p1r-clock-on: valid store=/root/jepsen-queen-next/store/queen-log-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-24T17:39:21.073659409Z log=/root/runs/p1r-clock-on.log
+2026-09-24T17:46:35Z start p1r-clock-off: --workload log --nemesis clock --time-limit 300 --rate 200 --no-offload
+2026-09-24T17:54:26Z done  p1r-clock-off: valid store=/root/jepsen-queen-next/store/queen-log-clock_t=one,primaries,majority,all_offload=off_lanes=16/2026-09-24T17:46:47.59231969Z log=/root/runs/p1r-clock-off.log
+2026-09-24T17:54:26Z matrix /root/runs/p1r.txt finished
+2026-09-24T17:54:35Z start p1z-kill-hot-on: --workload log --nemesis kill --time-limit 300 --rate 1000 --concurrency 5n --key-count 3 --nemesis-interval 5
+2026-09-24T18:05:19Z done  p1z-kill-hot-on: UNKNOWN store=/root/jepsen-queen-next/store/queen-log-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-24T17:54:48.307314189Z log=/root/runs/p1z-kill-hot-on.log
+2026-09-24T18:05:19Z start p1y-kill-prim-fast-on: --workload log --nemesis kill --db-targets primaries --time-limit 300 --rate 400 --nemesis-interval 3
+2026-09-24T18:11:38Z done  p1y-kill-prim-fast-on: CRASHED(rc=137) store= log=/root/runs/p1y-kill-prim-fast-on.log
+2026-09-24T18:11:38Z start p1y-kill-snap-fast-on: --workload log --nemesis kill --time-limit 300 --rate 300 --nemesis-interval 4 --env QUEEN_RAFT_PURGE_HOLD_S=3,QUEEN_RAFT_LOG_KEEP=16
+2026-09-24T18:18:59Z done  p1y-kill-snap-fast-on: valid store=/root/jepsen-queen-next/store/queen-log-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=3/2026-09-24T18:11:55.05569064Z log=/root/runs/p1y-kill-snap-fast-on.log
+2026-09-24T18:18:59Z start p1y-txn-all-fast-on: --workload log --txn --nemesis all --time-limit 300 --rate 300 --nemesis-interval 5
+2026-09-24T18:25:04Z done  p1y-txn-all-fast-on: INVALID store=/root/jepsen-queen-next/store/queen-log-clock,kill,partition,pause_p=one,primaries,majority,majorities-ring_t=one,primaries,majority,all_txn_offload=on_lanes=16/2026-09-24T18:19:12.29203807Z log=/root/runs/p1y-txn-all-fast-on.log
+2026-09-24T18:25:04Z start p1y-all-fast-on: --workload log --nemesis all --time-limit 300 --rate 300 --nemesis-interval 5 --env QUEEN_RAFT_PURGE_HOLD_S=3,QUEEN_RAFT_LOG_KEEP=16
+2026-09-24T18:30:47Z done  p1y-all-fast-on: valid store=/root/jepsen-queen-next/store/queen-log-clock,kill,partition,pause_p=one,primaries,majority,majorities-ring_t=one,primaries,majority,all_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=3/2026-09-24T18:25:16.638115606Z log=/root/runs/p1y-all-fast-on.log
+2026-09-24T18:30:47Z matrix /root/runs/p1y.txt finished
+2026-09-24T18:30:48Z start repro follower-purge-snapshot
+2026-09-24T18:30:48Z done  repro follower-purge-snapshot rc=0
+2026-09-24T18:31:07Z start repro follower-purge-snapshot (manual)
+2026-09-24T18:32:27Z done  repro (manual) rc=0
+2026-09-24T18:33:27Z start p1y-txn-all-fast-on-r: --workload log --txn --nemesis all --time-limit 300 --rate 300 --nemesis-interval 5
+2026-09-24T18:41:35Z done  p1y-txn-all-fast-on-r: valid store=/root/jepsen-queen/store/queen-log-clock,kill,partition,pause_p=one,primaries,majority,majorities-ring_t=one,primaries,majority,all_txn_offload=on_lanes=16/2026-09-24T18:33:38.617952358Z log=/root/runs/p1y-txn-all-fast-on-r.log
+2026-09-24T18:41:35Z matrix /root/runs/p1w.txt finished
+2026-09-25T05:06:28Z start p5-reg-kill-on: --workload log --nemesis kill --time-limit 300 --rate 200
+2026-09-25T05:14:09Z done  p5-reg-kill-on: valid store=/root/jepsen-queen/store/queen-log-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-25T05:06:38.287313144Z log=/root/runs/p5-reg-kill-on.log
+2026-09-25T05:14:09Z start p5-reg-part-on: --workload log --nemesis partition --time-limit 300 --rate 200
+2026-09-25T05:23:26Z done  p5-reg-part-on: valid store=/root/jepsen-queen/store/queen-log-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-09-25T05:14:19.327904721Z log=/root/runs/p5-reg-part-on.log
+2026-09-25T05:23:26Z start p5-reg-all-on: --workload log --nemesis all --time-limit 300 --rate 200
+2026-09-25T05:32:11Z done  p5-reg-all-on: valid store=/root/jepsen-queen/store/queen-log-clock,kill,partition,pause_p=one,primaries,majority,majorities-ring_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-25T05:23:36.922593036Z log=/root/runs/p5-reg-all-on.log
+2026-09-25T05:32:11Z matrix /root/runs/p5-reg.txt finished
+2026-09-25T05:32:13Z start p5-lz-smoke: --workload log --lazyfs --nemesis kill --db-targets one --time-limit 90 --rate 200 --nemesis-interval 10
+2026-09-25T05:34:42Z done  p5-lz-smoke: valid store=/root/jepsen-queen-next/store/queen-log-kill_t=one_lazyfs_offload=on_lanes=16/2026-09-25T05:32:23.514014738Z log=/root/runs/p5-lz-smoke.log
+2026-09-25T05:34:42Z matrix /root/runs/p5-lz-smoke.txt finished
+2026-09-25T05:35:28Z start p5-lz-kill-one: --workload log --lazyfs --nemesis kill --db-targets one --time-limit 300 --rate 200 --nemesis-interval 10
+2026-09-25T05:41:12Z done  p5-lz-kill-one: valid store=/root/jepsen-queen-next/store/queen-log-kill_t=one_lazyfs_offload=on_lanes=16/2026-09-25T05:35:39.133296413Z log=/root/runs/p5-lz-kill-one.log
+2026-09-25T05:41:12Z start p5-lz-kill-mix: --workload log --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+2026-09-25T05:46:54Z done  p5-lz-kill-mix: valid store=/root/jepsen-queen-next/store/queen-log-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-09-25T05:41:22.421364148Z log=/root/runs/p5-lz-kill-mix.log
+2026-09-25T05:46:54Z start p5-lz-pause-kill: --workload log --lazyfs --nemesis pause-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+2026-09-25T05:54:02Z done  p5-lz-pause-kill: valid store=/root/jepsen-queen-next/store/queen-log-pause-kill_lazyfs_offload=on_lanes=16/2026-09-25T05:47:05.727593609Z log=/root/runs/p5-lz-pause-kill.log
+2026-09-25T05:54:02Z start p5-lz-part-kill: --workload log --lazyfs --nemesis part-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+2026-09-25T06:01:23Z done  p5-lz-part-kill: valid store=/root/jepsen-queen-next/store/queen-log-part-kill_lazyfs_offload=on_lanes=16/2026-09-25T05:54:13.517217133Z log=/root/runs/p5-lz-part-kill.log
+2026-09-25T06:01:23Z start p5-lz-kill-fast-dp20: --workload log --lazyfs --nemesis kill --time-limit 300 --rate 300 --nemesis-interval 3 --env QUEEN_RAFT_DURABLE_EVERY_MS=20
+2026-09-25T06:07:10Z done  p5-lz-kill-fast-dp20: valid store=/root/jepsen-queen-next/store/queen-log-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16_env=DURABLE_EVERY_MS=20/2026-09-25T06:01:35.119214152Z log=/root/runs/p5-lz-kill-fast-dp20.log
+2026-09-25T06:07:10Z start p5-lz-hog-kill-one: --workload log --lazyfs --disk-hog --nemesis kill --db-targets one --time-limit 300 --rate 200 --nemesis-interval 5 --env QUEEN_RAFT_DURABLE_EVERY_MS=20
+2026-09-25T06:12:54Z done  p5-lz-hog-kill-one: valid store=/root/jepsen-queen-next/store/queen-log-kill_t=one_lazyfs_hog_offload=on_lanes=16_env=DURABLE_EVERY_MS=20/2026-09-25T06:07:21.055193463Z log=/root/runs/p5-lz-hog-kill-one.log
+2026-09-25T06:12:54Z matrix /root/runs/p5-lz.txt finished
+2026-09-25T06:12:55Z start repro apply-ahead-of-fsync
+2026-09-25T06:16:33Z done  repro apply-ahead-of-fsync rc=0
+2026-09-25T06:16:33Z start p5-leader-deaf: --workload log --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-09-25T06:24:16Z done  p5-leader-deaf: valid store=/root/jepsen-queen-next/store/queen-log-leader-deaf_offload=on_lanes=16/2026-09-25T06:16:44.709542202Z log=/root/runs/p5-leader-deaf.log
+2026-09-25T06:24:16Z start p5-bridge: --workload log --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-09-25T06:29:56Z done  p5-bridge: valid store=/root/jepsen-queen-next/store/queen-log-bridge_offload=on_lanes=16/2026-09-25T06:24:27.521629488Z log=/root/runs/p5-bridge.log
+2026-09-25T06:29:56Z start p5-snap-kill-lz: --workload log --lazyfs --nemesis snap-kill --time-limit 300 --rate 400 --composite-phase 10 --nemesis-interval 3 --env QUEEN_RAFT_PURGE_HOLD_S=3,QUEEN_RAFT_LOG_KEEP=16
+2026-09-25T06:35:50Z done  p5-snap-kill-lz: valid store=/root/jepsen-queen-next/store/queen-log-snap-kill_lazyfs_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=3/2026-09-25T06:30:10.526150914Z log=/root/runs/p5-snap-kill-lz.log
+2026-09-25T06:35:50Z start p5-corrupt: --workload log --nemesis corrupt --time-limit 300 --rate 200 --nemesis-interval 15
+2026-09-25T06:43:32Z done  p5-corrupt: valid store=/root/jepsen-queen-next/store/queen-log-corrupt_offload=on_lanes=16/2026-09-25T06:36:01.350286966Z log=/root/runs/p5-corrupt.log
+2026-09-25T06:43:32Z matrix /root/runs/p5-rest.txt finished
+2026-09-25T06:43:33Z start repro leader-deaf-stall
+2026-09-25T06:45:22Z done  repro leader-deaf-stall rc=0
+2026-09-25T06:45:25Z start p5-corrupt2: --workload log --nemesis corrupt --time-limit 300 --rate 200 --nemesis-interval 10
+2026-09-25T06:51:15Z done  p5-corrupt2: valid store=/root/jepsen-queen-next/store/queen-log-corrupt_offload=on_lanes=16/2026-09-25T06:45:41.044291777Z log=/root/runs/p5-corrupt2.log
+2026-09-25T06:51:15Z matrix /root/runs/p5-corrupt2.txt finished
+2026-09-25T08:01:56Z start p6-corrupt: --workload log --nemesis corrupt --corrupt-node n5 --time-limit 300 --rate 200 --nemesis-interval 10
+2026-09-25T08:07:41Z done  p6-corrupt: valid store=/root/jepsen-queen/store/queen-log-corrupt_offload=on_lanes=16/2026-09-25T08:02:10.237408796Z log=/root/runs/p6-corrupt.log
+2026-09-25T08:07:41Z start p6-leader-deaf: --workload log --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-09-25T08:15:08Z done  p6-leader-deaf: valid store=/root/jepsen-queen/store/queen-log-leader-deaf_offload=on_lanes=16/2026-09-25T08:07:53.100382824Z log=/root/runs/p6-leader-deaf.log
+2026-09-25T08:15:08Z start p6-lz-kill-mix: --workload log --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+2026-09-25T08:20:55Z done  p6-lz-kill-mix: valid store=/root/jepsen-queen/store/queen-log-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-09-25T08:15:21.998970759Z log=/root/runs/p6-lz-kill-mix.log
+2026-09-25T08:20:55Z start p6-lz-kill-fast-dp20: --workload log --lazyfs --nemesis kill --time-limit 300 --rate 300 --nemesis-interval 3 --env QUEEN_RAFT_DURABLE_EVERY_MS=20
+2026-09-25T08:26:44Z done  p6-lz-kill-fast-dp20: valid store=/root/jepsen-queen/store/queen-log-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16_env=DURABLE_EVERY_MS=20/2026-09-25T08:21:07.709820683Z log=/root/runs/p6-lz-kill-fast-dp20.log
+2026-09-25T08:26:44Z start p6-lz-hog-kill-one: --workload log --lazyfs --disk-hog --nemesis kill --db-targets one --time-limit 300 --rate 200 --nemesis-interval 5 --env QUEEN_RAFT_DURABLE_EVERY_MS=20
+2026-09-25T08:32:28Z done  p6-lz-hog-kill-one: valid store=/root/jepsen-queen/store/queen-log-kill_t=one_lazyfs_hog_offload=on_lanes=16_env=DURABLE_EVERY_MS=20/2026-09-25T08:26:55.112274641Z log=/root/runs/p6-lz-hog-kill-one.log
+2026-09-25T08:32:28Z start p6-snap-kill-lz: --workload log --lazyfs --nemesis snap-kill --time-limit 300 --rate 400 --composite-phase 10 --nemesis-interval 3 --env QUEEN_RAFT_PURGE_HOLD_S=3,QUEEN_RAFT_LOG_KEEP=16
+2026-09-25T08:38:24Z done  p6-snap-kill-lz: valid store=/root/jepsen-queen/store/queen-log-snap-kill_lazyfs_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=3/2026-09-25T08:32:39.165507096Z log=/root/runs/p6-snap-kill-lz.log
+2026-09-25T08:38:24Z start p6-reg-kill-on: --workload log --nemesis kill --time-limit 300 --rate 200
+2026-09-25T08:44:09Z done  p6-reg-kill-on: valid store=/root/jepsen-queen/store/queen-log-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-25T08:38:35.921995079Z log=/root/runs/p6-reg-kill-on.log
+2026-09-25T08:44:09Z start p6-reg-part-on: --workload log --nemesis partition --time-limit 300 --rate 200
+2026-09-25T08:51:11Z done  p6-reg-part-on: valid store=/root/jepsen-queen/store/queen-log-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-09-25T08:44:20.396498558Z log=/root/runs/p6-reg-part-on.log
+2026-09-25T08:51:11Z start p6-reg-all-on: --workload log --nemesis all --time-limit 300 --rate 200
+2026-09-25T08:57:43Z done  p6-reg-all-on: valid store=/root/jepsen-queen/store/queen-log-clock,kill,partition,pause_p=one,primaries,majority,majorities-ring_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-25T08:51:23.61223768Z log=/root/runs/p6-reg-all-on.log
+2026-09-25T08:57:43Z start p6-bridge: --workload log --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-09-25T09:03:26Z done  p6-bridge: valid store=/root/jepsen-queen/store/queen-log-bridge_offload=on_lanes=16/2026-09-25T08:57:54.661163642Z log=/root/runs/p6-bridge.log
+2026-09-25T09:03:26Z matrix /root/runs/p6.txt finished
+2026-09-25T09:03:29Z start w2-smoke-none: --workload queue --nemesis none --time-limit 120 --rate 200
+2026-09-25T09:06:14Z done  w2-smoke-none: valid store=/root/jepsen-w2/store/queen-queue-none_offload=on_lanes=16/2026-09-25T09:03:40.39927018Z log=/root/runs/w2-smoke-none.log
+2026-09-25T09:06:14Z start w2-kill: --workload queue --nemesis kill --time-limit 300 --rate 200
+2026-09-25T09:11:59Z done  w2-kill: valid store=/root/jepsen-w2/store/queen-queue-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-25T09:06:27.975928922Z log=/root/runs/w2-kill.log
+2026-09-25T09:12:00Z matrix /root/runs/w2.txt finished
+2026-09-25T09:12:00Z start repro qlog-bitflip-hole flip
+2026-09-25T09:12:00Z done  repro qlog-bitflip-hole flip rc=0
+2026-09-25T09:12:00Z start repro qlog-bitflip-hole cut
+2026-09-25T09:12:00Z done  repro qlog-bitflip-hole cut rc=0

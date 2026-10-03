@@ -572,3 +572,48 @@ export async function transactionAckWithConsumerGroup(client) {
     }
 }
 
+
+// An ack takes the consumer group the message was popped under (2026-10-02,
+// 2.0.0-beta.6). Without an explicit { consumerGroup } the op was judged in
+// queue mode and the bundle rolled back with rejected_ack; queen.ack() came
+// back "invalid or expired lease" the same way.
+export async function transactionAckTakesGroupFromMessage(client) {
+    const source = 'test-queue-v2-txn-group-from-msg'
+    const sink = 'test-queue-v2-txn-group-from-msg-out'
+    const group = 'test-txn-group-from-msg'
+    const qa = await client.queue(source).create()
+    const qb = await client.queue(sink).create()
+    if (!qa.configured || !qb.configured) {
+        return { success: false, message: 'Queues not created' }
+    }
+    await client.queue(source).push([{ data: { value: 1 } }, { data: { value: 2 } }])
+
+    const messages = await client.queue(source).group(group).subscriptionMode('all').batch(2).wait(false).pop()
+    if (messages.length !== 2) {
+        return { success: false, message: `Expected 2 messages, got ${messages.length}` }
+    }
+    if (messages[0].consumerGroup !== group) {
+        return { success: false, message: `pop answered consumerGroup=${messages[0].consumerGroup}, expected ${group}` }
+    }
+
+    let committed
+    try {
+        committed = await client.transaction()
+            .ack(messages[0])
+            .queue(sink).push([{ data: { from: messages[0].data.value } }])
+            .commit()
+    } catch (error) {
+        return { success: false, message: `commit threw (${error.reason}): ${error.message}` }
+    }
+    const direct = await client.ack(messages[1], true)
+    const after = await client.queue(source).group(group).batch(2).wait(false).pop()
+    const forwarded = await client.queue(sink).batch(1).wait(false).pop()
+
+    const success = committed.success === true && direct.success === true && after.length === 0 && forwarded.length === 1
+    return {
+        success,
+        message: success
+            ? 'transaction().ack and queen.ack took the group from the message'
+            : `txn=${committed.success} direct=${direct.success} (${direct.error}) after=${after.length} forwarded=${forwarded.length}`
+    }
+}

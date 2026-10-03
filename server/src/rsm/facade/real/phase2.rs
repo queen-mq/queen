@@ -144,21 +144,6 @@ impl RaftFacade {
                 if let Some(out) = self.api_dynamic(&ctx, &req).await? {
                     return Ok(out);
                 }
-                if let Some(queue) = req.path.strip_prefix("/api/v1/resources/queues/") {
-                    if let Some(queue) = queue.strip_suffix("/depth") {
-                        if req.method == "GET" {
-                            return self.api_queue_depth(ctx, queue, req.query.as_deref()).await;
-                        }
-                    } else if let Some(queue) = queue.strip_suffix("/sizes") {
-                        if req.method == "GET" {
-                            return self.api_queue_sizes(ctx, queue).await;
-                        }
-                    } else if req.method == "GET" {
-                        return self.api_get_queue(ctx, queue).await;
-                    } else if req.method == "DELETE" {
-                        return self.api_delete_queue(ctx, queue).await;
-                    }
-                }
                 Ok(ApiOut::json(
                     404,
                     json!({"code":"no_such_route","error":"not found","path":req.path}).to_string(),
@@ -426,6 +411,9 @@ impl RaftFacade {
                 json!({"success":false,"error":"refusing to purge the default tenant"}).to_string(),
             ));
         }
+        if crate::config::is_reserved_tenant(&tenant) {
+            return Ok(reserved_tenant(&tenant));
+        }
         let store = self.store.clone();
         let tenant_read = tenant.clone();
         let pids = tokio::task::spawn_blocking(move || {
@@ -483,6 +471,9 @@ impl RaftFacade {
             .filter(|v| !v.is_empty())
             .unwrap_or(&ctx.tenant)
             .to_string();
+        if crate::config::is_reserved_tenant(&tenant) {
+            return Ok(reserved_tenant(&tenant));
+        }
         let (kind, kind_name) = match value.get("kind").and_then(Value::as_str) {
             Some("kv") => (QuotaKind::Kv, "kv"),
             Some("ephemeral") => (QuotaKind::Ephemeral, "ephemeral"),
@@ -1162,6 +1153,21 @@ fn reject(code: impl Into<String>, message: impl Into<String>) -> RsmError {
 
 fn rejected(code: &'static str, e: impl std::fmt::Display) -> RsmError {
     reject(code, e.to_string())
+}
+
+/// A tenant purge or a quota grant that names a reserved tenant
+/// ([`crate::config::is_reserved_tenant`]): refused whoever asks, because the
+/// owners of those tenants act on them in-process and never through a route.
+fn reserved_tenant(tenant: &str) -> ApiOut {
+    ApiOut::json(
+        403,
+        json!({
+            "success": false,
+            "error": format!("tenant {} is reserved: no route acts on it", tenant.trim()),
+            "code": "reserved_tenant",
+        })
+        .to_string(),
+    )
 }
 
 fn configured_defaults(now: i64) -> QueueConfig {

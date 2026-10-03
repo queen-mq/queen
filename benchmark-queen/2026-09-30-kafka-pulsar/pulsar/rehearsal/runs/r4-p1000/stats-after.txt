@@ -1,0 +1,18 @@
+  n1  node=1 zk     pid=14657 up=197s cpu=43s rss=200MB thr=67 fds=381 | gc cycles=31 (major 3) pauses=15 max=0.05ms sum=0.4ms stalls=4 max=379.3ms safepoint_max=88.94ms | log ERROR=0 WARN=0 (since mark 07:25:09Z)
+  n1  node=1 zk       allocation stalls by thread: Notification Thread=3, NIOWorkerThread-3=1
+  n1  node=1 bookie pid=15075 up=188s cpu=33s rss=363MB thr=128 fds=535 | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=14.41ms | log ERROR=0 WARN=0 (since mark 07:25:09Z)
+  n1  node=1 broker pid=15427 up=178s cpu=116s rss=561MB thr=104 fds=497 | gc cycles=13 (major 2) pauses=10 max=0.06ms sum=0.4ms stalls=0 max=0.0ms safepoint_max=100.20ms | log ERROR=0 WARN=1 (since mark 07:25:09Z)
+  n1  node=1 disk   data=224MB zk=2MB journal=42MB (1 .txn in 1 dirs) ledgers=180MB (entry logs=2, 31MB; locations=75MB ledgers-index=75MB) | fs 76% used, 18G free
+  n1  node=1 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=30966324 throughput_in=0 rate_in=0 throughput_out=0 topics_count=321 msg_backlog=40 subscriptions_count=324 consumers_count=3
+  n2  node=2 zk     pid=9885 up=197s cpu=20s rss=191MB thr=67 fds=382 | gc cycles=20 (major 2) pauses=10 max=3.44ms sum=3.7ms stalls=6 max=666.6ms safepoint_max=125.68ms | log ERROR=0 WARN=0 (since mark 07:25:09Z)
+  n2  node=2 zk       allocation stalls by thread: Notification Thread=3, SendWorker:1=1, SendWorker:3=1, QuorumPeer[myid=2](plain=0.0.0.0:2181)(secure=disabled)=1
+  n2  node=2 bookie pid=10071 up=188s cpu=34s rss=346MB thr=117 fds=535 | gc cycles=5 (major 2) pauses=10 max=0.36ms sum=0.8ms stalls=0 max=0.0ms safepoint_max=18.63ms | log ERROR=0 WARN=0 (since mark 07:25:09Z)
+  n2  node=2 broker pid=10324 up=178s cpu=107s rss=517MB thr=92 fds=487 | gc cycles=12 (major 2) pauses=10 max=0.88ms sum=1.2ms stalls=0 max=0.0ms safepoint_max=52.27ms | log ERROR=0 WARN=1 (since mark 07:25:09Z)
+  n2  node=2 disk   data=224MB zk=2MB journal=42MB (1 .txn in 1 dirs) ledgers=180MB (entry logs=2, 31MB; locations=75MB ledgers-index=75MB) | fs 76% used, 18G free
+  n2  node=2 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=32613990 throughput_in=0 rate_in=0 throughput_out=0 topics_count=342 msg_backlog=46 subscriptions_count=342 consumers_count=0
+  n3  node=3 zk     pid=9678 up=197s cpu=76s rss=212MB thr=75 fds=388 | gc cycles=70 (major 8) pauses=43 max=2.05ms sum=3.9ms stalls=23 max=327.0ms safepoint_max=80.01ms | log ERROR=0 WARN=0 (since mark 07:25:09Z)
+  n3  node=3 zk       allocation stalls by thread: Notification Thread=13, PrometheusMetricsProviderWorker-1=2, NIOServerCxnFactory.SelectorThread-0=2, Sender-/10.202.0.2:38788=1, WorkerReceiver[myid=3]=1
+  n3  node=3 bookie pid=9873 up=189s cpu=33s rss=355MB thr=117 fds=535 | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=54.16ms | log ERROR=0 WARN=0 (since mark 07:25:09Z)
+  n3  node=3 broker pid=10125 up=179s cpu=114s rss=543MB thr=104 fds=495 | gc cycles=10 (major 1) pauses=5 max=0.35ms sum=0.6ms stalls=0 max=0.0ms safepoint_max=94.14ms | log ERROR=0 WARN=1 (since mark 07:25:09Z)
+  n3  node=3 disk   data=224MB zk=2MB journal=42MB (1 .txn in 1 dirs) ledgers=180MB (entry logs=2, 31MB; locations=75MB ledgers-index=75MB) | fs 76% used, 18G free
+  n3  node=3 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=32621343 throughput_in=0 rate_in=0 throughput_out=0 topics_count=338 msg_backlog=2 subscriptions_count=338 consumers_count=0

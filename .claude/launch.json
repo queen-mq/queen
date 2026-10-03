@@ -157,6 +157,27 @@
         "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6731 exec npx vite --port 4007 --strictPort"
       ],
       "port": 4007
+    },
+    {
+      "name": "webdoc-docs2",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "--dir",
+        "/Users/alice/Work/queen-docs/webdoc",
+        "preview",
+        "--port",
+        "4391"
+      ],
+      "port": 4391
+    },
+    {
+      "name": "queen-cloud-portal",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/alice/Work/queen-projects/queen-cloud/queen-control/webapp && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH exec npx vite --port 5191 --strictPort"
+      ],
+      "port": 5191
     }
   ]
 }

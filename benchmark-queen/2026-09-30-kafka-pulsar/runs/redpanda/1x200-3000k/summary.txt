@@ -1,0 +1,12 @@
+p0: msgs offered=21666200 achieved=21666200 shed=0 pushed=21666200 popped=21098800 lag=567400 errs push=0 pop=0 ack=0 | produce p50/p99/p999=41.73/411.65/782.34 ms | e2e p50/p99/p999=561.15/1466.37/1662.98 ms | cpu=63.7%
+p1: msgs offered=21666900 achieved=21666900 shed=0 pushed=21666900 popped=21121500 lag=545400 errs push=0 pop=0 ack=0 | produce p50/p99/p999=42.75/419.84/872.45 ms | e2e p50/p99/p999=552.96/1335.30/1515.52 ms | cpu=63.5%
+p2: msgs offered=21665800 achieved=21665800 shed=0 pushed=21665800 popped=21103500 lag=562300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=42.24/428.03/790.53 ms | e2e p50/p99/p999=552.96/1581.06/1777.66 ms | cpu=63.8%
+p3: msgs offered=21666500 achieved=21666500 shed=0 pushed=21666500 popped=21085400 lag=581100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=41.73/419.84/905.22 ms | e2e p50/p99/p999=552.96/1597.44/1859.58 ms | cpu=68.7%
+p4: msgs offered=21666600 achieved=21666600 shed=0 pushed=21666600 popped=21055100 lag=611500 errs push=0 pop=0 ack=0 | produce p50/p99/p999=42.75/428.03/937.98 ms | e2e p50/p99/p999=577.54/1548.29/1695.74 ms | cpu=68.9%
+p5: msgs offered=21665800 achieved=21665800 shed=0 pushed=21665800 popped=21201600 lag=464200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=41.73/415.74/839.68 ms | e2e p50/p99/p999=593.92/22675.46/28442.62 ms | cpu=68.4%
+p6: msgs offered=21666800 achieved=21666800 shed=0 pushed=21666800 popped=21127000 lag=539800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=42.24/428.03/823.30 ms | e2e p50/p99/p999=522.24/1449.98/1597.44 ms | cpu=64.2%
+p7: msgs offered=21667400 achieved=21667400 shed=0 pushed=21667400 popped=21062300 lag=605100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=42.24/428.03/839.68 ms | e2e p50/p99/p999=593.92/1548.29/1777.66 ms | cpu=64.4%
+p8: msgs offered=21666500 achieved=21666500 shed=0 pushed=21666500 popped=21252700 lag=413800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=42.24/415.74/806.91 ms | e2e p50/p99/p999=561.15/22413.31/28442.62 ms | cpu=64.1%
+total: 9/9 processes with a final line | msgs offered=194998500 achieved=194998500 shed=0 pushed=194998500 popped=190107900 errors=0 | worst produce p99=428.03 ms | worst e2e p99=22675.46 ms
+shards busy (redpanda_cpu_busy_seconds_total over the steady window): n1=11.81 n2=10.54 n3=9.54 sum=31.89 cores
+broker produce latency (redpanda_kafka_request_latency_seconds, log2 bucket upper bounds, steady window): n1 p50<=65.5 p99<=131.1 p999<=262.1 ms (586451 req) | n2 p50<=32.8 p99<=262.1 p999<=524.3 ms (559046 req) | n3 p50<=32.8 p99<=131.1 p999<=262.1 ms (572747 req)

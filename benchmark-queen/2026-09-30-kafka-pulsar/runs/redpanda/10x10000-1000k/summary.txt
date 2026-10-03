@@ -1,0 +1,12 @@
+p0: msgs offered=7222300 achieved=6314100 shed=908200 pushed=6314100 popped=6282076 lag=32024 errs push=0 pop=0 ack=0 | produce p50/p99/p999=317.44/25296.90/40108.03 ms | e2e p50/p99/p999=18481.15/62652.42/66846.72 ms | cpu=83.7%
+p1: NO FINAL LINE
+p2: msgs offered=7222400 achieved=6912100 shed=310300 pushed=6912100 popped=6303983 lag=608117 errs push=0 pop=0 ack=0 | produce p50/p99/p999=329.73/23986.18/38010.88 ms | e2e p50/p99/p999=17694.72/61603.84/65798.14 ms | cpu=81.9%
+p3: msgs offered=7222100 achieved=6711800 shed=510300 pushed=6711800 popped=6278800 lag=433000 errs push=0 pop=0 ack=0 | produce p50/p99/p999=342.02/22675.46/35913.73 ms | e2e p50/p99/p999=18219.01/61079.55/65273.86 ms | cpu=81.1%
+p4: msgs offered=7222300 achieved=6409500 shed=812800 pushed=6409500 popped=6283925 lag=125575 errs push=0 pop=0 ack=0 | produce p50/p99/p999=321.54/24772.61/40108.03 ms | e2e p50/p99/p999=18743.30/63176.70/66846.72 ms | cpu=91.7%
+p5: NO FINAL LINE
+p6: msgs offered=7222100 achieved=6771100 shed=451000 pushed=6771100 popped=6291077 lag=480023 errs push=0 pop=0 ack=0 | produce p50/p99/p999=317.44/23724.03/38535.17 ms | e2e p50/p99/p999=17432.58/61079.55/65798.14 ms | cpu=66.6%
+p7: msgs offered=7222000 achieved=6627700 shed=594300 pushed=6627700 popped=6273400 lag=354300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=346.11/23986.18/36962.30 ms | e2e p50/p99/p999=18743.30/62128.13/66322.43 ms | cpu=73.2%
+p8: NO FINAL LINE
+total: 6/9 processes with a final line | msgs offered=43333200 achieved=39746300 shed=3586900 pushed=39746300 popped=37713261 errors=0 | worst produce p99=25296.9 ms | worst e2e p99=63176.7 ms
+shards busy (redpanda_cpu_busy_seconds_total over the steady window): n1=14.37 n2=12.74 n3=11.49 sum=38.59 cores
+broker produce latency (redpanda_kafka_request_latency_seconds, log2 bucket upper bounds, steady window): n1 p50<=2097.2 p99<=16777.2 p999<=16777.2 ms (118290 req) | n2 p50<=131.1 p99<=1048.6 p999<=1048.6 ms (196394 req) | n3 p50<=131.1 p99<=524.3 p999<=1048.6 ms (196944 req)

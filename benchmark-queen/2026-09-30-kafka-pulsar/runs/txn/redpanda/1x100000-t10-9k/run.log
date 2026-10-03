@@ -1,0 +1,28 @@
+[2026-10-01T16:35:12Z] txn redpanda/1x100000-t10-9k: start: redpanda, rate=9000 over N=9 processes (3 loader hosts x 3) = 1000 msg/s each; in 100000 x out 100000 partitions; txn-size 10 (linger 1s); feeder units of 10; 33 workers + 33 readers per process (297 each in total); out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/redpanda/1x100000-t10-9k
+[2026-10-01T16:35:12Z] txn redpanda/1x100000-t10-9k: durability: RF 3 raft, acks=all acknowledged after a majority (2 of 3) fsynced (write_caching off), idempotent + transactional producers; tx coordinator topic RF 3 (internal_topic_replication_factor); read_committed
+[2026-10-01T16:35:17Z] txn redpanda/1x100000-t10-9k: 1. cluster reset
+      n1 [2026-10-01T16:35:24Z] rc.sh n1: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+      n2 [2026-10-01T16:35:24Z] rc.sh n2: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+      n3 [2026-10-01T16:35:23Z] rc.sh n3: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+    [2026-10-01T16:35:33Z] cluster: healthy in 16s
+      produced: Produced to partition 0 at offset 9999 with timestamp 1790872546310.
+    enable_transactions internal_topic_replication_factor transaction_coordinator_partitions = true 3 50
+[2026-10-01T16:35:59Z] txn redpanda/1x100000-t10-9k: 2. samplers start (txn-redpanda-1x100000-t10-9k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-01T16:36:00Z] txn redpanda/1x100000-t10-9k: 3. create x1x100000-t10-9k-in (100000) + x1x100000-t10-9k-out (100000), warm on loader 1
+    kload tag=1x100000-t10-9k-create loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=16 GOGC=400 seed=1790872771096018815
+      topics: 1 x 100000 partitions (x1x100000-t10-9k..x1x100000-t10-9k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=100000 starting at 0
+      payload: goload jsonEvent target 256 B, avg 289.6 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=0 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=classic fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s | txn: x1x100000-t10-9k-in -> 4 workers (GroupTransactSession, transactional.id per worker, txn-timeout 10s, concurrent-txn backoff 20ms, metadata-min-age 250ms, txn-size 10, linger 1s, read_committed) -> x1x100000-t10-9k-out, 4 read_committed readers
+    FATAL create partitions x1x100000-t10-9k-out -> 15000: INVALID_PARTITIONS: Number of partitions is below 1.
+[2026-10-01T16:36:16Z] txn redpanda/1x100000-t10-9k: FAILED: create: DONE 1 (loaders/l1/create.log)
+[2026-10-01T16:36:16Z] txn redpanda/1x100000-t10-9k: 7. collect
+    node=1 rss_MB=8334 threads=33 fds=28149 data_MB=4840 part_dirs=31204 disk_free_GB=374 busy_s=155.913 errors=0 warns=39 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=9000 elec
+    node=2 rss_MB=8392 threads=33 fds=28153 data_MB=4866 part_dirs=32363 disk_free_GB=370 busy_s=180.448 errors=0 warns=36 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=9147 elec
+    node=3 rss_MB=8747 threads=33 fds=28157 data_MB=4920 part_dirs=39373 disk_free_GB=374 busy_s=159.826 errors=0 warns=42 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=8679 elec
+bash: line 1: cd: /root/bench/runs/txn/redpanda/1x100000-t10-9k: No such file or directory
+bash: line 1: cd: /root/bench/runs/txn/redpanda/1x100000-t10-9k: No such file or directory
+tar: redpanda.log: file changed as we read it
+tar: redpanda.log: file changed as we read it
+[2026-10-01T16:36:39Z] txn redpanda/1x100000-t10-9k:    collected  27M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/redpanda/1x100000-t10-9k
+[2026-10-01T16:36:39Z] txn redpanda/1x100000-t10-9k:    stopping the cluster (data kept until the next reset)

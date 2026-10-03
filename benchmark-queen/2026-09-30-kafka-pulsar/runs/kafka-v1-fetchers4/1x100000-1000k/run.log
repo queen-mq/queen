@@ -1,0 +1,189 @@
+[2026-09-30T07:58:10Z] run 1x100000-1000k: start: rate=1000000 over N=9 processes (3 loader hosts x 3) = 111111 msg/s each; 1 topic(s) x 100000 partitions (100000 total), entities=0 mode=batch batch=100 consumers=33/process (297 total) warm=1 profile=default PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x100000-1000k
+[2026-09-30T07:58:10Z] run 1x100000-1000k: note: 1000000 is not divisible by 9; offering 999999 msg/s
+[2026-09-30T07:58:16Z] run 1x100000-1000k: 1. cluster reset (profile default, PARTS=100000)
+    [2026-09-30T07:58:36Z] cluster: healthy in 20s: cluster id fVuuRqiyjENvACwPktlQzg
+      n1 node=1 alive=1 leader=3 voters=3 unfenced=3 fenced=0 maxlag=0
+      n2 node=2 alive=1 leader=3 voters=3 unfenced=3 fenced=0 maxlag=0
+      n3 node=3 alive=1 leader=3 voters=3 unfenced=3 fenced=0 maxlag=0
+    [2026-09-30T07:58:37Z] cluster: versions (conf_hash must be equal: nodes differ only in node.id + listener IPs)
+      n1 node=1 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=df306073 pid=55535 jvm=[-Xms10g -Xmx10g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n2 node=2 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=df306073 pid=50600 jvm=[-Xms10g -Xmx10g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n3 node=3 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=df306073 pid=52461 jvm=[-Xms10g -Xmx10g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+    [2026-09-30T07:58:39Z] cluster: features: eligible.leader.replicas.version=1 group.version=1 kraft.version=0 metadata.version=4.3-IV0 share.version=1 streams.version=1 transaction.version=2 
+[2026-09-30T07:58:40Z] run 1x100000-1000k: 2. samplers start (kafka-1x100000-1000k, every 2s) on 3 brokers + 3 loader hosts
+[2026-09-30T07:58:41Z] run 1x100000-1000k: 3. create 1 topic(s) x 100000 partitions, RF 3, min.insync 2, warm on loader 1
+      [config] broker.num.network.threads = 8 (STATIC_BROKER_CONFIG)
+      [config] broker.num.replica.fetchers = 4 (STATIC_BROKER_CONFIG)
+      [config] topic.compression.type = producer (STATIC_BROKER_CONFIG)
+      [config] topic.flush.messages = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.max.message.bytes = 1048588 (DEFAULT_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+    [create] done: 1 topics x 100000 partitions ready
+[2026-09-30T08:04:21Z] run 1x100000-1000k:    topics ready after 371s since start
+    node=1 rss_MB=11238 threads=163 maps=200767 fds=100223 data_MB=1606 part_dirs=100001 gc_pauses=332 gc_max_ms=71.176 gc_sum_ms=5829 errors=0 warns=7 isr_shrinks=31666 isr_updates=40356 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=353
+    node=2 rss_MB=11262 threads=163 maps=200767 fds=100223 data_MB=1606 part_dirs=100001 gc_pauses=425 gc_max_ms=77.078 gc_sum_ms=8089 errors=0 warns=4 isr_shrinks=31667 isr_updates=70204 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=354
+    node=3 rss_MB=11265 threads=164 maps=200766 fds=100235 data_MB=1606 part_dirs=100001 gc_pauses=300 gc_max_ms=35.378 gc_sum_ms=4697 errors=0 warns=11 isr_shrinks=31667 isr_updates=42867 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=353
+[2026-09-30T08:04:25Z] run 1x100000-1000k: 4. launch 9 kload processes
+    launched 0 1 2 on queen-loader-01
+    launched 3 4 5 on queen-loader-02
+    launched 6 7 8 on queen-loader-03
+[2026-09-30T08:04:55Z] run 1x100000-1000k:    READY 0/9
+    p6 DONE 137
+    --- 10.114.0.5 p0.log
+      [config] topic.flush.messages = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.max.message.bytes = 1048588 (DEFAULT_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 consumers in 1 groups (k1x100000-1000k-g-t0 ... ), protocol consumer
+    [err consume #1] 08:04:57.489 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+      [group] t=+6.4s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+16.5s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+26.6s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+36.7s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+46.8s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.5 p1.log
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 consumers in 1 groups (k1x100000-1000k-g-t0 ... ), protocol consumer
+      [group] t=+0.0s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    [err consume #1] 08:04:55.237 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #2] 08:04:55.320 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #3] 08:04:55.433 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #4] 08:04:55.502 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #5] 08:04:55.568 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+      [group] t=+3.0s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+13.1s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+23.2s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+33.3s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+43.4s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+53.5s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.5 p2.log
+      [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.max.message.bytes = 1048588 (DEFAULT_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 consumers in 1 groups (k1x100000-1000k-g-t0 ... ), protocol consumer
+      [group] t=+2.8s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    [err consume #1] 08:04:57.242 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #2] 08:05:02.827 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+      [group] t=+12.9s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+23.0s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+33.2s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+43.3s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.6 p3.log
+      [config] topic.flush.messages = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.max.message.bytes = 1048588 (DEFAULT_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 consumers in 1 groups (k1x100000-1000k-g-t0 ... ), protocol consumer
+      [group] t=+2.5s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+12.6s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+22.7s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+32.8s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+42.9s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+53.0s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.6 p4.log
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 consumers in 1 groups (k1x100000-1000k-g-t0 ... ), protocol consumer
+    [err consume #1] 08:04:56.529 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #2] 08:04:56.911 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #3] 08:04:57.028 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #4] 08:04:57.134 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #5] 08:04:58.057 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+      [group] t=+10.0s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+20.1s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+30.2s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+40.3s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+50.5s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.6 p5.log
+      [config] topic.compression.type = producer (STATIC_BROKER_CONFIG)
+      [config] topic.flush.messages = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.max.message.bytes = 1048588 (DEFAULT_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 consumers in 1 groups (k1x100000-1000k-g-t0 ... ), protocol consumer
+      [group] t=+4.0s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+14.1s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+24.2s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+34.3s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+44.5s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.7 p6.log
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 consumers in 1 groups (k1x100000-1000k-g-t0 ... ), protocol consumer
+      [group] t=+0.0s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+3.3s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    [err consume #1] 08:05:01.379 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #2] 08:05:02.165 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #3] 08:05:02.376 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #4] 08:05:03.045 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #5] 08:05:03.873 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+      [group] t=+13.4s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+23.5s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+33.6s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+43.8s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.7 p7.log
+      [config] topic.max.message.bytes = 1048588 (DEFAULT_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 consumers in 1 groups (k1x100000-1000k-g-t0 ... ), protocol consumer
+    [err consume #1] 08:05:01.961 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+      [group] t=+10.0s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    [err consume #2] 08:05:04.282 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #3] 08:05:04.683 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+      [group] t=+20.1s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+30.2s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+40.3s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+50.4s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+    --- 10.114.0.7 p8.log
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+      [group] 33 consumers in 1 groups (k1x100000-1000k-g-t0 ... ), protocol consumer
+    [err consume #1] 08:04:56.802 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #2] 08:05:00.151 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #3] 08:05:00.484 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #4] 08:05:00.665 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+    [err consume #5] 08:05:01.771 /0: unable to join group session: UNKNOWN_SERVER_ERROR: The server experienced an unexpected error when processing the request.
+      [group] t=+10.0s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+20.1s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+30.2s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+40.3s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+      [group] t=+50.4s waiting: k1x100000-1000k-g-t0: local members 33/297 hold 0/100000 partitions (group-wide ? members=0 assigned=0)
+[2026-09-30T08:05:49Z] run 1x100000-1000k: FAILED: a load process exited before READY
+[2026-09-30T08:05:50Z] run 1x100000-1000k: 6. collect
+    node=1 rss_MB=11284 threads=165 maps=200869 fds=101964 data_MB=1606 part_dirs=100051 gc_pauses=515 gc_max_ms=71.176 gc_sum_ms=9196 errors=172 warns=7 isr_shrinks=31666 isr_updates=40356 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=443
+    node=2 rss_MB=11290 threads=164 maps=200869 fds=100562 data_MB=1606 part_dirs=100051 gc_pauses=627 gc_max_ms=77.078 gc_sum_ms=11764 errors=0 warns=4 isr_shrinks=31667 isr_updates=70204 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=443
+    node=3 rss_MB=11378 threads=165 maps=200872 fds=100597 data_MB=1606 part_dirs=100051 gc_pauses=507 gc_max_ms=35.378 gc_sum_ms=7948 errors=0 warns=11 isr_shrinks=31667 isr_updates=42867 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=443
+tar: kafkaServer.out: file changed as we read it
+tar: server.log: file changed as we read it
+[2026-09-30T08:06:30Z] run 1x100000-1000k:    collected  41M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/1x100000-1000k
+[2026-09-30T08:06:30Z] run 1x100000-1000k:    stopping the cluster (data kept until the next reset)

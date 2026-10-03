@@ -8,9 +8,34 @@ use std::time::Duration;
 /// the header is absent while it is on — so OSS/self-host behaviour is byte-identical
 /// (the DDL column defaults to this same value, so no backfill is ever needed).
 pub const DEFAULT_TENANT: &str = "00000000-0000-0000-0000-000000000001";
+/// The broker-internal tenant: documents the broker keeps for itself, such as
+/// the Postgres connectors' (KV namespace `queen-pg`, `conn:<tenant>:<name>`,
+/// sealed passwords included; src/pg_inproc.rs). No client addresses it: the
+/// proxy maps a client to its own tenant, and with tenancy off every request
+/// is the default tenant — so those documents are reachable only through the
+/// broker's own routes, which refuse a request scoped to this tenant.
+#[cfg_attr(not(feature = "pg"), allow(dead_code))]
+pub const SYSTEM_TENANT: &str = "00000000-0000-0000-0000-00000000fffd";
 /// The trusted header the proxy injects. The broker never validates the tenant
 /// against anything (it is opaque; the trust is network — the cell boundary).
 pub const TENANT_HEADER: &str = "x-queen-tenant";
+
+/// The embedded proxy's own tenant (`queen_proxy::store::schema::PROXY_TENANT`):
+/// its tenants, users, API keys, plans and usage live in this broker's KV under
+/// it, written and read IN-PROCESS by the proxy's store (`proxy_embed::RsmKv`).
+pub const PROXY_SYSTEM_TENANT: &str = "00000000-0000-0000-0000-00000000fffe";
+
+/// Whether `tenant` is one of the tenants only this binary's own code acts on:
+/// the proxy's ([`PROXY_SYSTEM_TENANT`]) and the broker's ([`SYSTEM_TENANT`]).
+/// No HTTP request is served as one (`handlers::raft::refuse_reserved_tenant`),
+/// and no tenant purge or quota grant may name one as its target: their owners
+/// reach them in-process, never through a route. Any letter case and the
+/// whitespace around it count, because a guard that compares bytes is a guard a
+/// spelling walks past.
+pub fn is_reserved_tenant(tenant: &str) -> bool {
+    let t = tenant.trim();
+    t.eq_ignore_ascii_case(PROXY_SYSTEM_TENANT) || t.eq_ignore_ascii_case(SYSTEM_TENANT)
+}
 
 /// The `JWT_ALGORITHM` values the broker accepts, in the order the boot error
 /// lists them. This is the ONE spelling of the set: `AuthConfig::validate` is
@@ -175,6 +200,10 @@ pub struct Config {
     // EMBEDDED MODE for the Kafka wire facade (server/src/kafka_facade.rs).
     // Off by default: nothing is spawned, nothing is logged, no behaviour changes.
     pub kafka_facade: KafkaFacadeConfig,
+    // The Postgres connectors (server/src/pg_inproc.rs). On by default where
+    // the binary has them: with no connector document the manager only reads
+    // an empty KV prefix every QUEEN_PG_RELOAD_MS.
+    pub pg_connectors: PgConnectorsConfig,
     // Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): native tenant scoping on queue
     // identity. Default OFF ⇒ every request uses config::DEFAULT_TENANT and the
     // broker behaves byte-identically to today. ON ⇒ the tenant is read from the
@@ -301,6 +330,31 @@ impl KafkaFacadeConfig {
             enabled: env_bool("QUEEN_KAFKA_EMBEDDED", false),
             // Floored at 100ms because a grace of zero is an abort with extra steps.
             shutdown_grace_ms: env_int("QUEEN_KAFKA_SHUTDOWN_GRACE_MS", 5000).max(100) as u64,
+        }
+    }
+}
+
+/// The Postgres connectors' manager on this node (pg_inproc.rs),
+/// `QUEEN_PG_CONNECTORS` (default true). Every other `QUEEN_PG_*` knob is read
+/// by the connectors' library itself (`queen_pg::config::NodeKnobs`), strictly,
+/// at boot.
+#[derive(Clone)]
+pub struct PgConnectorsConfig {
+    #[cfg_attr(not(feature = "pg"), allow(dead_code))]
+    pub enabled: bool,
+    /// The variable was set to true rather than defaulted: only then does a
+    /// binary built without the `pg` feature say it runs no connector.
+    #[cfg_attr(feature = "pg", allow(dead_code))]
+    pub requested: bool,
+}
+
+impl PgConnectorsConfig {
+    fn from_env() -> PgConnectorsConfig {
+        let enabled = env_bool("QUEEN_PG_CONNECTORS", true);
+        let set = std::env::var("QUEEN_PG_CONNECTORS").is_ok_and(|v| !v.trim().is_empty());
+        PgConnectorsConfig {
+            enabled,
+            requested: enabled && set,
         }
     }
 }
@@ -637,6 +691,7 @@ pub fn load() -> Config {
         auth: AuthConfig::from_env(),
         server_id: resolve_server_id(),
         kafka_facade: KafkaFacadeConfig::from_env(),
+        pg_connectors: PgConnectorsConfig::from_env(),
         tenancy_header,
         raft_dir: env_str("QUEEN_RAFT_DIR", "/var/lib/queen/raft"),
         raft_ready_lag_ms: env_int("QUEEN_RAFT_READY_LAG_MS", 2000).max(0) as u64,
@@ -762,6 +817,38 @@ mod tests {
         let m = mask("hunter2-super-secret");
         assert!(!m.contains("hunter2"), "mask leaked the secret: {m}");
         assert_eq!(m, "<set:20 chars>");
+    }
+
+    /// The broker's copy of the proxy's tenant IS the proxy's value: a copy
+    /// that drifted would keep HTTP off a tenant nobody uses while the proxy's
+    /// state sat under another one.
+    #[cfg(feature = "server")]
+    #[test]
+    fn the_proxy_system_tenant_is_the_proxys_own() {
+        assert_eq!(
+            PROXY_SYSTEM_TENANT,
+            queen_proxy::store::schema::PROXY_TENANT
+        );
+    }
+
+    #[test]
+    fn the_reserved_tenants_are_recognised_in_any_spelling() {
+        for reserved in [PROXY_SYSTEM_TENANT, SYSTEM_TENANT] {
+            assert!(is_reserved_tenant(reserved), "{reserved}");
+            assert!(
+                is_reserved_tenant(&reserved.to_ascii_uppercase()),
+                "{reserved} upper-cased"
+            );
+            assert!(
+                is_reserved_tenant(&format!(" {reserved}\t")),
+                "{reserved} padded"
+            );
+        }
+        // The default tenant is every tenancy-off client's: not reserved.
+        assert!(!is_reserved_tenant(DEFAULT_TENANT));
+        assert!(!is_reserved_tenant(""));
+        assert!(!is_reserved_tenant("aabbccdd-1122-3344-5566-778899aabbcc"));
+        assert!(!is_reserved_tenant("00000000-0000-0000-0000-00000000fffc"));
     }
 }
 

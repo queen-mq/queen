@@ -1,0 +1,158 @@
+[2026-10-01T10:47:59Z] cluster: reset: PROFILE=vm PARTS=100000 FALLOC=by-rule RPROPS=none START_FLAGS=none TUNE=1 brokers=10.114.0.2 10.114.0.3 10.114.0.4
+  n1 [2026-10-01T10:48:00Z] rc.sh n1: stopped pid 721302 in 0.4s
+  n1 [2026-10-01T10:48:00Z] rc.sh n1: wiped /root/bench/data/redpanda /root/bench/logs/redpanda
+  n2 [2026-10-01T10:48:00Z] rc.sh n2: stopped pid 642379 in 0.4s
+  n2 [2026-10-01T10:48:00Z] rc.sh n2: wiped /root/bench/data/redpanda /root/bench/logs/redpanda
+  n3 [2026-10-01T10:48:00Z] rc.sh n3: stopped pid 641302 in 0.4s
+  n3 [2026-10-01T10:48:01Z] rc.sh n3: wiped /root/bench/data/redpanda /root/bench/logs/redpanda
+  n1 mkconf: node 1/3 ip=10.114.0.2 PARTS=100000 segment_fallocation_step=262144 partitions_memory_pct=75 io-config=yes -> /root/bench/redpanda/conf
+  n2 mkconf: node 2/3 ip=10.114.0.3 PARTS=100000 segment_fallocation_step=262144 partitions_memory_pct=75 io-config=yes -> /root/bench/redpanda/conf
+  n3 mkconf: node 3/3 ip=10.114.0.4 PARTS=100000 segment_fallocation_step=262144 partitions_memory_pct=75 io-config=yes -> /root/bench/redpanda/conf
+  n1 [2026-10-01T10:48:04Z] rc.sh n1: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+  n2 [2026-10-01T10:48:04Z] rc.sh n2: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+  n3 [2026-10-01T10:48:03Z] rc.sh n3: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+  n1 page cache dropped: MemFree 30 -> 30 GiB
+  n2 page cache dropped: MemFree 30 -> 30 GiB
+  n3 page cache dropped: MemFree 30 -> 30 GiB
+[2026-10-01T10:48:05Z] cluster: start all 3
+  n1 [2026-10-01T10:48:07Z] rc.sh n1: started pid 728957 (10.114.0.2) nofile=1048576 memlock=unlimited oom_score_adj=-950
+  n2 [2026-10-01T10:48:07Z] rc.sh n2: started pid 648554 (10.114.0.3) nofile=1048576 memlock=unlimited oom_score_adj=-950
+  n3 [2026-10-01T10:48:06Z] rc.sh n3: started pid 647323 (10.114.0.4) nofile=1048576 memlock=unlimited oom_score_adj=-950
+[2026-10-01T10:48:13Z] cluster: healthy in 14s
+  n1 node=1 alive=1 ready=ready healthy=true controller=1 nodes=3 down=0 leaderless=0 under_replicated=0
+  n2 node=2 alive=1 ready=ready healthy=true controller=1 nodes=3 down=0 leaderless=0 under_replicated=0
+  n3 node=3 alive=1 ready=ready healthy=true controller=1 nodes=3 down=0 leaderless=0 under_replicated=0
+[2026-10-01T10:48:13Z] cluster: versions (conf_hash must be equal: nodes differ only in node_id + listener IPs)
+  n1 node=1 redpanda=v26.2.3 conf_hash=55c1a89e pid=728957 cmd=[/opt/redpanda/bin/redpanda --redpanda-cfg /root/bench/redpanda/conf/redpanda.yaml --io-properties-file=/root/bench/redpanda/conf/io-config.yaml --lock-memory=false] nofile=1048576 oom_score_adj=-950
+  n2 node=2 redpanda=v26.2.3 conf_hash=55c1a89e pid=648554 cmd=[/opt/redpanda/bin/redpanda --redpanda-cfg /root/bench/redpanda/conf/redpanda.yaml --io-properties-file=/root/bench/redpanda/conf/io-config.yaml --lock-memory=false] nofile=1048576 oom_score_adj=-950
+  n3 node=3 redpanda=v26.2.3 conf_hash=55c1a89e pid=647323 cmd=[/opt/redpanda/bin/redpanda --redpanda-cfg /root/bench/redpanda/conf/redpanda.yaml --lock-memory=false --io-properties-file=/root/bench/redpanda/conf/io-config.yaml] nofile=1048576 oom_score_adj=-950
+[2026-10-01T10:48:13Z] cluster: brokers:
+  CLUSTER
+  =======
+  redpanda.fb78939b-47a5-433e-8c3a-65d561819aec
+  
+  BROKERS
+  =======
+  ID    HOST        PORT
+  1*    10.114.0.2  9092
+  2     10.114.0.3  9092
+  3     10.114.0.4  9092
+  
+[2026-10-01T10:48:14Z] cluster: cluster config overrides in force (.bootstrap.yaml):
+  default_topic_replications = 3
+  internal_topic_replication_factor = 3
+  write_caching_default = false
+  kafka_batch_max_bytes = 16777216
+  log_retention_ms = 600000
+  rpc_server_listen_backlog = 4096
+  topic_partitions_per_shard = 7000
+  topic_partitions_memory_allocation_percent = 75
+  segment_fallocation_step = 262144
+  auto_create_topics_enabled = false
+[2026-10-01T10:48:20Z] cluster: cluster config status (restart pending must be false):
+  NODE  CONFIG-VERSION  NEEDS-RESTART  INVALID  UNKNOWN
+  1     2               false          []       []
+  2     2               false          []       []
+  3     2               false          []       []
+[2026-10-01T10:48:21Z] cluster: tuners (node 1; all nodes: state/tune.txt, collected per run):
+  # rpk redpanda tune all on queen-broker-01 (10.114.0.2) at 2026-10-01T10:48:03Z, rc=0, config /root/bench/redpanda/conf/redpanda.yaml; this pass planned 3 writes
+  TUNER                  APPLIED  ENABLED  SUPPORTED  ERROR
+  aio_events             true     true     true       
+  ballast_file           true     true     true       
+  clocksource            true     true     true       
+  coredump               false    false    true       
+  cpu                    true     true     true       
+  disk_irq               true     true     true       
+  disk_nomerges          true     true     true       
+  disk_scheduler         true     true     true       
+  disk_write_cache       false    true     false      Disk write cache tuner is only supported in GCP
+  fstrim                 false    false    true       
+  net                    true     true     true       
+  swappiness             true     true     true       
+  transparent_hugepages  false    false    true       
+  # every value a Redpanda tuner has written on this box: OS baseline (before its first tune; restored by rc.sh untune) -> now
+  file    /proc/sys/fs/aio-max-nr                                                  65536 -> 10000137
+  ballast /root/bench/data/redpanda/ballast                                        <absent> -> 1000000000
+  file    /sys/devices/system/clocksource/clocksource0/current_clocksource         kvm-clock -> tsc
+  file    /proc/irq/24/smp_affinity                                                ffff -> 0001
+  file    /proc/irq/25/smp_affinity                                                ffff -> ffff   (NOT APPLIED: wanted 00000001)
+  file    /sys/devices/pci0000:00/0000:00:06.0/virtio4/block/vda/queue/nomerges    0 -> 2
+  file    /sys/devices/pci0000:00/0000:00:06.0/virtio4/block/vda/queue/scheduler   mq-deadline -> none
+  file    /proc/irq/52/smp_affinity                                                0030 -> 0010
+  file    /proc/irq/70/smp_affinity                                                0030 -> 0010
+  file    /proc/irq/55/smp_affinity                                                00c0 -> 0080
+  file    /proc/irq/74/smp_affinity                                                0300 -> 0200
+  file    /proc/irq/61/smp_affinity                                                3000 -> 1000
+  file    /proc/irq/79/smp_affinity                                                c000 -> 8000
+  file    /proc/irq/56/smp_affinity                                                0300 -> 0100
+  file    /proc/irq/80/smp_affinity                                                c000 -> 8000
+  file    /proc/irq/75/smp_affinity                                                0c00 -> 0400
+  file    /proc/irq/49/smp_affinity                                                0003 -> 0001
+  file    /proc/irq/51/smp_affinity                                                000c -> 0004
+  file    /proc/irq/58/smp_affinity                                                0c00 -> 0800
+  file    /proc/irq/76/smp_affinity                                                0c00 -> 0800
+  file    /proc/irq/78/smp_affinity                                                3000 -> 2000
+  file    /proc/irq/48/smp_affinity                                                0003 -> 0001
+  file    /proc/irq/65/smp_affinity                                                0003 -> 0002
+  file    /proc/irq/68/smp_affinity                                                000c -> 0008
+  file    /proc/irq/72/smp_affinity                                                00c0 -> 0040
+  file    /proc/irq/69/smp_affinity                                                0030 -> 0020
+  file    /proc/irq/71/smp_affinity                                                00c0 -> 0040
+  file    /proc/irq/54/smp_affinity                                                00c0 -> 0080
+  file    /proc/irq/57/smp_affinity                                                0300 -> 0100
+  file    /proc/irq/59/smp_affinity                                                0c00 -> 0400
+  file    /proc/irq/62/smp_affinity                                                c000 -> 4000
+  file    /proc/irq/66/smp_affinity                                                0003 -> 0002
+  file    /proc/irq/50/smp_affinity                                                000c -> 0004
+  file    /proc/irq/67/smp_affinity                                                000c -> 0008
+  file    /proc/irq/73/smp_affinity                                                0300 -> 0200
+  file    /proc/irq/77/smp_affinity                                                3000 -> 2000
+  file    /proc/irq/63/smp_affinity                                                c000 -> 4000
+  file    /proc/irq/53/smp_affinity                                                0030 -> 0020
+  file    /proc/irq/60/smp_affinity                                                3000 -> 1000
+  file    /sys/class/net/eth1/queues/rx-0/rps_cpus                                 0000 -> ffff
+  file    /sys/class/net/eth1/queues/rx-1/rps_cpus                                 0000 -> ffff
+  file    /sys/class/net/eth1/queues/rx-2/rps_cpus                                 0000 -> ffff
+  file    /sys/class/net/eth1/queues/rx-3/rps_cpus                                 0000 -> ffff
+  file    /sys/class/net/eth1/queues/rx-4/rps_cpus                                 0000 -> ffff
+  file    /sys/class/net/eth1/queues/rx-5/rps_cpus                                 0000 -> ffff
+  file    /sys/class/net/eth1/queues/rx-6/rps_cpus                                 0000 -> ffff
+  file    /sys/class/net/eth1/queues/rx-7/rps_cpus                                 0000 -> ffff
+  file    /sys/class/net/eth1/queues/rx-0/rps_flow_cnt                             0 -> 4096
+  file    /sys/class/net/eth1/queues/rx-1/rps_flow_cnt                             0 -> 4096
+  file    /sys/class/net/eth1/queues/rx-2/rps_flow_cnt                             0 -> 4096
+  file    /sys/class/net/eth1/queues/rx-3/rps_flow_cnt                             0 -> 4096
+  file    /sys/class/net/eth1/queues/rx-4/rps_flow_cnt                             0 -> 4096
+  file    /sys/class/net/eth1/queues/rx-5/rps_flow_cnt                             0 -> 4096
+  file    /sys/class/net/eth1/queues/rx-6/rps_flow_cnt                             0 -> 4096
+  file    /sys/class/net/eth1/queues/rx-7/rps_flow_cnt                             0 -> 4096
+  sysctl  net.core.rps_sock_flow_entries                                           0 -> 32768
+[2026-10-01T10:48:21Z] cluster: durability proof on topic rp-proof: RF 3, 1 partition, 10000 records acks=all (rpk produce), then each replica's own raft view
+  TOPIC     STATUS
+  rp-proof  OK
+  produced: Produced to partition 0 at offset 9999 with timestamp 1790851705032.
+  NAME        rp-proof
+  PARTITIONS  1
+  REPLICAS    3
+  cleanup.policy                        delete         DEFAULT_CONFIG
+  flush.bytes                           262144         DEFAULT_CONFIG
+  flush.ms                              100            DEFAULT_CONFIG
+  retention.ms                          600000         DEFAULT_CONFIG
+  segment.bytes                         134217728      DEFAULT_CONFIG
+  write.caching                         false          DEFAULT_CONFIG
+  PARTITIONS
+  PARTITION  LEADER  EPOCH  REPLICAS  LOG-START-OFFSET  HIGH-WATERMARK
+  0          3       1      [1 2 3]   0                 10000
+[2026-10-01T10:48:26Z] cluster: raft state of every replica (admin API /v1/debug/partition, each replica's own report; flushed = fsynced):
+  replica {'node_id': 1, 'term': 1, 'is_leader': False, 'commit_index': 10000, 'flushed_offset': 10000, 'has_pending_flushes': False}
+  replica {'node_id': 2, 'term': 1, 'is_leader': False, 'commit_index': 10000, 'flushed_offset': 10000, 'has_pending_flushes': False}
+  replica {'node_id': 3, 'term': 1, 'is_leader': True, 'commit_index': 10000, 'flushed_offset': 10000, 'has_pending_flushes': False}
+     leader sees follower {'id': 2, 'last_flushed_log_index': 10000, 'last_dirty_log_index': 10000, 'match_index': 10000, 'is_learner': False}
+     leader sees follower {'id': 1, 'last_flushed_log_index': 10000, 'last_dirty_log_index': 10000, 'match_index': 10000, 'is_learner': False}
+  n1 on disk: 262333 bytes in /root/bench/data/redpanda/kafka/rp-proof/0_9/
+  n2 on disk: 262333 bytes in /root/bench/data/redpanda/kafka/rp-proof/0_9/
+  n3 on disk: 262333 bytes in /root/bench/data/redpanda/kafka/rp-proof/0_9/
+[2026-10-01T10:48:29Z] cluster: write_caching_default=false (false: acks=all is answered once a raft majority has fsynced)
+  TOPIC     STATUS
+  rp-proof  OK
+reset rc=0

@@ -1,0 +1,31 @@
+WARN max-pending 1000000 per partition producer would preallocate 22888 MB over 1000 partitions (24 B/slot); using 2796 (-pending-budget-mb 64)
+pload tag=r4-p1000 loader=2/3 mode=batch rate=3333 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=5s duration=30s report=10s drain=0s GOMAXPROCS=2 GOGC=400(default) seed=1790753071394694076
+  offered: 3333 msg/s = 33.3 units/s (avg 100.0 msgs/unit) across 1 pacer workers (33.33 units/s each)
+  topics: 1 x 1000 partitions (load..load), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=1000 starting at 666
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":2,...}), pool 64x100
+  consumers: 4 here (ci 8..11 of 12), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0 1 2]
+  pulsar: url=pulsar://10.202.0.2:6650,10.202.0.3:6650,10.202.0.4:6650 admin=http://10.202.0.2:8080 ns=bench/ns sub=sub type=failover compression=lz4 batch=5ms/1000 msgs/131072 B key-batching=false max-pending=2796/partition mem-limit=365 MB receiver-queue=1000 ack-group=100ms conns/broker=1
+  [admin] 1 topics with 1000 partitions and subscription "sub" exist (checked in 4.0s)
+  [consume] 4 consumers subscribed (failover, 1 topics each at most) in 10.3s
+  [produce] 1 producers (one per topic, 1000 partition producers each) created in 5.4s
+READY 1790753092014
+[start] waiting 4.505s for the common start 1790753116389
+[start] GO 07:25:16.389 (unix ms 1790753116389)
+[07:25:26] offered=     2297/s achieved=     1909/s shed=        0/s inflight=    38 | p50=1036.29 p99= 2179.07 p999= 2310.14 ms | push=18700 pop=15884 lag=2816 | errs push=0 pop=0 empty=0 gor=19025 | ack=     1621/s ackErr=0 ackAvg=1.40ms | e2e p50=1204.22 p99=2506.75 p999=2736.13 n=15885 | e2e_local p50=1204.22 p99=2506.75 n=15885
+[07:25:36] offered=     1460/s achieved=     1170/s shed=        0/s inflight=    76 | p50=3063.81 p99=19529.73 p999=19791.87 ms | push=30400 pop=30013 lag=387 | errs push=0 pop=0 empty=0 gor=19025 | ack=     1283/s ackErr=0 ackAvg=48.35ms | e2e p50=4079.62 p99=13697.02 p999=14483.46 n=14128 | e2e_local p50=4079.62 p99=13697.02 n=14128
+[07:25:49] offered=      171/s achieved=      111/s shed=        0/s inflight=    75 | p50=23724.03 p99=23724.03 p999=23724.03 ms | push=31900 pop=30712 lag=1188 | errs push=0 pop=0 empty=0 gor=19025 | ack=      134/s ackErr=0 ackAvg=127.53ms | e2e p50=21889.02 p99=22937.60 p999=22937.60 n=699 | e2e_local p50=21889.02 p99=22937.60 n=699
+time="2026-09-30T07:25:52Z" level=warning msg="receive 1 messages , all filtered" consumerID=419 name=c00008 subscription=sub topic="persistent://bench/ns/load-partition-980"
+time="2026-09-30T07:25:52Z" level=warning msg="receive 99 messages , all filtered" consumerID=419 name=c00008 subscription=sub topic="persistent://bench/ns/load-partition-980"
+time="2026-09-30T07:25:52Z" level=warning msg="receive 1 messages , all filtered" consumerID=1839 name=c00008 subscription=sub topic="persistent://bench/ns/load-partition-644"
+time="2026-09-30T07:25:52Z" level=warning msg="receive 99 messages , all filtered" consumerID=1839 name=c00008 subscription=sub topic="persistent://bench/ns/load-partition-644"
+time="2026-09-30T07:25:52Z" level=warning msg="receive 1 messages , all filtered" consumerID=3057 name=c00009 subscription=sub topic="persistent://bench/ns/load-partition-21"
+time="2026-09-30T07:25:52Z" level=warning msg="receive 99 messages , all filtered" consumerID=3057 name=c00009 subscription=sub topic="persistent://bench/ns/load-partition-21"
+time="2026-09-30T07:25:52Z" level=warning msg="receive 1 messages , all filtered" consumerID=2954 name=c00011 subscription=sub topic="persistent://bench/ns/load-partition-983"
+time="2026-09-30T07:25:52Z" level=warning msg="receive 99 messages , all filtered" consumerID=2954 name=c00011 subscription=sub topic="persistent://bench/ns/load-partition-983"
+time="2026-09-30T07:25:52Z" level=warning msg="receive 1 messages , all filtered" consumerID=410 name=c00010 subscription=sub topic="persistent://bench/ns/load-partition-982"
+time="2026-09-30T07:25:52Z" level=warning msg="receive 99 messages , all filtered" consumerID=410 name=c00010 subscription=sub topic="persistent://bench/ns/load-partition-982"
+[07:25:58] offered=     3074/s achieved=     1788/s shed=        0/s inflight=   188 | p50=23724.03 p99=27918.34 p999=27918.34 ms | push=47600 pop=55169 lag=-7569 | errs push=0 pop=0 empty=0 gor=19025 | ack=     2808/s ackErr=0 ackAvg=144.30ms | e2e p50=24510.46 p99=31064.06 p999=32899.07 n=24457 | e2e_local p50=24510.46 p99=31064.06 n=24457
+[07:26:06] offered=     3261/s achieved=     5116/s shed=        0/s inflight=    44 | p50=24772.61 p99=31064.06 p999=31588.35 ms | push=87300 pop=89145 lag=-1845 | errs push=0 pop=0 empty=0 gor=19024 | ack=     4379/s ackErr=0 ackAvg=115.26ms | e2e p50=26607.62 p99=32636.93 p999=32899.07 n=33976 | e2e_local p50=26607.62 p99=32636.93 n=33976
+[info] steady window 23s (after the ramp, before the producers stopped): offered 720/s pushed 563/s popped 632/s cpu 67.9% = 120.68 cores per 100k msg/s (produce+consume)
+[final] offered=917 achieved=917 shed=0 (msgs: offered=91700 achieved=91700 shed=0) pushErr=0 | pushed=91700 popped=92770 lag=-1070 | popErr=0 empty=0 | overall p50=22675.46 p99=30277.63 p999=31588.35 ms | acked=92770 ackErr=0 ackLag=-1070 ackAvg=113.90ms | e2e p50=23724.03 p99=31850.50 p999=32899.07 ms
+load_cpu=80.4%

@@ -490,6 +490,12 @@ pub(crate) async fn handle_prometheus(
     // QUEEN_RAFT_METRICS is off.
     crate::rsm::timing::render_prometheus(&mut body);
     body.push_str(&st.rsm.prometheus());
+    // The in-process Postgres connectors' `queen_pg_*` families (pg_inproc.rs),
+    // where they run: per node, like every family above.
+    #[cfg(feature = "pg")]
+    if let Some(pg) = crate::pg_inproc::prometheus_text() {
+        body.push_str(&pg);
+    }
     let conflated = crate::rsm::dashboard::collector::last_conflated();
     if !conflated.is_empty() {
         body.push_str(
@@ -946,7 +952,7 @@ pub(crate) fn build_raft_router(
 ) -> axum::Router {
     use axum::routing::{get, post};
 
-    axum::Router::new()
+    let routes = axum::Router::new()
         // ------------------------------------------------ message path → facade
         .route(
             "/api/v1/push",
@@ -1041,9 +1047,11 @@ pub(crate) fn build_raft_router(
             "/api/v1/ephemeral/queue/:queue",
             axum::routing::delete(super::handle_ephemeral_delete_queue),
         )
-        // Broker to broker (§3.7 across nodes): a ring hand-over and a drain
-        // notice. Behind auth and tenancy like every route; the handlers also
-        // require the forward mark (and the cluster token when one is set).
+        // Broker to broker (§3.7 across nodes): a ring hand-over, a drain
+        // notice and the readiness probe. Behind auth and tenancy like every
+        // route — auth takes the cluster token for these three in place of a
+        // JWT (`auth::is_peer_call`) — and the handlers also require the
+        // forward mark (and the cluster token when one is set).
         .route(
             "/api/v1/ephemeral/_adopt",
             post(super::handle_ephemeral_adopt),
@@ -1052,6 +1060,31 @@ pub(crate) fn build_raft_router(
             "/api/v1/ephemeral/_leaving",
             post(super::handle_ephemeral_leaving),
         )
+        .route(
+            "/api/v1/ephemeral/_ready",
+            get(super::handle_ephemeral_ready),
+        );
+    // ------------------- Postgres connectors (PLAN_PG_CONNECTORS.md §3.1)
+    // The documents every node's manager runs (pg_inproc.rs), stored in the
+    // broker-internal tenant. A document is small: the body limit here, not
+    // the message path's 64 MiB, so a PUT cannot park megabytes in memory.
+    #[cfg(feature = "pg")]
+    let routes = routes
+        .route("/api/v1/connectors", get(super::handle_connectors_list))
+        .route(
+            "/api/v1/connectors/:name",
+            get(super::handle_connector_get)
+                .put(super::handle_connector_put)
+                .delete(super::handle_connector_delete)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    super::connectors::MAX_BODY_BYTES,
+                )),
+        )
+        .route(
+            "/api/v1/connectors/:name/resync",
+            post(super::handle_connector_resync),
+        );
+    routes
         // Phase-2 /api and /streams are served by the generic RSM facade;
         // everything else falls through to the SPA/static handler.
         .fallback(raft_fallback)
@@ -1061,6 +1094,8 @@ pub(crate) fn build_raft_router(
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(64 * 1024 * 1024),
         ))
+        // Inside tenancy: it reads the tenant the layer below resolved.
+        .layer(axum::middleware::from_fn(refuse_reserved_tenant))
         .layer(axum::middleware::from_fn_with_state(
             crate::tenant::TenancyConfig {
                 enabled: tenancy_header,
@@ -1109,6 +1144,32 @@ async fn admit_edge(req: axum::extract::Request, next: axum::middleware::Next) -
             retry_after_s: o.retry_after_s,
         }),
     }
+}
+
+/// No request is served as a reserved tenant ([`crate::config::is_reserved_tenant`]):
+/// the proxy's state and the broker's own documents are written and read
+/// in-process by their owners, and nothing that arrives over HTTP is one of them.
+/// Runs after the tenant middleware, on whatever tenant it resolved — a client
+/// header on a router with tenancy on, a relay another broker proved — so every
+/// route is covered, the KV and the message path included, on every router.
+#[cfg(feature = "server")]
+async fn refuse_reserved_tenant(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let reserved = req
+        .extensions()
+        .get::<crate::tenant::Tenant>()
+        .is_some_and(|t| crate::config::is_reserved_tenant(t.as_str()));
+    if reserved {
+        return (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json")],
+            "{\"error\":\"this tenant is reserved: no route acts on it\",\"code\":\"reserved_tenant\"}",
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 /// Marks a request a follower already forwarded: it is served where it lands.
@@ -1297,7 +1358,7 @@ pub(crate) async fn dispatch_api(
                 StatusCode::from_u16(out.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             if status.is_success() {
                 #[cfg(feature = "server")]
-                apply_local_control(st, method, path, query, tenant, &body);
+                apply_local_control(st, method, path, tenant, &body, &out.body);
             }
             (status, [(header::CONTENT_TYPE, out.content_type)], out.body).into_response()
         }
@@ -1315,14 +1376,18 @@ pub(crate) fn query_string(params: &std::collections::HashMap<String, String>) -
         .join("&")
 }
 
+/// Mirrors a successful control call into this node's in-memory state. `answer`
+/// is the state machine's success body: a purge or a quota grant names the
+/// tenant it acted on there, and the mirror touches exactly that tenant — never
+/// one it re-reads out of the request by rules of its own.
 #[cfg(feature = "server")]
 fn apply_local_control(
     st: &AppState,
     method: &str,
     path: &str,
-    query: Option<&str>,
     tenant: &str,
     body: &[u8],
+    answer: &str,
 ) {
     let parsed = || serde_json::from_slice::<serde_json::Value>(body).ok();
     match (method, path) {
@@ -1363,17 +1428,12 @@ fn apply_local_control(
         ("POST", "/api/v1/resources/quota")
         | ("POST", "/api/v1/system/quota")
         | ("POST", "/api/v1/system/quotas") => {
-            if let Some(v) = parsed() {
-                let target = v
-                    .get("tenant")
-                    .or_else(|| v.get("tenantId"))
-                    .and_then(|x| x.as_str())
-                    .unwrap_or(tenant);
+            if let (Some(v), Some(target)) = (parsed(), answered_tenant(answer)) {
                 let grant = quota_grant_from_json(&v);
                 match v.get("kind").and_then(|x| x.as_str()) {
-                    Some("kv") => st.quota.upsert_limits(target, quota_limits(&grant)),
+                    Some("kv") => st.quota.upsert_limits(&target, quota_limits(&grant)),
                     Some("ephemeral") => st.ephemeral.upsert_grant(crate::ephemeral::Grant {
-                        tenant: target.to_string(),
+                        tenant: target,
                         enabled: grant.enabled,
                         max_bytes: grant.max_bytes,
                         max_queues: grant.max_queues.map(i64::from),
@@ -1384,18 +1444,10 @@ fn apply_local_control(
             }
         }
         ("DELETE", "/api/v1/resources/tenant") => {
-            let target = parsed()
-                .and_then(|v| {
-                    v.get("tenant")
-                        .or_else(|| v.get("tenantId"))
-                        .and_then(|x| x.as_str())
-                        .map(str::to_string)
-                })
-                .or_else(|| query_param(query, "tenant"))
-                .or_else(|| query_param(query, "tenantId"))
-                .unwrap_or_else(|| tenant.to_string());
-            st.quota.remove_tenant(&target);
-            st.ephemeral.remove_tenant(&target);
+            if let Some(target) = answered_tenant(answer) {
+                st.quota.remove_tenant(&target);
+                st.ephemeral.remove_tenant(&target);
+            }
         }
         ("DELETE", p) if p.starts_with("/api/v1/ephemeral/queue/") => {
             let queue = &p["/api/v1/ephemeral/queue/".len()..];
@@ -1405,44 +1457,14 @@ fn apply_local_control(
     }
 }
 
-fn query_param(query: Option<&str>, wanted: &str) -> Option<String> {
-    for pair in query.unwrap_or("").split('&') {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if percent_decode(key) == wanted {
-            return Some(percent_decode(value));
-        }
-    }
-    None
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'+' {
-            out.push(b' ');
-            i += 1;
-        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let nibble = |byte: u8| match byte {
-                b'0'..=b'9' => Some(byte - b'0'),
-                b'a'..=b'f' => Some(byte - b'a' + 10),
-                b'A'..=b'F' => Some(byte - b'A' + 10),
-                _ => None,
-            };
-            if let (Some(high), Some(low)) = (nibble(bytes[i + 1]), nibble(bytes[i + 2])) {
-                out.push(high * 16 + low);
-                i += 3;
-            } else {
-                out.push(bytes[i]);
-                i += 1;
-            }
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+/// The `tenant` a successful purge or quota grant answered with.
+#[cfg(feature = "server")]
+fn answered_tenant(answer: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(answer)
+        .ok()?
+        .get("tenant")?
+        .as_str()
+        .map(str::to_string)
 }
 
 pub(crate) fn percent_encode(value: &str) -> String {
@@ -2041,6 +2063,331 @@ mod tests {
         assert!(text.contains("not found"), "fallback body: {text}");
 
         drop(st);
+        if let Ok(f) = Arc::try_unwrap(facade) {
+            f.shutdown().await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A queue whose name has to be encoded in a path (`laravel:default`, a
+    /// space, a slash) is one queue on every route: the push files it under
+    /// the name in its body, and the depth read (the Laravel supervisor's
+    /// scaling input), the resource view, the sizes, the status read, the pop
+    /// and the delete all reach it through the encoded segment, as
+    /// `rawurlencode` and `encodeURIComponent` write it. Through the whole
+    /// router, the way a client reaches it. The embedded API's delete hands
+    /// the handler the plain name and reaches the same queue.
+    #[cfg(all(feature = "server", feature = "kafka"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn an_encoded_queue_name_reaches_its_queue_on_every_path_route() {
+        use axum::http::{Method, Request};
+        use serde_json::{json, Value};
+        use tower::ServiceExt;
+
+        use crate::rsm::facade::real::RaftFacade;
+        use crate::rsm::facade::{Rsm, RsmBuildCtx};
+
+        async fn call(
+            router: &axum::Router,
+            method: Method,
+            path: &str,
+            body: Option<Value>,
+        ) -> (StatusCode, Value) {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    body.map(|b| b.to_string()).unwrap_or_default(),
+                ))
+                .expect("request");
+            let (status, text) = body_of(router.clone().oneshot(req).await.expect("answer")).await;
+            (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+        }
+        // A write is answered before the store commit a fresh read sees (the
+        // commit cadence): read until the queue is there, briefly.
+        async fn get(router: &axum::Router, path: &str) -> (StatusCode, Value) {
+            for _ in 0..400 {
+                let (s, v) = call(router, Method::GET, path, None).await;
+                if s != StatusCode::NOT_FOUND {
+                    return (s, v);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            call(router, Method::GET, path, None).await
+        }
+
+        std::env::set_var("QUEEN_RAFT_MAP_BYTES", (256usize << 20).to_string());
+        let dir = std::env::temp_dir().join(format!(
+            "queen-raft-encoded-names-{}-{}",
+            std::process::id(),
+            crate::util::uuidv7_bytes()[15]
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let facade = Arc::new(
+            RaftFacade::open(&RsmBuildCtx {
+                data_dir: dir.display().to_string(),
+                notifier: crate::notify::Notifier::new(false),
+                disk_high_pct: 85.0,
+                disk_low_pct: 80.0,
+            })
+            .expect("open the facade"),
+        );
+        let rsm: Arc<dyn Rsm> = facade.clone();
+        let st = super::build_raft_state_with(&raft_config(), Some(rsm)).expect("raft state");
+        let auth = crate::auth::Authenticator::new(crate::config::AuthConfig {
+            enabled: false,
+            algorithm: "HS256".into(),
+            secret: String::new(),
+            public_key: String::new(),
+            jwks_url: String::new(),
+            jwks_refresh_interval_seconds: 3600,
+            jwks_request_timeout_ms: 5000,
+            issuer: String::new(),
+            audience: String::new(),
+            clock_skew_seconds: 30,
+            skip_paths: Vec::new(),
+            roles_claim: "role".into(),
+            roles_array_claim: "roles".into(),
+            role_admin: "admin".into(),
+            role_read_write: "read-write".into(),
+            role_read_only: "read-only".into(),
+            role_write_only: "write-only".into(),
+        });
+        let router = super::build_raft_router(st.clone(), auth, false);
+        let push = |name: &str| {
+            let items: Vec<Value> = (0..3)
+                .map(|n| json!({"queue": name, "payload": {"n": n}}))
+                .collect();
+            json!({ "items": items })
+        };
+
+        for (name, seg) in [
+            ("laravel:default", "laravel%3Adefault"),
+            ("jobs/eu west", "jobs%2Feu%20west"),
+        ] {
+            let (s, v) = call(&router, Method::POST, "/api/v1/push", Some(push(name))).await;
+            assert_eq!(s, StatusCode::CREATED, "{name}: push {v}");
+
+            let (s, v) = get(&router, &format!("/api/v1/resources/queues/{seg}/depth")).await;
+            assert_eq!(s, StatusCode::OK, "{name}: depth {v}");
+            assert_eq!(v["queue"], name, "{v}");
+            assert_eq!(v["pending"], 3, "{name}: depth {v}");
+
+            let (s, v) = get(&router, &format!("/api/v1/resources/queues/{seg}")).await;
+            assert_eq!(s, StatusCode::OK, "{name}: resource view {v}");
+            assert_eq!(v["name"], name, "{v}");
+            assert_eq!(v["totals"]["total"], 3, "{name}: resource view {v}");
+
+            let (s, v) = get(&router, &format!("/api/v1/resources/queues/{seg}/sizes")).await;
+            assert_eq!(s, StatusCode::OK, "{name}: sizes {v}");
+            assert_eq!(v["queue"], name, "{v}");
+
+            let (s, v) = get(&router, &format!("/api/v1/status/queues/{seg}")).await;
+            assert_eq!(s, StatusCode::OK, "{name}: status {v}");
+            assert_eq!(v["queue"]["name"], name, "{v}");
+
+            let pop = format!("/api/v1/pop/queue/{seg}?batch=10&wait=false&autoAck=true");
+            let (s, v) = call(&router, Method::GET, &pop, None).await;
+            assert_eq!(s, StatusCode::OK, "{name}: pop {v}");
+            assert_eq!(v["messages"].as_array().map(Vec::len), Some(3), "{v}");
+
+            let path = format!("/api/v1/resources/queues/{seg}");
+            let (s, v) = call(&router, Method::DELETE, &path, None).await;
+            assert_eq!(s, StatusCode::OK, "{name}: delete {v}");
+            assert_eq!(v["deleted"], true, "{name}: delete {v}");
+            let depth = format!("/api/v1/resources/queues/{seg}/depth");
+            let (s, v) = call(&router, Method::GET, &depth, None).await;
+            assert_eq!(s, StatusCode::NOT_FOUND, "{name}: depth after delete {v}");
+        }
+
+        // The embedded API's delete: the handler is handed the plain name.
+        let (s, v) = call(
+            &router,
+            Method::POST,
+            "/api/v1/push",
+            Some(push("jobs/eu west")),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "push {v}");
+        get(&router, "/api/v1/resources/queues/jobs%2Feu%20west").await;
+        let resp = super::super::handle_delete_queue(
+            State(st.clone()),
+            Extension(Tenant::default_tenant()),
+            Path("jobs/eu west".to_string()),
+        )
+        .await;
+        let (status, text) = body_of(resp).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(text.contains("\"deleted\":true"), "embedded delete: {text}");
+
+        drop((router, st));
+        if let Ok(f) = Arc::try_unwrap(facade) {
+            f.shutdown().await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reserved tenants (the embedded proxy's `...fffe`, which holds its
+    /// tenants, users, API-key hashes, plans and usage; the broker-internal
+    /// `...fffd`) are reachable only in-process by their owners, never over
+    /// HTTP. Two defences compose through the whole router, proven here with
+    /// auth OFF (the weakest posture, the internal broker port) so nothing but
+    /// the tenant rules can be doing the refusing:
+    ///   * a request SCOPED to a reserved tenant (`x-queen-tenant`) is a 403
+    ///     before any handler — it would otherwise read and write the proxy's
+    ///     own state by name;
+    ///   * a tenant purge or quota grant that NAMES a reserved tenant as its
+    ///     target is a 403 at the facade — the target is in the query or body,
+    ///     not the header, so the scope check above never sees it.
+    /// A normal tenant is still purged and still takes a quota, so the guard is
+    /// the reserved ids and nothing wider.
+    #[cfg(feature = "server")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn the_reserved_tenants_are_unreachable_over_http() {
+        use axum::http::{Method, Request};
+        use serde_json::{json, Value};
+        use tower::ServiceExt;
+
+        use crate::rsm::facade::real::RaftFacade;
+        use crate::rsm::facade::{Rsm, RsmBuildCtx};
+
+        const PROXY: &str = crate::config::PROXY_SYSTEM_TENANT; // ...fffe
+        const INTERNAL: &str = crate::config::SYSTEM_TENANT; // ...fffd
+        const ACME: &str = "aabbccdd-1122-3344-5566-778899aabbcc";
+
+        async fn call(
+            router: &axum::Router,
+            method: Method,
+            path: &str,
+            tenant_header: Option<&str>,
+            body: Option<Value>,
+        ) -> (StatusCode, Value) {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json");
+            if let Some(t) = tenant_header {
+                req = req.header(crate::config::TENANT_HEADER, t);
+            }
+            let req = req
+                .body(axum::body::Body::from(
+                    body.map(|b| b.to_string()).unwrap_or_default(),
+                ))
+                .expect("request");
+            let (status, text) = body_of(router.clone().oneshot(req).await.expect("answer")).await;
+            (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+        }
+
+        std::env::set_var("QUEEN_RAFT_MAP_BYTES", (256usize << 20).to_string());
+        let dir = std::env::temp_dir().join(format!(
+            "queen-raft-reserved-tenant-{}-{}",
+            std::process::id(),
+            crate::util::uuidv7_bytes()[15]
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let facade = Arc::new(
+            RaftFacade::open(&RsmBuildCtx {
+                data_dir: dir.display().to_string(),
+                notifier: crate::notify::Notifier::new(false),
+                disk_high_pct: 85.0,
+                disk_low_pct: 80.0,
+            })
+            .expect("open the facade"),
+        );
+        let rsm: Arc<dyn Rsm> = facade.clone();
+        let st = super::build_raft_state_with(&raft_config(), Some(rsm)).expect("raft state");
+        let mut auth_cfg = crate::config::load().auth;
+        auth_cfg.enabled = false;
+        let auth = crate::auth::Authenticator::new(auth_cfg);
+        // Tenancy ON so the header resolves to a tenant: the real posture of the
+        // router that sits behind the proxy, where a leaked `x-queen-tenant`
+        // would otherwise be honoured.
+        let router = super::build_raft_router(st.clone(), auth, true);
+
+        // (1) A request SCOPED to a reserved tenant: refused before any handler,
+        // on a read as much as a write.
+        for reserved in [PROXY, INTERNAL] {
+            for (method, path, body) in [
+                (Method::GET, "/api/v1/resources/queues".to_string(), None),
+                (
+                    Method::POST,
+                    "/api/v1/kv".to_string(),
+                    Some(json!({"ops":[{"op":"get","namespace":"px.keys","key":"#x"}]})),
+                ),
+            ] {
+                let (s, v) = call(&router, method.clone(), &path, Some(reserved), body).await;
+                assert_eq!(s, StatusCode::FORBIDDEN, "{method} {path} as {reserved}: {v}");
+                assert_eq!(v["code"], "reserved_tenant", "{method} {path} as {reserved}: {v}");
+            }
+        }
+
+        // (2) A purge or a quota grant that NAMES a reserved tenant as its
+        // target (query or body), the request itself scoped to the default
+        // tenant: refused at the facade.
+        for reserved in [PROXY, INTERNAL] {
+            let (s, v) = call(
+                &router,
+                Method::DELETE,
+                &format!("/api/v1/resources/tenant?tenant={reserved}"),
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(s, StatusCode::FORBIDDEN, "purge target {reserved}: {v}");
+            assert_eq!(v["code"], "reserved_tenant", "purge target {reserved}: {v}");
+
+            let (s, v) = call(
+                &router,
+                Method::POST,
+                "/api/v1/resources/quota",
+                None,
+                Some(json!({"tenant": reserved, "kind": "kv", "maxRows": 1})),
+            )
+            .await;
+            assert_eq!(s, StatusCode::FORBIDDEN, "quota target {reserved}: {v}");
+            assert_eq!(v["code"], "reserved_tenant", "quota target {reserved}: {v}");
+        }
+
+        // The same target in the body of the purge (not only the query): still
+        // refused, so neither spelling of the target slips past.
+        let (s, v) = call(
+            &router,
+            Method::DELETE,
+            "/api/v1/resources/tenant",
+            None,
+            Some(json!({"tenant": PROXY})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "purge body target: {v}");
+        assert_eq!(v["code"], "reserved_tenant", "purge body target: {v}");
+
+        // (3) A NORMAL tenant is untouched: the purge runs (nothing there, so a
+        // clean done) and the quota is accepted. The guard is the reserved ids,
+        // not every tenant that is not the default.
+        let (s, v) = call(
+            &router,
+            Method::DELETE,
+            &format!("/api/v1/resources/tenant?tenant={ACME}"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "purge normal tenant: {v}");
+        assert_eq!(v["success"], true, "purge normal tenant: {v}");
+
+        let (s, v) = call(
+            &router,
+            Method::POST,
+            "/api/v1/resources/quota",
+            None,
+            Some(json!({"tenant": ACME, "kind": "kv", "maxRows": 10})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "quota normal tenant: {v}");
+        assert_eq!(v["success"], true, "quota normal tenant: {v}");
+
+        drop((router, st));
         if let Ok(f) = Arc::try_unwrap(facade) {
             f.shutdown().await;
         }

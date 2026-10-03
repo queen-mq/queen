@@ -1,0 +1,3 @@
+    n1 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"leader","leader":true,"term":2,"applied":3,"commit":3,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"appl
+    n2 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"follower","leader":true,"term":2,"applied":3,"commit":3,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"ap
+    n3 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"follower","leader":true,"term":2,"applied":3,"commit":3,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"ap

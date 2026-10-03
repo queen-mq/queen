@@ -1,0 +1,65 @@
+  n1 mkconf: node 1/3 ip=10.114.0.2 PARTS=100000 segment_fallocation_step=262144 partitions_memory_pct=75 io-config=yes -> /root/bench/redpanda/conf
+[2026-10-01T10:48:13Z] cluster: healthy in 14s
+  TUNER                  APPLIED  ENABLED  SUPPORTED  ERROR
+[2026-10-01T10:48:30Z] create-test 100000: cluster before:
+  n1 node=1 rss_MB=1388 threads=33 fds=140 data_MB=956 part_dirs=0 disk_free_GB=337 busy_s=1.294 errors=0 warns=21 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=2 elections_won_since_mark=0 mark='none' uptime_s=24
+  n1 total memory: 1.816GiB, reserved memory: 1.487GiB, total memory minus pre-share reservations: 337.000MiB, chunk cache: 58.103MiB, kafka: 116.207MiB, rpc: 77.471MiB, recovery: 38.736MiB, tiered storage
+  n2 node=2 rss_MB=1386 threads=33 fds=139 data_MB=956 part_dirs=0 disk_free_GB=334 busy_s=1.098 errors=0 warns=20 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=0 elections_won_since_mark=0 mark='none' uptime_s=25
+  n2 total memory: 1.816GiB, reserved memory: 1.487GiB, total memory minus pre-share reservations: 337.000MiB, chunk cache: 58.103MiB, kafka: 116.207MiB, rpc: 77.471MiB, recovery: 38.736MiB, tiered storage
+  n3 node=3 rss_MB=1180 threads=33 fds=140 data_MB=956 part_dirs=0 disk_free_GB=337 busy_s=0.881 errors=0 warns=21 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=1 elections_won_since_mark=0 mark='none' uptime_s=25
+  n3 total memory: 1.816GiB, reserved memory: 1.487GiB, total memory minus pre-share reservations: 337.000MiB, chunk cache: 58.103MiB, kafka: 116.207MiB, rpc: 77.471MiB, recovery: 38.736MiB, tiered storage
+[2026-10-01T10:48:31Z] create-test 100000: kload -create-only -warm (as run.sh) on loader 1
+Healthy:                             false
+Unhealthy reasons:                   [leaderless_partitions under_replicated_partitions]
+Controller ID:                       1
+All nodes:                           [1 2 3]
+Leaderless partitions (40344):       [kafka/rpcreate100000/1070 kafka/rpcreate100000/11823 kafka/rpcreate100000/12926 ka
+Under-replicated partitions (2606):  [kafka/rpcreate100000/11648 kafka/rpcreate100000/17555 kafka/rpcreate100000/17567 k
+[2026-10-01T11:02:00Z] stopped by hand: not converging (40344 leaderless, 2606 under-replicated after ~12.5 min; RSS 20-23.5 GB/node and +0.5 GB/min; redpanda.log 4.3-6.9 GB/node, ~7 MB/s)
+rc=stopped
+  kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=0 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+  [topic] 1 topics created, 0 grown, 100000 partitions each x RF 3 accepted by the controller in 6.8s (20 requests of <= 5000 partitions)
+  [topic] t=+0s 0 topics missing, 0 with != 100000 partitions, 91616 partitions without leader, 0 with ISR < replicas
+  [topic] t=+11s 0 topics missing, 0 with != 100000 partitions, 75713 partitions without leader, 0 with ISR < replicas
+  [topic] t=+22s 0 topics missing, 0 with != 100000 partitions, 49867 partitions without leader, 0 with ISR < replicas
+  [topic] t=+32s 0 topics missing, 0 with != 100000 partitions, 40248 partitions without leader, 0 with ISR < replicas
+  [topic] t=+43s 0 topics missing, 0 with != 100000 partitions, 39181 partitions without leader, 0 with ISR < replicas
+  [topic] t=+53s 0 topics missing, 0 with != 100000 partitions, 35930 partitions without leader, 0 with ISR < replicas
+  [topic] t=+64s 0 topics missing, 0 with != 100000 partitions, 34633 partitions without leader, 0 with ISR < replicas
+  [topic] t=+74s 0 topics missing, 0 with != 100000 partitions, 32656 partitions without leader, 0 with ISR < replicas
+  [topic] t=+85s 0 topics missing, 0 with != 100000 partitions, 31073 partitions without leader, 0 with ISR < replicas
+  [topic] t=+95s 0 topics missing, 0 with != 100000 partitions, 29922 partitions without leader, 0 with ISR < replicas
+  [topic] t=+106s 0 topics missing, 0 with != 100000 partitions, 28271 partitions without leader, 0 with ISR < replicas
+  [topic] t=+116s 0 topics missing, 0 with != 100000 partitions, 26258 partitions without leader, 0 with ISR < replicas
+  [topic] t=+127s 0 topics missing, 0 with != 100000 partitions, 24197 partitions without leader, 0 with ISR < replicas
+  [topic] t=+138s 0 topics missing, 0 with != 100000 partitions, 23650 partitions without leader, 0 with ISR < replicas
+  [topic] t=+148s 0 topics missing, 0 with != 100000 partitions, 22178 partitions without leader, 0 with ISR < replicas
+  [topic] t=+159s 0 topics missing, 0 with != 100000 partitions, 20851 partitions without leader, 0 with ISR < replicas
+  [topic] t=+169s 0 topics missing, 0 with != 100000 partitions, 18911 partitions without leader, 0 with ISR < replicas
+  [topic] t=+180s 0 topics missing, 0 with != 100000 partitions, 17898 partitions without leader, 0 with ISR < replicas
+  [topic] t=+190s 0 topics missing, 0 with != 100000 partitions, 17011 partitions without leader, 0 with ISR < replicas
+  [topic] t=+201s 0 topics missing, 0 with != 100000 partitions, 16004 partitions without leader, 0 with ISR < replicas
+  [topic] t=+211s 0 topics missing, 0 with != 100000 partitions, 15744 partitions without leader, 0 with ISR < replicas
+  [topic] t=+222s 0 topics missing, 0 with != 100000 partitions, 13793 partitions without leader, 0 with ISR < replicas
+  [topic] t=+233s 0 topics missing, 0 with != 100000 partitions, 12483 partitions without leader, 0 with ISR < replicas
+  [topic] t=+243s 0 topics missing, 0 with != 100000 partitions, 11630 partitions without leader, 0 with ISR < replicas
+  [topic] t=+254s 0 topics missing, 0 with != 100000 partitions, 10986 partitions without leader, 0 with ISR < replicas
+  [topic] t=+264s 0 topics missing, 0 with != 100000 partitions, 9571 partitions without leader, 0 with ISR < replicas
+  [topic] t=+275s 0 topics missing, 0 with != 100000 partitions, 9089 partitions without leader, 0 with ISR < replicas
+  [topic] t=+285s 0 topics missing, 0 with != 100000 partitions, 7965 partitions without leader, 0 with ISR < replicas
+  [topic] t=+296s 0 topics missing, 0 with != 100000 partitions, 7154 partitions without leader, 0 with ISR < replicas
+  [topic] t=+306s 0 topics missing, 0 with != 100000 partitions, 6611 partitions without leader, 0 with ISR < replicas
+  [topic] t=+317s 0 topics missing, 0 with != 100000 partitions, 5493 partitions without leader, 0 with ISR < replicas
+  [topic] t=+327s 0 topics missing, 0 with != 100000 partitions, 4823 partitions without leader, 0 with ISR < replicas
+  [topic] t=+338s 0 topics missing, 0 with != 100000 partitions, 4082 partitions without leader, 0 with ISR < replicas
+  [topic] t=+349s 0 topics missing, 0 with != 100000 partitions, 3255 partitions without leader, 0 with ISR < replicas
+  [topic] t=+359s 0 topics missing, 0 with != 100000 partitions, 2321 partitions without leader, 0 with ISR < replicas
+  [topic] t=+370s 0 topics missing, 0 with != 100000 partitions, 1639 partitions without leader, 0 with ISR < replicas
+  [topic] t=+380s 0 topics missing, 0 with != 100000 partitions, 782 partitions without leader, 0 with ISR < replicas
+  [topic] t=+391s 0 topics missing, 0 with != 100000 partitions, 259 partitions without leader, 0 with ISR < replicas
+  [topic] t=+401s 0 topics missing, 0 with != 100000 partitions, 37 partitions without leader, 0 with ISR < replicas
+  [topic] t=+412s 0 topics missing, 0 with != 100000 partitions, 1 partitions without leader, 0 with ISR < replicas
+  [topic] t=+422s ready, holding for -topic-settle
+  [topic] t=+433s ready, holding for -topic-settle
+  [topic] t=+444s ready, holding for -topic-settle
+  [topic] READY after 460.0s: 1 topics x 100000 partitions, leaders + full ISR + every replica log on disk

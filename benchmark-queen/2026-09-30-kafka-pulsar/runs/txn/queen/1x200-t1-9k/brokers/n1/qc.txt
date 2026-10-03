@@ -1,0 +1,34 @@
+P1=10.114.0.2
+P2=10.114.0.3
+P3=10.114.0.4
+#!/usr/bin/env bash
+# qc.sh start|stop|wipe|health|cpu — one node of the 3-node openraft sizing cluster (peers from /root/qr/peers.env).
+# CORES=N pins the broker to CPUs 0..N-1 (taskset), to size an N-core machine on a bigger one.
+set -u
+R=/root/qr; BIN=${BIN:-$R/queen}
+IP=$(ip -4 -o addr show eth1 | awk '{print $4}' | cut -d/ -f1)
+# peers.env (written by setup.sh): P1 P2 P3 = the brokers' private IPs.
+. $R/peers.env
+case $IP in "$P1") ID=1;; "$P2") ID=2;; "$P3") ID=3;; *) echo "unknown host $IP"; exit 2;; esac
+PEERS="1=$P1:7400/$P1:6632,2=$P2:7400/$P2:6632,3=$P3:7400/$P3:6632"
+RUN=$BIN; [ -n "${CORES:-}" ] && RUN="taskset -c 0-$((CORES-1)) $BIN"
+case ${1:-} in
+start)
+  mkdir -p $R/d1; ulimit -n 1048576; rm -f $R/pid1
+  env QUEEN_RAFT_REPLICATOR=openraft QUEEN_RAFT_NODE_ID=$ID QUEEN_RAFT_PEERS=$PEERS \
+    QUEEN_RAFT_LISTEN=$IP:7400 QUEEN_RAFT_TOKEN=sz-2026-09-28-7c41d09e QUEEN_RAFT_DIR=$R/d1 \
+    QUEEN_RAFT_POP_FASTPATH_EMPTY=1 QUEEN_BIND_ADDR=$IP PORT=6632 JWT_ENABLED=false QUEEN_TENANCY_HEADER=false \
+    QUEEN_LANES=${LANES:-16} LOG_LEVEL=info ${EXTRA:-} nohup bash -c "
+      while true; do
+        $RUN & echo \$! > $R/pid1; wait \$!; rc=\$?
+        [ \$rc -eq 75 ] || break   # 75 = exit to load a received snapshot
+        echo \"qc.sh: queen exited 75 to load a received snapshot; restarting\"
+      done" > $R/b1.log 2>&1 < /dev/null &
+  for i in $(seq 1 50); do [ -s $R/pid1 ] && break; sleep 0.1; done ;;
+stop)
+  if [ -f $R/pid1 ]; then P=$(cat $R/pid1); kill $P 2>/dev/null
+    for i in $(seq 1 100); do kill -0 $P 2>/dev/null || break; sleep 0.1; done; kill -9 $P 2>/dev/null; fi; true ;;
+wipe) rm -rf $R/d1 $R/b1.log ;;
+health) curl -s --max-time 2 http://$IP:6632/health; echo ;;
+cpu) P=$(cat $R/pid1); top -b -n 2 -d 3 -p $P | awk -v p=$P '$1==p{c=$9} END{print c}' ;;
+esac

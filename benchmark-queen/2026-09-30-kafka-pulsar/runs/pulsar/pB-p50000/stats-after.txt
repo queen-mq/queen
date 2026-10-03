@@ -1,0 +1,19 @@
+  n1  node=1 zk     pid=609614 up=112s cpu=47s rss=1361MB thr=118 fds=413 | gc cycles=21 (major 8) pauses=40 max=0.05ms sum=0.8ms stalls=0 max=0.0ms safepoint_max=2.96ms | log ERROR=0 WARN=7 (since start)
+  n1  node=1 bookie pid=610203 up=105s cpu=22s rss=3368MB thr=190 fds=841 | gc cycles=2 (major 2) pauses=10 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.45ms | log ERROR=1 WARN=2 (since start)
+  n1  node=1 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+  n1  node=1 broker pid=610650 up=101s cpu=269s rss=7212MB thr=265 fds=702 | gc cycles=55 (major 14) pauses=70 max=0.05ms sum=1.5ms stalls=0 max=0.0ms safepoint_max=57.29ms | log ERROR=1 WARN=365956 (since start)
+  n1  node=1 broker   ERROR x1: [null] Failed to create tenant bench {}
+  n1  node=1 disk   data=238MB zk=46MB journal=42MB (1 .txn in 1 dirs) ledgers=152MB (entry logs=2, 2MB; locations=75MB ledgers-index=75MB) | fs 13% used, 338G free
+  n1  node=1 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=0 throughput_in=0 rate_in=0 throughput_out=0 topics_count=11446 msg_backlog=0 subscriptions_count=11449 consumers_count=3
+  n2  node=2 zk     pid=559505 up=112s cpu=19s rss=1279MB thr=115 fds=411 | gc cycles=7 (major 7) pauses=35 max=0.03ms sum=0.8ms stalls=0 max=0.0ms safepoint_max=0.83ms | log ERROR=0 WARN=6 (since start)
+  n2  node=2 bookie pid=559758 up=105s cpu=20s rss=3390MB thr=186 fds=841 | gc cycles=2 (major 2) pauses=10 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.61ms | log ERROR=1 WARN=2 (since start)
+  n2  node=2 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+  n2  node=2 broker pid=560107 up=101s cpu=103s rss=6971MB thr=239 fds=591 | gc cycles=6 (major 5) pauses=25 max=0.06ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=3.69ms | log ERROR=0 WARN=8 (since start)
+  n2  node=2 disk   data=238MB zk=46MB journal=41MB (1 .txn in 1 dirs) ledgers=152MB (entry logs=2, 2MB; locations=75MB ledgers-index=75MB) | fs 13% used, 340G free
+  n2  node=2 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=0 throughput_in=0 rate_in=0 throughput_out=0 topics_count=11338 msg_backlog=0 subscriptions_count=11338 consumers_count=0
+  n3  node=3 zk     pid=557776 up=112s cpu=36s rss=1369MB thr=124 fds=414 | gc cycles=19 (major 8) pauses=40 max=0.03ms sum=0.6ms stalls=0 max=0.0ms safepoint_max=3.17ms | log ERROR=0 WARN=9 (since start)
+  n3  node=3 bookie pid=558057 up=105s cpu=16s rss=3356MB thr=191 fds=841 | gc cycles=2 (major 2) pauses=10 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.47ms | log ERROR=1 WARN=5 (since start)
+  n3  node=3 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+  n3  node=3 broker pid=558442 up=101s cpu=83s rss=6919MB thr=238 fds=591 | gc cycles=6 (major 5) pauses=25 max=0.02ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=2.14ms | log ERROR=0 WARN=8 (since start)
+  n3  node=3 disk   data=237MB zk=46MB journal=41MB (1 .txn in 1 dirs) ledgers=152MB (entry logs=2, 2MB; locations=75MB ledgers-index=75MB) | fs 13% used, 339G free
+  n3  node=3 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=0 throughput_in=0 rate_in=0 throughput_out=0 topics_count=11278 msg_backlog=0 subscriptions_count=11278 consumers_count=0

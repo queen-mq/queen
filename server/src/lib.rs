@@ -42,6 +42,11 @@ mod metrics;
 mod notify;
 mod obs;
 mod peerclient;
+// Twin of the `mod pg_inproc;` in main.rs: the Postgres connectors run
+// IN-PROCESS (feature `pg`). Compiled, never started here, and its
+// process-global reads `None` for `handlers::status`.
+#[cfg(feature = "pg")]
+mod pg_inproc;
 mod quota;
 // The replicated state machine: the broker's storage. In BOTH crate roots (the
 // twin-list rule of this header): the embedded `queen::Broker` is a

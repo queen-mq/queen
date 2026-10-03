@@ -24,11 +24,11 @@ Queen speaks HTTP, but is also protocol-compatible with **Kafka**.
 ## The problem Queen solves
 
 Queen gives you the capability to have tons of ordered FIFO partitions, per entity, in order to solve HOL.
-It can manage 1M partitions easily, and those partitions are dynamic, created at first push with your key/entity.
+It can manage 10M partitions easily, and those partitions are dynamic, created at first push with your key/entity.
 
-Also, Queen is engineered in order to provide transactional features that allow you to offload to it a lot of complex application logic: with one unique Queen transaction is possible to: ACK (or NACK) a message, push to other queues, update counters in its own KV storage, set timers.
+Also, Queen is engineered in order to provide transactional features that allow you to offload to it a lot of complex application logic: with one unique Queen transaction is possible to: ACK (or NACK) a message, push to other queues, update counters in its own KV storage, set timers. It also have Postgres source and sink connetors to provide exaclty once operations between Queen and Postgres.
 
-Queen is multi tenant, and can spread its tenants over several Raft groups, each with its own leader. It's architeture is engineered to be almost insensible to partition count and make transactions easy and fast.
+Queen is multi tenant, and can spread its tenants over several Raft groups, each with its own leader. It's architeture is engineered to be almost insensible to partition count and make transactions easy and fast [Benchmark](https://queenmq.com/benchmarks/partitions/).
 
 Queen is running in production at [Smartness](https://smartness.com), and it is tested with Jepsen.
 
@@ -65,6 +65,8 @@ fan-out and cache invalidation: the shapes that should not pay for replay and re
 - **Kafka clients connect directly.** Since 1.4.0 Queen speaks Kafka wire protocols, so an
 existing client moves over by changing its connection URL.
 
+- **Postgres source and sink** Exaclty once processing between Queen and Postgres database.
+
 - **One binary, no sidecars, no database.** curl is a first-class client · six SDKs (JavaScript,
 Python, Go, Rust, C++, PHP/Laravel) plus `queenctl` · a dashboard served by the same binary on the
 same port · Prometheus metrics · JWT/JWKS auth · payload encryption · multi-tenant · Raft
@@ -73,11 +75,21 @@ replication over three or five nodes.
 
 ## Published benchmarks
 
+Three 16-vCPU nodes, every write fsynced on two of them before the answer, with Kafka 4.3.1,
+Redpanda 26.2.3 and Pulsar 4.2.4 on the same machines. Each row links to the run and its conditions.
 
+| | Result |
+|---|---|
+| [Partitions](https://queenmq.com/benchmarks/partitions/) | 1,000,000 msg/s in and out of one queue at every count from 200 to **10,000,000 partitions**, e2e p99 103 to 163 ms. Kafka fell behind at 100,000 partitions, Redpanda and Pulsar at 50,000. |
+| [Transactions](https://queenmq.com/benchmarks/transactions/) | 10 messages per transaction at 9,000 msg/s: commit p99 **4 ms**, e2e p99 19 ms (Kafka 34 and 51 ms, Pulsar 32 and 50 ms). |
+| [Kafka clients](https://queenmq.com/benchmarks/kafka-clients/) | franz-go at 1,000,000 msg/s through Queen's Kafka port, e2e p99 91 ms. |
+| [Soak](https://queenmq.com/benchmarks/soak/) | 500,000 msg/s for 3 h 23 min over 1,000,000 partitions, through a kill -9 of the leader and of a follower: e2e p99 86 ms in the median window. |
+| [Jepsen](https://queenmq.com/benchmarks/jepsen/) | 65 of 65 tests valid: no acknowledged message lost, no lease held twice, transactions atomic. |
+| [Laravel](https://queenmq.com/benchmarks/laravel/) | 2,753 jobs/s with 32 workers on one node, against 1,124 for Horizon on Redis. |
 
-**What these do not establish.** Single-shape runs say nothing about *your* throughput, latency,
-sizing, disk or partition distribution: those follow from your workload, payloads and hardware. Read
-[method and rig](https://queenmq.com/benchmarks/method) before quoting a number.
+Where Queen is behind: with few partitions and very high rates, Kafka carries more (4M msg/s at
+p99 75 ms, while one Queen queue tops out near 1.5M, set by its leader) and spends less CPU per
+message. [Method and rig](https://queenmq.com/benchmarks/methodology/).
 
 ## Quick start
 

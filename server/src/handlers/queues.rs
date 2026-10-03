@@ -34,6 +34,9 @@ pub async fn handle_delete_queue(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Path(queue): Path<String>,
 ) -> Response {
+    // The facade reads a path the way the wire carries it and decodes each
+    // segment: encode the name this call was handed as a plain string.
+    let queue = crate::handlers::raft::percent_encode(&queue);
     return crate::handlers::raft::dispatch_api(
         &st,
         tenant.as_str(),

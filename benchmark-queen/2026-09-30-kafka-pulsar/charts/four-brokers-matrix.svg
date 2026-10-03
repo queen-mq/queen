@@ -1,0 +1,991 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1660 1900" width="1660" height="1900"><style>
+  .bg{fill:#ffffff} .ink{fill:#141820} .mut{fill:#5a6474} .faint{fill:#8a93a1}
+  text{font-family:'IBM Plex Sans','Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px}
+  .title{font-size:30px;font-weight:700;fill:#141820;letter-spacing:-0.3px}
+  .sub{font-size:14px;fill:#5a6474}
+  .colh{font-size:17px;font-weight:700;fill:#141820} .colsub{font-size:12.5px;fill:#5a6474}
+  .rowh{font-size:15px;font-weight:700;fill:#141820} .rowsub{font-size:11.5px;fill:#5a6474}
+  .tick{font-family:'IBM Plex Mono',Menlo,Consolas,monospace;font-size:10.5px;fill:#6b7484}
+  .axl{font-size:11px;fill:#5a6474}
+  .note{font-size:11.5px;fill:#5a6474} .noteb{font-size:11.5px;fill:#141820;font-weight:600}
+  .grid{stroke:#e8ecf1;stroke-width:1} .axis{stroke:#c9d0da;stroke-width:1}
+  .ref{stroke:#8a93a1;stroke-width:1;stroke-dasharray:4 4}
+  .frame{fill:#fbfcfd;stroke:#e1e6ed;stroke-width:1}
+  .leg{font-size:13px;font-weight:600;fill:#141820} .legd{font-size:11.5px;fill:#5a6474}
+  .ptl{font-size:10px;font-weight:600}
+</style><rect class="bg" x="0" y="0" width="1660" height="1900"/><text x="24.0" y="46.0" class="title" text-anchor="start" >Four brokers on one rig</text>
+<text x="24.0" y="72.0" class="sub" text-anchor="start" >Kafka, Redpanda, Pulsar and Queen on the same 3 DigitalOcean brokers (16 vCPU, 31 GB, one ext4 disk each), 256-byte JSON messages, last 30 s of 60 to 70 s points. Queen also driven by Kafka clients.</text>
+<rect x="24" y="94" width="14" height="14" rx="2" fill="#3b4656"/>
+<text x="46.0" y="106.0" class="leg" text-anchor="start" >Kafka 4.3.1</text>
+<text x="46.0" y="124.0" class="legd" text-anchor="start" >RF 3, acks=all, page cache (no fsync)</text>
+<rect x="346" y="94" width="14" height="14" rx="2" fill="#d0362c"/>
+<text x="368.0" y="106.0" class="leg" text-anchor="start" >Redpanda 26.2.3</text>
+<text x="368.0" y="124.0" class="legd" text-anchor="start" >RF 3, ack after 2 of 3 fsync</text>
+<rect x="668" y="94" width="14" height="14" rx="2" fill="#12808d"/>
+<text x="690.0" y="106.0" class="leg" text-anchor="start" >Pulsar 4.2.4</text>
+<text x="690.0" y="124.0" class="legd" text-anchor="start" >E3/Qw3/Qa2, ack after 2 journal fsync</text>
+<rect x="990" y="94" width="14" height="14" rx="2" fill="#c98500"/>
+<text x="1012.0" y="106.0" class="leg" text-anchor="start" >Queen 2.0 beta.2</text>
+<text x="1012.0" y="124.0" class="legd" text-anchor="start" >3 copies, ack after 2 fsync</text>
+<rect x="1312" y="94" width="14" height="14" rx="2" fill="#7a3f8f"/>
+<text x="1334.0" y="106.0" class="leg" text-anchor="start" >Queen 2.0 + Kafka clients</text>
+<text x="1334.0" y="124.0" class="legd" text-anchor="start" >same cluster, Kafka protocol, build qk3</text>
+<circle cx="31.0" cy="147.0" r="3.8" fill="#5a6474"/>
+<circle cx="45.0" cy="147.0" r="4.3" fill="#ffffff" stroke="#5a6474" stroke-width="2"/>
+<text x="56.0" y="151.0" class="note" text-anchor="start" >filled: kept up · hollow: fell behind (consumed under 97% of offered, or p99 above 5 s)</text>
+<rect x="671.0" y="143.0" width="8.0" height="8.0" fill="#5a6474"/>
+<text x="686.0" y="151.0" class="note" text-anchor="start" >C: 100 messages per transaction</text>
+<path d="M997.0,141.6 L1002.4,147.0 L997.0,152.4 L991.6,147.0 Z" fill="#5a6474"/>
+<text x="1008.0" y="151.0" class="note" text-anchor="start" >C: more partitions, one worker each (900 / 1,800)</text>
+<text x="1314.0" y="151.0" class="note" text-anchor="start" >×  could not run at that size</text>
+<text x="250.0" y="198.0" class="colh" text-anchor="start" >A · Throughput ceiling</text>
+<text x="250.0" y="216.0" class="colsub" text-anchor="start" >1 topic or queue × 200 partitions, offered rate raised</text>
+<text x="740.0" y="198.0" class="colh" text-anchor="start" >B · Partition scaling</text>
+<text x="740.0" y="216.0" class="colsub" text-anchor="start" >1 topic or queue at 1M msg/s offered, partitions raised</text>
+<text x="1230.0" y="198.0" class="colh" text-anchor="start" >C · Transactions</text>
+<text x="1230.0" y="216.0" class="colsub" text-anchor="start" >exactly-once read → transform → write, 200 partitions</text>
+<text x="250.0" y="240.0" class="noteb">Ceiling:</text>
+<text x="304.2" y="240.0" class="noteb" style="fill:#3b4656">Kafka ≥ 4M</text>
+<text x="376.2" y="240.0" class="noteb" style="fill:#d0362c">Redpanda 2–3M</text>
+<text x="475.7" y="240.0" class="noteb" style="fill:#12808d">Pulsar ≥ 2M</text>
+<text x="250.0" y="258.0" class="noteb" style="fill:#c98500">Queen 1–1.5M</text>
+<text x="339.3" y="258.0" class="noteb" style="fill:#7a3f8f">Queen + Kafka clients 1.5–2M</text>
+<text x="250.0" y="276.0" class="note" text-anchor="start" >Above ~1.4M: Kafka ≥ 2.9×, Redpanda 1.4–2.1×, Pulsar ≥ 1.4× Queen</text>
+<text x="740.0" y="240.0" class="noteb" text-anchor="start" >At 100k partitions, p99 is higher than Queen's by:</text>
+<text x="740.0" y="258.0" class="noteb" style="fill:#3b4656">Kafka 67×</text>
+<text x="806.0" y="258.0" class="noteb" style="fill:#d0362c">Redpanda 290×</text>
+<text x="902.7" y="258.0" class="noteb" style="fill:#12808d">Pulsar 290×</text>
+<text x="979.0" y="258.0" class="noteb" style="fill:#7a3f8f">Queen + Kafka clients 1.5×</text>
+<text x="740.0" y="276.0" class="note" text-anchor="start" >Only Queen runs from 1M partitions.</text>
+<text x="1230.0" y="240.0" class="noteb">Ceiling at 10/txn:</text>
+<text x="1334.0" y="240.0" class="noteb" style="fill:#3b4656">Kafka 9–18k</text>
+<text x="1412.5" y="240.0" class="noteb" style="fill:#d0362c">Redpanda 9–18k</text>
+<text x="1515.3" y="240.0" class="noteb" style="fill:#12808d">Pulsar 36–72k</text>
+<text x="1230.0" y="258.0" class="noteb" style="fill:#c98500">Queen 72–144k</text>
+<text x="1325.7" y="258.0" class="noteb">at 100/txn:</text>
+<text x="1394.6" y="258.0" class="noteb" style="fill:#12808d">Pulsar 288–576k</text>
+<text x="1496.1" y="258.0" class="noteb" style="fill:#c98500">Queen 144–288k</text>
+<text x="1230.0" y="276.0" class="note" text-anchor="start" >Most delivered at 100/txn: Pulsar 572k, Queen 251k.</text>
+<text x="1230.0" y="292.0" class="note" text-anchor="start" >Below its ceiling, Queen has the lowest latency.</text>
+<text x="24.0" y="334.0" class="rowh" text-anchor="start" >Delivered</text>
+<text x="24.0" y="352.0" class="rowsub" text-anchor="start" >messages consumed per</text>
+<text x="24.0" y="367.0" class="rowsub" text-anchor="start" >second (C: committed</text>
+<text x="24.0" y="382.0" class="rowsub" text-anchor="start" >output)</text>
+<rect class="frame" x="242" y="310" width="416" height="206" rx="4"/>
+<line x1="250.0" y1="496.1" x2="650.0" y2="496.1" class="grid" />
+<text x="242.0" y="499.6" class="tick" text-anchor="end" >300k</text>
+<line x1="250.0" y1="450.9" x2="650.0" y2="450.9" class="grid" />
+<text x="242.0" y="454.4" class="tick" text-anchor="end" >600k</text>
+<line x1="250.0" y1="417.6" x2="650.0" y2="417.6" class="grid" />
+<text x="242.0" y="421.1" class="tick" text-anchor="end" >1M</text>
+<line x1="250.0" y1="372.3" x2="650.0" y2="372.3" class="grid" />
+<text x="242.0" y="375.8" class="tick" text-anchor="end" >2M</text>
+<line x1="250.0" y1="327.1" x2="650.0" y2="327.1" class="grid" />
+<text x="242.0" y="330.6" class="tick" text-anchor="end" >4M</text>
+<line x1="250.0" y1="508.0" x2="650.0" y2="508.0" class="axis" />
+<line x1="275.0" y1="508.0" x2="275.0" y2="512.0" class="axis" />
+<text x="275.0" y="525.0" class="tick" text-anchor="middle" >300k</text>
+<line x1="370.2" y1="508.0" x2="370.2" y2="512.0" class="axis" />
+<text x="370.2" y="525.0" class="tick" text-anchor="middle" >600k</text>
+<line x1="440.4" y1="508.0" x2="440.4" y2="512.0" class="axis" />
+<text x="440.4" y="525.0" class="tick" text-anchor="middle" >1M</text>
+<line x1="535.6" y1="508.0" x2="535.6" y2="512.0" class="axis" />
+<text x="535.6" y="525.0" class="tick" text-anchor="middle" >2M</text>
+<line x1="591.3" y1="508.0" x2="591.3" y2="512.0" class="axis" />
+<text x="591.3" y="525.0" class="tick" text-anchor="middle" >3M</text>
+<line x1="630.8" y1="508.0" x2="630.8" y2="512.0" class="axis" />
+<text x="630.8" y="525.0" class="tick" text-anchor="middle" >4M</text>
+<line x1="250.0" y1="508.0" x2="650.0" y2="318.0" class="ref" />
+<path d="M275.0,496.1 L370.2,450.9 L440.4,417.6 L496.1,391.1 L535.6,372.3 L591.3,345.9 L630.8,327.1" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="496.1" r="3.8" fill="#3b4656"/>
+<circle cx="370.2" cy="450.9" r="3.8" fill="#3b4656"/>
+<circle cx="440.4" cy="417.6" r="3.8" fill="#3b4656"/>
+<circle cx="496.1" cy="391.1" r="3.8" fill="#3b4656"/>
+<circle cx="535.6" cy="372.3" r="3.8" fill="#3b4656"/>
+<circle cx="591.3" cy="345.9" r="3.8" fill="#3b4656"/>
+<circle cx="630.8" cy="327.1" r="3.8" fill="#3b4656"/>
+<path d="M275.0,496.1 L370.2,450.9 L440.4,417.6 L496.1,391.1 L535.6,372.3 L591.3,347.7 L630.8,327.5" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="496.1" r="3.8" fill="#d0362c"/>
+<circle cx="370.2" cy="450.9" r="3.8" fill="#d0362c"/>
+<circle cx="440.4" cy="417.6" r="3.8" fill="#d0362c"/>
+<circle cx="496.1" cy="391.1" r="3.8" fill="#d0362c"/>
+<circle cx="535.6" cy="372.3" r="3.8" fill="#d0362c"/>
+<circle cx="591.3" cy="347.7" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="630.8" cy="327.5" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M275.0,496.1 L370.2,450.9 L440.4,417.6 L496.1,391.1 L535.6,372.3" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="496.1" r="3.8" fill="#12808d"/>
+<circle cx="370.2" cy="450.9" r="3.8" fill="#12808d"/>
+<circle cx="440.4" cy="417.6" r="3.8" fill="#12808d"/>
+<circle cx="496.1" cy="391.1" r="3.8" fill="#12808d"/>
+<circle cx="535.6" cy="372.3" r="3.8" fill="#12808d"/>
+<path d="M275.0,496.1 L370.2,450.9 L440.4,417.6 L496.1,398.4 L535.6,403.9" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="496.1" r="3.8" fill="#c98500"/>
+<circle cx="370.2" cy="450.9" r="3.8" fill="#c98500"/>
+<circle cx="440.4" cy="417.6" r="3.8" fill="#c98500"/>
+<circle cx="496.1" cy="398.4" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<circle cx="535.6" cy="403.9" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M275.0,496.1 L370.2,450.9 L440.4,417.6 L496.1,391.2 L535.6,508.0" fill="none" stroke="#7a3f8f" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="496.1" r="3.8" fill="#7a3f8f"/>
+<circle cx="370.2" cy="450.9" r="3.8" fill="#7a3f8f"/>
+<circle cx="440.4" cy="417.6" r="3.8" fill="#7a3f8f"/>
+<circle cx="496.1" cy="391.2" r="3.8" fill="#7a3f8f"/>
+<circle cx="535.6" cy="508.0" r="4.3" fill="#ffffff" stroke="#7a3f8f" stroke-width="2"/>
+<text x="543.6" y="502.0" class="ptl" style="fill:#7a3f8f">105k</text>
+<rect class="frame" x="732" y="310" width="416" height="206" rx="4"/>
+<line x1="740.0" y1="508.0" x2="1140.0" y2="508.0" class="grid" />
+<text x="732.0" y="511.5" class="tick" text-anchor="end" >0</text>
+<line x1="740.0" y1="470.0" x2="1140.0" y2="470.0" class="grid" />
+<text x="732.0" y="473.5" class="tick" text-anchor="end" >250k</text>
+<line x1="740.0" y1="432.0" x2="1140.0" y2="432.0" class="grid" />
+<text x="732.0" y="435.5" class="tick" text-anchor="end" >500k</text>
+<line x1="740.0" y1="394.0" x2="1140.0" y2="394.0" class="grid" />
+<text x="732.0" y="397.5" class="tick" text-anchor="end" >750k</text>
+<line x1="740.0" y1="356.0" x2="1140.0" y2="356.0" class="grid" />
+<text x="732.0" y="359.5" class="tick" text-anchor="end" >1M</text>
+<line x1="740.0" y1="508.0" x2="1140.0" y2="508.0" class="axis" />
+<line x1="757.3" y1="508.0" x2="757.3" y2="512.0" class="axis" />
+<text x="757.3" y="525.0" class="tick" text-anchor="middle" >200</text>
+<line x1="835.4" y1="508.0" x2="835.4" y2="512.0" class="axis" />
+<text x="835.4" y="525.0" class="tick" text-anchor="middle" >2k</text>
+<line x1="889.9" y1="508.0" x2="889.9" y2="512.0" class="axis" />
+<text x="889.9" y="525.0" class="tick" text-anchor="middle" >10k</text>
+<line x1="968.0" y1="508.0" x2="968.0" y2="512.0" class="axis" />
+<text x="968.0" y="525.0" class="tick" text-anchor="middle" >100k</text>
+<line x1="1046.0" y1="508.0" x2="1046.0" y2="512.0" class="axis" />
+<text x="1046.0" y="525.0" class="tick" text-anchor="middle" >1M</text>
+<line x1="1124.1" y1="508.0" x2="1124.1" y2="512.0" class="axis" />
+<text x="1124.1" y="525.0" class="tick" text-anchor="middle" >10M</text>
+<line x1="740.0" y1="356.0" x2="1140.0" y2="356.0" class="ref" />
+<text x="1138.0" y="351.0" class="tick" text-anchor="end" >1M offered</text>
+<path d="M757.3,356.2 L835.4,356.0 L889.9,356.0 L944.5,357.7 L968.0,330.6" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="356.2" r="3.8" fill="#3b4656"/>
+<circle cx="835.4" cy="356.0" r="3.8" fill="#3b4656"/>
+<circle cx="889.9" cy="356.0" r="3.8" fill="#3b4656"/>
+<circle cx="944.5" cy="357.7" r="3.8" fill="#3b4656"/>
+<circle cx="968.0" cy="330.6" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<path d="M757.3,356.0 L835.4,356.0 L889.9,355.1 L944.5,374.1 L968.0,472.1" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="356.0" r="3.8" fill="#d0362c"/>
+<circle cx="835.4" cy="356.0" r="3.8" fill="#d0362c"/>
+<circle cx="889.9" cy="355.1" r="3.8" fill="#d0362c"/>
+<circle cx="944.5" cy="374.1" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="968.0" cy="472.1" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M757.3,356.0 L835.4,356.0 L889.9,356.0 L944.5,472.7 L968.0,477.8" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="356.0" r="3.8" fill="#12808d"/>
+<circle cx="835.4" cy="356.0" r="3.8" fill="#12808d"/>
+<circle cx="889.9" cy="356.0" r="3.8" fill="#12808d"/>
+<circle cx="944.5" cy="472.7" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<circle cx="968.0" cy="477.8" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M757.3,356.2 L889.9,356.0 L944.5,356.0 L968.0,355.8 L1046.0,355.8 L1100.6,356.0 L1124.1,356.0" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="356.2" r="3.8" fill="#c98500"/>
+<circle cx="889.9" cy="356.0" r="3.8" fill="#c98500"/>
+<circle cx="944.5" cy="356.0" r="3.8" fill="#c98500"/>
+<circle cx="968.0" cy="355.8" r="3.8" fill="#c98500"/>
+<circle cx="1046.0" cy="355.8" r="3.8" fill="#c98500"/>
+<circle cx="1100.6" cy="356.0" r="3.8" fill="#c98500"/>
+<circle cx="1124.1" cy="356.0" r="3.8" fill="#c98500"/>
+<path d="M757.3,356.0 L889.9,356.0 L944.5,356.2 L968.0,356.2" fill="none" stroke="#7a3f8f" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="356.0" r="3.8" fill="#7a3f8f"/>
+<circle cx="889.9" cy="356.0" r="3.8" fill="#7a3f8f"/>
+<circle cx="944.5" cy="356.2" r="3.8" fill="#7a3f8f"/>
+<circle cx="968.0" cy="356.2" r="3.8" fill="#7a3f8f"/>
+<text x="1040.0" y="504.0" text-anchor="middle" style="font-size:14px;font-weight:700;fill:#3b4656">×</text>
+<text x="1052.0" y="504.0" text-anchor="middle" style="font-size:14px;font-weight:700;fill:#12808d">×</text>
+<text x="740.0" y="544.0" class="note">At 1M partitions: <tspan style="fill:#3b4656;font-weight:600">× Kafka cannot create them</tspan>, <tspan style="fill:#12808d;font-weight:600">× Pulsar setup failed after 31 min</tspan>.</text>
+<rect class="frame" x="1222" y="310" width="416" height="206" rx="4"/>
+<line x1="1230.0" y1="495.4" x2="1630.0" y2="495.4" class="grid" />
+<text x="1222.0" y="498.9" class="tick" text-anchor="end" >10k</text>
+<line x1="1230.0" y1="456.5" x2="1630.0" y2="456.5" class="grid" />
+<text x="1222.0" y="460.0" class="tick" text-anchor="end" >30k</text>
+<line x1="1230.0" y1="413.9" x2="1630.0" y2="413.9" class="grid" />
+<text x="1222.0" y="417.4" class="tick" text-anchor="end" >100k</text>
+<line x1="1230.0" y1="375.0" x2="1630.0" y2="375.0" class="grid" />
+<text x="1222.0" y="378.5" class="tick" text-anchor="end" >300k</text>
+<line x1="1230.0" y1="332.4" x2="1630.0" y2="332.4" class="grid" />
+<text x="1222.0" y="335.9" class="tick" text-anchor="end" >1M</text>
+<line x1="1230.0" y1="508.0" x2="1630.0" y2="508.0" class="axis" />
+<line x1="1248.7" y1="508.0" x2="1248.7" y2="512.0" class="axis" />
+<text x="1248.7" y="525.0" class="tick" text-anchor="middle" >9k</text>
+<line x1="1300.4" y1="508.0" x2="1300.4" y2="512.0" class="axis" />
+<line x1="1352.0" y1="508.0" x2="1352.0" y2="512.0" class="axis" />
+<text x="1352.0" y="525.0" class="tick" text-anchor="middle" >36k</text>
+<line x1="1403.7" y1="508.0" x2="1403.7" y2="512.0" class="axis" />
+<line x1="1455.4" y1="508.0" x2="1455.4" y2="512.0" class="axis" />
+<text x="1455.4" y="525.0" class="tick" text-anchor="middle" >144k</text>
+<line x1="1507.0" y1="508.0" x2="1507.0" y2="512.0" class="axis" />
+<line x1="1558.7" y1="508.0" x2="1558.7" y2="512.0" class="axis" />
+<text x="1558.7" y="525.0" class="tick" text-anchor="middle" >576k</text>
+<line x1="1610.3" y1="508.0" x2="1610.3" y2="512.0" class="axis" />
+<text x="1610.3" y="525.0" class="tick" text-anchor="middle" >1.15M</text>
+<line x1="1230.0" y1="508.0" x2="1630.0" y2="318.0" class="ref" />
+<path d="M1248.7,499.1 L1300.4,475.6 L1352.0,485.5" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="499.1" r="3.8" fill="#3b4656"/>
+<circle cx="1300.4" cy="475.6" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<circle cx="1352.0" cy="485.5" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<path d="M1248.7,499.1 L1300.4,475.0 L1352.0,484.2" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="499.1" r="3.8" fill="#d0362c"/>
+<circle cx="1300.4" cy="475.0" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="1352.0" cy="484.2" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M1248.7,499.1 L1300.4,474.6 L1352.0,450.0 L1403.7,425.9 L1455.4,426.6" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="499.1" r="3.8" fill="#12808d"/>
+<circle cx="1300.4" cy="474.6" r="3.8" fill="#12808d"/>
+<circle cx="1352.0" cy="450.0" r="3.8" fill="#12808d"/>
+<circle cx="1403.7" cy="425.9" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<circle cx="1455.4" cy="426.6" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1248.7,499.1 L1300.4,474.6 L1352.0,450.0 L1403.7,425.5 L1455.4,428.2" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="499.1" r="3.8" fill="#c98500"/>
+<circle cx="1300.4" cy="474.6" r="3.8" fill="#c98500"/>
+<circle cx="1352.0" cy="450.0" r="3.8" fill="#c98500"/>
+<circle cx="1403.7" cy="425.5" r="3.8" fill="#c98500"/>
+<circle cx="1455.4" cy="428.2" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M1455.4,401.0 L1507.0,376.4 L1558.7,352.1 L1610.3,353.6" fill="none" stroke="#12808d" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+<rect x="1451.4" y="397.0" width="8.0" height="8.0" fill="#12808d"/>
+<rect x="1503.0" y="372.4" width="8.0" height="8.0" fill="#12808d"/>
+<rect x="1554.5" y="347.9" width="8.4" height="8.4" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<rect x="1606.1" y="349.4" width="8.4" height="8.4" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1455.4,401.0 L1507.0,381.4" fill="none" stroke="#c98500" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+<rect x="1451.4" y="397.0" width="8.0" height="8.0" fill="#c98500"/>
+<rect x="1502.8" y="377.2" width="8.4" height="8.4" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M1455.4,395.6 L1460.8,401.0 L1455.4,406.4 L1450.0,401.0 Z" fill="#12808d"/>
+<text x="1463.4" y="404.5" class="ptl" style="fill:#12808d">900</text>
+<path d="M1507.0,395.4 L1512.6,401.0 L1507.0,406.6 L1501.4,401.0 Z" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<text x="1515.0" y="404.5" class="ptl" style="fill:#12808d">900</text>
+<path d="M1507.0,388.3 L1512.6,393.9 L1507.0,399.5 L1501.4,393.9 Z" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<text x="1515.0" y="397.4" class="ptl" style="fill:#12808d">1,800</text>
+<path d="M1455.4,432.1 L1461.0,437.7 L1455.4,443.3 L1449.8,437.7 Z" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<text x="1463.4" y="441.2" class="ptl" style="fill:#c98500">900</text>
+<text x="1602.3" y="369.6" class="ptl" text-anchor="end" style="fill:#12808d">100/txn</text>
+<text x="1499.0" y="372.4" class="ptl" text-anchor="end" style="fill:#c98500">100/txn</text>
+<text x="1230.0" y="544.0" class="note">Kafka, Redpanda: 100/txn and more partitions not run.</text>
+<text x="24.0" y="598.0" class="rowh" text-anchor="start" >End-to-end latency</text>
+<text x="24.0" y="616.0" class="rowsub" text-anchor="start" >p99 solid, p50 dashed, log</text>
+<text x="24.0" y="631.0" class="rowsub" text-anchor="start" >scale</text>
+<rect class="frame" x="242" y="574" width="416" height="206" rx="4"/>
+<line x1="250.0" y1="758.7" x2="650.0" y2="758.7" class="grid" />
+<text x="242.0" y="762.2" class="tick" text-anchor="end" >10 ms</text>
+<line x1="250.0" y1="714.5" x2="650.0" y2="714.5" class="grid" />
+<text x="242.0" y="718.0" class="tick" text-anchor="end" >100 ms</text>
+<line x1="250.0" y1="670.4" x2="650.0" y2="670.4" class="grid" />
+<text x="242.0" y="673.9" class="tick" text-anchor="end" >1 s</text>
+<line x1="250.0" y1="626.2" x2="650.0" y2="626.2" class="grid" />
+<text x="242.0" y="629.7" class="tick" text-anchor="end" >10 s</text>
+<line x1="250.0" y1="582.0" x2="650.0" y2="582.0" class="grid" />
+<text x="242.0" y="585.5" class="tick" text-anchor="end" >100 s</text>
+<line x1="250.0" y1="772.0" x2="650.0" y2="772.0" class="axis" />
+<line x1="275.0" y1="772.0" x2="275.0" y2="776.0" class="axis" />
+<text x="275.0" y="789.0" class="tick" text-anchor="middle" >300k</text>
+<line x1="370.2" y1="772.0" x2="370.2" y2="776.0" class="axis" />
+<text x="370.2" y="789.0" class="tick" text-anchor="middle" >600k</text>
+<line x1="440.4" y1="772.0" x2="440.4" y2="776.0" class="axis" />
+<text x="440.4" y="789.0" class="tick" text-anchor="middle" >1M</text>
+<line x1="535.6" y1="772.0" x2="535.6" y2="776.0" class="axis" />
+<text x="535.6" y="789.0" class="tick" text-anchor="middle" >2M</text>
+<line x1="591.3" y1="772.0" x2="591.3" y2="776.0" class="axis" />
+<text x="591.3" y="789.0" class="tick" text-anchor="middle" >3M</text>
+<line x1="630.8" y1="772.0" x2="630.8" y2="776.0" class="axis" />
+<text x="630.8" y="789.0" class="tick" text-anchor="middle" >4M</text>
+<path d="M275.0,758.7 L370.2,753.7 L440.4,747.4 L496.1,734.7 L535.6,724.6 L591.3,720.3 L630.8,720.0" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M275.0,763.0 L370.2,763.0 L440.4,763.0 L496.1,763.0 L535.6,760.7 L591.3,760.7 L630.8,748.5" fill="none" stroke="#3b4656" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="275.0" cy="758.7" r="3.8" fill="#3b4656"/>
+<circle cx="370.2" cy="753.7" r="3.8" fill="#3b4656"/>
+<circle cx="440.4" cy="747.4" r="3.8" fill="#3b4656"/>
+<circle cx="496.1" cy="734.7" r="3.8" fill="#3b4656"/>
+<circle cx="535.6" cy="724.6" r="3.8" fill="#3b4656"/>
+<circle cx="591.3" cy="720.3" r="3.8" fill="#3b4656"/>
+<circle cx="630.8" cy="720.0" r="3.8" fill="#3b4656"/>
+<path d="M275.0,722.5 L370.2,703.1 L440.4,702.5 L496.1,692.1 L535.6,696.7 L591.3,609.8 L630.8,613.6" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M275.0,760.7 L370.2,749.7 L440.4,749.7 L496.1,736.4 L535.6,728.6 L591.3,669.0 L630.8,697.5" fill="none" stroke="#d0362c" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="275.0" cy="722.5" r="3.8" fill="#d0362c"/>
+<circle cx="370.2" cy="703.1" r="3.8" fill="#d0362c"/>
+<circle cx="440.4" cy="702.5" r="3.8" fill="#d0362c"/>
+<circle cx="496.1" cy="692.1" r="3.8" fill="#d0362c"/>
+<circle cx="535.6" cy="696.7" r="3.8" fill="#d0362c"/>
+<circle cx="591.3" cy="609.8" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="630.8" cy="613.6" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M275.0,750.9 L370.2,747.4 L440.4,744.5 L496.1,745.4 L535.6,744.5" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M275.0,765.5 L370.2,765.5 L440.4,765.5 L496.1,763.0 L535.6,755.2" fill="none" stroke="#12808d" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="275.0" cy="750.9" r="3.8" fill="#12808d"/>
+<circle cx="370.2" cy="747.4" r="3.8" fill="#12808d"/>
+<circle cx="440.4" cy="744.5" r="3.8" fill="#12808d"/>
+<circle cx="496.1" cy="745.4" r="3.8" fill="#12808d"/>
+<circle cx="535.6" cy="744.5" r="3.8" fill="#12808d"/>
+<path d="M275.0,743.6 L370.2,714.9 L440.4,707.3 L496.1,635.0 L535.6,616.9" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M275.0,756.9 L370.2,746.4 L440.4,724.0 L496.1,641.0 L535.6,620.1" fill="none" stroke="#c98500" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="275.0" cy="743.6" r="3.8" fill="#c98500"/>
+<circle cx="370.2" cy="714.9" r="3.8" fill="#c98500"/>
+<circle cx="440.4" cy="707.3" r="3.8" fill="#c98500"/>
+<circle cx="496.1" cy="635.0" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<circle cx="535.6" cy="616.9" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M275.0,746.4 L370.2,733.1 L440.4,713.0 L496.1,644.8 L535.6,596.3" fill="none" stroke="#7a3f8f" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M275.0,758.7 L370.2,755.2 L440.4,730.3 L496.1,702.7 L535.6,598.1" fill="none" stroke="#7a3f8f" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="275.0" cy="746.4" r="3.8" fill="#7a3f8f"/>
+<circle cx="370.2" cy="733.1" r="3.8" fill="#7a3f8f"/>
+<circle cx="440.4" cy="713.0" r="3.8" fill="#7a3f8f"/>
+<circle cx="496.1" cy="644.8" r="3.8" fill="#7a3f8f"/>
+<circle cx="535.6" cy="596.3" r="4.3" fill="#ffffff" stroke="#7a3f8f" stroke-width="2"/>
+<rect class="frame" x="732" y="574" width="416" height="206" rx="4"/>
+<line x1="740.0" y1="758.7" x2="1140.0" y2="758.7" class="grid" />
+<text x="732.0" y="762.2" class="tick" text-anchor="end" >10 ms</text>
+<line x1="740.0" y1="714.5" x2="1140.0" y2="714.5" class="grid" />
+<text x="732.0" y="718.0" class="tick" text-anchor="end" >100 ms</text>
+<line x1="740.0" y1="670.4" x2="1140.0" y2="670.4" class="grid" />
+<text x="732.0" y="673.9" class="tick" text-anchor="end" >1 s</text>
+<line x1="740.0" y1="626.2" x2="1140.0" y2="626.2" class="grid" />
+<text x="732.0" y="629.7" class="tick" text-anchor="end" >10 s</text>
+<line x1="740.0" y1="582.0" x2="1140.0" y2="582.0" class="grid" />
+<text x="732.0" y="585.5" class="tick" text-anchor="end" >100 s</text>
+<line x1="740.0" y1="772.0" x2="1140.0" y2="772.0" class="axis" />
+<line x1="757.3" y1="772.0" x2="757.3" y2="776.0" class="axis" />
+<text x="757.3" y="789.0" class="tick" text-anchor="middle" >200</text>
+<line x1="835.4" y1="772.0" x2="835.4" y2="776.0" class="axis" />
+<text x="835.4" y="789.0" class="tick" text-anchor="middle" >2k</text>
+<line x1="889.9" y1="772.0" x2="889.9" y2="776.0" class="axis" />
+<text x="889.9" y="789.0" class="tick" text-anchor="middle" >10k</text>
+<line x1="968.0" y1="772.0" x2="968.0" y2="776.0" class="axis" />
+<text x="968.0" y="789.0" class="tick" text-anchor="middle" >100k</text>
+<line x1="1046.0" y1="772.0" x2="1046.0" y2="776.0" class="axis" />
+<text x="1046.0" y="789.0" class="tick" text-anchor="middle" >1M</text>
+<line x1="1124.1" y1="772.0" x2="1124.1" y2="776.0" class="axis" />
+<text x="1124.1" y="789.0" class="tick" text-anchor="middle" >10M</text>
+<path d="M757.3,747.4 L835.4,701.8 L889.9,729.4 L944.5,663.0 L968.0,624.4" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M757.3,763.0 L835.4,760.7 L889.9,750.9 L944.5,677.4 L968.0,651.5" fill="none" stroke="#3b4656" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="757.3" cy="747.4" r="3.8" fill="#3b4656"/>
+<circle cx="835.4" cy="701.8" r="3.8" fill="#3b4656"/>
+<circle cx="889.9" cy="729.4" r="3.8" fill="#3b4656"/>
+<circle cx="944.5" cy="663.0" r="3.8" fill="#3b4656"/>
+<circle cx="968.0" cy="624.4" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<path d="M757.3,702.5 L835.4,713.6 L889.9,659.0 L944.5,612.1 L968.0,596.3" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M757.3,749.7 L835.4,747.4 L889.9,689.4 L944.5,629.1 L968.0,604.0" fill="none" stroke="#d0362c" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="757.3" cy="702.5" r="3.8" fill="#d0362c"/>
+<circle cx="835.4" cy="713.6" r="3.8" fill="#d0362c"/>
+<circle cx="889.9" cy="659.0" r="3.8" fill="#d0362c"/>
+<circle cx="944.5" cy="612.1" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="968.0" cy="596.3" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M757.3,744.5 L835.4,750.9 L889.9,736.4 L944.5,596.3 L968.0,596.5" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M757.3,765.5 L835.4,765.5 L889.9,765.5 L944.5,605.8 L968.0,611.8" fill="none" stroke="#12808d" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="757.3" cy="744.5" r="3.8" fill="#12808d"/>
+<circle cx="835.4" cy="750.9" r="3.8" fill="#12808d"/>
+<circle cx="889.9" cy="736.4" r="3.8" fill="#12808d"/>
+<circle cx="944.5" cy="596.3" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<circle cx="968.0" cy="596.5" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M757.3,707.3 L889.9,707.5 L944.5,714.0 L968.0,705.2 L1046.0,710.6 L1100.6,708.3 L1124.1,710.7" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M757.3,724.0 L889.9,727.4 L944.5,728.2 L968.0,727.8 L1046.0,729.4 L1100.6,729.8 L1124.1,727.4" fill="none" stroke="#c98500" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="757.3" cy="707.3" r="3.8" fill="#c98500"/>
+<circle cx="889.9" cy="707.5" r="3.8" fill="#c98500"/>
+<circle cx="944.5" cy="714.0" r="3.8" fill="#c98500"/>
+<circle cx="968.0" cy="705.2" r="3.8" fill="#c98500"/>
+<circle cx="1046.0" cy="710.6" r="3.8" fill="#c98500"/>
+<circle cx="1100.6" cy="708.3" r="3.8" fill="#c98500"/>
+<circle cx="1124.1" cy="710.7" r="3.8" fill="#c98500"/>
+<path d="M757.3,713.0 L889.9,707.8 L944.5,701.2 L968.0,696.9" fill="none" stroke="#7a3f8f" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M757.3,730.3 L889.9,729.8 L944.5,719.3 L968.0,708.9" fill="none" stroke="#7a3f8f" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="757.3" cy="713.0" r="3.8" fill="#7a3f8f"/>
+<circle cx="889.9" cy="707.8" r="3.8" fill="#7a3f8f"/>
+<circle cx="944.5" cy="701.2" r="3.8" fill="#7a3f8f"/>
+<circle cx="968.0" cy="696.9" r="3.8" fill="#7a3f8f"/>
+<rect class="frame" x="1222" y="574" width="416" height="206" rx="4"/>
+<line x1="1230.0" y1="758.7" x2="1630.0" y2="758.7" class="grid" />
+<text x="1222.0" y="762.2" class="tick" text-anchor="end" >10 ms</text>
+<line x1="1230.0" y1="714.5" x2="1630.0" y2="714.5" class="grid" />
+<text x="1222.0" y="718.0" class="tick" text-anchor="end" >100 ms</text>
+<line x1="1230.0" y1="670.4" x2="1630.0" y2="670.4" class="grid" />
+<text x="1222.0" y="673.9" class="tick" text-anchor="end" >1 s</text>
+<line x1="1230.0" y1="626.2" x2="1630.0" y2="626.2" class="grid" />
+<text x="1222.0" y="629.7" class="tick" text-anchor="end" >10 s</text>
+<line x1="1230.0" y1="582.0" x2="1630.0" y2="582.0" class="grid" />
+<text x="1222.0" y="585.5" class="tick" text-anchor="end" >100 s</text>
+<line x1="1230.0" y1="772.0" x2="1630.0" y2="772.0" class="axis" />
+<line x1="1248.7" y1="772.0" x2="1248.7" y2="776.0" class="axis" />
+<text x="1248.7" y="789.0" class="tick" text-anchor="middle" >9k</text>
+<line x1="1300.4" y1="772.0" x2="1300.4" y2="776.0" class="axis" />
+<line x1="1352.0" y1="772.0" x2="1352.0" y2="776.0" class="axis" />
+<text x="1352.0" y="789.0" class="tick" text-anchor="middle" >36k</text>
+<line x1="1403.7" y1="772.0" x2="1403.7" y2="776.0" class="axis" />
+<line x1="1455.4" y1="772.0" x2="1455.4" y2="776.0" class="axis" />
+<text x="1455.4" y="789.0" class="tick" text-anchor="middle" >144k</text>
+<line x1="1507.0" y1="772.0" x2="1507.0" y2="776.0" class="axis" />
+<line x1="1558.7" y1="772.0" x2="1558.7" y2="776.0" class="axis" />
+<text x="1558.7" y="789.0" class="tick" text-anchor="middle" >576k</text>
+<line x1="1610.3" y1="772.0" x2="1610.3" y2="776.0" class="axis" />
+<text x="1610.3" y="789.0" class="tick" text-anchor="middle" >1.15M</text>
+<path d="M1248.7,727.4 L1300.4,607.8 L1352.0,597.2" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M1248.7,744.5 L1300.4,741.1 L1352.0,604.4" fill="none" stroke="#3b4656" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="1248.7" cy="727.4" r="3.8" fill="#3b4656"/>
+<circle cx="1300.4" cy="607.8" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<circle cx="1352.0" cy="597.2" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<path d="M1248.7,691.2 L1300.4,610.7 L1352.0,599.5" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M1248.7,697.7 L1300.4,706.4 L1352.0,604.9" fill="none" stroke="#d0362c" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="1248.7" cy="691.2" r="3.8" fill="#d0362c"/>
+<circle cx="1300.4" cy="610.7" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="1352.0" cy="599.5" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M1248.7,727.8 L1300.4,726.0 L1352.0,723.1 L1403.7,609.2 L1455.4,600.0" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M1248.7,738.3 L1300.4,737.6 L1352.0,737.0 L1403.7,698.7 L1455.4,608.8" fill="none" stroke="#12808d" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="1248.7" cy="727.8" r="3.8" fill="#12808d"/>
+<circle cx="1300.4" cy="726.0" r="3.8" fill="#12808d"/>
+<circle cx="1352.0" cy="723.1" r="3.8" fill="#12808d"/>
+<circle cx="1403.7" cy="609.2" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<circle cx="1455.4" cy="600.0" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1248.7,746.4 L1300.4,735.2 L1352.0,743.6 L1403.7,735.8 L1455.4,607.2" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M1248.7,755.2 L1300.4,755.2 L1352.0,752.2 L1403.7,742.7 L1455.4,609.2" fill="none" stroke="#c98500" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<circle cx="1248.7" cy="746.4" r="3.8" fill="#c98500"/>
+<circle cx="1300.4" cy="735.2" r="3.8" fill="#c98500"/>
+<circle cx="1352.0" cy="743.6" r="3.8" fill="#c98500"/>
+<circle cx="1403.7" cy="735.8" r="3.8" fill="#c98500"/>
+<circle cx="1455.4" cy="607.2" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M1455.4,725.7 L1507.0,714.9 L1558.7,610.7 L1610.3,599.5" fill="none" stroke="#12808d" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M1455.4,736.4 L1507.0,735.8 L1558.7,730.3 L1610.3,608.4" fill="none" stroke="#12808d" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<rect x="1451.4" y="721.7" width="8.0" height="8.0" fill="#12808d"/>
+<rect x="1503.0" y="710.9" width="8.0" height="8.0" fill="#12808d"/>
+<rect x="1554.5" y="606.5" width="8.4" height="8.4" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<rect x="1606.1" y="595.3" width="8.4" height="8.4" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1455.4,738.3 L1507.0,636.8" fill="none" stroke="#c98500" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+<path d="M1455.4,746.4 L1507.0,640.5" fill="none" stroke="#c98500" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+<rect x="1451.4" y="734.3" width="8.0" height="8.0" fill="#c98500"/>
+<rect x="1502.8" y="632.6" width="8.4" height="8.4" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M1455.4,669.3 L1460.8,674.7 L1455.4,680.1 L1450.0,674.7 Z" fill="#12808d"/>
+<path d="M1507.0,600.3 L1512.6,605.9 L1507.0,611.5 L1501.4,605.9 Z" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1507.0,602.8 L1512.6,608.4 L1507.0,614.0 L1501.4,608.4 Z" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1455.4,597.2 L1461.0,602.8 L1455.4,608.4 L1449.8,602.8 Z" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<text x="24.0" y="862.0" class="rowh" text-anchor="start" >Broker CPU</text>
+<text x="24.0" y="880.0" class="rowsub" text-anchor="start" >cores, system processes, 3</text>
+<text x="24.0" y="895.0" class="rowsub" text-anchor="start" >nodes summed</text>
+<rect class="frame" x="242" y="838" width="416" height="206" rx="4"/>
+<line x1="250.0" y1="1036.0" x2="650.0" y2="1036.0" class="grid" />
+<text x="242.0" y="1039.5" class="tick" text-anchor="end" >0</text>
+<line x1="250.0" y1="999.5" x2="650.0" y2="999.5" class="grid" />
+<text x="242.0" y="1003.0" class="tick" text-anchor="end" >10</text>
+<line x1="250.0" y1="962.9" x2="650.0" y2="962.9" class="grid" />
+<text x="242.0" y="966.4" class="tick" text-anchor="end" >20</text>
+<line x1="250.0" y1="926.4" x2="650.0" y2="926.4" class="grid" />
+<text x="242.0" y="929.9" class="tick" text-anchor="end" >30</text>
+<line x1="250.0" y1="889.8" x2="650.0" y2="889.8" class="grid" />
+<text x="242.0" y="893.3" class="tick" text-anchor="end" >40</text>
+<line x1="250.0" y1="853.3" x2="650.0" y2="853.3" class="grid" />
+<text x="242.0" y="856.8" class="tick" text-anchor="end" >50</text>
+<line x1="250.0" y1="1036.0" x2="650.0" y2="1036.0" class="axis" />
+<line x1="275.0" y1="1036.0" x2="275.0" y2="1040.0" class="axis" />
+<text x="275.0" y="1053.0" class="tick" text-anchor="middle" >300k</text>
+<line x1="370.2" y1="1036.0" x2="370.2" y2="1040.0" class="axis" />
+<text x="370.2" y="1053.0" class="tick" text-anchor="middle" >600k</text>
+<line x1="440.4" y1="1036.0" x2="440.4" y2="1040.0" class="axis" />
+<text x="440.4" y="1053.0" class="tick" text-anchor="middle" >1M</text>
+<line x1="535.6" y1="1036.0" x2="535.6" y2="1040.0" class="axis" />
+<text x="535.6" y="1053.0" class="tick" text-anchor="middle" >2M</text>
+<line x1="591.3" y1="1036.0" x2="591.3" y2="1040.0" class="axis" />
+<text x="591.3" y="1053.0" class="tick" text-anchor="middle" >3M</text>
+<line x1="630.8" y1="1036.0" x2="630.8" y2="1040.0" class="axis" />
+<text x="630.8" y="1053.0" class="tick" text-anchor="middle" >4M</text>
+<path d="M275.0,1022.8 L370.2,1013.0 L440.4,1000.6 L496.1,990.0 L535.6,983.0 L591.3,968.8 L630.8,965.1" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1022.8" r="3.8" fill="#3b4656"/>
+<circle cx="370.2" cy="1013.0" r="3.8" fill="#3b4656"/>
+<circle cx="440.4" cy="1000.6" r="3.8" fill="#3b4656"/>
+<circle cx="496.1" cy="990.0" r="3.8" fill="#3b4656"/>
+<circle cx="535.6" cy="983.0" r="3.8" fill="#3b4656"/>
+<circle cx="591.3" cy="968.8" r="3.8" fill="#3b4656"/>
+<circle cx="630.8" cy="965.1" r="3.8" fill="#3b4656"/>
+<path d="M275.0,1021.0 L370.2,1005.2 L440.4,984.2 L496.1,964.1 L535.6,949.9 L591.3,919.5 L630.8,898.2" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1021.0" r="3.8" fill="#d0362c"/>
+<circle cx="370.2" cy="1005.2" r="3.8" fill="#d0362c"/>
+<circle cx="440.4" cy="984.2" r="3.8" fill="#d0362c"/>
+<circle cx="496.1" cy="964.1" r="3.8" fill="#d0362c"/>
+<circle cx="535.6" cy="949.9" r="3.8" fill="#d0362c"/>
+<circle cx="591.3" cy="919.5" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="630.8" cy="898.2" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M275.0,1026.1 L370.2,1019.6 L440.4,1010.1 L496.1,999.5 L535.6,989.6" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1026.1" r="3.8" fill="#12808d"/>
+<circle cx="370.2" cy="1019.6" r="3.8" fill="#12808d"/>
+<circle cx="440.4" cy="1010.1" r="3.8" fill="#12808d"/>
+<circle cx="496.1" cy="999.5" r="3.8" fill="#12808d"/>
+<circle cx="535.6" cy="989.6" r="3.8" fill="#12808d"/>
+<path d="M275.0,1003.0 L370.2,988.4 L440.4,973.1 L496.1,945.2 L535.6,936.7" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1003.0" r="3.8" fill="#c98500"/>
+<circle cx="370.2" cy="988.4" r="3.8" fill="#c98500"/>
+<circle cx="440.4" cy="973.1" r="3.8" fill="#c98500"/>
+<circle cx="496.1" cy="945.2" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<circle cx="535.6" cy="936.7" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M275.0,996.2 L370.2,975.0 L440.4,955.2 L496.1,951.2 L535.6,964.0" fill="none" stroke="#7a3f8f" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="996.2" r="3.8" fill="#7a3f8f"/>
+<circle cx="370.2" cy="975.0" r="3.8" fill="#7a3f8f"/>
+<circle cx="440.4" cy="955.2" r="3.8" fill="#7a3f8f"/>
+<circle cx="496.1" cy="951.2" r="3.8" fill="#7a3f8f"/>
+<circle cx="535.6" cy="964.0" r="4.3" fill="#ffffff" stroke="#7a3f8f" stroke-width="2"/>
+<rect class="frame" x="732" y="838" width="416" height="206" rx="4"/>
+<line x1="740.0" y1="1036.0" x2="1140.0" y2="1036.0" class="grid" />
+<text x="732.0" y="1039.5" class="tick" text-anchor="end" >0</text>
+<line x1="740.0" y1="999.5" x2="1140.0" y2="999.5" class="grid" />
+<text x="732.0" y="1003.0" class="tick" text-anchor="end" >10</text>
+<line x1="740.0" y1="962.9" x2="1140.0" y2="962.9" class="grid" />
+<text x="732.0" y="966.4" class="tick" text-anchor="end" >20</text>
+<line x1="740.0" y1="926.4" x2="1140.0" y2="926.4" class="grid" />
+<text x="732.0" y="929.9" class="tick" text-anchor="end" >30</text>
+<line x1="740.0" y1="889.8" x2="1140.0" y2="889.8" class="grid" />
+<text x="732.0" y="893.3" class="tick" text-anchor="end" >40</text>
+<line x1="740.0" y1="853.3" x2="1140.0" y2="853.3" class="grid" />
+<text x="732.0" y="856.8" class="tick" text-anchor="end" >50</text>
+<line x1="740.0" y1="1036.0" x2="1140.0" y2="1036.0" class="axis" />
+<line x1="757.3" y1="1036.0" x2="757.3" y2="1040.0" class="axis" />
+<text x="757.3" y="1053.0" class="tick" text-anchor="middle" >200</text>
+<line x1="835.4" y1="1036.0" x2="835.4" y2="1040.0" class="axis" />
+<text x="835.4" y="1053.0" class="tick" text-anchor="middle" >2k</text>
+<line x1="889.9" y1="1036.0" x2="889.9" y2="1040.0" class="axis" />
+<text x="889.9" y="1053.0" class="tick" text-anchor="middle" >10k</text>
+<line x1="968.0" y1="1036.0" x2="968.0" y2="1040.0" class="axis" />
+<text x="968.0" y="1053.0" class="tick" text-anchor="middle" >100k</text>
+<line x1="1046.0" y1="1036.0" x2="1046.0" y2="1040.0" class="axis" />
+<text x="1046.0" y="1053.0" class="tick" text-anchor="middle" >1M</text>
+<line x1="1124.1" y1="1036.0" x2="1124.1" y2="1040.0" class="axis" />
+<text x="1124.1" y="1053.0" class="tick" text-anchor="middle" >10M</text>
+<path d="M757.3,1000.6 L835.4,980.1 L889.9,932.6 L944.5,929.3 L968.0,917.6" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1000.6" r="3.8" fill="#3b4656"/>
+<circle cx="835.4" cy="980.1" r="3.8" fill="#3b4656"/>
+<circle cx="889.9" cy="932.6" r="3.8" fill="#3b4656"/>
+<circle cx="944.5" cy="929.3" r="3.8" fill="#3b4656"/>
+<circle cx="968.0" cy="917.6" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<path d="M757.3,984.2 L835.4,976.8 L889.9,917.3 L944.5,907.9 L968.0,894.7" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="984.2" r="3.8" fill="#d0362c"/>
+<circle cx="835.4" cy="976.8" r="3.8" fill="#d0362c"/>
+<circle cx="889.9" cy="917.3" r="3.8" fill="#d0362c"/>
+<circle cx="944.5" cy="907.9" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="968.0" cy="894.7" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M757.3,1010.1 L835.4,1007.5 L889.9,999.1 L944.5,899.3 L968.0,896.4" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1010.1" r="3.8" fill="#12808d"/>
+<circle cx="835.4" cy="1007.5" r="3.8" fill="#12808d"/>
+<circle cx="889.9" cy="999.1" r="3.8" fill="#12808d"/>
+<circle cx="944.5" cy="899.3" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<circle cx="968.0" cy="896.4" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M757.3,973.1 L889.9,968.9 L944.5,970.1 L968.0,969.1 L1046.0,969.2 L1100.6,969.2 L1124.1,972.8" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="973.1" r="3.8" fill="#c98500"/>
+<circle cx="889.9" cy="968.9" r="3.8" fill="#c98500"/>
+<circle cx="944.5" cy="970.1" r="3.8" fill="#c98500"/>
+<circle cx="968.0" cy="969.1" r="3.8" fill="#c98500"/>
+<circle cx="1046.0" cy="969.2" r="3.8" fill="#c98500"/>
+<circle cx="1100.6" cy="969.2" r="3.8" fill="#c98500"/>
+<circle cx="1124.1" cy="972.8" r="3.8" fill="#c98500"/>
+<path d="M757.3,955.2 L889.9,943.9 L944.5,901.2 L968.0,854.4" fill="none" stroke="#7a3f8f" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="955.2" r="3.8" fill="#7a3f8f"/>
+<circle cx="889.9" cy="943.9" r="3.8" fill="#7a3f8f"/>
+<circle cx="944.5" cy="901.2" r="3.8" fill="#7a3f8f"/>
+<circle cx="968.0" cy="854.4" r="3.8" fill="#7a3f8f"/>
+<rect class="frame" x="1222" y="838" width="416" height="206" rx="4"/>
+<line x1="1230.0" y1="1036.0" x2="1630.0" y2="1036.0" class="grid" />
+<text x="1222.0" y="1039.5" class="tick" text-anchor="end" >0</text>
+<line x1="1230.0" y1="999.5" x2="1630.0" y2="999.5" class="grid" />
+<text x="1222.0" y="1003.0" class="tick" text-anchor="end" >10</text>
+<line x1="1230.0" y1="962.9" x2="1630.0" y2="962.9" class="grid" />
+<text x="1222.0" y="966.4" class="tick" text-anchor="end" >20</text>
+<line x1="1230.0" y1="926.4" x2="1630.0" y2="926.4" class="grid" />
+<text x="1222.0" y="929.9" class="tick" text-anchor="end" >30</text>
+<line x1="1230.0" y1="889.8" x2="1630.0" y2="889.8" class="grid" />
+<text x="1222.0" y="893.3" class="tick" text-anchor="end" >40</text>
+<line x1="1230.0" y1="853.3" x2="1630.0" y2="853.3" class="grid" />
+<text x="1222.0" y="856.8" class="tick" text-anchor="end" >50</text>
+<line x1="1230.0" y1="1036.0" x2="1630.0" y2="1036.0" class="axis" />
+<line x1="1248.7" y1="1036.0" x2="1248.7" y2="1040.0" class="axis" />
+<text x="1248.7" y="1053.0" class="tick" text-anchor="middle" >9k</text>
+<line x1="1300.4" y1="1036.0" x2="1300.4" y2="1040.0" class="axis" />
+<line x1="1352.0" y1="1036.0" x2="1352.0" y2="1040.0" class="axis" />
+<text x="1352.0" y="1053.0" class="tick" text-anchor="middle" >36k</text>
+<line x1="1403.7" y1="1036.0" x2="1403.7" y2="1040.0" class="axis" />
+<line x1="1455.4" y1="1036.0" x2="1455.4" y2="1040.0" class="axis" />
+<text x="1455.4" y="1053.0" class="tick" text-anchor="middle" >144k</text>
+<line x1="1507.0" y1="1036.0" x2="1507.0" y2="1040.0" class="axis" />
+<line x1="1558.7" y1="1036.0" x2="1558.7" y2="1040.0" class="axis" />
+<text x="1558.7" y="1053.0" class="tick" text-anchor="middle" >576k</text>
+<line x1="1610.3" y1="1036.0" x2="1610.3" y2="1040.0" class="axis" />
+<text x="1610.3" y="1053.0" class="tick" text-anchor="middle" >1.15M</text>
+<path d="M1248.7,1009.7 L1300.4,992.5 L1352.0,995.4" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1009.7" r="3.8" fill="#3b4656"/>
+<circle cx="1300.4" cy="992.5" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<circle cx="1352.0" cy="995.4" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<path d="M1248.7,1015.2 L1300.4,998.4 L1352.0,1000.2" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1015.2" r="3.8" fill="#d0362c"/>
+<circle cx="1300.4" cy="998.4" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="1352.0" cy="1000.2" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M1248.7,1019.9 L1300.4,1010.8 L1352.0,993.6 L1403.7,960.7 L1455.4,949.8" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1019.9" r="3.8" fill="#12808d"/>
+<circle cx="1300.4" cy="1010.8" r="3.8" fill="#12808d"/>
+<circle cx="1352.0" cy="993.6" r="3.8" fill="#12808d"/>
+<circle cx="1403.7" cy="960.7" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<circle cx="1455.4" cy="949.8" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1248.7,1020.3 L1300.4,1011.2 L1352.0,1000.2 L1403.7,988.9 L1455.4,987.0" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1020.3" r="3.8" fill="#c98500"/>
+<circle cx="1300.4" cy="1011.2" r="3.8" fill="#c98500"/>
+<circle cx="1352.0" cy="1000.2" r="3.8" fill="#c98500"/>
+<circle cx="1403.7" cy="988.9" r="3.8" fill="#c98500"/>
+<circle cx="1455.4" cy="987.0" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M1455.4,1012.2 L1507.0,996.5 L1558.7,967.3 L1610.3,954.9" fill="none" stroke="#12808d" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+<rect x="1451.4" y="1008.2" width="8.0" height="8.0" fill="#12808d"/>
+<rect x="1503.0" y="992.5" width="8.0" height="8.0" fill="#12808d"/>
+<rect x="1554.5" y="963.1" width="8.4" height="8.4" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<rect x="1606.1" y="950.7" width="8.4" height="8.4" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1455.4,1002.8 L1507.0,990.7" fill="none" stroke="#c98500" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+<rect x="1451.4" y="998.8" width="8.0" height="8.0" fill="#c98500"/>
+<rect x="1502.8" y="986.5" width="8.4" height="8.4" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M1455.4,908.9 L1460.8,914.3 L1455.4,919.7 L1450.0,914.3 Z" fill="#12808d"/>
+<path d="M1507.0,896.3 L1512.6,901.9 L1507.0,907.5 L1501.4,901.9 Z" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1507.0,884.2 L1512.6,889.8 L1507.0,895.4 L1501.4,889.8 Z" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1455.4,988.7 L1461.0,994.3 L1455.4,999.9 L1449.8,994.3 Z" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<text x="24.0" y="1126.0" class="rowh" text-anchor="start" >Broker memory</text>
+<text x="24.0" y="1144.0" class="rowsub" text-anchor="start" >GB resident on the busiest</text>
+<text x="24.0" y="1159.0" class="rowsub" text-anchor="start" >node</text>
+<rect class="frame" x="242" y="1102" width="416" height="206" rx="4"/>
+<line x1="250.0" y1="1300.0" x2="650.0" y2="1300.0" class="grid" />
+<text x="242.0" y="1303.5" class="tick" text-anchor="end" >0</text>
+<line x1="250.0" y1="1266.1" x2="650.0" y2="1266.1" class="grid" />
+<text x="242.0" y="1269.6" class="tick" text-anchor="end" >5</text>
+<line x1="250.0" y1="1232.1" x2="650.0" y2="1232.1" class="grid" />
+<text x="242.0" y="1235.6" class="tick" text-anchor="end" >10</text>
+<line x1="250.0" y1="1198.2" x2="650.0" y2="1198.2" class="grid" />
+<text x="242.0" y="1201.7" class="tick" text-anchor="end" >15</text>
+<line x1="250.0" y1="1164.3" x2="650.0" y2="1164.3" class="grid" />
+<text x="242.0" y="1167.8" class="tick" text-anchor="end" >20</text>
+<line x1="250.0" y1="1130.4" x2="650.0" y2="1130.4" class="grid" />
+<text x="242.0" y="1133.9" class="tick" text-anchor="end" >25</text>
+<line x1="250.0" y1="1300.0" x2="650.0" y2="1300.0" class="axis" />
+<line x1="275.0" y1="1300.0" x2="275.0" y2="1304.0" class="axis" />
+<text x="275.0" y="1317.0" class="tick" text-anchor="middle" >300k</text>
+<line x1="370.2" y1="1300.0" x2="370.2" y2="1304.0" class="axis" />
+<text x="370.2" y="1317.0" class="tick" text-anchor="middle" >600k</text>
+<line x1="440.4" y1="1300.0" x2="440.4" y2="1304.0" class="axis" />
+<text x="440.4" y="1317.0" class="tick" text-anchor="middle" >1M</text>
+<line x1="535.6" y1="1300.0" x2="535.6" y2="1304.0" class="axis" />
+<text x="535.6" y="1317.0" class="tick" text-anchor="middle" >2M</text>
+<line x1="591.3" y1="1300.0" x2="591.3" y2="1304.0" class="axis" />
+<text x="591.3" y="1317.0" class="tick" text-anchor="middle" >3M</text>
+<line x1="630.8" y1="1300.0" x2="630.8" y2="1304.0" class="axis" />
+<text x="630.8" y="1317.0" class="tick" text-anchor="middle" >4M</text>
+<path d="M275.0,1255.9 L370.2,1255.9 L440.4,1255.9 L496.1,1255.9 L535.6,1255.2 L591.3,1255.2 L630.8,1254.5" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1255.9" r="3.8" fill="#3b4656"/>
+<circle cx="370.2" cy="1255.9" r="3.8" fill="#3b4656"/>
+<circle cx="440.4" cy="1255.9" r="3.8" fill="#3b4656"/>
+<circle cx="496.1" cy="1255.9" r="3.8" fill="#3b4656"/>
+<circle cx="535.6" cy="1255.2" r="3.8" fill="#3b4656"/>
+<circle cx="591.3" cy="1255.2" r="3.8" fill="#3b4656"/>
+<circle cx="630.8" cy="1254.5" r="3.8" fill="#3b4656"/>
+<path d="M275.0,1243.0 L370.2,1223.3 L440.4,1195.5 L496.1,1162.2 L535.6,1127.0 L591.3,1116.1 L630.8,1116.1" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1243.0" r="3.8" fill="#d0362c"/>
+<circle cx="370.2" cy="1223.3" r="3.8" fill="#d0362c"/>
+<circle cx="440.4" cy="1195.5" r="3.8" fill="#d0362c"/>
+<circle cx="496.1" cy="1162.2" r="3.8" fill="#d0362c"/>
+<circle cx="535.6" cy="1127.0" r="3.8" fill="#d0362c"/>
+<circle cx="591.3" cy="1116.1" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="630.8" cy="1116.1" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M275.0,1214.5 L370.2,1213.8 L440.4,1213.1 L496.1,1212.5 L535.6,1211.1" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1214.5" r="3.8" fill="#12808d"/>
+<circle cx="370.2" cy="1213.8" r="3.8" fill="#12808d"/>
+<circle cx="440.4" cy="1213.1" r="3.8" fill="#12808d"/>
+<circle cx="496.1" cy="1212.5" r="3.8" fill="#12808d"/>
+<circle cx="535.6" cy="1211.1" r="3.8" fill="#12808d"/>
+<path d="M275.0,1289.2 L370.2,1280.2 L440.4,1269.5 L496.1,1249.4 L535.6,1221.8" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1289.2" r="3.8" fill="#c98500"/>
+<circle cx="370.2" cy="1280.2" r="3.8" fill="#c98500"/>
+<circle cx="440.4" cy="1269.5" r="3.8" fill="#c98500"/>
+<circle cx="496.1" cy="1249.4" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<circle cx="535.6" cy="1221.8" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M275.0,1287.1 L370.2,1277.6 L440.4,1265.4 L496.1,1248.4 L535.6,1227.4" fill="none" stroke="#7a3f8f" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1287.1" r="3.8" fill="#7a3f8f"/>
+<circle cx="370.2" cy="1277.6" r="3.8" fill="#7a3f8f"/>
+<circle cx="440.4" cy="1265.4" r="3.8" fill="#7a3f8f"/>
+<circle cx="496.1" cy="1248.4" r="3.8" fill="#7a3f8f"/>
+<circle cx="535.6" cy="1227.4" r="4.3" fill="#ffffff" stroke="#7a3f8f" stroke-width="2"/>
+<rect class="frame" x="732" y="1102" width="416" height="206" rx="4"/>
+<line x1="740.0" y1="1300.0" x2="1140.0" y2="1300.0" class="grid" />
+<text x="732.0" y="1303.5" class="tick" text-anchor="end" >0</text>
+<line x1="740.0" y1="1266.1" x2="1140.0" y2="1266.1" class="grid" />
+<text x="732.0" y="1269.6" class="tick" text-anchor="end" >5</text>
+<line x1="740.0" y1="1232.1" x2="1140.0" y2="1232.1" class="grid" />
+<text x="732.0" y="1235.6" class="tick" text-anchor="end" >10</text>
+<line x1="740.0" y1="1198.2" x2="1140.0" y2="1198.2" class="grid" />
+<text x="732.0" y="1201.7" class="tick" text-anchor="end" >15</text>
+<line x1="740.0" y1="1164.3" x2="1140.0" y2="1164.3" class="grid" />
+<text x="732.0" y="1167.8" class="tick" text-anchor="end" >20</text>
+<line x1="740.0" y1="1130.4" x2="1140.0" y2="1130.4" class="grid" />
+<text x="732.0" y="1133.9" class="tick" text-anchor="end" >25</text>
+<line x1="740.0" y1="1300.0" x2="1140.0" y2="1300.0" class="axis" />
+<line x1="757.3" y1="1300.0" x2="757.3" y2="1304.0" class="axis" />
+<text x="757.3" y="1317.0" class="tick" text-anchor="middle" >200</text>
+<line x1="835.4" y1="1300.0" x2="835.4" y2="1304.0" class="axis" />
+<text x="835.4" y="1317.0" class="tick" text-anchor="middle" >2k</text>
+<line x1="889.9" y1="1300.0" x2="889.9" y2="1304.0" class="axis" />
+<text x="889.9" y="1317.0" class="tick" text-anchor="middle" >10k</text>
+<line x1="968.0" y1="1300.0" x2="968.0" y2="1304.0" class="axis" />
+<text x="968.0" y="1317.0" class="tick" text-anchor="middle" >100k</text>
+<line x1="1046.0" y1="1300.0" x2="1046.0" y2="1304.0" class="axis" />
+<text x="1046.0" y="1317.0" class="tick" text-anchor="middle" >1M</text>
+<line x1="1124.1" y1="1300.0" x2="1124.1" y2="1304.0" class="axis" />
+<text x="1124.1" y="1317.0" class="tick" text-anchor="middle" >10M</text>
+<path d="M757.3,1255.9 L835.4,1255.2 L889.9,1254.5 L944.5,1221.3 L968.0,1217.9" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1255.9" r="3.8" fill="#3b4656"/>
+<circle cx="835.4" cy="1255.2" r="3.8" fill="#3b4656"/>
+<circle cx="889.9" cy="1254.5" r="3.8" fill="#3b4656"/>
+<circle cx="944.5" cy="1221.3" r="3.8" fill="#3b4656"/>
+<circle cx="968.0" cy="1217.9" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<path d="M757.3,1195.5 L835.4,1194.8 L889.9,1187.4 L944.5,1178.5 L968.0,1129.0" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1195.5" r="3.8" fill="#d0362c"/>
+<circle cx="835.4" cy="1194.8" r="3.8" fill="#d0362c"/>
+<circle cx="889.9" cy="1187.4" r="3.8" fill="#d0362c"/>
+<circle cx="944.5" cy="1178.5" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="968.0" cy="1129.0" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M757.3,1213.1 L835.4,1211.1 L889.9,1207.0 L944.5,1185.3 L968.0,1192.8" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1213.1" r="3.8" fill="#12808d"/>
+<circle cx="835.4" cy="1211.1" r="3.8" fill="#12808d"/>
+<circle cx="889.9" cy="1207.0" r="3.8" fill="#12808d"/>
+<circle cx="944.5" cy="1185.3" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<circle cx="968.0" cy="1192.8" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M757.3,1269.5 L889.9,1264.3 L944.5,1264.7 L968.0,1264.6 L1046.0,1258.0 L1100.6,1212.1 L1124.1,1152.3" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1269.5" r="3.8" fill="#c98500"/>
+<circle cx="889.9" cy="1264.3" r="3.8" fill="#c98500"/>
+<circle cx="944.5" cy="1264.7" r="3.8" fill="#c98500"/>
+<circle cx="968.0" cy="1264.6" r="3.8" fill="#c98500"/>
+<circle cx="1046.0" cy="1258.0" r="3.8" fill="#c98500"/>
+<circle cx="1100.6" cy="1212.1" r="3.8" fill="#c98500"/>
+<circle cx="1124.1" cy="1152.3" r="3.8" fill="#c98500"/>
+<path d="M757.3,1265.4 L889.9,1251.8 L944.5,1183.3 L968.0,1136.5" fill="none" stroke="#7a3f8f" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1265.4" r="3.8" fill="#7a3f8f"/>
+<circle cx="889.9" cy="1251.8" r="3.8" fill="#7a3f8f"/>
+<circle cx="944.5" cy="1183.3" r="3.8" fill="#7a3f8f"/>
+<circle cx="968.0" cy="1136.5" r="3.8" fill="#7a3f8f"/>
+<rect class="frame" x="1222" y="1102" width="416" height="206" rx="4"/>
+<line x1="1230.0" y1="1300.0" x2="1630.0" y2="1300.0" class="grid" />
+<text x="1222.0" y="1303.5" class="tick" text-anchor="end" >0</text>
+<line x1="1230.0" y1="1266.1" x2="1630.0" y2="1266.1" class="grid" />
+<text x="1222.0" y="1269.6" class="tick" text-anchor="end" >5</text>
+<line x1="1230.0" y1="1232.1" x2="1630.0" y2="1232.1" class="grid" />
+<text x="1222.0" y="1235.6" class="tick" text-anchor="end" >10</text>
+<line x1="1230.0" y1="1198.2" x2="1630.0" y2="1198.2" class="grid" />
+<text x="1222.0" y="1201.7" class="tick" text-anchor="end" >15</text>
+<line x1="1230.0" y1="1164.3" x2="1630.0" y2="1164.3" class="grid" />
+<text x="1222.0" y="1167.8" class="tick" text-anchor="end" >20</text>
+<line x1="1230.0" y1="1130.4" x2="1630.0" y2="1130.4" class="grid" />
+<text x="1222.0" y="1133.9" class="tick" text-anchor="end" >25</text>
+<line x1="1230.0" y1="1300.0" x2="1630.0" y2="1300.0" class="axis" />
+<line x1="1248.7" y1="1300.0" x2="1248.7" y2="1304.0" class="axis" />
+<text x="1248.7" y="1317.0" class="tick" text-anchor="middle" >9k</text>
+<line x1="1300.4" y1="1300.0" x2="1300.4" y2="1304.0" class="axis" />
+<line x1="1352.0" y1="1300.0" x2="1352.0" y2="1304.0" class="axis" />
+<text x="1352.0" y="1317.0" class="tick" text-anchor="middle" >36k</text>
+<line x1="1403.7" y1="1300.0" x2="1403.7" y2="1304.0" class="axis" />
+<line x1="1455.4" y1="1300.0" x2="1455.4" y2="1304.0" class="axis" />
+<text x="1455.4" y="1317.0" class="tick" text-anchor="middle" >144k</text>
+<line x1="1507.0" y1="1300.0" x2="1507.0" y2="1304.0" class="axis" />
+<line x1="1558.7" y1="1300.0" x2="1558.7" y2="1304.0" class="axis" />
+<text x="1558.7" y="1317.0" class="tick" text-anchor="middle" >576k</text>
+<line x1="1610.3" y1="1300.0" x2="1610.3" y2="1304.0" class="axis" />
+<text x="1610.3" y="1317.0" class="tick" text-anchor="middle" >1.15M</text>
+<path d="M1248.7,1255.2 L1300.4,1254.5 L1352.0,1255.2" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1255.2" r="3.8" fill="#3b4656"/>
+<circle cx="1300.4" cy="1254.5" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<circle cx="1352.0" cy="1255.2" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<path d="M1248.7,1260.6 L1300.4,1258.6 L1352.0,1257.9" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1260.6" r="3.8" fill="#d0362c"/>
+<circle cx="1300.4" cy="1258.6" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="1352.0" cy="1257.9" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M1248.7,1222.6 L1300.4,1220.6 L1352.0,1217.9 L1403.7,1213.8 L1455.4,1209.8" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1222.6" r="3.8" fill="#12808d"/>
+<circle cx="1300.4" cy="1220.6" r="3.8" fill="#12808d"/>
+<circle cx="1352.0" cy="1217.9" r="3.8" fill="#12808d"/>
+<circle cx="1403.7" cy="1213.8" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<circle cx="1455.4" cy="1209.8" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1248.7,1297.3 L1300.4,1295.9 L1352.0,1293.2 L1403.7,1288.5 L1455.4,1283.7" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1297.3" r="3.8" fill="#c98500"/>
+<circle cx="1300.4" cy="1295.9" r="3.8" fill="#c98500"/>
+<circle cx="1352.0" cy="1293.2" r="3.8" fill="#c98500"/>
+<circle cx="1403.7" cy="1288.5" r="3.8" fill="#c98500"/>
+<circle cx="1455.4" cy="1283.7" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M1455.4,1213.1 L1507.0,1212.5 L1558.7,1211.1 L1610.3,1198.9" fill="none" stroke="#12808d" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+<rect x="1451.4" y="1209.1" width="8.0" height="8.0" fill="#12808d"/>
+<rect x="1503.0" y="1208.5" width="8.0" height="8.0" fill="#12808d"/>
+<rect x="1554.5" y="1206.9" width="8.4" height="8.4" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<rect x="1606.1" y="1194.7" width="8.4" height="8.4" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1455.4,1287.1 L1507.0,1271.5" fill="none" stroke="#c98500" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+<rect x="1451.4" y="1283.1" width="8.0" height="8.0" fill="#c98500"/>
+<rect x="1502.8" y="1267.3" width="8.4" height="8.4" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M1455.4,1203.7 L1460.8,1209.1 L1455.4,1214.5 L1450.0,1209.1 Z" fill="#12808d"/>
+<path d="M1507.0,1198.7 L1512.6,1204.3 L1507.0,1209.9 L1501.4,1204.3 Z" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1507.0,1198.7 L1512.6,1204.3 L1507.0,1209.9 L1501.4,1204.3 Z" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1455.4,1278.8 L1461.0,1284.4 L1455.4,1290.0 L1449.8,1284.4 Z" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<text x="24.0" y="1390.0" class="rowh" text-anchor="start" >Disk writes</text>
+<text x="24.0" y="1408.0" class="rowsub" text-anchor="start" >MB/s per node, mean of the</text>
+<text x="24.0" y="1423.0" class="rowsub" text-anchor="start" >3</text>
+<rect class="frame" x="242" y="1366" width="416" height="206" rx="4"/>
+<line x1="250.0" y1="1564.0" x2="650.0" y2="1564.0" class="grid" />
+<text x="242.0" y="1567.5" class="tick" text-anchor="end" >0</text>
+<line x1="250.0" y1="1516.5" x2="650.0" y2="1516.5" class="grid" />
+<text x="242.0" y="1520.0" class="tick" text-anchor="end" >200</text>
+<line x1="250.0" y1="1469.0" x2="650.0" y2="1469.0" class="grid" />
+<text x="242.0" y="1472.5" class="tick" text-anchor="end" >400</text>
+<line x1="250.0" y1="1421.5" x2="650.0" y2="1421.5" class="grid" />
+<text x="242.0" y="1425.0" class="tick" text-anchor="end" >600</text>
+<line x1="250.0" y1="1374.0" x2="650.0" y2="1374.0" class="grid" />
+<text x="242.0" y="1377.5" class="tick" text-anchor="end" >800</text>
+<line x1="250.0" y1="1564.0" x2="650.0" y2="1564.0" class="axis" />
+<line x1="275.0" y1="1564.0" x2="275.0" y2="1568.0" class="axis" />
+<text x="275.0" y="1581.0" class="tick" text-anchor="middle" >300k</text>
+<line x1="370.2" y1="1564.0" x2="370.2" y2="1568.0" class="axis" />
+<text x="370.2" y="1581.0" class="tick" text-anchor="middle" >600k</text>
+<line x1="440.4" y1="1564.0" x2="440.4" y2="1568.0" class="axis" />
+<text x="440.4" y="1581.0" class="tick" text-anchor="middle" >1M</text>
+<line x1="535.6" y1="1564.0" x2="535.6" y2="1568.0" class="axis" />
+<text x="535.6" y="1581.0" class="tick" text-anchor="middle" >2M</text>
+<line x1="591.3" y1="1564.0" x2="591.3" y2="1568.0" class="axis" />
+<text x="591.3" y="1581.0" class="tick" text-anchor="middle" >3M</text>
+<line x1="630.8" y1="1564.0" x2="630.8" y2="1568.0" class="axis" />
+<text x="630.8" y="1581.0" class="tick" text-anchor="middle" >4M</text>
+<text x="450.0" y="1600.0" class="axl" text-anchor="middle" >offered rate (msg/s, log scale)</text>
+<path d="M275.0,1554.7 L370.2,1543.8 L440.4,1529.3 L496.1,1511.5 L535.6,1493.7 L591.3,1459.5 L630.8,1426.2" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1554.7" r="3.8" fill="#3b4656"/>
+<circle cx="370.2" cy="1543.8" r="3.8" fill="#3b4656"/>
+<circle cx="440.4" cy="1529.3" r="3.8" fill="#3b4656"/>
+<circle cx="496.1" cy="1511.5" r="3.8" fill="#3b4656"/>
+<circle cx="535.6" cy="1493.7" r="3.8" fill="#3b4656"/>
+<circle cx="591.3" cy="1459.5" r="3.8" fill="#3b4656"/>
+<circle cx="630.8" cy="1426.2" r="3.8" fill="#3b4656"/>
+<path d="M275.0,1539.3 L370.2,1522.7 L440.4,1500.1 L496.1,1475.4 L535.6,1452.8 L591.3,1421.7 L630.8,1388.0" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1539.3" r="3.8" fill="#d0362c"/>
+<circle cx="370.2" cy="1522.7" r="3.8" fill="#d0362c"/>
+<circle cx="440.4" cy="1500.1" r="3.8" fill="#d0362c"/>
+<circle cx="496.1" cy="1475.4" r="3.8" fill="#d0362c"/>
+<circle cx="535.6" cy="1452.8" r="3.8" fill="#d0362c"/>
+<circle cx="591.3" cy="1421.7" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="630.8" cy="1388.0" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M275.0,1538.8 L370.2,1517.5 L440.4,1491.3 L496.1,1456.2 L535.6,1422.5" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1538.8" r="3.8" fill="#12808d"/>
+<circle cx="370.2" cy="1517.5" r="3.8" fill="#12808d"/>
+<circle cx="440.4" cy="1491.3" r="3.8" fill="#12808d"/>
+<circle cx="496.1" cy="1456.2" r="3.8" fill="#12808d"/>
+<circle cx="535.6" cy="1422.5" r="3.8" fill="#12808d"/>
+<path d="M275.0,1532.5 L370.2,1520.5 L440.4,1505.0 L496.1,1481.2 L535.6,1482.1" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1532.5" r="3.8" fill="#c98500"/>
+<circle cx="370.2" cy="1520.5" r="3.8" fill="#c98500"/>
+<circle cx="440.4" cy="1505.0" r="3.8" fill="#c98500"/>
+<circle cx="496.1" cy="1481.2" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<circle cx="535.6" cy="1482.1" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M275.0,1544.3 L370.2,1537.4 L440.4,1526.2 L496.1,1512.5 L535.6,1509.8" fill="none" stroke="#7a3f8f" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="275.0" cy="1544.3" r="3.8" fill="#7a3f8f"/>
+<circle cx="370.2" cy="1537.4" r="3.8" fill="#7a3f8f"/>
+<circle cx="440.4" cy="1526.2" r="3.8" fill="#7a3f8f"/>
+<circle cx="496.1" cy="1512.5" r="3.8" fill="#7a3f8f"/>
+<circle cx="535.6" cy="1509.8" r="4.3" fill="#ffffff" stroke="#7a3f8f" stroke-width="2"/>
+<rect class="frame" x="732" y="1366" width="416" height="206" rx="4"/>
+<line x1="740.0" y1="1564.0" x2="1140.0" y2="1564.0" class="grid" />
+<text x="732.0" y="1567.5" class="tick" text-anchor="end" >0</text>
+<line x1="740.0" y1="1516.5" x2="1140.0" y2="1516.5" class="grid" />
+<text x="732.0" y="1520.0" class="tick" text-anchor="end" >200</text>
+<line x1="740.0" y1="1469.0" x2="1140.0" y2="1469.0" class="grid" />
+<text x="732.0" y="1472.5" class="tick" text-anchor="end" >400</text>
+<line x1="740.0" y1="1421.5" x2="1140.0" y2="1421.5" class="grid" />
+<text x="732.0" y="1425.0" class="tick" text-anchor="end" >600</text>
+<line x1="740.0" y1="1374.0" x2="1140.0" y2="1374.0" class="grid" />
+<text x="732.0" y="1377.5" class="tick" text-anchor="end" >800</text>
+<line x1="740.0" y1="1564.0" x2="1140.0" y2="1564.0" class="axis" />
+<line x1="757.3" y1="1564.0" x2="757.3" y2="1568.0" class="axis" />
+<text x="757.3" y="1581.0" class="tick" text-anchor="middle" >200</text>
+<line x1="835.4" y1="1564.0" x2="835.4" y2="1568.0" class="axis" />
+<text x="835.4" y="1581.0" class="tick" text-anchor="middle" >2k</text>
+<line x1="889.9" y1="1564.0" x2="889.9" y2="1568.0" class="axis" />
+<text x="889.9" y="1581.0" class="tick" text-anchor="middle" >10k</text>
+<line x1="968.0" y1="1564.0" x2="968.0" y2="1568.0" class="axis" />
+<text x="968.0" y="1581.0" class="tick" text-anchor="middle" >100k</text>
+<line x1="1046.0" y1="1564.0" x2="1046.0" y2="1568.0" class="axis" />
+<text x="1046.0" y="1581.0" class="tick" text-anchor="middle" >1M</text>
+<line x1="1124.1" y1="1564.0" x2="1124.1" y2="1568.0" class="axis" />
+<text x="1124.1" y="1581.0" class="tick" text-anchor="middle" >10M</text>
+<text x="940.0" y="1600.0" class="axl" text-anchor="middle" >partitions (log scale)</text>
+<path d="M757.3,1529.3 L835.4,1527.0 L889.9,1521.0 L944.5,1485.9 L968.0,1514.6" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1529.3" r="3.8" fill="#3b4656"/>
+<circle cx="835.4" cy="1527.0" r="3.8" fill="#3b4656"/>
+<circle cx="889.9" cy="1521.0" r="3.8" fill="#3b4656"/>
+<circle cx="944.5" cy="1485.9" r="3.8" fill="#3b4656"/>
+<circle cx="968.0" cy="1514.6" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<path d="M757.3,1500.1 L835.4,1503.9 L889.9,1502.5 L944.5,1508.9 L968.0,1498.5" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1500.1" r="3.8" fill="#d0362c"/>
+<circle cx="835.4" cy="1503.9" r="3.8" fill="#d0362c"/>
+<circle cx="889.9" cy="1502.5" r="3.8" fill="#d0362c"/>
+<circle cx="944.5" cy="1508.9" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="968.0" cy="1498.5" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M757.3,1491.3 L835.4,1490.1 L889.9,1489.9 L944.5,1500.6 L968.0,1509.6" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1491.3" r="3.8" fill="#12808d"/>
+<circle cx="835.4" cy="1490.1" r="3.8" fill="#12808d"/>
+<circle cx="889.9" cy="1489.9" r="3.8" fill="#12808d"/>
+<circle cx="944.5" cy="1500.6" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<circle cx="968.0" cy="1509.6" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M757.3,1505.0 L889.9,1493.3 L944.5,1494.5 L968.0,1495.4 L1046.0,1504.7 L1100.6,1504.6 L1124.1,1507.9" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1505.0" r="3.8" fill="#c98500"/>
+<circle cx="889.9" cy="1493.3" r="3.8" fill="#c98500"/>
+<circle cx="944.5" cy="1494.5" r="3.8" fill="#c98500"/>
+<circle cx="968.0" cy="1495.4" r="3.8" fill="#c98500"/>
+<circle cx="1046.0" cy="1504.7" r="3.8" fill="#c98500"/>
+<circle cx="1100.6" cy="1504.6" r="3.8" fill="#c98500"/>
+<circle cx="1124.1" cy="1507.9" r="3.8" fill="#c98500"/>
+<path d="M757.3,1526.2 L889.9,1522.4 L944.5,1520.8 L968.0,1519.6" fill="none" stroke="#7a3f8f" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="757.3" cy="1526.2" r="3.8" fill="#7a3f8f"/>
+<circle cx="889.9" cy="1522.4" r="3.8" fill="#7a3f8f"/>
+<circle cx="944.5" cy="1520.8" r="3.8" fill="#7a3f8f"/>
+<circle cx="968.0" cy="1519.6" r="3.8" fill="#7a3f8f"/>
+<rect class="frame" x="1222" y="1366" width="416" height="206" rx="4"/>
+<line x1="1230.0" y1="1564.0" x2="1630.0" y2="1564.0" class="grid" />
+<text x="1222.0" y="1567.5" class="tick" text-anchor="end" >0</text>
+<line x1="1230.0" y1="1516.5" x2="1630.0" y2="1516.5" class="grid" />
+<text x="1222.0" y="1520.0" class="tick" text-anchor="end" >200</text>
+<line x1="1230.0" y1="1469.0" x2="1630.0" y2="1469.0" class="grid" />
+<text x="1222.0" y="1472.5" class="tick" text-anchor="end" >400</text>
+<line x1="1230.0" y1="1421.5" x2="1630.0" y2="1421.5" class="grid" />
+<text x="1222.0" y="1425.0" class="tick" text-anchor="end" >600</text>
+<line x1="1230.0" y1="1374.0" x2="1630.0" y2="1374.0" class="grid" />
+<text x="1222.0" y="1377.5" class="tick" text-anchor="end" >800</text>
+<line x1="1230.0" y1="1564.0" x2="1630.0" y2="1564.0" class="axis" />
+<line x1="1248.7" y1="1564.0" x2="1248.7" y2="1568.0" class="axis" />
+<text x="1248.7" y="1581.0" class="tick" text-anchor="middle" >9k</text>
+<line x1="1300.4" y1="1564.0" x2="1300.4" y2="1568.0" class="axis" />
+<line x1="1352.0" y1="1564.0" x2="1352.0" y2="1568.0" class="axis" />
+<text x="1352.0" y="1581.0" class="tick" text-anchor="middle" >36k</text>
+<line x1="1403.7" y1="1564.0" x2="1403.7" y2="1568.0" class="axis" />
+<line x1="1455.4" y1="1564.0" x2="1455.4" y2="1568.0" class="axis" />
+<text x="1455.4" y="1581.0" class="tick" text-anchor="middle" >144k</text>
+<line x1="1507.0" y1="1564.0" x2="1507.0" y2="1568.0" class="axis" />
+<line x1="1558.7" y1="1564.0" x2="1558.7" y2="1568.0" class="axis" />
+<text x="1558.7" y="1581.0" class="tick" text-anchor="middle" >576k</text>
+<line x1="1610.3" y1="1564.0" x2="1610.3" y2="1568.0" class="axis" />
+<text x="1610.3" y="1581.0" class="tick" text-anchor="middle" >1.15M</text>
+<text x="1430.0" y="1600.0" class="axl" text-anchor="middle" >offered rate (msg/s, log scale)</text>
+<path d="M1248.7,1562.6 L1300.4,1561.9 L1352.0,1561.2" fill="none" stroke="#3b4656" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1562.6" r="3.8" fill="#3b4656"/>
+<circle cx="1300.4" cy="1561.9" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<circle cx="1352.0" cy="1561.2" r="4.3" fill="#ffffff" stroke="#3b4656" stroke-width="2"/>
+<path d="M1248.7,1546.2 L1300.4,1536.5 L1352.0,1538.6" fill="none" stroke="#d0362c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1546.2" r="3.8" fill="#d0362c"/>
+<circle cx="1300.4" cy="1536.5" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<circle cx="1352.0" cy="1538.6" r="4.3" fill="#ffffff" stroke="#d0362c" stroke-width="2"/>
+<path d="M1248.7,1557.3 L1300.4,1555.2 L1352.0,1550.9 L1403.7,1545.7 L1455.4,1537.4" fill="none" stroke="#12808d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1557.3" r="3.8" fill="#12808d"/>
+<circle cx="1300.4" cy="1555.2" r="3.8" fill="#12808d"/>
+<circle cx="1352.0" cy="1550.9" r="3.8" fill="#12808d"/>
+<circle cx="1403.7" cy="1545.7" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<circle cx="1455.4" cy="1537.4" r="4.3" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1248.7,1558.3 L1300.4,1555.0 L1352.0,1550.2 L1403.7,1541.2 L1455.4,1544.0" fill="none" stroke="#c98500" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+<circle cx="1248.7" cy="1558.3" r="3.8" fill="#c98500"/>
+<circle cx="1300.4" cy="1555.0" r="3.8" fill="#c98500"/>
+<circle cx="1352.0" cy="1550.2" r="3.8" fill="#c98500"/>
+<circle cx="1403.7" cy="1541.2" r="3.8" fill="#c98500"/>
+<circle cx="1455.4" cy="1544.0" r="4.3" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M1455.4,1538.1 L1507.0,1515.8 L1558.7,1477.1 L1610.3,1437.2" fill="none" stroke="#12808d" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+<rect x="1451.4" y="1534.1" width="8.0" height="8.0" fill="#12808d"/>
+<rect x="1503.0" y="1511.8" width="8.0" height="8.0" fill="#12808d"/>
+<rect x="1554.5" y="1472.9" width="8.4" height="8.4" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<rect x="1606.1" y="1433.0" width="8.4" height="8.4" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1455.4,1532.2 L1507.0,1531.7" fill="none" stroke="#c98500" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+<rect x="1451.4" y="1528.2" width="8.0" height="8.0" fill="#c98500"/>
+<rect x="1502.8" y="1527.5" width="8.4" height="8.4" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<path d="M1455.4,1526.1 L1460.8,1531.5 L1455.4,1536.9 L1450.0,1531.5 Z" fill="#12808d"/>
+<path d="M1507.0,1509.7 L1512.6,1515.3 L1507.0,1520.9 L1501.4,1515.3 Z" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1507.0,1506.9 L1512.6,1512.5 L1507.0,1518.1 L1501.4,1512.5 Z" fill="#ffffff" stroke="#12808d" stroke-width="2"/>
+<path d="M1455.4,1539.2 L1461.0,1544.8 L1455.4,1550.4 L1449.8,1544.8 Z" fill="#ffffff" stroke="#c98500" stroke-width="2"/>
+<text x="24.0" y="1644.0" class="note" text-anchor="start" >Durability: Redpanda, Pulsar and Queen acknowledge after two of three copies are fsynced; Kafka acknowledges from page cache on three replicas.</text>
+<text x="24.0" y="1662.0" class="note" text-anchor="start" >All x axes are log scales, so equal distances are equal ratios. Ceiling ≥: still keeping up at the highest rate offered. B's ratios use p99 at 100k partitions (Queen 163 ms).</text>
+<text x="24.0" y="1680.0" class="note" text-anchor="start" >CPU: the system's own processes summed over the 3 brokers (48 vCPU in all). Redpanda shows its shards' real work (its reactors busy-poll, so the OS counts more).</text>
+<text x="24.0" y="1698.0" class="note" text-anchor="start" >Load: Kafka, Redpanda, Pulsar and Queen + Kafka clients used 3 load hosts (9 processes); Queen used 4. Queen: pops of up to 10 partitions, dedup off. Redpanda: classic consumer groups.</text>
+<text x="24.0" y="1716.0" class="note" text-anchor="start" >Queen + Kafka clients: the same 3-node Queen cluster driven by the Kafka loader (franz-go, acks=all, idempotent, lz4, classic groups); build qk3 from the Kafka-facade performance branch (uncommitted).</text>
+<text x="24.0" y="1734.0" class="note" text-anchor="start" >C: every transaction acks its inputs and publishes its outputs atomically; a separate verifier found every input exactly once in the output on every point. 198 workers; feeder batches of 10 (100 for ■).</text>
+<text x="24.0" y="1752.0" class="note" text-anchor="start" >C: one transaction per partition at a time in all four. Queen plans every transaction on one thread (its ceiling); Pulsar spreads them over many threads and scales with partitions and workers.</text>
+<text x="24.0" y="1770.0" class="note" text-anchor="start" >Not run: Pulsar above 2M msg/s; Queen at 2k partitions; Kafka, Redpanda and Pulsar above 100k partitions except the two 1M attempts marked ×; transactions over Kafka clients on Queen.</text>
+<text x="24.0" y="1788.0" class="note" text-anchor="start" >Fell behind: Redpanda at 3M/4M and from 50k partitions; Pulsar from 50k partitions; Kafka at 100k partitions; Queen at 1.5M/2M msg/s; Queen + Kafka clients at 2M.</text>
+<text x="24.0" y="1806.0" class="note" text-anchor="start" >Kafka ran on 30 Sep 2026; Redpanda, Pulsar, Queen (2.0.0-beta.2) and the transactions on 1 Oct 2026; Queen + Kafka clients on 1–2 Oct 2026.</text></svg>

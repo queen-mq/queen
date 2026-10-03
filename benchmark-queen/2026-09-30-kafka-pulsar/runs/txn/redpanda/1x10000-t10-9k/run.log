@@ -1,0 +1,66 @@
+[2026-10-01T16:29:40Z] txn redpanda/1x10000-t10-9k: start: redpanda, rate=9000 over N=9 processes (3 loader hosts x 3) = 1000 msg/s each; in 10000 x out 10000 partitions; txn-size 10 (linger 1s); feeder units of 10; 33 workers + 33 readers per process (297 each in total); out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/redpanda/1x10000-t10-9k
+[2026-10-01T16:29:40Z] txn redpanda/1x10000-t10-9k: durability: RF 3 raft, acks=all acknowledged after a majority (2 of 3) fsynced (write_caching off), idempotent + transactional producers; tx coordinator topic RF 3 (internal_topic_replication_factor); read_committed
+[2026-10-01T16:29:48Z] txn redpanda/1x10000-t10-9k: 1. cluster reset
+      n1 [2026-10-01T16:29:56Z] rc.sh n1: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+      n2 [2026-10-01T16:29:57Z] rc.sh n2: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+      n3 [2026-10-01T16:29:56Z] rc.sh n3: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+    [2026-10-01T16:30:06Z] cluster: healthy in 18s
+      produced: Produced to partition 0 at offset 9999 with timestamp 1790872231350.
+    enable_transactions internal_topic_replication_factor transaction_coordinator_partitions = true 3 50
+[2026-10-01T16:30:44Z] txn redpanda/1x10000-t10-9k: 2. samplers start (txn-redpanda-1x10000-t10-9k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-01T16:30:45Z] txn redpanda/1x10000-t10-9k: 3. create x1x10000-t10-9k-in (10000) + x1x10000-t10-9k-out (10000), warm on loader 1
+    kload tag=1x10000-t10-9k-create loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=16 GOGC=400 seed=1790872023648667709
+      topics: 1 x 10000 partitions (x1x10000-t10-9k..x1x10000-t10-9k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=10000 starting at 0
+      payload: goload jsonEvent target 256 B, avg 289.4 B raw, ~319 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=0 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=classic fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s | txn: x1x10000-t10-9k-in -> 4 workers (GroupTransactSession, transactional.id per worker, txn-timeout 10s, concurrent-txn backoff 20ms, metadata-min-age 250ms, txn-size 10, linger 1s, read_committed) -> x1x10000-t10-9k-out, 4 read_committed readers
+      [topic] 2 topics created, 0 grown, 10000 partitions each x RF 3 accepted by the controller in 8.2s (4 requests of <= 5000 partitions)
+      [topic] t=+0s 0 topics missing, 1 with != 10000 partitions, 5000 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 18.4s: 2 topics x 10000 partitions, leaders + full ISR + every replica log on disk
+      [warm] one record (no "ts") into each of 20000 partitions, acks=all, in 1.0s; READY again after 0.0s
+    [create] done: x1x10000-t10-9k-in, x1x10000-t10-9k-out x 10000 partitions ready
+[2026-10-01T16:31:09Z] txn redpanda/1x10000-t10-9k:    topics ready after 89s since start
+    node=1 rss_MB=7731 threads=33 fds=20209 data_MB=21224 part_dirs=20000 disk_free_GB=358 busy_s=120.196 errors=0 warns=32 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=6632 ele
+    node=2 rss_MB=7702 threads=33 fds=20209 data_MB=21224 part_dirs=20000 disk_free_GB=354 busy_s=122.050 errors=0 warns=30 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=6671 ele
+    node=3 rss_MB=7703 threads=33 fds=20209 data_MB=21224 part_dirs=20000 disk_free_GB=359 busy_s=100.293 errors=0 warns=39 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=6700 ele
+[2026-10-01T16:31:11Z] txn redpanda/1x10000-t10-9k: 4. launch 9 kload processes
+    launched 6 7 8 on queen-loader-03
+    launched 0 1 2 on queen-loader-01
+    launched 3 4 5 on queen-loader-02
+[2026-10-01T16:31:22Z] txn redpanda/1x10000-t10-9k:    READY 0/9
+[2026-10-01T16:31:33Z] txn redpanda/1x10000-t10-9k:    READY 3/9
+[2026-10-01T16:31:38Z] txn redpanda/1x10000-t10-9k:    all 9 READY after 118s since start
+[2026-10-01T16:32:19Z] txn redpanda/1x10000-t10-9k:    leader balancer quiet for 25s (503 transfers so far), 70 s after the topics were ready
+[2026-10-01T16:32:38Z] txn redpanda/1x10000-t10-9k: 5. start instant 1790872367842 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s), drain <= 60s
+[2026-10-01T16:32:46Z] txn redpanda/1x10000-t10-9k:    0/9 exited | p0: 
+[2026-10-01T16:33:21Z] txn redpanda/1x10000-t10-9k:    0/9 exited | p0: [16:33:17] offered=     1000/s achieved=     1000/s shed=        0/s inflight=     3 | p50=   9.66 p99=   67.07 p999=   87.55 ms | push=24980 pop=2471 [txn] 16:33:17 txn=     101/s msgs=     1007/s avg= 10.00 msg/txn | commit p50=98.82 p99=246.78 p999=280.58 ms | aborts=0 errs=0 open=6 | in=      997 
+[2026-10-01T16:33:59Z] txn redpanda/1x10000-t10-9k:    0/9 exited | p0: [16:33:57] offered=     1000/s achieved=     1002/s shed=        0/s inflight=     1 | p50=   8.64 p99=   60.67 p999=   76.29 ms | push=64990 pop=6455 [txn] 16:33:57 txn=     101/s msgs=     1014/s avg= 10.00 msg/txn | commit p50=100.86 p99=232.45 p999=272.38 ms | aborts=0 errs=0 open=8 | in=     100 
+[2026-10-01T16:34:06Z] txn redpanda/1x10000-t10-9k:    load finished after 266s since start
+[2026-10-01T16:34:07Z] txn redpanda/1x10000-t10-9k: 6. verifier: collect the 9 id ledgers, run kload -verify on loader 1
+    [verify] kafka 10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092: 9 ledgers from /root/bench/runs/txn/redpanda/1x10000-t10-9k/verify-ids; reading x1x10000-t10-9k-out from offset 0 (read_committed), then x1x10000-t10-9k-in from group x1x10000-t10-9k-in-g-t0's committed offsets
+    [verify] out x1x10000-t10-9k-out: 604970 records after 10s
+    [verify] out x1x10000-t10-9k-out: 604970 records, idle 10s: scan complete after 10.4s
+    [verify] x1x10000-t10-9k-in-g-t0: committed offsets on 10000 of 10000 partitions (the rest from the start)
+    [verify] rest of x1x10000-t10-9k-in: 0 records, idle 10s: scan complete after 10.0s
+    [verify] system=kafka ledgers=9 produced=584970 ambiguous=0 out_records=604970 out_unique=584970 duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=20000 scan=20.5s | VERDICT PASS
+[2026-10-01T16:34:45Z] txn redpanda/1x10000-t10-9k:    verifier: PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0
+[2026-10-01T16:34:45Z] txn redpanda/1x10000-t10-9k: 7. collect
+    node=1 rss_MB=8074 threads=33 fds=20276 data_MB=21395 part_dirs=20016 disk_free_GB=358 busy_s=597.069 errors=0 warns=33 errors_since_mark=0 warns_since_mark=1 transfers=179 transfers_since_mark=8 elections_won=6869 e
+    node=2 rss_MB=8044 threads=33 fds=20276 data_MB=21395 part_dirs=20016 disk_free_GB=354 busy_s=481.030 errors=0 warns=31 errors_since_mark=0 warns_since_mark=0 transfers=178 transfers_since_mark=5 elections_won=6867 e
+    node=3 rss_MB=8016 threads=33 fds=20276 data_MB=21395 part_dirs=20016 disk_free_GB=358 busy_s=375.276 errors=0 warns=40 errors_since_mark=0 warns_since_mark=1 transfers=170 transfers_since_mark=11 elections_won=6859 
+[2026-10-01T16:35:03Z] txn redpanda/1x10000-t10-9k:    collected  12M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/redpanda/1x10000-t10-9k
+    p0: in offered=65000 achieved=65000 shed=0 | out consumed=64960 errs push=0 pop=0 ack=0 | produce p99=60.67 ms | e2e p50/p99/p999=342.02/708.61/823.30 ms | txns=6628 msgs=66070 aborts=0 errs=0 avg=9.97 commit p50/p99/p999=84.48/272.38/1695.74 ms | cpu=33.1%
+    p1: in offered=64990 achieved=64990 shed=0 | out consumed=64920 errs push=0 pop=0 ack=0 | produce p99=60.67 ms | e2e p50/p99/p999=342.02/700.42/806.91 ms | txns=6624 msgs=66030 aborts=0 errs=0 avg=9.97 commit p50/p99/p999=81.41/259.07/1662.98 ms | cpu=33.6%
+    p2: in offered=64990 achieved=64990 shed=0 | out consumed=65300 errs push=0 pop=0 ack=0 | produce p99=62.72 ms | e2e p50/p99/p999=346.11/700.42/806.91 ms | txns=6662 msgs=66417 aborts=0 errs=0 avg=9.97 commit p50/p99/p999=82.43/268.29/1974.27 ms | cpu=33.5%
+    p3: in offered=65000 achieved=65000 shed=0 | out consumed=64550 errs push=0 pop=0 ack=0 | produce p99=61.18 ms | e2e p50/p99/p999=329.73/708.61/815.10 ms | txns=6587 msgs=65653 aborts=0 errs=0 avg=9.97 commit p50/p99/p999=85.50/272.38/593.92 ms | cpu=35.2%
+    p4: in offered=64990 achieved=64990 shed=0 | out consumed=64980 errs push=0 pop=0 ack=0 | produce p99=58.11 ms | e2e p50/p99/p999=342.02/708.61/839.68 ms | txns=6630 msgs=66092 aborts=0 errs=0 avg=9.97 commit p50/p99/p999=81.41/261.12/1515.52 ms | cpu=35.6%
+    p5: in offered=65000 achieved=65000 shed=0 | out consumed=64940 errs push=0 pop=0 ack=0 | produce p99=61.70 ms | e2e p50/p99/p999=342.02/700.42/815.10 ms | txns=6626 msgs=66050 aborts=0 errs=0 avg=9.97 commit p50/p99/p999=79.36/259.07/2088.96 ms | cpu=35.4%
+    p6: in offered=65010 achieved=65010 shed=0 | out consumed=64760 errs push=0 pop=0 ack=0 | produce p99=58.11 ms | e2e p50/p99/p999=337.92/708.61/839.68 ms | txns=6608 msgs=65865 aborts=0 errs=0 avg=9.97 commit p50/p99/p999=82.43/264.19/593.92 ms | cpu=33.3%
+    p7: in offered=64990 achieved=64990 shed=0 | out consumed=65210 errs push=0 pop=0 ack=0 | produce p99=58.62 ms | e2e p50/p99/p999=337.92/700.42/847.87 ms | txns=6653 msgs=66324 aborts=0 errs=0 avg=9.97 commit p50/p99/p999=81.41/261.12/774.14 ms | cpu=33.2%
+    p8: in offered=65000 achieved=65000 shed=0 | out consumed=65350 errs push=0 pop=0 ack=0 | produce p99=63.23 ms | e2e p50/p99/p999=337.92/684.03/790.53 ms | txns=6667 msgs=66469 aborts=0 errs=0 avg=9.97 commit p50/p99/p999=80.38/268.29/1925.12 ms | cpu=33.8%
+    total: 9/9 processes with a final line | input msgs offered=584970 achieved=584970 shed=0 | output consumed=584970 | transactions=59685 msgs=594970 avg=9.97 msg/txn aborts=0 txnErrors=0 | errors=0 | worst produce p99=63.23 ms | worst e2e p99=708.61 ms | worst commit p99=272.38 ms
+    verifier: PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0
+    durability (redpanda): RF 3 raft, acks=all acknowledged after a majority (2 of 3) fsynced (write_caching off), idempotent + transactional producers; tx coordinator topic RF 3 (internal_topic_replication_factor); read_committed
+    shards busy (redpanda_cpu_busy_seconds_total over the steady window): n1=4.69 n2=3.37 n3=2.60 sum=10.67 cores
+[2026-10-01T16:35:06Z] txn redpanda/1x10000-t10-9k:    stopping the cluster (data kept until the next reset)
+[2026-10-01T16:35:12Z] txn redpanda/1x10000-t10-9k: DONE in 332s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/redpanda/1x10000-t10-9k (PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0)

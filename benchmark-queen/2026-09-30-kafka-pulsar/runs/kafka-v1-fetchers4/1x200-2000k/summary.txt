@@ -1,0 +1,10 @@
+p0: msgs offered=0 achieved=0 shed=0 pushed=0 popped=9533100 lag=-9533100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=0.00/0.00/0.00 ms | e2e p50/p99/p999=7.97/27.26/68.10 ms | cpu=12.6%
+p1: msgs offered=0 achieved=0 shed=0 pushed=0 popped=9532800 lag=-9532800 errs push=0 pop=0 ack=0 | produce p50/p99/p999=0.00/0.00/0.00 ms | e2e p50/p99/p999=7.90/27.78/65.28 ms | cpu=12.7%
+p2: msgs offered=0 achieved=0 shed=0 pushed=0 popped=9533400 lag=-9533400 errs push=0 pop=0 ack=0 | produce p50/p99/p999=0.00/0.00/0.00 ms | e2e p50/p99/p999=8.03/27.26/62.72 ms | cpu=12.7%
+p3: msgs offered=14444300 achieved=14444300 shed=0 pushed=14444300 popped=9533400 lag=4910900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.84/27.78/64.77 ms | e2e p50/p99/p999=7.58/28.54/65.28 ms | cpu=97.8%
+p4: msgs offered=14444000 achieved=14444000 shed=0 pushed=14444000 popped=9966800 lag=4477200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.90/27.26/66.05 ms | e2e p50/p99/p999=7.71/26.50/63.74 ms | cpu=98.1%
+p5: msgs offered=14444200 achieved=14444200 shed=0 pushed=14444200 popped=9966100 lag=4478100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.78/27.78/66.05 ms | e2e p50/p99/p999=7.58/27.52/64.26 ms | cpu=98.7%
+p6: msgs offered=14444200 achieved=14444200 shed=0 pushed=14444200 popped=9534000 lag=4910200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.78/27.78/66.05 ms | e2e p50/p99/p999=8.03/29.57/72.19 ms | cpu=87.8%
+p7: msgs offered=14444600 achieved=14444600 shed=0 pushed=14444600 popped=9533400 lag=4911200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.78/27.78/66.05 ms | e2e p50/p99/p999=8.16/27.78/67.07 ms | cpu=87.2%
+p8: msgs offered=14444500 achieved=14444500 shed=0 pushed=14444500 popped=9532800 lag=4911700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=7.78/28.03/68.10 ms | e2e p50/p99/p999=8.03/28.03/63.74 ms | cpu=87.7%
+total: 9/9 processes with a final line | msgs offered=86665800 achieved=86665800 shed=0 pushed=86665800 popped=86665800 errors=0 | worst produce p99=28.03 ms | worst e2e p99=29.57 ms

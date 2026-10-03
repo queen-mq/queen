@@ -1,0 +1,45 @@
+node=2 broker total=12.04 cores over 3s (281 threads, 281 named by jstack)
+    6.33 cores    32 thr  max1=0.33  pulsar-io
+    3.11 cores    32 thr  max1=0.33  BookKeeperClientWorker-OrderedExecutor
+    1.07 cores    16 thr  max1=0.09  broker-topic-workers-OrderedExecutor
+    0.38 cores    16 thr  max1=0.03  bookkeeper-ml-scheduler-OrderedScheduler
+    0.35 cores     8 thr  max1=0.05  pulsar-ordered-OrderedExecutor
+    0.21 cores    16 thr  max1=0.02  pulsar-transaction-executor
+    0.19 cores     6 thr  max1=0.03  transaction_coordinator_TransactionCoordinatorID(id=)thread_factory
+    0.18 cores     1 thr  max1=0.18  bookkeeper-ml-cache-eviction
+    0.10 cores     1 thr  max1=0.10  broker-client-shared-timer
+    0.06 cores     1 thr  max1=0.06  pulsar-transaction-timer
+    0.02 cores     2 thr  max1=0.02  C CompilerThread
+    0.01 cores     1 thr  max1=0.01  metadata-store-batch-flusher
+    0.00 cores     1 thr  max1=0.00  ZDirector
+    0.00 cores     2 thr  max1=0.00  BookKeeperClientScheduler-OrderedScheduler
+node=2 bookie total=4.05 cores over 3s (186 threads, 153 named by jstack)
+    3.00 cores    32 thr  max1=0.20  bookie-io
+    0.54 cores     1 thr  max1=0.54  BookieJournal
+    0.35 cores     1 thr  max1=0.35  ForceWriteThread
+    0.12 cores     8 thr  max1=0.12  ~rocksdb:high
+    0.03 cores     2 thr  max1=0.03  C CompilerThread
+    0.01 cores     2 thr  max1=0.00  metadata-store-batch-flusher
+    0.00 cores     1 thr  max1=0.00  ZDirector
+    0.00 cores     2 thr  max1=0.00  ~java
+    0.00 cores     1 thr  max1=0.00  main
+    0.00 cores     1 thr  max1=0.00  ZUnmapper
+    0.00 cores     1 thr  max1=0.00  ZUncommitter
+    0.00 cores     4 thr  max1=0.00  ZWorkerOld#
+    0.00 cores     4 thr  max1=0.00  ZWorkerYoung#
+    0.00 cores     1 thr  max1=0.00  ZDriverMinor
+node=2 zk total=0.01 cores over 3s (116 threads, 116 named by jstack)
+    0.00 cores     1 thr  max1=0.00  ZDirector
+    0.00 cores     2 thr  max1=0.00  C CompilerThread
+    0.00 cores     1 thr  max1=0.00  FollowerRequestProcessor:
+    0.00 cores     1 thr  max1=0.00  ~java
+    0.00 cores     1 thr  max1=0.00  main
+    0.00 cores     1 thr  max1=0.00  ZUnmapper
+    0.00 cores     1 thr  max1=0.00  ZUncommitter
+    0.00 cores     4 thr  max1=0.00  ZWorkerOld#
+    0.00 cores     4 thr  max1=0.00  ZWorkerYoung#
+    0.00 cores     1 thr  max1=0.00  ZDriverMinor
+    0.00 cores     1 thr  max1=0.00  ZDriverMajor
+    0.00 cores     1 thr  max1=0.00  ZStat
+    0.00 cores    10 thr  max1=0.00  RuntimeWorker#
+    0.00 cores     1 thr  max1=0.00  AsyncLog Thread

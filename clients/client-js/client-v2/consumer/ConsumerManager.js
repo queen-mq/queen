@@ -222,7 +222,7 @@ export class ConsumerManager {
               // failed message: everything after it in this popped batch WILL
               // be redelivered. Processing it now would only produce duplicates
               // and rejected acks — abandon the rest of the batch.
-              if (autoAck && !ok) {
+              if (!ok) {
                 logger.warn('ConsumerManager.worker', { workerId, status: 'batch-abandoned-after-nack', remaining: messages.length - messages.indexOf(message) - 1 })
                 break
               }
@@ -316,62 +316,83 @@ export class ConsumerManager {
   async #processMessage(message, handler, autoAck, group) {
     try {
       await handler(message)
-
-      // Auto-ack on success if enabled
-      if (autoAck) {
-        const context = group ? { group } : {}
-        const res = await this.#queen.ack(message, true, context)
-        if (res && res.success === false) {
-          logger.error('ConsumerManager.processMessage', { transactionId: message.transactionId, status: 'ack-rejected', error: res.error })
-        } else {
-          logger.log('ConsumerManager.processMessage', { transactionId: message.transactionId, status: 'acked' })
-        }
-      }
-      return true
     } catch (error) {
-      // Auto-nack on error if enabled
-      if (autoAck) {
-        const context = group ? { group, error: error.message } : { error: error.message }
-        const res = await this.#queen.ack(message, false, context)
-        if (res && res.success === false) {
-          logger.error('ConsumerManager.processMessage', { transactionId: message.transactionId, status: 'nack-rejected', error: res.error })
-        }
-        logger.error('ConsumerManager.processMessage', { transactionId: message.transactionId, error: error.message, status: 'nacked' })
-        // Don't rethrow when autoAck is enabled - NACK was already sent
-        // This allows the consumer to continue and retry
-        return false
-      }
-      logger.error('ConsumerManager.processMessage', { transactionId: message.transactionId, error: error.message })
-      throw error
+      await this.#nackFailed(message, error, autoAck, group, 'ConsumerManager.processMessage')
+      return false
     }
+
+    // Auto-ack on success if enabled
+    if (autoAck) {
+      const context = group ? { group } : {}
+      const res = await this.#queen.ack(message, true, context)
+      if (res && res.success === false) {
+        logger.error('ConsumerManager.processMessage', { transactionId: message.transactionId, status: 'ack-rejected', error: res.error })
+      } else {
+        logger.log('ConsumerManager.processMessage', { transactionId: message.transactionId, status: 'acked' })
+      }
+    }
+    return true
   }
 
   async #processBatch(messages, handler, autoAck, group) {
     try {
       await handler(messages)
-
-      // Auto-ack on success if enabled
-      if (autoAck) {
-        const context = group ? { group } : {}
-        const res = await this.#queen.ack(messages, true, context)
-        if (res && res.success === false) {
-          logger.error('ConsumerManager.processBatch', { count: messages.length, status: 'ack-rejected', error: res.error })
-        } else {
-          logger.log('ConsumerManager.processBatch', { count: messages.length, status: 'acked' })
-        }
-      }
     } catch (error) {
-      // Auto-nack on error if enabled
-      if (autoAck) {
-        const context = group ? { group, error: error.message } : { error: error.message }
-        await this.#queen.ack(messages, false, context)
-        logger.error('ConsumerManager.processBatch', { count: messages.length, error: error.message, status: 'nacked' })
-        // Don't rethrow when autoAck is enabled - NACK was already sent
-        // This allows the consumer to continue and retry
-        return
+      await this.#nackFailed(messages, error, autoAck, group, 'ConsumerManager.processBatch')
+      return
+    }
+
+    // Auto-ack on success if enabled
+    if (autoAck) {
+      const context = group ? { group } : {}
+      const res = await this.#queen.ack(messages, true, context)
+      if (res && res.success === false) {
+        logger.error('ConsumerManager.processBatch', { count: messages.length, status: 'ack-rejected', error: res.error })
+      } else {
+        logger.log('ConsumerManager.processBatch', { count: messages.length, status: 'acked' })
       }
-      logger.error('ConsumerManager.processBatch', { count: messages.length, error: error.message })
-      throw error
+    }
+  }
+
+  /**
+   * A handler threw: nack what it was given, and let the worker keep
+   * consuming. The same with `autoAck(false)`, which hands the SUCCESS path to
+   * the handler and not the failure path: a handler that threw did not get to
+   * settle its messages, and leaving them leased would hold the partition
+   * until the lease expires. Before this, a throw under autoAck(false) left
+   * the worker loop and stopped the consumer (the others kept running behind a
+   * consume() promise that had already rejected).
+   *
+   * The nack goes through the broker's retry budget like any other: the
+   * message is redelivered, and lands in the DLQ once the queue's retryLimit
+   * is spent. A message the handler already acked before throwing is already
+   * settled, so the broker refuses its nack and nothing changes for it. A
+   * handler that wants to decide for itself (ack, nack, DLQ, or stop)
+   * declares `.onError()`, which catches the error before it gets here.
+   */
+  async #nackFailed(messageOrMessages, error, autoAck, group, where) {
+    const batch = Array.isArray(messageOrMessages)
+    const subject = batch ? { count: messageOrMessages.length } : { transactionId: messageOrMessages.transactionId }
+    // A handler can throw anything, not only an Error.
+    const reason = error instanceof Error ? error.message : String(error)
+    logger.error(where, { ...subject, error: reason, status: 'handler-failed', autoAck })
+
+    const context = group ? { group, error: reason } : { error: reason }
+    try {
+      const res = await this.#queen.ack(messageOrMessages, false, context)
+      if (res && res.success === false) {
+        // Under autoAck(false) this is usually a handler that acked before it
+        // threw; with autoAck it means the lease ran out under the handler.
+        const log = autoAck ? logger.error : logger.warn
+        log(where, { ...subject, status: 'nack-rejected', error: res.error })
+      } else {
+        logger.log(where, { ...subject, status: 'nacked' })
+      }
+    } catch (nackError) {
+      // A message this client cannot even address (no partitionId) cannot be
+      // nacked; its lease expires and the broker redelivers it. Never a reason
+      // to stop the consumer.
+      logger.error(where, { ...subject, status: 'nack-failed', error: nackError.message })
     }
   }
 

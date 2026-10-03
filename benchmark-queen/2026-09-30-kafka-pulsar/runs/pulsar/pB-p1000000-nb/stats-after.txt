@@ -1,0 +1,20 @@
+  n1  node=1 zk     pid=636669 up=1942s cpu=1844s rss=4739MB thr=118 fds=413 | gc cycles=147 (major 16) pauses=80 max=0.05ms sum=1.8ms stalls=0 max=0.0ms safepoint_max=1.17ms | log ERROR=0 WARN=6 (since start)
+  n1  node=1 bookie pid=637255 up=1935s cpu=281s rss=3566MB thr=190 fds=810 | gc cycles=6 (major 6) pauses=30 max=0.04ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=0.38ms | log ERROR=1 WARN=2 (since start)
+  n1  node=1 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+  n1  node=1 broker not running | gc cycles=1732 (major 69) pauses=408 max=0.09ms sum=8.3ms stalls=13347 max=6348.1ms safepoint_max=84.78ms | log ERROR=0 WARN=19 (since start)
+  n1  node=1 broker   allocation stalls by thread: broker-topic-workers-OrderedExecutor-7-0=714, main-SendThread(10.114.0.2:2181)=582, metadata-store-batch-flusher-13-1=574, bookkeeper-ml-cache-eviction-24-1=530, Notification Thread=458
+  n1  node=1 disk   data=10149MB zk=7948MB journal=1939MB (1 .txn in 1 dirs) ledgers=264MB (entry logs=2, 101MB; locations=87MB ledgers-index=75MB) | fs 16% used, 327G free
+  n2  node=2 zk     pid=578299 up=1942s cpu=632s rss=4648MB thr=114 fds=410 | gc cycles=38 (major 13) pauses=65 max=0.04ms sum=1.6ms stalls=0 max=0.0ms safepoint_max=0.42ms | log ERROR=0 WARN=8 (since start)
+  n2  node=2 bookie pid=578553 up=1935s cpu=252s rss=3551MB thr=186 fds=810 | gc cycles=6 (major 6) pauses=30 max=0.03ms sum=0.4ms stalls=0 max=0.0ms safepoint_max=0.66ms | log ERROR=1 WARN=2 (since start)
+  n2  node=2 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+  n2  node=2 broker pid=578897 up=1931s cpu=1821s rss=14013MB thr=241 fds=572 | gc cycles=522 (major 20) pauses=109 max=0.04ms sum=2.3ms stalls=1358 max=5777.7ms safepoint_max=2.49ms | log ERROR=0 WARN=21 (since start)
+  n2  node=2 broker   allocation stalls by thread: broker-topic-workers-OrderedExecutor-7-0=108, metadata-store-batch-flusher-13-1=83, bookkeeper-ml-cache-eviction-24-1=80, main-SendThread(10.114.0.2:2181)=64, Notification Thread=59
+  n2  node=2 disk   data=10966MB zk=8557MB journal=2147MB (2 .txn in 1 dirs) ledgers=264MB (entry logs=2, 101MB; locations=87MB ledgers-index=75MB) | fs 16% used, 329G free
+  n2  node=2 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=0 throughput_in=0 rate_in=0 throughput_out=0 topics_count=323304 msg_backlog=0 subscriptions_count=323304 consumers_count=0
+  n3  node=3 zk     pid=576672 up=1942s cpu=821s rss=4689MB thr=125 fds=414 | gc cycles=65 (major 17) pauses=85 max=0.03ms sum=1.5ms stalls=0 max=0.0ms safepoint_max=0.36ms | log ERROR=0 WARN=9 (since start)
+  n3  node=3 bookie pid=576952 up=1935s cpu=196s rss=3556MB thr=191 fds=810 | gc cycles=6 (major 6) pauses=30 max=0.02ms sum=0.4ms stalls=0 max=0.0ms safepoint_max=0.39ms | log ERROR=1 WARN=5 (since start)
+  n3  node=3 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+  n3  node=3 broker pid=577339 up=1931s cpu=1528s rss=14139MB thr=239 fds=572 | gc cycles=549 (major 21) pauses=114 max=0.04ms sum=1.9ms stalls=1315 max=4791.4ms safepoint_max=23.32ms | log ERROR=0 WARN=20 (since start)
+  n3  node=3 broker   allocation stalls by thread: broker-topic-workers-OrderedExecutor-7-0=122, metadata-store-batch-flusher-13-1=80, bookkeeper-ml-cache-eviction-24-1=75, Notification Thread=65, main-SendThread(10.114.0.2:2181)=64
+  n3  node=3 disk   data=11480MB zk=9311MB journal=1907MB (1 .txn in 1 dirs) ledgers=264MB (entry logs=2, 101MB; locations=87MB ledgers-index=75MB) | fs 16% used, 327G free
+  n3  node=3 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=0 throughput_in=0 rate_in=0 throughput_out=0 topics_count=323073 msg_backlog=0 subscriptions_count=323073 consumers_count=0

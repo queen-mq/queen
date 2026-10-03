@@ -1,0 +1,5 @@
+node=2 total=13.89 cores over 3s from /proc (33 threads) | shards busy (redpanda_cpu_busy_seconds_total) = 9.69 cores
+   12.64 cores    15 thr  max1=0.87  reactor-N
+    0.87 cores     1 thr  max1=0.87  redpanda
+    0.38 cores    16 thr  max1=0.03  syscall-N
+    0.00 cores     1 thr  max1=0.00  worker-N

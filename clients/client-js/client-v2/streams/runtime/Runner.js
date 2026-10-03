@@ -323,8 +323,14 @@ export class Runner {
     const partitionId = group.partitionId
     const partitionName = group.partitionName
 
-    // Sort messages by (createdAt, id) to preserve partition FIFO order.
+    // Partition FIFO order. A 2.x broker answers each message with its offset,
+    // which IS that order, and the one the gate's partial ack counts in.
+    // (createdAt, id) is only the fallback for brokers that send no offset:
+    // createdAt is rendered to the millisecond, and pushes from concurrent
+    // producers share one with their ids out of offset order (measured
+    // 2026-10-02 on 2.0.0-beta.6: 69 of 400 positions disagreed).
     const orderedMessages = [...group.messages].sort((a, b) => {
+      if (Number.isFinite(a.offset) && Number.isFinite(b.offset)) return a.offset - b.offset
       const ta = Date.parse(a.createdAt || '') || 0
       const tb = Date.parse(b.createdAt || '') || 0
       if (ta !== tb) return ta - tb
@@ -431,12 +437,42 @@ export class Runner {
    * release_lease=false so the un-acked tail returns when the lease expires
    * (preserving FIFO per partition without a deferred queue).
    *
+   * The gate settles SOURCE MESSAGES, not envelopes. A pre-stage runs before
+   * it and breaks the one-to-one correspondence: `.filter()` leaves a message
+   * with no envelope, `.flatMap()` leaves it with several. The partial ack is
+   * an offset commit -- the broker advances `count` messages from the head of
+   * the leased batch -- so counting envelopes acks the wrong prefix: past a
+   * denied message (which is then never redelivered) after a flatMap, short of
+   * the allowed ones (which are then gated and pushed again) after a filter. A
+   * message is settled only when every envelope it produced was allowed, so a
+   * redelivery replays the whole message and never half of it.
+   *
    * State model: load ALL state rows for the partition once, evaluate the
    * gate in order, mutate in-memory state, then upsert only the keys whose
-   * ALLOWED messages mutated them.
+   * ALLOWED messages mutated them. What a denied message did to the state on
+   * its way to being denied is rolled back: a denied message did not happen.
    */
   async _processGateCycle({ stages, envelopes, orderedMessages, group, partitionId, partitionName }) {
     const gate = stages.gate
+
+    // One bucket of envelopes per claimed message, in partition order (the
+    // sort in _processPartitionCycleInner). Every pre-stage operator carries
+    // the source message through as `env.msg`.
+    const indexOf = new Map(orderedMessages.map((m, i) => [m, i]))
+    const buckets = orderedMessages.map(() => [])
+    for (const env of envelopes) {
+      const i = indexOf.get(env.msg)
+      if (i === undefined) {
+        // Not traceable to a claimed message, so not settleable by an offset
+        // commit. Hold the batch rather than ack past it: the lease lapses and
+        // the whole batch comes back.
+        this._reportError(new Error('.gate(): an envelope does not come from a message of this batch; holding the batch'), {
+          phase: 'gate-eval', partition: partitionId
+        })
+        return
+      }
+      buckets[i].push(env)
+    }
 
     // Load all state rows for this partition. Cheap: usually one row per
     // (rate-limit key) — for the canonical rate-limiter pattern that's a
@@ -465,46 +501,65 @@ export class Runner {
     }
 
     const streamTimeMs = Date.now()
-    let allowedCount = 0
-    let firstDenyIdx = -1
+    let settled = 0          // messages whose every envelope was allowed
+    let denied = false
     const allowedEnvelopes = []
 
-    for (let i = 0; i < envelopes.length; i++) {
-      const env = envelopes[i]
-      const key = env.key
-      const stateForKey = ensureState(key)
-      const ctx = {
-        state:        stateForKey,
-        streamTimeMs,
-        partitionId,
-        partition:    partitionName,
-        key
-      }
-      let decision
-      try {
-        decision = await gate.evaluate(env, ctx)
-      } catch (err) {
-        // Gate threw: treat as a transient cycle error. Don't commit
-        // anything. The lease will time out and the broker redelivers.
-        this._reportError(err, { phase: 'gate-eval', partition: partitionId, message: env.msg })
-        return
-      }
-      if (decision.allow) {
+    messages: for (const bucket of buckets) {
+      // What this message does to the state, to undo it if one of its
+      // envelopes is denied: key -> its value before this message
+      // (undefined: no entry yet), and the keys it touched first.
+      const before = new Map()
+      const newlyTouched = []
+      for (const env of bucket) {
+        const key = env.key
+        if (!before.has(key)) {
+          before.set(key, liveState.has(key) ? this._cloneState(liveState.get(key)) : undefined)
+        }
+        const stateForKey = ensureState(key)
+        const ctx = {
+          state:        stateForKey,
+          streamTimeMs,
+          partitionId,
+          partition:    partitionName,
+          key
+        }
+        let decision
+        try {
+          decision = await gate.evaluate(env, ctx)
+        } catch (err) {
+          // Gate threw: treat as a transient cycle error. Don't commit
+          // anything. The lease will time out and the broker redelivers.
+          this._reportError(err, { phase: 'gate-eval', partition: partitionId, message: env.msg })
+          return
+        }
+        if (!decision.allow) {
+          for (const [k, value] of before) {
+            if (value === undefined) liveState.delete(k)
+            else liveState.set(k, value)
+          }
+          for (const k of newlyTouched) touchedKeys.delete(k)
+          denied = true
+          break messages
+        }
         // Mutated state on this key is committable.
-        touchedKeys.add(key)
-        allowedCount++
-        allowedEnvelopes.push(env)
-      } else {
-        firstDenyIdx = i
-        break
+        if (!touchedKeys.has(key)) {
+          touchedKeys.add(key)
+          newlyTouched.push(key)
+        }
       }
+      // Settled, including a message the pre-stages dropped entirely: it
+      // has nothing to gate, and holding it would hold the whole batch.
+      allowedEnvelopes.push(...bucket)
+      settled++
     }
 
-    if (allowedCount === 0) {
-      // Nothing to commit: skip the cycle entirely. The lease stays held
-      // by us until it naturally expires; the messages are then
-      // redelivered (to us or another worker) in their original order.
-      this._stats.gateDenialsTotal = (this._stats.gateDenialsTotal || 0) + envelopes.length
+    if (settled === 0) {
+      // The first message was denied. Nothing to commit: skip the cycle
+      // entirely. The lease stays held by us until it naturally expires;
+      // the messages are then redelivered (to us or another worker) in
+      // their original order.
+      this._stats.gateDenialsTotal = (this._stats.gateDenialsTotal || 0) + orderedMessages.length
       return
     }
 
@@ -540,24 +595,26 @@ export class Runner {
       })))
     }
 
-    // Ack the LAST allowed message (cursor advances to it). The count
-    // tells the broker how many messages this commit covers.
-    const lastAllowedSrc = allowedEnvelopes[allowedEnvelopes.length - 1].msg
+    // Ack the LAST settled message (cursor advances to it). The count tells
+    // the broker how many messages this commit covers, counted from the head
+    // of the leased batch: on a partial ack it is the offset the cursor
+    // moves to, so it has to be the number of settled MESSAGES.
+    const lastSettled = orderedMessages[settled - 1]
     const ack = {
-      transactionId: lastAllowedSrc.transactionId,
-      leaseId:       lastAllowedSrc.leaseId || group.leaseId,
+      transactionId: lastSettled.transactionId,
+      leaseId:       lastSettled.leaseId || group.leaseId,
       status:        'completed',
-      count:         allowedCount
+      count:         settled
     }
 
-    const partial = firstDenyIdx >= 0   // some message was denied
-    const releaseLease = !partial
+    // Holding the lease on a partial ack is what preserves FIFO: the denied
+    // tail is not claimable by another worker, so it cannot be overtaken.
+    const releaseLease = !denied
 
-    if (firstDenyIdx >= 0) {
-      const tailUnacked = envelopes.length - allowedCount
-      this._stats.gateDenialsTotal = (this._stats.gateDenialsTotal || 0) + tailUnacked
+    if (denied) {
+      this._stats.gateDenialsTotal = (this._stats.gateDenialsTotal || 0) + (orderedMessages.length - settled)
     }
-    this._stats.gateAllowsTotal = (this._stats.gateAllowsTotal || 0) + allowedCount
+    this._stats.gateAllowsTotal = (this._stats.gateAllowsTotal || 0) + settled
 
     this._stats.stateOpsTotal  += stateOps.length
     this._stats.pushItemsTotal += pushItems.length

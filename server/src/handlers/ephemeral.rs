@@ -251,7 +251,9 @@ fn forward_failed(detail: &str) -> Response {
 ///   * the TENANT, because the receiving broker's middleware reads it from the
 ///     header and nothing else — the value comes from THIS broker's
 ///     `Extension<Tenant>`, i.e. from a header its own trusted proxy set, never
-///     from a body (`kv.rs`'s rule);
+///     from a body (`kv.rs`'s rule). The owner believes it with the cluster
+///     token even where its own router has tenancy off (`tenant.rs`): PORT
+///     next to a proxy on its own port, the layout stage and prod run;
 ///   * `Authorization`, unchanged, when the inbound request had one. Re-presenting
 ///     the caller's own credential means the peer applies the same policy to the
 ///     same principal — the relay grants nothing the original request did not
@@ -1306,14 +1308,40 @@ pub async fn handle_ephemeral_depth(
 // leaves, or is judged down — the node that held a ring HANDS IT OVER to the new
 // owner instead of dropping it, and a node stopping on SIGTERM hands over
 // everything first. Only a crash still loses the crashed node's share (§1.2).
+//
+// A peer takes partitions once raft hears it AND its listener answers
+// (`_ready`): a restarted node answers the leader's heartbeats before its HTTP
+// listener is up, and a hand-over sent into that gap was dropped (two prod
+// rolls, 2026-10-02). A hand-over that does not land is tried again with
+// backoff, each time to the partition's owner of the moment (this node
+// included), until `HANDOVER_RETRY_FOR`. The three calls between brokers —
+// the hand-over, the leaving notice, the readiness probe — carry no client and
+// prove themselves with the cluster token, never a JWT (`auth.rs`).
 
 /// How long a node that announced it is leaving stays out of the placement.
 /// Long enough for raft to judge it down if it really went; a node that comes
-/// back sooner rejoins when the notice expires.
+/// back sooner rejoins when the notice expires, or as soon as its new process
+/// answers the readiness probe when the notice named the one that left.
 const LEAVING_EXCLUSION_MS: i64 = 30_000;
 
 /// Deadline for one hand-over request.
 const HANDOVER_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How long a hand-over keeps trying before its contents are dropped: a peer
+/// whose listener is a few seconds behind its raft, or a placement that moves
+/// the partition elsewhere (back here included) while it waits.
+const HANDOVER_RETRY_FOR: Duration = Duration::from_secs(30);
+
+/// The pause before the second attempt, doubled after each one up to
+/// [`HANDOVER_BACKOFF_MAX`].
+const HANDOVER_BACKOFF_MIN: Duration = Duration::from_millis(100);
+const HANDOVER_BACKOFF_MAX: Duration = Duration::from_secs(2);
+
+/// How long a stopping node gives its rings to land (SIGTERM).
+const DRAIN_FOR: Duration = Duration::from_secs(15);
+
+/// Deadline for one readiness probe.
+const PROBE_DEADLINE: Duration = Duration::from_secs(1);
 
 /// A hand-over request's size target: rings are batched per (peer, tenant)
 /// up to about this many bytes.
@@ -1350,7 +1378,7 @@ fn fan_out(
     tokio::spawn(async move {
         for (_, addr) in peers {
             let url = format!("{}{}", addr.trim_end_matches('/'), path);
-            if let Err(e) = st
+            match st
                 .peers
                 .call(
                     method.clone(),
@@ -1361,7 +1389,19 @@ fn fan_out(
                 )
                 .await
             {
-                tracing::warn!(target: "ephemeral", %url, error = %e, "admin fan-out failed");
+                Ok(r) if r.status.is_success() => {}
+                // A peer that answered and refused (a 401 from a proxy in its
+                // way, a 403 on an unproven tenant) kept its rings as they were.
+                Ok(r) => tracing::warn!(
+                    target: "ephemeral",
+                    %url,
+                    status = r.status.as_u16(),
+                    body = %String::from_utf8_lossy(&r.body),
+                    "admin fan-out refused"
+                ),
+                Err(e) => {
+                    tracing::warn!(target: "ephemeral", %url, error = %e, "admin fan-out failed")
+                }
             }
         }
     });
@@ -1420,79 +1460,318 @@ fn ring_json(out: &mut String, r: &ephemeral::RingExport) {
     out.push_str("]}");
 }
 
-/// Ship hand-overs to their new owners, batched per (peer, tenant). A batch
-/// that does not land is dropped and counted — the contents of a class that
-/// survives nothing (§1.2) — never retried into a loop. Returns
-/// `(rings delivered, rings lost)`.
+/// Ship hand-overs to their new owners now: one attempt each, batched per
+/// (peer, tenant). What does not land goes back in the queue, which the
+/// placement loop ships again with retries ([`ship_until`]); what an owner
+/// refuses is dropped and counted. Returns `(rings delivered, rings lost)`.
+///
+/// The relayed push, pop and ack call this before relaying, so the owner
+/// serves what this node still held ahead of the request: they cannot wait
+/// out a retry, and need not — the relay itself fails while the owner does
+/// not answer.
 pub(crate) async fn ship(st: &AppState, out: Vec<ephemeral::Handover>) -> (usize, usize) {
+    let (s, left) = ship_rounds(st, out, None).await;
+    st.ephemeral.requeue(left);
+    (s.delivered, s.lost)
+}
+
+/// What [`ship_until`] did with the rings it was given.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Shipped {
+    /// Rings their new owner took.
+    pub delivered: usize,
+    /// Rings dropped: refused by the owner, or not landed by the deadline.
+    pub lost: usize,
+    /// Rings adopted here again: their partition came back to this node while
+    /// they waited (the peer they were going to dropped out).
+    pub kept: usize,
+    /// Messages in the delivered rings, as the owners counted them.
+    pub messages: usize,
+}
+
+/// Ship hand-overs, trying again with backoff until `until`, each attempt to
+/// the partition's owner of the moment: the peer it was detached for, another
+/// one if the placement moved it, or this node, which adopts it back. What has
+/// not landed by `until` is dropped and counted — the contents of a class that
+/// survives nothing (§1.2).
+pub(crate) async fn ship_until(
+    st: &AppState,
+    out: Vec<ephemeral::Handover>,
+    until: Instant,
+) -> Shipped {
+    let (mut s, left) = ship_rounds(st, out, Some(until)).await;
+    if !left.is_empty() {
+        tracing::warn!(
+            target: "ephemeral",
+            rings = left.len(),
+            "hand-over did not land before its deadline"
+        );
+    }
+    for h in &left {
+        st.ephemeral.handover_lost(h);
+    }
+    s.lost += left.len();
+    s
+}
+
+/// The rounds of [`ship`] and [`ship_until`]: one, then — given a deadline —
+/// one per backoff while something is left to try and `until` has not
+/// passed. Returns what is left.
+async fn ship_rounds(
+    st: &AppState,
+    out: Vec<ephemeral::Handover>,
+    until: Option<Instant>,
+) -> (Shipped, Vec<ephemeral::Handover>) {
+    let mut s = Shipped::default();
     if out.is_empty() {
-        return (0, 0);
+        return (s, out);
     }
-    let mut by: std::collections::BTreeMap<(String, String), Vec<ephemeral::Handover>> =
-        std::collections::BTreeMap::new();
-    for h in out {
-        by.entry((h.addr.clone(), h.ring.tenant.clone()))
-            .or_default()
-            .push(h);
-    }
-    let (mut delivered, mut lost) = (0usize, 0usize);
-    for ((addr, tenant), hs) in by {
-        let url = format!("{}/api/v1/ephemeral/_adopt", addr.trim_end_matches('/'));
-        let mut headers = crate::peerclient::internal_headers();
-        if let (Ok(k), Ok(v)) = (
-            HeaderName::from_bytes(crate::config::TENANT_HEADER.as_bytes()),
-            HeaderValue::from_str(&tenant),
-        ) {
-            headers.push((k, v));
-        }
-        let mut i = 0;
-        while i < hs.len() {
-            let start = i;
-            let mut body = String::from("{\"rings\":[");
-            while i < hs.len() && (i == start || body.len() < HANDOVER_BATCH_BYTES) {
-                if i > start {
-                    body.push(',');
+    let taken = out.len();
+    st.ephemeral.shipping_started(taken);
+    let mut pending = out;
+    let mut backoff = HANDOVER_BACKOFF_MIN;
+    let mut said = false;
+    loop {
+        let mut by: std::collections::BTreeMap<(String, String), Vec<ephemeral::Handover>> =
+            std::collections::BTreeMap::new();
+        let now_ms = crate::util::now_epoch_ms();
+        let mut woken: Vec<(String, String)> = Vec::new();
+        for mut h in pending.drain(..) {
+            let r = &h.ring;
+            match st
+                .ephemeral
+                .destination(&r.tenant, &r.queue, &r.partition, now_ms)
+            {
+                ephemeral::Dest::Peer(owner, addr) => {
+                    h.owner = owner;
+                    h.addr = addr;
                 }
-                ring_json(&mut body, &hs[i].ring);
-                i += 1;
+                // The partition is this node's again: adopt it here.
+                ephemeral::Dest::Here => {
+                    let key = (
+                        ephemeral::Ephemeral::qkey(&r.tenant, &r.queue),
+                        r.partition.clone(),
+                    );
+                    if st.ephemeral.take_back(h, now_ms) {
+                        s.kept += 1;
+                        woken.push(key);
+                    } else {
+                        s.lost += 1;
+                    }
+                    continue;
+                }
+                // Leaving, with every peer leaving too: nobody will take it.
+                ephemeral::Dest::Nobody => {
+                    st.ephemeral.handover_lost(&h);
+                    s.lost += 1;
+                    continue;
+                }
             }
-            body.push_str("]}");
-            let r = st
-                .peers
-                .call(
-                    Method::POST,
-                    &url,
-                    &headers,
-                    Bytes::from(body),
-                    HANDOVER_DEADLINE,
-                )
-                .await;
-            match r {
-                Ok(resp) if resp.status.is_success() => delivered += i - start,
-                Ok(resp) => {
+            by.entry((h.addr.clone(), h.ring.tenant.clone()))
+                .or_default()
+                .push(h);
+        }
+        if !woken.is_empty() {
+            st.notifier.notify_pushed_batch(&woken);
+        }
+        // Every (peer, tenant) at once: a peer that does not answer holds
+        // nobody else's rings up. Within a deadline, no attempt outlives it
+        // by more than a second.
+        let attempt = match until {
+            None => HANDOVER_DEADLINE,
+            Some(u) => HANDOVER_DEADLINE.min(
+                u.saturating_duration_since(Instant::now())
+                    .max(Duration::from_secs(1)),
+            ),
+        };
+        let sent = futures_util::future::join_all(
+            by.into_iter()
+                .map(|((addr, tenant), hs)| send_rings(st, addr, tenant, hs, attempt)),
+        )
+        .await;
+        let mut why = None;
+        for r in sent {
+            s.delivered += r.delivered;
+            s.lost += r.lost;
+            s.messages += r.messages;
+            pending.extend(r.retry);
+            why = why.or(r.why);
+        }
+        let now = Instant::now();
+        let Some(until) = until.filter(|u| now < *u) else {
+            break;
+        };
+        if pending.is_empty() {
+            break;
+        }
+        if !said {
+            said = true;
+            tracing::info!(
+                target: "ephemeral",
+                rings = pending.len(),
+                why = why.as_deref().unwrap_or(""),
+                for_s = until.saturating_duration_since(now).as_secs(),
+                "hand-over not landed yet; trying again"
+            );
+        }
+        tokio::time::sleep(backoff.min(until - now)).await;
+        backoff = (backoff * 2).min(HANDOVER_BACKOFF_MAX);
+    }
+    st.ephemeral.shipping_done(taken);
+    (s, pending)
+}
+
+/// What one peer did with one tenant's rings in one round.
+#[derive(Default)]
+struct Sent {
+    delivered: usize,
+    lost: usize,
+    messages: usize,
+    /// Not landed, worth another attempt: no answer, or a 5xx / 429.
+    retry: Vec<ephemeral::Handover>,
+    /// Why the first of them did not land, for the log.
+    why: Option<String>,
+}
+
+/// POST one tenant's rings to `addr`'s `_adopt`, in batches of about
+/// [`HANDOVER_BATCH_BYTES`].
+async fn send_rings(
+    st: &AppState,
+    addr: String,
+    tenant: String,
+    hs: Vec<ephemeral::Handover>,
+    attempt: Duration,
+) -> Sent {
+    let url = format!("{}/api/v1/ephemeral/_adopt", addr.trim_end_matches('/'));
+    let mut headers = crate::peerclient::internal_headers();
+    if let (Ok(k), Ok(v)) = (
+        HeaderName::from_bytes(crate::config::TENANT_HEADER.as_bytes()),
+        HeaderValue::from_str(&tenant),
+    ) {
+        headers.push((k, v));
+    }
+    let mut out = Sent::default();
+    let mut hs = hs.into_iter().peekable();
+    while hs.peek().is_some() {
+        let mut batch = Vec::new();
+        let mut body = String::from("{\"rings\":[");
+        while let Some(h) = hs.next_if(|_| batch.is_empty() || body.len() < HANDOVER_BATCH_BYTES) {
+            if !batch.is_empty() {
+                body.push(',');
+            }
+            ring_json(&mut body, &h.ring);
+            batch.push(h);
+        }
+        body.push_str("]}");
+        let r = st
+            .peers
+            .call(Method::POST, &url, &headers, Bytes::from(body), attempt)
+            .await;
+        match r {
+            Ok(resp) if resp.status.is_success() => {
+                let (adopted, refused) = adopt_answer(&resp.body);
+                let refused = refused.min(batch.len());
+                if refused > 0 {
+                    // Which ones the answer does not say: the count is what
+                    // the class's contract owes (§1.2), counted, never silent.
+                    st.metrics
+                        .eph_wipes
+                        .fetch_add(refused as u64, std::sync::atomic::Ordering::Relaxed);
                     tracing::warn!(
                         target: "ephemeral",
                         %url,
-                        status = resp.status.as_u16(),
-                        body = %String::from_utf8_lossy(&resp.body),
-                        "hand-over refused"
+                        rings = refused,
+                        "the new owner refused rings (its bounds or quotas); their contents are dropped"
                     );
-                    for h in &hs[start..i] {
-                        st.ephemeral.handover_lost(h);
-                    }
-                    lost += i - start;
                 }
-                Err(e) => {
-                    tracing::warn!(target: "ephemeral", %url, error = %e, "hand-over failed");
-                    for h in &hs[start..i] {
-                        st.ephemeral.handover_lost(h);
+                out.delivered += batch.len() - refused;
+                out.lost += refused;
+                out.messages += adopted;
+            }
+            Ok(resp)
+                if resp.status.is_server_error()
+                    || resp.status == StatusCode::TOO_MANY_REQUESTS =>
+            {
+                // A peer that is stopping said so: out of the way now, so the
+                // next attempt goes to the partition's next owner instead of
+                // waiting for its leaving notice or for raft.
+                if is_leaving_answer(&resp.body) {
+                    if let Some(h) = batch.first() {
+                        st.ephemeral.exclude_peer(
+                            &h.owner,
+                            crate::util::now_epoch_ms() + LEAVING_EXCLUSION_MS,
+                            None,
+                        );
                     }
-                    lost += i - start;
                 }
+                tracing::debug!(
+                    target: "ephemeral",
+                    %url,
+                    status = resp.status.as_u16(),
+                    "hand-over not taken yet; trying again"
+                );
+                if out.why.is_none() {
+                    out.why = Some(format!("{url} answered {}", resp.status.as_u16()));
+                }
+                out.retry.extend(batch);
+            }
+            Ok(resp) => {
+                let hint = if matches!(
+                    resp.status,
+                    StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                ) {
+                    "set the same QUEEN_RAFT_TOKEN on every node: the calls between brokers prove themselves with it"
+                } else {
+                    ""
+                };
+                tracing::warn!(
+                    target: "ephemeral",
+                    %url,
+                    status = resp.status.as_u16(),
+                    body = %String::from_utf8_lossy(&resp.body),
+                    hint,
+                    "hand-over refused"
+                );
+                for h in &batch {
+                    st.ephemeral.handover_lost(h);
+                }
+                out.lost += batch.len();
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: "ephemeral",
+                    %url,
+                    error = %e,
+                    "hand-over did not reach the peer; trying again"
+                );
+                if out.why.is_none() {
+                    out.why = Some(format!("{url}: {e}"));
+                }
+                out.retry.extend(batch);
             }
         }
     }
-    (delivered, lost)
+    out
+}
+
+/// `{adopted, refusedRings}` out of an `_adopt` answer; zeros when it says
+/// neither (an older broker answers the same shape).
+fn adopt_answer(body: &[u8]) -> (usize, usize) {
+    let v: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+    (n("adopted"), n("refusedRings"))
+}
+
+/// Is this the `{error, code: "leaving"}` a stopping peer answers ([`leaving`])?
+fn is_leaving_answer(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("code")
+                .and_then(|c| c.as_str())
+                .map(|c| c == "leaving")
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Deserialize)]
@@ -1538,9 +1817,21 @@ fn internal_only() -> Response {
     )
 }
 
+/// What a node that is stopping answers a peer that would give it partitions:
+/// 503, so the peer tries again — with the partition's next owner.
+fn leaving() -> Response {
+    err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "leaving",
+        "this broker is stopping and takes no ephemeral partitions",
+    )
+}
+
 /// `POST /api/v1/ephemeral/_adopt` — broker to broker: take over rings whose
 /// ownership moved here. The tenant is the request's (the trusted header the
 /// sending broker set), never a body field: a hand-over cannot cross tenants.
+/// A node that is stopping takes nothing: what it adopted now would leave with
+/// it.
 pub async fn handle_ephemeral_adopt(
     State(st): State<Arc<AppState>>,
     Extension(_authed): Extension<crate::auth::AuthedSub>,
@@ -1550,6 +1841,9 @@ pub async fn handle_ephemeral_adopt(
 ) -> Response {
     if !is_forwarded(&headers) {
         return internal_only();
+    }
+    if st.ephemeral.is_leaving() {
+        return leaving();
     }
     let parsed: AdoptBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
@@ -1608,6 +1902,10 @@ pub async fn handle_ephemeral_adopt(
 #[derive(Deserialize)]
 struct LeavingBody {
     node: String,
+    /// The incarnation that is leaving, in hex (absent from a node older than
+    /// this field): its successor answers the readiness probe with another.
+    #[serde(default)]
+    epoch: Option<String>,
 }
 
 /// `POST /api/v1/ephemeral/_leaving` — broker to broker: the sender is
@@ -1628,8 +1926,161 @@ pub async fn handle_ephemeral_leaving(
     st.ephemeral.exclude_peer(
         &parsed.node,
         crate::util::now_epoch_ms() + LEAVING_EXCLUSION_MS,
+        parsed
+            .epoch
+            .as_deref()
+            .and_then(|e| u64::from_str_radix(e, 16).ok()),
     );
     json(StatusCode::OK, "{\"ok\":true}".to_string())
+}
+
+/// `GET /api/v1/ephemeral/_ready` — broker to broker: does this node take
+/// partitions? 200 `{node, epoch}` once its listener is up — which is all an
+/// answer can prove, and the one thing raft cannot: a restarted node answers
+/// raft before it listens here. 503 `leaving` while it stops. A peer places
+/// nothing on a node before this has answered it (§3.7).
+pub async fn handle_ephemeral_ready(
+    State(st): State<Arc<AppState>>,
+    Extension(_authed): Extension<crate::auth::AuthedSub>,
+    headers: HeaderMap,
+) -> Response {
+    if !is_forwarded(&headers) {
+        return internal_only();
+    }
+    if st.ephemeral.is_leaving() {
+        return leaving();
+    }
+    let node = st
+        .rsm
+        .members()
+        .map(|c| c.node_id.to_string())
+        .unwrap_or_default();
+    json(
+        StatusCode::OK,
+        format!(
+            "{{\"node\":\"{node}\",\"epoch\":\"{:x}\"}}",
+            st.ephemeral.epoch()
+        ),
+    )
+}
+
+/// Ask the peer `id` at `addr` whether it takes partitions (`_ready`).
+///
+/// Ready on a 200, with the incarnation it names. Ready, too, on a 4xx: the
+/// listener answered, which is what the probe is for — a node older than the
+/// route answers 404 (a rolling upgrade), and one that cannot verify this
+/// node's calls answers 401 or 403 (its hand-overs then fail, as they would
+/// anyway, and say why). Not ready on a 5xx (leaving, or a proxy in the way
+/// with nothing behind it) or no answer at all.
+pub(crate) async fn probe(st: &AppState, id: &str, addr: &str) -> ephemeral::Probe {
+    let url = format!("{}/api/v1/ephemeral/_ready", addr.trim_end_matches('/'));
+    let r = st
+        .peers
+        .call(
+            Method::GET,
+            &url,
+            &crate::peerclient::internal_headers(),
+            Bytes::new(),
+            PROBE_DEADLINE,
+        )
+        .await;
+    match r {
+        Ok(resp) if resp.status.is_success() => {
+            let v: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+            let node = v.get("node").and_then(|x| x.as_str()).unwrap_or("");
+            if !node.is_empty() && node != id {
+                // Two members at one address: placing partitions on it would
+                // give one process two shares.
+                static WRONG_NODE: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+                if let Some(suppressed) = WRONG_NODE.tick_now() {
+                    tracing::warn!(
+                        target: "ephemeral",
+                        peer = %id,
+                        %addr,
+                        answered = %node,
+                        suppressed,
+                        "another node answers at this peer's address; it takes no partitions (check QUEEN_RAFT_PEERS)"
+                    );
+                }
+                return ephemeral::Probe::NotReady;
+            }
+            let epoch = v
+                .get("epoch")
+                .and_then(|x| x.as_str())
+                .and_then(|e| u64::from_str_radix(e, 16).ok());
+            ephemeral::Probe::Ready(epoch)
+        }
+        Ok(resp) if resp.status.is_client_error() => {
+            if matches!(
+                resp.status,
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ) {
+                static REFUSED: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+                if let Some(suppressed) = REFUSED.tick_now() {
+                    tracing::warn!(
+                        target: "ephemeral",
+                        peer = %id,
+                        %addr,
+                        status = resp.status.as_u16(),
+                        suppressed,
+                        "a peer refuses this node's calls: ring hand-overs to it will fail; set the same QUEEN_RAFT_TOKEN on every node"
+                    );
+                }
+            }
+            ephemeral::Probe::Ready(None)
+        }
+        _ => ephemeral::Probe::NotReady,
+    }
+}
+
+/// How long a peer raft finds live may keep its listener silent before this
+/// node says so: longer than a restart's gap between the two.
+const SILENT_LISTENER_WARN: Duration = Duration::from_secs(30);
+
+/// Since when each peer raft finds live has not answered the probe (and is
+/// not leaving): the placement loop's, cleared when raft judges it down.
+type Silent = Arc<std::sync::Mutex<HashMap<String, Instant>>>;
+
+/// Probe one peer in the background, at most one probe per peer in flight;
+/// a peer found ready is placed at once (the loop is kicked). One that stays
+/// silent is named in a warning: it takes no partitions, and nothing else
+/// would say why (an unreachable http half of `QUEEN_RAFT_PEERS`, say).
+fn spawn_probe(st: &Arc<AppState>, silent: &Silent, id: String, addr: String) {
+    if !st.ephemeral.start_probe(&id) {
+        return;
+    }
+    let (st, silent) = (st.clone(), silent.clone());
+    tokio::spawn(async move {
+        let answer = probe(&st, &id, &addr).await;
+        if st.ephemeral.probe_done(&id, &addr, answer) {
+            tracing::info!(target: "ephemeral", peer = %id, %addr, "peer listening: it takes partitions");
+            st.ephemeral.kick_handle().notify_one();
+        }
+        let leaving = st
+            .ephemeral
+            .excluded_peers(crate::util::now_epoch_ms())
+            .contains(&id);
+        let mut silent = silent.lock().unwrap();
+        if answer != ephemeral::Probe::NotReady || leaving {
+            silent.remove(&id);
+            return;
+        }
+        let since = *silent.entry(id.clone()).or_insert_with(Instant::now);
+        if since.elapsed() >= SILENT_LISTENER_WARN {
+            static SILENT: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+            if let Some(suppressed) = SILENT.tick_now() {
+                tracing::warn!(
+                    target: "ephemeral",
+                    peer = %id,
+                    %addr,
+                    silent_s = since.elapsed().as_secs(),
+                    suppressed,
+                    "a peer raft finds live does not answer on its listener: it takes no ephemeral \
+                     partitions until it does (check the http half of QUEEN_RAFT_PEERS)"
+                );
+            }
+        }
+    });
 }
 
 /// Bring this node's RAM in line with the replicated control rows: the switch,
@@ -1676,15 +2127,33 @@ fn member_ttl_ms() -> u64 {
         .unwrap_or(4_000)
 }
 
+/// Do this node's calls to its peers carry the cluster token? Without it a
+/// peer with JWT auth on cannot tell a hand-over from a client (`auth.rs`).
+fn sends_cluster_token() -> bool {
+    crate::peerclient::internal_headers()
+        .iter()
+        .any(|(k, _)| k.as_str() == crate::peerclient::TOKEN_HEADER)
+}
+
 /// The placement loop (server only): every 250 ms — sooner when kicked — judge
-/// the raft members' view, install the placement, hand over the rings that
-/// moved, and once a second converge the control rows.
+/// the raft members' view, keep out the peers that are leaving or not
+/// listening yet (and probe those), install the placement, hand over the rings
+/// that moved, and once a second converge the control rows.
 pub fn spawn_ephemeral_placement(st: Arc<AppState>) {
     if st.rsm.members().is_none() {
         return;
     }
+    if st.auth_enabled && !sends_cluster_token() {
+        tracing::warn!(
+            target: "ephemeral",
+            "JWT_ENABLED without QUEEN_RAFT_TOKEN: a peer cannot verify this node's ring \
+             hand-overs and leaving notices, so a stopping node's ephemeral contents are \
+             dropped; set the same QUEEN_RAFT_TOKEN on every node"
+        );
+    }
     tokio::spawn(async move {
         let mut judge = ephemeral::MemberJudge::new(member_ttl_ms());
+        let silent: Silent = Arc::default();
         let mut last_reconcile = Instant::now();
         loop {
             tokio::select! {
@@ -1693,12 +2162,20 @@ pub fn spawn_ephemeral_placement(st: Arc<AppState>) {
             }
             if !st.ephemeral.is_leaving() {
                 if let Some(cm) = st.rsm.members() {
-                    let excluded = st.ephemeral.excluded_peers(crate::util::now_epoch_ms());
-                    let judged = judge.judge(&cm, &excluded);
+                    let judged = judge.judge(&cm);
                     for id in judge.down_ids() {
                         st.ephemeral.clear_exclusion(&id);
+                        st.ephemeral.forget_ready(&id);
+                        silent.lock().unwrap().remove(&id);
                     }
                     if let Some(p) = judged {
+                        let (p, probe) = match p {
+                            Some(p) => st.ephemeral.admit(p, crate::util::now_epoch_ms()),
+                            None => (None, Vec::new()),
+                        };
+                        for (id, addr) in probe {
+                            spawn_probe(&st, &silent, id, addr);
+                        }
                         if st.ephemeral.set_placement(p) {
                             let moved = st.ephemeral.reap_foreign();
                             tracing::info!(
@@ -1711,10 +2188,24 @@ pub fn spawn_ephemeral_placement(st: Arc<AppState>) {
                     }
                 }
             }
+            // Shipped beside the loop, not in it: a hand-over waiting on a
+            // peer must not hold up the placement that may move it elsewhere.
             let out = st.ephemeral.take_outbox();
             if !out.is_empty() {
-                let (delivered, lost) = ship(&st, out).await;
-                tracing::info!(target: "ephemeral", delivered, lost, "hand-over");
+                let st = st.clone();
+                tokio::spawn(async move {
+                    let rings = out.len();
+                    let s = ship_until(&st, out, Instant::now() + HANDOVER_RETRY_FOR).await;
+                    tracing::info!(
+                        target: "ephemeral",
+                        rings,
+                        delivered = s.delivered,
+                        lost = s.lost,
+                        kept = s.kept,
+                        messages = s.messages,
+                        "hand-over"
+                    );
+                });
             }
             if last_reconcile.elapsed() >= Duration::from_secs(1) {
                 last_reconcile = Instant::now();
@@ -1724,14 +2215,31 @@ pub fn spawn_ephemeral_placement(st: Arc<AppState>) {
     });
 }
 
+/// What [`ephemeral_drain`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Drained {
+    /// The peers it told it is leaving, and how many took the notice.
+    pub peers: usize,
+    pub told: usize,
+    /// Rings it detached at the signal.
+    pub rings: u64,
+    /// What became of the rings it shipped (those, and any requeued).
+    pub shipped: Shipped,
+    /// Rings the placement loop still had on their way when the bound ran out.
+    pub still_shipping: usize,
+}
+
 /// SIGTERM, before the raft hand-off: tell the peers this node is leaving,
-/// stop owning anything, and hand every ring to its next owner. Bounded: a
-/// stop is never held hostage by a peer that does not answer.
-pub async fn ephemeral_drain(st: &Arc<AppState>) {
+/// stop owning anything, and hand every ring to its next owner, retrying what
+/// does not land. Bounded by [`DRAIN_FOR`]: a stop is never held hostage by a
+/// peer that does not answer. It also waits, within the same bound, for the
+/// hand-overs the placement loop had in flight.
+pub async fn ephemeral_drain(st: &Arc<AppState>) -> Drained {
     let peers = st.ephemeral.peers();
     if peers.is_empty() {
-        return;
+        return Drained::default();
     }
+    let until = Instant::now() + DRAIN_FOR;
     let me = st
         .rsm
         .members()
@@ -1739,26 +2247,93 @@ pub async fn ephemeral_drain(st: &Arc<AppState>) {
         .unwrap_or_default();
     st.ephemeral.set_leaving();
     let headers = crate::peerclient::internal_headers();
-    let body = format!("{{\"node\":\"{me}\"}}");
+    let body = format!(
+        "{{\"node\":\"{me}\",\"epoch\":\"{:x}\"}}",
+        st.ephemeral.epoch()
+    );
     let notices = peers.iter().map(|(_, addr)| {
         let url = format!("{}/api/v1/ephemeral/_leaving", addr.trim_end_matches('/'));
         let headers = headers.clone();
         let body = Bytes::from(body.clone());
         let st = st.clone();
         async move {
-            let _ = st
+            match st
                 .peers
                 .call(Method::POST, &url, &headers, body, Duration::from_secs(2))
-                .await;
+                .await
+            {
+                Ok(r) if r.status.is_success() => true,
+                Ok(r) => {
+                    tracing::warn!(
+                        target: "shutdown",
+                        %url,
+                        status = r.status.as_u16(),
+                        body = %String::from_utf8_lossy(&r.body),
+                        "a peer refused the leaving notice"
+                    );
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!(target: "shutdown", %url, error = %e, "a peer did not take the leaving notice");
+                    false
+                }
+            }
         }
     });
-    futures_util::future::join_all(notices).await;
+    let told = futures_util::future::join_all(notices)
+        .await
+        .into_iter()
+        .filter(|ok| *ok)
+        .count();
     let rings = st.ephemeral.reap_foreign();
-    let out = st.ephemeral.take_outbox();
-    let (delivered, lost) = match tokio::time::timeout(Duration::from_secs(15), ship(st, out)).await
-    {
-        Ok(x) => x,
-        Err(_) => (0, rings as usize),
+    let mut s = Shipped::default();
+    loop {
+        let out = st.ephemeral.take_outbox();
+        if !out.is_empty() {
+            if Instant::now() >= until {
+                // Past the drain's bound: what is still queued leaves with
+                // this process.
+                for h in &out {
+                    st.ephemeral.handover_lost(h);
+                }
+                s.lost += out.len();
+                break;
+            }
+            let r = ship_until(st, out, until).await;
+            s.delivered += r.delivered;
+            s.lost += r.lost;
+            s.kept += r.kept;
+            s.messages += r.messages;
+            continue;
+        }
+        if st.ephemeral.shipping() == 0 || Instant::now() >= until {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let d = Drained {
+        peers: peers.len(),
+        told,
+        rings,
+        shipped: s,
+        still_shipping: st.ephemeral.shipping(),
     };
-    tracing::info!(target: "shutdown", rings, delivered, lost, "ephemeral rings handed over");
+    tracing::info!(
+        target: "shutdown",
+        peers = d.peers,
+        told = d.told,
+        rings = d.rings,
+        delivered = s.delivered,
+        lost = s.lost,
+        messages = s.messages,
+        still_shipping = d.still_shipping,
+        "ephemeral rings handed over"
+    );
+    d
 }
+
+// Two brokers over real HTTP: the hand-over with JWT auth on, and to a peer
+// still starting (`src/tests_unit/README.md`).
+#[cfg(all(test, feature = "server"))]
+#[path = "../tests_unit/ephemeral_handover.rs"]
+mod ephemeral_handover_tests;

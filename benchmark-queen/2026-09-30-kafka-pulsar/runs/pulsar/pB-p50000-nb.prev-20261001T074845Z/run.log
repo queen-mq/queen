@@ -1,0 +1,26 @@
+[2026-10-01T07:16:24Z] run pB-p50000-nb: pulsar 4.2.4, 1000000 msg/s total over 9 load processes (3 loaders x 3), topics=1 x partitions=50000 entities=0 mode=batch batch=100 sub=failover consumers=33/process
+[2026-10-01T07:16:26Z] 1. cluster reset: PROFILE=vm
+  [2026-10-01T07:16:57Z] brokers healthy: brokers active=3 10.114.0.2:8080=ok 10.114.0.3:8080=ok 10.114.0.4:8080=ok
+    proof persistent://bench/ns/probe-health-1790839023: ledger 9 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.2:3181, 10.114.0.3:3181, 10.114.0.
+  [2026-10-01T07:17:05Z] reset done
+[2026-10-01T07:17:05Z] 2. topics + subscription + warm: pload -create-only on loader 1
+    [admin] subscription "sub" created in 64.3s and verified on all 50000 partitions in 29.7s (15870 re-created on a partition)
+    [warm] one message (no "ts") into each of 50000 partitions in 22.7s; consumed and acked in 3.2s
+  [create] done: 1 topics x 50000 partitions, subscription "sub" on every partition
+    namespace bench/ns: bundles=48 persistence=E3/Qw3/Qa2 markDeleteRate=1.0 retention=0min/0MB
+    proof persistent://bench/ns/load-partition-0: ledger 12 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.2:3181, 10.114.0.3:3181, 10.114.0.4:3181] (broker internalSt
+      LedgerMetadata{formatVersion=3, ensembleSize=3, writeQuorumSize=3, ackQuorumSize=2, state=OPEN, digestType=CRC32C, password=base64:, ensembles={0=[10.114.0.2:3181, 10.114.0.3:3181, 10.114.0.4:3181]}, ...
+[2026-10-01T07:19:13Z] 3. balance -fix
+  balance bench/ns: 50000 topics (1 partitioned) in 48 of 48 bundles, 3 brokers, mean 16666.7 topics/broker; hash check 4/4 lookups agree
+    10.114.0.2:8080        bundles= 16 topics=  16571 (  -0.6%)  per-bundle max/min=1062/1018
+    10.114.0.3:8080        bundles= 16 topics=  16748 (  +0.5%)  per-bundle max/min=1062/1031
+    10.114.0.4:8080        bundles= 16 topics=  16681 (  +0.1%)  per-bundle max/min=1057/1019
+    unowned bundles with topics: 0 (0 topics); max deviation 0.6% (target ±10%): OK
+[2026-10-01T07:19:14Z] 4. samplers on 3 brokers + 3 loaders
+  sampler pB-p50000-nb started pid 619018 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p50000-nb started pid 564875 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p50000-nb started pid 563289 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p50000-nb started pid 160309 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p50000-nb started pid 141317 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p50000-nb started pid 140512 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+[2026-10-01T07:19:18Z] 5. 9 load processes

@@ -1,0 +1,33 @@
+[2026-09-30T06:54:11Z] run reh-priv-fail: start: rate=10000 over N=3 processes (1 loader hosts x 3) = 3333 msg/s each; 1 topic(s) x 6 partitions (6 total), entities=0 mode=batch batch=100 consumers=1/process (3 total) warm=0 profile=default PROFILE=local out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/reh-priv-fail
+[2026-09-30T06:54:11Z] run reh-priv-fail: note: 10000 is not divisible by 3; offering 9999 msg/s
+[2026-09-30T06:54:12Z] run reh-priv-fail: 1. cluster reset (profile default, PARTS=6)
+    [2026-09-30T06:54:23Z] cluster: healthy in 11s: cluster id Rlm71oFPS0gRRDLcJ9nQ_w
+      n1 node=1 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+      n2 node=2 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+      n3 node=3 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+    [2026-09-30T06:54:23Z] cluster: versions (conf_hash must be equal: nodes differ only in node.id + listener IPs)
+      n1 node=1 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=local conf_hash=cb1d1e98 pid=15085 jvm=[-Xms384m -Xmx384m -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n2 node=2 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=local conf_hash=cb1d1e98 pid=13267 jvm=[-Xms384m -Xmx384m -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n3 node=3 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=local conf_hash=cb1d1e98 pid=13959 jvm=[-Xms384m -Xmx384m -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+    [2026-09-30T06:54:24Z] cluster: features: eligible.leader.replicas.version=1 group.version=1 kraft.version=0 metadata.version=4.3-IV0 share.version=1 streams.version=1 transaction.version=2 
+[2026-09-30T06:54:24Z] run reh-priv-fail: 2. samplers start (kafka-reh-priv-fail, every 2s) on 3 brokers + 1 loader hosts
+[2026-09-30T06:54:24Z] run reh-priv-fail: 3. create 1 topic(s) x 6 partitions, RF 3, min.insync 2 on loader 1
+      -topic-settle value
+        	the topics must stay ready (leaders, full ISR, replica logs) this long (a Go duration, or a bare number of seconds)
+      -topic-timeout value
+        	give up if the topics are not created and ready within this (a Go duration, or a bare number of seconds) (default 5m0s)
+      -topic-zipf-s float
+        	Zipf exponent over topics (-topic-dist zipf) (default 1)
+      -topics int
+        	number of topics T (names: -topic if T=1, else <topic>-t<i>) (default 1)
+      -warm
+        	after the topics are ready: write ONE message without "ts" into every partition (and consume it: Pulsar)
+      -zipf-s float
+        	Zipf exponent over entities (-dist zipf) (default 1.1)
+[2026-09-30T06:54:24Z] run reh-priv-fail: FAILED: topic create: DONE 2 (loaders/l1/create.log)
+[2026-09-30T06:54:24Z] run reh-priv-fail: 6. collect
+    node=1 rss_MB=544 threads=133 maps=554 fds=194 data_MB=1 part_dirs=1 gc_pauses=15 gc_max_ms=14.613 gc_sum_ms=67 errors=0 warns=6 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=11
+    node=2 rss_MB=541 threads=133 maps=555 fds=188 data_MB=1 part_dirs=1 gc_pauses=15 gc_max_ms=32.663 gc_sum_ms=88 errors=2 warns=5 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=11
+    node=3 rss_MB=540 threads=133 maps=554 fds=188 data_MB=1 part_dirs=1 gc_pauses=15 gc_max_ms=19.315 gc_sum_ms=89 errors=2 warns=4 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=11
+[2026-09-30T06:54:26Z] run reh-priv-fail:    collected 264K into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/reh-priv-fail
+[2026-09-30T06:54:26Z] run reh-priv-fail:    stopping the cluster (data kept until the next reset)

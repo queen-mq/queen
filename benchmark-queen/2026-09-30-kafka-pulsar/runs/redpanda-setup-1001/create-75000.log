@@ -1,0 +1,70 @@
+  n1 mkconf: node 1/3 ip=10.114.0.2 PARTS=75000 segment_fallocation_step=262144 partitions_memory_pct=55 io-config=yes -> /root/bench/redpanda/conf
+[2026-10-01T11:03:55Z] cluster: healthy in 13s
+  TUNER                  APPLIED  ENABLED  SUPPORTED  ERROR
+[2026-10-01T11:04:11Z] create-test 75000: cluster before:
+  n1 node=1 rss_MB=1536 threads=33 fds=140 data_MB=956 part_dirs=0 disk_free_GB=337 busy_s=1.347 errors=0 warns=20 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=2 elections_won_since_mark=0 mark='none' uptime_s=24
+  n1 total memory: 1.816GiB, reserved memory: 1.124GiB, total memory minus pre-share reservations: 709.000MiB, chunk cache: 122.241MiB, kafka: 244.483MiB, rpc: 162.988MiB, recovery: 81.494MiB, tiered stora
+  n2 node=2 rss_MB=1737 threads=33 fds=140 data_MB=956 part_dirs=0 disk_free_GB=334 busy_s=1.349 errors=0 warns=21 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=1 elections_won_since_mark=0 mark='none' uptime_s=24
+  n2 total memory: 1.816GiB, reserved memory: 1.124GiB, total memory minus pre-share reservations: 709.000MiB, chunk cache: 122.241MiB, kafka: 244.483MiB, rpc: 162.988MiB, recovery: 81.494MiB, tiered stora
+  n3 node=3 rss_MB=1734 threads=33 fds=139 data_MB=956 part_dirs=0 disk_free_GB=337 busy_s=1.046 errors=0 warns=21 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=0 elections_won_since_mark=0 mark='none' uptime_s=25
+  n3 total memory: 1.816GiB, reserved memory: 1.124GiB, total memory minus pre-share reservations: 709.000MiB, chunk cache: 122.241MiB, kafka: 244.483MiB, rpc: 162.988MiB, recovery: 81.494MiB, tiered stora
+[2026-10-01T11:04:13Z] create-test 75000: kload -create-only -warm (as run.sh) on loader 1
+  kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=0 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+  [topic] 1 topics created, 0 grown, 75000 partitions each x RF 3 accepted by the controller in 6.1s (15 requests of <= 5000 partitions)
+  [topic] t=+0s 0 topics missing, 1 with != 75000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+11s 0 topics missing, 0 with != 75000 partitions, 45730 partitions without leader, 0 with ISR < replicas
+  [topic] t=+21s 0 topics missing, 0 with != 75000 partitions, 30245 partitions without leader, 0 with ISR < replicas
+  [topic] t=+32s 0 topics missing, 0 with != 75000 partitions, 2019 partitions without leader, 0 with ISR < replicas
+  [topic] t=+42s ready, holding for -topic-settle
+  [topic] t=+53s ready, holding for -topic-settle
+  [topic] t=+64s ready, holding for -topic-settle
+  [topic] READY after 79.1s: 1 topics x 75000 partitions, leaders + full ISR + every replica log on disk
+  [warm] t=+0s ready, holding for -topic-settle
+  [warm] t=+11s ready, holding for -topic-settle
+  [warm] t=+22s ready, holding for -topic-settle
+  [warm] one record (no "ts") into each of 75000 partitions, acks=all, in 5.3s; READY again after 31.0s
+  [config] broker.default.replication.factor = 3 (STATIC_BROKER_CONFIG)
+  [config] topic.compression.type = producer (DEFAULT_CONFIG)
+  [config] topic.flush.ms = 100 (DEFAULT_CONFIG)
+  [config] topic.max.message.bytes = 16777216 (DEFAULT_CONFIG)
+  [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+  [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+[create] done: 1 topics x 75000 partitions ready
+[2026-10-01T11:06:09Z] create-test 75000: create + ready + warm + 30 s settle: rc=0 in 116 s
+[2026-10-01T11:06:09Z] create-test 75000: cluster after create:
+  n1 node=1 rss_MB=14001 threads=33 fds=75209 data_MB=20817 part_dirs=75000 disk_free_GB=317 busy_s=656.749 errors=0 warns=59 errors_since_mark=0 warns_since_mark=0 transfers=132 transfers_since_mark=0 elections_won=25133 elections_won_since_mark=0 mark='none' upti
+  n1 total memory: 1.816GiB, reserved memory: 1.124GiB, total memory minus pre-share reservations: 709.000MiB, chunk cache: 122.241MiB, kafka: 244.483MiB, rpc: 162.988MiB, recovery: 81.494MiB, tiered stora
+  n2 node=2 rss_MB=14010 threads=33 fds=75209 data_MB=20821 part_dirs=75000 disk_free_GB=314 busy_s=673.364 errors=0 warns=61 errors_since_mark=0 warns_since_mark=0 transfers=5590 transfers_since_mark=0 elections_won=30590 elections_won_since_mark=0 mark='none' upt
+  n2 total memory: 1.816GiB, reserved memory: 1.124GiB, total memory minus pre-share reservations: 709.000MiB, chunk cache: 122.241MiB, kafka: 244.483MiB, rpc: 162.988MiB, recovery: 81.494MiB, tiered stora
+  n3 node=3 rss_MB=13982 threads=33 fds=75209 data_MB=20821 part_dirs=75000 disk_free_GB=318 busy_s=543.912 errors=0 warns=58 errors_since_mark=0 warns_since_mark=0 transfers=9201 transfers_since_mark=0 elections_won=34201 elections_won_since_mark=0 mark='none' upt
+  n3 total memory: 1.816GiB, reserved memory: 1.124GiB, total memory minus pre-share reservations: 709.000MiB, chunk cache: 122.241MiB, kafka: 244.483MiB, rpc: 162.988MiB, recovery: 81.494MiB, tiered stora
+  CLUSTER HEALTH OVERVIEW
+  =======================
+  Healthy:                          true
+  Unhealthy reasons:                []
+  Controller ID:                    1
+  All nodes:                        [1 2 3]
+  Nodes down:                       []
+  Nodes in recovery mode:           []
+  
+  {"count": 75002, "leaderless": 0, "under_replicated": 0}
+  {"count": 75002, "leaderless": 0, "under_replicated": 0}
+  {"count": 75002, "leaderless": 0, "under_replicated": 0}
+[2026-10-01T11:06:24Z] create-test 75000: leaders per node (metadata):
+  leader 1: 24999 partitions
+  leader 2: 25001 partitions
+  leader 3: 25000 partitions
+[2026-10-01T11:06:26Z] create-test 75000: delete
+TOPIC          STATUS
+rpcreate75000  OK
+[2026-10-01T11:06:27Z] create-test 75000: delete accepted in 1 s; waiting until the partition dirs are gone on every node
+[2026-10-01T11:07:42Z] create-test 75000: topic dirs gone on all nodes after 76 s
+[2026-10-01T11:07:42Z] create-test 75000: cluster after delete:
+  n1 node=1 rss_MB=15442 threads=33 fds=209 data_MB=1111 part_dirs=0 disk_free_GB=336 busy_s=1165.436 errors=816 warns=87121 errors_since_mark=0 warns_since_mark=0 transfers=132 transfers_since_mark=0 elections_won=38101 elections_won_since_mark=0 mark='none' uptim
+  n1 total memory: 1.816GiB, reserved memory: 1.124GiB, total memory minus pre-share reservations: 709.000MiB, chunk cache: 122.241MiB, kafka: 244.483MiB, rpc: 162.988MiB, recovery: 81.494MiB, tiered stora
+  n2 node=2 rss_MB=15485 threads=33 fds=209 data_MB=1115 part_dirs=0 disk_free_GB=333 busy_s=1129.161 errors=102 warns=22840 errors_since_mark=0 warns_since_mark=0 transfers=5590 transfers_since_mark=0 elections_won=36207 elections_won_since_mark=0 mark='none' upti
+  n2 total memory: 1.816GiB, reserved memory: 1.124GiB, total memory minus pre-share reservations: 709.000MiB, chunk cache: 122.241MiB, kafka: 244.483MiB, rpc: 162.988MiB, recovery: 81.494MiB, tiered stora
+  n3 node=3 rss_MB=15450 threads=33 fds=209 data_MB=1103 part_dirs=0 disk_free_GB=336 busy_s=797.023 errors=0 warns=451 errors_since_mark=0 warns_since_mark=0 transfers=9201 transfers_since_mark=0 elections_won=34271 elections_won_since_mark=0 mark='none' uptime_s=
+  n3 total memory: 1.816GiB, reserved memory: 1.124GiB, total memory minus pre-share reservations: 709.000MiB, chunk cache: 122.241MiB, kafka: 244.483MiB, rpc: 162.988MiB, recovery: 81.494MiB, tiered stora
+rc=0

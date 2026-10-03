@@ -1,0 +1,15 @@
+pload tag=1x10000-t10-9k-v120-create loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=16 GOGC=400 seed=1790888772781539010
+  topics: 1 x 10000 partitions (x1x10000-t10-9k-v120..x1x10000-t10-9k-v120), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=10000 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.4 B raw, ~319 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  pulsar: url=pulsar://10.114.0.2:6650,10.114.0.3:6650,10.114.0.4:6650 admin=http://10.114.0.2:8080 ns=bench/ns sub=sub type=failover compression=lz4 batch=5ms/10 msgs/131072 B max-pending=1000/partition mem-limit=365 MB receiver-queue=1000 ack-group=100ms conns/broker=1 | feeder batches capped at -txn-size messages (whole entries per transaction) | txn: x1x10000-t10-9k-v120-in -> 4 workers (own client + TC each, NewTransaction timeout 10s, send+AckWithTxn on whole entries, txn-size 10, linger 1s) -> x1x10000-t10-9k-v120-out, 4 readers
+  [admin] cluster bench, tenant bench exists
+  [admin] namespace bench/ns exists with 48 bundles
+  [admin] namespace persistence: {"bookkeeperEnsemble":3,"bookkeeperWriteQuorum":3,"bookkeeperAckQuorum":2,"managedLedgerMaxMarkDeleteRate":1.0}
+  [admin] 2 topics created, 0 existed (10000 partitions each) in 0.7s
+  [admin] subscription "sub" on x1x10000-t10-9k-v120-in,x1x10000-t10-9k-v120-out created in 34.7s and verified on all 20000 partitions in 1.2s (0 re-created on a partition)
+  [admin] subscription "verify" on x1x10000-t10-9k-v120-out created in 6.9s and verified on all 10000 partitions in 0.5s (0 re-created on a partition)
+time="2026-10-01T21:03:06Z" level=error msg="Failed to create consumer" consumerID=2312 error="server error: ServiceNotReady: Topic is temporarily unavailable" name=pload-warm subscription=sub topic="persistent://bench/ns/x1x10000-t10-9k-v120-out-partition-68"
+time="2026-10-01T21:03:06Z" level=error msg="Failed to create consumer at reconnect" consumerID=2312 error="server error: ServiceNotReady: Topic is temporarily unavailable" name=pload-warm subscription=sub topic="persistent://bench/ns/x1x10000-t10-9k-v120-out-partition-68"
+  [warm] one message (no "ts") into each of 20000 partitions in 6.7s; consumed and acked in 12.1s
+[create] done: x1x10000-t10-9k-v120-in, x1x10000-t10-9k-v120-out x 10000 partitions, subscription "sub" on both, verify on x1x10000-t10-9k-v120-out

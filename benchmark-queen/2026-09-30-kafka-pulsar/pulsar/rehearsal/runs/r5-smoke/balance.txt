@@ -1,0 +1,5 @@
+balance bench/ns: 6 topics (1 partitioned) in 6 of 48 bundles, 3 brokers, mean 2.0 topics/broker; hash check 4/4 lookups agree
+  10.202.0.2:8080        bundles=  2 topics=      2 (  +0.0%)  per-bundle max/min=1/1
+  10.202.0.3:8080        bundles=  2 topics=      2 (  +0.0%)  per-bundle max/min=1/1
+  10.202.0.4:8080        bundles=  2 topics=      2 (  +0.0%)  per-bundle max/min=1/1
+  unowned bundles with topics: 0 (0 topics); max deviation 0.0% (target ±10%): OK

@@ -454,7 +454,15 @@ pub fn rendezvous_key(tenant: &str, name: &str, partition: &str) -> String {
 /// (`queen-kafka/src/cluster/liveness.rs`): a member the leader has not heard
 /// from within `ttl_ms` is down; one that was down comes back only once heard
 /// within half of it, so a member at the edge does not flap partitions back and
-/// forth; and a view older than half the ttl judges nothing.
+/// forth; and a view older than half the ttl judges nothing. A member the
+/// leader has no figure for at all keeps the judgement it had, and one never
+/// judged is not live: a partition placed on a node nobody has heard from is a
+/// hand-over into the void.
+///
+/// Raft liveness is not enough to take partitions: a restarted node answers
+/// the leader's heartbeats before its HTTP listener is up. What else a peer
+/// needs (its leaving notice, its listener's answer) is the engine's
+/// ([`Ephemeral::admit`]).
 pub struct MemberJudge {
     ttl_ms: u64,
     live: HashMap<u64, bool>,
@@ -470,8 +478,8 @@ impl MemberJudge {
 
     /// The members the last judgement found down. A node that announced it was
     /// leaving needs no exclusion once raft says it is gone: clearing it then
-    /// lets the restarted node back in as soon as it is heard again, instead of
-    /// after the notice's full window.
+    /// lets the restarted node back in as soon as it is heard again and its
+    /// listener answers, instead of after the notice's full window.
     pub fn down_ids(&self) -> Vec<String> {
         self.live
             .iter()
@@ -485,7 +493,6 @@ impl MemberJudge {
     pub fn judge(
         &mut self,
         cm: &crate::rsm::replicator::ClusterMembers,
-        excluded: &std::collections::HashSet<String>,
     ) -> Option<Option<Placement>> {
         let view = cm.view.as_ref()?;
         let age = cm.view_age?.as_millis() as u64;
@@ -501,7 +508,7 @@ impl MemberJudge {
             }
             let was = self.live.get(&m.id).copied();
             let is = match m.last_ack_ms {
-                None => was.unwrap_or(true),
+                None => was.unwrap_or(false),
                 Some(ack) => {
                     let ack = ack.saturating_add(age);
                     match was {
@@ -512,7 +519,7 @@ impl MemberJudge {
             };
             self.live.insert(m.id, is);
             let id = m.id.to_string();
-            if !is || m.http.is_empty() || excluded.contains(&id) {
+            if !is || m.http.is_empty() {
                 continue;
             }
             let addr = if m.http.starts_with("http://") || m.http.starts_with("https://") {
@@ -567,6 +574,41 @@ pub struct Handover {
     pub owner: String,
     pub addr: String,
     pub ring: RingExport,
+}
+
+/// What a peer answered when asked whether it takes partitions
+/// (`GET /api/v1/ephemeral/_ready`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// Its listener answered and it is not leaving: the incarnation that
+    /// answered, when it said (`None`: an older build, or one that refused a
+    /// call it could not verify — up is all that can be learned).
+    Ready(Option<u64>),
+    /// No answer, or a refusal that says to come back (leaving, starting).
+    NotReady,
+}
+
+/// Where a hand-over goes now ([`Ephemeral::destination`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Dest {
+    /// This node owns the partition again: it adopts the ring back.
+    Here,
+    /// The partition's owner: its id and base URL.
+    Peer(String, String),
+    /// Nobody: this node is leaving, and so is every peer it could give the
+    /// partition to (a whole cluster stopping).
+    Nobody,
+}
+
+/// A leaving notice in force ([`Ephemeral::exclude_peer`]).
+#[derive(Clone, Copy, Debug)]
+struct Exclusion {
+    /// Epoch ms it lapses at.
+    until_ms: i64,
+    /// The incarnation that announced it, when it said: another one answering
+    /// the readiness probe is the restarted node, back before the notice
+    /// lapses.
+    epoch: Option<u64>,
 }
 
 /// `e:<epoch_hex>:<partition>:<seq>` — opaque to clients, self-describing to
@@ -1443,11 +1485,21 @@ pub struct Ephemeral {
     /// Set on SIGTERM: this node owns nothing any more and hands every ring to
     /// the next owner ([`Ephemeral::set_leaving`]).
     leaving: AtomicBool,
-    /// Peers that announced they are leaving, and until when (epoch ms): they
-    /// are out of the placement before raft notices they are gone.
-    excluded: Mutex<HashMap<String, i64>>,
+    /// Peers that announced they are leaving: they are out of the placement
+    /// before raft notices they are gone.
+    excluded: Mutex<HashMap<String, Exclusion>>,
+    /// Peers whose listener answered the readiness probe, at the address it
+    /// answered on, with the incarnation that answered. Raft hears a restarted
+    /// node before its HTTP listener is up; a peer takes partitions only once
+    /// it is in here ([`Ephemeral::admit`]).
+    ready: Mutex<HashMap<String, (String, Option<u64>)>>,
+    /// Peers with a readiness probe in flight: one at a time each.
+    probing: Mutex<std::collections::HashSet<String>>,
     /// Rings detached for their new owner and not shipped yet ([`Handover`]).
     outbox: Mutex<Vec<Handover>>,
+    /// Rings taken out of the outbox and not landed yet: being shipped, or
+    /// waiting to retry. A drain waits for them.
+    shipping: std::sync::atomic::AtomicUsize,
     /// Wakes the placement loop early: a hand-over queued, a drain notice.
     kick: tokio::sync::Notify,
 }
@@ -1471,7 +1523,10 @@ impl Ephemeral {
             placement: std::sync::RwLock::new(None),
             leaving: AtomicBool::new(false),
             excluded: Mutex::new(HashMap::new()),
+            ready: Mutex::new(HashMap::new()),
+            probing: Mutex::new(std::collections::HashSet::new()),
             outbox: Mutex::new(Vec::new()),
+            shipping: std::sync::atomic::AtomicUsize::new(0),
             kick: tokio::sync::Notify::new(),
         })
     }
@@ -1786,12 +1841,24 @@ impl Ephemeral {
     }
 
     /// A peer said it is leaving: keep it out of the placement until `until_ms`,
-    /// before raft notices it is gone.
-    pub fn exclude_peer(&self, id: &str, until_ms: i64) {
-        self.excluded
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), until_ms);
+    /// before raft notices it is gone. `epoch` is the incarnation that said so,
+    /// when it did: another one answering the readiness probe ends the notice
+    /// early ([`Ephemeral::probe_done`]). A second word on the same peer keeps
+    /// the later end and the incarnation already known (a hand-over's 503
+    /// `leaving` names none). What this node knew of its listener goes with
+    /// it: the process that comes back is probed again.
+    pub fn exclude_peer(&self, id: &str, until_ms: i64, epoch: Option<u64>) {
+        {
+            let mut m = self.excluded.lock().unwrap();
+            let e = m
+                .entry(id.to_string())
+                .or_insert(Exclusion { until_ms, epoch });
+            e.until_ms = e.until_ms.max(until_ms);
+            if epoch.is_some() {
+                e.epoch = epoch;
+            }
+        }
+        self.forget_ready(id);
         self.kick.notify_one();
     }
 
@@ -1804,8 +1871,95 @@ impl Ephemeral {
     /// The peers still excluded at `now_ms` (expired notices are forgotten).
     pub fn excluded_peers(&self, now_ms: i64) -> std::collections::HashSet<String> {
         let mut m = self.excluded.lock().unwrap();
-        m.retain(|_, until| *until > now_ms);
+        m.retain(|_, e| e.until_ms > now_ms);
         m.keys().cloned().collect()
+    }
+
+    /// Forget what this node knew of a peer's listener: raft judged it down,
+    /// or it announced it is leaving. It takes partitions again once a probe
+    /// finds its listener up.
+    pub fn forget_ready(&self, id: &str) {
+        self.ready.lock().unwrap().remove(id);
+    }
+
+    /// Of the peers raft finds live (`p`, from [`MemberJudge::judge`]), the
+    /// ones that take partitions: not leaving, and whose listener answered at
+    /// the address `p` names. Also returns the peers to probe: the ones not
+    /// known ready, and the leaving ones whose notice named its incarnation
+    /// (another one answering is the restarted node). `None`: no peer takes
+    /// partitions — every partition is local.
+    pub fn admit(
+        &self,
+        mut p: Placement,
+        now_ms: i64,
+    ) -> (Option<Placement>, Vec<(String, String)>) {
+        let excluded: HashMap<String, Exclusion> = {
+            let mut m = self.excluded.lock().unwrap();
+            m.retain(|_, e| e.until_ms > now_ms);
+            m.clone()
+        };
+        let ready = self.ready.lock().unwrap();
+        let mut probe = Vec::new();
+        p.addrs.retain(|id, addr| {
+            let up = ready.get(id).is_some_and(|(at, _)| at == addr);
+            match excluded.get(id) {
+                Some(e) => {
+                    if e.epoch.is_some() {
+                        probe.push((id.clone(), addr.clone()));
+                    }
+                    false
+                }
+                None => {
+                    if !up {
+                        probe.push((id.clone(), addr.clone()));
+                    }
+                    up
+                }
+            }
+        });
+        drop(ready);
+        let me = p.me.clone();
+        p.nodes.retain(|n| *n == me || p.addrs.contains_key(n));
+        probe.sort();
+        if p.addrs.is_empty() {
+            (None, probe)
+        } else {
+            (Some(p), probe)
+        }
+    }
+
+    /// Claim the probe of `id`: `false` when one is already in flight.
+    pub fn start_probe(&self, id: &str) -> bool {
+        self.probing.lock().unwrap().insert(id.to_string())
+    }
+
+    /// A probe of `id` at `addr` came back. Returns whether it made the peer
+    /// ready, so the caller places at once instead of on the next tick.
+    ///
+    /// A peer under a leaving notice stays out unless the answer comes from
+    /// another incarnation than the one that sent the notice: the process that
+    /// announced it is still draining, the one that answers is its successor.
+    pub fn probe_done(&self, id: &str, addr: &str, answer: Probe) -> bool {
+        self.probing.lock().unwrap().remove(id);
+        let Probe::Ready(epoch) = answer else {
+            return false;
+        };
+        {
+            let mut ex = self.excluded.lock().unwrap();
+            if let Some(e) = ex.get(id) {
+                match (e.epoch, epoch) {
+                    (Some(left), Some(now)) if left != now => {
+                        ex.remove(id);
+                    }
+                    _ => return false,
+                }
+            }
+        }
+        self.ready
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), (addr.to_string(), epoch));
+        true
     }
 
     /// The placement loop's early wake-up.
@@ -1965,6 +2119,95 @@ impl Ephemeral {
     /// Every queued hand-over.
     pub fn take_outbox(&self) -> Vec<Handover> {
         std::mem::take(&mut *self.outbox.lock().unwrap())
+    }
+
+    /// Hand-overs that could not land yet go back in the queue, for the
+    /// placement loop to ship (and retry) in the background.
+    pub fn requeue(&self, hs: Vec<Handover>) {
+        if hs.is_empty() {
+            return;
+        }
+        self.outbox.lock().unwrap().extend(hs);
+        self.kick.notify_one();
+    }
+
+    /// Where a hand-over goes now: the partition's owner under the placement
+    /// in force, leaving out the peers that said they are leaving since (the
+    /// placement catches up on the next tick — or never, on a node that is
+    /// itself leaving, which judges no more).
+    pub fn destination(&self, tenant: &str, name: &str, partition: &str, now_ms: i64) -> Dest {
+        let gone = if self.is_leaving() {
+            Dest::Nobody
+        } else {
+            Dest::Here
+        };
+        let Some(p) = self.placement() else {
+            return gone;
+        };
+        let excluded = self.excluded_peers(now_ms);
+        let nodes: Vec<String> = p
+            .nodes
+            .iter()
+            .filter(|n| !excluded.contains(*n))
+            .cloned()
+            .collect();
+        let key = rendezvous_key(tenant, name, partition);
+        match hrw_pick(&key, &nodes) {
+            Some(o) if o == p.me => Dest::Here,
+            Some(o) => match p.addrs.get(o).filter(|a| !a.is_empty()) {
+                Some(addr) => Dest::Peer(o.to_string(), addr.clone()),
+                None => gone,
+            },
+            None => gone,
+        }
+    }
+
+    /// A hand-over whose partition came back to this node while it waited:
+    /// adopted here, charged like any adoption. `false` when refused (bounds,
+    /// quotas): then its contents are gone, counted as a lost hand-over.
+    pub fn take_back(&self, h: Handover, now_ms: i64) -> bool {
+        let (tenant, queue, partition) = (
+            h.ring.tenant.clone(),
+            h.ring.queue.clone(),
+            h.ring.partition.clone(),
+        );
+        let messages = h.ring.msgs.len();
+        match self.adopt(h.ring, now_ms) {
+            Ok(_) => true,
+            Err(r) => {
+                self.metrics.eph_wipes.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    target: "ephemeral",
+                    %tenant,
+                    %queue,
+                    %partition,
+                    messages,
+                    refusal = ?r,
+                    "a hand-over that came back could not be adopted; the partition's contents are dropped"
+                );
+                false
+            }
+        }
+    }
+
+    /// `n` rings left the outbox for their new owners.
+    pub fn shipping_started(&self, n: usize) {
+        self.shipping.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// `n` rings landed, came back or were dropped.
+    pub fn shipping_done(&self, n: usize) {
+        #[allow(deprecated)] // fetch_update: see Budget::refund
+        let _ = self
+            .shipping
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(n))
+            });
+    }
+
+    /// Rings on their way to a new owner: out of the outbox, not landed.
+    pub fn shipping(&self) -> usize {
+        self.shipping.load(Ordering::Relaxed)
     }
 
     /// A hand-over that could not be delivered: its contents are gone, which is

@@ -1,0 +1,36 @@
+pload tag=1x200-t10-9k-p5 loader=5/9 mode=batch rate=1000 msg/s batch=10 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=1m0s GOMAXPROCS=16 GOGC=400 seed=1790873704714880281
+  offered: 1000 msg/s = 100.0 units/s (avg 10.0 msgs/unit) across 3 pacer workers (33.33 units/s each)
+  topics: 1 x 200 partitions (x1x200-t10-9k..x1x200-t10-9k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=22 starting at 0 [producer shard 5/9: partitions p % 9 == 5, entity j -> partition 5 + j*9]
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~319 B stamped ({"ts":µs,"src":5,...}), pool 64x10
+  consumers: 22 here (ci 110..131 of 198), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[3 4 5]
+  pulsar: url=pulsar://10.114.0.2:6650,10.114.0.3:6650,10.114.0.4:6650 admin=http://10.114.0.2:8080 ns=bench/ns sub=sub type=failover compression=lz4 batch=5ms/10 msgs/131072 B max-pending=100000/partition mem-limit=64 MB receiver-queue=1000 ack-group=100ms conns/broker=1 | feeder batches capped at -txn-size messages (whole entries per transaction) | txn: x1x200-t10-9k-in -> 22 workers (own client + TC each, NewTransaction timeout 10s, send+AckWithTxn on whole entries, txn-size 10, linger 1s) -> x1x200-t10-9k-out, 22 readers
+  [admin] 2 topics with 200 partitions and subscription "sub" exist (checked in 0.0s)
+  [txn] 22 workers (ci 110..131 of 198, 0 idle): each its own client + TC, a failover consumer on its partitions of x1x200-t10-9k-in, 22 producers on x1x200-t10-9k-out in all; txn-size 10, linger 1s, txn-timeout 10s; ready in 1.0s
+  [consume] 22 consumers (ci 110..131 of 198), failover, partition slices (every partition exactly one consumer): 22 partition registrations here, 200 in total across all processes; idle 0 here, 0 in total; subscribed in 0.0s, settling 2s
+  [produce] producer shard 5/9: 22 partitions per topic (p % 9 == 5) x 1 topics, per-partition producers created lazily on first use
+READY 1790873983573
+[start] waiting 9.308s for the common start 1790873999927
+[start] GO 16:59:59.927 (unix ms 1790873999927)
+[17:00:09] offered=      500/s achieved=      500/s shed=        0/s inflight=     0 | p50=   6.37 p99=   18.82 p999=   25.73 ms | push=5000 pop=4940 lag=60 | errs push=0 pop=0 empty=0 gor=1902 | ack=      494/s ackErr=0 ackAvg=0.00ms | e2e p50=30.59 p99=90.62 p999=98.82 n=4940 | e2e_local p50=30.34 p99=82.43 n=2020
+[txn] 17:00:09 txn=      50/s msgs=      495/s avg= 10.00 msg/txn | commit p50=23.94 p99=65.28 p999=72.19 ms | aborts=0 errs=0 open=7 | in=      502/s | total txns=495 msgs=4950 aborts=0 errs=0
+[17:00:19] offered=     1000/s achieved=      999/s shed=        0/s inflight=     1 | p50=   6.18 p99=    9.02 p999=    9.66 ms | push=14990 pop=14840 lag=150 | errs push=0 pop=0 empty=0 gor=2364 | ack=      990/s ackErr=0 ackAvg=0.00ms | e2e p50=28.80 p99=38.14 p999=43.26 n=9900 | e2e_local p50=28.80 p99=38.14 n=4100
+[txn] 17:00:19 txn=      99/s msgs=      989/s avg= 10.00 msg/txn | commit p50=22.14 p99=27.26 p999=31.10 ms | aborts=0 errs=0 open=0 | in=      982/s | total txns=1484 msgs=14840 aborts=0 errs=0
+[17:00:29] offered=     1000/s achieved=     1000/s shed=        0/s inflight=     1 | p50=   6.11 p99=    9.15 p999=   10.05 ms | push=24990 pop=24680 lag=310 | errs push=0 pop=0 empty=0 gor=2382 | ack=      984/s ackErr=0 ackAvg=0.00ms | e2e p50=29.06 p99=37.63 p999=43.78 n=9840 | e2e_local p50=28.54 p99=38.14 n=4060
+[txn] 17:00:29 txn=      99/s msgs=      986/s avg= 10.00 msg/txn | commit p50=22.40 p99=27.52 p999=29.57 ms | aborts=0 errs=0 open=10 | in=      996/s | total txns=2470 msgs=24700 aborts=0 errs=0
+[17:00:39] offered=     1000/s achieved=     1001/s shed=        0/s inflight=     0 | p50=   6.11 p99=    8.77 p999=    9.79 ms | push=35000 pop=34700 lag=300 | errs push=0 pop=0 empty=0 gor=2374 | ack=     1002/s ackErr=0 ackAvg=0.00ms | e2e p50=28.54 p99=37.63 p999=41.22 n=10020 | e2e_local p50=27.78 p99=37.12 n=4130
+[txn] 17:00:39 txn=     100/s msgs=     1000/s avg= 10.00 msg/txn | commit p50=21.63 p99=26.50 p999=28.03 ms | aborts=0 errs=0 open=0 | in=      990/s | total txns=3470 msgs=34700 aborts=0 errs=0
+[17:00:49] offered=     1000/s achieved=      999/s shed=        0/s inflight=     1 | p50=   6.11 p99=    9.02 p999=   10.82 ms | push=44990 pop=44520 lag=470 | errs push=0 pop=0 empty=0 gor=2371 | ack=      982/s ackErr=0 ackAvg=0.00ms | e2e p50=28.80 p99=37.63 p999=43.26 n=9820 | e2e_local p50=28.54 p99=35.58 n=4050
+[txn] 17:00:49 txn=      98/s msgs=      982/s avg= 10.00 msg/txn | commit p50=22.14 p99=27.52 p999=35.58 ms | aborts=0 errs=0 open=4 | in=      986/s | total txns=4452 msgs=44520 aborts=0 errs=0
+[17:00:59] offered=     1000/s achieved=     1000/s shed=        0/s inflight=     1 | p50=   6.18 p99=    9.02 p999=    9.54 ms | push=54990 pop=54560 lag=430 | errs push=0 pop=0 empty=0 gor=2383 | ack=     1004/s ackErr=0 ackAvg=0.00ms | e2e p50=28.54 p99=37.63 p999=43.26 n=10040 | e2e_local p50=28.29 p99=36.10 n=4140
+[txn] 17:00:59 txn=     100/s msgs=     1004/s avg= 10.00 msg/txn | commit p50=21.38 p99=27.01 p999=28.29 ms | aborts=0 errs=0 open=0 | in=     1000/s | total txns=5456 msgs=54560 aborts=0 errs=0
+[drain] workers and readers keep going for up to 59.999s (ends early after 3s idle; lag now 620)
+[17:01:09] offered=     1000/s achieved=     1001/s shed=        0/s inflight=     0 | p50=   5.98 p99=    9.02 p999=    9.79 ms | push=65000 pop=64380 lag=620 | errs push=0 pop=0 empty=0 gor=2361 | ack=      982/s ackErr=0 ackAvg=0.00ms | e2e p50=28.54 p99=37.12 p999=41.73 n=9820 | e2e_local p50=28.29 p99=35.07 n=4050
+[txn] 17:01:09 txn=      98/s msgs=      982/s avg= 10.00 msg/txn | commit p50=21.63 p99=26.50 p999=27.26 ms | aborts=0 errs=0 open=1 | in=      983/s | total txns=6438 msgs=64380 aborts=0 errs=0
+[drain] idle for 3s after 3.1s: ending the drain (lag 590)
+[info] txn workers: 0 re-subscriptions after an abort, 0 messages held outside a transaction at the stop (left unacked)
+[info] producers created: 22 per-partition producers (shard), 0 creation errors, avg creation 9.9 ms
+[info] steady window 60s (after the ramp, before the producers stopped): offered 1000/s pushed 1000/s popped 991/s cpu 19.4% = 19.36 cores per 100k msg/s (produce+consume)
+[final] offered=6500 achieved=6500 shed=0 (msgs: offered=65000 achieved=65000 shed=0) pushErr=0 | pushed=65000 popped=64410 lag=590 | popErr=0 empty=0 | overall p50=6.11 p99=9.28 p999=18.30 ms | acked=64410 ackErr=0 ackLag=590 ackAvg=0.00ms | e2e p50=28.80 p99=38.66 p999=85.50 ms
+load_cpu=15.0%
+[txn-final] txns=6441 msgs=64410 aborts=0 errs=0 in=64410 avg=10.00 msg/txn | commit p50=22.14 p99=28.29 p999=64.26 max=72.19 ms
+[ids] ledger /root/bench/runs/txn/pulsar/1x200-t10-9k/ids/p5.ids: 65000 confirmed, 0 failed, 0 unanswered

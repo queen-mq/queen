@@ -1,0 +1,60 @@
+[2026-10-01T20:37:38Z] txn queen/1x200-t100-144k-w198-b100: start: queen, rate=144000 over N=9 processes (3 loader hosts x 3) = 16000 msg/s each; in 200 x out 200 partitions; txn-size 100 (linger 1s); feeder units of 100; 22 workers + 22 readers per process (198 each in total); out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/queen/1x200-t100-144k-w198-b100
+[2026-10-01T20:37:38Z] txn queen/1x200-t100-144k-w198-b100: durability: raft: 3 copies, ack after 2 fsyncs; one transaction = one raft entry (acks + pushes, all-or-nothing), the pop lease as the fence
+[2026-10-01T20:37:43Z] txn queen/1x200-t100-144k-w198-b100: 1. cluster reset
+    n1 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"leader","leader":true,"term":2,"applied":3,"commit":3,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"appl
+    n2 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"follower","leader":true,"term":2,"applied":3,"commit":3,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"ap
+    n3 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"follower","leader":true,"term":2,"applied":3,"commit":3,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"ap
+[2026-10-01T20:38:06Z] txn queen/1x200-t100-144k-w198-b100:    Queen leader n1 (/root/qr/queen-b2 md5 cf86ea1ad2ad0be32529223858b2a835, LANES=16, EXTRA='QUEEN_RAFT_LOG_CACHE_MB=4096 QUEEN_RAFT_TXN_WINDOW_MIN_S=300 QUEEN_QLOG_SHARDS=4')
+[2026-10-01T20:38:06Z] txn queen/1x200-t100-144k-w198-b100: 2. samplers start (txn-queen-1x200-t100-144k-w198-b100, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-01T20:38:07Z] txn queen/1x200-t100-144k-w198-b100: 3. create x1x200-t100-144k-w198-b100-in (200) + x1x200-t100-144k-w198-b100-out (200), warm on loader 1
+      payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~319 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      queen: url=http://10.114.0.2:6632 (of 3) conns=2048 timeout=30s pop-width=1 pop-batch=1000 pop-timeout=2s lease=10s | configure: leaseTime=30 completedRetention=3600 dedup=0 retryLimit=1000000 | txn: x1x200-t100-144k-w198-b100-in -> workers (txn-size 100, linger 1s, one /transaction = acks with leases + pushes) -> x1x200-t100-144k-w198-b100-out, 4 read-committed readers
+      [queen] http://10.114.0.2:6632 healthy: version 2.0.0-beta.2, this node leader
+      [configure] x1x200-t100-144k-w198-b100-in: leaseTime=30 completedRetentionSeconds=3600 dedupWindowSeconds=0 retryLimit=1e+06 retentionSeconds=0
+      [configure] x1x200-t100-144k-w198-b100-out: leaseTime=30 completedRetentionSeconds=3600 dedupWindowSeconds=0 retryLimit=1e+06 retentionSeconds=0
+      [warm] x1x200-t100-144k-w198-b100-in: 200 partitions written and drained (200 messages)
+      [warm] x1x200-t100-144k-w198-b100-out: 200 partitions written and drained (200 messages)
+      [warm] one message (no "ts") into each of 200 partitions of x1x200-t100-144k-w198-b100-in, x1x200-t100-144k-w198-b100-out in 0.0s; drained in 0.1s
+    [create] done: x1x200-t100-144k-w198-b100-in, x1x200-t100-144k-w198-b100-out x 200 partitions
+[2026-10-01T20:38:15Z] txn queen/1x200-t100-144k-w198-b100:    topics ready after 37s since start
+    node=1 pid=1092749 rss_MB=71 threads=80 data_MB=1 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"leader","leader":true,"term":2,"applied":12,"commit":12,"lag":0,"storageReady":true,"clus
+    node=2 pid=938480 rss_MB=57 threads=40 data_MB=1 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"follower","leader":true,"term":2,"applied":12,"commit":12,"lag":0,"storageReady":true,"clu
+    node=3 pid=937152 rss_MB=57 threads=40 data_MB=1 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"follower","leader":true,"term":2,"applied":12,"commit":12,"lag":0,"storageReady":true,"clu
+[2026-10-01T20:38:16Z] txn queen/1x200-t100-144k-w198-b100: 4. launch 9 qload processes
+    launched 6 7 8 on queen-loader-03
+    launched 3 4 5 on queen-loader-02
+    launched 0 1 2 on queen-loader-01
+[2026-10-01T20:38:26Z] txn queen/1x200-t100-144k-w198-b100:    all 9 READY after 48s since start
+[2026-10-01T20:38:28Z] txn queen/1x200-t100-144k-w198-b100: 5. start instant 1790887117448 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s), drain <= 60s
+[2026-10-01T20:38:35Z] txn queen/1x200-t100-144k-w198-b100:    0/9 exited | p0: 
+[2026-10-01T20:39:12Z] txn queen/1x200-t100-144k-w198-b100:    0/9 exited | p0: [20:39:07] offered=    15999/s achieved=    15999/s shed=        0/s inflight=     1 | p50=   3.50 p99=    6.11 p999=    9.02 ms | push=399900 pop=403 [txn] 20:39:07 txn=     161/s msgs=    16079/s avg=100.00 msg/txn | commit p50=4.38 p99=6.75 p999=9.79 ms | aborts=0 errs=0 open=0 | in=    16069/s |  
+[2026-10-01T20:39:47Z] txn queen/1x200-t100-144k-w198-b100:    0/9 exited | p0: [20:39:47] offered=    16001/s achieved=    16001/s shed=        0/s inflight=     1 | p50=   3.50 p99=    6.82 p999=   11.46 ms | push=1039900 pop=10 [txn] 20:39:47 txn=     162/s msgs=    16151/s avg=100.00 msg/txn | commit p50=4.45 p99=6.75 p999=10.05 ms | aborts=0 errs=0 open=2 | in=    16171/s | 
+[2026-10-01T20:39:54Z] txn queen/1x200-t100-144k-w198-b100:    load finished after 136s since start
+[2026-10-01T20:39:55Z] txn queen/1x200-t100-144k-w198-b100: 6. verifier: collect the 9 id ledgers, run qload -verify on loader 1
+    [verify] queen http://10.114.0.2:6632: 9 ledgers from /root/bench/runs/txn/queen/1x200-t100-144k-w198-b100/verify-ids; reading x1x200-t100-144k-w198-b100-out (group verify, from the first message) then the rest of x1x200-t100-144k-w198-b100-in
+    [verify] out x1x200-t100-144k-w198-b100-out: 5953000 records after 10s
+    [verify] out x1x200-t100-144k-w198-b100-out: 9360200 records after 20s
+    [verify] out x1x200-t100-144k-w198-b100-out: 9360200 records, idle 10s: scan complete after 25.7s
+    [verify] rest of x1x200-t100-144k-w198-b100-in: 0 records, idle 10s: scan complete after 10.0s
+    [verify] system=queen ledgers=9 produced=9360000 ambiguous=0 out_records=9360200 out_unique=9360000 duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=200 scan=35.9s | VERDICT PASS
+[2026-10-01T20:40:49Z] txn queen/1x200-t100-144k-w198-b100:    verifier: PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0
+[2026-10-01T20:40:49Z] txn queen/1x200-t100-144k-w198-b100: 7. collect
+    node=1 pid=1092749 rss_MB=2122 threads=124 data_MB=4309 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"leader","leader":true,"term":2,"applied":148636,"commit":148636,"lag":0,"storageRea
+    node=2 pid=938480 rss_MB=1880 threads=83 data_MB=4309 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"follower","leader":true,"term":2,"applied":148636,"commit":148636,"lag":0,"storageRea
+    node=3 pid=937152 rss_MB=1878 threads=82 data_MB=4309 {"status":"healthy","engine":"raft","version":"2.0.0-beta.2","raft":{"role":"follower","leader":true,"term":2,"applied":148636,"commit":148636,"lag":0,"storageRea
+[2026-10-01T20:41:03Z] txn queen/1x200-t100-144k-w198-b100:    collected 868K into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/queen/1x200-t100-144k-w198-b100
+    p0: in offered=1040000 achieved=1040000 shed=0 | out consumed=1047600 errs push=0 pop=0 ack=0 | produce p99=6.05 ms | e2e p50/p99/p999=18.56/25.98/31.87 ms | txns=10494 msgs=1049400 aborts=0 errs=0 avg=100.00 commit p50/p99/p999=4.38/7.01/10.05 ms | cpu=44.2%
+    p1: in offered=1040000 achieved=1040000 shed=0 | out consumed=1036400 errs push=0 pop=0 ack=0 | produce p99=6.56 ms | e2e p50/p99/p999=18.82/25.73/33.54 ms | txns=10337 msgs=1033700 aborts=0 errs=0 avg=100.00 commit p50/p99/p999=4.58/7.20/12.10 ms | cpu=44.1%
+    p2: in offered=1040000 achieved=1040000 shed=0 | out consumed=1042100 errs push=0 pop=0 ack=0 | produce p99=6.30 ms | e2e p50/p99/p999=18.56/25.47/32.13 ms | txns=10453 msgs=1045300 aborts=0 errs=0 avg=100.00 commit p50/p99/p999=4.26/6.94/11.07 ms | cpu=44.3%
+    p3: in offered=1040000 achieved=1040000 shed=0 | out consumed=1042200 errs push=0 pop=0 ack=0 | produce p99=6.18 ms | e2e p50/p99/p999=18.56/25.73/32.13 ms | txns=10442 msgs=1044200 aborts=0 errs=0 avg=100.00 commit p50/p99/p999=4.45/7.14/10.82 ms | cpu=47.5%
+    p4: in offered=1040000 achieved=1040000 shed=0 | out consumed=1032900 errs push=0 pop=0 ack=0 | produce p99=6.50 ms | e2e p50/p99/p999=18.56/25.73/31.62 ms | txns=10301 msgs=1030100 aborts=0 errs=0 avg=100.00 commit p50/p99/p999=4.70/7.52/11.33 ms | cpu=46.4%
+    p5: in offered=1040000 achieved=1040000 shed=0 | out consumed=1033300 errs push=0 pop=0 ack=0 | produce p99=6.37 ms | e2e p50/p99/p999=18.56/24.96/31.10 ms | txns=10377 msgs=1037700 aborts=0 errs=0 avg=100.00 commit p50/p99/p999=4.38/7.20/11.46 ms | cpu=46.9%
+    p6: in offered=1040000 achieved=1040000 shed=0 | out consumed=1048800 errs push=0 pop=0 ack=0 | produce p99=5.92 ms | e2e p50/p99/p999=18.82/26.24/34.05 ms | txns=10462 msgs=1046200 aborts=0 errs=0 avg=100.00 commit p50/p99/p999=4.38/7.20/10.69 ms | cpu=44.8%
+    p7: in offered=1040000 achieved=1040000 shed=0 | out consumed=1036700 errs push=0 pop=0 ack=0 | produce p99=6.50 ms | e2e p50/p99/p999=19.07/25.98/32.13 ms | txns=10336 msgs=1033600 aborts=0 errs=0 avg=100.00 commit p50/p99/p999=4.64/7.46/10.43 ms | cpu=44.1%
+    p8: in offered=1040000 achieved=1040000 shed=0 | out consumed=1040000 errs push=0 pop=0 ack=0 | produce p99=6.50 ms | e2e p50/p99/p999=18.82/25.98/34.05 ms | txns=10398 msgs=1039800 aborts=0 errs=0 avg=100.00 commit p50/p99/p999=4.26/6.94/11.20 ms | cpu=44.5%
+    total: 9/9 processes with a final line | input msgs offered=9360000 achieved=9360000 shed=0 | output consumed=9360000 | transactions=93600 msgs=9360000 avg=100.00 msg/txn aborts=0 txnErrors=0 | errors=0 | worst produce p99=6.56 ms | worst e2e p99=26.24 ms | worst commit p99=7.52 ms
+    verifier: PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0
+    durability (queen): raft: 3 copies, ack after 2 fsyncs; one transaction = one raft entry (acks + pushes, all-or-nothing), the pop lease as the fence
+[2026-10-01T20:41:05Z] txn queen/1x200-t100-144k-w198-b100:    stopping the cluster (data kept until the next reset)
+[2026-10-01T20:41:07Z] txn queen/1x200-t100-144k-w198-b100: DONE in 209s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/queen/1x200-t100-144k-w198-b100 (PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0)

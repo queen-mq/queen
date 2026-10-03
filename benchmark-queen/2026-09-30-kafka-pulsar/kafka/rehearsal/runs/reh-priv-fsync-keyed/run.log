@@ -1,0 +1,50 @@
+[2026-09-30T06:52:25Z] run reh-priv-fsync-keyed: start: rate=10000 over N=3 processes (1 loader hosts x 3) = 3333 msg/s each; 1 topic(s) x 24 partitions (24 total), entities=1000 mode=keyed batch=1-5 consumers=2/process (6 total) warm=1 profile=fsync PROFILE=local out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/reh-priv-fsync-keyed
+[2026-09-30T06:52:25Z] run reh-priv-fsync-keyed: note: 10000 is not divisible by 3; offering 9999 msg/s
+[2026-09-30T06:52:25Z] run reh-priv-fsync-keyed: 1. cluster reset (profile fsync, PARTS=24)
+    [2026-09-30T06:52:37Z] cluster: healthy in 12s: cluster id sABzodJYnSUQPwVKiMaYrw
+      n1 node=1 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+      n2 node=2 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+      n3 node=3 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+    [2026-09-30T06:52:37Z] cluster: versions (conf_hash must be equal: nodes differ only in node.id + listener IPs)
+      n1 node=1 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=fsync PROFILE=local conf_hash=2cead5a5 pid=11070 jvm=[-Xms384m -Xmx384m -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n2 node=2 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=fsync PROFILE=local conf_hash=2cead5a5 pid=9781 jvm=[-Xms384m -Xmx384m -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+      n3 node=3 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=fsync PROFILE=local conf_hash=2cead5a5 pid=10472 jvm=[-Xms384m -Xmx384m -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+    [2026-09-30T06:52:38Z] cluster: features: eligible.leader.replicas.version=1 group.version=1 kraft.version=0 metadata.version=4.3-IV0 share.version=1 streams.version=1 transaction.version=2 
+[2026-09-30T06:52:38Z] run reh-priv-fsync-keyed: 2. samplers start (kafka-reh-priv-fsync-keyed, every 2s) on 3 brokers + 1 loader hosts
+[2026-09-30T06:52:38Z] run reh-priv-fsync-keyed: 3. create 1 topic(s) x 24 partitions, RF 3, min.insync 2, warm on loader 1
+      [config] broker.num.network.threads = 8 (STATIC_BROKER_CONFIG)
+      [config] broker.num.replica.fetchers = 4 (STATIC_BROKER_CONFIG)
+      [config] topic.compression.type = producer (STATIC_BROKER_CONFIG)
+      [config] topic.flush.messages = 1 (STATIC_BROKER_CONFIG)
+      [config] topic.flush.ms = 9223372036854775807 (DEFAULT_CONFIG)
+      [config] topic.max.message.bytes = 1048588 (DEFAULT_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.unclean.leader.election.enable = false (STATIC_BROKER_CONFIG)
+    [create] done: 1 topics x 24 partitions ready
+[2026-09-30T06:52:47Z] run reh-priv-fsync-keyed:    topics ready after 22s since start
+    node=1 rss_MB=559 threads=145 maps=625 fds=249 data_MB=1 part_dirs=25 gc_pauses=17 gc_max_ms=13.893 gc_sum_ms=81 errors=2 warns=6 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=20
+    node=2 rss_MB=556 threads=145 maps=627 fds=240 data_MB=1 part_dirs=25 gc_pauses=17 gc_max_ms=25.410 gc_sum_ms=131 errors=0 warns=5 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=20
+    node=3 rss_MB=551 threads=144 maps=622 fds=239 data_MB=1 part_dirs=25 gc_pauses=17 gc_max_ms=19.458 gc_sum_ms=95 errors=0 warns=3 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='none' uptime_s=20
+[2026-09-30T06:52:47Z] run reh-priv-fsync-keyed: 4. launch 3 kload processes
+    launched 0 1 2 on kl1
+[2026-09-30T06:52:48Z] run reh-priv-fsync-keyed:    READY 0/3
+[2026-09-30T06:52:59Z] run reh-priv-fsync-keyed:    READY 2/3
+[2026-09-30T06:53:01Z] run reh-priv-fsync-keyed:    all 3 READY after 36s since start
+[2026-09-30T06:53:01Z] run reh-priv-fsync-keyed: 5. start instant 1790751186500 (loader-1 clock + 5s) written to 3 start files; producing 30s (ramp 5s)
+[2026-09-30T06:53:06Z] run reh-priv-fsync-keyed:    0/3 exited | p0: 
+[2026-09-30T06:53:38Z] run reh-priv-fsync-keyed:    0/3 exited | p0: [06:53:36] offered=     3330/s achieved=     2379/s shed=      826/s inflight=  5000 | p50=5472.26 p99= 7372.80 p999= 7766.02 ms | push=65541 pop=64151 lag=1390 | errs push=0 pop=0 empty=0 gor=330 | a
+[2026-09-30T06:53:49Z] run reh-priv-fsync-keyed:    load finished after 84s since start
+[2026-09-30T06:53:49Z] run reh-priv-fsync-keyed: 6. collect
+    node=1 rss_MB=575 threads=150 maps=738 fds=305 data_MB=39 part_dirs=75 gc_pauses=39 gc_max_ms=127.222 gc_sum_ms=563 errors=2 warns=6 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='2026-09-30 06:53:01' uptime_s=83
+    node=2 rss_MB=585 threads=149 maps=740 fds=296 data_MB=39 part_dirs=75 gc_pauses=39 gc_max_ms=56.856 gc_sum_ms=533 errors=0 warns=6 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='2026-09-30 06:53:01' uptime_s=83
+    node=3 rss_MB=588 threads=149 maps=735 fds=296 data_MB=39 part_dirs=75 gc_pauses=35 gc_max_ms=54.640 gc_sum_ms=405 errors=0 warns=4 isr_shrinks=0 isr_updates=0 errors_since_mark=0 isr_shrinks_since_mark=0 isr_updates_since_mark=0 mark='2026-09-30 06:53:01' uptime_s=83
+[2026-09-30T06:53:52Z] run reh-priv-fsync-keyed:    collected 580K into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/reh-priv-fsync-keyed
+    p0: msgs offered=91407 achieved=80571 shed=10836 pushed=80571 popped=78700 lag=1871 errs push=0 pop=0 ack=0 | produce p50/p99/p999=4423.68/7176.19/7634.94 ms | e2e p50/p99/p999=4358.14/7176.19/7766.02 ms | cpu=6.0%
+    p1: msgs offered=91069 achieved=80177 shed=10892 pushed=80177 popped=84174 lag=-3997 errs push=0 pop=0 ack=0 | produce p50/p99/p999=4489.22/7241.73/7766.02 ms | e2e p50/p99/p999=4423.68/7110.66/7634.94 ms | cpu=5.7%
+    p2: msgs offered=91599 achieved=80688 shed=10911 pushed=80688 popped=78217 lag=2471 errs push=0 pop=0 ack=0 | produce p50/p99/p999=4423.68/7241.73/7831.55 ms | e2e p50/p99/p999=4554.75/7503.87/8159.23 ms | cpu=5.9%
+    total: 3/3 processes with a final line | msgs offered=274075 achieved=241436 shed=32639 pushed=241436 popped=241091 errors=0 | worst produce p99=7241.73 ms | worst e2e p99=7503.87 ms
+[2026-09-30T06:53:52Z] run reh-priv-fsync-keyed:    stopping the cluster (data kept until the next reset)
+[2026-09-30T06:53:59Z] run reh-priv-fsync-keyed: DONE in 94s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/kafka/reh-priv-fsync-keyed

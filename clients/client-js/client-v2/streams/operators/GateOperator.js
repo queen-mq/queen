@@ -30,6 +30,13 @@
  * cycle entirely — no state, no push, no ack — and the lease times out
  * naturally.
  *
+ * K counts SOURCE MESSAGES, because the ack is an offset commit. A pre-stage
+ * can turn one message into several values (`.flatMap()`) or into none
+ * (`.filter()`): a message is allowed only when every value it produced is
+ * allowed, a denied value rolls back what its whole message did to the
+ * state, and a message the pre-stages dropped is settled with the prefix.
+ * A redelivery therefore replays whole messages, never half of one.
+ *
  * Ordering
  * --------
  * FIFO per-partition is preserved by construction: the same partition lease

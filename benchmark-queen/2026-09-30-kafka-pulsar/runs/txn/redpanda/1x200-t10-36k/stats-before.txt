@@ -1,0 +1,3 @@
+node=1 rss_MB=4253 threads=33 fds=609 data_MB=14047 part_dirs=400 disk_free_GB=365 busy_s=5.620 errors=0 warns=21 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=141 elections_won_since_mark=0 mark='none' uptime_s=72
+node=2 rss_MB=5060 threads=33 fds=609 data_MB=14047 part_dirs=400 disk_free_GB=361 busy_s=4.524 errors=0 warns=20 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=138 elections_won_since_mark=0 mark='none' uptime_s=71
+node=3 rss_MB=4448 threads=33 fds=609 data_MB=14047 part_dirs=400 disk_free_GB=366 busy_s=3.462 errors=0 warns=21 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=124 elections_won_since_mark=0 mark='none' uptime_s=71

@@ -1,0 +1,49 @@
+[2026-10-01T23:20:23Z] run c3-1x200-600k: start: rate=600000 over N=9 processes (3 loader hosts x 3) = 66666 msg/s each; 1 topic(s) x 200 partitions (200 total), entities=0 mode=batch batch=100 consumers=22/process (198 total) warm=0 profile=default PROFILE=vm out=/private/tmp/claude-502/-Users-alice-Work-queen/536e4c47-a94e-4124-94b0-59f67994b98a/scratchpad/h/kp/runs/queen-kafka/c3-1x200-600k
+[2026-10-01T23:20:23Z] run c3-1x200-600k: note: 600000 is not divisible by 9; offering 599994 msg/s
+[2026-10-01T23:20:27Z] run c3-1x200-600k: 1. TARGET=queen: Queen's Kafka facade on 10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 (cluster managed outside run.sh; no reset)
+[2026-10-01T23:20:27Z] run c3-1x200-600k: 2. samplers start (kafka-c3-1x200-600k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-01T23:20:28Z] run c3-1x200-600k: 3. create 1 topic(s) x 200 partitions, RF 3, min.insync 2 on loader 1
+      topics: 1 x 200 partitions (kc3-1x200-600k..kc3-1x200-600k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 0
+      payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~319 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=1 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+      [topic] 1 topics created, 0 grown, 200 partitions each x RF 3 accepted by the controller in 0.0s (1 requests of <= 5000 partitions)
+      [topic] t=+0s 1 topics missing, 0 with != 200 partitions, 0 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 5.0s: 1 topics x 200 partitions, leaders + full ISR + every replica log on disk
+      [config] broker.compression.type = producer (DEFAULT_CONFIG)
+      [config] broker.group.initial.rebalance.delay.ms = 3000 (STATIC_BROKER_CONFIG)
+      [config] topic.min.insync.replicas = 1 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+    [create] done: 1 topics x 200 partitions ready
+[2026-10-01T23:20:36Z] run c3-1x200-600k:    topics ready after 13s since start
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-01T23:20:36Z] run c3-1x200-600k: 4. launch 9 kload processes
+    launched 3 4 5 on queen-loader-02
+    launched 6 7 8 on queen-loader-03
+    launched 0 1 2 on queen-loader-01
+[2026-10-01T23:20:47Z] run c3-1x200-600k:    READY 0/9
+[2026-10-01T23:20:54Z] run c3-1x200-600k:    READY 3/9
+[2026-10-01T23:20:59Z] run c3-1x200-600k:    all 9 READY after 36s since start
+[2026-10-01T23:21:01Z] run c3-1x200-600k: 5. start instant 1790896871183 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s)
+[2026-10-01T23:21:09Z] run c3-1x200-600k:    0/9 exited | p0: 
+[2026-10-01T23:21:39Z] run c3-1x200-600k:    0/9 exited | p0: [23:21:31] offered=    66658/s achieved=    66688/s shed=        0/s inflight=     4 | p50=  10.30 p99=   29.06 p999=   40.70 ms | push=999600 pop=989100 lag=10500 | errs push=0 pop=0 empty=0 gor=241 
+[2026-10-01T23:22:16Z] run c3-1x200-600k:    0/9 exited | p0: [23:22:11] offered=    66660/s achieved=    66670/s shed=        0/s inflight=     7 | p50=  10.43 p99=   36.61 p999=   44.29 ms | push=3666100 pop=3629300 lag=36800 | errs push=0 pop=0 empty=0 gor=24
+[2026-10-01T23:22:22Z] run c3-1x200-600k:    load finished after 119s since start
+[2026-10-01T23:22:22Z] run c3-1x200-600k: 6. collect
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-10-01T23:22:54Z] run c3-1x200-600k:    collected 1.3M into /private/tmp/claude-502/-Users-alice-Work-queen/536e4c47-a94e-4124-94b0-59f67994b98a/scratchpad/h/kp/runs/queen-kafka/c3-1x200-600k
+    p0: msgs offered=4333300 achieved=4333300 shed=0 pushed=4333300 popped=4289900 lag=43400 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.43/33.02/43.26 ms | e2e p50/p99/p999=11.07/34.05/45.82 ms | cpu=36.0%
+    p1: msgs offered=4333400 achieved=4333400 shed=0 pushed=4333400 popped=4289800 lag=43600 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.56/31.36/42.24 ms | e2e p50/p99/p999=11.07/34.05/44.80 ms | cpu=35.6%
+    p2: msgs offered=4333200 achieved=4333200 shed=0 pushed=4333200 popped=4290000 lag=43200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.43/32.38/43.78 ms | e2e p50/p99/p999=11.07/33.54/44.80 ms | cpu=36.3%
+    p3: msgs offered=4333300 achieved=4333300 shed=0 pushed=4333300 popped=4289900 lag=43400 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.56/33.02/42.75 ms | e2e p50/p99/p999=10.30/32.13/43.26 ms | cpu=35.6%
+    p4: msgs offered=4333200 achieved=4333200 shed=0 pushed=4333200 popped=4290000 lag=43200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.43/32.38/43.26 ms | e2e p50/p99/p999=10.43/33.02/43.26 ms | cpu=35.6%
+    p5: msgs offered=4333300 achieved=4333300 shed=0 pushed=4333300 popped=4485000 lag=-151700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.43/31.87/42.75 ms | e2e p50/p99/p999=10.30/33.54/44.29 ms | cpu=35.6%
+    p6: msgs offered=4333100 achieved=4333100 shed=0 pushed=4333100 popped=4290000 lag=43100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.30/32.64/42.75 ms | e2e p50/p99/p999=11.33/33.54/45.31 ms | cpu=35.6%
+    p7: msgs offered=4333500 achieved=4333500 shed=0 pushed=4333500 popped=4290100 lag=43400 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.56/31.62/42.24 ms | e2e p50/p99/p999=11.33/34.05/44.29 ms | cpu=35.9%
+    p8: msgs offered=4333300 achieved=4333300 shed=0 pushed=4333300 popped=4484900 lag=-151600 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.43/32.64/42.75 ms | e2e p50/p99/p999=11.46/33.54/44.29 ms | cpu=36.8%
+    total: 9/9 processes with a final line | msgs offered=38999600 achieved=38999600 shed=0 pushed=38999600 popped=38999600 errors=0 | worst produce p99=33.02 ms | worst e2e p99=34.05 ms
+[2026-10-01T23:22:56Z] run c3-1x200-600k: DONE in 153s -> /private/tmp/claude-502/-Users-alice-Work-queen/536e4c47-a94e-4124-94b0-59f67994b98a/scratchpad/h/kp/runs/queen-kafka/c3-1x200-600k

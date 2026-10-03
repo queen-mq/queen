@@ -1,1 +1,0 @@
-restart_to_health_s 4.87

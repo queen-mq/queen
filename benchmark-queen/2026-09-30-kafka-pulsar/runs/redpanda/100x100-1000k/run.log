@@ -1,0 +1,67 @@
+[2026-10-01T12:05:42Z] run 100x100-1000k: start: rate=1000000 over N=9 processes (3 loader hosts x 3) = 111111 msg/s each; 100 topic(s) x 100 partitions (10000 total), entities=0 mode=batch batch=100 consumers=33/process (297 total) group-protocol=classic warm=1 tune=1 PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/redpanda/100x100-1000k
+[2026-10-01T12:05:42Z] run 100x100-1000k: note: 1000000 is not divisible by 9; offering 999999 msg/s
+[2026-10-01T12:05:46Z] run 100x100-1000k: 1. cluster reset (PARTS=10000, tune=1)
+      n1 mkconf: node 1/3 ip=10.114.0.2 PARTS=10000 segment_fallocation_step=2097152 partitions_memory_pct=10 memory_per_partition=204800 io-config=yes -> /root/bench/redpanda/conf
+      n2 mkconf: node 2/3 ip=10.114.0.3 PARTS=10000 segment_fallocation_step=2097152 partitions_memory_pct=10 memory_per_partition=204800 io-config=yes -> /root/bench/redpanda/conf
+      n3 mkconf: node 3/3 ip=10.114.0.4 PARTS=10000 segment_fallocation_step=2097152 partitions_memory_pct=10 memory_per_partition=204800 io-config=yes -> /root/bench/redpanda/conf
+      n1 [2026-10-01T12:05:51Z] rc.sh n1: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+      n2 [2026-10-01T12:05:51Z] rc.sh n2: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+      n3 [2026-10-01T12:05:50Z] rc.sh n3: tuners applied (rc=0): 56 values differ from the OS baseline, 1 refused by the kernel (state/tune.txt)
+    [2026-10-01T12:06:00Z] cluster: healthy in 14s
+      n1 node=1 alive=1 ready=ready healthy=true controller=1 nodes=3 down=0 leaderless=0 under_replicated=0
+      n2 node=2 alive=1 ready=ready healthy=true controller=1 nodes=3 down=0 leaderless=0 under_replicated=0
+      n3 node=3 alive=1 ready=ready healthy=true controller=1 nodes=3 down=0 leaderless=0 under_replicated=0
+      n1 node=1 redpanda=v26.2.3 conf_hash=71b56dea pid=818073 cmd=[/opt/redpanda/bin/redpanda --redpanda-cfg /root/bench/redpanda/conf/redpanda.yaml --io-properties-file=/root/bench/redpanda/conf/io-config.yaml --lock-memory=false] nofile=1048576 oom_score_adj=-950
+      n2 node=2 redpanda=v26.2.3 conf_hash=71b56dea pid=716024 cmd=[/opt/redpanda/bin/redpanda --redpanda-cfg /root/bench/redpanda/conf/redpanda.yaml --io-properties-file=/root/bench/redpanda/conf/io-config.yaml --lock-memory=false] nofile=1048576 oom_score_adj=-950
+      n3 node=3 redpanda=v26.2.3 conf_hash=71b56dea pid=715392 cmd=[/opt/redpanda/bin/redpanda --redpanda-cfg /root/bench/redpanda/conf/redpanda.yaml --io-properties-file=/root/bench/redpanda/conf/io-config.yaml --lock-memory=false] nofile=1048576 oom_score_adj=-950
+      produced: Produced to partition 0 at offset 9999 with timestamp 1790856371993.
+[2026-10-01T12:06:18Z] run 100x100-1000k: 2. samplers start (redpanda-100x100-1000k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-01T12:06:19Z] run 100x100-1000k: 3. create 100 topic(s) x 100 partitions, RF 3, warm on loader 1
+      [topic] 100 topics created, 0 grown, 100 partitions each x RF 3 accepted by the controller in 7.2s (2 requests of <= 5000 partitions)
+      [topic] t=+0s 0 topics missing, 0 with != 100 partitions, 3 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 12.3s: 100 topics x 100 partitions, leaders + full ISR + every replica log on disk
+      [warm] one record (no "ts") into each of 10000 partitions, acks=all, in 0.4s; READY again after 0.0s
+      [config] broker.default.replication.factor = 3 (STATIC_BROKER_CONFIG)
+      [config] topic.compression.type = producer (DEFAULT_CONFIG)
+      [config] topic.flush.ms = 100 (DEFAULT_CONFIG)
+      [config] topic.max.message.bytes = 16777216 (DEFAULT_CONFIG)
+      [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+      [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+    [create] done: 100 topics x 100 partitions ready
+[2026-10-01T12:06:34Z] run 100x100-1000k:    topics ready after 52s since start
+    node=1 rss_MB=6707 threads=33 fds=10210 data_MB=21108 part_dirs=10000 disk_free_GB=317 busy_s=61.432 errors=0 warns=22 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=3368 elections_won_since_mark=0 mark='none' uptime_s=43
+    node=2 rss_MB=6689 threads=33 fds=10210 data_MB=21108 part_dirs=10000 disk_free_GB=314 busy_s=69.449 errors=0 warns=21 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=3314 elections_won_since_mark=0 mark='none' uptime_s=43
+    node=3 rss_MB=6701 threads=33 fds=10210 data_MB=21108 part_dirs=10000 disk_free_GB=318 busy_s=53.529 errors=0 warns=22 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=3321 elections_won_since_mark=0 mark='none' uptime_s=43
+[2026-10-01T12:06:35Z] run 100x100-1000k: 4. launch 9 kload processes
+    launched 6 7 8 on queen-loader-03
+    launched 0 1 2 on queen-loader-01
+    launched 3 4 5 on queen-loader-02
+[2026-10-01T12:06:44Z] run 100x100-1000k:    READY 0/9
+[2026-10-01T12:06:55Z] run 100x100-1000k:    READY 6/9
+[2026-10-01T12:06:59Z] run 100x100-1000k:    all 9 READY after 77s since start
+[2026-10-01T12:07:43Z] run 100x100-1000k:    leader balancer quiet for 25s (1970 transfers so far), 69 s after the topics were ready (waited 44 s here)
+[2026-10-01T12:07:46Z] run 100x100-1000k: 5. start instant 1790856475271 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s)
+[2026-10-01T12:07:53Z] run 100x100-1000k:    0/9 exited | p0: 
+[2026-10-01T12:08:27Z] run 100x100-1000k:    0/9 exited | p0: [12:08:25] offered=   111125/s achieved=   110985/s shed=        0/s inflight=   538 | p50= 197.63 p99= 1449.98 p999= 1728.51 ms | push=2723700 pop=2742000 lag=-18300 | errs push=0 pop=0 empty=0 gor=7
+[2026-10-01T12:09:01Z] run 100x100-1000k:    0/9 exited | p0: [12:08:55] offered=   111120/s achieved=   108370/s shed=        0/s inflight=   309 | p50= 181.25 p99= 1351.68 p999= 1630.21 ms | push=6080200 pop=6122000 lag=-41800 | errs push=0 pop=0 empty=0 gor=7
+[2026-10-01T12:09:08Z] run 100x100-1000k:    load finished after 206s since start
+[2026-10-01T12:09:08Z] run 100x100-1000k: 6. collect
+    node=1 rss_MB=17039 threads=33 fds=10225 data_MB=21234 part_dirs=10016 disk_free_GB=317 busy_s=998.539 errors=0 warns=25 errors_since_mark=0 warns_since_mark=3 transfers=660 transfers_since_mark=0 elections_won=4001 elections_won_since_mark=0 mark='2026-10-01 12:07:44' uptime_s=197
+    node=2 rss_MB=17038 threads=33 fds=10225 data_MB=21234 part_dirs=10016 disk_free_GB=314 busy_s=823.062 errors=0 warns=21 errors_since_mark=0 warns_since_mark=0 transfers=665 transfers_since_mark=0 elections_won=4002 elections_won_since_mark=0 mark='2026-10-01 12:07:44' uptime_s=197
+    node=3 rss_MB=17049 threads=33 fds=10225 data_MB=21234 part_dirs=10016 disk_free_GB=318 busy_s=757.663 errors=0 warns=24 errors_since_mark=0 warns_since_mark=2 transfers=645 transfers_since_mark=0 elections_won=3986 elections_won_since_mark=0 mark='2026-10-01 12:07:44' uptime_s=197
+[2026-10-01T12:09:22Z] run 100x100-1000k:    collected 7.4M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/redpanda/100x100-1000k
+    p0: msgs offered=7222400 achieved=7222400 shed=0 pushed=7222400 popped=7294072 lag=-71672 errs push=0 pop=0 ack=0 | produce p50/p99/p999=175.10/1351.68/1679.36 ms | e2e p50/p99/p999=346.11/1499.14/2088.96 ms | cpu=31.8%
+    p1: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7289400 lag=-67100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=177.15/1318.91/1728.51 ms | e2e p50/p99/p999=296.96/1236.99/1662.98 ms | cpu=32.3%
+    p2: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7496900 lag=-274700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=177.15/1269.76/1794.05 ms | e2e p50/p99/p999=329.73/1302.53/1744.90 ms | cpu=32.2%
+    p3: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7193000 lag=29300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=177.15/1368.06/1843.20 ms | e2e p50/p99/p999=346.11/1433.60/1875.97 ms | cpu=33.8%
+    p4: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7074000 lag=148200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=175.10/1515.52/1908.74 ms | e2e p50/p99/p999=301.06/1253.38/1662.98 ms | cpu=34.1%
+    p5: msgs offered=7222400 achieved=7222400 shed=0 pushed=7222400 popped=7184200 lag=38200 errs push=0 pop=0 ack=0 | produce p50/p99/p999=173.06/1302.53/1613.82 ms | e2e p50/p99/p999=337.92/1335.30/1728.51 ms | cpu=34.1%
+    p6: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7302000 lag=-79900 errs push=0 pop=0 ack=0 | produce p50/p99/p999=177.15/1269.76/1662.98 ms | e2e p50/p99/p999=350.21/1548.29/2146.30 ms | cpu=32.3%
+    p7: msgs offered=7222000 achieved=7222000 shed=0 pushed=7222000 popped=7078300 lag=143700 errs push=0 pop=0 ack=0 | produce p50/p99/p999=175.10/1351.68/1777.66 ms | e2e p50/p99/p999=292.86/1269.76/1662.98 ms | cpu=32.6%
+    p8: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7074100 lag=148100 errs push=0 pop=0 ack=0 | produce p50/p99/p999=177.15/1335.30/1810.43 ms | e2e p50/p99/p999=321.54/1253.38/1679.36 ms | cpu=32.2%
+    total: 9/9 processes with a final line | msgs offered=65000100 achieved=65000100 shed=0 pushed=65000100 popped=64985972 errors=0 | worst produce p99=1515.52 ms | worst e2e p99=1548.29 ms
+    shards busy (redpanda_cpu_busy_seconds_total over the steady window): n1=12.90 n2=10.48 n3=10.10 sum=33.49 cores
+    broker produce latency (redpanda_kafka_request_latency_seconds, log2 bucket upper bounds, steady window): n1 p50<=131.1 p99<=1048.6 p999<=1048.6 ms (196264 req) | n2 p50<=65.5 p99<=524.3 p999<=1048.6 ms (195181 req) | n3 p50<=65.5 p99<=524.3 p999<=1048.6 ms (196694 req)
+[2026-10-01T12:09:24Z] run 100x100-1000k:    stopping the cluster (data kept until the next reset)
+[2026-10-01T12:09:28Z] run 100x100-1000k: DONE in 226s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/redpanda/100x100-1000k

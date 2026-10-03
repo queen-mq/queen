@@ -1,0 +1,3 @@
+node=1 not running
+node=2 not running
+node=3 not running

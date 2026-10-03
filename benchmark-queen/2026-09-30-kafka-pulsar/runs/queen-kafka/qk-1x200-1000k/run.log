@@ -1,0 +1,47 @@
+[2026-09-30T18:20:03Z] run qk-1x200-1000k: start: rate=1000000 over N=9 processes (3 loader hosts x 3) = 111111 msg/s each; 1 topic(s) x 200 partitions (200 total), entities=0 mode=batch batch=100 consumers=22/process (198 total) warm=0 profile=default PROFILE=vm out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/qk-1x200-1000k
+[2026-09-30T18:20:03Z] run qk-1x200-1000k: note: 1000000 is not divisible by 9; offering 999999 msg/s
+[2026-09-30T18:20:08Z] run qk-1x200-1000k: 1. TARGET=queen: Queen's Kafka facade on 10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 (cluster managed outside run.sh; no reset)
+[2026-09-30T18:20:08Z] run qk-1x200-1000k: 2. samplers start (kafka-qk-1x200-1000k, every 2s) on 3 brokers + 3 loader hosts
+[2026-09-30T18:20:09Z] run qk-1x200-1000k: 3. create 1 topic(s) x 200 partitions, RF 3, min.insync 2 on loader 1
+      topics: 1 x 200 partitions (kqk-1x200-1000k..kqk-1x200-1000k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 0
+      payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+      consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+      kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=1 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+      [topic] 1 topics created, 0 grown, 200 partitions each x RF 3 accepted by the controller in 0.0s (1 requests of <= 5000 partitions)
+      [topic] t=+0s 1 topics missing, 0 with != 200 partitions, 0 partitions without leader, 0 with ISR < replicas
+      [topic] READY after 5.0s: 1 topics x 200 partitions, leaders + full ISR + every replica log on disk
+      [config] broker.compression.type = producer (DEFAULT_CONFIG)
+      [config] broker.group.initial.rebalance.delay.ms = 3000 (STATIC_BROKER_CONFIG)
+      [config] topic.min.insync.replicas = 2 (DEFAULT_CONFIG)
+      [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+    [create] done: 1 topics x 200 partitions ready
+[2026-09-30T18:20:17Z] run qk-1x200-1000k:    topics ready after 14s since start
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-09-30T18:20:18Z] run qk-1x200-1000k: 4. launch 9 kload processes
+    launched 6 7 8 on queen-loader-03
+    launched 0 1 2 on queen-loader-01
+    launched 3 4 5 on queen-loader-02
+[2026-09-30T18:20:44Z] run qk-1x200-1000k:    all 9 READY after 41s since start
+[2026-09-30T18:20:46Z] run qk-1x200-1000k: 5. start instant 1790792456283 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s)
+[2026-09-30T18:20:54Z] run qk-1x200-1000k:    0/9 exited | p0: 
+[2026-09-30T18:21:23Z] run qk-1x200-1000k:    0/9 exited | p0: [18:21:16] offered=   111097/s achieved=   109667/s shed=        0/s inflight=   356 | p50= 234.50 p99=  362.50 p999=  415.74 ms | push=1630900 pop=1600900 lag=30000 | errs push=0 pop=0 empty=0 gor=53
+[2026-09-30T18:21:59Z] run qk-1x200-1000k:    0/9 exited | p0: [18:21:56] offered=   111095/s achieved=   103295/s shed=        0/s inflight=  2415 | p50=1761.28 p99= 2867.20 p999= 2965.50 ms | push=5869600 pop=5762837 lag=106763 | errs push=0 pop=0 empty=0 gor=5
+[2026-09-30T18:22:29Z] run qk-1x200-1000k:    load finished after 146s since start
+[2026-09-30T18:22:29Z] run qk-1x200-1000k: 6. collect
+    node=1 not running
+    node=2 not running
+    node=3 not running
+[2026-09-30T18:23:37Z] run qk-1x200-1000k:    collected  53M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/qk-1x200-1000k
+    p0: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7096536 lag=125764 errs push=0 pop=0 ack=0 | produce p50/p99/p999=659.46/4423.68/4816.90 ms | e2e p50/p99/p999=790.53/4685.82/5144.58 ms | cpu=30.8%
+    p1: msgs offered=7222400 achieved=7222400 shed=0 pushed=7222400 popped=7088506 lag=133894 errs push=0 pop=0 ack=0 | produce p50/p99/p999=651.26/4423.68/4816.90 ms | e2e p50/p99/p999=790.53/4816.90/5144.58 ms | cpu=30.7%
+    p2: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7082042 lag=140058 errs push=0 pop=0 ack=0 | produce p50/p99/p999=659.46/4423.68/4882.43 ms | e2e p50/p99/p999=790.53/4751.36/5144.58 ms | cpu=30.8%
+    p3: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7074843 lag=147257 errs push=0 pop=0 ack=0 | produce p50/p99/p999=659.46/4423.68/4816.90 ms | e2e p50/p99/p999=790.53/4882.43/5210.11 ms | cpu=32.1%
+    p4: msgs offered=7222200 achieved=7222200 shed=0 pushed=7222200 popped=7089275 lag=132925 errs push=0 pop=0 ack=0 | produce p50/p99/p999=651.26/4423.68/4816.90 ms | e2e p50/p99/p999=790.53/4751.36/5210.11 ms | cpu=32.2%
+    p5: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7375631 lag=-153331 errs push=0 pop=0 ack=0 | produce p50/p99/p999=659.46/4423.68/4816.90 ms | e2e p50/p99/p999=782.34/6193.15/9633.79 ms | cpu=32.1%
+    p6: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7075372 lag=146728 errs push=0 pop=0 ack=0 | produce p50/p99/p999=659.46/4358.14/4751.36 ms | e2e p50/p99/p999=790.53/4816.90/5210.11 ms | cpu=31.0%
+    p7: msgs offered=7222300 achieved=7222300 shed=0 pushed=7222300 popped=7075107 lag=147193 errs push=0 pop=0 ack=0 | produce p50/p99/p999=659.46/4423.68/4816.90 ms | e2e p50/p99/p999=782.34/4816.90/5210.11 ms | cpu=31.2%
+    p8: msgs offered=7222100 achieved=7222100 shed=0 pushed=7222100 popped=7366133 lag=-144033 errs push=0 pop=0 ack=0 | produce p50/p99/p999=659.46/4423.68/4816.90 ms | e2e p50/p99/p999=782.34/6324.22/9633.79 ms | cpu=31.1%
+    total: 9/9 processes with a final line | msgs offered=64999900 achieved=64999900 shed=0 pushed=64999900 popped=64323445 errors=0 | worst produce p99=4423.68 ms | worst e2e p99=6324.22 ms
+[2026-09-30T18:23:40Z] run qk-1x200-1000k: DONE in 217s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/qk-1x200-1000k

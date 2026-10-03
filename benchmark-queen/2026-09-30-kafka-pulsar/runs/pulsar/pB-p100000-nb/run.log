@@ -1,0 +1,53 @@
+[2026-10-01T07:54:14Z] run pB-p100000-nb: pulsar 4.2.4, 1000000 msg/s total over 9 load processes (3 loaders x 3), topics=1 x partitions=100000 entities=0 mode=batch batch=100 sub=failover consumers=33/process
+[2026-10-01T07:54:15Z] 1. cluster reset: PROFILE=vm
+  [2026-10-01T07:54:50Z] brokers healthy: brokers active=3 10.114.0.2:8080=ok 10.114.0.3:8080=ok 10.114.0.4:8080=ok
+    proof persistent://bench/ns/probe-health-1790841296: ledger 9 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.4:3181, 10.114.0.3:3181, 10.114.0.
+  [2026-10-01T07:54:58Z] reset done
+[2026-10-01T07:54:58Z] 2. topics + subscription + warm: pload -create-only on loader 1
+    [admin] subscription "sub" created in 108.1s and verified on all 100000 partitions in 74.5s (39361 re-created on a partition)
+    [warm] one message (no "ts") into each of 100000 partitions in 56.3s; consumed and acked in 5.3s
+  [create] done: 1 topics x 100000 partitions, subscription "sub" on every partition
+    namespace bench/ns: bundles=48 persistence=E3/Qw3/Qa2 markDeleteRate=1.0 retention=0min/0MB
+    proof persistent://bench/ns/load-partition-0: ledger 3384 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.2:3181, 10.114.0.4:3181, 10.114.0.3:3181] (broker internal
+      LedgerMetadata{formatVersion=3, ensembleSize=3, writeQuorumSize=3, ackQuorumSize=2, state=OPEN, digestType=CRC32C, password=base64:, ensembles={0=[10.114.0.2:3181, 10.114.0.4:3181, 10.114.0.3:3181]}, ...
+[2026-10-01T07:59:12Z] 3. balance -fix
+  balance bench/ns: 100000 topics (1 partitioned) in 48 of 48 bundles, 3 brokers, mean 33333.3 topics/broker; hash check 4/4 lookups agree
+    10.114.0.2:8080        bundles= 16 topics=  33370 (  +0.1%)  per-bundle max/min=2123/2063
+    10.114.0.3:8080        bundles= 16 topics=  33377 (  +0.1%)  per-bundle max/min=2111/2046
+    10.114.0.4:8080        bundles= 16 topics=  33253 (  -0.2%)  per-bundle max/min=2098/2049
+    unowned bundles with topics: 0 (0 topics); max deviation 0.2% (target ±10%): OK
+[2026-10-01T07:59:13Z] 4. samplers on 3 brokers + 3 loaders
+  sampler pB-p100000-nb started pid 631755 -> /root/bench/samples/pB-p100000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p100000-nb started pid 573524 -> /root/bench/samples/pB-p100000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p100000-nb started pid 572015 -> /root/bench/samples/pB-p100000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p100000-nb started pid 195447 -> /root/bench/samples/pB-p100000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p100000-nb started pid 176234 -> /root/bench/samples/pB-p100000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p100000-nb started pid 175298 -> /root/bench/samples/pB-p100000-nb.txt (iface=eth1 disk=vda)
+[2026-10-01T07:59:17Z] 5. 9 load processes
+[2026-10-01T07:59:33Z]   9/9 READY after 14s
+[2026-10-01T07:59:39Z] 6. start instant 1790841587889 (loader 1 clock + 10 s); producing 70s (ramp 10s) + drain 0s
+[2026-10-01T08:00:24Z]   mid-run thread snapshot
+    n1  node=1 broker total=13.27 cores over 3s (268 threads, 268 named by jstack)
+    n1  node=1 bookie total=4.63 cores over 3s (193 threads, 160 named by jstack)
+    n1  node=1 zk total=0.01 cores over 3s (115 threads, 115 named by jstack)
+    n2  node=2 broker total=13.05 cores over 3s (240 threads, 240 named by jstack)
+    n2  node=2 bookie total=6.18 cores over 3s (187 threads, 154 named by jstack)
+    n2  node=2 zk total=1.17 cores over 3s (121 threads, 121 named by jstack)
+    n3  node=3 broker total=6.82 cores over 3s (240 threads, 240 named by jstack)
+    n3  node=3 bookie total=3.64 cores over 3s (192 threads, 159 named by jstack)
+    n3  node=3 zk total=0.00 cores over 3s (123 threads, 123 named by jstack)
+[2026-10-01T08:01:20Z] 7. loaders done
+[2026-10-01T08:01:20Z] collect -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/pulsar/pB-p100000-nb
+  pload-1: [final] offered=72220 achieved=25484 shed=46736 (msgs: offered=7222000 achieved=2548400 shed=4673600) pushErr=0 | pushed=2548400 popped=2179738 lag=368662 | popErr=0 empty=0 | overall p50=11337.73 p99=30277.63 p999=31850.50 ms | acked=2179738 ackErr=0 ackLag=368662 ackAvg=0.01ms | e2e p50=7634.94 p99=58982.40 p999=67633.15 ms
+  pload-1: load_cpu=185.1%
+  pload-3: [final] offered=72221 achieved=25192 shed=47029 (msgs: offered=7222100 achieved=2519200 shed=4702900) pushErr=0 | pushed=2519200 popped=2236365 lag=282835 | popErr=0 empty=0 | overall p50=11993.09 p99=32374.78 p999=33816.58 ms | acked=2236365 ackErr=0 ackLag=282835 ackAvg=0.00ms | e2e p50=8224.77 p99=34865.15 p999=44826.62 ms
+  pload-3: load_cpu=200.6%
+  pload-4: [final] offered=72220 achieved=25616 shed=46604 (msgs: offered=7222000 achieved=2561600 shed=4660400) pushErr=0 | pushed=2561600 popped=2188900 lag=372700 | popErr=0 empty=0 | overall p50=13697.02 p99=31588.35 p999=32374.78 ms | acked=2188900 ackErr=0 ackLag=372700 ackAvg=0.01ms | e2e p50=9371.65 p99=71827.46 p999=73924.61 ms
+  pload-4: load_cpu=194.8%
+  pload-5: [final] offered=72223 achieved=25091 shed=47132 (msgs: offered=7222300 achieved=2509100 shed=4713200) pushErr=0 | pushed=2509100 popped=2237818 lag=271282 | popErr=0 empty=0 | overall p50=10682.37 p99=35389.44 p999=35913.73 ms | acked=2237818 ackErr=0 ackLag=271282 ackAvg=0.00ms | e2e p50=7962.62 p99=43253.76 p999=54788.10 ms
+  pload-5: load_cpu=197.7%
+  pload-6: [final] offered=72224 achieved=24087 shed=48137 (msgs: offered=7222400 achieved=2408700 shed=4813700) pushErr=0 | pushed=2408700 popped=2221891 lag=186809 | popErr=0 empty=0 | overall p50=10944.51 p99=45875.20 p999=46923.78 ms | acked=2221891 ackErr=0 ackLag=186809 ackAvg=0.00ms | e2e p50=7569.41 p99=64225.28 p999=67633.15 ms
+  pload-6: load_cpu=179.4%
+  pload-7: [final] offered=72221 achieved=24809 shed=47412 (msgs: offered=7222100 achieved=2480900 shed=4741200) pushErr=0 | pushed=2480900 popped=2192139 lag=288761 | popErr=0 empty=0 | overall p50=10289.15 p99=36962.30 p999=37486.59 ms | acked=2192139 ackErr=0 ackLag=288761 ackAvg=0.00ms | e2e p50=7372.80 p99=38010.88 p999=46923.78 ms
+  pload-7: load_cpu=188.3%
+[2026-10-01T08:01:45Z] FAILED: only 6/9 [final] lines

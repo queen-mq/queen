@@ -15,6 +15,7 @@ import { StreamBuilder } from './stream/StreamBuilder.js'
 import { StreamConsumer } from './stream/StreamConsumer.js'
 import { Admin } from './admin/Admin.js'
 import { popAutopilotDisabledByEnv } from './utils/autopilot.js'
+import { consumerGroupOf, sharedConsumerGroupOf } from './utils/consumerGroup.js'
 import { CLIENT_DEFAULTS } from './utils/defaults.js'
 import { validateUrl, validateUrls } from './utils/validation.js'
 import * as logger from './utils/logger.js'
@@ -59,6 +60,30 @@ function parseAckResults(result, expected) {
   }
 
   throw new Error('Unexpected ack response format: missing per-item result array')
+}
+
+// POST /api/v1/lease/:leaseId/extend answers HTTP 200 whether or not anything
+// was renewed, so `success` in the body is the only signal:
+//   1.x and 2.x brokers: {leaseId, success, renewed, newExpiresAt, expiresAt, lease_expires_at}
+//   the C++ broker:      [{index, leaseId, success, error, expiresAt}]
+// success:false means the lease is gone (expired, released by an ack or nack,
+// or never existed): nothing was extended, and the messages it covered can
+// already be on their way to another consumer.
+function parseRenewResult(result, leaseId) {
+  const item = Array.isArray(result) ? result[0] : result
+  if (item === null || typeof item !== 'object') {
+    return { leaseId, success: false, newExpiresAt: null, error: 'Unexpected lease renewal response' }
+  }
+  const newExpiresAt = item.newExpiresAt ?? item.expiresAt ?? item.lease_expires_at ?? null
+  const success = typeof item.success === 'boolean' ? item.success : newExpiresAt !== null
+  const outcome = { leaseId, success, newExpiresAt }
+  if (typeof item.renewed === 'number') outcome.renewed = item.renewed
+  if (!success) {
+    outcome.error = typeof item.error === 'string' && item.error.length > 0
+      ? item.error
+      : 'Lease not renewed: it expired, was released by an ack or nack, or does not exist'
+  }
+  return outcome
 }
 
 export class Queen {
@@ -438,11 +463,15 @@ export class Queen {
         })
       }
 
+      // The group the messages were popped under unless the caller names one:
+      // the lease every ack has to match belongs to it (utils/consumerGroup.js).
+      const consumerGroup = context.group || sharedConsumerGroupOf(message)
+
       // Call batch ack endpoint
       try {
         const result = await this.#httpClient.post('/api/v1/ack/batch', {
           acknowledgments,
-          consumerGroup: context.group || null
+          consumerGroup
         })
 
         const results = parseAckResults(result, acknowledgments.length)
@@ -487,7 +516,9 @@ export class Queen {
       partitionId,
       status: statusStr,
       error: context.error || null,
-      consumerGroup: context.group || null
+      // The group the message was popped under unless the caller names one
+      // (utils/consumerGroup.js).
+      consumerGroup: context.group || consumerGroupOf(message)
     }
 
     if (leaseId) body.leaseId = leaseId
@@ -545,12 +576,13 @@ export class Queen {
     for (const leaseId of leaseIds) {
       try {
         const result = await this.#httpClient.post(`/api/v1/lease/${leaseId}/extend`, {})
-        results.push({
-          leaseId,
-          success: true,
-          newExpiresAt: result.leaseId ? result.newExpiresAt : result.lease_expires_at
-        })
-        logger.log('Queen.renew', { leaseId, success: true })
+        const outcome = parseRenewResult(result, leaseId)
+        results.push(outcome)
+        if (outcome.success) {
+          logger.log('Queen.renew', { leaseId, success: true, renewed: outcome.renewed })
+        } else {
+          logger.error('Queen.renew', { leaseId, error: outcome.error })
+        }
       } catch (error) {
         results.push({ leaseId, success: false, error: error.message })
         logger.error('Queen.renew', { leaseId, error: error.message })

@@ -1,0 +1,43 @@
+[2026-09-30T07:22:52Z] run r4-p1000: pulsar 4.2.4, 10000 msg/s total over 3 load processes (1 loaders x 3), topics=1 x partitions=1000 entities=0 mode=batch batch=100 sub=failover consumers=4/process
+[2026-09-30T07:22:52Z] 1. cluster reset: PROFILE=local
+  [2026-09-30T07:23:44Z] brokers healthy: brokers active=3 10.202.0.2:8080=ok 10.202.0.3:8080=ok 10.202.0.4:8080=ok
+    proof persistent://bench/ns/probe-health-1790753029: ledger 9 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.202.0.2:3181, 10.202.0.3:3181, 10.202.0.
+  [2026-09-30T07:23:54Z] reset done
+[2026-09-30T07:23:54Z] 2. topics + subscription + warm: pload -create-only on loader 1
+    [admin] subscription "sub" created in 28.2s and verified on all 1000 partitions in 1.0s (0 re-created on a partition)
+    [warm] one message (no "ts") into each of 1000 partitions in 1.3s; consumed and acked in 2.0s
+  [create] done: 1 topics x 1000 partitions, subscription "sub" on every partition
+    namespace bench/ns: bundles=48 persistence=E3/Qw3/Qa2 markDeleteRate=1.0 retention=0min/0MB
+    proof persistent://bench/ns/load-partition-0: ledger 14 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.202.0.4:3181, 10.202.0.2:3181, 10.202.0.3:3181] (broker internalSt
+      LedgerMetadata{formatVersion=3, ensembleSize=3, writeQuorumSize=3, ackQuorumSize=2, state=OPEN, digestType=CRC32C, password=base64:, ensembles={0=[10.202.0.4:3181, 10.202.0.2:3181, 10.202.0.3:3181]}, ...
+[2026-09-30T07:24:31Z] 3. balance -fix
+  balance bench/ns: 1000 topics (1 partitioned) in 48 of 48 bundles, 3 brokers, mean 333.3 topics/broker; hash check 4/4 lookups agree
+    10.202.0.2:8080        bundles= 16 topics=    320 (  -4.0%)  per-bundle max/min=29/13
+    10.202.0.3:8080        bundles= 16 topics=    342 (  +2.6%)  per-bundle max/min=31/13
+    10.202.0.4:8080        bundles= 16 topics=    338 (  +1.4%)  per-bundle max/min=31/12
+    unowned bundles with topics: 0 (0 topics); max deviation 4.0% (target ±10%): OK
+[2026-09-30T07:24:31Z] 4. samplers on 3 brokers + 1 loaders
+  sampler r4-p1000 started pid 18332 -> /root/bench/samples/r4-p1000.txt (iface=eth0 disk=overlay)
+  sampler r4-p1000 started pid 12778 -> /root/bench/samples/r4-p1000.txt (iface=eth0 disk=overlay)
+  sampler r4-p1000 started pid 12543 -> /root/bench/samples/r4-p1000.txt (iface=eth0 disk=overlay)
+  sampler r4-p1000 started pid 1222 -> /root/bench/samples/r4-p1000.txt (iface=eth0 disk=overlay)
+[2026-09-30T07:24:32Z] 5. 3 load processes
+[2026-09-30T07:25:09Z]   3/3 READY after 37s
+[2026-09-30T07:25:11Z] 6. start instant 1790753116389 (loader 1 clock + 5 s); producing 30s (ramp 5s) + drain 0s
+[2026-09-30T07:25:31Z]   mid-run thread snapshot
+    n1  node=1 broker total=0.35 cores over 3s (103 threads, 103 named by jstack)
+    n1  node=1 bookie total=0.03 cores over 3s (127 threads, 94 named by jstack)
+    n1  node=1 zk total=0.02 cores over 3s (66 threads, 66 named by jstack)
+    n2  node=2 broker total=0.19 cores over 3s (91 threads, 91 named by jstack)
+    n2  node=2 bookie total=0.03 cores over 3s (116 threads, 83 named by jstack)
+    n2  node=2 zk total=0.01 cores over 3s (66 threads, 66 named by jstack)
+    n3  node=3 broker total=0.36 cores over 3s (103 threads, 103 named by jstack)
+    n3  node=3 bookie total=0.04 cores over 3s (116 threads, 83 named by jstack)
+    n3  node=3 zk total=0.02 cores over 3s (74 threads, 74 named by jstack)
+[2026-09-30T07:26:11Z] 7. loaders done
+[2026-09-30T07:26:11Z] collect -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/pulsar/rehearsal/runs/r4-p1000
+  pload-0: [final] offered=917 achieved=917 shed=0 (msgs: offered=91700 achieved=91700 shed=0) pushErr=0 | pushed=91700 popped=107733 lag=-16033 | popErr=0 empty=0 | overall p50=23199.74 p99=32899.07 p999=33816.58 ms | acked=107733 ackErr=0 ackLag=-16033 ackAvg=119.26ms | e2e p50=25034.75 p99=36438.02 p999=39059.46 ms
+  pload-0: load_cpu=63.3%
+  pload-2: [final] offered=917 achieved=917 shed=0 (msgs: offered=91700 achieved=91700 shed=0) pushErr=0 | pushed=91700 popped=92770 lag=-1070 | popErr=0 empty=0 | overall p50=22675.46 p99=30277.63 p999=31588.35 ms | acked=92770 ackErr=0 ackLag=-1070 ackAvg=113.90ms | e2e p50=23724.03 p99=31850.50 p999=32899.07 ms
+  pload-2: load_cpu=80.4%
+[2026-09-30T07:26:15Z] FAILED: only 2/3 [final] lines

@@ -337,3 +337,27 @@ export async function popV4SharedLeaseRenew(client) {
     return { success: true, message: 'Shared leaseId renewed once and dedup confirmed' }
 }
 
+
+// renew() reports the broker's verdict (2026-10-02, 2.0.0-beta.6): the extend
+// route answers HTTP 200 whether or not anything was renewed, and a lease an
+// ack had already released came back success:true.
+export async function renewReportsAReleasedLease(client) {
+    const queueName = 'test-queue-v2-renew-released'
+    const queue = await client.queue(queueName).config({ leaseTime: 60 }).create()
+    if (!queue.configured) {
+        return { success: false, message: 'Queue not created' }
+    }
+    await client.queue(queueName).push([{ data: { n: 1 } }])
+
+    const [message] = await client.queue(queueName).batch(1).wait(false).pop()
+    if (!message) {
+        return { success: false, message: 'Nothing popped' }
+    }
+    const live = await client.renew(message)
+    await client.ack(message, true)
+    const released = await client.renew(message)
+
+    const success = live.success === true && typeof live.newExpiresAt === 'string' &&
+                    released.success === false && released.newExpiresAt === null && typeof released.error === 'string'
+    return { success, message: `live lease: ${JSON.stringify(live)}; after the ack: ${JSON.stringify(released)}` }
+}

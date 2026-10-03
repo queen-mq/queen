@@ -3,7 +3,8 @@
 # Builds the complete Queen stack:
 # - Rust broker (server/): one binary, storage in its own data directory
 # - the proxy and its console, linked into the broker (in-process with
-#   QUEEN_PROXY_EMBEDDED=true), and the Kafka facade (QUEEN_KAFKA_EMBEDDED=true)
+#   QUEEN_PROXY_EMBEDDED=true), the Kafka facade (QUEEN_KAFKA_EMBEDDED=true)
+#   and the Postgres connectors (on by default, /api/v1/connectors)
 # - Vue.js frontend dashboard (served by the broker's SPA fallback)
 # - queenctl operator CLI (Go static binary)
 #
@@ -75,6 +76,12 @@ COPY crates /usr/build/crates
 # like queen-protocol, so it has to be in the context here too.
 COPY protocols/queen-kafka/Cargo.toml /usr/build/protocols/queen-kafka/Cargo.toml
 COPY protocols/queen-kafka/src /usr/build/protocols/queen-kafka/src
+# ...and the Postgres connectors library, linked in by the default `pg` feature
+# (server/src/pg_inproc.rs runs every connector in-process). A path dependency
+# like the Kafka facade; its own Cargo.lock is not needed here, the broker's
+# lock covers it.
+COPY connectors/queen-pg/Cargo.toml /usr/build/connectors/queen-pg/Cargo.toml
+COPY connectors/queen-pg/src /usr/build/connectors/queen-pg/src
 # ...and the proxy library, linked in by the default `server` feature (stage 1b).
 # Its console is rust_embed-ed, so it has to be here. Its second embed,
 # ../server/webapp/dist, is the dashboard that layer 3 below puts at

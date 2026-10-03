@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif">
+<rect x="0" y="0" width="1080" height="1350" fill="#f5f3ee"/>
+<text xml:space="preserve" x="56.0" y="70.0" font-size="15" font-weight="700" fill="#9a6400" text-anchor="start" letter-spacing="2.2">BROKER BENCHMARK · OCTOBER 2026</text>
+<text xml:space="preserve" x="56.0" y="120.0" font-size="48" font-weight="700" fill="#15171c" text-anchor="start" letter-spacing="-0.6">Four brokers, one rig</text>
+<text xml:space="preserve" x="56.0" y="156.0" font-size="21" font-weight="400" fill="#5c6370" text-anchor="start">Kafka, Redpanda, Pulsar and Queen on the same three servers, with the same load</text>
+<rect x="40" y="186" width="1000" height="598" rx="22" fill="#ffffff" stroke="#e5e1d8" stroke-width="1.5"/>
+<text xml:space="preserve" x="72.0" y="236.0" font-size="29" font-weight="700" fill="#15171c" text-anchor="start">Latency as partitions grow</text>
+<text xml:space="preserve" x="72.0" y="266.0" font-size="18" font-weight="400" fill="#5c6370" text-anchor="start">p99 end-to-end at 1M msg/s, one topic · log scales · lower is better</text>
+<line x1="150" y1="690.2" x2="795" y2="690.2" stroke="#eeebe5" stroke-width="1.5"/>
+<text xml:space="preserve" x="136.0" y="696.2" font-size="16" font-weight="400" fill="#98a0aa" text-anchor="end">10 ms</text>
+<line x1="150" y1="589.3" x2="795" y2="589.3" stroke="#eeebe5" stroke-width="1.5"/>
+<text xml:space="preserve" x="136.0" y="595.3" font-size="16" font-weight="400" fill="#98a0aa" text-anchor="end">100 ms</text>
+<line x1="150" y1="488.3" x2="795" y2="488.3" stroke="#eeebe5" stroke-width="1.5"/>
+<text xml:space="preserve" x="136.0" y="494.3" font-size="16" font-weight="400" fill="#98a0aa" text-anchor="end">1 s</text>
+<line x1="150" y1="387.3" x2="795" y2="387.3" stroke="#eeebe5" stroke-width="1.5"/>
+<text xml:space="preserve" x="136.0" y="393.3" font-size="16" font-weight="400" fill="#98a0aa" text-anchor="end">10 s</text>
+<text xml:space="preserve" x="166.2" y="734.0" font-size="16" font-weight="400" fill="#98a0aa" text-anchor="middle">200</text>
+<text xml:space="preserve" x="387.1" y="734.0" font-size="16" font-weight="400" fill="#98a0aa" text-anchor="middle">10k</text>
+<text xml:space="preserve" x="517.1" y="734.0" font-size="16" font-weight="400" fill="#98a0aa" text-anchor="middle">100k</text>
+<text xml:space="preserve" x="647.1" y="734.0" font-size="16" font-weight="400" fill="#98a0aa" text-anchor="middle">1M</text>
+<text xml:space="preserve" x="777.1" y="734.0" font-size="16" font-weight="400" fill="#98a0aa" text-anchor="middle">10M</text>
+<text xml:space="preserve" x="467.5" y="764.0" font-size="16" font-weight="400" fill="#5c6370" text-anchor="middle">partitions</text>
+<path d="M166.2,561.8 L296.2,587.1 L387.1,462.3 L478.0,355.1 L517.1,319.1" fill="none" stroke="#d0362c" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="166.2" cy="561.8" r="5.5" fill="#d0362c" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="296.2" cy="587.1" r="5.5" fill="#d0362c" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="387.1" cy="462.3" r="5.5" fill="#d0362c" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="478.0" cy="355.1" r="5.5" fill="#d0362c" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="517.1" cy="319.1" r="5.5" fill="#d0362c" stroke="#ffffff" stroke-width="2.5"/>
+<path d="M166.2,657.7 L296.2,672.4 L387.1,639.2 L478.0,319.1 L517.1,319.5" fill="none" stroke="#12808d" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="166.2" cy="657.7" r="5.5" fill="#12808d" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="296.2" cy="672.4" r="5.5" fill="#12808d" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="387.1" cy="639.2" r="5.5" fill="#12808d" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="478.0" cy="319.1" r="5.5" fill="#12808d" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="517.1" cy="319.5" r="5.5" fill="#12808d" stroke="#ffffff" stroke-width="2.5"/>
+<path d="M166.2,664.4 L296.2,560.2 L387.1,623.3 L478.0,471.5 L517.1,383.4" fill="none" stroke="#3b4656" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="166.2" cy="664.4" r="5.5" fill="#3b4656" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="296.2" cy="560.2" r="5.5" fill="#3b4656" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="387.1" cy="623.3" r="5.5" fill="#3b4656" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="478.0" cy="471.5" r="5.5" fill="#3b4656" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="517.1" cy="383.4" r="5.5" fill="#3b4656" stroke="#ffffff" stroke-width="2.5"/>
+<path d="M166.2,585.9 L387.1,573.9 L478.0,558.9 L517.1,548.9" fill="none" stroke="#7a3f8f" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="166.2" cy="585.9" r="5.5" fill="#7a3f8f" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="387.1" cy="573.9" r="5.5" fill="#7a3f8f" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="478.0" cy="558.9" r="5.5" fill="#7a3f8f" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="517.1" cy="548.9" r="5.5" fill="#7a3f8f" stroke="#ffffff" stroke-width="2.5"/>
+<path d="M166.2,572.7 L387.1,573.3 L478.0,588.0 L517.1,567.8 L647.1,580.2 L738.0,575.1 L777.1,580.5" fill="none" stroke="#c98500" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="166.2" cy="572.7" r="6.5" fill="#c98500" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="387.1" cy="573.3" r="6.5" fill="#c98500" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="478.0" cy="588.0" r="6.5" fill="#c98500" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="517.1" cy="567.8" r="6.5" fill="#c98500" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="647.1" cy="580.2" r="6.5" fill="#c98500" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="738.0" cy="575.1" r="6.5" fill="#c98500" stroke="#ffffff" stroke-width="2.5"/>
+<circle cx="777.1" cy="580.5" r="6.5" fill="#c98500" stroke="#ffffff" stroke-width="2.5"/>
+<text xml:space="preserve" x="793.1" y="587.5" font-size="20" font-weight="400" fill="#15171c" text-anchor="start"><tspan fill="#c98500" font-weight="700">Queen </tspan><tspan fill="#15171c" font-weight="700">122 ms</tspan></text>
+<text xml:space="preserve" x="533.1" y="390.4" font-size="20" font-weight="400" fill="#15171c" text-anchor="start"><tspan fill="#3b4656" font-weight="700">Kafka </tspan><tspan fill="#15171c" font-weight="700">10.9 s</tspan></text>
+<text xml:space="preserve" x="533.1" y="326.1" font-size="20" font-weight="400" fill="#15171c" text-anchor="start"><tspan fill="#d0362c" font-weight="700">Redpanda</tspan><tspan fill="#98a0aa"> · </tspan><tspan fill="#12808d" font-weight="700">Pulsar </tspan><tspan fill="#15171c" font-weight="700">~47 s</tspan></text>
+<text xml:space="preserve" x="533.1" y="544.9" font-size="19" font-weight="400" fill="#15171c" text-anchor="start"><tspan fill="#7a3f8f" font-weight="700">Queen + Kafka clients </tspan><tspan fill="#15171c" font-weight="700">251 ms</tspan></text>
+<text xml:space="preserve" x="638.1" y="461.7" font-size="26" font-weight="700" fill="#3b4656" text-anchor="middle">×</text>
+<text xml:space="preserve" x="656.1" y="461.7" font-size="26" font-weight="700" fill="#12808d" text-anchor="middle">×</text>
+<text xml:space="preserve" x="673.1" y="459.7" font-size="16" font-weight="400" fill="#5c6370" text-anchor="start">Kafka, Pulsar: cannot run 1M partitions</text>
+<text xml:space="preserve" x="712.1" y="644.9" font-size="21" font-weight="700" fill="#9a6400" text-anchor="middle">Only Queen runs 1M → 10M partitions</text>
+<rect x="40" y="806" width="490" height="456" rx="22" fill="#ffffff" stroke="#e5e1d8" stroke-width="1.5"/>
+<text xml:space="preserve" x="68.0" y="854.0" font-size="27" font-weight="700" fill="#15171c" text-anchor="start">Throughput ceiling</text>
+<text xml:space="preserve" x="68.0" y="882.0" font-size="17" font-weight="400" fill="#5c6370" text-anchor="start">200 partitions · higher is better</text>
+<text xml:space="preserve" x="68.0" y="904.0" font-size="17" font-weight="400" fill="#5c6370" text-anchor="start">highest msg/s delivered in full, p99 under 200 ms</text>
+<text xml:space="preserve" x="68.0" y="944.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>Kafka</tspan><tspan fill="#98a0aa" font-weight="400" font-size="15">  no fsync</tspan></text>
+<rect x="68" y="954" width="300.0" height="22" rx="6" fill="#3b4656"/>
+<rect x="373.0" y="954" width="8" height="22" rx="3" fill="#3b4656" opacity="0.5"/>
+<rect x="385.0" y="954" width="8" height="22" rx="3" fill="#3b4656" opacity="0.28"/>
+<rect x="397.0" y="954" width="8" height="22" rx="3" fill="#3b4656" opacity="0.12"/>
+<text xml:space="preserve" x="419.0" y="971.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>≥ 4M</tspan></text>
+<text xml:space="preserve" x="502.0" y="944.0" font-size="15" font-weight="400" fill="#98a0aa" text-anchor="end">p99 75 ms</text>
+<text xml:space="preserve" x="68.0" y="1006.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>Pulsar</tspan></text>
+<rect x="68" y="1016" width="150.0" height="22" rx="6" fill="#12808d"/>
+<rect x="223.0" y="1016" width="8" height="22" rx="3" fill="#12808d" opacity="0.5"/>
+<rect x="235.0" y="1016" width="8" height="22" rx="3" fill="#12808d" opacity="0.28"/>
+<rect x="247.0" y="1016" width="8" height="22" rx="3" fill="#12808d" opacity="0.12"/>
+<text xml:space="preserve" x="269.0" y="1033.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>≥ 2M</tspan></text>
+<text xml:space="preserve" x="502.0" y="1006.0" font-size="15" font-weight="400" fill="#98a0aa" text-anchor="end">p99 21 ms</text>
+<text xml:space="preserve" x="68.0" y="1068.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>Redpanda</tspan></text>
+<rect x="68" y="1078" width="75.0" height="22" rx="6" fill="#d0362c"/>
+<text xml:space="preserve" x="153.0" y="1095.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>1M</tspan></text>
+<text xml:space="preserve" x="502.0" y="1068.0" font-size="15" font-weight="400" fill="#98a0aa" text-anchor="end">p99 187 ms</text>
+<text xml:space="preserve" x="68.0" y="1130.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>Queen</tspan></text>
+<rect x="68" y="1140" width="75.0" height="22" rx="6" fill="#c98500"/>
+<text xml:space="preserve" x="153.0" y="1157.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>1M</tspan></text>
+<text xml:space="preserve" x="502.0" y="1130.0" font-size="15" font-weight="400" fill="#98a0aa" text-anchor="end">p99 146 ms</text>
+<text xml:space="preserve" x="68.0" y="1192.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>Queen + Kafka clients</tspan></text>
+<rect x="68" y="1202" width="75.0" height="22" rx="6" fill="#7a3f8f"/>
+<text xml:space="preserve" x="153.0" y="1219.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>1M</tspan></text>
+<text xml:space="preserve" x="502.0" y="1192.0" font-size="15" font-weight="400" fill="#98a0aa" text-anchor="end">p99 108 ms</text>
+<rect x="550" y="806" width="490" height="456" rx="22" fill="#ffffff" stroke="#e5e1d8" stroke-width="1.5"/>
+<text xml:space="preserve" x="578.0" y="854.0" font-size="27" font-weight="700" fill="#15171c" text-anchor="start">Exactly-once transactions</text>
+<text xml:space="preserve" x="578.0" y="882.0" font-size="17" font-weight="400" fill="#5c6370" text-anchor="start">end-to-end p99 at 9k msg/s · lower is better</text>
+<text xml:space="preserve" x="578.0" y="904.0" font-size="17" font-weight="400" fill="#5c6370" text-anchor="start">10 messages per transaction, 200 partitions</text>
+<text xml:space="preserve" x="578.0" y="944.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>Queen</tspan></text>
+<rect x="578" y="954" width="16.9" height="22" rx="6" fill="#c98500"/>
+<text xml:space="preserve" x="604.9" y="971.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start">19 ms</text>
+<text xml:space="preserve" x="578.0" y="1002.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>Pulsar</tspan></text>
+<rect x="578" y="1012" width="44.4" height="22" rx="6" fill="#12808d"/>
+<text xml:space="preserve" x="632.4" y="1029.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start">50 ms</text>
+<text xml:space="preserve" x="578.0" y="1060.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>Kafka</tspan></text>
+<rect x="578" y="1070" width="45.3" height="22" rx="6" fill="#3b4656"/>
+<text xml:space="preserve" x="633.3" y="1087.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start">51 ms</text>
+<text xml:space="preserve" x="578.0" y="1118.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start"><tspan>Redpanda</tspan></text>
+<rect x="578" y="1128" width="300.0" height="22" rx="6" fill="#d0362c"/>
+<text xml:space="preserve" x="888.0" y="1145.0" font-size="19" font-weight="700" fill="#15171c" text-anchor="start">338 ms</text>
+<line x1="578" y1="1190" x2="1012" y2="1190" stroke="#eeebe5" stroke-width="1.5"/>
+<text xml:space="preserve" x="578.0" y="1220.0" font-size="17" font-weight="400" fill="#15171c" text-anchor="start"><tspan>100k partitions: </tspan><tspan fill="#9a6400" font-weight="700">only Queen runs (43 ms p99)</tspan></text>
+<text xml:space="preserve" x="578.0" y="1248.0" font-size="17" font-weight="400" fill="#15171c" text-anchor="start"><tspan>Peak at 100 msgs/txn: </tspan><tspan fill="#12808d" font-weight="700">Pulsar 572k</tspan><tspan>, </tspan><tspan fill="#9a6400" font-weight="700">Queen 251k</tspan><tspan> msg/s</tspan></text>
+<text xml:space="preserve" x="56.0" y="1298.0" font-size="14.5" font-weight="400" fill="#5c6370" text-anchor="start">3 DigitalOcean brokers (16 vCPU, 31 GB, one disk each) · 256-byte messages · acked after 2 of 3 copies are fsynced; Kafka acks from page cache</text>
+<text xml:space="preserve" x="56.0" y="1322.0" font-size="14.5" font-weight="400" fill="#5c6370" text-anchor="start">Kafka 4.3.1 · Redpanda 26.2.3 · Pulsar 4.2.4 · Queen 2.0 (Kafka clients: franz-go) · same 3 load hosts for all · Oct 2026</text>
+</svg>

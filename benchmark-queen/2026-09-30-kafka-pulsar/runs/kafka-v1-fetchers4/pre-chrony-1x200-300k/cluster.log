@@ -1,0 +1,64 @@
+[2026-09-30T07:22:55Z] cluster: reset: profile=default PROFILE=vm PARTS=200 HEAP=by-rule KPROPS=none JVM_EXTRA=none brokers=10.114.0.2 10.114.0.3 10.114.0.4
+  n1 [2026-09-30T07:22:58Z] kc.sh n1: stopped pid 12891 in 2.6s
+  n1 [2026-09-30T07:22:58Z] kc.sh n1: wiped /root/bench/data/kafka /root/bench/logs/kafka
+  n2 [2026-09-30T07:23:03Z] kc.sh n2: stopped pid 12800 in 7.5s
+  n2 [2026-09-30T07:23:03Z] kc.sh n2: wiped /root/bench/data/kafka /root/bench/logs/kafka
+  n3 [2026-09-30T07:22:56Z] kc.sh n3: stopped pid 15276 in 0.6s
+  n3 [2026-09-30T07:22:56Z] kc.sh n3: wiped /root/bench/data/kafka /root/bench/logs/kafka
+[2026-09-30T07:23:03Z] cluster: format all 3 with cluster id _ogNlHgaRDhRAzU7NlnO_g
+  n1 mkconf: node 1/3 ip=10.114.0.2 profile=default PROFILE=vm heap=6g (PARTS=200 <= 10k partitions) -> /root/bench/kafka/conf/server.properties
+  n1 Formatting metadata directory /root/bench/data/kafka with metadata.version 4.3-IV0.
+  n2 mkconf: node 2/3 ip=10.114.0.3 profile=default PROFILE=vm heap=6g (PARTS=200 <= 10k partitions) -> /root/bench/kafka/conf/server.properties
+  n2 Formatting metadata directory /root/bench/data/kafka with metadata.version 4.3-IV0.
+  n3 mkconf: node 3/3 ip=10.114.0.4 profile=default PROFILE=vm heap=6g (PARTS=200 <= 10k partitions) -> /root/bench/kafka/conf/server.properties
+  n3 Formatting metadata directory /root/bench/data/kafka with metadata.version 4.3-IV0.
+[2026-09-30T07:23:06Z] cluster: start all 3
+  n1 [2026-09-30T07:23:08Z] kc.sh n1: started pid 16402 (10.114.0.2, profile default) heap='-Xms6g -Xmx6g' nofile=1048576 max_map_count=4194304
+  n2 [2026-09-30T07:23:08Z] kc.sh n2: started pid 15985 (10.114.0.3, profile default) heap='-Xms6g -Xmx6g' nofile=1048576 max_map_count=4194304
+  n3 [2026-09-30T07:23:08Z] kc.sh n3: started pid 16549 (10.114.0.4, profile default) heap='-Xms6g -Xmx6g' nofile=1048576 max_map_count=4194304
+[2026-09-30T07:23:13Z] cluster: healthy in 18s: cluster id _ogNlHgaRDhRAzU7NlnO_g
+  n1 node=1 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+  n2 node=2 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+  n3 node=3 alive=1 leader=1 voters=3 unfenced=3 fenced=0 maxlag=0
+[2026-09-30T07:23:15Z] cluster: versions (conf_hash must be equal: nodes differ only in node.id + listener IPs)
+  n1 node=1 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=df306073 pid=16402 jvm=[-Xms6g -Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+  n2 node=2 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=df306073 pid=15985 jvm=[-Xms6g -Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+  n3 node=3 kafka=4.3.1 java="openjdk version "21.0.12.1" 2026-08-18" profile=default PROFILE=vm conf_hash=df306073 pid=16549 jvm=[-Xms6g -Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+AlwaysPreTouch] nofile=1048576
+[2026-09-30T07:23:18Z] cluster: features: eligible.leader.replicas.version=1 group.version=1 kraft.version=0 metadata.version=4.3-IV0 share.version=1 streams.version=1 transaction.version=2 
+[2026-09-30T07:23:18Z] cluster: effective settings (node 1; secrets none):
+  # /root/bench/kafka/conf/server.properties
+  process.roles=broker,controller
+  node.id=1
+  controller.quorum.voters=1@10.114.0.2:9093,2@10.114.0.3:9093,3@10.114.0.4:9093
+  listeners=PLAINTEXT://10.114.0.2:9092,CONTROLLER://10.114.0.2:9093
+  advertised.listeners=PLAINTEXT://10.114.0.2:9092,CONTROLLER://10.114.0.2:9093
+  inter.broker.listener.name=PLAINTEXT
+  controller.listener.names=CONTROLLER
+  listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+  log.dirs=/root/bench/data/kafka
+  num.network.threads=8
+  num.io.threads=16
+  num.replica.fetchers=4
+  background.threads=16
+  num.recovery.threads.per.data.dir=8
+  socket.send.buffer.bytes=-1
+  socket.receive.buffer.bytes=-1
+  replica.socket.receive.buffer.bytes=-1
+  socket.listen.backlog.size=4096
+  max.incremental.fetch.session.cache.slots=4000
+  default.replication.factor=3
+  min.insync.replicas=2
+  offsets.topic.replication.factor=3
+  transaction.state.log.replication.factor=3
+  transaction.state.log.min.isr=2
+  share.coordinator.state.topic.replication.factor=3
+  share.coordinator.state.topic.min.isr=2
+  unclean.leader.election.enable=false
+  auto.create.topics.enable=false
+  log.retention.ms=600000
+  log.retention.check.interval.ms=60000
+  log.segment.bytes=268435456
+  compression.type=producer
+  # /root/bench/kafka/conf/jvm.env
+  KAFKA_HEAP_OPTS="-Xms6g -Xmx6g"
+  KAFKA_JVM_PERFORMANCE_OPTS="-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+AlwaysPreTouch"

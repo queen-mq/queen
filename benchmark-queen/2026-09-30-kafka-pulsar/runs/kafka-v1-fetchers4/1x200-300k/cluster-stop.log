@@ -1,0 +1,4 @@
+[2026-09-30T07:29:55Z] cluster: stop all 3
+  n1 [2026-09-30T07:29:57Z] kc.sh n1: stopped pid 21220 in 0.8s
+  n2 [2026-09-30T07:29:57Z] kc.sh n2: stopped pid 20199 in 1.0s
+  n3 [2026-09-30T07:30:58Z] kc.sh n3: no exit after 60s: SIGKILL 20742

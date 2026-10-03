@@ -41,6 +41,7 @@ pub async fn handle_dlq_replay(
     Path(dlq_id): Path<String>,
     body: Bytes,
 ) -> Response {
+    let dlq_id = crate::handlers::raft::percent_encode(&dlq_id);
     return crate::handlers::raft::dispatch_api(
         &st,
         tenant.as_str(),

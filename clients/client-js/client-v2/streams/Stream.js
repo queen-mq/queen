@@ -186,7 +186,9 @@ export class Stream {
    * commits an ack for the prefix that was allowed and DOES NOT release the
    * source lease, so the denied message and its successors get redelivered
    * in their original order when the lease expires. FIFO per partition is
-   * preserved without any deferred queue.
+   * preserved without any deferred queue. The prefix is counted in source
+   * messages: after a `.flatMap()`, a message is allowed only if every value
+   * it produced is allowed.
    *
    * Example (token bucket rate limiter):
    *
@@ -258,7 +260,10 @@ export class Stream {
    * @param {number} [runOptions.batchSize=200] - messages per cycle
    * @param {number} [runOptions.maxPartitions=4] - lease up to N partitions/cycle
    * @param {number} [runOptions.maxWaitMillis=1000] - long-poll wait for source pop
-   * @param {string} [runOptions.subscriptionMode] - 'all' (default) | 'new'
+   * @param {string} [runOptions.subscriptionMode] - 'new' | 'all'. Unset, the
+   *   broker's default applies, which is 'new' (DEFAULT_SUBSCRIPTION_MODE): a
+   *   query registered after its source already holds messages starts at the
+   *   tail and skips them. Pass 'all' to process the backlog.
    * @param {string} [runOptions.subscriptionFrom] - ISO timestamp or 'now'
    * @param {boolean} [runOptions.conflation=false] - last-value delivery on the
    *   source pop: each cycle sees only the newest visible message per partition

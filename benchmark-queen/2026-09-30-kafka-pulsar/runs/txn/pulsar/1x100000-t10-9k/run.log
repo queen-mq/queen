@@ -1,0 +1,63 @@
+[2026-10-01T17:05:27Z] txn pulsar/1x100000-t10-9k: start: pulsar, rate=9000 over N=9 processes (3 loader hosts x 3) = 1000 msg/s each; in 100000 x out 100000 partitions; txn-size 10 (linger 1s); feeder units of 10; 33 workers + 33 readers per process (297 each in total); out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/pulsar/1x100000-t10-9k
+[2026-10-01T17:05:27Z] txn pulsar/1x100000-t10-9k: durability: E3/Qw3/Qa2 with journal fsync (ack after 2 bookie fsyncs) for data, the transaction log, the pending-ack logs and the transaction buffer snapshots; 16 transaction coordinators
+[2026-10-01T17:05:32Z] txn pulsar/1x100000-t10-9k: 1. cluster reset
+    [2026-10-01T17:05:57Z] brokers healthy: brokers active=3 10.114.0.2:8080=ok 10.114.0.3:8080=ok 10.114.0.4:8080=ok
+      proof persistent://bench/ns/probe-health-1790874364: ledger 9 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.2:3181, 10.114.0.4:3181, 10.114.
+    [2026-10-01T17:06:06Z] reset done
+[2026-10-01T17:06:06Z] txn pulsar/1x100000-t10-9k:    transaction coordinator assign topic: {"partitions":16,"deleted":false}
+    transactionCoordinatorEnabled=true
+    transactionMetadataStoreProviderClassName=org.apache.pulsar.transaction.coordinator.impl.MLTransactionMetadataStoreProvider
+    transactionBufferSnapshotMaxTransactionCount=1000
+    transactionBufferSnapshotMinTimeInMillis=5000
+    transactionBufferSegmentedSnapshotEnabled=false
+    transactionBufferSnapshotSegmentSize=262144
+    transactionBufferClientMaxConcurrentRequests=1000
+    transactionPendingAckLogIndexMinLag=500
+    transactionBufferClientOperationTimeoutInMills=3000
+    transactionLogBatchedWriteEnabled=true
+    transactionLogBatchedWriteMaxRecords=512
+    transactionLogBatchedWriteMaxSize=4194304
+    transactionLogBatchedWriteMaxDelayInMillis=1
+    transactionPendingAckBatchedWriteEnabled=true
+    transactionPendingAckBatchedWriteMaxRecords=512
+    transactionPendingAckBatchedWriteMaxSize=4194304
+    transactionPendingAckBatchedWriteMaxDelayInMillis=1
+[2026-10-01T17:06:11Z] txn pulsar/1x100000-t10-9k: 2. samplers start (txn-pulsar-1x100000-t10-9k, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-01T17:06:12Z] txn pulsar/1x100000-t10-9k: 3. create x1x100000-t10-9k-in (100000) + x1x100000-t10-9k-out (100000), warm on loader 1
+    time="2026-10-01T17:21:27Z" level=error msg="Failed to create producer at send PRODUCER request" error="request timed out" topic="persistent://bench/ns/x1x100000-t10-9k-out-partition-48066"
+    time="2026-10-01T17:21:27Z" level=error msg="Failed to create producer at send PRODUCER request" error="request timed out" topic="persistent://bench/ns/x1x100000-t10-9k-out-partition-48069"
+    time="2026-10-01T17:21:27Z" level=error msg="Failed to create producer at send PRODUCER request" error="request timed out" topic="persistent://bench/ns/x1x100000-t10-9k-out-partition-47576"
+    time="2026-10-01T17:21:28Z" level=error msg="Failed to create producer at send PRODUCER request" error="request timed out" topic="persistent://bench/ns/x1x100000-t10-9k-out-partition-47829"
+    time="2026-10-01T17:21:56Z" level=error msg="Failed to create producer at newPartitionProducer" error="request timed out" topic="persistent://bench/ns/x1x100000-t10-9k-out-partition-41900"
+    time="2026-10-01T17:21:57Z" level=error msg="Failed to create producer at newPartitionProducer" error="request timed out" topic="persistent://bench/ns/x1x100000-t10-9k-out-partition-48066"
+    time="2026-10-01T17:21:57Z" level=error msg="Failed to create producer at newPartitionProducer" error="request timed out" topic="persistent://bench/ns/x1x100000-t10-9k-out-partition-48069"
+    time="2026-10-01T17:21:57Z" level=error msg="Failed to create producer at newPartitionProducer" error="request timed out" topic="persistent://bench/ns/x1x100000-t10-9k-out-partition-47576"
+    time="2026-10-01T17:22:15Z" level=error msg="Failed to create producer at newPartitionProducer" error="request timed out" topic="persistent://bench/ns/x1x100000-t10-9k-out-partition-47829"
+    time="2026-10-01T17:23:46Z" level=warning msg="Failed to write on connection" error="write tcp 10.114.0.5:40388->10.114.0.4:6650: write: broken pipe" local_addr="10.114.0.5:40388" remote_addr="pulsar://10.114.0.4:6650"
+[2026-10-01T18:05:10Z] txn pulsar/1x100000-t10-9k: FAILED: create: DONE 137 (loaders/l1/create.log)
+[2026-10-01T18:05:10Z] txn pulsar/1x100000-t10-9k: 7. collect
+    node=1 zk     pid=982443 up=3576s cpu=347s rss=1404MB thr=115 fds=411 | gc cycles=126 (major 26) pauses=130 max=0.06ms sum=3.0ms stalls=0 max=0.0ms safepoint_max=5.85ms | log ERROR=0 WARN=14 (since start)
+    node=1 bookie pid=983037 up=3569s cpu=134s rss=3465MB thr=190 fds=841 | gc cycles=4 (major 4) pauses=20 max=0.02ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=0.37ms | log ERROR=1 WARN=2 (since start)
+    node=1 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+    node=1 broker pid=983483 up=3564s cpu=1861s rss=7640MB thr=285 fds=639 | gc cycles=359 (major 43) pauses=215 max=0.09ms sum=5.1ms stalls=815 max=196.3ms safepoint_max=83.61ms | log ERROR=0 WARN=737068 (since start)
+    node=1 broker   allocation stalls by thread: jersey-client-async-executor-3=49, jersey-client-async-executor-7=48, jersey-client-async-executor-5=48, jersey-client-async-executor-4=48, jersey-client-async-executor-0=
+    node=1 disk   data=1674MB zk=905MB journal=589MB (1 .txn in 1 dirs) ledgers=181MB (entry logs=2, 31MB; locations=75MB ledgers-index=75MB) | fs 3% used, 377G free
+    node=1 broker bench/ns metrics: producers_count=3 rate_out=0 storage_size=288 throughput_in=0 rate_in=0 throughput_out=0 topics_count=66685 msg_backlog=0 subscriptions_count=100043 consumers_count=0
+    node=2 zk     pid=848614 up=3576s cpu=323s rss=1417MB thr=121 fds=415 | gc cycles=128 (major 28) pauses=140 max=0.05ms sum=3.0ms stalls=0 max=0.0ms safepoint_max=2.24ms | log ERROR=0 WARN=9 (since start)
+    node=2 bookie pid=848892 up=3569s cpu=103s rss=3471MB thr=186 fds=841 | gc cycles=4 (major 4) pauses=20 max=0.02ms sum=0.2ms stalls=0 max=0.0ms safepoint_max=0.38ms | log ERROR=1 WARN=2 (since start)
+    node=2 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+    node=2 broker pid=849225 up=3564s cpu=677s rss=7294MB thr=256 fds=574 | gc cycles=43 (major 19) pauses=95 max=0.05ms sum=2.1ms stalls=0 max=0.0ms safepoint_max=0.73ms | log ERROR=0 WARN=8 (since start)
+    node=2 disk   data=1638MB zk=881MB journal=577MB (1 .txn in 1 dirs) ledgers=181MB (entry logs=2, 31MB; locations=75MB ledgers-index=75MB) | fs 4% used, 373G free
+    node=2 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=0 throughput_in=0 rate_in=0 throughput_out=0 topics_count=66604 msg_backlog=0 subscriptions_count=99884 consumers_count=0
+    node=3 zk     pid=850087 up=3576s cpu=314s rss=1389MB thr=121 fds=412 | gc cycles=181 (major 30) pauses=150 max=0.07ms sum=2.5ms stalls=0 max=0.0ms safepoint_max=2.65ms | log ERROR=0 WARN=13 (since start)
+    node=3 bookie pid=850336 up=3568s cpu=84s rss=3496MB thr=191 fds=842 | gc cycles=4 (major 4) pauses=20 max=0.02ms sum=0.2ms stalls=0 max=0.0ms safepoint_max=0.32ms | log ERROR=1 WARN=5 (since start)
+    node=3 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+    node=3 broker pid=850750 up=3564s cpu=550s rss=7318MB thr=257 fds=575 | gc cycles=43 (major 20) pauses=100 max=0.05ms sum=1.6ms stalls=0 max=0.0ms safepoint_max=0.58ms | log ERROR=3 WARN=12 (since start)
+    node=3 broker   ERROR x2: [persistent://bench/ns/xNxN-tN-Nk-in-partition-N]Transaction buffer failed to recover snapshot! {}
+    node=3 broker   ERROR x1: [persistent://bench/ns/xNxN-tN-Nk-out-partition-N]Transaction buffer failed to recover snapshot! {}
+    node=3 disk   data=1627MB zk=867MB journal=581MB (1 .txn in 1 dirs) ledgers=181MB (entry logs=2, 31MB; locations=75MB ledgers-index=75MB) | fs 3% used, 377G free
+    node=3 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=0 throughput_in=0 rate_in=0 throughput_out=0 topics_count=66713 msg_backlog=0 subscriptions_count=100078 consumers_count=3
+bash: line 1: cd: /root/bench/runs/txn/pulsar/1x100000-t10-9k: No such file or directory
+bash: line 1: cd: /root/bench/runs/txn/pulsar/1x100000-t10-9k: No such file or directory
+[2026-10-01T18:05:45Z] txn pulsar/1x100000-t10-9k:    collected 108M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/pulsar/1x100000-t10-9k
+[2026-10-01T18:05:45Z] txn pulsar/1x100000-t10-9k:    stopping the cluster (data kept until the next reset)

@@ -1,0 +1,68 @@
+[package]
+name = "queen-pg"
+# The crate's own version line, as connectors/queen-s3 and protocols/queen-kafka
+# keep theirs: the broker links it as a path dependency.
+version = "2.0.0"
+edition = "2021"
+# Same floor as server/Cargo.toml: this library is compiled into the broker.
+rust-version = "1.88"
+description = "PostgreSQL source and sink for QueenMQ, linked into the broker: tables to queues through logical replication, queues to tables through a consumer group, exactly-once effects both ways."
+license = "Apache-2.0"
+homepage = "https://queenmq.com"
+repository = "https://github.com/queen-mq/queen"
+publish = false
+
+# A library only. The broker links it (feature `pg`, server/src/pg_inproc.rs)
+# and runs every connector in-process on every node of the cluster.
+[lib]
+name = "queen_pg"
+path = "src/lib.rs"
+
+[features]
+# `queen_pg::fake::FakeQueen`, the in-memory broker double, for the tests of a
+# crate that links this one. Never in a shipped build.
+fake = []
+
+# Every dependency names the module that uses it.
+[dependencies]
+# Same pin and feature set as server/ and the other connectors, so the broker
+# build resolves one tokio.
+tokio = { version = "1", features = ["full"] }
+# Regular (non-replication) connections: catalog reads, slot and publication
+# management, snapshot chunks, watermarks (src/source), every write of the
+# sink (src/sink). The client the 1.x broker used, same version.
+tokio-postgres = "0.7"
+# TLS for those connections (src/pg/connect.rs): rustls with the `ring`
+# provider, the broker's one TLS stack — no OpenSSL, no cmake.
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "1"
+rustls-pki-types = { version = "1", features = ["std"] }
+# The replication connection (src/repl/wire.rs): frontend messages, SCRAM-SHA-256
+# and MD5, and the backend parser for every message but CopyBothResponse.
+# Upstream tokio-postgres cannot run the replication protocol.
+postgres-protocol = "0.6"
+# The replication connection's socket (src/repl/wire.rs): TCP keepalive and
+# TCP_USER_TIMEOUT, the liveness bounds tokio-postgres gives the regular
+# connection. Already in the build with these features (tokio-postgres).
+socket2 = { version = "0.6", features = ["all"] }
+serde = { version = "1", features = ["derive"] }
+# `raw_value`: payloads are spliced through untouched (src/queen.rs `Popped`).
+serde_json = { version = "1", features = ["raw_value"] }
+bytes = "1"
+futures-util = "0.3"
+# Epochs and lease incarnations (src/source), backoff jitter.
+rand = "0.8"
+# Partition names longer than 128 bytes become `~` + SHA-256 (src/source).
+sha2 = "0.10"
+hex = "0.4"
+# Log lines only; the broker owns the subscriber. Target `queen-pg`.
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+# The crate itself with `fake`: integration tests (tests/*.rs) link the
+# library built without cfg(test), so `queen_pg::fake::FakeQueen` reaches them
+# only through the feature. Dev builds only; a shipped build never has it.
+queen-pg = { path = ".", features = ["fake"] }

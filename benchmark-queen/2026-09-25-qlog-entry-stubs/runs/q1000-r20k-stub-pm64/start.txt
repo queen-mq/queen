@@ -1,1 +1,0 @@
-health=200 layout=stub queues=1000 rate=20000

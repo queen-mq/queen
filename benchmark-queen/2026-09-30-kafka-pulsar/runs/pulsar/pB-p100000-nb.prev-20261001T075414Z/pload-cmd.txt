@@ -1,0 +1,1 @@
+create: /root/bench/bin/pload -create-only -url pulsar://10.114.0.2:6650,10.114.0.3:6650,10.114.0.4:6650 -admin http://10.114.0.2:8080 -tenant bench -namespace ns -bundles 48 -topics 1 -topic load -partitions 100000 -entities 0 -sub sub -sub-type failover -payload 256 -tag pB-p100000-nb -topic-timeout 1800s -compression none -batch-delay 1s -batch-max-msgs 1 -warm

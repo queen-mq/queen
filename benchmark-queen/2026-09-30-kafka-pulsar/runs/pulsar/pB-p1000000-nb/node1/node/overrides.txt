@@ -1,0 +1,48 @@
+zookeeper.conf              dataDir                                       data/zookeeper -> /root/bench/data/pulsar/zk/data
+zookeeper.conf              dataLogDir                                    (absent) -> /root/bench/data/pulsar/zk/txlog
+zookeeper.conf              metricsProvider.httpPort                      8000 -> 8001
+zookeeper.conf              4lw.commands.whitelist                        (absent) -> ruok,mntr,srvr,stat,conf,isro,envi,cons,wchs
+zookeeper.conf              server.1                                      (absent) -> 10.114.0.2:2888:3888
+zookeeper.conf              server.2                                      (absent) -> 10.114.0.3:2888:3888
+zookeeper.conf              server.3                                      (absent) -> 10.114.0.4:2888:3888
+zookeeper.conf              clientPortAddress                             (absent) -> 10.114.0.2
+zookeeper.conf              admin.serverAddress                           (absent) -> 10.114.0.2
+zookeeper.conf              metricsProvider.httpHost                      (absent) -> 10.114.0.2
+bookkeeper.conf             advertisedAddress                             (empty) -> 10.114.0.2
+bookkeeper.conf             listeningInterface                            (commented: eth0) -> eth1
+bookkeeper.conf             httpServerHost                                (absent) -> 10.114.0.2
+bookkeeper.conf             metadataServiceUri                            (empty) -> zk+hierarchical://10.114.0.2:2181;10.114.0.3:2181;10.114.0.4:2181/ledgers
+bookkeeper.conf             zkServers                                     localhost:2181 -> 10.114.0.2:2181,10.114.0.3:2181,10.114.0.4:2181
+bookkeeper.conf             journalDirectories                            (commented: /tmp/bk-journal) -> /root/bench/data/pulsar/bookie/journal
+bookkeeper.conf             journalDirectory                              data/bookkeeper/journal -> /root/bench/data/pulsar/bookie/journal
+bookkeeper.conf             ledgerDirectories                             data/bookkeeper/ledgers -> /root/bench/data/pulsar/bookie/ledgers
+bookkeeper.conf             journalSyncData                               true -> true
+bookkeeper.conf             journalPreAllocSizeMB                         16 -> 128
+bookkeeper.conf             dbStorage_writeCacheMaxSizeMb                 (empty) -> 1536
+bookkeeper.conf             dbStorage_readAheadCacheMaxSizeMb             (empty) -> 1024
+bookkeeper.conf             dbStorage_rocksDB_blockCacheSize              (empty) -> 536870912
+bookkeeper.conf             entryLocationRocksdbConf                      (absent) -> /root/bench/pulsar/node/entry_location_rocksdb.conf
+bookkeeper.conf             httpServerEnabled                             false -> true
+bookkeeper.conf             httpServerPort                                8000 -> 8000
+entry_location_rocksdb.conf block_cache (RocksDB entry-location index)    206150041 -> 536870912
+broker.conf                 clusterName                                   (empty) -> bench
+broker.conf                 metadataStoreUrl                              (empty) -> zk:10.114.0.2:2181,10.114.0.3:2181,10.114.0.4:2181
+broker.conf                 configurationMetadataStoreUrl                 (empty) -> zk:10.114.0.2:2181,10.114.0.3:2181,10.114.0.4:2181
+broker.conf                 advertisedAddress                             (empty) -> 10.114.0.2
+broker.conf                 bindAddress                                   0.0.0.0 -> 10.114.0.2
+broker.conf                 managedLedgerDefaultEnsembleSize              2 -> 3
+broker.conf                 managedLedgerDefaultWriteQuorum               2 -> 3
+broker.conf                 managedLedgerDefaultAckQuorum                 2 -> 2
+broker.conf                 managedLedgerCacheSizeMB                      (empty) -> 2048
+broker.conf                 exposeTopicLevelMetricsInPrometheus           true -> false
+broker.conf                 brokerDeleteInactiveTopicsEnabled             true -> false
+broker.conf                 allowAutoTopicCreation                        true -> false
+broker.conf                 defaultNumberOfNamespaceBundles               4 -> 48
+broker.conf                 loadBalancerSheddingEnabled                   true -> false
+broker.conf                 loadBalancerAutoBundleSplitEnabled            true -> false
+broker.conf                 loadBalancerAutoUnloadSplitBundlesEnabled     true -> false
+broker.conf                 forceDeleteNamespaceAllowed                   false -> true
+broker.conf                 forceDeleteTenantAllowed                      false -> true
+zk.env                      zk JVM memory                                 (PULSAR_MEM -Xms2g -Xmx2g -XX:MaxDirectMemorySize=4g) -> "-Xms4g -Xmx4g"
+bookie.env                  bookie JVM memory                             (BOOKIE_MEM -Xms2g -Xmx2g -XX:MaxDirectMemorySize=2g) -> "-Xms3g -Xmx3g -XX:MaxDirectMemorySize=4g"
+broker.env                  broker JVM memory                             (PULSAR_MEM -Xms2g -Xmx2g -XX:MaxDirectMemorySize=4g) -> "-Xms12g -Xmx12g -XX:MaxDirectMemorySize=4g"

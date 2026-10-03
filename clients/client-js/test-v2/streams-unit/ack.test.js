@@ -201,3 +201,64 @@ describe('Queen.ack batch (/api/v1/ack/batch)', () => {
     )
   })
 })
+
+// The consumer group of an ack. /ack and /ack/batch judge an ack that names no
+// group in queue mode, so a message popped by a group and acked without one
+// came back `invalid or expired lease` (found 2026-10-02 against
+// 2.0.0-beta.6). Every pop answers each message with its `consumerGroup`.
+describe('Queen.ack — the group the message was popped under', () => {
+  const okFor = (body) => (body.acknowledgments || [body]).map((a, i) => ackResultItem(i, a.transactionId, true))
+  const popped = (n, group) => ({ transactionId: `tx-${n}`, partitionId: 'p-1', leaseId: 'lease-1', consumerGroup: group })
+
+  it('single: takes consumerGroup from the message when the caller names none', async () => {
+    await withAckServer(okFor, async (client, requests) => {
+      await client.ack(popped(1, 'workers'), true)
+      assert.equal(requests[0].body.consumerGroup, 'workers')
+    })
+  })
+
+  it('single: a queue-mode or hand-built message still sends consumerGroup null', async () => {
+    await withAckServer(okFor, async (client, requests) => {
+      await client.ack(popped(1, '__QUEUE_MODE__'), true)
+      await client.ack(MSG, true)
+      assert.equal(requests[0].body.consumerGroup, null)
+      assert.equal(requests[1].body.consumerGroup, null)
+    })
+  })
+
+  it('single: an explicit { group } wins', async () => {
+    await withAckServer(okFor, async (client, requests) => {
+      await client.ack(popped(1, 'workers'), false, { group: 'auditors' })
+      assert.equal(requests[0].body.consumerGroup, 'auditors')
+    })
+  })
+
+  it('batch: the group the messages share', async () => {
+    await withAckServer(okFor, async (client, requests) => {
+      const result = await client.ack([popped(1, 'workers'), popped(2, 'workers')], true)
+      assert.equal(result.success, true)
+      assert.equal(requests[0].path, '/api/v1/ack/batch')
+      assert.equal(requests[0].body.consumerGroup, 'workers')
+    })
+  })
+
+  it('batch: queue-mode messages still send consumerGroup null', async () => {
+    await withAckServer(okFor, async (client, requests) => {
+      await client.ack([popped(1, '__QUEUE_MODE__'), popped(2, '__QUEUE_MODE__')], true)
+      assert.equal(requests[0].body.consumerGroup, null)
+    })
+  })
+
+  it('batch: messages from two groups are refused before anything is sent', async () => {
+    await withAckServer(okFor, async (client, requests) => {
+      await assert.rejects(
+        () => client.ack([popped(1, 'a'), popped(2, 'b')], true),
+        /different consumer groups in one call \(a, b\)/
+      )
+      assert.equal(requests.length, 0)
+      // ... unless the caller names the group, which is then theirs to get right.
+      await client.ack([popped(1, 'a'), popped(2, 'b')], true, { group: 'a' })
+      assert.equal(requests[0].body.consumerGroup, 'a')
+    })
+  })
+})

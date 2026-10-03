@@ -1,0 +1,10 @@
+  544.5% 120 thr  tokio-r+
+  216.9%   5 thr  queen-k+
+  201.2%   8 thr  queen-l+
+  133.3%  22 thr  queen-r+
+  125.2%   4 thr  qlog-zs+
+   25.4%   9 thr  queen-q+
+   25.2%   1 thr  queen-p+
+    0.3%   1 thr  consume+
+    0.0%   2 thr  queen-s+
+    0.0%   1 thr  queen-d+

@@ -1,0 +1,66 @@
+[2026-10-01T10:44:45Z] create-test 50000: cluster before:
+  n1 node=1 rss_MB=1994 threads=33 fds=140 data_MB=957 part_dirs=0 disk_free_GB=337 busy_s=1.902 errors=0 warns=20 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=2 elections_won_since_mark=0 mark='none' uptime_s=31
+  n1 total memory: 1.816GiB, reserved memory: 872.000MiB, total memory minus pre-share reservations: 988.000MiB, chunk cache: 170.345MiB, kafka: 340.690MiB, rpc: 227.126MiB, recovery: 113.563MiB, tiered st
+  n2 node=2 rss_MB=2197 threads=33 fds=140 data_MB=957 part_dirs=0 disk_free_GB=334 busy_s=1.632 errors=0 warns=21 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=1 elections_won_since_mark=0 mark='none' uptime_s=32
+  n2 total memory: 1.816GiB, reserved memory: 872.000MiB, total memory minus pre-share reservations: 988.000MiB, chunk cache: 170.345MiB, kafka: 340.690MiB, rpc: 227.126MiB, recovery: 113.563MiB, tiered st
+  n3 node=3 rss_MB=1994 threads=33 fds=139 data_MB=957 part_dirs=0 disk_free_GB=337 busy_s=1.228 errors=0 warns=21 errors_since_mark=0 warns_since_mark=0 transfers=0 transfers_since_mark=0 elections_won=0 elections_won_since_mark=0 mark='none' uptime_s=32
+  n3 total memory: 1.816GiB, reserved memory: 872.000MiB, total memory minus pre-share reservations: 988.000MiB, chunk cache: 170.345MiB, kafka: 340.690MiB, rpc: 227.126MiB, recovery: 113.563MiB, tiered st
+[2026-10-01T10:44:47Z] create-test 50000: kload -create-only -warm (as run.sh) on loader 1
+  kafka: brokers=10.114.0.2:9092,10.114.0.3:9092,10.114.0.4:9092 rf=3 min-isr=0 producers=4 linger=5ms compression=lz4 acks=all idempotent batch-max-bytes=1048576 | consumers: protocol=consumer fetch-max-wait=500ms fetch-min-bytes=1 fetch-max-partition-bytes=1048576 session=45s
+  [topic] 1 topics created, 0 grown, 50000 partitions each x RF 3 accepted by the controller in 4.8s (10 requests of <= 5000 partitions)
+  [topic] t=+0s 0 topics missing, 1 with != 50000 partitions, 0 partitions without leader, 0 with ISR < replicas
+  [topic] t=+10s 0 topics missing, 0 with != 50000 partitions, 23725 partitions without leader, 0 with ISR < replicas
+  [topic] t=+21s 0 topics missing, 0 with != 50000 partitions, 845 partitions without leader, 0 with ISR < replicas
+  [topic] t=+31s ready, holding for -topic-settle
+  [topic] t=+42s ready, holding for -topic-settle
+  [topic] t=+52s ready, holding for -topic-settle
+  [topic] READY after 66.6s: 1 topics x 50000 partitions, leaders + full ISR + every replica log on disk
+  [warm] t=+0s ready, holding for -topic-settle
+  [warm] t=+11s ready, holding for -topic-settle
+  [warm] t=+21s ready, holding for -topic-settle
+  [warm] one record (no "ts") into each of 50000 partitions, acks=all, in 5.2s; READY again after 30.9s
+  [config] broker.default.replication.factor = 3 (STATIC_BROKER_CONFIG)
+  [config] topic.compression.type = producer (DEFAULT_CONFIG)
+  [config] topic.flush.ms = 100 (DEFAULT_CONFIG)
+  [config] topic.max.message.bytes = 16777216 (DEFAULT_CONFIG)
+  [config] topic.message.timestamp.type = CreateTime (DEFAULT_CONFIG)
+  [config] topic.retention.ms = 600000 (DYNAMIC_TOPIC_CONFIG)
+  [config] topic.segment.bytes = 268435456 (DYNAMIC_TOPIC_CONFIG)
+[create] done: 1 topics x 50000 partitions ready
+[2026-10-01T10:46:31Z] create-test 50000: create + ready + warm + 30 s settle: rc=0 in 104 s
+[2026-10-01T10:46:31Z] create-test 50000: cluster after create:
+  n1 node=1 rss_MB=11111 threads=33 fds=50209 data_MB=26771 part_dirs=50000 disk_free_GB=312 busy_s=448.408 errors=0 warns=48 errors_since_mark=0 warns_since_mark=0 transfers=8119 transfers_since_mark=0 elections_won=24788 elections_won_since_mark=0 mark='none' upt
+  n1 total memory: 1.816GiB, reserved memory: 872.000MiB, total memory minus pre-share reservations: 988.000MiB, chunk cache: 170.345MiB, kafka: 340.690MiB, rpc: 227.126MiB, recovery: 113.563MiB, tiered st
+  n2 node=2 rss_MB=11128 threads=33 fds=50209 data_MB=26773 part_dirs=50000 disk_free_GB=308 busy_s=472.701 errors=0 warns=59 errors_since_mark=0 warns_since_mark=0 transfers=6395 transfers_since_mark=0 elections_won=23061 elections_won_since_mark=0 mark='none' upt
+  n2 total memory: 1.816GiB, reserved memory: 872.000MiB, total memory minus pre-share reservations: 988.000MiB, chunk cache: 170.345MiB, kafka: 340.690MiB, rpc: 227.126MiB, recovery: 113.563MiB, tiered st
+  n3 node=3 rss_MB=11107 threads=33 fds=50209 data_MB=26772 part_dirs=50000 disk_free_GB=312 busy_s=369.933 errors=0 warns=54 errors_since_mark=0 warns_since_mark=0 transfers=4068 transfers_since_mark=0 elections_won=20735 elections_won_since_mark=0 mark='none' upt
+  n3 total memory: 1.816GiB, reserved memory: 872.000MiB, total memory minus pre-share reservations: 988.000MiB, chunk cache: 170.345MiB, kafka: 340.690MiB, rpc: 227.126MiB, recovery: 113.563MiB, tiered st
+  CLUSTER HEALTH OVERVIEW
+  =======================
+  Healthy:                          true
+  Unhealthy reasons:                []
+  Controller ID:                    1
+  All nodes:                        [1 2 3]
+  Nodes down:                       []
+  Nodes in recovery mode:           []
+  
+  {"count": 50002, "leaderless": 0, "under_replicated": 0}
+  {"count": 50002, "leaderless": 0, "under_replicated": 0}
+  {"count": 50002, "leaderless": 0, "under_replicated": 0}
+[2026-10-01T10:46:41Z] create-test 50000: leaders per node (metadata):
+  leader 1: 16667 partitions
+  leader 2: 16666 partitions
+  leader 3: 16667 partitions
+[2026-10-01T10:46:43Z] create-test 50000: delete
+TOPIC          STATUS
+rpcreate50000  OK
+[2026-10-01T10:46:44Z] create-test 50000: delete accepted in 1 s; waiting until the partition dirs are gone on every node
+[2026-10-01T10:47:25Z] create-test 50000: topic dirs gone on all nodes after 42 s
+[2026-10-01T10:47:25Z] create-test 50000: cluster after delete:
+  n1 node=1 rss_MB=12034 threads=33 fds=210 data_MB=1072 part_dirs=0 disk_free_GB=336 busy_s=705.109 errors=0 warns=17326 errors_since_mark=0 warns_since_mark=0 transfers=8119 transfers_since_mark=0 elections_won=28208 elections_won_since_mark=0 mark='none' uptime_
+  n1 total memory: 1.816GiB, reserved memory: 872.000MiB, total memory minus pre-share reservations: 988.000MiB, chunk cache: 170.345MiB, kafka: 340.690MiB, rpc: 227.126MiB, recovery: 113.563MiB, tiered st
+  n2 node=2 rss_MB=12012 threads=33 fds=210 data_MB=1072 part_dirs=0 disk_free_GB=333 busy_s=724.050 errors=0 warns=7914 errors_since_mark=0 warns_since_mark=0 transfers=6395 transfers_since_mark=0 elections_won=24790 elections_won_since_mark=0 mark='none' uptime_s
+  n2 total memory: 1.816GiB, reserved memory: 872.000MiB, total memory minus pre-share reservations: 988.000MiB, chunk cache: 170.345MiB, kafka: 340.690MiB, rpc: 227.126MiB, recovery: 113.563MiB, tiered st
+  n3 node=3 rss_MB=11964 threads=33 fds=210 data_MB=1064 part_dirs=0 disk_free_GB=337 busy_s=538.677 errors=0 warns=135 errors_since_mark=0 warns_since_mark=0 transfers=4068 transfers_since_mark=0 elections_won=20738 elections_won_since_mark=0 mark='none' uptime_s=
+  n3 total memory: 1.816GiB, reserved memory: 872.000MiB, total memory minus pre-share reservations: 988.000MiB, chunk cache: 170.345MiB, kafka: 340.690MiB, rpc: 227.126MiB, recovery: 113.563MiB, tiered st
+rc=0

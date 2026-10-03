@@ -1,0 +1,24 @@
+node=1 zk     pid=1127520 up=97s cpu=9s rss=1234MB thr=119 fds=414 | gc cycles=3 (major 3) pauses=15 max=0.03ms sum=0.2ms stalls=0 max=0.0ms safepoint_max=0.45ms | log ERROR=0 WARN=5 (since start)
+node=1 bookie pid=1128110 up=89s cpu=10s rss=3294MB thr=190 fds=842 | gc cycles=2 (major 2) pauses=10 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.40ms | log ERROR=1 WARN=2 (since start)
+node=1 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+node=1 broker pid=1128557 up=85s cpu=41s rss=6638MB thr=298 fds=640 | gc cycles=3 (major 3) pauses=15 max=0.04ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=4.18ms | log ERROR=4 WARN=18 (since start)
+node=1 broker   ERROR x2: [persistent://bench/ns/xNxN-tN-Nk-wN-bN-in-partition-N]Transaction buffer failed to recover snapshot! {}
+node=1 broker   ERROR x1: [null] Failed to create tenant bench {}
+node=1 broker   ERROR x1: [persistent://bench/ns/xNxN-tN-Nk-wN-bN-out-partition-N]Transaction buffer failed to recover snapshot! {}
+node=1 disk   data=153MB zk=1MB journal=3MB (1 .txn in 1 dirs) ledgers=150MB (entry logs=2, 0MB; locations=75MB ledgers-index=75MB) | fs 5% used, 371G free
+node=1 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=139428 throughput_in=0 rate_in=0 throughput_out=0 topics_count=138 msg_backlog=65 subscriptions_count=206 consumers_count=3
+node=2 zk     pid=966807 up=97s cpu=8s rss=1236MB thr=116 fds=413 | gc cycles=3 (major 3) pauses=15 max=0.03ms sum=0.2ms stalls=0 max=0.0ms safepoint_max=0.33ms | log ERROR=0 WARN=7 (since start)
+node=2 bookie pid=967081 up=89s cpu=9s rss=3296MB thr=186 fds=842 | gc cycles=2 (major 2) pauses=10 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.37ms | log ERROR=1 WARN=2 (since start)
+node=2 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+node=2 broker pid=967418 up=85s cpu=38s rss=6634MB thr=273 fds=576 | gc cycles=3 (major 3) pauses=15 max=0.03ms sum=0.2ms stalls=0 max=0.0ms safepoint_max=0.60ms | log ERROR=7 WARN=30 (since start)
+node=2 broker   ERROR x5: [persistent://bench/ns/xNxN-tN-Nk-wN-bN-in-partition-N]Transaction buffer failed to recover snapshot! {}
+node=2 broker   ERROR x2: [persistent://bench/ns/xNxN-tN-Nk-wN-bN-out-partition-N]Transaction buffer failed to recover snapshot! {}
+node=2 disk   data=153MB zk=1MB journal=3MB (1 .txn in 1 dirs) ledgers=150MB (entry logs=2, 0MB; locations=75MB ledgers-index=75MB) | fs 6% used, 367G free
+node=2 broker bench/ns metrics: producers_count=3 rate_out=0 storage_size=130560 throughput_in=0 rate_in=0 throughput_out=7 topics_count=129 msg_backlog=64 subscriptions_count=194 consumers_count=3
+node=3 zk     pid=965213 up=97s cpu=7s rss=1235MB thr=122 fds=412 | gc cycles=3 (major 3) pauses=15 max=0.02ms sum=0.2ms stalls=0 max=0.0ms safepoint_max=0.31ms | log ERROR=0 WARN=9 (since start)
+node=3 bookie pid=965474 up=89s cpu=8s rss=3292MB thr=191 fds=842 | gc cycles=2 (major 2) pauses=10 max=0.01ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.43ms | log ERROR=1 WARN=5 (since start)
+node=3 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+node=3 broker pid=965877 up=85s cpu=27s rss=6639MB thr=274 fds=575 | gc cycles=3 (major 3) pauses=15 max=0.02ms sum=0.2ms stalls=0 max=0.0ms safepoint_max=0.48ms | log ERROR=1 WARN=11 (since start)
+node=3 broker   ERROR x1: [persistent://bench/ns/xNxN-tN-Nk-wN-bN-in-partition-N]Transaction buffer failed to recover snapshot! {}
+node=3 disk   data=153MB zk=1MB journal=3MB (1 .txn in 1 dirs) ledgers=150MB (entry logs=2, 0MB; locations=75MB ledgers-index=75MB) | fs 4% used, 372G free
+node=3 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=137388 throughput_in=0 rate_in=0 throughput_out=0 topics_count=135 msg_backlog=73 subscriptions_count=208 consumers_count=0

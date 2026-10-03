@@ -1,0 +1,13 @@
+2026-09-25T09:39:09Z start p7-lz-kill-fast-dp20: --workload log --lazyfs --nemesis kill --time-limit 300 --rate 300 --nemesis-interval 3 --env QUEEN_RAFT_DURABLE_EVERY_MS=20
+2026-09-25T09:45:03Z done  p7-lz-kill-fast-dp20: valid store=/root/jepsen-p7/store/queen-log-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16_env=DURABLE_EVERY_MS=20/2026-09-25T09:39:23.502833827Z log=/root/runs-p7/p7-lz-kill-fast-dp20.log
+2026-09-25T09:45:03Z start p7-lz-kill-mix: --workload log --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+2026-09-25T09:50:47Z done  p7-lz-kill-mix: valid store=/root/jepsen-p7/store/queen-log-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-09-25T09:45:15.809204044Z log=/root/runs-p7/p7-lz-kill-mix.log
+2026-09-25T09:50:47Z start p7-snap-kill-lz: --workload log --lazyfs --nemesis snap-kill --time-limit 300 --rate 400 --composite-phase 10 --nemesis-interval 3 --env QUEEN_RAFT_PURGE_HOLD_S=3,QUEEN_RAFT_LOG_KEEP=16
+2026-09-25T09:56:46Z done  p7-snap-kill-lz: valid store=/root/jepsen-p7/store/queen-log-snap-kill_lazyfs_offload=on_lanes=16_env=LOG_KEEP=16,PURGE_HOLD_S=3/2026-09-25T09:50:58.683852471Z log=/root/runs-p7/p7-snap-kill-lz.log
+2026-09-25T09:56:46Z start p7-lz-hog-kill-one: --workload log --lazyfs --disk-hog --nemesis kill --db-targets one --time-limit 300 --rate 200 --nemesis-interval 5 --env QUEEN_RAFT_DURABLE_EVERY_MS=20
+2026-09-25T10:02:36Z done  p7-lz-hog-kill-one: valid store=/root/jepsen-p7/store/queen-log-kill_t=one_lazyfs_hog_offload=on_lanes=16_env=DURABLE_EVERY_MS=20/2026-09-25T09:57:00.821452466Z log=/root/runs-p7/p7-lz-hog-kill-one.log
+2026-09-25T10:02:36Z start p7-reg-part-on: --workload log --nemesis partition --time-limit 300 --rate 200
+2026-09-25T10:09:47Z done  p7-reg-part-on: valid store=/root/jepsen-p7/store/queen-log-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-09-25T10:02:48.148714366Z log=/root/runs-p7/p7-reg-part-on.log
+2026-09-25T10:09:47Z start p7-w2-kill-lz: --workload queue --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-09-25T10:15:41Z done  p7-w2-kill-lz: valid store=/root/jepsen-p7/store/queen-queue-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-09-25T10:09:58.977821276Z log=/root/runs-p7/p7-w2-kill-lz.log
+2026-09-25T10:15:41Z matrix matrix-p7.txt finished

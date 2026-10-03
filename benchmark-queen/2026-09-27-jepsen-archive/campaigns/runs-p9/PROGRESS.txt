@@ -1,0 +1,10 @@
+2026-09-25T21:23:50Z campaign p9-early.txt on /root/bin/queen-kvfix
+2026-09-25T21:24:15Z p9-w3c-pause CRASHED(rc=255) dur=0m25s acked=1 ops={'ok': 1} nemesis={'pause': 2} invalid=[] workload={} faults={}
+2026-09-25T21:24:38Z p9-w3c-membership CRASHED(rc=255) dur=0m20s acked=2 ops={'ok': 2, 'fail': 1} nemesis={} invalid=[] workload={} faults={}
+2026-09-25T21:30:06Z p9-w4-pause valid dur=5m25s acked=18447 ops={'ok': 18447, 'fail': 17, 'info': 26} nemesis={'pause': 30, 'resume': 32} invalid=[] workload={'ok-count': 18447, 'fail-count': 17, 'info-count': 26} faults={}
+2026-09-25T21:36:14Z p9-w4-leader-deaf valid dur=6m05s acked=26766 ops={'ok': 26766, 'fail': 21, 'info': 19} nemesis={'start-leader-deaf': 16, 'stop-leader-deaf': 9} invalid=[] workload={'ok-count': 26766, 'fail-count': 21, 'info-count': 19} faults={}
+2026-09-25T21:36:17Z campaign p9-early.txt finished
+2026-09-25T21:36:24Z campaign p9-claim.txt on /root/bin/queen-kvfix
+2026-09-25T21:41:49Z p9-w3c-pause-b valid dur=5m25s acked=1286 ops={'ok': 7668, 'fail': 5191, 'info': 31} nemesis={'pause': 30, 'resume': 32} invalid=[] workload={'ok-count': 6382, 'fail-count': 58, 'info-count': 0, 'bad-keys': 0, 'winners': 1286, 'keys': 1290} faults={}
+2026-09-25T21:47:32Z p9-w3c-membership-b valid dur=5m40s acked=2484 ops={'ok': 14749, 'fail': 10061, 'info': 16} nemesis={'member-cycle': 19, 'member-double': 4, 'member-heal': 1} invalid=[] workload={'ok-count': 12265, 'fail-count': 145, 'info-count': 0, 'bad-keys': 0, 'winners': 2484, 'keys': 2484} faults={'member-ops': '{:member-cycle 19, :member-double 4, :member-heal 1}', 'member-rejoins': '{true 27}', 'member-removals': '{[200 nil] 27}', 'member-final': '{:leader 1, :term 11, :voters [1 2 3 4 5], :learners []}'}
+2026-09-25T21:47:35Z campaign p9-claim.txt finished

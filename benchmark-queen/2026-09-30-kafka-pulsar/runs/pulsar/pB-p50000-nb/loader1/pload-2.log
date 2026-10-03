@@ -1,0 +1,90 @@
+WARN max-pending 1000000 per partition producer would preallocate 127166 MB over 5556 partitions (24 B/slot); using 1000 (-pending-budget-mb 64)
+pload tag=pB-p50000-nb loader=2/9 mode=batch rate=111111 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=16 GOGC=400(default) seed=1790841299895705949
+  offered: 111111 msg/s = 1111.1 units/s (avg 100.0 msgs/unit) across 23 pacer workers (48.31 units/s each)
+  topics: 1 x 50000 partitions (load..load), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=5556 starting at 0 [producer shard 2/9: partitions p % 9 == 2, entity j -> partition 2 + j*9]
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":2,...}), pool 64x100
+  consumers: 33 here (ci 66..98 of 297), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0 1 2]
+  pulsar: url=pulsar://10.114.0.2:6650,10.114.0.3:6650,10.114.0.4:6650 admin=http://10.114.0.2:8080 ns=bench/ns sub=sub type=failover compression=none batch=1s/1 msgs/131072 B key-batching=false max-pending=1000/partition mem-limit=365 MB receiver-queue=1000 ack-group=100ms conns/broker=1
+  [admin] 1 topics with 50000 partitions and subscription "sub" exist (checked in 0.0s)
+  [consume] 33 consumers (ci 66..98 of 297), failover, partition slices (every partition exactly one consumer): 5577 partition registrations here, 50000 in total across all processes; idle 0 here, 0 in total; subscribed in 1.4s, settling 2s
+  [produce] producer shard 2/9: 5556 partitions per topic (p % 9 == 2) x 1 topics, per-partition producers created before READY (-producer-eager)
+  [produce] 5556 per-partition producers created in 2.4s
+READY 1790841131579
+[start] waiting 9.466s for the common start 1790841148479
+[start] GO 07:52:28.479 (unix ms 1790841148479)
+[07:52:38] offered=    55574/s achieved=    37423/s shed=        0/s inflight=  1815 | p50= 847.87 p99= 2146.30 p999= 2179.07 ms | push=374200 pop=391549 lag=-17349 | errs push=0 pop=0 empty=0 gor=50180 | ack=    39158/s ackErr=0 ackAvg=0.02ms | e2e p50=201.73 p99=1613.82 p999=1957.89 n=391549 | e2e_local p50=193.54 p99=1581.06 n=106849
+[07:52:48] offered=   111127/s achieved=    27279/s shed=    51999/s inflight=  5000 | p50=3915.78 p99= 6914.05 p999= 7962.62 ms | push=647000 pop=717650 lag=-70650 | errs push=0 pop=0 empty=0 gor=50180 | ack=    32609/s ackErr=0 ackAvg=0.01ms | e2e p50=2867.20 p99=7569.41 p999=8585.22 n=326101 | e2e_local p50=2867.20 p99=7831.55 n=87033
+[07:52:58] offered=   111091/s achieved=    21290/s shed=    89801/s inflight=  5000 | p50=8093.70 p99=19529.73 p999=19791.87 ms | push=859900 pop=885592 lag=-25692 | errs push=0 pop=0 empty=0 gor=50180 | ack=    16794/s ackErr=0 ackAvg=0.01ms | e2e p50=4227.07 p99=18219.01 p999=19791.87 n=167942 | e2e_local p50=5799.94 p99=16318.46 n=48330
+[07:53:08] offered=   111112/s achieved=    29641/s shed=    81501/s inflight=  4999 | p50=20316.16 p99=27131.90 p999=27918.34 ms | push=1156300 pop=1198887 lag=-42587 | errs push=0 pop=0 empty=0 gor=50180 | ack=    31330/s ackErr=0 ackAvg=0.01ms | e2e p50=19791.87 p99=27918.34 p999=28442.62 n=313295 | e2e_local p50=20054.02 p99=27918.34 n=91282
+[err produce #1] 07:53:11.607 message send timeout: TimeoutError
+[err produce #2] 07:53:11.617 message send timeout: TimeoutError
+[err produce #3] 07:53:11.619 message send timeout: TimeoutError
+[err produce #4] 07:53:11.622 message send timeout: TimeoutError
+[err produce #5] 07:53:11.622 message send timeout: TimeoutError
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:60051 entryId:114 on sequenceId 113 - expected: 114, local > remote, ignore it" producerID=2797 producer_name=bench-2-24247 topic="persistent://bench/ns/load-partition-25211"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:6798 entryId:186 on sequenceId 185 - expected: 186, local > remote, ignore it" producerID=931 producer_name=bench-2-18568 topic="persistent://bench/ns/load-partition-8255"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:38537 entryId:165 on sequenceId 164 - expected: 165, local > remote, ignore it" producerID=1386 producer_name=bench-2-19909 topic="persistent://bench/ns/load-partition-12422"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:25820 entryId:184 on sequenceId 183 - expected: 184, local > remote, ignore it" producerID=1020 producer_name=bench-2-18841 topic="persistent://bench/ns/load-partition-9164"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:27992 entryId:122 on sequenceId 121 - expected: 122, local > remote, ignore it" producerID=2533 producer_name=bench-2-23485 topic="persistent://bench/ns/load-partition-22754"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:83842 entryId:105 on sequenceId 104 - expected: 105, local > remote, ignore it" producerID=3464 producer_name=bench-2-26197 topic="persistent://bench/ns/load-partition-31259"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:70052 entryId:138 on sequenceId 137 - expected: 138, local > remote, ignore it" producerID=1503 producer_name=bench-2-20268 topic="persistent://bench/ns/load-partition-13547"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:48998 entryId:113 on sequenceId 112 - expected: 113, local > remote, ignore it" producerID=3350 producer_name=bench-2-25840 topic="persistent://bench/ns/load-partition-30143"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:34282 entryId:105 on sequenceId 104 - expected: 105, local > remote, ignore it" producerID=3477 producer_name=bench-2-26242 topic="persistent://bench/ns/load-partition-31277"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:29354 entryId:200 on sequenceId 199 - expected: 200, local > remote, ignore it" producerID=1170 producer_name=bench-2-19280 topic="persistent://bench/ns/load-partition-10685"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:60135 entryId:112 on sequenceId 111 - expected: 112, local > remote, ignore it" producerID=2878 producer_name=bench-2-24464 topic="persistent://bench/ns/load-partition-25832"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:30281 entryId:159 on sequenceId 158 - expected: 159, local > remote, ignore it" producerID=1379 producer_name=bench-2-19888 topic="persistent://bench/ns/load-partition-12467"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:29532 entryId:187 on sequenceId 186 - expected: 187, local > remote, ignore it" producerID=1211 producer_name=bench-2-19391 topic="persistent://bench/ns/load-partition-10784"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:46868 entryId:122 on sequenceId 121 - expected: 122, local > remote, ignore it" producerID=1901 producer_name=bench-2-21516 topic="persistent://bench/ns/load-partition-17147"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:46969 entryId:125 on sequenceId 124 - expected: 125, local > remote, ignore it" producerID=1986 producer_name=bench-2-21761 topic="persistent://bench/ns/load-partition-17912"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:55708 entryId:101 on sequenceId 100 - expected: 101, local > remote, ignore it" producerID=3623 producer_name=bench-2-26663 topic="persistent://bench/ns/load-partition-32591"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:7088 entryId:187 on sequenceId 186 - expected: 187, local > remote, ignore it" producerID=922 producer_name=bench-2-18537 topic="persistent://bench/ns/load-partition-8480"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:59145 entryId:124 on sequenceId 123 - expected: 124, local > remote, ignore it" producerID=2105 producer_name=bench-2-22147 topic="persistent://bench/ns/load-partition-18848"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:31817 entryId:124 on sequenceId 123 - expected: 124, local > remote, ignore it" producerID=2233 producer_name=bench-2-22547 topic="persistent://bench/ns/load-partition-20036"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:7337 entryId:189 on sequenceId 188 - expected: 189, local > remote, ignore it" producerID=961 producer_name=bench-2-18652 topic="persistent://bench/ns/load-partition-8642"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:68921 entryId:171 on sequenceId 170 - expected: 171, local > remote, ignore it" producerID=1324 producer_name=bench-2-19729 topic="persistent://bench/ns/load-partition-11891"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:29063 entryId:200 on sequenceId 199 - expected: 200, local > remote, ignore it" producerID=1175 producer_name=bench-2-19296 topic="persistent://bench/ns/load-partition-10478"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:80263 entryId:113 on sequenceId 112 - expected: 113, local > remote, ignore it" producerID=2981 producer_name=bench-2-24731 topic="persistent://bench/ns/load-partition-26813"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:85865 entryId:101 on sequenceId 100 - expected: 101, local > remote, ignore it" producerID=3738 producer_name=bench-2-27001 topic="persistent://bench/ns/load-partition-33599"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:63639 entryId:200 on sequenceId 199 - expected: 200, local > remote, ignore it" producerID=1326 producer_name=bench-2-19733 topic="persistent://bench/ns/load-partition-11945"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:12955 entryId:163 on sequenceId 162 - expected: 163, local > remote, ignore it" producerID=2400 producer_name=bench-2-23026 topic="persistent://bench/ns/load-partition-21728"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:83018 entryId:111 on sequenceId 110 - expected: 111, local > remote, ignore it" producerID=3366 producer_name=bench-2-25863 topic="persistent://bench/ns/load-partition-30224"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:29440 entryId:182 on sequenceId 181 - expected: 182, local > remote, ignore it" producerID=1220 producer_name=bench-2-19423 topic="persistent://bench/ns/load-partition-10766"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:75773 entryId:123 on sequenceId 122 - expected: 123, local > remote, ignore it" producerID=2366 producer_name=bench-2-22931 topic="persistent://bench/ns/load-partition-21278"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:70946 entryId:154 on sequenceId 153 - expected: 154, local > remote, ignore it" producerID=1631 producer_name=bench-2-20678 topic="persistent://bench/ns/load-partition-14744"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:76045 entryId:125 on sequenceId 124 - expected: 125, local > remote, ignore it" producerID=2409 producer_name=bench-2-23056 topic="persistent://bench/ns/load-partition-21611"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:40749 entryId:122 on sequenceId 121 - expected: 122, local > remote, ignore it" producerID=2664 producer_name=bench-2-23860 topic="persistent://bench/ns/load-partition-23834"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:61096 entryId:101 on sequenceId 100 - expected: 101, local > remote, ignore it" producerID=3632 producer_name=bench-2-26692 topic="persistent://bench/ns/load-partition-32681"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:31635 entryId:126 on sequenceId 125 - expected: 126, local > remote, ignore it" producerID=2092 producer_name=bench-2-22112 topic="persistent://bench/ns/load-partition-19019"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:80512 entryId:113 on sequenceId 112 - expected: 113, local > remote, ignore it" producerID=3005 producer_name=bench-2-24810 topic="persistent://bench/ns/load-partition-27119"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:11059 entryId:141 on sequenceId 140 - expected: 141, local > remote, ignore it" producerID=1614 producer_name=bench-2-20622 topic="persistent://bench/ns/load-partition-14537"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:7155 entryId:186 on sequenceId 185 - expected: 186, local > remote, ignore it" producerID=952 producer_name=bench-2-18622 topic="persistent://bench/ns/load-partition-8498"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:32952 entryId:113 on sequenceId 112 - expected: 113, local > remote, ignore it" producerID=2832 producer_name=bench-2-24339 topic="persistent://bench/ns/load-partition-25463"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:83640 entryId:108 on sequenceId 107 - expected: 108, local > remote, ignore it" producerID=3448 producer_name=bench-2-26139 topic="persistent://bench/ns/load-partition-31034"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:86627 entryId:101 on sequenceId 100 - expected: 101, local > remote, ignore it" producerID=3841 producer_name=bench-2-27308 topic="persistent://bench/ns/load-partition-34562"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:32310 entryId:122 on sequenceId 121 - expected: 122, local > remote, ignore it" producerID=2524 producer_name=bench-2-23453 topic="persistent://bench/ns/load-partition-22583"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:60530 entryId:112 on sequenceId 111 - expected: 112, local > remote, ignore it" producerID=3200 producer_name=bench-2-25405 topic="persistent://bench/ns/load-partition-28784"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:69043 entryId:200 on sequenceId 199 - expected: 200, local > remote, ignore it" producerID=1335 producer_name=bench-2-19764 topic="persistent://bench/ns/load-partition-12053"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:76291 entryId:124 on sequenceId 123 - expected: 124, local > remote, ignore it" producerID=2441 producer_name=bench-2-23159 topic="persistent://bench/ns/load-partition-21962"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:82995 entryId:113 on sequenceId 112 - expected: 113, local > remote, ignore it" producerID=3361 producer_name=bench-2-25862 topic="persistent://bench/ns/load-partition-30188"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:42224 entryId:104 on sequenceId 103 - expected: 104, local > remote, ignore it" producerID=3498 producer_name=bench-2-26308 topic="persistent://bench/ns/load-partition-31430"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:46756 entryId:131 on sequenceId 130 - expected: 131, local > remote, ignore it" producerID=1851 producer_name=bench-2-21362 topic="persistent://bench/ns/load-partition-16553"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:42217 entryId:106 on sequenceId 105 - expected: 106, local > remote, ignore it" producerID=3462 producer_name=bench-2-26156 topic="persistent://bench/ns/load-partition-31133"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:49403 entryId:101 on sequenceId 100 - expected: 101, local > remote, ignore it" producerID=3631 producer_name=bench-2-26682 topic="persistent://bench/ns/load-partition-32618"
+time="2026-10-01T07:53:11Z" level=warning msg="Received ack for ledgerId:66065 entryId:105 on sequenceId 104 - expected: 105, local > remote, ignore it" producerID=3478 producer_name=bench-2-26243 topic="persistent://bench/ns/load-partition-31322"
+time="2026-10-01T07:53:12Z" level=warning msg="Received ack for ledgerId:69525 entryId:155 on sequenceId 154 - expected: 155, local > remote, ignore it" producerID=1417 producer_name=bench-2-20002 topic="persistent://bench/ns/load-partition-12710"
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0xf8 pc=0xbd9473]
+
+goroutine 3788 [running]:
+github.com/apache/pulsar-client-go/pulsar.(*sendRequest).done(0x2b3fa13c9a20, {0xf124f0, 0x2b3fff482360}, {0x0, 0x0})
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/producer_partition.go:1653 +0xb3
+github.com/apache/pulsar-client-go/pulsar.(*partitionProducer).ReceivedSendReceipt(0x2b3f82833340, 0x2b3ff7c53d10)
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/producer_partition.go:1462 +0x513
+github.com/apache/pulsar-client-go/pulsar/internal.(*connection).handleSendReceipt(0x2b3f5c080000, 0x2b3ff7c53d10)
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/internal/connection.go:773 +0xcf
+github.com/apache/pulsar-client-go/pulsar/internal.(*connection).receivedCommand(0x2b3f5c080000, 0x2b3ff81a4200, {0x0, 0x0})
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/internal/connection.go:613 +0x117
+github.com/apache/pulsar-client-go/pulsar/internal.(*connectionReader).readFromConnection(0x2b3f5b976018)
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/internal/connection_reader.go:57 +0x5e
+created by github.com/apache/pulsar-client-go/pulsar/internal.(*connection).run in goroutine 34
+	github.com/apache/pulsar-client-go@v0.21.0/pulsar/internal/connection.go:411 +0xec

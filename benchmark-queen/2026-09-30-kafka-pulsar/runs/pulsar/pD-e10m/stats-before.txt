@@ -1,0 +1,15 @@
+  n1  node=1 zk     pid=671511 up=51s cpu=6s rss=1212MB thr=118 fds=411 | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since mark 08:48:28Z)
+  n1  node=1 bookie pid=672107 up=44s cpu=8s rss=3263MB thr=193 fds=839 | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since mark 08:48:28Z)
+  n1  node=1 broker pid=672554 up=39s cpu=34s rss=6641MB thr=265 fds=714 | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since mark 08:48:28Z)
+  n1  node=1 disk   data=9MB zk=1MB journal=1MB (1 .txn in 1 dirs) ledgers=9MB (entry logs=0, 0MB; locations=5MB ledgers-index=5MB) | fs 13% used, 338G free
+  n1  node=1 broker bench/ns metrics: producers_count=144 rate_out=0 storage_size=16107 throughput_in=0 rate_in=0 throughput_out=0 topics_count=17 msg_backlog=0 subscriptions_count=20 consumers_count=3171
+  n2  node=2 zk     pid=604138 up=51s cpu=6s rss=1202MB thr=120 fds=413 | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since mark 08:48:28Z)
+  n2  node=2 bookie pid=604421 up=44s cpu=8s rss=3262MB thr=187 fds=839 | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since mark 08:48:28Z)
+  n2  node=2 broker pid=604751 up=39s cpu=32s rss=6603MB thr=238 fds=602 | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since mark 08:48:28Z)
+  n2  node=2 disk   data=9MB zk=1MB journal=1MB (1 .txn in 1 dirs) ledgers=9MB (entry logs=0, 0MB; locations=5MB ledgers-index=5MB) | fs 13% used, 340G free
+  n2  node=2 broker bench/ns metrics: producers_count=135 rate_out=0 storage_size=15099 throughput_in=0 rate_in=0 throughput_out=0 topics_count=15 msg_backlog=0 subscriptions_count=15 consumers_count=2970
+  n3  node=3 zk     pid=602925 up=51s cpu=6s rss=1205MB thr=129 fds=414 | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since mark 08:48:28Z)
+  n3  node=3 bookie pid=603215 up=43s cpu=7s rss=3270MB thr=192 fds=839 | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.05ms | log ERROR=0 WARN=0 (since mark 08:48:28Z)
+  n3  node=3 broker pid=603602 up=39s cpu=28s rss=6626MB thr=239 fds=598 | gc cycles=0 (major 0) pauses=0 max=0.00ms sum=0.0ms stalls=0 max=0.0ms safepoint_max=0.00ms | log ERROR=0 WARN=0 (since mark 08:48:28Z)
+  n3  node=3 disk   data=9MB zk=1MB journal=1MB (1 .txn in 1 dirs) ledgers=9MB (entry logs=0, 0MB; locations=5MB ledgers-index=5MB) | fs 13% used, 339G free
+  n3  node=3 broker bench/ns metrics: producers_count=153 rate_out=0 storage_size=17115 throughput_in=0 rate_in=0 throughput_out=0 topics_count=17 msg_backlog=0 subscriptions_count=17 consumers_count=3366

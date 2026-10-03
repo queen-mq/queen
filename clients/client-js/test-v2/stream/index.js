@@ -12,6 +12,7 @@
  *   recovery.js   — config_hash mismatch + reset + mid-stream resume
  *   throughput.js — multi-partition / many-window throughput
  *   combined.js   — full pipelines + concurrent streams
+ *   gate.js       — .gate() partial acks against the broker
  */
 
 export * from './operators.js'
@@ -23,3 +24,4 @@ export * from './eventTime.js'
 export * from './recovery.js'
 export * from './throughput.js'
 export * from './combined.js'
+export * from './gate.js'

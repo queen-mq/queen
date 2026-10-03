@@ -1,0 +1,35 @@
+qload tag=1x200-t100-9k-p6 loader=6/9 mode=batch rate=1000 msg/s batch=10 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=1m0s GOMAXPROCS=16 GOGC=400 seed=1790880717259874206
+  offered: 1000 msg/s = 100.0 units/s (avg 10.0 msgs/unit) across 3 pacer workers (33.33 units/s each)
+  topics: 1 x 200 partitions (x1x200-t100-9k..x1x200-t100-9k), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 133
+  payload: goload jsonEvent target 256 B, avg 289.7 B raw, ~320 B stamped ({"ts":µs,"src":6,...}), pool 64x10
+  consumers: 22 here (ci 132..153 of 198), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[6 7 8]
+  queen: url=http://10.114.0.2:6632 (of 3) conns=2048 timeout=30s pop-width=10 pop-batch=1000 pop-timeout=2s lease=10s | configure: leaseTime=30 completedRetention=3600 dedup=0 retryLimit=1000000 | txn: x1x200-t100-9k-in -> workers (txn-size 100, linger 3s, one /transaction = acks with leases + pushes) -> x1x200-t100-9k-out, 22 read-committed readers
+  [queen] http://10.114.0.2:6632 healthy: version 2.0.0-beta.2, this node leader
+  [txn] 22 workers (ci 132..153 of 198): x1x200-t100-9k-in -> x1x200-t100-9k-out, txn-size 100, linger 3s, pop width 10, lease 10s
+  [consume] 22 consumers of x1x200-t100-9k-out: pop width 10, batch 1000, long poll 2s, lease 10s, async batch acks (ack-inflight 256)
+READY 1790880981016
+[start] waiting 9.381s for the common start 1790880993408
+[start] GO 18:56:33.408 (unix ms 1790880993408)
+[18:56:43] offered=      499/s achieved=      499/s shed=        0/s inflight=     0 | p50=   2.42 p99=    3.73 p999=    5.15 ms | push=4990 pop=3360 lag=1630 | errs push=0 pop=0 empty=256 gor=158 | ack=      336/s ackErr=0 ackAvg=4.54ms | e2e p50=1236.99 p99=3031.04 p999=4177.92 n=3360 | e2e_local p50=1155.07 p99=3031.04 n=1180
+[txn] 18:56:43 txn=       7/s msgs=      417/s avg= 61.32 msg/txn | commit p50=3.73 p99=7.33 p999=7.33 ms | aborts=0 errs=0 open=0 | in=      449/s | total txns=68 msgs=4170 aborts=0 errs=0
+[18:56:53] offered=     1001/s achieved=     1001/s shed=        0/s inflight=     0 | p50=   2.32 p99=    4.08 p999=    7.14 ms | push=15000 pop=14340 lag=660 | errs push=0 pop=0 empty=322 gor=164 | ack=     1098/s ackErr=0 ackAvg=6.07ms | e2e p50=1466.37 p99=3817.47 p999=4685.82 n=10980 | e2e_local p50=1417.22 p99=3293.18 n=3600
+[txn] 18:56:53 txn=      12/s msgs=     1060/s avg= 86.18 msg/txn | commit p50=5.47 p99=15.04 p999=15.81 ms | aborts=0 errs=0 open=0 | in=     1070/s | total txns=191 msgs=14770 aborts=0 errs=0
+[18:57:03] offered=     1000/s achieved=     1000/s shed=        0/s inflight=     0 | p50=   2.35 p99=    6.05 p999=    8.38 ms | push=25000 pop=23580 lag=1420 | errs push=0 pop=0 empty=388 gor=164 | ack=      924/s ackErr=0 ackAvg=7.20ms | e2e p50=1925.12 p99=3588.10 p999=4046.85 n=9240 | e2e_local p50=2007.04 p99=3522.56 n=2970
+[txn] 18:57:03 txn=      12/s msgs=      988/s avg= 82.33 msg/txn | commit p50=7.20 p99=16.77 p999=17.02 ms | aborts=0 errs=0 open=0 | in=      980/s | total txns=311 msgs=24650 aborts=0 errs=0
+[18:57:13] offered=      999/s achieved=      999/s shed=        0/s inflight=     0 | p50=   2.22 p99=    6.62 p999=   10.43 ms | push=34990 pop=31640 lag=3350 | errs push=0 pop=0 empty=476 gor=164 | ack=      806/s ackErr=0 ackAvg=7.63ms | e2e p50=1875.97 p99=4046.85 p999=4751.36 n=8060 | e2e_local p50=1859.58 p99=3981.31 n=2700
+[txn] 18:57:13 txn=      13/s msgs=     1142/s avg= 89.22 msg/txn | commit p50=7.84 p99=15.30 p999=15.30 ms | aborts=0 errs=0 open=0 | in=     1134/s | total txns=439 msgs=36070 aborts=0 errs=0
+[18:57:23] offered=     1001/s achieved=     1001/s shed=        0/s inflight=     0 | p50=   2.26 p99=    6.18 p999=   12.48 ms | push=45000 pop=38310 lag=6690 | errs push=0 pop=0 empty=555 gor=164 | ack=      667/s ackErr=0 ackAvg=7.36ms | e2e p50=1843.20 p99=3948.54 p999=4358.14 n=6670 | e2e_local p50=1712.13 p99=3817.47 n=2260
+[txn] 18:57:23 txn=      14/s msgs=     1200/s avg= 85.11 msg/txn | commit p50=7.07 p99=16.51 p999=16.77 ms | aborts=0 errs=0 open=1 | in=     1194/s | total txns=580 msgs=48070 aborts=0 errs=0
+[18:57:33] offered=     1000/s achieved=     1000/s shed=        0/s inflight=     0 | p50=   2.22 p99=    6.30 p999=    9.41 ms | push=55000 pop=52680 lag=2320 | errs push=0 pop=0 empty=622 gor=164 | ack=     1437/s ackErr=0 ackAvg=7.70ms | e2e p50=1515.52 p99=3588.10 p999=4489.22 n=14370 | e2e_local p50=1482.75 p99=3620.86 n=5090
+[txn] 18:57:33 txn=      14/s msgs=     1066/s avg= 76.14 msg/txn | commit p50=7.90 p99=16.06 p999=16.19 ms | aborts=0 errs=0 open=0 | in=     1084/s | total txns=720 msgs=58730 aborts=0 errs=0
+[drain] workers and readers keep going for up to 1m0s (ends early after 3s idle; lag now 3490)
+[18:57:43] offered=      999/s achieved=      999/s shed=        0/s inflight=     0 | p50=   2.32 p99=    6.43 p999=    8.51 ms | push=64990 pop=61500 lag=3490 | errs push=0 pop=0 empty=688 gor=161 | ack=      882/s ackErr=0 ackAvg=7.78ms | e2e p50=1810.43 p99=3686.40 p999=4685.82 n=8820 | e2e_local p50=1679.36 p99=3915.78 n=2950
+[txn] 18:57:43 txn=      11/s msgs=      831/s avg= 76.94 msg/txn | commit p50=7.01 p99=14.53 p999=15.17 ms | aborts=0 errs=0 open=0 | in=      817/s | total txns=828 msgs=67040 aborts=0 errs=0
+[err pop-in #1] 18:57:48.958 HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+[drain] idle for 3s after 7.9s: ending the drain (lag 1250)
+[info] steady window 60s (after the ramp, before the producers stopped): offered 1000/s pushed 1000/s popped 969/s cpu 12.6% = 12.58 cores per 100k msg/s (produce+consume)
+[info] errors pop-in=1 first: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+[final] offered=6499 achieved=6499 shed=0 (msgs: offered=64990 achieved=64990 shed=0) pushErr=0 | pushed=64990 popped=63740 lag=1250 | popErr=0 empty=792 | overall p50=2.29 p99=6.05 p999=9.41 ms | acked=63740 ackErr=0 ackLag=1250 ackAvg=7.67ms | e2e p50=1712.13 p99=4112.38 p999=5668.86 ms
+load_cpu=9.9%
+[txn-final] txns=854 msgs=68450 aborts=0 errs=0 in=68450 avg=80.15 msg/txn | commit p50=6.69 p99=15.94 p999=17.02 max=17.02 ms
+[ids] ledger /root/bench/runs/txn/queen/1x200-t100-9k/ids/p6.ids: 64990 confirmed, 0 failed, 0 unanswered

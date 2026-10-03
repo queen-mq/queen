@@ -1,0 +1,14 @@
+2026-09-25T21:23:50Z start p9-w3c-pause: --workload claim --nemesis pause --time-limit 300 --rate 100
+2026-09-25T21:24:15Z done  p9-w3c-pause: CRASHED(rc=255) store= log=/root/runs-p9/p9-w3c-pause.log
+2026-09-25T21:24:18Z start p9-w3c-membership: --workload claim --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-25T21:24:38Z done  p9-w3c-membership: CRASHED(rc=255) store= log=/root/runs-p9/p9-w3c-membership.log
+2026-09-25T21:24:41Z start p9-w4-pause: --workload elle --nemesis pause --time-limit 300 --rate 100
+2026-09-25T21:30:06Z done  p9-w4-pause: valid store=/root/jepsen-p8/store/queen-elle-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-25T21:24:51.181030821Z log=/root/runs-p9/p9-w4-pause.log
+2026-09-25T21:30:09Z start p9-w4-leader-deaf: --workload elle --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-25T21:36:14Z done  p9-w4-leader-deaf: valid store=/root/jepsen-p8/store/queen-elle-leader-deaf_offload=on_lanes=16/2026-09-25T21:30:27.516074444Z log=/root/runs-p9/p9-w4-leader-deaf.log
+2026-09-25T21:36:17Z matrix p9-early.txt finished
+2026-09-25T21:36:24Z start p9-w3c-pause-b: --workload claim --nemesis pause --time-limit 300 --rate 100
+2026-09-25T21:41:49Z done  p9-w3c-pause-b: valid store=/root/jepsen-p8/store/queen-claim-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-09-25T21:36:36.793855461Z log=/root/runs-p9/p9-w3c-pause-b.log
+2026-09-25T21:41:52Z start p9-w3c-membership-b: --workload claim --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-25T21:47:32Z done  p9-w3c-membership-b: valid store=/root/jepsen-p8/store/queen-claim-membership_offload=on_lanes=16/2026-09-25T21:42:04.954701872Z log=/root/runs-p9/p9-w3c-membership-b.log
+2026-09-25T21:47:35Z matrix p9-claim.txt finished

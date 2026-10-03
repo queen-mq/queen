@@ -1,0 +1,11 @@
+[2026-10-01T08:01:45Z] run pB-p1000000-nb: pulsar 4.2.4, 1000000 msg/s total over 9 load processes (3 loaders x 3), topics=1 x partitions=1000000 entities=0 mode=batch batch=100 sub=failover consumers=33/process
+[2026-10-01T08:01:47Z] 1. cluster reset: PROFILE=vm MEM_ZK=-Xms4g -Xmx4g MEM_BOOKIE=-Xms3g -Xmx3g -XX:MaxDirectMemorySize=4g MEM_BROKER=-Xms12g -Xmx12g -XX:MaxDirectMemorySize=4g
+  [2026-10-01T08:02:26Z] brokers healthy: brokers active=3 10.114.0.2:8080=ok 10.114.0.3:8080=ok 10.114.0.4:8080=ok
+    proof persistent://bench/ns/probe-health-1790841752: ledger 9 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.4:3181, 10.114.0.2:3181, 10.114.0.
+  [2026-10-01T08:02:34Z] reset done
+[2026-10-01T08:02:34Z] 2. topics + subscription + warm: pload -create-only on loader 1
+  	mqload/cmd/pload/admin.go:112 +0x125
+  created by main.parallel in goroutine 1
+  	mqload/cmd/pload/admin.go:104 +0x139
+[2026-10-01T08:34:07Z] FAILED: pload -create-only rc=2
+[2026-10-01T08:34:24Z] collect -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/pulsar/pB-p1000000-nb

@@ -1,0 +1,119 @@
+[2026-10-01T19:56:02Z] txn pulsar/1x1800-t10-288k-w1800: start: pulsar, rate=288000 over N=9 processes (3 loader hosts x 3) = 32000 msg/s each; in 1800 x out 1800 partitions; txn-size 10 (linger 1s); feeder units of 10; 200 workers + 200 readers per process (1800 each in total); out=/Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/pulsar/1x1800-t10-288k-w1800
+[2026-10-01T19:56:02Z] txn pulsar/1x1800-t10-288k-w1800: durability: E3/Qw3/Qa2 with journal fsync (ack after 2 bookie fsyncs) for data, the transaction log, the pending-ack logs and the transaction buffer snapshots; 16 transaction coordinators
+[2026-10-01T19:56:07Z] txn pulsar/1x1800-t10-288k-w1800: 1. cluster reset
+    [2026-10-01T19:56:34Z] brokers healthy: brokers active=3 10.114.0.2:8080=ok 10.114.0.3:8080=ok 10.114.0.4:8080=ok
+      proof persistent://bench/ns/probe-health-1790884601: ledger 9 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.2:3181, 10.114.0.3:3181, 10.114.
+    [2026-10-01T19:56:43Z] reset done
+[2026-10-01T19:57:00Z] txn pulsar/1x1800-t10-288k-w1800:    transaction coordinator assign topic: {"partitions":16,"deleted":false}
+    transactionCoordinatorEnabled=true
+    transactionMetadataStoreProviderClassName=org.apache.pulsar.transaction.coordinator.impl.MLTransactionMetadataStoreProvider
+    transactionBufferSnapshotMaxTransactionCount=1000
+    transactionBufferSnapshotMinTimeInMillis=5000
+    transactionBufferSegmentedSnapshotEnabled=false
+    transactionBufferSnapshotSegmentSize=262144
+    transactionBufferClientMaxConcurrentRequests=1000
+    transactionPendingAckLogIndexMinLag=500
+    transactionBufferClientOperationTimeoutInMills=3000
+    transactionLogBatchedWriteEnabled=true
+    transactionLogBatchedWriteMaxRecords=512
+    transactionLogBatchedWriteMaxSize=4194304
+    transactionLogBatchedWriteMaxDelayInMillis=1
+    transactionPendingAckBatchedWriteEnabled=true
+    transactionPendingAckBatchedWriteMaxRecords=512
+    transactionPendingAckBatchedWriteMaxSize=4194304
+    transactionPendingAckBatchedWriteMaxDelayInMillis=1
+[2026-10-01T19:57:00Z] txn pulsar/1x1800-t10-288k-w1800: 2. samplers start (txn-pulsar-1x1800-t10-288k-w1800, every 2s) on 3 brokers + 3 loader hosts
+[2026-10-01T19:57:01Z] txn pulsar/1x1800-t10-288k-w1800: 3. create x1x1800-t10-288k-w1800-in (1800) + x1x1800-t10-288k-w1800-out (1800), warm on loader 1
+    time="2026-10-01T19:57:34Z" level=error msg="Failed to create consumer" consumerID=266 error="server error: ServiceNotReady: Topic is temporarily unavailable" name=pload-warm subscription=sub topic="persistent://bench/ns/x1x1800-t10-288k-w1800-out-partition-1"
+    time="2026-10-01T19:57:34Z" level=error msg="Failed to create consumer at reconnect" consumerID=266 error="server error: ServiceNotReady: Topic is temporarily unavailable" name=pload-warm subscription=sub topic="persistent://bench/ns/x1x1800-t10-288k-w1800-out-partition-1"
+    time="2026-10-01T19:57:34Z" level=error msg="Failed to create consumer" consumerID=29 error="server error: ServiceNotReady: Topic is temporarily unavailable" name=pload-warm subscription=sub topic="persistent://bench/ns/x1x1800-t10-288k-w1800-in-partition-12"
+    time="2026-10-01T19:57:34Z" level=error msg="Failed to create consumer at reconnect" consumerID=29 error="server error: ServiceNotReady: Topic is temporarily unavailable" name=pload-warm subscription=sub topic="persistent://bench/ns/x1x1800-t10-288k-w1800-in-partition-12"
+    time="2026-10-01T19:57:34Z" level=error msg="Failed to create consumer" consumerID=536 error="server error: ServiceNotReady: Topic is temporarily unavailable" name=pload-warm subscription=sub topic="persistent://bench/ns/x1x1800-t10-288k-w1800-out-partition-53"
+    time="2026-10-01T19:57:34Z" level=error msg="Failed to create consumer at reconnect" consumerID=536 error="server error: ServiceNotReady: Topic is temporarily unavailable" name=pload-warm subscription=sub topic="persistent://bench/ns/x1x1800-t10-288k-w1800-out-partition-53"
+    time="2026-10-01T19:57:34Z" level=error msg="Failed to create consumer" consumerID=10 error="server error: ServiceNotReady: Topic is temporarily unavailable" name=pload-warm subscription=sub topic="persistent://bench/ns/x1x1800-t10-288k-w1800-in-partition-1"
+    time="2026-10-01T19:57:34Z" level=error msg="Failed to create consumer at reconnect" consumerID=10 error="server error: ServiceNotReady: Topic is temporarily unavailable" name=pload-warm subscription=sub topic="persistent://bench/ns/x1x1800-t10-288k-w1800-in-partition-1"
+      [warm] one message (no "ts") into each of 3600 partitions in 1.2s; consumed and acked in 22.3s
+    [create] done: x1x1800-t10-288k-w1800-in, x1x1800-t10-288k-w1800-out x 1800 partitions, subscription "sub" on both, verify on x1x1800-t10-288k-w1800-out
+[2026-10-01T19:57:37Z] txn pulsar/1x1800-t10-288k-w1800:    topics ready after 95s since start
+    node=1 zk     pid=1071588 up=87s cpu=10s rss=1224MB thr=118 fds=413 | gc cycles=4 (major 4) pauses=20 max=0.06ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=0.92ms | log ERROR=0 WARN=6 (since start)
+    node=1 bookie pid=1072181 up=78s cpu=16s rss=3375MB thr=190 fds=842 | gc cycles=2 (major 2) pauses=10 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=0.41ms | log ERROR=1 WARN=2 (since start)
+    node=1 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+    node=1 broker pid=1072629 up=74s cpu=98s rss=6868MB thr=304 fds=703 | gc cycles=5 (major 5) pauses=25 max=0.04ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=10.67ms | log ERROR=4 WARN=18 (since start)
+    node=1 broker   ERROR x2: [persistent://bench/ns/xNxN-tN-Nk-wN-in-partition-N]Transaction buffer failed to recover snapshot! {}
+    node=1 broker   ERROR x1: [null] Failed to create tenant bench {}
+    node=1 broker   ERROR x1: [persistent://bench/ns/xNxN-tN-Nk-wN-out-partition-N]Transaction buffer failed to recover snapshot! {}
+    node=1 disk   data=169MB zk=7MB journal=12MB (1 .txn in 1 dirs) ledgers=151MB (entry logs=2, 1MB; locations=75MB ledgers-index=75MB) | fs 4% used, 375G free
+    node=1 broker bench/ns metrics: producers_count=3 rate_out=0 storage_size=1227789 throughput_in=0 rate_in=0 throughput_out=2 topics_count=1222 msg_backlog=614 subscriptions_count=1837 consumers_count=3
+    node=2 zk     pid=921367 up=87s cpu=16s rss=1272MB thr=116 fds=412 | gc cycles=6 (major 5) pauses=25 max=0.04ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=1.85ms | log ERROR=0 WARN=7 (since start)
+    node=2 bookie pid=921636 up=79s cpu=16s rss=3400MB thr=186 fds=842 | gc cycles=2 (major 2) pauses=10 max=0.01ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=3.36ms | log ERROR=1 WARN=2 (since start)
+    node=2 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+    node=2 broker pid=921977 up=74s cpu=54s rss=6759MB thr=275 fds=591 | gc cycles=4 (major 4) pauses=20 max=0.03ms sum=0.4ms stalls=0 max=0.0ms safepoint_max=1.03ms | log ERROR=0 WARN=8 (since start)
+    node=2 disk   data=170MB zk=7MB journal=12MB (1 .txn in 1 dirs) ledgers=151MB (entry logs=2, 1MB; locations=75MB ledgers-index=75MB) | fs 5% used, 371G free
+    node=2 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=1174041 throughput_in=0 rate_in=0 throughput_out=0 topics_count=1168 msg_backlog=572 subscriptions_count=1740 consumers_count=0
+    node=3 zk     pid=921132 up=87s cpu=13s rss=1290MB thr=123 fds=413 | gc cycles=5 (major 4) pauses=20 max=0.03ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=0.47ms | log ERROR=0 WARN=7 (since start)
+    node=3 bookie pid=921422 up=79s cpu=13s rss=3416MB thr=193 fds=842 | gc cycles=2 (major 2) pauses=10 max=0.02ms sum=0.1ms stalls=0 max=0.0ms safepoint_max=2.49ms | log ERROR=1 WARN=5 (since start)
+    node=3 bookie   ERROR x1: Problems reading from /root/bench/data/pulsar/bookie/ledgers/current/lastMark (this is okay if it is the first time starting this bookie {}
+    node=3 broker pid=921808 up=74s cpu=59s rss=6784MB thr=275 fds=592 | gc cycles=4 (major 4) pauses=20 max=0.02ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=0.69ms | log ERROR=4 WARN=21 (since start)
+    node=3 broker   ERROR x2: [persistent://bench/ns/xNxN-tN-Nk-wN-in-partition-N]Transaction buffer failed to recover snapshot! {}
+    node=3 broker   ERROR x2: [persistent://bench/ns/xNxN-tN-Nk-wN-out-partition-N]Transaction buffer failed to recover snapshot! {}
+    node=3 disk   data=169MB zk=7MB journal=12MB (1 .txn in 1 dirs) ledgers=151MB (entry logs=2, 1MB; locations=75MB ledgers-index=75MB) | fs 4% used, 375G free
+    node=3 broker bench/ns metrics: producers_count=0 rate_out=0 storage_size=1217385 throughput_in=0 rate_in=0 throughput_out=0 topics_count=1212 msg_backlog=616 subscriptions_count=1831 consumers_count=3
+[2026-10-01T19:57:38Z] txn pulsar/1x1800-t10-288k-w1800: 4. launch 9 pload processes
+    launched 0 1 2 on queen-loader-01
+    launched 3 4 5 on queen-loader-02
+    launched 6 7 8 on queen-loader-03
+[2026-10-01T19:57:50Z] txn pulsar/1x1800-t10-288k-w1800:    READY 0/9
+[2026-10-01T19:57:54Z] txn pulsar/1x1800-t10-288k-w1800:    all 9 READY after 112s since start
+[2026-10-01T19:57:57Z] txn pulsar/1x1800-t10-288k-w1800: 5. start instant 1790884686508 (loader-1 clock + 10s) written to 9 start files; producing 70s (ramp 10s), drain <= 60s
+[2026-10-01T19:58:05Z] txn pulsar/1x1800-t10-288k-w1800:    0/9 exited | p0: 
+[2026-10-01T19:58:35Z] txn pulsar/1x1800-t10-288k-w1800:    0/9 exited | p0: [19:58:26] offered=    32001/s achieved=    31994/s shed=        0/s inflight=    48 | p50=  12.99 p99=   51.46 p999=   83.46 ms | push=479480 pop=315 [txn] 19:58:26 txn=    1751/s msgs=    17512/s avg= 10.00 msg/txn | commit p50=92.67 p99=317.44 p999=501.76 ms | aborts=0 errs=0 open=200 | in=    175 
+[2026-10-01T19:59:08Z] txn pulsar/1x1800-t10-288k-w1800:    0/9 exited | p0: [19:59:06] offered=    32001/s achieved=    32001/s shed=        0/s inflight=    50 | p50=  13.63 p99=   68.10 p999=   94.72 ms | push=1759520 pop=10 [txn] 19:59:06 txn=    1880/s msgs=    18803/s avg= 10.00 msg/txn | commit p50=86.53 p99=342.02 p999=452.61 ms | aborts=0 errs=0 open=200 | in=    188 
+[2026-10-01T19:59:44Z] txn pulsar/1x1800-t10-288k-w1800:    0/9 exited | p0: [19:59:36] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=2080000 pop=17 [txn] 19:59:36 txn=    2456/s msgs=    24564/s avg= 10.00 msg/txn | commit p50=65.28 p99=280.58 p999=370.69 ms | aborts=0 errs=0 open=188 | in=    245 
+[2026-10-01T20:00:06Z] txn pulsar/1x1800-t10-288k-w1800:    load finished after 244s since start
+[2026-10-01T20:00:07Z] txn pulsar/1x1800-t10-288k-w1800: 6. verifier: collect the 9 id ledgers, run pload -verify on loader 1
+    [verify] pulsar pulsar://10.114.0.2:6650,10.114.0.3:6650,10.114.0.4:6650: 9 ledgers from /root/bench/runs/txn/pulsar/1x1800-t10-288k-w1800/verify-ids; reading x1x1800-t10-288k-w1800-out on subscription verify, then the rest of x1x1800-t10-288k-w1800-in on sub
+    [verify] out x1x1800-t10-288k-w1800-out: 16 consumers on verify subscribed in 0.1s
+    [verify] out x1x1800-t10-288k-w1800-out: 12986029 records after 10s
+    [verify] out x1x1800-t10-288k-w1800-out: 18694620 records after 20s
+    [verify] out x1x1800-t10-288k-w1800-out: 18721800 records after 30s
+    [verify] out x1x1800-t10-288k-w1800-out: 18721800 records, idle 10s: scan complete after 32.1s
+    [verify] rest of x1x1800-t10-288k-w1800-in: 16 consumers on sub subscribed in 0.1s
+    [verify] rest of x1x1800-t10-288k-w1800-in: 0 records, idle 10s: scan complete after 10.0s
+    [verify] system=pulsar ledgers=9 produced=18720000 ambiguous=0 out_records=18721800 out_unique=18720000 duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=1800 scan=42.6s | VERDICT PASS
+[2026-10-01T20:01:11Z] txn pulsar/1x1800-t10-288k-w1800:    verifier: PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0
+[2026-10-01T20:01:11Z] txn pulsar/1x1800-t10-288k-w1800: 7. collect
+    node=1 zk     pid=1071588 up=301s cpu=14s rss=1226MB thr=119 fds=414 | gc cycles=2 (major 2) pauses=10 max=0.04ms sum=0.3ms stalls=0 max=0.0ms safepoint_max=3.40ms | log ERROR=0 WARN=1 (since mark 19:57:55Z)
+    node=1 bookie pid=1072181 up=292s cpu=398s rss=6569MB thr=191 fds=854 | gc cycles=5 (major 5) pauses=25 max=0.07ms sum=0.8ms stalls=0 max=0.0ms safepoint_max=8.22ms | log ERROR=0 WARN=0 (since mark 19:57:55Z)
+    node=1 broker pid=1072629 up=288s cpu=1200s rss=8341MB thr=308 fds=641 | gc cycles=16 (major 2) pauses=10 max=0.20ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=8.90ms | log ERROR=126 WARN=4 (since mark 19:57:55Z)
+    node=1 broker   ERROR x125: Read of ledger entry failed: LN EN-EN, Sent to [N.N.N.N:N, N.N.N.N:N, N.N.N.N:N], Heard from [] : bitset = {}, Error = 'Too many requests to
+    node=1 broker   ERROR x1: Read of ledger entry failed: LN EN-EN, Sent to [N.N.N.N:N, N.N.N.N:N, N.N.N.N:N], Heard from [N.N.N.N:N] : bitset = {N}, Error = 'Too many r
+    node=1 disk   data=15541MB zk=10MB journal=7779MB (4 .txn in 1 dirs) ledgers=7753MB (entry logs=9, 7514MB; locations=164MB ledgers-index=75MB) | fs 8% used, 360G free
+    node=1 broker bench/ns metrics: producers_count=3 throughput_in=23466 rate_in=129 throughput_out=0 consumers_count=0 rate_out=0 storage_size=7029474855 topics_count=1222 msg_backlog=637105 subscriptions_count=1834
+    node=2 zk     pid=921367 up=301s cpu=24s rss=1286MB thr=117 fds=413 | gc cycles=3 (major 3) pauses=15 max=0.13ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=3.40ms | log ERROR=0 WARN=0 (since mark 19:57:55Z)
+    node=2 bookie pid=921636 up=293s cpu=476s rss=6463MB thr=187 fds=854 | gc cycles=5 (major 5) pauses=25 max=0.32ms sum=1.1ms stalls=0 max=0.0ms safepoint_max=7.19ms | log ERROR=0 WARN=0 (since mark 19:57:55Z)
+    node=2 broker pid=921977 up=287s cpu=1267s rss=8365MB thr=282 fds=577 | gc cycles=23 (major 3) pauses=15 max=0.04ms sum=0.4ms stalls=0 max=0.0ms safepoint_max=68.65ms | log ERROR=152 WARN=3 (since mark 19:57:55Z)
+    node=2 broker   ERROR x151: Read of ledger entry failed: LN EN-EN, Sent to [N.N.N.N:N, N.N.N.N:N, N.N.N.N:N], Heard from [] : bitset = {}, Error = 'Too many requests to
+    node=2 broker   ERROR x1: Read of ledger entry failed: LN EN-EN, Sent to [N.N.N.N:N, N.N.N.N:N, N.N.N.N:N], Heard from [N.N.N.N:N] : bitset = {N}, Error = 'Too many r
+    node=2 disk   data=15530MB zk=10MB journal=7767MB (4 .txn in 1 dirs) ledgers=7754MB (entry logs=9, 7514MB; locations=165MB ledgers-index=75MB) | fs 9% used, 356G free
+    node=2 broker bench/ns metrics: producers_count=0 throughput_in=0 rate_in=0 throughput_out=0 consumers_count=0 rate_out=0 storage_size=6700360641 topics_count=1168 msg_backlog=595472 subscriptions_count=1740
+    node=3 zk     pid=921132 up=301s cpu=19s rss=1295MB thr=124 fds=414 | gc cycles=4 (major 4) pauses=20 max=0.07ms sum=0.5ms stalls=0 max=0.0ms safepoint_max=2.54ms | log ERROR=0 WARN=0 (since mark 19:57:55Z)
+    node=3 bookie pid=921422 up=293s cpu=368s rss=6531MB thr=192 fds=854 | gc cycles=6 (major 6) pauses=30 max=0.06ms sum=0.6ms stalls=0 max=0.0ms safepoint_max=4.98ms | log ERROR=0 WARN=0 (since mark 19:57:55Z)
+    node=3 broker pid=921808 up=288s cpu=1110s rss=8280MB thr=284 fds=577 | gc cycles=20 (major 2) pauses=10 max=0.06ms sum=0.2ms stalls=0 max=0.0ms safepoint_max=4.06ms | log ERROR=251 WARN=4 (since mark 19:57:55Z)
+    node=3 broker   ERROR x251: Read of ledger entry failed: LN EN-EN, Sent to [N.N.N.N:N, N.N.N.N:N, N.N.N.N:N], Heard from [] : bitset = {}, Error = 'Too many requests to
+    node=3 disk   data=15518MB zk=10MB journal=7756MB (4 .txn in 1 dirs) ledgers=7753MB (entry logs=9, 7514MB; locations=164MB ledgers-index=75MB) | fs 7% used, 360G free
+    node=3 broker bench/ns metrics: producers_count=0 throughput_in=0 rate_in=0 throughput_out=0 consumers_count=3 rate_out=0 storage_size=6951691734 topics_count=1212 msg_backlog=641278 subscriptions_count=1831
+[2026-10-01T20:01:27Z] txn pulsar/1x1800-t10-288k-w1800:    collected 7.2M into /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/pulsar/1x1800-t10-288k-w1800
+    p0: in offered=2080000 achieved=2080000 shed=0 | out consumed=2080000 errs push=0 pop=0 ack=0 | produce p99=52.48 ms | e2e p50/p99/p999=18743.30/38535.17/41156.61 ms | txns=208000 msgs=2080000 aborts=0 errs=0 avg=10.00 commit p50/p99/p999=75.26/342.02/489.47 ms | cpu=188.4%
+    p1: in offered=2080000 achieved=2080000 shed=0 | out consumed=2080000 errs push=0 pop=0 ack=0 | produce p99=45.82 ms | e2e p50/p99/p999=19529.73/38535.17/42729.47 ms | txns=208002 msgs=2080000 aborts=0 errs=0 avg=10.00 commit p50/p99/p999=76.29/346.11/493.57 ms | cpu=185.3%
+    p2: in offered=2080000 achieved=2080000 shed=0 | out consumed=2080000 errs push=0 pop=0 ack=0 | produce p99=45.82 ms | e2e p50/p99/p999=19267.58/39059.46/41680.90 ms | txns=208001 msgs=2080000 aborts=0 errs=0 avg=10.00 commit p50/p99/p999=75.26/346.11/489.47 ms | cpu=185.3%
+    p3: in offered=2080000 achieved=2080000 shed=0 | out consumed=2080000 errs push=0 pop=0 ack=0 | produce p99=46.85 ms | e2e p50/p99/p999=19791.87/40108.03/42729.47 ms | txns=208000 msgs=2080000 aborts=0 errs=0 avg=10.00 commit p50/p99/p999=76.29/342.02/489.47 ms | cpu=200.6%
+    p4: in offered=2080000 achieved=2080000 shed=0 | out consumed=2080000 errs push=0 pop=0 ack=0 | produce p99=49.92 ms | e2e p50/p99/p999=19791.87/40108.03/42205.18 ms | txns=208001 msgs=2080000 aborts=0 errs=0 avg=10.00 commit p50/p99/p999=76.29/342.02/497.66 ms | cpu=198.6%
+    p5: in offered=2080000 achieved=2080000 shed=0 | out consumed=2080000 errs push=0 pop=0 ack=0 | produce p99=46.85 ms | e2e p50/p99/p999=20054.02/39583.74/42729.47 ms | txns=208000 msgs=2080000 aborts=0 errs=0 avg=10.00 commit p50/p99/p999=76.29/342.02/489.47 ms | cpu=200.6%
+    p6: in offered=2080000 achieved=2080000 shed=0 | out consumed=2080000 errs push=0 pop=0 ack=0 | produce p99=45.82 ms | e2e p50/p99/p999=19529.73/39583.74/43253.76 ms | txns=208000 msgs=2080000 aborts=0 errs=0 avg=10.00 commit p50/p99/p999=76.29/337.92/493.57 ms | cpu=193.4%
+    p7: in offered=2080000 achieved=2080000 shed=0 | out consumed=2080000 errs push=0 pop=0 ack=0 | produce p99=43.78 ms | e2e p50/p99/p999=19791.87/39583.74/42205.18 ms | txns=208004 msgs=2080000 aborts=0 errs=0 avg=10.00 commit p50/p99/p999=76.29/337.92/485.38 ms | cpu=192.5%
+    p8: in offered=2080000 achieved=2080000 shed=0 | out consumed=2080000 errs push=0 pop=0 ack=0 | produce p99=46.34 ms | e2e p50/p99/p999=19529.73/39583.74/41680.90 ms | txns=208001 msgs=2080000 aborts=0 errs=0 avg=10.00 commit p50/p99/p999=76.29/337.92/485.38 ms | cpu=192.5%
+    total: 9/9 processes with a final line | input msgs offered=18720000 achieved=18720000 shed=0 | output consumed=18720000 | transactions=1872009 msgs=18720000 avg=10.00 msg/txn aborts=0 txnErrors=0 | errors=0 | worst produce p99=52.48 ms | worst e2e p99=40108.03 ms | worst commit p99=346.11 ms
+    verifier: PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0
+    durability (pulsar): E3/Qw3/Qa2 with journal fsync (ack after 2 bookie fsyncs) for data, the transaction log, the pending-ack logs and the transaction buffer snapshots; 16 transaction coordinators
+[2026-10-01T20:01:29Z] txn pulsar/1x1800-t10-288k-w1800:    stopping the cluster (data kept until the next reset)
+[2026-10-01T20:02:03Z] txn pulsar/1x1800-t10-288k-w1800: DONE in 361s -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/pulsar/1x1800-t10-288k-w1800 (PASS: duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0)

@@ -1,0 +1,35 @@
+2026-09-25T10:20:19Z start p8-w3-spread-smoke: --workload register --nemesis none --time-limit 120 --rate 100
+2026-09-25T10:22:55Z done  p8-w3-spread-smoke: valid store=/root/jepsen-p8/store/queen-register-none_offload=on_lanes=16/2026-09-25T10:20:33.250959786Z log=/root/runs-p8/p8-w3-spread-smoke.log
+2026-09-25T10:22:55Z start p8-w3-leader-smoke: --workload register --kv-route leader --nemesis none --time-limit 120 --rate 100
+2026-09-25T10:25:33Z done  p8-w3-leader-smoke: valid store=/root/jepsen-p8/store/queen-register-none_kv-leader_offload=on_lanes=16/2026-09-25T10:23:10.81496527Z log=/root/runs-p8/p8-w3-leader-smoke.log
+2026-09-25T10:25:33Z start p8-w3b-smoke: --workload counter --nemesis none --time-limit 120 --rate 100
+2026-09-25T10:28:10Z done  p8-w3b-smoke: valid store=/root/jepsen-p8/store/queen-counter-none_offload=on_lanes=16/2026-09-25T10:25:47.951262683Z log=/root/runs-p8/p8-w3b-smoke.log
+2026-09-25T10:28:10Z start p8-w3c-smoke: --workload claim --nemesis none --time-limit 120 --rate 100
+2026-09-25T10:30:44Z done  p8-w3c-smoke: valid store=/root/jepsen-p8/store/queen-claim-none_offload=on_lanes=16/2026-09-25T10:28:22.472341827Z log=/root/runs-p8/p8-w3c-smoke.log
+2026-09-25T10:30:44Z start p8-w4-smoke: --workload elle --nemesis none --time-limit 120 --rate 100
+2026-09-25T10:33:29Z done  p8-w4-smoke: INVALID store=/root/jepsen-p8/store/queen-elle-none_offload=on_lanes=16/2026-09-25T10:31:00.436870136Z log=/root/runs-p8/p8-w4-smoke.log
+2026-09-25T10:33:29Z start p8-w5-smoke: --workload pipeline --nemesis none --time-limit 120 --rate 100
+2026-09-25T10:36:13Z done  p8-w5-smoke: valid store=/root/jepsen-p8/store/queen-pipeline-none_offload=on_lanes=16/2026-09-25T10:33:44.422107742Z log=/root/runs-p8/p8-w5-smoke.log
+2026-09-25T10:36:13Z start p8-w6-smoke: --workload dedup --nemesis none --time-limit 120 --rate 100
+2026-09-25T10:38:50Z done  p8-w6-smoke: valid store=/root/jepsen-p8/store/queen-dedup-none_offload=on_lanes=16/2026-09-25T10:36:27.50134357Z log=/root/runs-p8/p8-w6-smoke.log
+2026-09-25T10:38:50Z start p8-restart-check: --workload log --nemesis restart --time-limit 120 --rate 100 --nemesis-interval 20
+2026-09-25T10:41:40Z done  p8-restart-check: valid store=/root/jepsen-p8/store/queen-log-restart_offload=on_lanes=16/2026-09-25T10:39:02.939039514Z log=/root/runs-p8/p8-restart-check.log
+2026-09-25T10:41:40Z matrix smoke-p8.txt finished
+2026-09-25T12:09:36Z start p8b-w1-membership: --workload log --nemesis membership --time-limit 180 --rate 100 --nemesis-interval 20
+2026-09-25T12:14:07Z done  p8b-w1-membership: valid store=/root/jepsen-p8/store/queen-log-membership_offload=on_lanes=16/2026-09-25T12:09:48.548319121Z log=/root/runs-p8/p8b-w1-membership.log
+2026-09-25T12:14:07Z start p8b-w1-corrupt-store: --workload log --nemesis corrupt --corrupt-classes store --corrupt-remedy mix --time-limit 180 --rate 100 --nemesis-interval 10
+2026-09-25T12:18:05Z done  p8b-w1-corrupt-store: valid store=/root/jepsen-p8/store/queen-log-corrupt_c=store_mix_offload=on_lanes=16/2026-09-25T12:14:21.758186629Z log=/root/runs-p8/p8b-w1-corrupt-store.log
+2026-09-25T12:18:05Z matrix smoke-p8b.txt finished
+2026-09-25T12:18:40Z start p8c-w4-smoke: --workload elle --nemesis none --time-limit 120 --rate 100
+2026-09-25T12:21:24Z done  p8c-w4-smoke: valid store=/root/jepsen-p8/store/queen-elle-none_offload=on_lanes=16/2026-09-25T12:18:52.639940426Z log=/root/runs-p8/p8c-w4-smoke.log
+2026-09-25T12:21:24Z matrix smoke-p8c.txt finished
+2026-09-25T12:22:19Z start p8-w1-restart: --workload log --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-09-25T12:28:09Z done  p8-w1-restart: valid store=/root/jepsen-p8/store/queen-log-restart_offload=on_lanes=16/2026-09-25T12:22:31.823615867Z log=/root/runs-p8/p8-w1-restart.log
+2026-09-25T12:28:09Z start p8-w2-restart: --workload queue --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-09-25T12:34:19Z done  p8-w2-restart: INVALID store=/root/jepsen-p8/store/queen-queue-restart_offload=on_lanes=16/2026-09-25T12:28:23.038763383Z log=/root/runs-p8/p8-w2-restart.log
+2026-09-25T12:34:20Z start p8-w3-restart: --workload register --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-25T12:40:00Z done  p8-w3-restart: valid store=/root/jepsen-p8/store/queen-register-restart_offload=on_lanes=16/2026-09-25T12:34:32.439498705Z log=/root/runs-p8/p8-w3-restart.log
+2026-09-25T12:40:00Z start p8-w3b-restart: --workload counter --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-09-25T12:45:45Z done  p8-w3b-restart: valid store=/root/jepsen-p8/store/queen-counter-restart_offload=on_lanes=16/2026-09-25T12:40:16.204130595Z log=/root/runs-p8/p8-w3b-restart.log
+2026-09-25T12:45:48Z matrix p8-part1.txt finished
+2026-09-25T12:46:55Z start p8-w1-kill-membfix: --workload log --nemesis kill --time-limit 300 --rate 200

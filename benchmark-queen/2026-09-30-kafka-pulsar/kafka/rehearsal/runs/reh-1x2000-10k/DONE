@@ -1,0 +1,5 @@
+2026-09-30T07:03:56Z
+p0: msgs offered=91700 achieved=91700 shed=0 pushed=91700 popped=108200 lag=-16500 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.30/103.94/236.54 ms | e2e p50/p99/p999=11.58/146.43/214.02 ms | cpu=3.7%
+p1: msgs offered=91600 achieved=91600 shed=0 pushed=91600 popped=75300 lag=16300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.05/108.03/264.19 ms | e2e p50/p99/p999=9.15/58.62/83.46 ms | cpu=3.2%
+p2: msgs offered=91700 achieved=91700 shed=0 pushed=91700 popped=91400 lag=300 errs push=0 pop=0 ack=0 | produce p50/p99/p999=10.43/114.18/195.58 ms | e2e p50/p99/p999=10.18/103.94/272.38 ms | cpu=3.3%
+total: 3/3 processes with a final line | msgs offered=275000 achieved=275000 shed=0 pushed=275000 popped=274900 errors=0 | worst produce p99=114.18 ms | worst e2e p99=146.43 ms

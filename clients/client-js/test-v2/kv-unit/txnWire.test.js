@@ -181,11 +181,19 @@ describe('Transaction wire — the verdict that must not throw', () => {
   })
 
   it('commit() still THROWS on every other failure', async () => {
-    const rejected = ok({ transactionId: 'txn-1', success: false, reason: 'ack_rejected', error: 'QTXN invalid or expired lease', results: [] })
+    // The body a 2.0 broker answers for an ack whose lease is gone (a 1.x
+    // broker spelled the reason ack_rejected).
+    const rejected = ok({
+      transactionId: 'txn-1',
+      success: false,
+      reason: 'rejected_ack',
+      error: 'QTXN 1 acked message(s) on partition 3 are not leased by this worker or were already acked; the transaction rolled back',
+      results: []
+    })
     await withQueen([rejected], async (queen) => {
       await assert.rejects(() => queen.transaction().ack(MSG).commit(), (e) => {
         assert.match(e.message, /QTXN/)
-        assert.equal(e.reason, 'ack_rejected', 'the closed-taxonomy reason travels on the error, so nobody matches the message')
+        assert.equal(e.reason, 'rejected_ack', 'the broker\'s reason travels on the error, so nobody matches the message')
         return true
       })
     })
@@ -217,6 +225,55 @@ describe('Transaction wire — the verdict that must not throw', () => {
       assert.equal(res.results[1].type, 'kv')
       assert.equal(res.results[1].applied, true)
       assert.equal(res.results[2].status, 'scheduled')
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The consumer group of an ack op. The lease an ack has to match belongs to
+// the group the message was popped under, and an op that names no group is
+// judged in queue mode: a message popped by a group and acked without one
+// rolled the whole bundle back with `rejected_ack` (found 2026-10-02 against
+// 2.0.0-beta.6). Every pop answers each message with its `consumerGroup`.
+// ---------------------------------------------------------------------------
+
+describe('Transaction wire — the ack op carries the group the message was popped under', () => {
+  const fromGroup = (group, n = 1) => ({
+    ...MSG,
+    transactionId: `aaaaaaaa-aaaa-7aaa-8aaa-00000000000${n}`,
+    consumerGroup: group
+  })
+
+  it('takes consumerGroup from the message when the caller names none', async () => {
+    await withQueen([success()], async (queen, hits) => {
+      await queen.transaction().ack(fromGroup('workers')).commit()
+      assert.equal(hits[0].body.operations[0].consumerGroup, 'workers')
+    })
+  })
+
+  it('a queue-mode message adds no consumerGroup key, as before', async () => {
+    await withQueen([success(), success()], async (queen, hits) => {
+      await queen.transaction().ack(fromGroup('__QUEUE_MODE__')).commit()
+      await queen.transaction().ack(MSG).commit()   // hand-built, no group at all
+      for (const hit of hits) {
+        assert.deepEqual(Object.keys(hit.body.operations[0]).sort(), ['partitionId', 'status', 'transactionId', 'type'])
+      }
+    })
+  })
+
+  it('an explicit group wins, as { consumerGroup } or as { group }', async () => {
+    await withQueen([success(), success()], async (queen, hits) => {
+      await queen.transaction().ack(fromGroup('workers'), 'completed', { consumerGroup: 'auditors' }).commit()
+      await queen.transaction().ack(fromGroup('workers'), 'completed', { group: 'auditors' }).commit()
+      assert.equal(hits[0].body.operations[0].consumerGroup, 'auditors')
+      assert.equal(hits[1].body.operations[0].consumerGroup, 'auditors')
+    })
+  })
+
+  it('messages from different groups each keep their own', async () => {
+    await withQueen([success()], async (queen, hits) => {
+      await queen.transaction().ack([fromGroup('a', 1), fromGroup('b', 2)]).commit()
+      assert.deepEqual(hits[0].body.operations.map(op => op.consumerGroup), ['a', 'b'])
     })
   })
 })

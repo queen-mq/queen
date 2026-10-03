@@ -28,6 +28,11 @@ mod obs;
 // The broker→broker forwarding client. Twin of the `mod peerclient;` in lib.rs
 // (the twin-list rule of lib.rs's header).
 mod peerclient;
+// The Postgres connectors run IN-PROCESS (PLAN_PG_CONNECTORS.md §6): every node
+// runs every connector document on its own runtime, reaching the state machine
+// directly — no child, no second binary.
+#[cfg(feature = "pg")]
+mod pg_inproc;
 #[allow(dead_code)]
 mod quota;
 // The replicated state machine: the broker's storage. Twin of the `mod rsm;`
@@ -210,6 +215,24 @@ async fn run_raft(cfg: config::Config) {
         );
     }
 
+    // The Postgres connectors (pg_inproc.rs): their node knobs (QUEEN_PG_*) are
+    // read HERE, strictly, whether or not this node runs the manager — a value
+    // out of range is unfixable by retrying, and the connectors API reads the
+    // egress policy from them on every node.
+    #[cfg(feature = "pg")]
+    let pg_knobs = match pg_inproc::preflight(&cfg.server_id, proxy_embed::enabled()) {
+        Ok(k) => k,
+        Err(e) => obs::fatal(format!("Postgres connectors: {e}")),
+    };
+    #[cfg(not(feature = "pg"))]
+    if cfg.pg_connectors.requested {
+        tracing::warn!(
+            target: "queen-pg",
+            "QUEEN_PG_CONNECTORS=true, but this binary was built without the `pg` feature: \
+             no connector runs and /api/v1/connectors is not served"
+        );
+    }
+
     let state = match handlers::raft::build_raft_state(&cfg) {
         Ok(s) => s,
         Err(e) => obs::fatal(format!("raft state init failed: {e}")),
@@ -229,11 +252,27 @@ async fn run_raft(cfg: config::Config) {
     // rolling restart) costs the cluster one transfer, not an election timeout
     // without a leader (1-2 s). It drains as a follower.
     let handoff_rsm = state.rsm.clone();
+    // The Postgres connectors start later, once the listener is bound; they
+    // are put here so the signal can start their drain at once.
+    #[cfg(feature = "pg")]
+    let pg_at_signal: std::sync::Arc<
+        std::sync::OnceLock<std::sync::Arc<pg_inproc::InProcess>>,
+    > = std::sync::Arc::new(std::sync::OnceLock::new());
     let shutdown = {
         let rsm = handoff_rsm.clone();
         let st = state.clone();
+        #[cfg(feature = "pg")]
+        let pg_at_signal = std::sync::Arc::clone(&pg_at_signal);
         async move {
             obs::shutdown_signal().await;
+            // The connectors drain beside everything below — a source flushes
+            // the bundle in flight and gives its lease back, a sink finishes
+            // its batch — rather than after the ephemeral drain and the
+            // hand-off, which can take seconds between them.
+            #[cfg(feature = "pg")]
+            if let Some(pg) = pg_at_signal.get() {
+                pg.begin_shutdown();
+            }
             // The ephemeral rings go to their next owners first, while the
             // peers still answer and this node still serves.
             handlers::ephemeral_drain(&st).await;
@@ -251,6 +290,11 @@ async fn run_raft(cfg: config::Config) {
     let kafka_router = proxy_embed::enabled().then(|| {
         handlers::raft::build_raft_router(state.clone(), authenticator.clone(), cfg.tenancy_header)
     });
+    // The connectors reach the state machine directly (pg_inproc.rs): no
+    // router, no auth, no tenancy header in between — each acts as its own
+    // tenant.
+    #[cfg(feature = "pg")]
+    let pg_rsm = state.rsm.clone();
 
     // The single binary (PLAN_SINGLE_BINARY.md W3/W4): the proxy fronts the
     // public port; the broker router behind it has tenancy on, the broker's
@@ -269,7 +313,7 @@ async fn run_raft(cfg: config::Config) {
             auth::Authenticator::new(inner_auth),
             true,
         );
-        let (proxy, public) = match proxy_embed::public_router(state.rsm.clone(), inner) {
+        let (proxy, public) = match proxy_embed::public_router(state.rsm.clone(), inner.clone()) {
             Ok(v) => v,
             Err(e) => obs::fatal(format!("single binary: {e}")),
         };
@@ -281,7 +325,9 @@ async fn run_raft(cfg: config::Config) {
             }
             None => {
                 tracing::info!(target: "boot", "single binary: proxy in-process on the public port");
-                public
+                // The other brokers relay ephemeral requests to PORT: theirs
+                // go to the broker router, everyone else's to the proxy.
+                proxy_embed::with_peer_relays(public, inner)
             }
         }
     } else {
@@ -338,6 +384,23 @@ async fn run_raft(cfg: config::Config) {
         )
     });
 
+    // The Postgres connectors start once the listener is bound, on every node;
+    // a source's lease decides which node streams it, a sink's consumer group
+    // spreads its work. The signal starts their drain through `pg_at_signal`.
+    #[cfg(feature = "pg")]
+    let pg = if cfg.pg_connectors.enabled {
+        let pg = pg_inproc::start(pg_knobs, pg_rsm);
+        let _ = pg_at_signal.set(std::sync::Arc::clone(&pg));
+        Some(pg)
+    } else {
+        tracing::info!(
+            target: "queen-pg",
+            "QUEEN_PG_CONNECTORS=false: this node runs no connector (the API still stores \
+             documents for the nodes that do)"
+        );
+        None
+    };
+
     if let Some((proxy_listener, public)) = proxy_front {
         // Two listeners, one shutdown: the hand-off runs once, then both drain.
         let shutdown = futures_util::FutureExt::shared(shutdown);
@@ -375,6 +438,14 @@ async fn run_raft(cfg: config::Config) {
     #[cfg(feature = "kafka")]
     if let Some(k) = kafka {
         k.shutdown().await;
+    }
+    // The connectors have been draining since the signal; this waits for what
+    // is left of QUEEN_PG_SHUTDOWN_GRACE_MS, counted from the signal. Their
+    // calls reach the state machine directly, so the closed listener does not
+    // stop them.
+    #[cfg(feature = "pg")]
+    if let Some(pg) = pg {
+        pg.shutdown().await;
     }
     // The embedded proxy's open usage minute and pending queue rows.
     if let Some(proxy) = embedded_proxy {

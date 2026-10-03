@@ -1,0 +1,47 @@
+[2026-10-01T07:48:45Z] run pB-p50000-nb: pulsar 4.2.4, 1000000 msg/s total over 9 load processes (3 loaders x 3), topics=1 x partitions=50000 entities=0 mode=batch batch=100 sub=failover consumers=33/process
+[2026-10-01T07:48:47Z] 1. cluster reset: PROFILE=vm
+  [2026-10-01T07:49:43Z] brokers healthy: brokers active=3 10.114.0.2:8080=ok 10.114.0.3:8080=ok 10.114.0.4:8080=ok
+    proof persistent://bench/ns/probe-health-1790840989: ledger 9 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.2:3181, 10.114.0.3:3181, 10.114.0.
+  [2026-10-01T07:49:51Z] reset done
+[2026-10-01T07:49:51Z] 2. topics + subscription + warm: pload -create-only on loader 1
+    [admin] subscription "sub" created in 65.1s and verified on all 50000 partitions in 29.9s (15839 re-created on a partition)
+    [warm] one message (no "ts") into each of 50000 partitions in 21.7s; consumed and acked in 3.2s
+  [create] done: 1 topics x 50000 partitions, subscription "sub" on every partition
+    namespace bench/ns: bundles=48 persistence=E3/Qw3/Qa2 markDeleteRate=1.0 retention=0min/0MB
+    proof persistent://bench/ns/load-partition-0: ledger 1729 (1 ledgers, state=LedgerOpened) ensembleSize=3 writeQuorumSize=3 ackQuorumSize=2 ensemble=[10.114.0.3:3181, 10.114.0.2:3181, 10.114.0.4:3181] (broker internal
+      LedgerMetadata{formatVersion=3, ensembleSize=3, writeQuorumSize=3, ackQuorumSize=2, state=OPEN, digestType=CRC32C, password=base64:, ensembles={0=[10.114.0.3:3181, 10.114.0.2:3181, 10.114.0.4:3181]}, ...
+[2026-10-01T07:52:00Z] 3. balance -fix
+  balance bench/ns: 50000 topics (1 partitioned) in 48 of 48 bundles, 3 brokers, mean 16666.7 topics/broker; hash check 4/4 lookups agree
+    10.114.0.2:8080        bundles= 16 topics=  16704 (  +0.2%)  per-bundle max/min=1058/1020
+    10.114.0.3:8080        bundles= 16 topics=  16655 (  -0.1%)  per-bundle max/min=1062/1018
+    10.114.0.4:8080        bundles= 16 topics=  16641 (  -0.2%)  per-bundle max/min=1062/1019
+    unowned bundles with topics: 0 (0 topics); max deviation 0.2% (target ±10%): OK
+[2026-10-01T07:52:01Z] 4. samplers on 3 brokers + 3 loaders
+  sampler pB-p50000-nb started pid 623710 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p50000-nb started pid 567379 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p50000-nb started pid 565869 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p50000-nb started pid 194346 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p50000-nb started pid 175285 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+  sampler pB-p50000-nb started pid 174342 -> /root/bench/samples/pB-p50000-nb.txt (iface=eth1 disk=vda)
+[2026-10-01T07:52:05Z] 5. 9 load processes
+[2026-10-01T07:52:15Z]   9/9 READY after 9s
+[2026-10-01T07:52:19Z] 6. start instant 1790841148479 (loader 1 clock + 10 s); producing 70s (ramp 10s) + drain 0s
+[2026-10-01T07:53:04Z]   mid-run thread snapshot
+    n1  node=1 broker total=14.13 cores over 3s (268 threads, 269 named by jstack)
+    n1  node=1 bookie total=5.20 cores over 3s (193 threads, 160 named by jstack)
+    n1  node=1 zk total=0.09 cores over 3s (120 threads, 120 named by jstack)
+    n2  node=2 broker total=13.56 cores over 3s (243 threads, 242 named by jstack)
+    n2  node=2 bookie total=5.73 cores over 3s (187 threads, 154 named by jstack)
+    n2  node=2 zk total=0.00 cores over 3s (115 threads, 115 named by jstack)
+    n3  node=3 broker total=4.85 cores over 3s (248 threads, 243 named by jstack)
+    n3  node=3 bookie total=2.86 cores over 3s (192 threads, 159 named by jstack)
+    n3  node=3 zk total=0.18 cores over 3s (125 threads, 125 named by jstack)
+[2026-10-01T07:53:54Z] 7. loaders done
+[2026-10-01T07:53:54Z] collect -> /Users/alice/Work/queen/benchmark-queen/2026-09-30-kafka-pulsar/runs/pulsar/pB-p50000-nb
+  pload-1: [final] offered=72223 achieved=37385 shed=34838 (msgs: offered=7222300 achieved=3738500 shed=3483800) pushErr=0 | pushed=3738500 popped=2323547 lag=1414953 | popErr=0 empty=0 | overall p50=6651.90 p99=30539.78 p999=31064.06 ms | acked=2323547 ackErr=0 ackLag=1414953 ackAvg=0.01ms | e2e p50=4816.90 p99=38535.17 p999=48496.64 ms
+  pload-1: load_cpu=178.6%
+  pload-5: [final] offered=72223 achieved=36689 shed=35534 (msgs: offered=7222300 achieved=3668900 shed=3553400) pushErr=0 | pushed=3668900 popped=2348616 lag=1320284 | popErr=0 empty=0 | overall p50=5996.54 p99=30277.63 p999=31326.21 ms | acked=2348616 ackErr=0 ackLag=1320284 ackAvg=0.01ms | e2e p50=4292.61 p99=61079.55 p999=62652.42 ms
+  pload-5: load_cpu=189.0%
+  pload-7: [final] offered=72224 achieved=31367 shed=39216 (msgs: offered=7222400 achieved=3297465 shed=3921600) pushErr=1641 | pushed=3297465 popped=2284531 lag=1012934 | popErr=0 empty=0 | overall p50=4882.43 p99=28704.77 p999=32112.64 ms | acked=2284531 ackErr=0 ackLag=1012934 ackAvg=0.01ms | e2e p50=4554.75 p99=45875.20 p999=47448.06 ms
+  pload-7: load_cpu=180.4%
+[2026-10-01T07:54:14Z] FAILED: only 3/9 [final] lines

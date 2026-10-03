@@ -1,0 +1,8 @@
+[verify] pulsar pulsar://10.114.0.2:6650,10.114.0.3:6650,10.114.0.4:6650: 9 ledgers from /root/bench/runs/txn/pulsar/1x200-t10-144k/verify-ids; reading x1x200-t10-144k-out on subscription verify, then the rest of x1x200-t10-144k-in on sub
+[verify] out x1x200-t10-144k-out: 16 consumers on verify subscribed in 0.0s
+[verify] out x1x200-t10-144k-out: 9186270 records after 10s
+[verify] out x1x200-t10-144k-out: 9186270 records, idle 10s: scan complete after 18.2s
+[verify] rest of x1x200-t10-144k-in: 16 consumers on sub subscribed in 0.0s
+[verify] rest of x1x200-t10-144k-in: 173820 records after 10s
+[verify] rest of x1x200-t10-144k-in: 173820 records, idle 10s: scan complete after 11.2s
+[verify] system=pulsar ledgers=9 produced=9359890 ambiguous=0 out_records=9186270 out_unique=9186070 duplicates=0 dup_records=0 missing=0 pending_in=173820 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=200 scan=29.7s | VERDICT PASS
