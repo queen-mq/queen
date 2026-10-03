@@ -1,6 +1,6 @@
 ---
 title: Streams
-description: "Window and aggregate a queue in your own process, with the window state kept in Queen and each cycle committed as one entry."
+description: "Window and aggregate a queue in your own process, with the window state kept in Queen and each cycle committing the source ack, the state and the sink push as one entry."
 type: how-to
 tier: use
 sourceOfTruth:
@@ -8,10 +8,15 @@ sourceOfTruth:
   - clients/client-js/client-v2/streams/runtime/Runner.js
   - clients/client-js/client-v2/streams/runtime/cycle.js
   - clients/client-js/client-v2/streams/operators/WindowTumblingOperator.js
+  - clients/client-js/client-v2/streams/operators/AggregateOperator.js
+  - clients/client-js/client-v2/streams/operators/GateOperator.js
   - server/src/rsm/facade/real/phase2/streams.rs
   - server/src/rsm/planner/txn.rs
 verifiedBy:
-  - examples/tutorials/js/05-streaming.mjs
+  - examples/apps/js/rate-limiter.mjs
+  - examples/apps/py/rate_limiter.py
+  - examples/apps/go/rate-limiter/main.go
+  - examples/apps/rust/src/bin/rate_limiter.rs
   - clients/client-js/test-v2/stream/eventTime.js
   - clients/client-js/test-v2/stream/session.js
   - clients/client-js/test-v2/stream/sliding.js
@@ -21,11 +26,11 @@ sidebar:
   order: 5
 ---
 
-A stream is an operator chain (map, filter, window, aggregate, sink) that runs inside your
-process and reads a queue the way a consumer group does. The window state lives in Queen, and each
-cycle commits the source ack, the state change and the sink push as one entry, so a crash
-mid-cycle neither loses an event nor counts it twice. There is no stream cluster, changelog topic
-or state store to run.
+A stream is a chain of operators (filter, map, a window, an aggregate, a sink) that runs inside your
+own process and reads a queue as a consumer group. The window state is kept in Queen, and each
+cycle commits the source ack, the state change and the sink push as one entry, so a crash between
+cycles neither loses an event nor counts one twice. There is no stream-processing cluster to run
+beside the broker, no changelog topic, and no local state store to rebuild after a restart.
 
 ## A windowed total per customer
 
@@ -36,7 +41,7 @@ const url = 'http://localhost:6632'
 const queen = new Queen({ url })
 
 const handle = await Stream
-  .from(queen.queue('sales'))                       // partitioned by customer
+  .from(queen.queue('sales'))                       // one partition per customer
   .filter((m) => m.data.amount > 0)
   .windowTumbling({ seconds: 60 })
   .aggregate({ count: () => 1, sum: (s) => s.amount })
@@ -46,87 +51,115 @@ const handle = await Stream
 // later: await handle.stop()
 ```
 
-- **The partition is the key.** Window state is kept per source partition, so with one partition
-  per customer each customer gets its own windows. The sink pushes into a partition of the same
-  name unless `.to(q, { partition })` says otherwise.
-- **`queryId` is the query's identity.** Its state is keyed by it, so a restart with the same id
-  resumes the same windows. Registering a different chain under the same id is refused unless you
-  pass `reset: true`, which drops the state.
-- **The runner is a consumer group**, `streams.<queryId>` by default. It leases up to
-  `maxPartitions` partitions (4) and `batchSize` messages (200) per cycle, so several processes
-  running the same query share the partitions.
-- **Extractors see the payload.** `aggregate` and `reduce` receive the message payload, or what a
-  `map` before the window returned (`s.amount`); `filter`, `map` and `eventTime` receive the
-  message (`m.data.amount`). A missing field aggregates to zero, without an error.
+The partition is the grouping key. Window state is kept per source partition, so with one
+partition per customer each customer gets windows of its own without the code naming a key, and
+the result goes to the partition of the same name in the sink unless `.to(q, { partition })` says
+otherwise (a name, or a function of the result).
+
+`queryId` is the query's identity, and its state is stored under it, so a process restarted with
+the same id resumes the same windows. The runner reads the source as the consumer group
+`streams.<queryId>`, which means several processes running the same query share the partitions
+between them. Like any new group, a new query starts at the tail of the queue: start it before the
+traffic you want counted, or pass `subscriptionMode: 'all'` to `run()` to begin at the oldest
+retained message.
+
+Before the window, `filter`, `map` and `eventTime` receive the whole message (`m.data.amount`),
+while the extractors of `aggregate` and `reduce` receive the payload, or what the last `map` before
+the window returned (`s.amount`). Every `map` before the window sees the original message, so two
+of them do not compose; after the window, `map` and `filter` receive the emitted result. In
+`aggregate`, `count` adds one per event, `sum` treats a missing field as zero, `min` and `max`
+start at `null`, and `avg` skips a value it cannot read.
+
+## What one cycle commits
+
+The runner pops up to `batchSize` messages (200) spread over up to `maxPartitions` partitions (4),
+runs the chain for each partition, and posts one cycle per partition to `POST /streams/v1/cycle`.
+The broker turns the cycle into one transaction: a positional ack of the source batch, made under
+the batch's lease, the state upserts and deletes, and the sink pushes. All of it applies or none
+of it does. If the lease expired while the chain ran, the whole cycle is refused and the batch is
+processed again by whoever holds it next. If the commit fails for any other reason, the runner does
+not nack: the lease runs out, and the batch comes back to the same chain with the same state.
+
+<Figure id="guides/streams-cycle" />
+
+We keep the state in the broker for the same reason we keep KV there. A stream processor that
+holds its windows in local storage has to checkpoint them and restore them after a crash, and
+needs a changelog to rebuild them elsewhere. Here the window is a row that commits with the ack of
+the events it counted, so the counter cannot drift from the stream it was computed from.
 
 ## Windows
 
-| Operator | Window | Closes |
-|---|---|---|
-| `windowTumbling({ seconds })` | fixed, non-overlapping | at window end + `gracePeriod` |
-| `windowSliding({ size, slide })` | overlapping, hops every `slide` s | at each window's end + grace |
-| `windowSession({ gap })` | per key, extends while events arrive within `gap` s | after `gap` s of silence |
-| `windowCron({ every })` | aligned to `second`, `minute`, `hour`, `day` or `week` (UTC) | at the boundary + grace |
+| Operator | Window | Closes | Idle flush default |
+|---|---|---|---|
+| `windowTumbling({ seconds })` | Fixed, back to back | At its end plus `gracePeriod` | 5000 ms |
+| `windowSliding({ size, slide })` | Overlapping, one every `slide` seconds; `size` is a multiple of `slide` | At each window's end plus grace | 5000 ms |
+| `windowSession({ gap })` | Per key, extended while events keep arriving within `gap` seconds | At the last event plus `gap` plus grace | 1000 ms |
+| `windowCron({ every })` | Aligned to a `second`, `minute`, `hour`, `day` or `week` (UTC, weeks from Monday) | At the boundary plus grace | 30000 ms |
 
 By default a window runs on processing time, the `createdAt` Queen stamped on each message. A
-window on a partition that has gone quiet is closed by the idle flush (`idleFlushMs`, 5000 by
-default for tumbling and sliding), which commits the state delete and the sink push as one entry
-with no source ack.
+window on a partition that has gone quiet is closed by the idle flush (`idleFlushMs`, `0` turns it
+off), which commits the state delete and the sink push as one entry with no source ack. A session
+window needs a reducer after it.
 
-Pass `eventTime` to window on a time inside the event instead:
+To window on a time carried inside the event, pass `eventTime`:
 
 ```js
 .windowTumbling({
   seconds: 60,
-  eventTime: (m) => m.data.eventTs,   // Date, epoch ms or ISO string
+  eventTime: (m) => m.data.eventTs,   // a Date, epoch ms or a date string
   allowedLateness: 30,                // seconds behind the newest event still accepted
   onLate: 'drop',                     // or 'include'
 })
 ```
 
-Each partition keeps a watermark: the newest event time seen, minus `allowedLateness`. A window
-closes when the watermark passes its end plus grace, and an event older than the watermark is
-dropped (or, with `include`, added to a window that may already have been emitted, which emits it
-again). The watermark is stored with the window state, so it survives a restart.
+Each partition keeps a watermark, the newest event time it has seen minus `allowedLateness`. A
+window closes when the watermark passes its end plus grace, and an event older than the watermark
+is dropped. With `onLate: 'include'`, the late event opens a fresh accumulator for its window
+instead, so the window is emitted a second time with only the late events in it. The watermark is
+stored with the window state and survives a restart.
 
-## What one cycle commits
+## Other terminals
 
-The runner pops a batch per partition, runs the chain, and posts the result to
-`POST /streams/v1/cycle`. The broker turns it into one transaction: a positional ack of the source
-batch, the state upserts and deletes, and the sink pushes. All of it applies or none of it does.
-If the commit fails, the lease expires and the batch is redelivered to the same chain with the
-same state.
+`.foreach(fn)` runs `fn` for each result and commits the ack after `fn` resolves, so its effect is
+at-least-once. When the effect has to happen once, write to a sink queue and act on it from there.
 
-`.foreach(fn)` is the other terminal: it runs `fn` and acks only after `fn` resolves, so its
-effect is at-least-once. Write to a sink queue instead when the effect must happen once. `.gate()`
-makes an allow or deny decision per message with per-key state (a token-bucket rate limiter), and
-cannot be combined with a window in the same stream.
+`.gate(fn)` makes an allow or deny decision per message with per-key state, and `tokenBucketGate`
+and `slidingWindowGate` are ready-made gates exported next to `Stream`. The first denial stops the
+batch: the messages allowed before it are acked, and the denied message comes back, with
+everything behind it in order, once the lease expires. A gate cannot share a stream with a window
+or a reducer.
 
-## The tutorial in four languages
+## A complete program
+
+A rate limiter built from a stream. Each API key's requests land in its own partition, a 2-second
+tumbling window counts them, and a consumer turns every window over the quota into a throttle
+decision on another queue. The program checks that the quiet key and the noisy key are counted
+exactly, that the noisy one is throttled and that the quiet one never is. It runs in four
+languages, because the Python, Go and Rust clients have the same operators and defaults.
 
 <Tabs>
 
 <TabItem label="JavaScript">
 
-<Render file="snippets/tut-js-streaming" />
+<Render file="snippets/app-js-rate-limiter" />
 
 </TabItem>
 
 <TabItem label="Python">
 
-<Render file="snippets/tut-py-streaming" />
+<Render file="snippets/app-py-rate-limiter" />
 
 </TabItem>
 
 <TabItem label="Go">
 
-<Render file="snippets/tut-go-streaming" />
+<Render file="snippets/app-go-rate-limiter" />
 
 </TabItem>
 
 <TabItem label="Rust">
 
-<Render file="snippets/tut-rust-streaming" />
+<Render file="snippets/app-rust-rate-limiter" />
 
 </TabItem>
 
@@ -134,14 +167,38 @@ cannot be combined with a window in the same stream.
 
 ## Limits
 
-- **Streams are not part of the Jepsen pass.** The cycle route and the runners are covered by the
-  server and client test suites, not by fault injection. See [guarantees](/concepts/guarantees/).
-- **One window and one reducer per stream.** Chain two streams through a queue for more stages.
-- **Re-keying costs contention.** `.keyBy()` with a key that is not the partition lets workers
-  holding different partitions write the same state key. Push to a queue partitioned by the new
-  key and aggregate there instead.
-- **Event-time idle flush follows the watermark, not the clock.** On a partition that stops
-  receiving events, the last event-time window stays open until a newer event arrives.
-- **`windowCron` takes `every`, not cron syntax.**
-- **No published run measures stream throughput.** The [benchmarks](/benchmarks/) measure push,
-  pop and ack.
+A stream cycle has no retry limit and no dead-letter queue. A message that makes the chain throw
+(an extractor that reads `s.a.b` of an event without `a`) comes back after every lease expiry and
+holds up its partition until you fix the code or the data, so filter out what the chain cannot
+handle before the window. An event whose time `eventTime` cannot parse is reported, skipped and
+acked.
+
+The exactly-once property covers the cycle. It does not cover `foreach`, a window emitted again by
+`onLate: 'include'`, or the idle flush, which commits without a lease: two processes flushing the
+same partition, or a flush retried after an unanswered request, can emit a window twice.
+
+A stream has one window and one reducer. For more stages, chain two streams through a queue.
+`.keyBy()` can group by something other than the partition, but state stays per source partition,
+so a key spread over several partitions gets a separate window, and a separate partial result, in
+each. To aggregate across partitions, push to a queue partitioned by the new key and aggregate
+there.
+
+Registering a different operator chain under an existing `queryId` answers `409` unless you pass
+`reset: true`, which deletes every state row of the query while the group keeps its position, so
+events already counted into the dropped windows are gone from the results. The comparison covers
+the operators, their order and their options; the bodies of your functions are outside it, so a
+changed `map` body goes unnoticed.
+
+On a partition that stops receiving events, an event-time window stays open until a newer event
+moves the watermark, because in event time the idle flush follows the watermark. `windowCron`
+takes `every`, not cron syntax.
+
+The cycle route has its own workload in the Jepsen suite (W9 in `test/jepsen`), which checks that
+every acknowledged push lands in exactly one sink record while nodes are killed, partitioned and
+paused. It has run since 2.0.0-alpha.6; [Jepsen](/benchmarks/jepsen/) lists the campaigns, including
+one run under bridge partitions that ended unknown on a liveness problem that is still open. The
+runners' windowing, watermarks and idle flush are covered by the client test suites and have no
+fault-injection workload, and no published benchmark measures stream throughput.
+
+Next: the [transaction](/concepts/transactions/) a cycle is built on, and the
+[KV store](/concepts/kv/) that holds the same kind of state for your own code.

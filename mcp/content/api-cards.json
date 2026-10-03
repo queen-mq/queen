@@ -1,0 +1,2304 @@
+{
+  "kv": {
+    "js": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "queen.kv",
+          "does": "The KV client, a lazy singleton on the Queen instance.",
+          "source": "clients/client-js/client-v2/Queen.js:294"
+        },
+        {
+          "call": "await queen.kv.get(ns, key)",
+          "does": "Read one key. Returns the row {found, key, value, version, expiresAt, updatedAt}, not the bare value: {found: true, value: null} is a stored null, {found: false} is absence. An expired key is never returned.",
+          "source": "clients/client-js/client-v2/kv/Kv.js:300"
+        },
+        {
+          "call": "await queen.kv.getMany(ns, keys)",
+          "does": "Read several keys of one namespace: {rows, missing, truncated}. missing is explicit; keys cut by the read budget are in neither list and truncated is true.",
+          "source": "clients/client-js/client-v2/kv/Kv.js:311"
+        },
+        {
+          "call": "await queen.kv.getPrefix(ns, prefix, { limit, after, keysOnly })",
+          "does": "One page of keys under a non-empty prefix: {rows, truncated, nextAfter}. limit defaults to 100, clamped at 1000; after is an exclusive keyset cursor. Each page is its own snapshot (fine for walking state, not for an exact count).",
+          "source": "clients/client-js/client-v2/kv/Kv.js:327"
+        },
+        {
+          "call": "for await (const row of queen.kv.listAll(ns, prefix, { limit, keysOnly }))",
+          "does": "Async generator over every row under a prefix, following nextAfter page by page. Client-side convenience over getPrefix.",
+          "source": "clients/client-js/client-v2/kv/Kv.js:342"
+        },
+        {
+          "call": "await queen.kv.put(ns, key, value, { ttl, expect, required })",
+          "does": "Write a value. Exactly one expiry is mandatory: ttl (a string such as '30s', '1h30m', '7d'), ttlSeconds (integer), until (Date, ISO string or epoch ms) or forever: true. expect: 0 means must not exist; expect: N updates only version N and never creates. Returns {applied, op, key, value, version, reason?}.",
+          "source": "clients/client-js/client-v2/kv/Kv.js:373"
+        },
+        {
+          "call": "await queen.kv.putIfAbsent(ns, key, value, { ttl, required })",
+          "does": "put with expect: 0 under its own name. Of concurrent callers exactly one gets applied: true; the losers get the winner's value and version. Passing expect throws.",
+          "source": "clients/client-js/client-v2/kv/Kv.js:378"
+        },
+        {
+          "call": "await queen.kv.delete(ns, key, { expect, required })",
+          "does": "Delete a key, optionally fenced with expect. A key that was not there answers applied: false, reason: 'absent' (HTTP 200).",
+          "source": "clients/client-js/client-v2/kv/Kv.js:388"
+        },
+        {
+          "call": "await queen.kv.incr(ns, key, delta = 1, { min, max, ttl, required })",
+          "does": "Atomic add with no compare-and-swap loop. With max (or min), applied IS the admission decision: an increment past the bound does not apply and answers reason: 'limit' with the current value. The TTL is set only when the counter is created; an expired counter counts from zero. Takes no expect.",
+          "source": "clients/client-js/client-v2/kv/Kv.js:405"
+        },
+        {
+          "call": "await queen.kv.once(ns, key, { ttl, value })",
+          "does": "Idempotency marker: putIfAbsent with value true by default. Returns {won, value, version, result}. Standalone, so not atomic with an ack: inside a bundle use queen.transaction().once(...).",
+          "source": "clients/client-js/client-v2/kv/Kv.js:427"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "queen.transaction()",
+          "does": "Start a bundle: its KV operations commit together with its acks, pushes and timers, or none of them do.",
+          "source": "clients/client-js/client-v2/Queen.js:376"
+        },
+        {
+          "call": ".kv.get(ns, key)",
+          "does": "Read a key inside the bundle; the result comes back in the transaction's results.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:190"
+        },
+        {
+          "call": ".kv.getMany(ns, keys)",
+          "does": "Read several keys inside the bundle. getPrefix is refused inside a transaction (throws before sending).",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:191"
+        },
+        {
+          "call": ".kv.put(ns, key, value, { ttl, expect, required })",
+          "does": "Write state with the ack. required: true turns a lost expect into a rolled-back bundle.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:192"
+        },
+        {
+          "call": ".kv.putIfAbsent(ns, key, value, { ttl, required: true })",
+          "does": "The gate: with required: true an existing key rolls back the whole bundle.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:193"
+        },
+        {
+          "call": ".kv.delete(ns, key, { expect, required })",
+          "does": "Delete with the ack.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:194"
+        },
+        {
+          "call": ".kv.incr(ns, key, delta, { max, ttl, required: true })",
+          "does": "Count with the ack; with required: true a refused increment (reason 'limit') rolls back the bundle.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:195"
+        },
+        {
+          "call": ".once(ns, key, { ttl })",
+          "does": "putIfAbsent(value true) with required: true: a redelivery that finds the marker rolls back the bundle, push and ack included.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:224"
+        },
+        {
+          "call": ".queue(name).partition(p).push(items)",
+          "does": "A push that commits or rolls back with the KV operations.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:102"
+        },
+        {
+          "call": ".ack(messages, 'completed', { consumerGroup })",
+          "does": "Ack under the delivery's lease. The group defaults to the one each message was popped under (msg.consumerGroup). An expired lease refuses the ack and the KV writes with it.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:60"
+        },
+        {
+          "call": "await tx.commit()",
+          "does": "Send the bundle. A lost required precondition is RETURNED, not thrown: {success: false, reason: 'kv_precondition', kvReason, failedIndex, value, version}. Every other failure throws, with err.reason (rejected_ack, duplicate, ...).",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:260"
+        }
+      ],
+      "usage": "const res = await queen\n  .transaction()\n  .kv.putIfAbsent(NS, markerKey(order.orderId), { chargeId, cents: order.cents }, { ttl: '1h', required: true })\n  .ack(msg, 'completed', { consumerGroup: msg.consumerGroup })\n  .commit()\nif (res.success === false && res.reason === 'kv_precondition') {\n  // a duplicate delivery: nothing in the bundle was written; ack the message on its own\n}\nconst marker = await queen.kv.get(NS, markerKey(order.orderId))      // { found, value, version, expiresAt }\nconst markers = await queen.kv.getMany(NS, ORDER_IDS.map(markerKey))  // { rows, missing, truncated }\nawait queen.kv.delete(NS, markerKey(order.orderId))                   // read .applied, never the object",
+      "usageTested": "examples/apps/js/exactly-once.mjs",
+      "notes": "Every write returns an object, and objects are always truthy: read .applied (.won for once), never `if (await queen.kv.delete(...))`. A put never inherits the previous TTL. Writing `expect: undefined` throws (drop the key for an unconditional write). A counter past 2^53 throws rather than lose precision. A read in one call and a write in another is safe only when the key derives from the partition key (one worker holds a partition); otherwise use incr or expect, and prefer writing state in the same transaction as the ack. Limits: 64 KiB per value, 256 operations per call, 100 write calls/s per tenant per node by default (429 with Retry-After; KV inside a transaction is not rate-limited)."
+    },
+    "python": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "queen.kv",
+          "does": "The KV client (property on Queen).",
+          "source": "clients/client-py/queen/client.py:302"
+        },
+        {
+          "call": "await queen.kv.get(ns, key)",
+          "does": "Read one key: a dict {found, key, value, version, expiresAt, updatedAt}. Its truthiness is `found`.",
+          "source": "clients/client-py/queen/kv/kv.py:117"
+        },
+        {
+          "call": "await queen.kv.get_many(ns, keys)",
+          "does": "Read several keys: {rows, missing, truncated}.",
+          "source": "clients/client-py/queen/kv/kv.py:126"
+        },
+        {
+          "call": "await queen.kv.get_prefix(ns, prefix, after=None, limit=None, keys_only=False)",
+          "does": "One page under a non-empty prefix: {rows, truncated, nextAfter}; each page is its own snapshot.",
+          "source": "clients/client-py/queen/kv/kv.py:136"
+        },
+        {
+          "call": "await queen.kv.list_all(ns, prefix, limit=None, keys_only=False, max_rows=None)",
+          "does": "Follow nextAfter to the end and return the rows as a list; max_rows caps what is pulled into memory.",
+          "source": "clients/client-py/queen/kv/kv.py:159"
+        },
+        {
+          "call": "await queen.kv.put(ns, key, value, ttl=timedelta(hours=1), expect=None, required=False)",
+          "does": "Write a value. Exactly one expiry: ttl (timedelta), ttl_seconds (int), until (datetime) or forever=True. expect=0 means must not exist, expect=N updates only version N. Truthiness is `applied`.",
+          "source": "clients/client-py/queen/kv/kv.py:195"
+        },
+        {
+          "call": "await queen.kv.put_if_absent(ns, key, value, ttl=..., required=False)",
+          "does": "Must not exist; applied answers 'did I win?', and a loser gets the winner's value and version.",
+          "source": "clients/client-py/queen/kv/kv.py:222"
+        },
+        {
+          "call": "await queen.kv.delete(ns, key, expect=..., required=False)",
+          "does": "Delete; a missing key is applied False, reason 'absent' (HTTP 200).",
+          "source": "clients/client-py/queen/kv/kv.py:252"
+        },
+        {
+          "call": "await queen.kv.incr(ns, key, delta=1, min=None, max=None, ttl=..., required=False)",
+          "does": "Atomic add; with max, applied IS the admission decision (reason 'limit'). delta is keyword-only. TTL set only on creation.",
+          "source": "clients/client-py/queen/kv/kv.py:264"
+        },
+        {
+          "call": "await queen.kv.once(ns, key, ttl=..., value=True)",
+          "does": "Idempotency marker; returns a bool (True if this caller claimed the key). Not atomic with an ack: use tx.once(...) for that.",
+          "source": "clients/client-py/queen/kv/kv.py:291"
+        },
+        {
+          "call": "await queen.kv.batch([queen.kv.op.put(ns, key, value, ttl_seconds=60), ...])",
+          "does": "Several ops in one call and one transaction, results index-aligned. Ops come from the builders in queen.kv.op (get, get_many, get_prefix, put, put_if_absent, delete, incr).",
+          "source": "clients/client-py/queen/kv/kv.py:84"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "queen.transaction()",
+          "does": "Start a bundle.",
+          "source": "clients/client-py/queen/client.py:369"
+        },
+        {
+          "call": "tx.kv.get(ns, key)",
+          "does": "Read inside the bundle.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:291"
+        },
+        {
+          "call": "tx.kv.get_many(ns, keys)",
+          "does": "Read several keys inside the bundle; get_prefix raises inside a transaction.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:294"
+        },
+        {
+          "call": "tx.kv.put(ns, key, value, ttl=..., expect=..., required=True)",
+          "does": "Write state with the ack; returns the transaction for chaining.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:314"
+        },
+        {
+          "call": "tx.kv.put_if_absent(ns, key, value, ttl=..., required=True)",
+          "does": "The gate: with required=True an existing key rolls back the whole bundle.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:317"
+        },
+        {
+          "call": "tx.kv.delete(ns, key, expect=..., required=False)",
+          "does": "Delete with the ack.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:323"
+        },
+        {
+          "call": "tx.kv.incr(ns, key, delta=1, max=..., ttl=..., required=True)",
+          "does": "Count with the ack; a refused increment rolls the bundle back when required.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:326"
+        },
+        {
+          "call": "tx.once(ns, key, ttl=..., value=True)",
+          "does": "put_if_absent with required=True: a redelivery that finds the marker rolls back the bundle.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:148"
+        },
+        {
+          "call": "tx.queue(name).partition(p).push(items)",
+          "does": "A push that commits or rolls back with the KV ops.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:119"
+        },
+        {
+          "call": "tx.ack(msg, \"completed\", {\"consumer_group\": group})",
+          "does": "Ack under the delivery's lease. Pass the group explicitly: this client does not read it from the message.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:62"
+        },
+        {
+          "call": "await tx.commit()",
+          "does": "Send the bundle. A lost required precondition is RETURNED as {success: False, reason: 'kv_precondition', kvReason, failedIndex, value, version} (truthiness False); other failures raise.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:200"
+        }
+      ],
+      "usage": "marker = await queen.kv.get(NS, marker_key(order_id))\nif marker[\"found\"]:\n    ...  # already charged: ack the message and stop\nres = await (\n    queen.transaction()\n    .kv.put_if_absent(NS, marker_key(order_id), {\"chargeId\": charge_id, \"cents\": order[\"cents\"]},\n                      ttl=timedelta(hours=1), required=True)\n    .ack(msg, \"completed\", {\"consumer_group\": group})\n    .commit()\n)\nif res.get(\"success\") is False and res.get(\"reason\") == \"kv_precondition\":\n    ...  # a duplicate delivery: nothing was written",
+      "usageTested": "examples/apps/py/exactly_once.py",
+      "notes": "snake_case names: get_many, get_prefix, put_if_absent, list_all. The expiry is ttl=datetime.timedelta, ttl_seconds=int, until=datetime or forever=True; there is no '1h' string parser. Results are dicts whose truthiness is the verdict (applied for writes, found for reads), so `if await queen.kv.delete(...)` is correct here, unlike JS. incr's delta is keyword-only: incr(ns, key, delta=5). once() returns a bool. A bool passed for a numeric field raises. tx.ack does not default the consumer group from the message (JS does): pass {'consumer_group': msg['consumerGroup']}."
+    },
+    "go": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "client.KV()",
+          "does": "The KV API.",
+          "source": "clients/client-go/kv.go:646"
+        },
+        {
+          "call": "client.KV().Get(ctx, ns, key)",
+          "does": "Read one key: KVEntry{Found, Key, Value json.RawMessage, Version, ExpiresAt, UpdatedAt}.",
+          "source": "clients/client-go/kv.go:759"
+        },
+        {
+          "call": "queen.KVGetAs[T](ctx, client.KV(), ns, key)",
+          "does": "Generic read that decodes the value: (T, found bool, error).",
+          "source": "clients/client-go/kv.go:780"
+        },
+        {
+          "call": "client.KV().GetMany(ctx, ns, keys)",
+          "does": "Read several keys: KVMany{Rows, Missing, Truncated}.",
+          "source": "clients/client-go/kv.go:797"
+        },
+        {
+          "call": "client.KV().GetPrefix(ctx, ns, prefix, queen.KVPrefixOptions{After, Limit, KeysOnly})",
+          "does": "One page under a non-empty prefix: KVPage{Rows, Truncated, NextAfter}.",
+          "source": "clients/client-go/kv.go:806"
+        },
+        {
+          "call": "client.KV().Put(ctx, ns, key, value, queen.TTL(time.Hour), queen.KVWriteOptions{Expect: queen.Expect(v), Required: true})",
+          "does": "Write a value. The Expiry argument is positional and mandatory (its zero value is refused). Returns KVWrite{Applied, Reason, Key, Value, Version}.",
+          "source": "clients/client-go/kv.go:815"
+        },
+        {
+          "call": "client.KV().PutIfAbsent(ctx, ns, key, value, exp, opts...)",
+          "does": "Must not exist; a loser gets the winner's Value and Version.",
+          "source": "clients/client-go/kv.go:844"
+        },
+        {
+          "call": "client.KV().Delete(ctx, ns, key, opts...)",
+          "does": "Delete, optionally fenced with KVWriteOptions{Expect}.",
+          "source": "clients/client-go/kv.go:853"
+        },
+        {
+          "call": "client.KV().Incr(ctx, ns, key, delta, exp, queen.KVIncrOptions{Min, Max: queen.Int64(100), Required})",
+          "does": "Atomic add; with Max, Applied is the admission decision (Reason 'limit'). Returns KVCounter{Applied, Reason, Value int64, Version}.",
+          "source": "clients/client-go/kv.go:881"
+        },
+        {
+          "call": "client.KV().Batch(ctx, ops...)",
+          "does": "Several ops (built with the KV*Op functions) in one call and one transaction; []KVResult index-aligned.",
+          "source": "clients/client-go/kv.go:752"
+        },
+        {
+          "call": "queen.TTL(d time.Duration)",
+          "does": "Expiry from a duration (rounded up to whole seconds).",
+          "source": "clients/client-go/kv.go:71"
+        },
+        {
+          "call": "queen.TTLSeconds(n)",
+          "does": "Expiry in whole seconds.",
+          "source": "clients/client-go/kv.go:61"
+        },
+        {
+          "call": "queen.Until(t time.Time)",
+          "does": "Expiry at an instant, converted to a delay at send time.",
+          "source": "clients/client-go/kv.go:86"
+        },
+        {
+          "call": "queen.Forever()",
+          "does": "No expiry. Keep it out of anything CI runs.",
+          "source": "clients/client-go/kv.go:94"
+        },
+        {
+          "call": "queen.Expect(version)",
+          "does": "*int64 for KVWriteOptions.Expect (0 = must not exist).",
+          "source": "clients/client-go/kv.go:172"
+        },
+        {
+          "call": "queen.Int64(v)",
+          "does": "*int64 helper for KVIncrOptions.Min / Max.",
+          "source": "clients/client-go/kv.go:163"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "client.Transaction()",
+          "does": "Start a bundle.",
+          "source": "clients/client-go/queen.go:86"
+        },
+        {
+          "call": ".KV(ops...)",
+          "does": "Add KV ops to the bundle (a top-level kv array beside the operations). KVGetPrefixOp is refused before sending.",
+          "source": "clients/client-go/transaction_builder.go:93"
+        },
+        {
+          "call": "queen.KVGetOp(ns, key)",
+          "does": "Op: read one key.",
+          "source": "clients/client-go/kv.go:260"
+        },
+        {
+          "call": "queen.KVGetManyOp(ns, keys)",
+          "does": "Op: read several keys.",
+          "source": "clients/client-go/kv.go:266"
+        },
+        {
+          "call": "queen.KVPutOp(ns, key, value, exp, queen.KVWriteOptions{Expect, Required})",
+          "does": "Op: write state with the ack.",
+          "source": "clients/client-go/kv.go:295"
+        },
+        {
+          "call": "queen.KVPutIfAbsentOp(ns, key, value, exp, queen.KVWriteOptions{Required: true})",
+          "does": "Op: the gate; with Required an existing key rolls the bundle back.",
+          "source": "clients/client-go/kv.go:313"
+        },
+        {
+          "call": "queen.KVDeleteOp(ns, key, opts...)",
+          "does": "Op: delete.",
+          "source": "clients/client-go/kv.go:325"
+        },
+        {
+          "call": "queen.KVIncrOp(ns, key, delta, exp, queen.KVIncrOptions{Max, Required})",
+          "does": "Op: count with the ack.",
+          "source": "clients/client-go/kv.go:336"
+        },
+        {
+          "call": ".Queue(name).Partition(p).Push(payload)",
+          "does": "A push that commits or rolls back with the KV ops.",
+          "source": "clients/client-go/transaction_builder.go:73"
+        },
+        {
+          "call": ".Ack(msg, \"completed\", queen.AckOptions{ConsumerGroup: group})",
+          "does": "Ack under the delivery's lease. The group is not read from the message: pass it.",
+          "source": "clients/client-go/transaction_builder.go:36"
+        },
+        {
+          "call": ".Commit(ctx)",
+          "does": "Send the bundle. A lost Required precondition comes back as (res, nil) with res.Success false and Reason kv_precondition; every other failure is an error (the response is returned beside it).",
+          "source": "clients/client-go/transaction_builder.go:124"
+        },
+        {
+          "call": "res.IsKVPrecondition()",
+          "does": "True when the bundle was rolled back by a lost gate (nil-safe).",
+          "source": "clients/client-go/types.go:374"
+        }
+      ],
+      "usage": "res, err := client.Transaction().\n    KV(queen.KVPutIfAbsentOp(ns, sagaKey(bookingID),\n        sagaState{Step: \"held\", Room: room, Cents: int(cents)},\n        queen.TTL(time.Hour), queen.KVWriteOptions{Required: true})).\n    Ack(msg, \"completed\", queen.AckOptions{ConsumerGroup: reserverGroup}).\n    Commit(ctx)\nif res.IsKVPrecondition() {\n    // a duplicate: err is nil and nothing was written; ack msg on its own and return\n}\nentry, err := client.KV().Get(ctx, ns, sagaKey(bookingID)) // entry.Found, entry.Value (json.RawMessage), entry.Version\n_, err = client.KV().Delete(cleanupCtx, ns, sagaKey(bookingID))",
+      "usageTested": "examples/apps/go/saga/main.go",
+      "notes": "Every call takes ctx first, options are structs, and the Expiry is a positional argument (queen.TTL / TTLSeconds / Until / Forever) whose zero value is refused. Inside a transaction KV ops are values built with KVPutOp, KVPutIfAbsentOp, KVIncrOp, ... and passed to .KV(...). Value is json.RawMessage: json.Unmarshal it, or use queen.KVGetAs[T]. Versions are int64 end to end. No once() or listAll() helper: use KVPutIfAbsentOp with Required, and loop GetPrefix on NextAfter. Commit returns err == nil for a lost gate: check res.IsKVPrecondition() before treating the bundle as committed."
+    },
+    "php": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "$queen->kv()",
+          "does": "The KV client.",
+          "source": "clients/client-php/src/Queen.php:83"
+        },
+        {
+          "call": "$queen->kv()->get($ns, $key)",
+          "does": "Read one key: ['found', 'key', 'value', 'version', 'expiresAt', 'updatedAt'] (only found and key on a miss).",
+          "source": "clients/client-php/src/Kv.php:72"
+        },
+        {
+          "call": "$queen->kv()->getMany($ns, $keys)",
+          "does": "Read several keys: ['rows', 'missing', 'truncated'].",
+          "source": "clients/client-php/src/Kv.php:84"
+        },
+        {
+          "call": "$queen->kv()->getPrefix($ns, $prefix, ['after' => $cursor, 'limit' => 100, 'keysOnly' => true])",
+          "does": "One page under a non-empty prefix: ['rows', 'truncated', 'nextAfter'].",
+          "source": "clients/client-php/src/Kv.php:98"
+        },
+        {
+          "call": "$queen->kv()->put($ns, $key, $value, ['ttlSeconds' => 300, 'expect' => $version, 'required' => true])",
+          "does": "Write a value. Exactly one of 'ttlSeconds' (int) and 'forever' => true. Returns ['applied', 'key', 'value', 'version', 'reason'?].",
+          "source": "clients/client-php/src/Kv.php:116"
+        },
+        {
+          "call": "$queen->kv()->putIfAbsent($ns, $key, $value, ['ttlSeconds' => 300])",
+          "does": "Must not exist; a loser gets the winner's value and version.",
+          "source": "clients/client-php/src/Kv.php:121"
+        },
+        {
+          "call": "$queen->kv()->delete($ns, $key, ['expect' => $version])",
+          "does": "Delete; a missing key is applied false, reason 'absent' (HTTP 200).",
+          "source": "clients/client-php/src/Kv.php:126"
+        },
+        {
+          "call": "$queen->kv()->incr($ns, $key, $delta, ['ttlSeconds' => 60, 'max' => 100])",
+          "does": "Atomic add; delta is positional and required. With max, applied is the admission decision (reason 'limit').",
+          "source": "clients/client-php/src/Kv.php:136"
+        },
+        {
+          "call": "$queen->kv()->batch([KvOp::put($ns, $key, $value, ['ttlSeconds' => 60]), ...])",
+          "does": "Several ops (from Queen\\Support\\KvOp) in one call and one transaction: ['results' => [...]] index-aligned, or the kv_precondition verdict.",
+          "source": "clients/client-php/src/Kv.php:155"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "$queen->transaction()",
+          "does": "Start a bundle.",
+          "source": "clients/client-php/src/Queen.php:141"
+        },
+        {
+          "call": "->kv($ns)->get($key)",
+          "does": "Read inside the bundle. kv() binds ONE namespace; the methods take the key only.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:250"
+        },
+        {
+          "call": "->kv($ns)->getMany($keys)",
+          "does": "Read several keys inside the bundle (getPrefix does not exist here).",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:256"
+        },
+        {
+          "call": "->kv($ns)->put($key, $value, ['ttlSeconds' => 300, 'expect' => $v, 'required' => true])",
+          "does": "Write state with the ack; returns the TransactionBuilder.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:262"
+        },
+        {
+          "call": "->kv($ns)->putIfAbsent($key, $value, ['ttlSeconds' => 300, 'required' => true])",
+          "does": "The gate: with required an existing key rolls back the bundle.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:268"
+        },
+        {
+          "call": "->kv($ns)->delete($key, ['expect' => $v])",
+          "does": "Delete with the ack.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:274"
+        },
+        {
+          "call": "->kv($ns)->incr($key, $delta, ['ttlSeconds' => 300, 'max' => 100, 'required' => true])",
+          "does": "Count with the ack.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:280"
+        },
+        {
+          "call": "->queue($name)->partition($p)->push($items)",
+          "does": "A push that commits or rolls back with the KV ops.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:71"
+        },
+        {
+          "call": "->ack($message, 'completed', ['consumerGroup' => $group])",
+          "does": "Ack under the delivery's lease; pass the group explicitly.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:23"
+        },
+        {
+          "call": "->commit()",
+          "does": "Send the bundle. A lost required precondition is RETURNED (['success' => false, 'reason' => 'kv_precondition', 'kvReason', 'failedIndex', 'value', 'version']); any other failure throws RuntimeException.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:194"
+        }
+      ],
+      "usage": "$result = $queen->transaction()\n    ->kv('state')->put('txn-marker', ['step' => 'reserved'], ['ttlSeconds' => 300])\n    ->kv('counters')->incr('window', 1, ['ttlSeconds' => 300])\n    ->commit();\n$value = $queen->kv()->get('state', 'txn-marker')['value'];   // ['step' => 'reserved']\n\n$second = $queen->transaction()\n    ->kv('state')->putIfAbsent('txn-gate', ['owner' => 'second'], ['ttlSeconds' => 300, 'required' => true])\n    ->queue('orders')->push([['data' => ['attempt' => 2]]])\n    ->commit();\n// a lost gate: $second['success'] === false, ['reason'] === 'kv_precondition', ['kvReason'] === 'exists'",
+      "usageTested": "clients/client-php/tests/Integration/TransactionRidersIntegrationTest.php",
+      "notes": "Options are arrays and unknown keys throw InvalidArgumentException: the expiry is 'ttlSeconds' => int or 'forever' => true; 'ttl', 'ttlMillis' and 'expiresAt' are refused by name, and a null option (e.g. 'expect' => null) is refused too. Inside a transaction kv() is bound to one namespace: ->kv('ns')->put('key', ...). Results are arrays: read ['applied'] or ['found']. No once() or listAll() helper: use putIfAbsent, and loop getPrefix with 'after' => ['nextAfter']. tx ack takes ['consumerGroup' => ...] explicitly. version is a 64-bit int; a counter past PHP_INT_MAX would decode as a float, so bound counters with max."
+    },
+    "rust": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "queen.kv()",
+          "does": "The KV API.",
+          "source": "clients/client-rust/src/lib.rs:173"
+        },
+        {
+          "call": "queen.kv().get(ns, key).await?",
+          "does": "Read one key: KvResult with .found(), .value (Option<Value>), .version, .expires_at.",
+          "source": "clients/client-rust/src/kv.rs:119"
+        },
+        {
+          "call": "queen.kv().get_many(ns, keys: Vec<String>).await?",
+          "does": "Read several keys (rows and missing).",
+          "source": "clients/client-rust/src/kv.rs:129"
+        },
+        {
+          "call": "queen.kv().get_prefix(ns, prefix).after(cursor).limit(100).keys_only().send().await?",
+          "does": "One page under a non-empty prefix (rows, truncated, next_after).",
+          "source": "clients/client-rust/src/kv.rs:139"
+        },
+        {
+          "call": "queen.kv().put(ns, key, value, Expiry::seconds(300)).expect(v).required().send().await?",
+          "does": "Write a serde_json::Value. A builder: nothing is sent before .send().await.",
+          "source": "clients/client-rust/src/kv.rs:149"
+        },
+        {
+          "call": "queen.kv().put_if_absent(ns, key, value, expiry).send().await?",
+          "does": "Must not exist; a loser gets the winner's value.",
+          "source": "clients/client-rust/src/kv.rs:170"
+        },
+        {
+          "call": "queen.kv().delete(ns, key).expect(v).send().await?",
+          "does": "Delete; a missing key is applied() false with reason KvReason::Absent.",
+          "source": "clients/client-rust/src/kv.rs:183"
+        },
+        {
+          "call": "queen.kv().incr(ns, key, delta: i64, expiry).min(0).max(100).send().await?",
+          "does": "Atomic add; with max, applied() is the admission decision.",
+          "source": "clients/client-rust/src/kv.rs:200"
+        },
+        {
+          "call": "queen.kv().batch(ops: Vec<KvOperation>).await?",
+          "does": "Several ops in one call and one transaction: KvOutcome (results, or the precondition verdict).",
+          "source": "clients/client-rust/src/kv.rs:219"
+        },
+        {
+          "call": "Expiry::seconds(n)",
+          "does": "Expiry in whole seconds (mandatory on put, put_if_absent and incr).",
+          "source": "crates/queen-protocol/src/kv.rs:69"
+        },
+        {
+          "call": "Expiry::forever()",
+          "does": "No expiry.",
+          "source": "crates/queen-protocol/src/kv.rs:73"
+        },
+        {
+          "call": "Expiry::until(SystemTime)",
+          "does": "Expiry at an instant, converted to seconds at send time.",
+          "source": "crates/queen-protocol/src/kv.rs:77"
+        },
+        {
+          "call": "result.applied()",
+          "does": "The write verdict.",
+          "source": "crates/queen-protocol/src/kv.rs:562"
+        },
+        {
+          "call": "result.found()",
+          "does": "The read verdict.",
+          "source": "crates/queen-protocol/src/kv.rs:566"
+        },
+        {
+          "call": "result.counter()",
+          "does": "The counter value of an incr as i64 (Err when not an integer).",
+          "source": "crates/queen-protocol/src/kv.rs:590"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "queen.transaction()",
+          "does": "Start a bundle.",
+          "source": "clients/client-rust/src/lib.rs:192"
+        },
+        {
+          "call": ".kv_put_if_absent(ns, key, value, expiry)?",
+          "does": "The gate. ALWAYS required: an existing key rolls back the whole bundle.",
+          "source": "clients/client-rust/src/transaction.rs:211"
+        },
+        {
+          "call": ".kv_put(ns, key, value, expiry)?",
+          "does": "Unconditional write of state alongside the ack.",
+          "source": "clients/client-rust/src/transaction.rs:225"
+        },
+        {
+          "call": ".kv_delete(ns, key)",
+          "does": "Delete alongside the ack.",
+          "source": "clients/client-rust/src/transaction.rs:237"
+        },
+        {
+          "call": ".kv(op: KvOperation)",
+          "does": "Any KV op: incr, get, get_many, a fenced put. Build it with the standalone builders' .operation()?.",
+          "source": "clients/client-rust/src/transaction.rs:199"
+        },
+        {
+          "call": "queen.kv().put(ns, key, value, expiry).expect(v).required().operation()?",
+          "does": "A fenced put as a KvOperation, for .kv(op).",
+          "source": "clients/client-rust/src/kv.rs:360"
+        },
+        {
+          "call": "queen.kv().incr(ns, key, 1, expiry).max(100).required().operation()?",
+          "does": "An admission counter as a KvOperation, for .kv(op).",
+          "source": "clients/client-rust/src/kv.rs:471"
+        },
+        {
+          "call": ".ack(&msg)",
+          "does": "Ack as completed; the consumer group is read from the message.",
+          "source": "clients/client-rust/src/transaction.rs:82"
+        },
+        {
+          "call": ".push(queue, payload)?",
+          "does": "A push that commits or rolls back with the KV ops.",
+          "source": "clients/client-rust/src/transaction.rs:138"
+        },
+        {
+          "call": ".commit().await?",
+          "does": "Send the bundle. Ok(resp) even when the gate lost: check resp.success or resp.lost_precondition().",
+          "source": "clients/client-rust/src/transaction.rs:317"
+        },
+        {
+          "call": "resp.lost_precondition()",
+          "does": "Some(KvPrecondition) when a required KV op lost and the bundle rolled back.",
+          "source": "crates/queen-protocol/src/transaction.rs:398"
+        },
+        {
+          "call": "resp.kv_results()",
+          "does": "The KV riders' results, in order.",
+          "source": "crates/queen-protocol/src/transaction.rs:411"
+        }
+      ],
+      "usage": "let put = q.kv().put(&ns, \"order\", serde_json::json!({\"step\": 2}), Expiry::seconds(300)).send().await?;\nassert!(put.applied());\nlet got = q.kv().get(&ns, \"order\").await?;            // got.found(), got.value, got.version\nlet r = q.kv().incr(&ns, \"quota\", 1, Expiry::seconds(300)).max(3).send().await?;\n// r.applied() is the admission decision; r.counter()? is the value\nlet first = q\n    .transaction()\n    .ack(&msgs[0])\n    .kv_put_if_absent(&ns, \"idem:9137\", serde_json::json!({\"by\": \"worker-1\"}), Expiry::seconds(300))?\n    .commit()\n    .await?;\nif first.lost_precondition().is_some() { /* a redelivery: nothing in the bundle was written */ }",
+      "usageTested": "clients/client-rust/tests/kv_timers.rs",
+      "notes": "Writes are builders: nothing is sent until .send().await. The expiry is a positional Expiry (seconds / forever / until). In a transaction kv_put_if_absent is always required (it is the gate, unlike JS where required is opt-in); for incr, reads or a fenced put build the op with .operation()? and pass it to .kv(op). commit() is Ok(resp) for a lost gate: check resp.success or resp.lost_precondition(). No once() or list_all() helper. The transaction's ack reads the consumer group from the message."
+    },
+    "cpp": {
+      "status": "partial",
+      "calls": [
+        {
+          "call": "QueenClient client(\"http://localhost:6632\")",
+          "does": "Build the client.",
+          "source": "clients/client-cpp/queen_client.hpp:3909"
+        },
+        {
+          "call": "client.kv(ns)",
+          "does": "KV bound to one namespace.",
+          "source": "clients/client-cpp/queen_client.hpp:3993"
+        },
+        {
+          "call": "client.kv(ns).get(key)",
+          "does": "Read one key: json {found, key, value, version, expiresAt, updatedAt}.",
+          "source": "clients/client-cpp/queen_client.hpp:2875"
+        },
+        {
+          "call": "client.kv(ns).put(key, value, KvTtl::seconds(60), opts)",
+          "does": "Write a json value; the KvTtl is mandatory. Returns {applied, key, value, version, reason?}.",
+          "source": "clients/client-cpp/queen_client.hpp:2889"
+        },
+        {
+          "call": "client.kv(ns).put_if_absent(key, value, ttl, opts)",
+          "does": "Must not exist; a non-zero expect throws std::invalid_argument.",
+          "source": "clients/client-cpp/queen_client.hpp:2909"
+        },
+        {
+          "call": "client.kv(ns).del(key, opts)",
+          "does": "Delete (spelled del), optionally fenced with expect.",
+          "source": "clients/client-cpp/queen_client.hpp:2916"
+        },
+        {
+          "call": "client.kv(ns).incr(key, delta, ttl, KvIncrOptions{min, max, required})",
+          "does": "Atomic add; with max, applied is the admission decision.",
+          "source": "clients/client-cpp/queen_client.hpp:2933"
+        },
+        {
+          "call": "KvTtl::seconds(n)",
+          "does": "Expiry in whole seconds (> 0).",
+          "source": "clients/client-cpp/queen_client.hpp:1115"
+        },
+        {
+          "call": "KvTtl::forever()",
+          "does": "No expiry; must not be used in anything CI runs.",
+          "source": "clients/client-cpp/queen_client.hpp:1128"
+        },
+        {
+          "call": "KvTtl::until(time_point)",
+          "does": "Expiry at an instant, rounded up to seconds at send time.",
+          "source": "clients/client-cpp/queen_client.hpp:1135"
+        },
+        {
+          "call": "KvWriteOptions{expect, required}",
+          "does": "Options for put, put_if_absent and del (expect is std::optional<long long>).",
+          "source": "clients/client-cpp/queen_client.hpp:1170"
+        },
+        {
+          "call": "KvIncrOptions{min, max, required}",
+          "does": "Options for incr (no expect, by construction).",
+          "source": "clients/client-cpp/queen_client.hpp:1187"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "client.transaction()",
+          "does": "Start a bundle.",
+          "source": "clients/client-cpp/queen_client.hpp:3961"
+        },
+        {
+          "call": ".kv(ns).get(key)",
+          "does": "Read inside the bundle.",
+          "source": "clients/client-cpp/queen_client.hpp:2622"
+        },
+        {
+          "call": ".kv(ns).put(key, value, ttl, opts)",
+          "does": "Write state with the ack; returns the TransactionBuilder&.",
+          "source": "clients/client-cpp/queen_client.hpp:2627"
+        },
+        {
+          "call": ".kv(ns).put_if_absent(key, value, ttl, opts)",
+          "does": "The gate; set opts.required = true so an existing key rolls back the bundle.",
+          "source": "clients/client-cpp/queen_client.hpp:2634"
+        },
+        {
+          "call": ".kv(ns).del(key, opts)",
+          "does": "Delete with the ack.",
+          "source": "clients/client-cpp/queen_client.hpp:2644"
+        },
+        {
+          "call": ".kv(ns).incr(key, delta, ttl, opts)",
+          "does": "Count with the ack.",
+          "source": "clients/client-cpp/queen_client.hpp:2650"
+        },
+        {
+          "call": ".ack(message, \"completed\", json{{\"consumerGroup\", group}})",
+          "does": "Ack under the delivery's lease; the group goes in the context json.",
+          "source": "clients/client-cpp/queen_client.hpp:2691"
+        },
+        {
+          "call": ".commit()",
+          "does": "Send the bundle. A lost required precondition is RETURNED (success false, reason kv_precondition, kvReason, failedIndex); every other failure throws.",
+          "source": "clients/client-cpp/queen_client.hpp:2790"
+        }
+      ],
+      "http": [
+        {
+          "call": "POST /api/v1/kv  {\"operations\":[{\"op\":\"getMany\",\"ns\":\"<ns>\",\"keys\":[\"k1\",\"k2\"]}]}",
+          "does": "getMany: {results:[{rows, missing, truncated}]}."
+        },
+        {
+          "call": "POST /api/v1/kv  {\"operations\":[{\"op\":\"getPrefix\",\"ns\":\"<ns>\",\"prefix\":\"<prefix>\",\"limit\":100,\"after\":\"<cursor>\"}]}",
+          "does": "getPrefix: one page {rows, truncated, nextAfter}; refused inside a transaction."
+        }
+      ],
+      "usage": "client.kv(\"saga\").put(\"order-1\", json{{\"state\", \"open\"}}, KvTtl::seconds(60));\njson row = client.kv(\"saga\").get(\"order-1\");         // row[\"found\"], row[\"value\"], row[\"version\"]\nKvWriteOptions opts;\nopts.expect = 7;                                        // the version you read\nclient.kv(\"saga\").put(\"order-1\", json{{\"state\", \"done\"}}, KvTtl::seconds(60), opts);\nclient.kv(\"saga\").put_if_absent(\"marker\", json{{\"seen\", true}}, KvTtl::seconds(3600));\nclient.kv(\"quota\").incr(\"acme:2026-08\", 1, KvTtl::seconds(3600));\nclient.kv(\"saga\").del(\"order-1\");\nclient.transaction()\n    .kv(\"saga\").put_if_absent(\"saga-1\", json{{\"state\", \"open\"}}, KvTtl::seconds(600))\n    .commit();",
+      "usageTested": "clients/client-cpp/test_kv_timers.cpp",
+      "notes": "Missing: getMany, getPrefix and the once helper (the header says so); call POST /api/v1/kv directly for them (see http). delete is spelled del. Everything returns nlohmann::json: read row[\"found\"] / r[\"applied\"], never test the json for truthiness. KvWriteOptions.expect is a std::optional, so there is no 'explicitly undefined' guard: compute the version before you build the options. The transaction's ack takes the group in its context json; it is not read from the message. The usage block comes from a wire-contract test (in-process HTTP server, no broker)."
+    }
+  },
+  "timers": {
+    "js": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "queen.timer(queue)",
+          "does": "A timer builder for one destination queue. Nothing is sent until a terminal (schedule, cancel, peek, list).",
+          "source": "clients/client-js/client-v2/Queen.js:367"
+        },
+        {
+          "call": ".key(timerKey)",
+          "does": "The timer's identity inside its queue; (queue, timerKey) is the primary key.",
+          "source": "clients/client-js/client-v2/builders/TimerBuilder.js:88"
+        },
+        {
+          "call": ".delay('30m')",
+          "does": "Relative delay as a duration string ('250ms', '30s', '2h').",
+          "source": "clients/client-js/client-v2/builders/TimerBuilder.js:112"
+        },
+        {
+          "call": ".delayMs(ms)",
+          "does": "Relative delay in milliseconds; a negative delay fires on the first cycle.",
+          "source": "clients/client-js/client-v2/builders/TimerBuilder.js:103"
+        },
+        {
+          "call": ".payload(value)",
+          "does": "The delivered message body: any JSON value (base64-encoded for you), or a Buffer/Uint8Array for raw bytes.",
+          "source": "clients/client-js/client-v2/builders/TimerBuilder.js:118"
+        },
+        {
+          "call": ".partition(name)",
+          "does": "Destination partition; 'Default' when absent.",
+          "source": "clients/client-js/client-v2/builders/TimerBuilder.js:97"
+        },
+        {
+          "call": ".txn(transactionId)",
+          "does": "The transactionId the delivered message will carry; minted when absent.",
+          "source": "clients/client-js/client-v2/builders/TimerBuilder.js:132"
+        },
+        {
+          "call": "await queen.timer(queue).key(k).delay('30m').payload(p).schedule()",
+          "does": "Schedule or reschedule (an upsert on queue + key): {ok, status: 'scheduled' | 'rescheduled' | 'too_late', deliverAt, txn, messageId}.",
+          "source": "clients/client-js/client-v2/builders/TimerBuilder.js:202"
+        },
+        {
+          "call": "await queen.timer(queue).key(k).cancel()",
+          "does": "Cancel on DELETE /api/v1/timers/:queue/*timerKey, the route nothing can block. status 'absent' (ok: false) MAY mean already delivered.",
+          "source": "clients/client-js/client-v2/builders/TimerBuilder.js:226"
+        },
+        {
+          "call": "await queen.timer(queue).key(k).peek()",
+          "does": "One pending timer: {found, deliverAt, txn, attempts, claimed, payload, ...}; payload comes back base64 as stored. A miss is {found: false}, HTTP 200.",
+          "source": "clients/client-js/client-v2/builders/TimerBuilder.js:239"
+        },
+        {
+          "call": "await queen.timer(queue).list({ limit, after })",
+          "does": "Pending timers of one queue: {rows, truncated, nextAfter}; after is an exclusive keyset cursor.",
+          "source": "clients/client-js/client-v2/builders/TimerBuilder.js:253"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "queen.transaction()",
+          "does": "Start a bundle.",
+          "source": "clients/client-js/client-v2/Queen.js:376"
+        },
+        {
+          "call": ".timer(queue).key(k).delay('24h').payload(p).schedule()",
+          "does": "Schedule with the bundle; the terminal hands back the transaction, so the chain continues.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:253"
+        },
+        {
+          "call": ".timer(queue).key(k).cancel()",
+          "does": "Cancel with the bundle: it shares the bundle's fate and its authorization (atomic with the ack).",
+          "source": "clients/client-js/client-v2/builders/TimerBuilder.js:226"
+        },
+        {
+          "call": ".ack(messages, 'completed', { consumerGroup })",
+          "does": "Ack under the delivery's lease (group defaults to msg.consumerGroup).",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:60"
+        },
+        {
+          "call": "await tx.commit()",
+          "does": "Send the bundle.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:260"
+        }
+      ],
+      "usage": "await queen\n  .transaction()\n  .timer(EXPIRIES).key(bookingId).delayMs(HOLD_MS).payload({ bookingId, room }).schedule()\n  .ack(msg, 'completed', { consumerGroup: msg.consumerGroup })\n  .commit()\nconst armed = await queen.timer(EXPIRIES).list({ limit: 50 })        // { rows, truncated, nextAfter }\nconst held = (await queen.timer(EXPIRIES).key(bookingId).peek()).found\nconst tx = queen.transaction()                                        // confirm: cancel the release in the same commit\ntx.timer(EXPIRIES).key(bookingId).cancel()\nconst res = await tx.ack(msg, 'completed', { consumerGroup: msg.consumerGroup }).commit()\nawait queen.timer(EXPIRIES).key(bookingId).cancel()                   // standalone: the route that is never blocked",
+      "usageTested": "examples/apps/js/saga.mjs",
+      "notes": "Only relative delays (delayMs, or a duration string through delay); an absolute instant is not expressible, the broker's clock decides. deliverAt means 'not before'. A reschedule is the same schedule() call on the same key and resets attempts. There is no tombstone: cancel answering 'absent' cannot tell 'cancelled earlier' from 'already delivered', so a compensating consumer must check its KV state. Cancel inside a transaction shares the bundle's fate; the standalone cancel uses the never-blocked DELETE route. peek and list are reads and throw on tx.timer(...). The standalone route refuses delays past 90 days and payloads over 1 MiB, and spends the tenant's KV write rate. A reschedule after the fire is a new message: each schedule mints a new txn unless you pass .txn(...), and only a kept txn still inside the destination partition's dedup window is deduplicated."
+    },
+    "python": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "queen.timer(queue)",
+          "does": "Fluent builder; terminals are coroutines here.",
+          "source": "clients/client-py/queen/client.py:353"
+        },
+        {
+          "call": ".key(timer_key)",
+          "does": "The timer's identity inside its queue.",
+          "source": "clients/client-py/queen/timers/timers.py:282"
+        },
+        {
+          "call": ".payload(value, zstd=False)",
+          "does": "The delivered message body (JSON-encoded for you).",
+          "source": "clients/client-py/queen/timers/timers.py:286"
+        },
+        {
+          "call": ".after(timedelta(minutes=30))",
+          "does": "Relative delay as a datetime.timedelta.",
+          "source": "clients/client-py/queen/timers/timers.py:296"
+        },
+        {
+          "call": ".after_ms(ms)",
+          "does": "Relative delay in milliseconds.",
+          "source": "clients/client-py/queen/timers/timers.py:292"
+        },
+        {
+          "call": ".partition(name)",
+          "does": "Destination partition.",
+          "source": "clients/client-py/queen/timers/timers.py:302"
+        },
+        {
+          "call": ".txn(txn)",
+          "does": "The transactionId of the delivered message.",
+          "source": "clients/client-py/queen/timers/timers.py:306"
+        },
+        {
+          "call": "await queen.timer(queue).key(k).payload(p).after(d).schedule()",
+          "does": "Schedule (upsert on queue + key): {ok, status, queue, timerKey, txn, messageId, deliverAt}.",
+          "source": "clients/client-py/queen/timers/timers.py:320"
+        },
+        {
+          "call": "await queen.timer(queue).key(k).payload(p).after(d).reschedule()",
+          "does": "The same upsert under the name of the intent; attempts return to zero.",
+          "source": "clients/client-py/queen/timers/timers.py:327"
+        },
+        {
+          "call": "await queen.timer(queue).key(k).cancel()",
+          "does": "Cancel on the never-blocked DELETE route.",
+          "source": "clients/client-py/queen/timers/timers.py:334"
+        },
+        {
+          "call": "queen.timers",
+          "does": "Flat timers API (property on Queen).",
+          "source": "clients/client-py/queen/client.py:318"
+        },
+        {
+          "call": "await queen.timers.schedule(queue, timer_key, payload, delay=timedelta(...), delay_ms=None, partition=None, txn=None)",
+          "does": "Flat schedule; delay is a timedelta, delay_ms an int.",
+          "source": "clients/client-py/queen/timers/timers.py:102"
+        },
+        {
+          "call": "await queen.timers.reschedule(queue, timer_key, payload, delay=..., partition=None, txn=None)",
+          "does": "Flat reschedule.",
+          "source": "clients/client-py/queen/timers/timers.py:127"
+        },
+        {
+          "call": "await queen.timers.cancel(queue, timer_key, txn=None)",
+          "does": "Cancel on DELETE /api/v1/timers/:queue/*timerKey; txn is echoed back on 'absent'.",
+          "source": "clients/client-py/queen/timers/timers.py:153"
+        },
+        {
+          "call": "await queen.timers.peek(queue, timer_key)",
+          "does": "One pending timer with its payload exactly as stored; {found: False} on a miss.",
+          "source": "clients/client-py/queen/timers/timers.py:185"
+        },
+        {
+          "call": "await queen.timers.list(queue, after=None, limit=None)",
+          "does": "Keyset page of one queue's pending timers: {rows, truncated, nextAfter}.",
+          "source": "clients/client-py/queen/timers/timers.py:199"
+        },
+        {
+          "call": "await queen.timers.list_all(queue, limit=None, max_rows=None)",
+          "does": "Walk nextAfter to the end; returns the rows.",
+          "source": "clients/client-py/queen/timers/timers.py:230"
+        },
+        {
+          "call": "await queen.timers.batch(ops)",
+          "does": "Timer ops (from queen.timers.op) in one transaction, results index-aligned. A cancel here inherits the schedule route's authorization.",
+          "source": "clients/client-py/queen/timers/timers.py:70"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "queen.transaction()",
+          "does": "Start a bundle.",
+          "source": "clients/client-py/queen/client.py:369"
+        },
+        {
+          "call": "tx.timer(queue).key(k).after_ms(ms).payload(p).schedule()",
+          "does": "Schedule with the bundle; NOT a coroutine here, it returns the transaction.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:393"
+        },
+        {
+          "call": "tx.timer(queue).key(k).after(d).payload(p).reschedule()",
+          "does": "Reschedule with the bundle.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:405"
+        },
+        {
+          "call": "tx.timer(queue).key(k).cancel()",
+          "does": "Cancel with the bundle (shares its fate and authorization).",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:417"
+        },
+        {
+          "call": "tx.ack(msg, \"completed\", {\"consumer_group\": group})",
+          "does": "Ack under the delivery's lease; pass the group explicitly.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:62"
+        },
+        {
+          "call": "await tx.commit()",
+          "does": "Send the bundle.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:200"
+        }
+      ],
+      "usage": "tx = queen.transaction()\ntx.timer(EXPIRIES).key(booking_id).after_ms(HOLD_MS).payload(\n    {\"bookingId\": booking_id, \"room\": room}\n).schedule()\nres = await tx.ack(msg, \"completed\", {\"consumer_group\": group}).commit()\narmed = await queen.timers.list(EXPIRIES, limit=50)               # {rows, truncated, nextAfter}\nfound = (await queen.timers.peek(EXPIRIES, booking_id))[\"found\"]\ntx = queen.transaction()\ntx.timer(EXPIRIES).key(booking_id).cancel()                       # cancel with the confirming ack\nres = await tx.ack(msg, \"completed\", {\"consumer_group\": group}).commit()\nawait queen.timers.cancel(EXPIRIES, booking_id)                   # standalone: the never-blocked route",
+      "usageTested": "examples/apps/py/saga.py",
+      "notes": "Two surfaces: queen.timer(q) (fluent; its terminals are coroutines) and queen.timers.* (flat calls, plus peek, list and list_all, which the builder does not have). Delays are datetime.timedelta (after / delay=) or int milliseconds (after_ms / delay_ms=); there is no string duration parser. On tx.timer(...) the terminals are not coroutines: they return the transaction. tx.ack takes {'consumer_group': ...} explicitly. Same semantics as JS: relative delays only, 'absent' on cancel may mean already delivered, the standalone cancel is the never-blocked route."
+    },
+    "go": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "client.Timers()",
+          "does": "The timers API.",
+          "source": "clients/client-go/timers.go:370"
+        },
+        {
+          "call": "client.Timers().Schedule(ctx, queen.TimerSchedule{Queue, TimerKey, Delay, Payload, Partition, TransactionID})",
+          "does": "Schedule (upsert on Queue + TimerKey): TimerResult{OK, Status, Queue, TimerKey, TransactionID, MessageID, DeliverAt}.",
+          "source": "clients/client-go/timers.go:409"
+        },
+        {
+          "call": "queen.TimerSchedule{Queue, TimerKey, Partition, Delay, DeliverAt, Payload, TransactionID}",
+          "does": "Delay is a time.Duration (ms on the wire); DeliverAt is client-side sugar converted to a delay; setting both is an error. []byte / json.RawMessage payloads travel verbatim, anything else is JSON-encoded.",
+          "source": "clients/client-go/timers.go:64"
+        },
+        {
+          "call": "client.Timers().Reschedule(ctx, s)",
+          "does": "The same upsert under the name of the intent.",
+          "source": "clients/client-go/timers.go:419"
+        },
+        {
+          "call": "client.Timers().ScheduleBatch(ctx, schedules...)",
+          "does": "Several schedules in one call.",
+          "source": "clients/client-go/timers.go:429"
+        },
+        {
+          "call": "client.Timers().Apply(ctx, ops...)",
+          "does": "Raw timer ops (ScheduleTimerOp, ...) in one call.",
+          "source": "clients/client-go/timers.go:442"
+        },
+        {
+          "call": "client.Timers().Cancel(ctx, queue, timerKey, queen.TimerCancelOptions{ExpectedTransactionID})",
+          "does": "Cancel on the never-blocked DELETE route; the expected txn is echoed back on 'absent'.",
+          "source": "clients/client-go/timers.go:450"
+        },
+        {
+          "call": "client.Timers().Peek(ctx, queue, timerKey)",
+          "does": "TimerInfo{Found, DeliverAt, TransactionID, MessageID, Payload []byte, Attempts, LastError, Claimed, ...}.",
+          "source": "clients/client-go/timers.go:474"
+        },
+        {
+          "call": "client.Timers().List(ctx, queue, queen.TimerListOptions{After, Limit})",
+          "does": "TimerPage{Rows, Truncated, NextAfter}.",
+          "source": "clients/client-go/timers.go:491"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "client.Transaction()",
+          "does": "Start a bundle.",
+          "source": "clients/client-go/queen.go:86"
+        },
+        {
+          "call": ".Timers(ops...)",
+          "does": "Add timer ops to the bundle (a top-level timers array).",
+          "source": "clients/client-go/transaction_builder.go:104"
+        },
+        {
+          "call": "queen.ScheduleTimerOp(queen.TimerSchedule{...})",
+          "does": "Op: schedule.",
+          "source": "clients/client-go/timers.go:199"
+        },
+        {
+          "call": "queen.RescheduleTimerOp(s)",
+          "does": "Op: reschedule.",
+          "source": "clients/client-go/timers.go:204"
+        },
+        {
+          "call": "queen.CancelTimerOp(queue, timerKey)",
+          "does": "Op: cancel with the bundle (shares its fate and authorization).",
+          "source": "clients/client-go/timers.go:215"
+        },
+        {
+          "call": ".Ack(msg, \"completed\", queen.AckOptions{ConsumerGroup: group})",
+          "does": "Ack under the delivery's lease; pass the group.",
+          "source": "clients/client-go/transaction_builder.go:36"
+        },
+        {
+          "call": ".Commit(ctx)",
+          "does": "Send the bundle.",
+          "source": "clients/client-go/transaction_builder.go:124"
+        }
+      ],
+      "usage": "_, err := client.Transaction().\n    Timers(queen.ScheduleTimerOp(queen.TimerSchedule{\n        Queue: expiriesQueue, TimerKey: bookingID, Delay: hold,\n        Payload: map[string]interface{}{\"bookingId\": bookingID, \"room\": room},\n    })).\n    Ack(msg, \"completed\", queen.AckOptions{ConsumerGroup: reserverGroup}).\n    Commit(ctx)\n// confirming step (another message): cancel the release with that ack\ntx := client.Transaction().Timers(queen.CancelTimerOp(expiriesQueue, bookingID))\narmed, err := client.Timers().List(ctx, expiriesQueue, queen.TimerListOptions{Limit: 50})\ninfo, err := client.Timers().Peek(ctx, expiriesQueue, bookingID) // info.Found\n_, err = client.Timers().Cancel(cleanupCtx, expiriesQueue, bookingID)",
+      "usageTested": "examples/apps/go/saga/main.go",
+      "notes": "Every call takes ctx first; options are structs. Delay is a time.Duration; DeliverAt is converted to a delay at send time. Inside a transaction timers are op values built with ScheduleTimerOp / RescheduleTimerOp / CancelTimerOp and passed to .Timers(...). Peek returns the payload decoded to []byte. The transaction's Ack does not read the group from the message: pass queen.AckOptions{ConsumerGroup: ...}."
+    },
+    "php": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "$queen->timers()",
+          "does": "The timers API (no fluent builder in this client).",
+          "source": "clients/client-php/src/Queen.php:101"
+        },
+        {
+          "call": "$queen->timers()->schedule($queue, $timerKey, $delayMs, $payload, ['txn' => $txn, 'partition' => $p])",
+          "does": "Schedule (upsert): ['ok', 'status', 'queue', 'timerKey', 'txn', 'messageId', 'deliverAt'], or ok false with status 'too_late'. delayMs is an int of milliseconds.",
+          "source": "clients/client-php/src/Timers.php:64"
+        },
+        {
+          "call": "$queen->timers()->reschedule($queue, $timerKey, $delayMs, $payload, $opts)",
+          "does": "The same upsert; resets the retry budget.",
+          "source": "clients/client-php/src/Timers.php:74"
+        },
+        {
+          "call": "$queen->timers()->cancel($queue, $timerKey, $txn = null)",
+          "does": "Cancel on the never-blocked DELETE route; $txn is echoed back on 'absent'.",
+          "source": "clients/client-php/src/Timers.php:91"
+        },
+        {
+          "call": "$queen->timers()->peek($queue, $timerKey)",
+          "does": "One pending timer; payload as stored (base64). ['found' => false] on a miss.",
+          "source": "clients/client-php/src/Timers.php:111"
+        },
+        {
+          "call": "$queen->timers()->list($queue, ['after' => $cursor, 'limit' => 50])",
+          "does": "['rows', 'truncated', 'nextAfter'], no payloads (use peek).",
+          "source": "clients/client-php/src/Timers.php:129"
+        },
+        {
+          "call": "$queen->timers()->count($queue, $prefix)",
+          "does": "Exact number of pending timers under one literal timerKey prefix (GET /api/v1/timers/:queue?mode=count), falling back to walking list pages on older brokers.",
+          "source": "clients/client-php/src/Timers.php:159"
+        },
+        {
+          "call": "$queen->timers()->batch([TimerOp::schedule($queue, $key, $delayMs, $payload), ...])",
+          "does": "Several timer ops in one transaction (ops from Queen\\Support\\TimerOp).",
+          "source": "clients/client-php/src/Timers.php:323"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "$queen->transaction()",
+          "does": "Start a bundle.",
+          "source": "clients/client-php/src/Queen.php:141"
+        },
+        {
+          "call": "->timers($queue)->schedule($timerKey, $delayMs, $payload, $opts)",
+          "does": "Schedule with the bundle; timers() binds the queue. Returns the TransactionBuilder.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:301"
+        },
+        {
+          "call": "->timers($queue)->reschedule($timerKey, $delayMs, $payload, $opts)",
+          "does": "Reschedule with the bundle.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:307"
+        },
+        {
+          "call": "->timers($queue)->cancel($timerKey, $txn = null)",
+          "does": "Cancel with the bundle (shares its fate and authorization).",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:317"
+        },
+        {
+          "call": "->ack($message, 'completed', ['consumerGroup' => $group])",
+          "does": "Ack under the delivery's lease; pass the group.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:23"
+        },
+        {
+          "call": "->commit()",
+          "does": "Send the bundle.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:194"
+        }
+      ],
+      "usage": "$queen->timers()->schedule('compensation', 'txn-timer', 3_600_000, ['compensate' => true]);  // delay in ms\n$found = $queen->timers()->peek('compensation', 'txn-timer')['found'];                       // true\n$result = $queen->transaction()\n    ->timers('compensation')->cancel('txn-timer')\n    ->commit();\n// $result['success'] === true, and peek now answers ['found' => false]\n$result = $queen->transaction()\n    ->timers('compensation')->schedule('txn-timer', 3_600_000, ['compensate' => true])\n    ->commit();",
+      "usageTested": "clients/client-php/tests/Integration/TransactionRidersIntegrationTest.php",
+      "notes": "Flat positional calls, not the JS fluent builder: schedule($queue, $key, $delayMs, $payload, $opts) with the delay as an int of milliseconds. peek() returns the payload as stored, base64: json_decode(base64_decode($row['payload']), true). count() is extra in this client. Inside a transaction ->timers($queue) binds the queue: ->schedule($key, $delayMs, $payload). A cancel inside a bundle shares its fate; Timers::cancel uses the never-blocked DELETE route."
+    },
+    "rust": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "queen.timers()",
+          "does": "The timers API.",
+          "source": "clients/client-rust/src/lib.rs:178"
+        },
+        {
+          "call": "queen.timers().schedule(queue, timer_key, Duration::from_secs(600))",
+          "does": "Start a ScheduleBuilder; nothing is sent before .send().await.",
+          "source": "clients/client-rust/src/timers.rs:86"
+        },
+        {
+          "call": ".payload_json(&value)?",
+          "does": "JSON payload.",
+          "source": "clients/client-rust/src/timers.rs:243"
+        },
+        {
+          "call": ".payload(bytes)",
+          "does": "Raw payload bytes.",
+          "source": "clients/client-rust/src/timers.rs:236"
+        },
+        {
+          "call": ".partition(p)",
+          "does": "Destination partition.",
+          "source": "clients/client-rust/src/timers.rs:220"
+        },
+        {
+          "call": ".txn(t)",
+          "does": "transactionId of the delivered message.",
+          "source": "clients/client-rust/src/timers.rs:230"
+        },
+        {
+          "call": ".reschedule()",
+          "does": "Send it as a reschedule.",
+          "source": "clients/client-rust/src/timers.rs:254"
+        },
+        {
+          "call": ".send().await?",
+          "does": "Schedule: TimerResult{ok, status, message_id, deliver_at, ...}.",
+          "source": "clients/client-rust/src/timers.rs:278"
+        },
+        {
+          "call": "queen.timers().cancel(queue, timer_key).await?",
+          "does": "Cancel on the never-blocked DELETE route.",
+          "source": "clients/client-rust/src/timers.rs:107"
+        },
+        {
+          "call": "queen.timers().cancel_expecting(queue, timer_key, txn).await?",
+          "does": "Cancel and have the expected txn echoed back on 'absent'.",
+          "source": "clients/client-rust/src/timers.rs:116"
+        },
+        {
+          "call": "queen.timers().peek(queue, timer_key).await?",
+          "does": "TimerPeek{found, attempts, claimed, ...}; .payload_bytes() decodes the payload.",
+          "source": "clients/client-rust/src/timers.rs:150"
+        },
+        {
+          "call": "queen.timers().list(queue).after(cursor).limit(50).send().await?",
+          "does": "TimerPage{rows, truncated, next_after}.",
+          "source": "clients/client-rust/src/timers.rs:164"
+        },
+        {
+          "call": "queen.timers().batch(ops).await?",
+          "does": "Several timer ops in one call.",
+          "source": "clients/client-rust/src/timers.rs:180"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "queen.transaction()",
+          "does": "Start a bundle.",
+          "source": "clients/client-rust/src/lib.rs:192"
+        },
+        {
+          "call": ".schedule(queue, timer_key, Duration, payload: impl Into<Vec<u8>>)",
+          "does": "Schedule with the bundle; the payload is raw bytes (serialize JSON yourself).",
+          "source": "clients/client-rust/src/transaction.rs:250"
+        },
+        {
+          "call": ".cancel_timer(queue, timer_key)",
+          "does": "Cancel with the bundle (shares its fate and authorization).",
+          "source": "clients/client-rust/src/transaction.rs:273"
+        },
+        {
+          "call": ".timer(op: TimerOperation)",
+          "does": "Any timer op, e.g. queen.timers().schedule(..).payload_json(&v)?.operation()?",
+          "source": "clients/client-rust/src/transaction.rs:244"
+        },
+        {
+          "call": ".ack(&msg)",
+          "does": "Ack as completed (group read from the message).",
+          "source": "clients/client-rust/src/transaction.rs:82"
+        },
+        {
+          "call": ".commit().await?",
+          "does": "Send the bundle; resp.timer_results() holds the timer results.",
+          "source": "clients/client-rust/src/transaction.rs:317"
+        }
+      ],
+      "usage": "let resp = q\n    .transaction()\n    .schedule(&queue, \"timeout\", Duration::from_secs(600), b\"{\\\"phase\\\":\\\"expired\\\"}\".to_vec())\n    .commit()\n    .await?;\nq.timers()\n    .schedule(&queue, \"nope\", Duration::from_secs(2))\n    .payload_json(&serde_json::json!({\"n\": 1}))?\n    .send()\n    .await?;\nlet cancelled = q.timers().cancel(&queue, \"nope\").await?;   // cancelled.status == TimerStatus::Cancelled\nlet peek = q.timers().peek(&queue, \"timeout\").await?;        // peek.found; q.timers().list(&queue).send().await? for all",
+      "usageTested": "clients/client-rust/tests/kv_timers.rs",
+      "notes": "Standalone schedule is a builder: .payload_json(&v)? (or .payload(bytes)), then .send().await. The transaction's .schedule takes the payload as raw bytes, not a Value. Delays are std::time::Duration. Same semantics as JS: relative delays only, 'absent' on cancel may mean already delivered, the standalone cancel is the never-blocked route."
+    },
+    "cpp": {
+      "status": "partial",
+      "calls": [
+        {
+          "call": "client.timers()",
+          "does": "The timers API.",
+          "source": "clients/client-cpp/queen_client.hpp:4014"
+        },
+        {
+          "call": "TimerSchedule{queue, timer_key, payload, delay_millis, partition, txn}",
+          "does": "One timer: delay_millis is relative milliseconds; empty partition is 'Default'; an empty txn is minted.",
+          "source": "clients/client-cpp/queen_client.hpp:1213"
+        },
+        {
+          "call": "client.timers().schedule(timer)",
+          "does": "Schedule (upsert): json {ok, status, queue, timerKey, txn, messageId, deliverAt}; status scheduled | rescheduled | too_late.",
+          "source": "clients/client-cpp/queen_client.hpp:2974"
+        },
+        {
+          "call": "client.timers().cancel(queue, timer_key, txn = \"\")",
+          "does": "Cancel on the never-blocked DELETE route.",
+          "source": "clients/client-cpp/queen_client.hpp:3005"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "client.transaction()",
+          "does": "Start a bundle.",
+          "source": "clients/client-cpp/queen_client.hpp:3961"
+        },
+        {
+          "call": ".timers().schedule(timer)",
+          "does": "Schedule with the bundle; timers() is not bound to a queue (the TimerSchedule carries it).",
+          "source": "clients/client-cpp/queen_client.hpp:2674"
+        },
+        {
+          "call": ".timers().cancel(queue, timer_key, txn = \"\")",
+          "does": "Cancel with the bundle (shares its fate and authorization).",
+          "source": "clients/client-cpp/queen_client.hpp:2679"
+        },
+        {
+          "call": ".commit()",
+          "does": "Send the bundle.",
+          "source": "clients/client-cpp/queen_client.hpp:2790"
+        }
+      ],
+      "http": [
+        {
+          "call": "GET /api/v1/timers/:queue/*timerKey",
+          "does": "peek: one pending timer with its payload (base64); {found: false} on a miss, HTTP 200."
+        },
+        {
+          "call": "GET /api/v1/timers/:queue?limit=50&after=<timerKey>",
+          "does": "list: the pending timers of one queue, {rows, truncated, nextAfter}."
+        }
+      ],
+      "usage": "TimerSchedule timer;\ntimer.queue = \"compensation\";\ntimer.timer_key = \"saga-1\";\ntimer.payload = json{{\"undo\", true}};\ntimer.delay_millis = 30000;\nclient.transaction()\n    .timers().schedule(timer)\n    .commit();\nclient.timers().schedule(timer);                     // standalone: the same upsert on (queue, timer_key)\nclient.timers().cancel(\"compensation\", \"saga-1\");    // DELETE route, never blocked",
+      "usageTested": "clients/client-cpp/test_kv_timers.cpp",
+      "notes": "Missing: peek and list (no read surface for timers); use the two GET routes (see http). A reschedule is schedule() again on the same key. Results are json: read r[\"ok\"] and r[\"status\"]. The usage block comes from a wire-contract test (in-process HTTP server, no broker)."
+    }
+  },
+  "streams": {
+    "js": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "Stream.from(queen.queue(name))",
+          "does": "Entry point: a stream reading that queue (import { Stream } from 'queen-mq').",
+          "source": "clients/client-js/client-v2/streams/Stream.js:38"
+        },
+        {
+          "call": ".map(fn)",
+          "does": "Transform each message (before a window it receives the whole message, m.data...).",
+          "source": "clients/client-js/client-v2/streams/Stream.js:61"
+        },
+        {
+          "call": ".filter(predicate)",
+          "does": "Keep messages for which predicate is true.",
+          "source": "clients/client-js/client-v2/streams/Stream.js:66"
+        },
+        {
+          "call": ".flatMap(fn)",
+          "does": "Zero or more values per message.",
+          "source": "clients/client-js/client-v2/streams/Stream.js:71"
+        },
+        {
+          "call": ".keyBy(fn)",
+          "does": "Group by something other than the partition (state stays per source partition).",
+          "source": "clients/client-js/client-v2/streams/Stream.js:90"
+        },
+        {
+          "call": ".windowTumbling({ seconds, gracePeriod, idleFlushMs, eventTime, allowedLateness, onLate })",
+          "does": "Fixed back-to-back windows; seconds is required. idleFlushMs (default 5000) closes windows on quiet partitions.",
+          "source": "clients/client-js/client-v2/streams/Stream.js:107"
+        },
+        {
+          "call": ".windowSliding({ size, slide, ... })",
+          "does": "Overlapping windows, one every slide seconds.",
+          "source": "clients/client-js/client-v2/streams/Stream.js:117"
+        },
+        {
+          "call": ".windowSession({ gap, ... })",
+          "does": "Per-key activity windows; needs a reducer after it.",
+          "source": "clients/client-js/client-v2/streams/Stream.js:127"
+        },
+        {
+          "call": ".windowCron({ every: 'minute' })",
+          "does": "Wall-clock aligned windows: second | minute | hour | day | week (not cron syntax).",
+          "source": "clients/client-js/client-v2/streams/Stream.js:138"
+        },
+        {
+          "call": ".reduce(fn, initial)",
+          "does": "Fold the window's events.",
+          "source": "clients/client-js/client-v2/streams/Stream.js:149"
+        },
+        {
+          "call": ".aggregate({ count: () => 1, sum: (s) => s.amount })",
+          "does": "Named numeric fields per window; extractors receive the payload.",
+          "source": "clients/client-js/client-v2/streams/Stream.js:164"
+        },
+        {
+          "call": ".gate((value, ctx) => boolean)",
+          "does": "Per-message allow/deny with per-key ctx.state; the first denial stops the batch and the rest is redelivered in order after the lease. Cannot share a stream with a window or reducer.",
+          "source": "clients/client-js/client-v2/streams/Stream.js:223"
+        },
+        {
+          "call": ".to(queen.queue(sink), { partition })",
+          "does": "Sink: push results to a queue in the same commit (partition: a name or a function of the result).",
+          "source": "clients/client-js/client-v2/streams/Stream.js:235"
+        },
+        {
+          "call": ".foreach(fn)",
+          "does": "Terminal side effect, acked after fn resolves (at-least-once).",
+          "source": "clients/client-js/client-v2/streams/Stream.js:247"
+        },
+        {
+          "call": "await stream.run({ queryId, url, batchSize, maxPartitions, maxWaitMillis, subscriptionMode, reset, onError })",
+          "does": "Register the query and start the runner; returns a handle. queryId and url are required.",
+          "source": "clients/client-js/client-v2/streams/Stream.js:275"
+        },
+        {
+          "call": "await handle.stop()",
+          "does": "Graceful drain.",
+          "source": "clients/client-js/client-v2/streams/runtime/Runner.js:163"
+        },
+        {
+          "call": "handle.metrics()",
+          "does": "Cycle, throughput and lag stats.",
+          "source": "clients/client-js/client-v2/streams/runtime/Runner.js:172"
+        },
+        {
+          "call": "tokenBucketGate({ capacity, refillPerSec, costFn })",
+          "does": "Ready-made gate for .gate(...).",
+          "source": "clients/client-js/client-v2/streams/helpers/rateLimiter.js:45"
+        },
+        {
+          "call": "slidingWindowGate({ limit, windowSec, costFn })",
+          "does": "Ready-made gate for .gate(...).",
+          "source": "clients/client-js/client-v2/streams/helpers/rateLimiter.js:105"
+        }
+      ],
+      "inTransaction": [],
+      "usage": "import { Queen, Stream } from 'queen-mq'\nconst stream = await Stream\n  .from(queen.queue(REQUESTS))\n  .windowTumbling({ seconds: WINDOW_SECONDS, idleFlushMs: 800 })\n  .aggregate({ requests: () => 1, cost: (r) => r.cost ?? 1 })\n  .to(queen.queue(USAGE))\n  .run({ queryId: QUERY_ID, url: QUEEN_URL, subscriptionMode: 'all', batchSize: 200, maxPartitions: 8, maxWaitMillis: 200 })\n// ... later\nawait stream.stop()",
+      "usageTested": "examples/apps/js/rate-limiter.mjs",
+      "notes": "Each cycle (per partition) commits the source ack, the state change and the sink push as one transaction, so there is no separate transaction API for streams. run() needs both queryId and url: the runtime calls /streams/v1/* itself. The source is read as consumer group streams.<queryId>; a new query starts at the tail (broker default subscriptionMode 'new') unless you pass subscriptionMode: 'all'. Window state is per source partition: the partition is the grouping key. One window and one reducer per stream (chain two streams through a queue for more), at most one gate, and no gate with a window. A changed chain under the same queryId answers 409 unless reset: true, which drops the state. No retry limit or DLQ in a cycle: a message that makes the chain throw blocks its partition. Do not use queen.stream(name, namespace) / queen.consumer(...): they are the legacy API and call /api/v1/stream/* routes the 2.0 broker does not serve."
+    },
+    "python": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "Stream.from_(queen.queue(name))",
+          "does": "Entry point (trailing underscore: from is a keyword); from queen import Stream.",
+          "source": "clients/client-py/queen/streams/stream.py:55"
+        },
+        {
+          "call": "Stream.from_queue(queen.queue(name))",
+          "does": "Alias of from_.",
+          "source": "clients/client-py/queen/streams/stream.py:67"
+        },
+        {
+          "call": ".map(fn)",
+          "does": "Transform each message.",
+          "source": "clients/client-py/queen/streams/stream.py:77"
+        },
+        {
+          "call": ".filter(predicate)",
+          "does": "Keep matching messages.",
+          "source": "clients/client-py/queen/streams/stream.py:80"
+        },
+        {
+          "call": ".flat_map(fn)",
+          "does": "Zero or more values per message.",
+          "source": "clients/client-py/queen/streams/stream.py:83"
+        },
+        {
+          "call": ".key_by(fn)",
+          "does": "Group by something other than the partition.",
+          "source": "clients/client-py/queen/streams/stream.py:91"
+        },
+        {
+          "call": ".window_tumbling(seconds=60, grace_period=0, idle_flush_ms=5000, event_time=None, allowed_lateness=0, on_late=None)",
+          "does": "Fixed windows; keyword arguments.",
+          "source": "clients/client-py/queen/streams/stream.py:98"
+        },
+        {
+          "call": ".window_sliding(size=60, slide=10)",
+          "does": "Overlapping windows.",
+          "source": "clients/client-py/queen/streams/stream.py:101"
+        },
+        {
+          "call": ".window_session(gap=30)",
+          "does": "Per-key activity windows.",
+          "source": "clients/client-py/queen/streams/stream.py:104"
+        },
+        {
+          "call": ".window_cron(every=\"minute\")",
+          "does": "Wall-clock aligned windows.",
+          "source": "clients/client-py/queen/streams/stream.py:107"
+        },
+        {
+          "call": ".reduce(fn, initial)",
+          "does": "Fold the window's events.",
+          "source": "clients/client-py/queen/streams/stream.py:118"
+        },
+        {
+          "call": ".aggregate({\"count\": lambda m: 1, \"sum\": lambda m: m[\"amount\"]})",
+          "does": "Named numeric fields; extractors receive the payload.",
+          "source": "clients/client-py/queen/streams/stream.py:121"
+        },
+        {
+          "call": ".gate(fn)",
+          "does": "Per-message allow/deny with per-key state.",
+          "source": "clients/client-py/queen/streams/stream.py:126"
+        },
+        {
+          "call": ".to(queen.queue(sink), partition=None)",
+          "does": "Sink to a queue in the same commit.",
+          "source": "clients/client-py/queen/streams/stream.py:138"
+        },
+        {
+          "call": ".foreach(fn)",
+          "does": "Terminal side effect (at-least-once).",
+          "source": "clients/client-py/queen/streams/stream.py:141"
+        },
+        {
+          "call": "await stream.run(query_id=..., url=..., batch_size=200, max_partitions=4, max_wait_millis=1000, subscription_mode=\"all\", reset=False, consumer_group=None, on_error=None, bearer_token=None)",
+          "does": "Register and start; returns the Runner. query_id and url are required; options are snake_case keywords.",
+          "source": "clients/client-py/queen/streams/stream.py:146"
+        },
+        {
+          "call": "await runner.stop()",
+          "does": "Cancel the idle flush and wait for the polling loop.",
+          "source": "clients/client-py/queen/streams/runtime/runner.py:166"
+        },
+        {
+          "call": "runner.metrics()",
+          "does": "Cycle and throughput stats.",
+          "source": "clients/client-py/queen/streams/runtime/runner.py:186"
+        },
+        {
+          "call": "token_bucket_gate(capacity, refill_per_sec, cost_fn=...)",
+          "does": "Ready-made gate for .gate(...).",
+          "source": "clients/client-py/queen/streams/helpers/rate_limiter.py:38"
+        },
+        {
+          "call": "sliding_window_gate(limit, window_sec, cost_fn=...)",
+          "does": "Ready-made gate for .gate(...).",
+          "source": "clients/client-py/queen/streams/helpers/rate_limiter.py:86"
+        }
+      ],
+      "inTransaction": [],
+      "usage": "from queen import Queen, Stream\nstream = await (\n    Stream.from_(queen.queue(REQUESTS))\n    .window_tumbling(seconds=WINDOW_SECONDS, idle_flush_ms=800)\n    .aggregate({\"requests\": lambda r: 1, \"cost\": lambda r: r.get(\"cost\", 1)})\n    .to(queen.queue(USAGE))\n    .run(query_id=QUERY_ID, url=QUEEN_URL, subscription_mode=\"all\",\n         batch_size=200, max_partitions=8, max_wait_millis=200)\n)\nawait stream.stop()",
+      "usageTested": "examples/apps/py/rate_limiter.py",
+      "notes": "Same operators and defaults as JS in snake_case (flat_map, key_by, window_tumbling, ...); window and run() options are keyword arguments. run() needs query_id and url. The run() docstring says subscription_mode defaults to 'all', but the runner sends nothing when it is unset, so the broker default 'new' applies (start at the tail): pass subscription_mode='all' to process a backlog. Same limits as JS: one window and one reducer, the gate alone, 409 on a changed chain unless reset=True."
+    },
+    "go": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "streams.From(client.Queue(name).AsStreamSource())",
+          "does": "Entry point; package github.com/smartpricing/queen/clients/client-go/streams.",
+          "source": "clients/client-go/streams/stream.go:66"
+        },
+        {
+          "call": "client.Queue(name).AsStreamSource()",
+          "does": "Adapt a queue builder into a stream source.",
+          "source": "clients/client-go/streams_adapter.go:81"
+        },
+        {
+          "call": ".Map(fn)",
+          "does": "Transform each message.",
+          "source": "clients/client-go/streams/stream.go:75"
+        },
+        {
+          "call": ".Filter(fn)",
+          "does": "Keep matching messages.",
+          "source": "clients/client-go/streams/stream.go:80"
+        },
+        {
+          "call": ".FlatMap(fn)",
+          "does": "Zero or more values per message.",
+          "source": "clients/client-go/streams/stream.go:85"
+        },
+        {
+          "call": ".KeyBy(fn)",
+          "does": "Group by something other than the partition.",
+          "source": "clients/client-go/streams/stream.go:90"
+        },
+        {
+          "call": ".WindowTumbling(seconds, streams.WithIdleFlushMs(800))",
+          "does": "Fixed windows; size positional, options as With* functions.",
+          "source": "clients/client-go/streams/stream.go:95"
+        },
+        {
+          "call": ".WindowSliding(size, slide, opts...)",
+          "does": "Overlapping windows.",
+          "source": "clients/client-go/streams/stream.go:101"
+        },
+        {
+          "call": ".WindowSession(gap, opts...)",
+          "does": "Per-key activity windows.",
+          "source": "clients/client-go/streams/stream.go:106"
+        },
+        {
+          "call": ".WindowCron(every, opts...)",
+          "does": "Wall-clock aligned windows (\"minute\", ...).",
+          "source": "clients/client-go/streams/stream.go:111"
+        },
+        {
+          "call": "streams.WithIdleFlushMs(ms)",
+          "does": "Window option; also WithGracePeriod, WithEventTime, WithAllowedLateness, WithOnLate.",
+          "source": "clients/client-go/streams/operators/operators.go:1100"
+        },
+        {
+          "call": ".Reduce(fn, initial)",
+          "does": "Fold the window's events.",
+          "source": "clients/client-go/streams/stream.go:116"
+        },
+        {
+          "call": ".Aggregate(map[string]streams.ExtractorFn{...}, \"field1\", \"field2\")",
+          "does": "Named numeric fields; pass the field order after the map.",
+          "source": "clients/client-go/streams/stream.go:124"
+        },
+        {
+          "call": ".Gate(fn)",
+          "does": "Per-message allow/deny with per-key state.",
+          "source": "clients/client-go/streams/stream.go:129"
+        },
+        {
+          "call": ".To(client.Queue(sink))",
+          "does": "Sink to a queue in the same commit.",
+          "source": "clients/client-go/streams/stream.go:135"
+        },
+        {
+          "call": ".ToPartitioned(sink, resolver)",
+          "does": "Sink with a partition name or resolver function.",
+          "source": "clients/client-go/streams/stream.go:162"
+        },
+        {
+          "call": ".Foreach(fn)",
+          "does": "Terminal side effect (at-least-once).",
+          "source": "clients/client-go/streams/stream.go:167"
+        },
+        {
+          "call": ".Run(ctx, streams.RunOptions{QueryID, URL, BatchSize, MaxPartitions, MaxWaitMillis, SubscriptionMode})",
+          "does": "Register and start; returns *Runner.",
+          "source": "clients/client-go/streams/stream.go:177"
+        },
+        {
+          "call": "runner.Stop()",
+          "does": "Wait for the pop and idle-flush loops; idempotent.",
+          "source": "clients/client-go/streams/runtime/runner.go:252"
+        },
+        {
+          "call": "runner.Metrics()",
+          "does": "Cycle and throughput stats.",
+          "source": "clients/client-go/streams/runtime/runner.go:272"
+        },
+        {
+          "call": "helpers.TokenBucketGate(helpers.TokenBucketGateOptions{Capacity, RefillPerSec})",
+          "does": "Ready-made gate for .Gate(...).",
+          "source": "clients/client-go/streams/helpers/rate_limiter.go:35"
+        },
+        {
+          "call": "helpers.SlidingWindowGate(helpers.SlidingWindowGateOptions{Limit, WindowSec})",
+          "does": "Ready-made gate for .Gate(...).",
+          "source": "clients/client-go/streams/helpers/rate_limiter.go:102"
+        }
+      ],
+      "inTransaction": [],
+      "usage": "runner, err := streams.\n    From(client.Queue(requestsQueue).AsStreamSource()).\n    WindowTumbling(windowSeconds, streams.WithIdleFlushMs(800)).\n    Aggregate(map[string]streams.ExtractorFn{\n        \"requests\": func(m interface{}) (float64, error) { return 1, nil },\n        \"cost\":     func(m interface{}) (float64, error) { return cost(m), nil },\n    }, \"requests\", \"cost\").\n    To(client.Queue(usageQueue)).\n    Run(ctx, streams.RunOptions{QueryID: queryID, URL: brokerURL, BatchSize: 200,\n        MaxPartitions: 8, MaxWaitMillis: 200, SubscriptionMode: queen.SubscriptionModeAll})\nif err != nil { return fmt.Errorf(\"start the counter: %w\", err) }\ndefer runner.Stop()",
+      "usageTested": "examples/apps/go/rate-limiter/main.go",
+      "notes": "The streams engine is a sub-package (import .../clients/client-go/streams). A queue builder becomes a source with .AsStreamSource(); To takes the queue builder itself. Window sizes are positional seconds, options are With* functions. Pass the Aggregate field order after the map: a Go map has no order, the order is part of the query's identity hash, and without it the names are sorted, which hashes differently from the same query written in JS. Extractors receive the payload as interface{}. Run needs QueryID and URL."
+    },
+    "php": {
+      "status": "none",
+      "calls": [],
+      "inTransaction": [],
+      "http": [
+        {
+          "call": "POST /streams/v1/queries",
+          "does": "Register the query: {name, source_queue, sink_queue?, config_hash, reset}. Answers the query_id the next calls use; 409 when the operator chain changed under the same name and reset is not true."
+        },
+        {
+          "call": "GET /api/v1/pop/queue/:queue?consumerGroup=streams.<queryId>&batch=200&partitions=4&wait=true&timeout=1000",
+          "does": "Pop the source batch as the query's consumer group, which is what every runner does. Each message carries its partitionId and leaseId."
+        },
+        {
+          "call": "POST /streams/v1/state/get",
+          "does": "{query_id, partition_id, keys}: read the window state rows of one source partition ({rows: [{key, value, updated_at}]})."
+        },
+        {
+          "call": "POST /streams/v1/cycle",
+          "does": "{query_id, partition_id, consumer_group, state_ops, push_items, ack, release_lease}: commit the partition's positional ack (under the batch lease), the state upserts and deletes and the sink pushes as one transaction, all or nothing."
+        }
+      ],
+      "usage": null,
+      "usageTested": null,
+      "notes": "The PHP client has no streams runtime: no Stream builder, no operators, no runner. Run the stream in a JS, Python, Go or Rust process beside the PHP app, or drive the routes yourself (see http), in which case windowing, watermarks and idle flush are your code. For per-key state without a runtime, write it with $queen->kv() inside the same $queen->transaction() as the ack."
+    },
+    "rust": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "Stream::from(queen.queue(name))",
+          "does": "Entry point (use queen_mq::streams::{RunOptions, Stream}).",
+          "source": "clients/client-rust/src/streams/mod.rs:127"
+        },
+        {
+          "call": ".map(f)",
+          "does": "Transform each message.",
+          "source": "clients/client-rust/src/streams/mod.rs:142"
+        },
+        {
+          "call": ".filter(f)",
+          "does": "Keep matching messages.",
+          "source": "clients/client-rust/src/streams/mod.rs:150"
+        },
+        {
+          "call": ".flat_map(f)",
+          "does": "Zero or more values per message.",
+          "source": "clients/client-rust/src/streams/mod.rs:158"
+        },
+        {
+          "call": ".key_by(f)",
+          "does": "Group by something other than the partition.",
+          "source": "clients/client-rust/src/streams/mod.rs:174"
+        },
+        {
+          "call": ".window_tumbling(seconds)",
+          "does": "Fixed windows.",
+          "source": "clients/client-rust/src/streams/mod.rs:184"
+        },
+        {
+          "call": ".window_sliding(size, slide)",
+          "does": "Overlapping windows.",
+          "source": "clients/client-rust/src/streams/mod.rs:193"
+        },
+        {
+          "call": ".window_session(gap)",
+          "does": "Per-key activity windows.",
+          "source": "clients/client-rust/src/streams/mod.rs:198"
+        },
+        {
+          "call": ".window_cron(Every::Minute)",
+          "does": "Wall-clock aligned windows (Every::Second | Minute | Hour | Day | Week).",
+          "source": "clients/client-rust/src/streams/mod.rs:203"
+        },
+        {
+          "call": ".idle_flush_ms(ms)",
+          "does": "Window modifier, its own chain step after the window.",
+          "source": "clients/client-rust/src/streams/mod.rs:250"
+        },
+        {
+          "call": ".grace_seconds(s)",
+          "does": "Window modifier.",
+          "source": "clients/client-rust/src/streams/mod.rs:243"
+        },
+        {
+          "call": ".event_time(f)",
+          "does": "Window on a time carried in the event.",
+          "source": "clients/client-rust/src/streams/mod.rs:224"
+        },
+        {
+          "call": ".allowed_lateness(s)",
+          "does": "Event-time lateness.",
+          "source": "clients/client-rust/src/streams/mod.rs:233"
+        },
+        {
+          "call": ".on_late(LatePolicy::Include)",
+          "does": "Late-event policy (Drop is the default).",
+          "source": "clients/client-rust/src/streams/mod.rs:238"
+        },
+        {
+          "call": ".reduce(initial, f)",
+          "does": "Fold the window's events; note the (initial, f) order.",
+          "source": "clients/client-rust/src/streams/mod.rs:257"
+        },
+        {
+          "call": ".aggregate_count(name)",
+          "does": "Count field.",
+          "source": "clients/client-rust/src/streams/mod.rs:283"
+        },
+        {
+          "call": ".aggregate_sum(name, |r| r.number(\"x\"))",
+          "does": "Sum field; the extractor gets a Record over the payload.",
+          "source": "clients/client-rust/src/streams/mod.rs:292"
+        },
+        {
+          "call": ".aggregate_min(name, f)",
+          "does": "Min field.",
+          "source": "clients/client-rust/src/streams/mod.rs:305"
+        },
+        {
+          "call": ".aggregate_max(name, f)",
+          "does": "Max field.",
+          "source": "clients/client-rust/src/streams/mod.rs:317"
+        },
+        {
+          "call": ".aggregate_avg(name, f)",
+          "does": "Average field.",
+          "source": "clients/client-rust/src/streams/mod.rs:329"
+        },
+        {
+          "call": ".gate(|record, ctx| bool)",
+          "does": "Per-message allow/deny; per-key state through GateCtx num / set_num.",
+          "source": "clients/client-rust/src/streams/mod.rs:352"
+        },
+        {
+          "call": ".to(queen.queue(sink))",
+          "does": "Sink to a queue in the same commit.",
+          "source": "clients/client-rust/src/streams/mod.rs:362"
+        },
+        {
+          "call": ".to_partitioned(sink, f)",
+          "does": "Sink with a partition function.",
+          "source": "clients/client-rust/src/streams/mod.rs:371"
+        },
+        {
+          "call": ".foreach(f)",
+          "does": "Terminal async side effect (at-least-once).",
+          "source": "clients/client-rust/src/streams/mod.rs:387"
+        },
+        {
+          "call": ".run(&queen, RunOptions::new(query_id).batch_size(200).max_partitions(8).max_wait(Duration::from_millis(200)).subscription_mode(SubscriptionMode::All)).await?",
+          "does": "Register and start; returns a StreamHandle. Uses the client, no URL.",
+          "source": "clients/client-rust/src/streams/mod.rs:404"
+        },
+        {
+          "call": "RunOptions::new(query_id)",
+          "does": "Run options builder.",
+          "source": "clients/client-rust/src/streams/runner.rs:107"
+        },
+        {
+          "call": "handle.stop().await?",
+          "does": "Wait for the in-flight cycle and its flush.",
+          "source": "clients/client-rust/src/streams/runner.rs:207"
+        },
+        {
+          "call": "handle.metrics()",
+          "does": "Stream metrics.",
+          "source": "clients/client-rust/src/streams/runner.rs:219"
+        }
+      ],
+      "inTransaction": [],
+      "usage": "use queen_mq::streams::{RunOptions, Stream};\nlet counter = Stream::from(queen.queue(&requests))\n    .window_tumbling(WINDOW_SECONDS)\n    .idle_flush_ms(800)\n    .aggregate_count(\"requests\")\n    .aggregate_sum(\"cost\", |r| Some(r.number(\"cost\").unwrap_or(1.0)))\n    .to(queen.queue(&usage))\n    .run(&queen, RunOptions::new(&query_id).batch_size(200).max_partitions(8)\n        .max_wait(Duration::from_millis(200)).subscription_mode(SubscriptionMode::All))\n    .await?;\ncounter.stop().await?;",
+      "usageTested": "examples/apps/rust/src/bin/rate_limiter.rs",
+      "notes": "Window modifiers are separate chain steps after the window (idle_flush_ms, grace_seconds, event_time, allowed_lateness, on_late), and aggregates are one aggregate_* call per output field instead of an object. reduce takes (initial, f), the reverse of JS. run() takes the Queen client and RunOptions::new(query_id); there is no URL. No ready-made rate-limit gates (JS, Python and Go have tokenBucket / slidingWindow helpers): write the gate with GateCtx num / set_num. Same semantics and limits as JS."
+    },
+    "cpp": {
+      "status": "none",
+      "calls": [],
+      "inTransaction": [],
+      "http": [
+        {
+          "call": "POST /streams/v1/queries",
+          "does": "Register the query: {name, source_queue, sink_queue?, config_hash, reset}. Answers the query_id the next calls use; 409 when the operator chain changed under the same name and reset is not true."
+        },
+        {
+          "call": "GET /api/v1/pop/queue/:queue?consumerGroup=streams.<queryId>&batch=200&partitions=4&wait=true&timeout=1000",
+          "does": "Pop the source batch as the query's consumer group, which is what every runner does. Each message carries its partitionId and leaseId."
+        },
+        {
+          "call": "POST /streams/v1/state/get",
+          "does": "{query_id, partition_id, keys}: read the window state rows of one source partition ({rows: [{key, value, updated_at}]})."
+        },
+        {
+          "call": "POST /streams/v1/cycle",
+          "does": "{query_id, partition_id, consumer_group, state_ops, push_items, ack, release_lease}: commit the partition's positional ack (under the batch lease), the state upserts and deletes and the sink pushes as one transaction, all or nothing."
+        }
+      ],
+      "usage": null,
+      "usageTested": null,
+      "notes": "The C++ client has no streams runtime. Run the stream in a JS, Python, Go or Rust process, or drive the routes yourself (see http); windowing, watermarks and idle flush are then your code. For per-key state without a runtime, write KV inside the same transaction as the ack (client.transaction().kv(ns)...)."
+    }
+  },
+  "ephemeral": {
+    "js": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "queen.ephemeral",
+          "does": "The ephemeral client, a lazy singleton on Queen.",
+          "source": "clients/client-js/client-v2/Queen.js:342"
+        },
+        {
+          "call": "await queen.ephemeral.push(queue, messages, { partition, buffered })",
+          "does": "Push one message or many, all-or-nothing: {pushed}. buffered (true or { messageCount, timeMillis, maxSize }) batches client-side and resolves {buffered: true, count} once the messages are in the buffer.",
+          "source": "clients/client-js/client-v2/ephemeral/Ephemeral.js:320"
+        },
+        {
+          "call": "await queen.ephemeral.pop(queue, { partition, batch, wait, timeout, group, autoAck })",
+          "does": "Take up to batch messages: {queue, messages: [{id, partition, payload, attempts}]}, messages [] when empty. wait: true is a real long poll; timeout in ms (default 30000 when waiting). group: same group competes, own group fans out, none is queue mode. autoAck is at-most-once.",
+          "source": "clients/client-js/client-v2/ephemeral/Ephemeral.js:409"
+        },
+        {
+          "call": "await queen.ephemeral.ack(queue, messages, { group, status })",
+          "does": "Ack popped messages (or ids, or {id, status}): {results: [{id, outcome: acked | redelivered | stale | unknown}]}. status completed (default) | failed | retry.",
+          "source": "clients/client-js/client-v2/ephemeral/Ephemeral.js:467"
+        },
+        {
+          "call": "await queen.ephemeral.configure(queue, { maxLength, maxBytes, policy, ttlSeconds, leaseSeconds, retryLimit, windowBuffer })",
+          "does": "Declare non-default bounds; the options survive restarts, the contents never do. policy 'reject' (429 queue_full) or 'dropOldest'. Unknown options are a 400.",
+          "source": "clients/client-js/client-v2/ephemeral/Ephemeral.js:271"
+        },
+        {
+          "call": "await queen.ephemeral.flush(queue, { partition, deadlineMillis })",
+          "does": "Send what is buffered for one queue/partition now.",
+          "source": "clients/client-js/client-v2/ephemeral/Ephemeral.js:377"
+        },
+        {
+          "call": "await queen.ephemeral.reset(queue)",
+          "does": "Drop every message, lease and group cursor: {dropped}. Configuration stays.",
+          "source": "clients/client-js/client-v2/ephemeral/Ephemeral.js:286"
+        },
+        {
+          "call": "await queen.ephemeral.delete(queue)",
+          "does": "Delete contents, cursors and configuration.",
+          "source": "clients/client-js/client-v2/ephemeral/Ephemeral.js:293"
+        },
+        {
+          "call": "await queen.ephemeral.queues()",
+          "does": "Every ephemeral queue of the tenant on the answering node.",
+          "source": "clients/client-js/client-v2/ephemeral/Ephemeral.js:487"
+        },
+        {
+          "call": "await queen.ephemeral.depth(queue)",
+          "does": "Depth gauges and per-group cursors; the only verb that raises EPHEMERAL_QUEUE_NOT_FOUND.",
+          "source": "clients/client-js/client-v2/ephemeral/Ephemeral.js:502"
+        }
+      ],
+      "inTransaction": [],
+      "usage": "// responder: competing consumers in group 'workers'\nconst { messages } = await queen.ephemeral.pop('rpc-requests', { group: 'workers', batch: 10, wait: true, timeout: 1000 })\nfor (const m of messages) {\n  await queen.ephemeral.push(m.payload.replyTo, [{ n: m.payload.n, squared: m.payload.n ** 2 }])\n}\nawait queen.ephemeral.ack('rpc-requests', messages, { group: 'workers' })\n// requester: a throw-away inbox per request, never declared\nconst inbox = `rpc-inbox-${randomUUID()}`\nawait queen.ephemeral.push('rpc-requests', [{ n: 7, replyTo: inbox }])\nconst reply = await queen.ephemeral.pop(inbox, { batch: 1, wait: true, timeout: 5000, autoAck: true })\nif (reply.messages.length === 0) throw new Error('no reply within 5 s')",
+      "usageTested": null,
+      "notes": "No SDK has a request() helper: request/reply is a push to a requests queue carrying a replyTo inbox name, then a long-poll pop on that inbox with autoAck (at-most-once is right for a reply). Contents live in the RAM of the partition's owner node: a crash loses them, a SIGTERM hands them to the next owner. A queue is created by the first push or pop that names it, and an idle implicit queue is collected after 300 s. No transactions (an ephemeral push cannot ride a transaction), no DLQ, no replay, no subscriptionMode. Unacked messages come back after the 30 s lease with attempts+1, up to retryLimit (5), then they are dropped. Ack with the same group the pop used; outcome 'stale' (message from a previous owner incarnation) is an answer, not an error. A message whose object has a 'data' or 'payload' key is read as the push sugar: wrap it as {payload: obj} when that object IS the payload. Errors carry .code EPHEMERAL_UNSUPPORTED (broker without the routes) or EPHEMERAL_QUEUE_NOT_FOUND (depth on a missing queue); branch on the code. The usage follows examples/36-ephemeral-reqreply.js, a runnable example that is not in the run.sh suite."
+    },
+    "python": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "queen.ephemeral",
+          "does": "The ephemeral client (property on Queen).",
+          "source": "clients/client-py/queen/client.py:332"
+        },
+        {
+          "call": "await queen.ephemeral.push(queue, messages, partition=None, buffered=None)",
+          "does": "Push one or many, all-or-nothing: {pushed}; buffered batches client-side.",
+          "source": "clients/client-py/queen/ephemeral/ephemeral.py:468"
+        },
+        {
+          "call": "await queen.ephemeral.pop(queue, partition=None, batch=None, wait=False, timeout=None, group=None, auto_ack=False)",
+          "does": "{queue, messages}, messages [] when empty; timeout (or timeout_millis) in ms.",
+          "source": "clients/client-py/queen/ephemeral/ephemeral.py:587"
+        },
+        {
+          "call": "await queen.ephemeral.ack(queue, acks, group=None, status=None, error=None)",
+          "does": "Ack popped messages or ids: {results: [{id, outcome}]}.",
+          "source": "clients/client-py/queen/ephemeral/ephemeral.py:683"
+        },
+        {
+          "call": "await queen.ephemeral.configure(queue, max_length=..., max_bytes=..., policy=..., ttl_seconds=..., lease_seconds=..., retry_limit=..., window_buffer=...)",
+          "does": "Declare bounds; snake_case keywords or one mapping; unknown options are refused.",
+          "source": "clients/client-py/queen/ephemeral/ephemeral.py:413"
+        },
+        {
+          "call": "await queen.ephemeral.flush(queue, partition=None)",
+          "does": "Send the buffered messages now.",
+          "source": "clients/client-py/queen/ephemeral/ephemeral.py:568"
+        },
+        {
+          "call": "await queen.ephemeral.reset(queue)",
+          "does": "Drop contents, leases and cursors.",
+          "source": "clients/client-py/queen/ephemeral/ephemeral.py:444"
+        },
+        {
+          "call": "await queen.ephemeral.delete(queue)",
+          "does": "Delete the queue and its configuration.",
+          "source": "clients/client-py/queen/ephemeral/ephemeral.py:456"
+        },
+        {
+          "call": "await queen.ephemeral.queues()",
+          "does": "List the tenant's ephemeral queues.",
+          "source": "clients/client-py/queen/ephemeral/ephemeral.py:728"
+        },
+        {
+          "call": "await queen.ephemeral.depth(queue)",
+          "does": "Depth gauges; raises for a missing queue.",
+          "source": "clients/client-py/queen/ephemeral/ephemeral.py:737"
+        }
+      ],
+      "inTransaction": [],
+      "usage": "# responder: competing consumers in group \"workers\"\nres = await queen.ephemeral.pop(\"rpc-requests\", group=\"workers\", batch=10, wait=True, timeout=1000)\nfor m in res[\"messages\"]:\n    await queen.ephemeral.push(m[\"payload\"][\"replyTo\"], [{\"squared\": m[\"payload\"][\"n\"] ** 2}])\nawait queen.ephemeral.ack(\"rpc-requests\", res[\"messages\"], group=\"workers\")\n# requester: a throw-away inbox per request\ninbox = f\"rpc-inbox-{uuid.uuid4()}\"\nawait queen.ephemeral.push(\"rpc-requests\", [{\"n\": 7, \"replyTo\": inbox}])\nreply = await queen.ephemeral.pop(inbox, batch=1, wait=True, timeout=5000, auto_ack=True)\nif not reply[\"messages\"]:\n    raise TimeoutError(\"no reply within 5 s\")",
+      "usageTested": null,
+      "notes": "No SDK has a request() helper: request/reply is a push to a requests queue carrying a replyTo inbox name, then a long-poll pop on that inbox with autoAck (at-most-once is right for a reply). Contents live in the RAM of the partition's owner node: a crash loses them, a SIGTERM hands them to the next owner. A queue is created by the first push or pop that names it, and an idle implicit queue is collected after 300 s. No transactions (an ephemeral push cannot ride a transaction), no DLQ, no replay, no subscriptionMode. Unacked messages come back after the 30 s lease with attempts+1, up to retryLimit (5), then they are dropped. Ack with the same group the pop used; outcome 'stale' (message from a previous owner incarnation) is an answer, not an error. A message whose object has a 'data' or 'payload' key is read as the push sugar: wrap it as {payload: obj} when that object IS the payload. Python differences: snake_case keywords (auto_ack, timeout or timeout_millis, max_length, ttl_seconds, ...); results are dicts (res['messages'])."
+    },
+    "go": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "client.Ephemeral()",
+          "does": "The ephemeral API.",
+          "source": "clients/client-go/ephemeral.go:377"
+        },
+        {
+          "call": "eph.Push(ctx, queue, messages, queen.EphemeralPushOptions{Partition, Buffered})",
+          "does": "Push one value, a slice, or EphemeralMessage{Payload}: EphemeralPushResult.",
+          "source": "clients/client-go/ephemeral.go:493"
+        },
+        {
+          "call": "eph.Pop(ctx, queue, queen.EphemeralPopOptions{Partition, Batch, Wait, TimeoutMillis, Group, AutoAck})",
+          "does": "EphemeralBatch{Queue, Messages []EphemeralPopped{ID, Partition, Payload json.RawMessage, Attempts}}.",
+          "source": "clients/client-go/ephemeral.go:597"
+        },
+        {
+          "call": "eph.Ack(ctx, queue, batch.Messages, queen.EphemeralAckOptions{Group, Status, Error})",
+          "does": "Ack the batch, its messages, ids or EphemeralAck values: []EphemeralAckResult{ID, Outcome}.",
+          "source": "clients/client-go/ephemeral.go:697"
+        },
+        {
+          "call": "eph.Configure(ctx, queue, queen.EphemeralOptions{MaxBytes, MaxLength, Policy, TTLSeconds, LeaseSeconds, RetryLimit, WindowBuffer})",
+          "does": "Declare bounds (pointer fields; queen.Int64 helps).",
+          "source": "clients/client-go/ephemeral.go:398"
+        },
+        {
+          "call": "eph.Flush(ctx, queue, opts...)",
+          "does": "Send buffered messages now.",
+          "source": "clients/client-go/ephemeral.go:576"
+        },
+        {
+          "call": "eph.Reset(ctx, queue)",
+          "does": "Drop contents; returns the dropped count.",
+          "source": "clients/client-go/ephemeral.go:417"
+        },
+        {
+          "call": "eph.Delete(ctx, queue)",
+          "does": "Delete the queue and its configuration.",
+          "source": "clients/client-go/ephemeral.go:456"
+        },
+        {
+          "call": "eph.Queues(ctx)",
+          "does": "List the tenant's ephemeral queues.",
+          "source": "clients/client-go/ephemeral.go:752"
+        },
+        {
+          "call": "eph.Depth(ctx, queue)",
+          "does": "Depth gauges; code EphemeralCodeQueueNotFound for a missing queue.",
+          "source": "clients/client-go/ephemeral.go:768"
+        },
+        {
+          "call": "queen.GenerateUUID()",
+          "does": "A fresh id for an inbox name.",
+          "source": "clients/client-go/uuid.go:9"
+        }
+      ],
+      "inTransaction": [],
+      "usage": "eph := client.Ephemeral()\nbatch, err := eph.Pop(ctx, \"rpc-requests\", queen.EphemeralPopOptions{Group: \"workers\", Batch: 10, Wait: true, TimeoutMillis: 1000})\nfor _, m := range batch.Messages {\n    var req rpcRequest\n    _ = json.Unmarshal(m.Payload, &req)\n    _, err = eph.Push(ctx, req.ReplyTo, rpcReply{N: req.N, Squared: req.N * req.N})\n}\n_, err = eph.Ack(ctx, \"rpc-requests\", batch.Messages, queen.EphemeralAckOptions{Group: \"workers\"})\ninbox := \"rpc-inbox-\" + queen.GenerateUUID()\n_, err = eph.Push(ctx, \"rpc-requests\", rpcRequest{N: 7, ReplyTo: inbox})\nreply, err := eph.Pop(ctx, inbox, queen.EphemeralPopOptions{Batch: 1, Wait: true, TimeoutMillis: 5000, AutoAck: true})",
+      "usageTested": null,
+      "notes": "No SDK has a request() helper: request/reply is a push to a requests queue carrying a replyTo inbox name, then a long-poll pop on that inbox with autoAck (at-most-once is right for a reply). Contents live in the RAM of the partition's owner node: a crash loses them, a SIGTERM hands them to the next owner. A queue is created by the first push or pop that names it, and an idle implicit queue is collected after 300 s. No transactions (an ephemeral push cannot ride a transaction), no DLQ, no replay, no subscriptionMode. Unacked messages come back after the 30 s lease with attempts+1, up to retryLimit (5), then they are dropped. Ack with the same group the pop used; outcome 'stale' (message from a previous owner incarnation) is an answer, not an error. A message whose object has a 'data' or 'payload' key is read as the push sugar: wrap it as {payload: obj} when that object IS the payload. Go differences: ctx first, option structs; a popped Payload is json.RawMessage (json.Unmarshal it); errors are EphemeralUnsupportedError vs code EphemeralCodeQueueNotFound. The usage follows clients/client-go/examples/10-ephemeral-reqreply/main.go, a runnable example that no test suite runs."
+    },
+    "php": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "$queen->ephemeral()",
+          "does": "The ephemeral client.",
+          "source": "clients/client-php/src/Queen.php:129"
+        },
+        {
+          "call": "$queen->ephemeral()->push($queue, $messages, ['partition' => $p, 'buffered' => true])",
+          "does": "Push one or many, all-or-nothing: ['pushed' => n]. A bare associative array is ONE message, a list is many.",
+          "source": "clients/client-php/src/Ephemeral.php:188"
+        },
+        {
+          "call": "$queen->ephemeral()->pop($queue, ['partition', 'batch', 'wait', 'timeout', 'group', 'autoAck'])",
+          "does": "['queue' => ..., 'messages' => [...]], messages [] when empty; timeout (alias timeoutMillis) in ms.",
+          "source": "clients/client-php/src/Ephemeral.php:288"
+        },
+        {
+          "call": "$queen->ephemeral()->ack($queue, $messages, ['group' => $g, 'status' => 'retry'])",
+          "does": "Ack popped messages, ids or wire arrays: ['results' => [['id', 'outcome']]].",
+          "source": "clients/client-php/src/Ephemeral.php:364"
+        },
+        {
+          "call": "$queen->ephemeral()->configure($queue, ['maxLength', 'maxBytes', 'policy', 'ttlSeconds', 'leaseSeconds', 'retryLimit', 'windowBuffer'])",
+          "does": "Declare bounds; unknown keys are refused.",
+          "source": "clients/client-php/src/Ephemeral.php:128"
+        },
+        {
+          "call": "$queen->ephemeral()->flush($queue, $partition = null)",
+          "does": "Send buffered messages now.",
+          "source": "clients/client-php/src/Ephemeral.php:249"
+        },
+        {
+          "call": "$queen->ephemeral()->reset($queue)",
+          "does": "Drop contents, leases and cursors.",
+          "source": "clients/client-php/src/Ephemeral.php:146"
+        },
+        {
+          "call": "$queen->ephemeral()->delete($queue)",
+          "does": "Delete the queue and its configuration.",
+          "source": "clients/client-php/src/Ephemeral.php:154"
+        },
+        {
+          "call": "$queen->ephemeral()->queues()",
+          "does": "List the tenant's ephemeral queues.",
+          "source": "clients/client-php/src/Ephemeral.php:391"
+        },
+        {
+          "call": "$queen->ephemeral()->depth($queue)",
+          "does": "Depth gauges; EphemeralQueueNotFoundException for a missing queue.",
+          "source": "clients/client-php/src/Ephemeral.php:406"
+        }
+      ],
+      "inTransaction": [],
+      "usage": "$eph = $queen->ephemeral();\n// responder: competing consumers in group 'workers'\n$batch = $eph->pop('rpc-requests', ['group' => 'workers', 'batch' => 10, 'wait' => true, 'timeout' => 1000]);\nforeach ($batch['messages'] as $m) {\n    $eph->push($m['payload']['replyTo'], [['payload' => ['squared' => $m['payload']['n'] ** 2]]]);\n}\n$eph->ack('rpc-requests', $batch['messages'], ['group' => 'workers']);\n// requester: a throw-away inbox per request\n$inbox = 'rpc-inbox-' . bin2hex(random_bytes(8));\n$eph->push('rpc-requests', [['payload' => ['n' => 7, 'replyTo' => $inbox]]]);\n$reply = $eph->pop($inbox, ['batch' => 1, 'wait' => true, 'timeout' => 5000, 'autoAck' => true]);\nif ($reply['messages'] === []) { throw new RuntimeException('no reply within 5 s'); }",
+      "usageTested": null,
+      "notes": "No SDK has a request() helper: request/reply is a push to a requests queue carrying a replyTo inbox name, then a long-poll pop on that inbox with autoAck (at-most-once is right for a reply). Contents live in the RAM of the partition's owner node: a crash loses them, a SIGTERM hands them to the next owner. A queue is created by the first push or pop that names it, and an idle implicit queue is collected after 300 s. No transactions (an ephemeral push cannot ride a transaction), no DLQ, no replay, no subscriptionMode. Unacked messages come back after the 30 s lease with attempts+1, up to retryLimit (5), then they are dropped. Ack with the same group the pop used; outcome 'stale' (message from a previous owner incarnation) is an answer, not an error. A message whose object has a 'data' or 'payload' key is read as the push sugar: wrap it as {payload: obj} when that object IS the payload. PHP differences: option arrays with camelCase keys ('autoAck', 'timeout'); results are arrays. A pop with wait blocks the PHP worker for up to timeout ms."
+    },
+    "rust": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "queen.ephemeral()",
+          "does": "The ephemeral API.",
+          "source": "clients/client-rust/src/lib.rs:187"
+        },
+        {
+          "call": "eph.push(queue, payload).partition(p).buffered(opts).send().await?",
+          "does": "Push one serializable payload: EphemeralPushed. A builder: nothing is sent before .send().await.",
+          "source": "clients/client-rust/src/ephemeral.rs:265"
+        },
+        {
+          "call": "eph.push_many(queue, payloads).send().await?",
+          "does": "Push several payloads in one request.",
+          "source": "clients/client-rust/src/ephemeral.rs:274"
+        },
+        {
+          "call": "eph.pop(queue).group(g).batch(10).wait(true).poll_timeout(Duration::from_secs(5)).auto_ack(true).send().await?",
+          "does": "EphemeralBatch{queue, group, messages: Vec<EphemeralDelivered{id, partition, payload: Value, attempts}>}.",
+          "source": "clients/client-rust/src/ephemeral.rs:319"
+        },
+        {
+          "call": "eph.ack(&batch).await?",
+          "does": "Ack the whole batch as completed; the queue and group come from the batch.",
+          "source": "clients/client-rust/src/ephemeral.rs:340"
+        },
+        {
+          "call": "eph.nack(&batch, reason).await?",
+          "does": "Fail the whole batch (back with attempts+1 until retryLimit).",
+          "source": "clients/client-rust/src/ephemeral.rs:347"
+        },
+        {
+          "call": "eph.ack_with(&batch, EphemeralStatus::Retry, None).await?",
+          "does": "Ack a batch with an explicit status.",
+          "source": "clients/client-rust/src/ephemeral.rs:357"
+        },
+        {
+          "call": "eph.ack_ids(queue, acks).group(g).send().await?",
+          "does": "Hand-built acks; the group must be supplied.",
+          "source": "clients/client-rust/src/ephemeral.rs:389"
+        },
+        {
+          "call": "eph.configure(queue, EphemeralOptions { .. }).await?",
+          "does": "Declare bounds.",
+          "source": "clients/client-rust/src/ephemeral.rs:214"
+        },
+        {
+          "call": "eph.flush_buffer(queue, partition).await?",
+          "does": "Send buffered messages now.",
+          "source": "clients/client-rust/src/ephemeral.rs:308"
+        },
+        {
+          "call": "eph.reset(queue).await?",
+          "does": "Drop contents; returns the dropped count.",
+          "source": "clients/client-rust/src/ephemeral.rs:231"
+        },
+        {
+          "call": "eph.delete(queue).await?",
+          "does": "Delete the queue and its configuration.",
+          "source": "clients/client-rust/src/ephemeral.rs:248"
+        },
+        {
+          "call": "eph.queues().await?",
+          "does": "List the tenant's ephemeral queues.",
+          "source": "clients/client-rust/src/ephemeral.rs:408"
+        },
+        {
+          "call": "eph.depth(queue).await?",
+          "does": "Depth gauges.",
+          "source": "clients/client-rust/src/ephemeral.rs:423"
+        },
+        {
+          "call": "queen_mq::uuid::uuidv7()",
+          "does": "A fresh id for an inbox name.",
+          "source": "clients/client-rust/src/uuid.rs:64"
+        }
+      ],
+      "inTransaction": [],
+      "usage": "let eph = queen.ephemeral();\n// responder: competing consumers in group \"workers\"\nlet batch = eph.pop(\"rpc-requests\").group(\"workers\").batch(10).wait(true).poll_timeout(Duration::from_secs(1)).send().await?;\nfor m in &batch.messages {\n    let reply_to = m.payload[\"replyTo\"].as_str().unwrap_or_default();\n    eph.push(reply_to, serde_json::json!({\"ok\": true})).send().await?;\n}\neph.ack(&batch).await?;                      // queue and group travel with the batch\n// requester: a throw-away inbox per request\nlet inbox = format!(\"rpc-inbox-{}\", queen_mq::uuid::uuidv7());\neph.push(\"rpc-requests\", serde_json::json!({\"n\": 7, \"replyTo\": inbox})).send().await?;\nlet reply = eph.pop(&inbox).batch(1).wait(true).poll_timeout(Duration::from_secs(5)).auto_ack(true).send().await?;",
+      "usageTested": null,
+      "notes": "No SDK has a request() helper: request/reply is a push to a requests queue carrying a replyTo inbox name, then a long-poll pop on that inbox with autoAck (at-most-once is right for a reply). Contents live in the RAM of the partition's owner node: a crash loses them, a SIGTERM hands them to the next owner. A queue is created by the first push or pop that names it, and an idle implicit queue is collected after 300 s. No transactions (an ephemeral push cannot ride a transaction), no DLQ, no replay, no subscriptionMode. Unacked messages come back after the 30 s lease with attempts+1, up to retryLimit (5), then they are dropped. Ack with the same group the pop used; outcome 'stale' (message from a previous owner incarnation) is an answer, not an error. A message whose object has a 'data' or 'payload' key is read as the push sugar: wrap it as {payload: obj} when that object IS the payload. Rust differences: push and pop are builders ending in .send().await; ack takes the whole EphemeralBatch (no group to repeat), ack_ids is the escape hatch and needs the group; poll_timeout is a Duration."
+    },
+    "cpp": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "client.ephemeral()",
+          "does": "The ephemeral API (flat methods, no builder chain).",
+          "source": "clients/client-cpp/queen_client.hpp:4036"
+        },
+        {
+          "call": "client.ephemeral().push(queue, messages, EphemeralPushOptions{partition})",
+          "does": "Push a json value or array, all-or-nothing: {pushed}. Unbuffered only.",
+          "source": "clients/client-cpp/queen_client.hpp:3174"
+        },
+        {
+          "call": "client.ephemeral().pop(queue, EphemeralPopOptions{partition, batch, wait, timeout_millis, group, auto_ack})",
+          "does": "json {queue, messages}, messages [] when empty.",
+          "source": "clients/client-cpp/queen_client.hpp:3203"
+        },
+        {
+          "call": "client.ephemeral().ack(queue, acks, EphemeralAckOptions{group, status, error})",
+          "does": "Ack popped messages or ids: {results: [{id, outcome}]}.",
+          "source": "clients/client-cpp/queen_client.hpp:3271"
+        },
+        {
+          "call": "client.ephemeral().ack(queue, acks, true, group)",
+          "does": "Boolean sugar: true is completed, false is failed.",
+          "source": "clients/client-cpp/queen_client.hpp:3284"
+        },
+        {
+          "call": "client.ephemeral().configure(queue, EphemeralOptions{max_bytes, max_length, policy, ttl_seconds, lease_seconds, retry_limit, window_buffer})",
+          "does": "Declare bounds.",
+          "source": "clients/client-cpp/queen_client.hpp:3128"
+        },
+        {
+          "call": "client.ephemeral().reset(queue)",
+          "does": "Drop contents, leases and cursors.",
+          "source": "clients/client-cpp/queen_client.hpp:3145"
+        },
+        {
+          "call": "client.ephemeral().del(queue)",
+          "does": "Delete the queue and its configuration (spelled del).",
+          "source": "clients/client-cpp/queen_client.hpp:3156"
+        },
+        {
+          "call": "client.ephemeral().queues()",
+          "does": "List the tenant's ephemeral queues.",
+          "source": "clients/client-cpp/queen_client.hpp:3299"
+        },
+        {
+          "call": "client.ephemeral().depth(queue)",
+          "does": "Depth gauges; EphemeralQueueNotFoundError for a missing queue.",
+          "source": "clients/client-cpp/queen_client.hpp:3315"
+        }
+      ],
+      "inTransaction": [],
+      "usage": "auto eph = client.ephemeral();\nEphemeralPopOptions work;\nwork.group = \"workers\"; work.batch = 10; work.wait = true; work.timeout_millis = 1000;\njson batch = eph.pop(\"rpc-requests\", work);\nfor (const auto& m : batch[\"messages\"]) {\n    eph.push(m[\"payload\"][\"replyTo\"].get<std::string>(), json::array({json{{\"ok\", true}}}));\n}\nEphemeralAckOptions acked;\nacked.group = \"workers\";\neph.ack(\"rpc-requests\", batch[\"messages\"], acked);\nEphemeralPopOptions reply_wait;\nreply_wait.batch = 1; reply_wait.wait = true; reply_wait.timeout_millis = 5000; reply_wait.auto_ack = true;",
+      "usageTested": null,
+      "notes": "No SDK has a request() helper: request/reply is a push to a requests queue carrying a replyTo inbox name, then a long-poll pop on that inbox with autoAck (at-most-once is right for a reply). Contents live in the RAM of the partition's owner node: a crash loses them, a SIGTERM hands them to the next owner. A queue is created by the first push or pop that names it, and an idle implicit queue is collected after 300 s. No transactions (an ephemeral push cannot ride a transaction), no DLQ, no replay, no subscriptionMode. Unacked messages come back after the 30 s lease with attempts+1, up to retryLimit (5), then they are dropped. Ack with the same group the pop used; outcome 'stale' (message from a previous owner incarnation) is an answer, not an error. A message whose object has a 'data' or 'payload' key is read as the push sugar: wrap it as {payload: obj} when that object IS the payload. C++ differences: option structs, json results, delete is del, and push is unbuffered (the JS, Python and PHP buffered push is not wired here). The requester side is eph.push(\"rpc-requests\", ...) with a replyTo inbox, then eph.pop(inbox, reply_wait)."
+    }
+  },
+  "client": {
+    "go": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "client, err := queen.New(brokerURL)",
+          "does": "Create the client; its type is *queen.Queen (pass that to your own functions)",
+          "source": "examples/full/go/produce-consume/main.go:52"
+        },
+        {
+          "call": "func readSaga(ctx context.Context, client *queen.Queen, bookingID string)",
+          "does": "A helper taking the client, as the tested saga writes it",
+          "source": "examples/apps/go/saga/main.go:601"
+        },
+        {
+          "call": "client.Ack(ctx, msg, true, queen.AckOptions{ConsumerGroup: group})",
+          "does": "Standalone ack: the third argument is a bool, true = completed, false = failed; it cannot send dlq or retry",
+          "source": "clients/client-go/queen.go:93"
+        },
+        {
+          "call": "client.Transaction().Ack(msg, \"dlq\", queen.AckOptions{ConsumerGroup: group, Error: reason}).Commit(ctx)",
+          "does": "Any status (completed, failed, retry, dlq) goes through a transaction ack, which takes a string",
+          "source": "clients/client-go/transaction_builder.go:36"
+        }
+      ]
+    },
+    "js": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "import { Queen } from 'queen-mq'; const queen = new Queen({ url: QUEEN_URL })",
+          "does": "Create the client",
+          "source": "examples/apps/js/saga.mjs:90"
+        }
+      ]
+    },
+    "python": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "from queen import Queen; queen = Queen(url=QUEEN_URL)",
+          "does": "Create the client",
+          "source": "examples/apps/py/saga.py:102"
+        }
+      ]
+    },
+    "php": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "use Queen\\Queen; $queen = new Queen($QUEEN_URL);",
+          "does": "Create the client",
+          "source": "examples/apps/php/chat.php:66"
+        }
+      ]
+    },
+    "rust": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "let queen = Queen::connect(Config::new(&url))?;",
+          "does": "Create the client",
+          "source": "examples/apps/rust/src/bin/webhooks.rs:100"
+        }
+      ]
+    }
+  }
+}

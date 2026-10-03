@@ -1,0 +1,367 @@
+/* Figures drawn from specs (src/components/Figure.astro, src/lib/figures.ts).
+ *
+ * Every colour here is a theme token, so a figure follows the theme toggle
+ * with no second file. The data colours are the dashboard's own chart tokens
+ * (app/src/style.css, --series-* and --cat-*): a grey ramp whose first slot is
+ * the ink, amber for attention, coral for failure. A chart about Queen draws
+ * Queen in the ink and everything else in grey, the way the dashboard draws
+ * one queue against the rest. */
+
+:root {
+	--qf-s1: #1f1d1a;
+	--qf-s2: #8f8a83;
+	--qf-s3: #b0aaa2;
+	--qf-s4: #4f4b45;
+	--qf-s5: #cdc7bf;
+	--qf-c1: #44689e;
+	--qf-c2: #2c7a6a;
+	--qf-c3: #6f4fa0;
+	--qf-c4: #5b7a26;
+	--qf-c5: #9a4d73;
+	--qf-warn: var(--nb-warning);
+	--qf-danger: var(--nb-danger);
+}
+:root[data-mode="dark"] {
+	--qf-s1: #eeebe6;
+	--qf-s2: #8f8a83;
+	--qf-s3: #66625c;
+	--qf-s4: #bdb7af;
+	--qf-s5: #4a4743;
+	--qf-c1: #7f9fd0;
+	--qf-c2: #6fb3a3;
+	--qf-c3: #b092d0;
+	--qf-c4: #a3b56f;
+	--qf-c5: #d08fae;
+}
+
+.qf {
+	margin: 1.75rem 0;
+}
+.qf-frame {
+	overflow-x: auto;
+	border: 1px solid var(--nb-border);
+	border-radius: 0.625rem;
+	background: var(--nb-card);
+	padding: 1rem 0.75rem;
+}
+.qf-svg {
+	display: block;
+	width: 100%;
+	height: auto;
+	margin: 0 auto;
+	font-family: var(--nb-font-sans);
+	font-variant-numeric: tabular-nums;
+	overflow: visible;
+}
+.qf figcaption {
+	margin-top: 0.625rem;
+	font-size: 0.8125rem;
+	line-height: 1.55;
+	color: var(--nb-muted-foreground);
+}
+.qf-source code {
+	font-size: 0.75rem;
+}
+
+/* ---- Text ---- */
+.qf-t {
+	font-size: 13px;
+	font-weight: 500;
+	fill: var(--nb-foreground);
+}
+.qf-head {
+	font-size: 12.5px;
+	font-weight: 600;
+}
+.qf-mono {
+	font-family: var(--nb-font-mono);
+	font-size: 12px;
+}
+.qf-ts {
+	font-size: 11.5px;
+	font-weight: 400;
+	fill: var(--nb-muted-foreground);
+}
+.qf-te,
+.qf-ml {
+	font-size: 11.5px;
+	font-weight: 500;
+	fill: var(--nb-muted-foreground);
+	paint-order: stroke;
+	stroke: var(--nb-card);
+	stroke-width: 5px;
+	stroke-linejoin: round;
+}
+.qf-ml {
+	font-size: 12px;
+	fill: var(--nb-foreground);
+}
+.qf-te-strong,
+.qf-ml-strong {
+	fill: var(--nb-foreground);
+	font-weight: 600;
+}
+.qf-te-warn,
+.qf-ml-warn {
+	fill: var(--nb-warning);
+}
+.qf-te-danger,
+.qf-ml-danger {
+	fill: var(--nb-danger);
+}
+.qf-ml-faint {
+	fill: var(--nb-muted-foreground);
+	font-weight: 400;
+}
+.qf-note {
+	font-size: 11.5px;
+	fill: var(--nb-muted-foreground);
+}
+.qf-note-warn {
+	fill: var(--nb-warning);
+}
+.qf-note-danger {
+	fill: var(--nb-danger);
+}
+
+/* ---- Boxes ---- */
+.qf-n rect,
+.qf-n path,
+.qf-n ellipse {
+	fill: var(--nb-background);
+	stroke: var(--nb-border-strong);
+	stroke-width: 1.25;
+}
+.qf-n-strong rect,
+.qf-n-strong path,
+.qf-n-strong ellipse {
+	fill: var(--nb-accent);
+	stroke: var(--nb-foreground);
+	stroke-width: 1.4;
+}
+.qf-n-ghost rect,
+.qf-n-ghost path,
+.qf-n-ghost ellipse {
+	fill: none;
+	stroke-dasharray: 4 3;
+}
+.qf-n-warn rect,
+.qf-n-warn path,
+.qf-n-warn ellipse {
+	fill: var(--nb-warning-muted);
+	stroke: var(--nb-warning);
+}
+.qf-n-danger rect,
+.qf-n-danger path,
+.qf-n-danger ellipse {
+	fill: var(--nb-danger-muted);
+	stroke: var(--nb-danger);
+}
+
+.qf-g rect {
+	fill: none;
+	stroke: var(--nb-border-strong);
+	stroke-width: 1;
+	stroke-dasharray: 5 4;
+}
+.qf-g-warn rect {
+	stroke: var(--nb-warning);
+}
+.qf-g-danger rect {
+	stroke: var(--nb-danger);
+}
+.qf-gl {
+	font-size: 10.5px;
+	font-weight: 600;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	fill: var(--nb-muted-foreground);
+	/* drawn after the lines, so a line crossing the label passes behind it */
+	paint-order: stroke;
+	stroke: var(--nb-card);
+	stroke-width: 5px;
+	stroke-linejoin: round;
+}
+
+/* ---- Lines ---- */
+.qf-e {
+	fill: none;
+	stroke: var(--nb-muted-foreground);
+	stroke-width: 1.3;
+}
+.qf-e-strong {
+	stroke: var(--nb-foreground);
+	stroke-width: 1.6;
+}
+.qf-e-faint {
+	stroke: var(--nb-border-strong);
+}
+.qf-e-warn {
+	stroke: var(--nb-warning);
+}
+.qf-e-danger {
+	stroke: var(--nb-danger);
+}
+.qf-ah {
+	fill: var(--nb-muted-foreground);
+}
+.qf-ah-strong {
+	fill: var(--nb-foreground);
+}
+.qf-ah-faint {
+	fill: var(--nb-border-strong);
+}
+.qf-ah-warn {
+	fill: var(--nb-warning);
+}
+.qf-ah-danger {
+	fill: var(--nb-danger);
+}
+
+/* ---- Sequence ---- */
+.qf-life {
+	stroke: var(--nb-border-strong);
+	stroke-width: 1;
+	stroke-dasharray: 3 4;
+}
+.qf-sn rect {
+	fill: var(--nb-muted);
+	stroke: var(--nb-border-strong);
+	stroke-width: 1;
+}
+.qf-sn text {
+	font-size: 11.5px;
+	fill: var(--nb-foreground);
+}
+.qf-sn-strong rect {
+	fill: var(--nb-accent);
+	stroke: var(--nb-foreground);
+}
+.qf-sn-warn rect {
+	fill: var(--nb-warning-muted);
+	stroke: var(--nb-warning);
+}
+.qf-sn-danger rect {
+	fill: var(--nb-danger-muted);
+	stroke: var(--nb-danger);
+}
+.qf-div line {
+	stroke: var(--nb-border-strong);
+	stroke-dasharray: 2 4;
+}
+.qf-div rect {
+	fill: var(--nb-card);
+	stroke: var(--nb-border-strong);
+}
+.qf-div text {
+	font-size: 11px;
+	font-weight: 500;
+	fill: var(--nb-muted-foreground);
+}
+
+/* ---- Charts ---- */
+.qf-grid {
+	stroke: var(--nb-border);
+	stroke-width: 1;
+}
+.qf-axis {
+	stroke: var(--nb-border-strong);
+	stroke-width: 1;
+}
+.qf-tick {
+	font-size: 11px;
+	fill: var(--nb-muted-foreground);
+}
+.qf-axt {
+	font-size: 11.5px;
+	font-weight: 500;
+	fill: var(--nb-muted-foreground);
+}
+.qf-cat {
+	font-size: 12px;
+	fill: var(--nb-foreground);
+}
+.qf-line {
+	fill: none;
+	stroke: var(--c);
+	stroke-width: 1.6;
+	stroke-linejoin: round;
+	stroke-linecap: round;
+}
+.qf-primary .qf-line {
+	stroke-width: 2.2;
+}
+.qf-line.qf-dense,
+.qf-primary .qf-line.qf-dense {
+	stroke-width: 1.1;
+}
+.qf-mark {
+	fill: var(--c);
+	stroke: var(--nb-card);
+	stroke-width: 1.5;
+}
+.qf-mark.qf-hollow {
+	fill: var(--nb-card);
+	stroke: var(--c);
+	stroke-width: 1.6;
+}
+.qf-bar {
+	fill: var(--c);
+}
+.qf-end {
+	font-size: 12px;
+	font-weight: 500;
+	fill: var(--nb-muted-foreground);
+}
+.qf-primary .qf-end {
+	font-weight: 600;
+	fill: var(--nb-foreground);
+}
+.qf-val {
+	font-size: 11px;
+	fill: var(--nb-muted-foreground);
+}
+.qf-primary .qf-val {
+	font-weight: 600;
+	fill: var(--nb-foreground);
+}
+.qf-missing {
+	font-style: italic;
+	font-weight: 400;
+}
+.qf-ann {
+	font-size: 11px;
+	fill: var(--nb-muted-foreground);
+}
+.qf-halo {
+	paint-order: stroke;
+	stroke: var(--nb-card);
+	stroke-width: 4px;
+	stroke-linejoin: round;
+}
+.qf-band rect {
+	fill: var(--nb-muted);
+}
+.qf-band-warn rect {
+	fill: var(--nb-warning-muted);
+}
+.qf-band-danger rect {
+	fill: var(--nb-danger-muted);
+}
+.qf-ref line {
+	stroke: var(--nb-muted-foreground);
+	stroke-width: 1;
+	stroke-dasharray: 4 4;
+}
+.qf-ref-warn line {
+	stroke: var(--nb-warning);
+}
+.qf-ref-warn text {
+	fill: var(--nb-warning);
+}
+.qf-ref-danger line {
+	stroke: var(--nb-danger);
+}
+.qf-ref-danger text {
+	fill: var(--nb-danger);
+}

@@ -62,6 +62,17 @@ export async function GET() {
     "most fetch pipelines, which truncate it without reporting that they did. Take it",
     "only if you know your own limit is larger.",
     "",
+    // An agent that reads only this file should still learn that the docs also
+    // come as tools: the MCP server answers from this same build, and adds the
+    // tested code per language, the trap checklist and the setup recipes.
+    "## For coding agents",
+    "",
+    `Queen's MCP server, over Streamable HTTP with no sign-in: ${abs("/mcp")}`,
+    "",
+    "It answers from these docs, with tested code in every client language, the checklist of",
+    "known traps, what each error means, which Kafka clients work, and setup recipes for KV,",
+    `timers, streams and the Postgres and S3 connectors. Setup for each agent: ${abs("/start/ai-agents/")}`,
+    "",
     "## Pages",
     "",
     // The landing page is a hand-written `index.astro`, not a `docs` entry, so

@@ -1,6 +1,6 @@
 ---
 title: Contributing
-description: "The repository layout, how to build and test the broker, and the rules a change to the engine, the docs or a benchmark claim must follow."
+description: "The repository layout, how to build and test the broker, and the rules a change to the engine, the docs or a benchmark claim follows, with the reason for each."
 type: concept
 tier: internals
 sidebar:
@@ -13,16 +13,21 @@ sourceOfTruth:
   - build.sh
   - test/run.sh
   - test/README.md
+  - test/raft/lint/deny-bites.sh
   - webdoc/package.json
   - webdoc/scripts/gen-snippets.mjs
   - webdoc/scripts/check-sourceoftruth.mjs
   - webdoc/scripts/check-prose.mjs
 ---
 
-Queen is one repository with one Rust binary in it: the broker, which links the proxy and the Kafka
-facade as libraries and embeds the dashboard. The broker keeps its state in a data directory, so
-building, testing and running it needs no database. Pull requests target `master`; run the suite
-of the component you touched.
+Queen is one repository with one Rust binary at its center: the broker, which links the proxy and
+the Kafka facade as libraries and embeds the dashboard. It keeps its state in a data directory, so
+building it, testing it and running it needs no database and no other service. A clean clone and a
+Rust toolchain are enough to build a node and run it, and that is a property we work to keep.
+
+Pull requests target `master`. Run the suite of the component you touched, and read the rules
+below before you change the engine: each one is there because breaking it is silent until it is
+expensive.
 
 ## The repository
 
@@ -34,15 +39,15 @@ of the component you touched.
 | `proxy/` | The multi-tenant proxy, linked by the `server` feature; `proxy/console/` is its operator console. |
 | `app/` | The dashboard (Vue and Vite). It builds into `server/webapp/dist`, which the binary embeds. |
 | `crates/queen-protocol/` | Shared wire types for the Rust client and the embedded library API. |
-| `test/` | `run.sh` (the Docker test matrix), `jepsen/`, `recovery/` (failure rehearsals), `raft/` (lint and harnesses). |
+| `test/` | `run.sh` (the Docker test matrix), `jepsen/`, `recovery/` (failure rehearsals), `raft/` (the determinism lint and harnesses). |
 | `benchmark-queen/` | Archived benchmark sessions: harness, raw output, results. |
 | `webdoc/` | This site. |
 
 ## Build and run
 
-The committed `server/webapp/dist` and `proxy/console/dist` let a clean clone compile. Rebuild the
-dashboard when you change `app/`, then rebuild the broker, because the assets are embedded at
-compile time:
+The committed `server/webapp/dist` and `proxy/console/dist` let a clean clone compile without
+Node. When you change `app/`, rebuild the dashboard and then the broker, because the assets are
+embedded at compile time:
 
 ```sh
 npm --prefix app ci && npm --prefix app run build
@@ -56,54 +61,57 @@ QUEEN_RAFT_DIR=./queen-data ./server/target/release/queen
 curl -s localhost:6632/health
 ```
 
-`/health` answers `503` with `"status":"settling"` until the node is ready, then `200`. Delete the
-directory to start empty. The version comes from `server/server.json` (`server/build.rs` embeds
-it). The minimum Rust version is 1.88 (`rust-version` in `server/Cargo.toml`). `./build.sh` builds
-the product image from the root `Dockerfile`.
+`/health` answers `503` with `"status":"settling"` until the node knows a leader and has caught up,
+then `200`. Delete the directory to start empty. The version comes from `server/server.json`
+(`server/build.rs` embeds it), the minimum Rust version is 1.88 (`rust-version` in
+`server/Cargo.toml`), and `./build.sh` builds the product image from the root `Dockerfile`.
 
 ## Test
 
 | Command | What it runs |
 |---|---|
 | `cargo test --manifest-path server/Cargo.toml --locked` | The broker's in-process tests: engine, crash, recovery and cluster tests under `server/src/rsm/tests/`. |
-| `test/run.sh` | Every client suite against a fresh single node, flag-off and default-tenant (`single`, `tenanted`), in Docker. |
+| `test/run.sh` | Every client suite against a fresh single node, with the tenancy header off and on (`single`, `tenanted`), in Docker. |
 | `test/run.sh --suite js --topo single,ha` | The same suite against a three-node openraft cluster as well. |
-| `test/run.sh --suite http` | Every KV and timer route at the raw wire, with no SDK. |
+| `test/run.sh --suite http` | Every KV and timer route at the raw wire, with no SDK in between. |
 | `test/raft/lint/deny-bites.sh` | Proves the determinism lint still refuses a clock, an environment read and a random number. |
 
 `test/run.sh` builds the broker image as `queen:test`, gives every suite and topology its own
 Compose project with fresh volumes, and prints a pass/fail matrix. The tenancy parity gate fails
-the run when a suite's `single` and `tenanted` results differ. CI runs the same matrix
+the run when a suite's `single` and `tenanted` results differ, because the tenancy header must
+change nothing for a client that does not send it. CI runs the same matrix
 (`.github/workflows/tests.yml`).
 
-The Jepsen suite is in `test/jepsen/` (Clojure, Leiningen, five nodes over SSH): `run-matrix.sh`
-runs one test per line of a matrix file on the control node. The failure rehearsals behind the
+The Jepsen suite is in `test/jepsen/` (Clojure and Leiningen, five nodes over SSH): `run-matrix.sh`
+runs one test per line of a matrix file from the control node. The failure rehearsals behind the
 recovery runbook are in `test/recovery/`. Neither runs in CI.
 
 ## Rules for engine changes
 
-- **Apply is pure.** `rsm/apply.rs`, `rsm/state/` and `rsm/store/` may not read a clock, the
-  environment or a random number: `server/clippy.toml` lists those calls and the three modules
-  deny them. Time and ids come from the planner, inside the entry. Run `test/raft/lint/deny-bites.sh`
-  after you change that list.
-- **Bytes on disk are versioned.** Effects and outcomes share one catalogue version. A new field
-  is a new version decoded beside the old one, never an edit of an existing encoder, and the golden
-  fixtures in `server/src/rsm/tests/golden/` fail when an encoding changes. A cluster raises its
-  version only once every member reads it, so mixed versions can roll.
-- **Nothing blocks the async runtime.** Every I/O and RPC has a deadline, store and file calls run
-  on blocking threads, and no `std::sync::Mutex` is held across an `.await`.
+**Apply is pure.** `rsm/apply.rs`, `rsm/state/` and `rsm/store/` may not read a clock, the
+environment or a random number: `server/clippy.toml` lists those calls, and the three modules deny
+them. Time and ids come from the planner, inside the entry. This is the rule every replica's
+correctness rests on, so after you change the list, run `test/raft/lint/deny-bites.sh`, which
+plants one call of each kind in `rsm/apply.rs` and requires clippy to refuse every one.
+
+**Bytes on disk are versioned.** Effects and outcomes share one catalogue version. A new field is a
+new version decoded beside the old one, never an edit of an existing encoder, and the golden
+fixtures in `server/src/rsm/tests/golden/` fail when an encoding changes. A cluster raises its
+version only once every member can read it, which is what lets a rolling upgrade run nodes of two
+releases side by side.
+
+**Nothing blocks the async runtime.** Every I/O and RPC has a deadline, store and file calls run on
+blocking threads, and no `std::sync::Mutex` is held across an `.await`. A blocking call on a
+runtime thread stalls every request scheduled behind it.
 
 ## Rules for the docs
 
-- **`sourceOfTruth` is a debt list.** Each page names the files that govern it, and
-  `check-sourceoftruth.mjs` fails a page whose last commit is older than the last commit of any of
-  them. Update the page in the same change as the code.
-- **Code on a page ran.** Prefer a snippet generated from a tested file over code you type.
-- **Generated partials are not edited by hand.** Run `pnpm --dir webdoc gen`.
-- **One gate.** `pnpm --dir webdoc verify` runs the generator drift check, the build, the markdown
-  and brief checks, the linter, the prose check (no em dashes) and the `sourceOfTruth` check.
+**`sourceOfTruth` is a debt list.** Each page names the files that govern it, and
+`check-sourceoftruth.mjs` fails a page whose last commit is older than the last commit of any of
+them. Update the page in the same change as the code.
 
-A snippet is a marked region of a file a suite executes. This one is in
+**Code on a page ran.** Prefer a snippet generated from a tested file over code you type. A snippet
+is a marked region of a file that a suite executes. This one is in
 `clients/client-js/test-v2/docs.js`:
 
 ```js
@@ -119,10 +127,19 @@ const res = await client
 `webdoc/src/content/partials/snippets/<id>.mdx`, and a page includes it with
 `<Render file="snippets/js-push" />`. The marker works after any comment prefix (`//`, `#`, `--`).
 
+**Generated partials are not edited by hand.** The route tables, the environment variables and the
+metric families are read out of the Rust by `webdoc/scripts/gen-*.mjs`; run `pnpm --dir webdoc gen`.
+Where a generator mirrors Rust logic in JavaScript (the access levels, the proxy's route classes),
+it guards the mirror with a fingerprint of the Rust function and refuses to run when the function
+changes, until someone re-reads it.
+
+**One gate.** `pnpm --dir webdoc verify` runs the generator drift check, the build, the markdown
+and brief checks, the linter, the prose check and the `sourceOfTruth` check.
+
 ## Rules for benchmarks
 
 **A number is published only with an archived artifact under `benchmark-queen/`**: the harness, the
 raw output and the conditions (hardware, node count, shape, duration). The site's benchmark figures
 are rendered from those artifacts by `webdoc/scripts/charts.py`, and the drift check fails when a
-figure no longer matches its data. A number without an artifact is a claim nobody can check: leave
-it out.
+figure no longer matches its data. A number without an artifact is a claim nobody can check, so it
+stays out.

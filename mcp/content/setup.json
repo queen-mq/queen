@@ -1,0 +1,68 @@
+[
+  {
+    "feature": "kv",
+    "title": "KV state",
+    "pages": ["concepts/kv"],
+    "related": ["concepts/transactions", "reference/limits"],
+    "card": "kv",
+    "words": "kv key value state store versioned expect ttl"
+  },
+  {
+    "feature": "timers",
+    "title": "Timers",
+    "pages": ["concepts/timers"],
+    "related": ["concepts/transactions", "guides/state-machines"],
+    "card": "timers",
+    "words": "timer timers delay schedule reminder timeout deadline cancel"
+  },
+  {
+    "feature": "streams",
+    "title": "Stream processing",
+    "pages": ["guides/streams"],
+    "related": ["concepts/consuming", "concepts/transactions"],
+    "card": "streams",
+    "words": "stream streams window windowed aggregate cycle operator gate"
+  },
+  {
+    "feature": "ephemeral",
+    "title": "Ephemeral queues and request/reply",
+    "pages": ["guides/ephemeral"],
+    "related": [],
+    "card": "ephemeral",
+    "words": "ephemeral request reply rpc"
+  },
+  {
+    "feature": "kafka",
+    "title": "Kafka clients through the Kafka facade",
+    "pages": ["guides/kafka"],
+    "related": ["reference/kafka", "guides/kafka-frameworks"],
+    "card": null,
+    "words": "kafka facade topic offset bootstrap"
+  },
+  {
+    "feature": "pg-source",
+    "title": "Postgres source: tables into queues",
+    "pages": ["guides/postgres"],
+    "skip": ["How a message becomes a row"],
+    "related": [],
+    "card": null,
+    "words": "postgres postgresql source cdc replication slot publication wal snapshot change events"
+  },
+  {
+    "feature": "pg-sink",
+    "title": "Postgres sink: queues into tables",
+    "pages": ["guides/postgres"],
+    "skip": ["The change events"],
+    "related": [],
+    "card": null,
+    "words": "postgres postgresql sink upsert append table row columns"
+  },
+  {
+    "feature": "s3-sink",
+    "title": "S3 sink: queues into object storage",
+    "pages": ["guides/s3"],
+    "related": [],
+    "card": null,
+    "words": "s3 sink bucket object storage jsonl parquet minio lake"
+  }
+]

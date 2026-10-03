@@ -1,0 +1,558 @@
+---
+title: Recovery
+description: "What breaks in a single node or a cluster of three or five, how to tell which case you are in, and the commands that bring it back. Every procedure here was rehearsed under load."
+type: how-to
+tier: operate
+sidebar:
+  order: 7
+sourceOfTruth:
+  - server/src/rsm/replicator/raft/repair.rs
+  - server/src/rsm/replicator/raft/admin.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/cluster.rs
+  - server/src/rsm/replicator/raft/log_store.rs
+  - server/src/rsm/replicator/node.rs
+  - server/src/rsm/replicator/mod.rs
+  - server/src/rsm/replicator/local.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/mod.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/qlog/set.rs
+  - server/src/rsm/store/sigbus.rs
+  - server/src/handlers/raft.rs
+  - server/src/handlers/ephemeral.rs
+  - server/src/ephemeral.rs
+  - server/src/encryption.rs
+  - server/src/main.rs
+  - test/recovery/README.md
+  - test/recovery/FINDINGS.md
+verifiedBy:
+  - test/recovery/sc01-crash.sh
+  - test/recovery/sc02-snapshot.sh
+  - test/recovery/sc03-replace.sh
+  - test/recovery/sc03c-empty-voter.sh
+  - test/recovery/sc05-diskfull.sh
+  - test/recovery/sc08-config.sh
+  - test/recovery/sc09-quorum-loss.sh
+  - test/recovery/sc11-force-recover.sh
+  - test/recovery/sc13-addresses.sh
+  - test/recovery/sc14-apply-skip.sh
+  - test/recovery/sc16-split-brain.sh
+  - test/recovery/k8s-K1-replace.sh
+  - test/recovery/k8s-K2c-ondelete.sh
+  - test/recovery/k8s-K3-skip.sh
+digest: >-
+  Queen recovery (2.0.0-beta.6): `/health` answering 200 does not prove a cluster can commit,
+  because a node cut off from its majority keeps the last leader it knew; test with a write such
+  as `PUT /api/v1/kv/ops/probe` with a `ttlSeconds`, which answers within a second when the
+  cluster commits. A node whose disk is lost or damaged is replaced by removing it from the
+  membership first (`DELETE /api/v1/system/raft/membership/members/:id`), wiping it, starting it
+  empty and adding it back as a learner, then promoting it; a voter that comes back empty without
+  being removed never catches up. A majority of disks lost for good needs
+  `QUEEN_RAFT_FORCE_RECOVER=<survivor id>` on exactly one node, which can lose writes only the lost
+  nodes held. A deterministic apply failure stops every node and is stepped over with the
+  `QUEEN_RAFT_APPLY_SKIP=<index>:<digest>` value the log prints, set on every node.
+---
+
+Most failures need nothing from you. A node that crashes starts again on its own directory and
+catches up from the leader, a leader that gets SIGTERM hands its job to a caught-up peer before it
+stops, and a node that was away too long loads a snapshot and carries on. This page is for the
+rest: a lost disk, a lost majority, a damaged file, a rollout that went wrong. We broke clusters in
+each of these ways on purpose and ran the procedures below against them, most of them while a load
+generator kept writing. Afterwards a ledger of every acknowledged write was checked, one write at a
+time, and often through the repaired node alone.
+
+<Aside title="How these procedures were tested">
+On 2026-10-01, on 2.0.0-beta.1, with three Docker containers built like Kubernetes pods and with a
+local k3s cluster running a StatefulSet for the `kubectl` steps. On 2026-10-02 the plain-host
+procedures ran again on 2.0.0-beta.6, as three processes on one machine. The scripts, and the tool
+that keeps a ledger of every write and proves afterwards which ones survived, are in
+`test/recovery/` (start with its `README.md`).
+</Aside>
+
+## One node
+
+A single node fsyncs every write before it answers, so a crash, a kill -9 or a power cut loses
+nothing it acknowledged: start it again on the same directory and it replays its log. What one node
+cannot survive is losing that directory, which is what [backups](/operate/recovery-backups/) are
+for.
+
+| What happened | What to do |
+|---|---|
+| The process crashed or was killed, the machine rebooted, the power went | Start it on the same directory. There is nothing to repair |
+| Writes answer `507 storage_full` | The volume is above 85% (`QUEEN_RAFT_DISK_HIGH_PCT`). Grow it, or let retention delete; reads, acks and deletes still work. At 100% the node stops (role `stopped`): grow the volume and restart it |
+| It refuses to start with a `FATAL` line naming a damaged file, or exits with code 139 and no line at all | [Restore the last backup](/operate/recovery-backups/#restore-one-node). There is no peer to copy from |
+| The disk is gone | Restore the last backup. Writes after it are lost |
+| It stops with `APPLY FAILED at entry N ... a DETERMINISTIC refusal` | A bug. Keep the line for the report, then run a release that fixes it or restore a backup. The line suggests `QUEEN_RAFT_APPLY_SKIP`, but only cluster nodes read that variable |
+
+Ephemeral queues on a single node live in its memory and end with the process, a graceful stop
+included, because there is no peer to hand them to.
+
+## A cluster: start with a write
+
+With three or five nodes, the question that decides everything is whether the cluster can still
+commit, and `/health` cannot tell you. A node that lost its majority keeps the last leader it knew,
+so it goes on answering `200 healthy` with `"leader":true`. In the beta.6 rehearsal, with two of
+three nodes killed, the survivor said exactly that for as long as we watched, while every write
+sent through it hung. So ask with a write:
+
+<Tabs>
+<TabItem label="Plain hosts">
+
+```bash
+curl -s -m 10 -X PUT http://queen-1:6632/api/v1/kv/ops/probe \
+  -H 'content-type: application/json' -d "{\"value\":\"$(date -u +%FT%TZ)\",\"ttlSeconds\":60}"
+```
+
+</TabItem>
+<TabItem label="Kubernetes">
+
+```bash
+# q POD PATH [curl options]: the broker API from inside a pod (the image ships curl)
+q() { kubectl -n queen exec "$1" -c queen -- curl -s -m 30 "${@:3}" "localhost:6632$2"; echo; }
+
+q queen-0 /api/v1/kv/ops/probe -m 10 -X PUT -H 'content-type: application/json' \
+  -d "{\"value\":\"$(date -u +%FT%TZ)\",\"ttlSeconds\":60}"
+```
+
+</TabItem>
+</Tabs>
+
+```json
+{"applied":true,"index":0,"key":"probe","op":"put","value":"2026-10-02T13:26:02Z","version":21}
+```
+
+An answer within a second (0.09 s through a follower in the rehearsal) means the cluster commits,
+and you are looking for one sick node. No answer within 10 s means it does not. The probe writes
+one KV key that expires after a minute. Send it through a second node before you conclude anything
+about the first, because a node that is itself broken can hang while the cluster is fine.
+
+The plain-host commands assume nodes `queen-1` to `queen-3` with the client port 6632 and the raft
+port 7400, as on [Run a cluster](/operate/cluster/). The Kubernetes ones use the names of the
+[Kubernetes](/operate/kubernetes/) manifest: namespace `queen`, StatefulSet `queen`, pods `queen-0`
+to `queen-2`, volumes `data-queen-0` to `data-queen-2`. **Pod `queen-0` is node 1.** The membership
+API takes node ids and `kubectl` takes pod names, and mixing the two up is the easiest mistake to
+make on a bad day. With broker authentication on (`JWT_ENABLED=true`), add an admin token to every
+call; the membership routes are refused on the proxy's port, so always call port 6632.
+
+Then ask every node what it thinks:
+
+<Tabs>
+<TabItem label="Plain hosts">
+
+```bash
+HEALTH='{status, role: .raft.role, term: .raft.term, applied: .raft.applied, commit: .raft.commit,
+    failure: .raft.apply.failure}'
+MEMBERS='.membership | ({source, viewAgeMs, leader, term, voters, learners, joint},
+    (.members[] | {nodeId, voter, matched, lag, live}))'
+
+for n in queen-1 queen-2 queen-3; do
+  echo "$n $(curl -s -m 2 http://$n:6632/health | jq -c "$HEALTH")"
+done
+curl -s http://queen-1:6632/api/v1/system/raft/membership | jq -c "$MEMBERS"
+```
+
+</TabItem>
+<TabItem label="Kubernetes">
+
+```bash
+HEALTH='{status, role: .raft.role, term: .raft.term, applied: .raft.applied, commit: .raft.commit,
+    failure: .raft.apply.failure}'
+MEMBERS='.membership | ({source, viewAgeMs, leader, term, voters, learners, joint},
+    (.members[] | {nodeId, voter, matched, lag, live}))'
+
+kubectl -n queen get pods -l app=queen -o wide
+for i in 0 1 2; do echo "queen-$i $(q queen-$i /health | jq -c "$HEALTH")"; done
+q queen-0 /api/v1/system/raft/membership | jq -c "$MEMBERS"
+kubectl -n queen logs queen-1 --previous | grep FATAL | tail -1    # why a pod will not start
+```
+
+</TabItem>
+</Tabs>
+
+On a healthy cluster every node reports the same term and an `applied` close to the leader's
+`commit`. The membership is the leader's own view (`"source":"leader"`) whenever the node you asked
+can reach a leader. When it cannot, the answer says `"source":"follower"`, its `viewAgeMs` keeps
+growing and every member shows `"live":false`. After the probe itself, that is the clearest sign of
+a lost majority: the survivor in the rehearsal answered with a view 60 s old while its `/health`
+still said `healthy`. A node that will not start names the reason in its last `FATAL` line, in
+`journalctl`, `docker logs` or `kubectl logs --previous`.
+
+## Find your case
+
+<Figure id="operate/recovery-cases" />
+
+### The cluster commits, one node is sick
+
+| What you see | What it is | Do |
+|---|---|---|
+| A node restarted and is healthy again, `lag` 0 | A crash, an OOM kill, an eviction, a reboot | Nothing |
+| A node exited once with code 75, its log says `the process exits to load a received snapshot` | It was away longer than the leader kept the log for it (`QUEEN_RAFT_PURGE_HOLD_S`, 600 s) and loaded a snapshot on its next start | Nothing |
+| A node refuses to start: `FATAL` with `rsm qlog corrupt`, `damaged record at byte`, `does not parse`, `bus error (SIGBUS)` or `Cannot re-apply logs` | Damaged or missing files | [Replace it](#replace-a-node) |
+| A node crash-loops with exit code 139 and no `FATAL` line | A damaged store file | [Replace it](#replace-a-node) |
+| A cluster node refuses with `was written by the local replicator` | Its `raft/state.json` is gone (the message is misleading) | [Replace it](#replace-a-node) |
+| A node answers `200` but its `applied` sits at 0 or far below the others, often with role `learner`, while the membership lists it as a voter | It came back empty, or from an old copy, without being removed first | [Replace it](#replace-a-node), starting with the removal |
+| Pops through one node fail with `500` and `record checksum` | Damaged old data in that node's queue logs | [Replace it](#replace-a-node) |
+| Writes sent to one node answer `507`, or the node is `stopped` after `raft log write failed: No space left on device` | Its disk is full | [Grow it](#a-disk-is-full) |
+| A node logs `refused this node's QUEEN_RAFT_TOKEN` | The nodes do not share one token | [Configuration](#configuration-mistakes) |
+| A node refuses with `QUEEN_RAFT_NODE_ID=N is not in QUEEN_RAFT_PEERS` | A wrong peer list | [Configuration](#configuration-mistakes) |
+| Consumers of an encrypted queue receive `{"encrypted":...,"iv":...,"authTag":...}` as data | `QUEEN_ENCRYPTION_KEY` changed | [Put the key back](#configuration-mistakes) |
+| An empty node serves `503`, role `learner`, term 0, and logs `this fresh node joins an existing cluster` | A replacement waiting to be added | Continue [the replacement](#replace-a-node) at step 4 |
+
+### The cluster does not commit
+
+| What you see | What it is | Do |
+|---|---|---|
+| Every node `stopped`, `/health` 503 with `apply.failure.class` `deterministic` | A poisoned entry: a bug that apply refuses on every node | [Skip it](#a-poisoned-entry-stops-every-node) |
+| A majority of the nodes is down, their disks intact | A lost quorum, for now | [Bring them back](#a-majority-is-down-the-disks-are-fine) |
+| A majority of the disks is gone for good, or a majority of the voters came back empty | A lost majority | [Force-recover one survivor](#a-majority-of-the-disks-is-gone-for-good) |
+| Every disk is gone | Everything | [Restore a backup](/operate/recovery-backups/#restore-a-cluster) |
+| Nodes disagree about the voters or the `clusterId`, or two of them lead | Two clusters | [Split brain](#two-clusters) |
+| The membership lists addresses that no longer resolve, and no node reaches another | Renamed hosts, namespace or service | [Peer addresses](#the-peer-addresses-changed) |
+| The membership shows `joint`, and changes answer `409 in_flight` | A membership change stopped half-way | [Finish it](#a-membership-change-stopped-half-way) |
+
+## Rules for a bad day
+
+Each of these comes from a rehearsal where breaking it made things worse.
+
+1. Change one node at a time, and wait until it is healthy before you touch the next. In the
+   Kubernetes rehearsal, deleting two pods' volumes together left a cluster that could not commit
+   while every pod reported Ready.
+2. Remove a node from the membership before you wipe it. A voter that comes back empty under its
+   old id is never repaired: the leader keeps replicating from where the node used to be, the node
+   answers `200`, and its clients hang. In the beta.6 rehearsal the load generator managed 104
+   writes in 45 s instead of about 1,800, because its requests through that node waited out their
+   deadline.
+3. Never put an old copy back on one node of a running cluster. Its log went backwards, which is
+   the same stall. Replace the node instead.
+4. Never delete files inside a data directory to make room. A missing queue-log file is not noticed
+   at boot, and the node then serves holes. Grow the volume, or replace the node.
+5. Set `QUEEN_RAFT_FORCE_RECOVER` on exactly one node, and only when a majority is gone for good.
+   On two nodes it makes two clusters.
+6. Give every node the same disk size. The disk gate refuses writes from the node's own clients at
+   85%, but entries the other nodes accept keep replicating into it until it is full.
+7. Keep `QUEEN_ENCRYPTION_KEY` safe and unchanged. With a different key, consumers of encrypted
+   queues receive the ciphertext envelope as their data, and nothing reports an error.
+
+## A node crashed or restarted
+
+Nothing to do. The node replays its log, catches up from the leader, and its `/health` turns 200
+once it has caught up. A leader that gets SIGTERM hands leadership to the most caught-up voter
+before it drains, so a planned restart costs one transfer and no election.
+
+In the 2026-10-01 rehearsal (beta.1, Docker, under load), kill -9 of the leader gave a new leader
+within 4 s and the old one was back and caught up 4 s later; SIGTERM of the leader handed off in
+14 ms; no acknowledged write of 3,300 was lost. A node that was away longer than the leader keeps
+the log for it receives a snapshot, exits with code 75 and loads it on its next start. On beta.6, a
+node away 45 s with the hold shortened to 20 s did exactly that, and then served all 2,325
+acknowledged pushes by itself. Do not delete such a node's volume: that turns a 10-second
+catch-up into a rebuild.
+
+## Replace a node
+
+This is the workhorse, for every "replace it" row above. The node comes back empty and copies
+everything from the leader, so nothing is lost as long as the other nodes commit. Before you start,
+check that the probe commits through another node and that the other members show `"live":true`.
+
+<Tabs>
+<TabItem label="Plain hosts">
+
+```bash
+# 1. Remove node 3 from the membership, through a healthy node.
+curl -s -X DELETE http://queen-1:6632/api/v1/system/raft/membership/members/3 \
+  | jq -c '{ok, voters: .membership.voters, code, error}'
+
+# 2. On queen-3: stop the node and move its data directory away.
+systemctl stop queen               # or docker stop -t 60 queen
+mv /var/lib/queen/raft /var/lib/queen/raft.broken
+
+# 3. Start it on the empty directory, with QUEEN_RAFT_JOIN=true in its environment.
+
+# 4. Add it as a learner, then promote it.
+curl -s -X POST http://queen-1:6632/api/v1/system/raft/membership/learners \
+  -H 'content-type: application/json' -d '{"id":3,"raft":"queen-3:7400","http":"queen-3:6632"}'
+curl -s -X POST http://queen-1:6632/api/v1/system/raft/membership/promote \
+  -H 'content-type: application/json' -d '{"ids":[3]}'
+```
+
+</TabItem>
+<TabItem label="Kubernetes">
+
+```bash
+q() { kubectl -n queen exec "$1" -c queen -- curl -s -m 30 "${@:3}" "localhost:6632$2"; echo; }
+I=2; N=$((I + 1)); H=queen-0     # the broken pod's ordinal, its node id, a healthy pod
+
+# 1. Remove the node from the membership.
+q $H /api/v1/system/raft/membership/members/$N -X DELETE | jq -c '{ok, voters: .membership.voters, code, error}'
+
+# 2. Delete its volume, then its pod: the StatefulSet recreates both, empty.
+kubectl -n queen delete pvc data-queen-$I --wait=false
+kubectl -n queen delete pod queen-$I
+
+# 3. Wait until it is Running. It stays NotReady until step 4.
+kubectl -n queen get pod queen-$I -w
+
+# 4. Add it as a learner, then promote it.
+P=queen-$I.queen-headless.queen.svc.cluster.local
+q $H /api/v1/system/raft/membership/learners -X POST -H 'content-type: application/json' \
+  -d "{\"id\":$N,\"raft\":\"$P:7400\",\"http\":\"$P:6632\"}"
+q $H /api/v1/system/raft/membership/promote -X POST -H 'content-type: application/json' -d "{\"ids\":[$N]}"
+```
+
+</TabItem>
+</Tabs>
+
+Step 1 answers `"ok":true` with the voters that remain. A `409 no_quorum` means too few of the
+other nodes are live, so stop there and look again: you are in one of the cases where the cluster
+does not commit. At step 3 the empty node serves `503` and logs `this fresh node joins an existing
+cluster`. `QUEEN_RAFT_JOIN` makes it wait to be added instead of founding a cluster of its own; it
+matters only on an empty directory, so it can stay set. On Kubernetes the variable is not needed,
+because a fresh pod asks its peers first and joins when one of them holds cluster state. If the
+promotion answers `409 learner_behind`, the node is still copying: repeat it a few seconds later.
+It is done when the membership lists three voters with `lag` 0 and the probe commits through the
+new node.
+
+If the node already came back empty without step 1 (someone deleted the volume first), run step 1
+now, wipe it again (what it holds is no use), and continue from step 3. The beta.6 rehearsal fixed
+exactly that case in 3 s.
+
+The plain-host replacement took 9 s on beta.6 with a writer sending 40 requests a second through
+the cluster, and none of the 2,100 acknowledged pushes in the ledger was lost. The `kubectl`
+version took 20 s on k3s (beta.1), none of 3,060 lost. Both times the rebuilt node, read on its
+own, served every message.
+
+## A disk is full
+
+At 85% of its volume a node answers its own clients `507 storage_full` for anything that grows
+storage, while reads, acks and deletes go on. The entries other nodes accept still replicate into
+it, though, so a smaller or fuller disk keeps filling. At 100% the node logs `raft log write
+failed: No space left on device` and stops: role `stopped`, `/health` 503, the process still up.
+The other nodes keep serving.
+
+Grow its volume and restart the node; it catches up on its own. Then grow the other volumes the
+same way, because they hold the same data and fill at the same rate, and bring down what is stored
+with retention on the biggest queues. On Kubernetes that is a PVC expansion followed by deleting the
+pod, plus the `volumeClaimTemplates` change described under [Kubernetes](/operate/kubernetes/) so
+that new pods get the size too. If a volume cannot grow, [replace the node](#replace-a-node) onto a
+bigger one.
+
+In the rehearsal (beta.1, Docker) a node on a 300 MB volume filled to 100% through the other two,
+stopped itself, and the other two went on serving. Its volume was grown, it was restarted, it
+caught up, and none of 6,900 acknowledged writes was lost.
+
+## A majority is down, the disks are fine
+
+Two nodes of three are gone for a while: a lost machine, a zone outage, an OOM storm, an image that
+will not pull. Nothing commits, and the survivor may still call itself healthy. Bring the missing
+nodes back. Do not delete any volume, and do not force-recover: as soon as a majority runs, they
+elect a leader and the rest catch up.
+
+On beta.6, with the leader and a follower killed for 40 s, writes committed again one second after
+the first of them restarted, and every acknowledged write was there. On beta.1 all three nodes were
+killed at the same instant and restarted: healthy within 3 s, none of 4,054 writes lost.
+
+## A majority of the disks is gone for good
+
+Raft needs a majority to elect a leader, and when most voters lost their disks for good that
+majority will never exist again. `QUEEN_RAFT_FORCE_RECOVER=<id>` is the way out. Set on the one
+survivor, it writes a new membership in which that node is the only voter, in a new term and after
+everything its log holds, and the node then leads alone. The other nodes are rebuilt empty and
+join it.
+
+What it costs: writes that the lost nodes had committed without the survivor. Usually that is
+nothing, at worst the last moments before the failure. If more than one node survived with data,
+pick the one with the highest `commit` in `/health` as the survivor and rebuild the others empty.
+
+<Tabs>
+<TabItem label="Plain hosts">
+
+```bash
+# On the survivor, say queen-1 (node 1):
+# 1. Restart it with QUEEN_RAFT_FORCE_RECOVER=1 in its environment. Its log says
+#    "QUEEN_RAFT_FORCE_RECOVER: UNSAFE RECOVERY. This node makes itself the ONLY voter ..."
+curl -s http://queen-1:6632/api/v1/system/raft/membership | jq -c '.membership | {leader, voters}'
+# 2. Restart it once more without the variable.
+# 3. Start queen-2 and queen-3 on empty directories with QUEEN_RAFT_JOIN=true, then:
+curl -s -X POST http://queen-1:6632/api/v1/system/raft/membership/learners \
+  -H 'content-type: application/json' -d '{"id":2,"raft":"queen-2:7400","http":"queen-2:6632"}'
+curl -s -X POST http://queen-1:6632/api/v1/system/raft/membership/learners \
+  -H 'content-type: application/json' -d '{"id":3,"raft":"queen-3:7400","http":"queen-3:6632"}'
+curl -s -X POST http://queen-1:6632/api/v1/system/raft/membership/promote \
+  -H 'content-type: application/json' -d '{"ids":[2,3]}'
+```
+
+</TabItem>
+<TabItem label="Kubernetes">
+
+```bash
+q() { kubectl -n queen exec "$1" -c queen -- curl -s -m 30 "${@:3}" "localhost:6632$2"; echo; }
+S=1; SID=$((S + 1))     # the surviving pod's ordinal and its node id
+
+# 1. Template changes reach a pod only when you delete it.
+kubectl -n queen patch sts queen -p '{"spec":{"updateStrategy":{"type":"OnDelete","rollingUpdate":null}}}'
+kubectl -n queen set env sts/queen QUEEN_RAFT_FORCE_RECOVER=$SID
+kubectl -n queen delete pod queen-$S
+q queen-$S /api/v1/system/raft/membership | jq -c '.membership | {leader, voters}'
+
+# 2. Remove the variable and restart the survivor once more.
+kubectl -n queen set env sts/queen QUEEN_RAFT_FORCE_RECOVER-
+kubectl -n queen delete pod queen-$S
+
+# 3. Rebuild every other pod, one at a time: steps 2 to 4 of "Replace a node",
+#    with H=queen-$S (they are no longer members, so there is nothing to remove).
+
+# 4. Back to rolling updates.
+kubectl -n queen patch sts queen -p '{"spec":{"updateStrategy":{"type":"RollingUpdate"}}}'
+```
+
+</TabItem>
+</Tabs>
+
+After step 1 the membership shows the survivor as the only voter and the probe commits through it.
+Step 2 matters: once members were added, a node started with the variable still set refuses to
+boot with `QUEEN_RAFT_FORCE_RECOVER=1 is still set, but this node already recovered`, because a
+second recovery would drop them.
+
+On Kubernetes the `OnDelete` strategy is what makes the steps predictable. A rolling update waits
+forever for pods that cannot become Ready, a pod you delete meanwhile comes back from the old
+template, and scaling down to zero and up again can schedule a fresh pod onto the survivor's
+machine or zone, leaving the survivor Pending: all three happened on k3s. A pod recreated while the
+variable is in the template refuses to start with `QUEEN_RAFT_FORCE_RECOVER=2, but this node is 1:
+it names the ONE surviving node`, which is expected, since it gets rebuilt in step 3.
+
+One trap is still open in beta.6, found while rehearsing a restore on 2026-10-02. A node that ran a
+forced recovery once keeps a marker, `raft/force_recovered.json`, and refuses a second one with the
+same `already recovered` message, even when a new disaster makes the second one right. When you are
+sure, move that file aside on the survivor and start it again with the variable. Nothing else reads
+the file; it exists only for that check.
+
+On beta.6, with the leader's disk and a follower's disk deleted, the survivor led alone within 4 s
+of its restart and the cluster had three voters again 11 s after it, with none of 2,494
+acknowledged pushes lost, because the survivor was current. On k3s (beta.1), from "every pod Ready
+and nothing commits" (two volumes deleted at once) to three voters took 73 s, none of 900 writes
+lost.
+
+## A poisoned entry stops every node
+
+When apply refuses a committed entry the same way on every node, it is a bug in Queen, and every
+node stops on that entry. A restart replays it and stops again, so restarting alone never helps.
+Every node reports the exact way out in `/health` (and in the `APPLY FAILED` line of its log):
+
+```json
+"apply":{"failure":{"class":"deterministic","command":"request 01a0fcd9ad9b7000b25c3c898fa95c6a (kv)","digest":"3f60b0096ef89f56","effect":"#0 kv_put","error":"...","index":4,"term":2},"skipped":[]}
+```
+
+1. Read `index` and `digest` on two nodes; they must agree, and `class` must be `deterministic`. A
+   `node-local` failure is one node's disk or files: [replace](#replace-a-node) that node or
+   [grow its disk](#a-disk-is-full), and the skip refuses to run for it anyway.
+2. Set `QUEEN_RAFT_APPLY_SKIP=<index>:<digest>` (here `4:3f60b0096ef89f56`) on every node, stopped
+   ones included, and restart them all. On Kubernetes, switch the StatefulSet to `OnDelete` as
+   above, `kubectl -n queen set env sts/queen QUEEN_RAFT_APPLY_SKIP=4:3f60b0096ef89f56`, then
+   `kubectl -n queen delete pod -l app=queen`.
+3. Check that `apply.failure` is `null` and `apply.skipped` lists the entry on every node, and that
+   the probe commits. Each node logs `QUEEN_RAFT_APPLY_SKIP: entry 4 is REPLACED by a skip marker`
+   with `held=`, what the entry contained: keep it for the bug report.
+4. Remove the variable whenever convenient (the skip marker stays in the log), and go back to
+   rolling updates.
+
+The skipped entry becomes a no-op on every node. None of its effects apply, the client that sent
+it got no answer, and nothing else is lost. On beta.6, with a test-only switch that makes apply
+refuse one KV key, the cluster served again 2 s after the restart; the key was absent, and a write
+made a moment earlier was intact. With `kubectl` on k3s (beta.1) it took 14 s.
+
+## A rolling restart goes wrong
+
+A rolling restart is safe when it waits for each node's `/health` to answer 200 before it stops
+the next one, which is what a Kubernetes rolling update with the readiness probe on `/health` does.
+Stop the next node too early and you have [a majority down](#a-majority-is-down-the-disks-are-fine)
+for a while: bring the node back, and the cluster heals.
+
+When the new release will not start on a node, read its `FATAL` line and stop the roll there; the
+others keep serving. A configuration error is fixed in place. To roll back, start the previous
+release on the same directory, which works until the leader raises the cluster version. It does
+that only once every member runs a release that reads the new version, and from then on an older
+build refuses to boot with `this build reads effect catalogue version N, and the cluster this store
+belongs to writes version M ... never an older one`. On Kubernetes, a rolling update stalls on a pod
+that cannot become Ready: fix that pod, or change only it with `OnDelete`.
+
+Give each stop its time. A stopping node first hands its ephemeral partitions to their next owners
+(up to 15 s), then its leadership (up to 3 s), then lets long-poll pops finish (30 s by default),
+and a SIGKILL before the end is a crash. Ephemeral queues are where that shows. On beta.6 a node
+stopped with SIGTERM logged `ephemeral rings handed over rings=4 delivered=4 lost=0`, and all 60
+test messages could still be popped. Sixty more, pushed while it was down, were all there after it
+came back and took its partitions back. A kill -9 of another node left 20 of 60, because the
+messages a node owns live only in its memory. One issue is open in beta.6: a hand-over to a node
+that is still restarting can drop a partition's messages, which we have seen in production rolling
+restarts. Each loss logs `hand-over failed; the partition's contents are dropped` (WARN) and counts
+in `queen_ephemeral_wipes_total`.
+
+## Rarer cases
+
+### Two clusters
+
+Only an operator can cause this, by force-recovering two nodes. Each then leads a cluster of its
+own, both accept writes, and they diverge: the nodes disagree about the voters, `clusterId`
+differs (unless you set `QUEEN_CELL_ID`), and two nodes report the leader role. Pick the side to
+keep, usually the one most clients wrote to. Its node already leads alone, so restart it without
+the variable and rebuild every other node empty, one at a time, as in steps 2 to 4 of
+[Replace a node](#replace-a-node). Writes accepted by the other side are gone, and producers have to
+send them again. In the rehearsal (beta.1) both sides took writes to the same KV key; after
+converging, the kept side's data was whole and the other side's 50 writes were gone, as expected.
+
+### The peer addresses changed
+
+The membership lives in the log together with each node's raft and HTTP address. Rename the hosts,
+the namespace or the headless Service under a running cluster, and no node can reach another, while
+each may still call itself healthy. The best fix is to put the old names back. Otherwise run the
+[forced recovery](#a-majority-of-the-disks-is-gone-for-good) with any node as the survivor (they all
+hold the data): it takes its new address from `QUEEN_RAFT_PEERS`, and the others are rebuilt under
+their new names. The rehearsal (beta.1) changed the namespace in every address and came back that
+way with none of 900 writes lost. To move a cluster on purpose, start the new one beside it and
+move the clients.
+
+### Configuration mistakes
+
+- `refused this node's QUEEN_RAFT_TOKEN`: one node has a different token and is cut off from the
+  others, possibly while it says healthy. Give it the same value and restart it.
+- Rotating the token on purpose works as a rolling restart: change it everywhere, restart one node
+  at a time, and the nodes with the new token form a majority once two have restarted. The
+  rehearsal (beta.1) cost one extra election; the slowest request took 11 s and none of 1,598 writes
+  was lost.
+- `QUEEN_RAFT_NODE_ID=N is not in QUEEN_RAFT_PEERS`: the peer list is wrong. Fix it and restart.
+- A changed `QUEEN_ENCRYPTION_KEY`: consumers of encrypted queues get the envelope instead of their
+  payloads. Nothing on disk is damaged; put the previous key back and restart, and the plaintext
+  returns.
+
+### A membership change stopped half-way
+
+A voter change has two steps. If the leader dies between them, the membership shows `"joint"` with
+two voter sets, and every other change answers `409 in_flight` with the command that finishes it,
+for example `finish it first with PUT /api/v1/system/raft/membership/voters {"voters": [1, 2, 4]}`.
+Run exactly that command. The rehearsal tried six times to kill a leader 0 to 40 ms into a change,
+and every change had completed first.
+
+## Known gaps
+
+The rehearsals found most of these. They are open in 2.0.0-beta.6: we checked each one against
+the code, and reproduced the first three on beta.6. The procedures above work around every one;
+the details and the fixes we have in mind are in `test/recovery/FINDINGS.md`.
+
+| Gap | What it means for you |
+|---|---|
+| A node cut off from its majority keeps answering `/health` 200 with `"leader":true` (F8) | Readiness stays green and an alert on `/health` never fires. Alert on the write probe |
+| A node that applied nothing reports `lag` 0 (F2) | An empty node stuck as a voter looks healthy. Compare its `applied` with the leader's `commit` |
+| A voter whose log went backwards is never repaired unless it was removed first (F1). On Kubernetes, two volumes deleted at once leave a cluster that cannot commit while every pod is Ready (F11) | Remove before you wipe, one node at a time |
+| Damage in an old, sealed queue-log file is not found at boot. Pops through that node answer `500 record checksum` with no ERROR line, and auto-ack consumers lose the batch they claimed (F3) | Replace the node. Reads through the other nodes are complete |
+| A deleted queue-log file, or a deleted `qlog/SHARDS`, is not detected at boot (F4, F6) | Never delete files in a data directory |
+| A bit flip in `store/data.mdb` can crash the boot with exit code 139 and no log line (F5) | Treat a silent 139 at boot as a damaged store and replace the node |
+| A missing `raft/state.json` is reported as `written by the local replicator` (F7) | Replace the node |
+| The disk gate refuses only the node's own clients (F9, by design) | Keep the disks the same size, and alert on each node's disk usage and on `queen_raft_storage_full` |
+| A wrong `QUEEN_ENCRYPTION_KEY` serves the ciphertext envelope with no error (F10) | Keep the key, backed up apart from the data |
+| A node that force-recovered once refuses a second forced recovery | Move `raft/force_recovered.json` aside first |
+| On a single node, the apply-failure line suggests `QUEEN_RAFT_APPLY_SKIP`, which only cluster nodes read | A single node needs a fixed release or a backup |
+| A hand-over of ephemeral partitions to a node that is still restarting can drop their messages | Watch the WARN line and `queen_ephemeral_wipes_total` |
+
+<CardGrid>
+  <LinkCard title="Backups and restore" href="/operate/recovery-backups/" description="What to copy, how to copy it while a node runs, and how to bring back one node or a whole cluster." />
+  <LinkCard title="Run a cluster" href="/operate/cluster/" description="How replication, quorum and membership work, and what each failure costs." />
+</CardGrid>

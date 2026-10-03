@@ -1,6 +1,6 @@
 ---
 title: HTTP API
-description: "Base URL, authentication headers, status-code conventions and every route the broker serves, with links to the OpenAPI documents."
+description: "Base URL, which node to call, authentication, status codes, every route the broker serves, reads by offset, the control-plane API and the OpenAPI documents."
 type: reference
 tier: use
 sidebar:
@@ -11,15 +11,26 @@ sourceOfTruth:
   - server/src/auth.rs
   - server/src/tenant.rs
   - server/src/config.rs
+  - server/src/main.rs
   - server/src/rsm/facade/mod.rs
   - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/remote.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/offsets.rs
   - server/src/proxy_embed.rs
   - proxy/src/auth.rs
+  - proxy/src/app.rs
+  - proxy/src/cp.rs
 ---
 
-Every Queen node serves the whole API over HTTP with JSON bodies, on port 6632 by default. Any
-node of a cluster answers: a follower forwards the request to the leader. This page lists the
-conventions every route shares and then every route.
+Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no
+second protocol to learn and no admin port: `curl` is a complete client, and every SDK is a thin
+layer over the routes on this page. We kept it that way on purpose, so that when something looks
+wrong you can ask the broker directly, with the tools already on your machine.
+
+The page starts with what every route shares, then lists every route the broker registers, then
+documents the two surfaces that need more than a table row: reads by offset, and the control-plane
+API the embedded proxy adds.
 
 ## Base URL
 
@@ -31,95 +42,233 @@ curl -s http://localhost:6632/health
 |---|---|---|
 | `PORT` | `6632` | The HTTP port. |
 | `QUEEN_BIND_ADDR` | `0.0.0.0` | The address the listener binds. |
-| `QUEEN_MAX_BODY_BYTES` | `67108864` (64 MiB) | Larger request bodies are refused with 413 before they are parsed. |
+| `QUEEN_MAX_BODY_BYTES` | `67108864` (64 MiB) | A larger request body is refused with 413 before it is parsed. |
 
-- **Any node.** A follower forwards every `/api/` and `/streams/` request to the leader and relays
-  the answer. It answers `/api/v1/raft/*` itself (those describe the node asked). With no leader
-  known it answers 503 `no_leader`; with the leader unreachable, 503 `retry`.
-- **Plain HTTP.** The bare broker has no TLS listener. TLS (`QUEEN_TLS_CERT`, `QUEEN_TLS_KEY`) is
-  served by the proxy built into the same binary (`QUEEN_PROXY_EMBEDDED=true`). See
-  [security](/operate/security/).
+The broker's own listener is plain HTTP. TLS is served by the proxy built into the same binary
+(`QUEEN_PROXY_EMBEDDED=true`), from `QUEEN_TLS_CERT` and `QUEEN_TLS_KEY`, two PEM file paths that
+are set together or not at all. See [security](/operate/security/).
+
+## Which node to call
+
+Any node of a cluster answers any request. By default (`QUEEN_RAFT_CLIENT_OFFLOAD`, on) every node
+serves its own clients: it parses and validates the request, prepares the command exactly as the
+leader would, sends the leader only that prepared command, and answers from its own copy of the
+state once it has applied the entry. A pop therefore reads its payloads from the queue logs of the
+node you called. With offload off, a follower forwards each `/api/` and `/streams/` request to the
+leader whole and relays the answer.
+
+Two families never go to the leader. `/api/v1/raft/*` describes the node you asked (its id, its
+role, its view of the members), so that node answers it. An ephemeral push, pop or ack lives in
+the memory of the node that owns its partition, so the node you called relays it there; see
+[ephemeral queues](/guides/ephemeral/). When no leader is known the answer is 503 `no_leader`,
+and when a forwarded call cannot reach the leader it is 503 `retry`, both with `Retry-After: 1`.
 
 ## Requests and responses
 
-- Request bodies are JSON. Send `Content-Type: application/json`.
+- Request bodies are JSON; send `Content-Type: application/json`.
 - Responses are `application/json`, except `GET /metrics/prometheus` (Prometheus text format) and
   an empty pop, which is `204 No Content` with no body.
 - A message `payload` is any JSON value.
-- Query parameters are camelCase, as in the body: `consumerGroup`, `subscriptionMode`,
-  `leaseSeconds`.
+- Query parameters are camelCase, like the body fields: `consumerGroup`, `subscriptionMode`,
+  `leaseSeconds`, `autoAck`.
 
 ## Authentication
 
-The broker's own authentication is off by default (`JWT_ENABLED=false`): every route is open, so a
-bare broker belongs on a trusted network.
+The broker's own authentication is off by default (`JWT_ENABLED=false`), and then every route is
+open, so a bare broker belongs on a network you trust. In front of the internet, run the embedded
+proxy, which authenticates API keys and sessions before a request reaches the broker.
 
 | Credential | Header | Enabled by |
 |---|---|---|
 | JWT | `Authorization: Bearer <jwt>` | `JWT_ENABLED=true`, plus `JWT_SECRET`, `JWT_PUBLIC_KEY` or `JWT_JWKS_URL` |
-| Proxy API key | `Authorization: Bearer qk_...` | the proxy built into the binary (`QUEEN_PROXY_EMBEDDED=true`), which issues the keys |
+| Proxy API key | `Authorization: Bearer qk_...` | the embedded proxy, which issues the keys |
 | Proxy session | the proxy's session cookie, or `Authorization: Bearer <session token>` | signing in to the proxy (`queenctl login`, the console) |
 
-With JWT on, each route requires an access level, listed in the route table below. A token's
-role comes from the `role` claim (`JWT_ROLES_CLAIM`) or the `roles` array (`JWT_ROLES_ARRAY_CLAIM`):
+With JWT on, every route requires an access level, shown in the route table below. A token's role
+comes from the `role` claim (`JWT_ROLES_CLAIM`) or the `roles` array (`JWT_ROLES_ARRAY_CLAIM`), and
+the role names themselves are settings (`JWT_ROLE_ADMIN` and its siblings):
 
 | Role (default name) | Grants |
 |---|---|
 | `admin` | every level |
 | `read-write` | read-write, read-only and write-only routes |
 | `read-only` | read-only routes |
-| `write-only` | write-only routes (`POST /api/v1/push`, `POST /api/v1/timers`, `POST /api/v1/ephemeral/push`) |
+| `write-only` | write-only routes: `POST /api/v1/push`, `POST /api/v1/timers`, `POST /api/v1/ephemeral/push` |
 
-A missing or invalid token answers 401, a valid token with too little access 403. `/health`,
-`/metrics`, `/metrics/prometheus` and `/` skip authentication (`JWT_SKIP_PATHS`).
+Write-only is deliberately not a step on a ladder: a producer token can push into a queue it can
+never read. A missing or invalid token answers 401, a valid one with too little access 403. The
+paths in `JWT_SKIP_PATHS` (default `/health,/metrics/prometheus,/metrics,/`) skip authentication;
+an entry ending in `/` skips the paths under it as well.
 
 ### Tenancy header
 
-With `QUEEN_TENANCY_HEADER=true` the broker reads the tenant from `x-queen-tenant`, a UUID. A
-malformed value answers 400; an absent one uses the default tenant,
-`00000000-0000-0000-0000-000000000001`. With the setting off (the default) every request uses the
-default tenant.
+With `QUEEN_TENANCY_HEADER=true` the broker reads the tenant of each request from
+`x-queen-tenant`, which must be a UUID. A malformed value answers 400; an absent one means the
+default tenant, `00000000-0000-0000-0000-000000000001`. With the setting off (the default) every
+request belongs to the default tenant.
 
 <Aside type="caution">
-The broker trusts `x-queen-tenant` as given. It is meant to be set by the proxy, which
-authenticates the caller first. Never let clients reach a broker that has
-`QUEEN_TENANCY_HEADER=true` directly. See [tenants](/operate/tenants/).
+The broker trusts `x-queen-tenant` as given. The embedded proxy sets it after it has authenticated
+the caller. Never let clients reach a broker that has `QUEEN_TENANCY_HEADER=true` directly: anyone
+could name any tenant. See [tenants](/operate/tenants/).
 </Aside>
 
 ## Status codes
 
-Most routes follow plain HTTP. A few carry their verdict in the body, and a client must read it:
+Most routes use plain HTTP semantics. A few carry their verdict in the body, and a client has to
+read it there:
 
 | Answer | Meaning |
 |---|---|
 | `201` from `POST /api/v1/push` | The request was handled. Each item has its own `status`: `queued`, `duplicate` (its `transactionId` is already in the partition's dedup window, or repeated in the request) or `error`. |
-| `200` from `POST /api/v1/transaction` with `success: false` | Rolled back: nothing was written. `reason` says why; a lost `required` KV precondition is `kv_precondition`. See [transaction](/reference/transaction/). |
-| `200` from the KV and timers routes | A business verdict, not a failure: `applied: false` (a lost `putIfAbsent`, a version mismatch), `ok: false` (cancel of an absent timer). |
+| `200` from `POST /api/v1/transaction` with `success: false` | Rolled back: nothing was written. `reason` says why. See [transaction](/reference/transaction/). |
+| `200` from the KV and timer routes | A business verdict: `applied: false` (a lost `putIfAbsent`, a version mismatch) or `ok: false` (cancelling a timer that is not pending). |
 | `204` from a pop | No message was available before the long-poll ended. |
 | `503` `outcome_unknown` | The leader changed while an ack, nack or DLQ move was being made durable. It may or may not have applied. |
 | `503` `retry`, `no_leader`, `timeout` | The call did not complete. Retry after `Retry-After` (1 s); a write may still have applied, so make it safe to repeat. |
-| `429` `overloaded` | The node's admission budget for writes (pushes, transactions) is full. Retry after `Retry-After`. |
+| `429` `overloaded` | The node's admission budget for writes (pushes, transactions, KV writes, timer schedules) stayed full for the whole hold. Retry after `Retry-After`. |
 | `507` `storage_full` | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Writes that grow storage are refused; acks and deletes still work. |
 
 An engine error body is `{"error": "<message>", "code": "<code>"}`, plus `"leader"` on a 503
-`retry` when the leader is known. The KV and timers routes, the transaction route and the
-authentication layer use their own shapes. Every code, and what to do with it:
-[errors](/reference/errors/).
+`retry` when the leader is known. The KV and timer routes, the transaction route, the ephemeral
+routes and the authentication layer have shapes of their own. Every code, and what a client does
+with it, is on [errors](/reference/errors/).
+
+## Health
+
+`GET /health` answers `200` with `"status": "healthy"` when this node knows a leader and its apply
+lag is within `QUEEN_RAFT_READY_LAG_MS` (2000 ms), and `503` with `"status": "settling"` otherwise.
+The body carries `engine`, `version` and a `raft` block (`role`, `leader`, `term`, `applied`,
+`commit`, `lag`, `storageReady`, `clusterVersion`). Those two conditions are the whole check: the
+node does not contact the other members to answer, so a probe sees what this node believes. What
+that means during a quorum loss is on [recovery](/operate/recovery/).
 
 ## Routes
 
 <Render file="generated/broker-routes" />
 
+`POST /api/v1/ephemeral/_adopt` and `_leaving` are broker-to-broker hand-over calls: they also
+require the forward mark that only another node sets (and the cluster token when one is
+configured), and the proxy never lets a tenant reach them.
+
+## Reads by offset
+
+Three routes read a partition's log by position. None of them takes a lease or moves a cursor, so
+two readers asking the same question get the same answer and nothing has to be acked. The Kafka
+facade consumes through them, and they are also the right tool for a replay, an audit or a sink
+that keeps its own position. Each is served from the answering node's own state, with no read
+barrier: a follower answers from what it has applied.
+
+### `POST /api/v1/fetch`
+
+```bash
+curl -s localhost:6632/api/v1/fetch -H 'content-type: application/json' -d '{
+  "entries": [{"queue": "orders", "partition": "customer-42", "offset": 0, "maxBytes": 1048576}],
+  "maxWaitMs": 5000, "minBytes": 1}'
+```
+
+```json
+{"entries": [{"queue": "orders", "partition": "customer-42",
+  "records": [{"offset": 0, "transactionId": "order-9137-created",
+               "payload": {"orderId": 9137}, "ts": "2026-10-02T09:14:03.512887Z"}],
+  "highWatermark": 1, "logStartOffset": 0}]}
+```
+
+| Field | Rule |
+|---|---|
+| `entries` | At most 1024. Each names a `queue`, a `partition` (a string, a number, or absent for `Default`) and a non-negative `offset`; a negative one answers 400. |
+| `entries[].maxBytes` | Default 1 MiB, clamped to 1 byte to 8 MiB. |
+| `maxWaitMs` | Default 0, at most 30,000. With a wait, the call holds until `minBytes` (default 1) are readable across the entries or the wait ends. |
+| An entry's `error` | `UNKNOWN_TOPIC_OR_PARTITION` for a queue that does not exist; `OFFSET_OUT_OF_RANGE` for an offset below `logStartOffset` or above `highWatermark`. A partition nobody has written yet answers no records and no error. |
+
+`highWatermark` is the next offset the partition will assign; `logStartOffset` is the first one
+retention has kept.
+
+### `POST /api/v1/fetch/offsets`
+
+Turns a time into an offset: for each entry, the first offset appended at or after `timestamp`
+(epoch milliseconds, or an ISO-8601 time). At most 1024 entries.
+
+```json
+{"entries": [{"queue": "orders", "partition": "customer-42", "timestamp": "2026-10-02T09:00:00Z"}]}
+```
+
+```json
+{"entries": [{"queue": "orders", "partition": "customer-42", "offset": 42,
+  "ts": "2026-10-02T09:00:00.004211Z", "highWatermark": 97, "logStartOffset": 0}]}
+```
+
+`offset` and `ts` are `null` when nothing was appended that late, and you start at
+`highWatermark`; a time older than the log answers its first retained offset. "Appended" means the
+broker's clock when the leader planned the write, never a time inside your payload. The lookup is a
+binary search over the partition's per-append rows, about log2(partition length) seeks, with no
+payload read.
+
+### `POST /api/v1/partitions/changed`
+
+Maps a queue: its partitions with their `lastOffset`, `logStart` and `lastWriteAt`, by name, or
+only those written since a time.
+
+```json
+{"entries": [{"queue": "orders", "since": "2026-10-02T09:00:00Z", "limit": 1000}]}
+```
+
+Each entry answers `partitions` and `next`, a cursor to pass back as `after` while the page was
+full; `limit` defaults to 1000 and is capped there. A queue that does not exist answers
+`UNKNOWN_TOPIC_OR_PARTITION`, a cursor that does not parse `BAD_CURSOR`. At most 1024 entries.
+
+## Control plane: `/api/cp`
+
+With the embedded proxy on, a node also serves a small control-plane API under `/api/cp`: how a
+provisioning script, an operator or a cloud control plane manages tenants, clusters and API keys.
+The proxy keeps that state in the broker's own replicated KV, so there is no database to run
+beside it. The surface is built for an at-least-once caller: repeating a provision, a key
+registration, a purge or a delete that already took effect answers success with the same ids. The
+exception is `POST /api/cp/tenants`, which answers 409 `conflict` for a slug that exists;
+`POST /api/cp/clusters` is the call that ensures a tenant and its cluster idempotently.
+
+The surface exists only when `QUEEN_PROXY_CP_TOKEN` is set. Every call sends the token in
+`x-queen-cp-token`; a wrong token answers 401, and with the variable unset every route answers 404.
+Request bodies are capped at 1 MiB (413 above that), and the token is checked before any of the
+body is read. A call that acts on broker data (purge, queues, configure) always acts on the
+cluster's own broker tenant, never on one the request names, and it refuses the default tenant and
+the proxy's own.
+
+| Method | Path | What it does |
+|---|---|---|
+| `POST` | `/api/cp/bootstrap` | Creates a tenant, its cluster, an admin user and an API key in one call. Body: `tenant_slug`, `admin_email`; optional `tenant_name`, `cluster_slug` (default the tenant slug), `plan` (default `free`), `password`, `key_name`. |
+| `POST` | `/api/cp/provision` | Tenant, cluster, user, role, API key and limit overrides in one batch, with ids the caller chose. Body: `tenant_slug`, `cluster_slug`, `plan`, `user_id` (a UUID), `email`, `role`, `key_name`, `key_hash`, `scopes`; optional `tenant_name`, `overrides`. 503 `unavailable` until the node has seeded its state. |
+| `POST` | `/api/cp/tenants` | Creates a tenant (`slug`, optional `name`). 201 with its `id`. |
+| `PUT` | `/api/cp/tenants/:slug/status` | Sets `status`: `active`, `grace`, `suspended` or `deleting`. |
+| `POST` | `/api/cp/tenants/:slug/purge` | Deletes the broker data of every cluster of a `deleting` tenant. Repeat until the answer says `done: true`. |
+| `DELETE` | `/api/cp/tenants/:slug` | Deletes a tenant that is `deleting` and purged; `?force=true` skips both checks. |
+| `GET` | `/api/cp/clusters` | Every cluster; `?plan=<code>` keeps one plan's. |
+| `POST` | `/api/cp/clusters` | Ensures a cluster and its tenant exist (`tenant_slug`, `slug`; optional `tenant_name`, `plan`, `cell_id`). 201 when created, 200 when it already existed. |
+| `GET` | `/api/cp/clusters/:slug` | The cluster with its tenant, plan, statuses and overrides. |
+| `GET` | `/api/cp/clusters/:slug/queues` | The broker's queue listing for the cluster, query string passed through. |
+| `POST` | `/api/cp/clusters/:slug/configure` | The broker's `configure` for the cluster (`{"queue", "options"}` passed through). Refused with 409 `deleting` during a wipe. |
+| `PUT` | `/api/cp/clusters/:id/overrides` | Sets the cluster's limit overrides: a JSON object, or `null` to clear them. |
+| `PUT` | `/api/cp/clusters/:id/status` | Sets `status`: `active`, `push_blocked`, `suspended` or `deleting`. |
+| `GET` | `/api/cp/clusters/:id/usage` | The last hour of metered minutes, summed over the nodes. |
+| `POST` | `/api/cp/activity` | For up to 256 cluster slugs: last traffic, first push, last key use and retained bytes. Absent data is `null`, never 0. |
+| `POST` | `/api/cp/keys` | Registers an API key the caller has already hashed (`cluster_id`, `name`, `key_hash`, `scopes`); the plaintext never reaches the proxy. 201 for a new key, 200 when the cluster already holds a live key with that hash. |
+| `DELETE` | `/api/cp/keys/:id` | Revokes a key: 200 with `already_revoked`, or 404 `key_unknown`. |
+
+Slugs are DNS labels (`a-z`, `0-9` and `-`, at most 63 characters); `:id` is a UUID. Errors use the
+proxy's `{"error", "code"}` envelope, and the codes are listed on
+[errors](/reference/errors/#control-plane-codes).
+
 ## OpenAPI
 
-Two OpenAPI documents are generated from the same router and published with the site:
+Two OpenAPI documents are generated from the routers and published with the site:
 
-- [`/openapi/queen-broker.json`](/openapi/queen-broker.json): the broker, every route above.
-- [`/openapi/queen-proxy.json`](/openapi/queen-proxy.json): the proxy's own routes (console,
-  sign-in, operator, control plane).
+- [`/openapi/queen-broker.json`](/openapi/queen-broker.json): the broker, every route in the table
+  above.
+- [`/openapi/queen-proxy.json`](/openapi/queen-proxy.json): the proxy's own routes (sign-in, the
+  console, the operator API and `/api/cp`).
 
-Most broker request bodies are not derived from a Rust type yet, so the documents describe paths
-and parameters more completely than bodies. For a body, this site's pages are the contract, above
+Most request bodies are not derived from a Rust type yet, so the documents describe paths and
+parameters more completely than bodies. For a body, the pages of this site are the contract, above
 all [transaction](/reference/transaction/).
 
 <Render file="generated/openapi-coverage" />

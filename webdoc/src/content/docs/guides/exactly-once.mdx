@@ -1,6 +1,6 @@
 ---
 title: Charge a card once
-description: "Make a redelivered order harmless: write the charge marker and the ack in one transaction, gate it with putIfAbsent, fence it with the lease."
+description: "Make a redelivered order harmless: write a charge marker in the same transaction as the ack, gate it with putIfAbsent, and let the lease fence a worker that ran out of time."
 type: how-to
 tier: use
 sourceOfTruth:
@@ -9,6 +9,7 @@ sourceOfTruth:
   - server/src/rsm/facade/real.rs
   - server/src/rsm/consume/ack.rs
   - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/kv.rs
 verifiedBy:
   - examples/apps/js/exactly-once.mjs
   - examples/apps/py/exactly_once.py
@@ -17,27 +18,21 @@ sidebar:
   order: 3
 ---
 
-A consumer that charges cards will see some orders twice: a lease expires, a node restarts, an
-operator replays the queue. Make the second delivery harmless by writing a marker in the same
-transaction as the ack, so an order is charged-and-acked or neither. This gives exactly-once
-effects inside Queen; the charge itself is a call to another system, and the last section says
-what that leaves open.
-
-## The problem
-
-The usual worker keeps its "already charged" flag in a second system: charge, write the flag to
-the database, ack the broker. The flag and the ack commit separately, so they can disagree, and
-nothing stops a worker whose lease has expired from writing its flag after another worker took the
-message. Anything else the step emits (a receipt, a ledger event) has the same gap.
+A consumer that charges cards will see some orders twice: a lease runs out while the card network
+is slow, a node restarts, someone replays the queue. Make the second delivery harmless by writing a
+marker in the same transaction as the ack, so an order is either charged and acknowledged or
+neither. That gives you exactly-once effects inside Queen. The charge itself is a call to another
+system, and the last section is honest about what that leaves open.
 
 ## The fix
 
-Keep the marker in KV and commit it with the ack:
+The marker lives in Queen's KV store and commits with the ack:
 
 ```js
 await queen.queue('orders')
   .group('charger')
   .subscriptionMode('all')
+  .batch(1)                                         // one order per lease, see below
   .autoAck(false)
   .each()
   .consume(async (msg) => {
@@ -48,9 +43,8 @@ await queen.queue('orders')
       return
     }
 
-    const chargeId = await chargeCard(msg.data)       // the external effect
-
     try {
+      const chargeId = await chargeCard(msg.data)     // the external effect
       const res = await queen.transaction()
         .kv.putIfAbsent('charges', key, { chargeId }, { ttl: '30d', required: true })
         .ack(msg, 'completed', { consumerGroup: msg.consumerGroup })
@@ -65,30 +59,48 @@ await queen.queue('orders')
   })
 ```
 
-Three things make it hold:
+Two details in that consumer matter more than they look. `.batch(1)` keeps each charge inside its
+own lease: a failed ack releases the partition's lease, so with a bigger batch the orders popped
+after a failure would be charged, refused at commit with `rejected_ack`, and charged again when they
+came back. And the charge sits inside the `try` so the handler chooses each ending itself: a lost
+lease (`rejected_ack`) needs no ack at all, and any other failure is acked as `failed` with its
+error. An error that escaped would be nacked by the SDK, and the consumer would keep going. The complete program, with
+the ledger that proves it, is the [charge each order once](/examples/exactly-once/) example.
 
-- **Marker and ack in one transaction.** The marker exists exactly when the order is acked. A
-  worker that dies before the commit leaves no marker, and the redelivery runs the handler again.
-- **`required: true` makes `putIfAbsent` a gate.** Without it a lost race is only a verdict in the
-  results, and the ack still commits. With it, the whole transaction rolls back and `commit()`
-  returns `success: false, reason: 'kv_precondition'` with HTTP 200. It is returned, not thrown,
-  because it is the normal outcome of a duplicate. The gate covers what the read cannot: two
-  deliveries of one order in flight at once (two messages for the same order, or two groups). Only
-  one of them commits its marker and anything else in its transaction.
-- **The lease is the fence.** If the worker's lease expired while it was charging, the ack is
-  refused and the marker write is refused with it: `commit()` throws with `reason:
-  'rejected_ack'`. A compare-and-set cannot do this, because a version that still matches succeeds
-  for a worker that no longer owns the message.
+The usual worker keeps its "already charged" flag in a second system: it charges, writes the flag
+to a database, then acks the broker. The flag and the ack commit separately, so they can disagree,
+and nothing stops a worker whose lease has expired from writing its flag after another worker took
+the message. Here the marker exists exactly when the order is acknowledged, because they are one
+entry in the log. A worker that dies before the commit leaves no marker behind, and the redelivery
+runs the handler again.
 
-`once` is the same gate under a shorter name: `.once('charges', key, { ttl: '30d', value: {
-chargeId } })` is `putIfAbsent` with `required: true`. Over HTTP, put the pop's `leaseId` on the
-ack operation, as the curl program below does. The SDKs send it for you. **An ack without a lease
-id is not fenced.** See [transactions](/concepts/transactions/) and [dedup](/concepts/dedup/).
+<Figure id="guides/exactly-once-commit" />
+
+`required: true` is what turns `putIfAbsent` into a gate. Without it, losing the race to an
+existing marker is only a verdict in the results and the ack still commits. With it, the whole
+transaction rolls back and `commit()` returns `success: false` with `reason: 'kv_precondition'`,
+over HTTP 200, since for this code a duplicate is an expected outcome that the caller checks for.
+The gate covers the case the read at the top cannot: two deliveries of one order in flight at once
+(the order pushed twice, or read by two groups). Only one of them commits its marker, and with it
+everything else in its transaction.
+
+The lease is the fence. If the worker's lease expired while it was charging, the broker refuses
+the ack, and the marker write with it, and `commit()` throws with `reason: 'rejected_ack'`. A
+compare-and-set cannot do this on its own, because a version that still matches succeeds for a
+worker that no longer owns the message.
+
+`once` is the same gate under a shorter name inside a transaction:
+`.once('charges', key, { ttl: '30d', value: { chargeId } })` is `putIfAbsent` with
+`required: true`. The SDKs send the pop's lease with every transaction; over HTTP, put the pop's
+`leaseId` on the ack operation yourself, as the curl program below does, because an ack without a
+lease is not fenced. [Transactions](/concepts/transactions/) and [dedup](/concepts/dedup/) cover
+both mechanisms in full.
 
 ## The verified programs
 
-Each program charges five orders, fails one of them before its commit, then replays the whole
-queue through a second consumer group and checks that the ledger still has five charges.
+Each program charges five orders. The first attempt at one of them fails before it charges
+anything, and must leave no trace. Then a second consumer group replays the whole queue, finds a
+marker for every order, and must charge nothing, so the ledger still holds exactly five charges.
 
 <Tabs>
 
@@ -114,16 +126,24 @@ queue through a second consumer group and checks that the ledger still has five 
 
 ## Limits
 
-- **The charge itself can still happen twice.** Three windows remain, all between the provider's
-  answer and the commit: the worker dies; its lease expires during the call (the commit is then
-  refused and the next worker charges again); or two deliveries of one order are in flight at
-  once. The marker narrows a double charge to those windows; it does not close them. Keep
-  `leaseTime` well above the provider's timeout, and pass the order id as the provider's
-  idempotency key so a second charge for the same order is refused there.
-- **Do the work that can fail before the charge.** Validation, lookups and anything else that can
-  throw should run first, so a failure leaves no external effect behind.
-- **A marker lives as long as its TTL.** An expired marker is absent, so its TTL must outlast any
-  redelivery or replay you will run. Markers are KV rows: deleting the queue does not delete them.
-- **Delivery stays at-least-once.** Exactly-once holds for what the transaction writes. The
-  transaction and the dedup are Jepsen-tested; see [guarantees](/concepts/guarantees/) for the
-  conditions.
+The charge itself can still happen twice. Three windows remain, all between the provider's answer
+and the commit: the worker dies, its lease expires during the call (the commit is then refused and
+the next worker charges again), or two deliveries of one order are in flight at once. The marker
+narrows a double charge to those windows and cannot close them, because the provider is outside
+the commit. Keep `leaseTime` well above the provider's timeout, and pass the order id as the
+provider's idempotency key so that a second charge for the same order is refused on their side.
+
+Do the work that can fail before the charge. Validation, lookups and anything else that can throw
+should run first, so a failure leaves no external effect behind.
+
+A marker lives as long as its TTL, and an expired marker reads as absent, so the TTL must outlast
+any redelivery or replay you will run. Markers are KV rows, and deleting the queue does not delete
+them.
+
+The fence covers one pop's lease. The SDKs send the lease beside the acks, and the broker attaches
+it only when the transaction names a single lease, so a transaction that acks messages from two
+different pops is not fenced. Commit one transaction per pop, as the code above does.
+
+Delivery itself stays at-least-once: exactly-once holds for what the transaction writes. The
+transaction and the dedup are part of the Jepsen runs; see [guarantees](/concepts/guarantees/) for
+the conditions.

@@ -12,6 +12,7 @@ import { CardGrid } from "./components/ui/card-grid";
 import Chart from "./components/Chart.astro";
 import { Code } from "./components/ui/code";
 import { CodeGroup } from "./components/ui/code-group";
+import Figure from "./components/Figure.astro";
 import { FileTree } from "./components/ui/file-tree";
 import { Frame } from "./components/ui/frame";
 import { LinkButton } from "./components/ui/link-button";
@@ -35,6 +36,7 @@ export const components = {
   Chart,
   Code,
   CodeGroup,
+  Figure,
   FileTree,
   Frame,
   LinkButton,

@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: "Run one node with Docker, push and consume a message with curl, then commit an ack, a push and a KV write as one transaction."
+description: "Run one Queen MQ node with Docker, push and consume an order with curl, then commit the ack, a receipt and the order's new state as one transaction."
 type: quickstart
 tier: use
 sidebar:
@@ -10,6 +10,7 @@ sourceOfTruth:
   - server/src/config.rs
   - server/src/handlers/raft.rs
   - server/src/rsm/facade/real.rs
+  - server/src/rsm/planner/txn.rs
   - server/src/rsm/planner/kv.rs
   - clients/client-js/client-v2/builders/TransactionBuilder.js
 verifiedBy:
@@ -23,25 +24,36 @@ verifiedBy:
   - examples/tutorials/go/transaction-ack-push/main.go
 ---
 
-Docker, curl, jq and five minutes. You run one node, push a message, consume it, and then commit
-a whole step (the ack, the next event and a state change) as one transaction.
+You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the
+way a real service does: the ack, the receipt it sends and the order's new state reach the broker
+as one transaction. Then you'll try to commit half a step and watch the broker refuse it.
 
 <Steps>
 
-1. **Run a node.** One container, no database. The volume keeps the node's data directory
-   (`QUEEN_RAFT_DIR`, default `/var/lib/queen/raft`) when the container is replaced.
+1. **Start a node.**
 
    ```bash
-   docker run -d --name queen -p 6632:6632 -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
+   docker run -d --name queen --platform linux/amd64 -p 6632:6632 \
+     -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
    curl -s http://localhost:6632/health
    ```
 
-   The answer carries `"status":"healthy"` and a `raft` object with `"role":"leader"`: a single
-   node leads its own raft group. No answer means the node is still starting; `docker logs queen`
-   says why if it stays that way. The dashboard is on the same port, at `http://localhost:6632`.
+   ```json
+   {"status":"healthy","engine":"raft","version":"2.0.0-beta.6","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3}}
+   ```
 
-2. **Push a message.** Nothing is created first: the queue `orders` and the partition
-   `customer-123` come into existence with this push. `transactionId` is your idempotency key.
+   That is the whole installation. There is no database to start first, because the node keeps
+   everything in a log on its own disk, under `/var/lib/queen/raft`, and the volume keeps that
+   directory when the container is replaced. A single node is a raft group of one, so it reports
+   itself as the leader. The images are published for amd64 only, which is why the command
+   names the platform: on an Apple Silicon Mac, Docker runs the image under emulation, slower but
+   fine for this. Use the version tag, because `latest` still points at 1.6, which needs
+   PostgreSQL.
+
+   If `curl` prints nothing, the node is still starting, and `docker logs queen` says what it is
+   doing. The dashboard is on the same port, at `http://localhost:6632`.
+
+2. **Push an order.**
 
    ```bash
    Q=http://localhost:6632
@@ -52,18 +64,43 @@ a whole step (the ack, the next event and a state change) as one transaction.
    }'
    ```
 
-   The answer has one entry per item, with `"status":"queued"` and the message's `offset` in its
-   partition. Run the same command again: it answers `"status":"duplicate"` with the first
-   message's id, and writes nothing.
+   ```json
+   [{"index":0,"message_id":"01a0fcc5-761f-7000-9763-5c091bbc2aff","transaction_id":"order-8891-created","queueName":"orders","status":"queued","offset":0}]
+   ```
 
-3. **Pop it and ack it.** A pop takes a lease: the message is yours until you ack it or the lease
-   expires. With no `consumerGroup`, the pop reads through the queue's own cursor, which starts at
-   the beginning.
+   You never created the queue `orders` or the partition `customer-123`. This push did, in the
+   same log entry that stored the message, and every other customer you push for gets a
+   partition of their own the same way. Order holds inside each one.
+
+   Now run the same command again. The answer says `"status":"duplicate"`, with the same
+   `message_id` and offset, and nothing new is stored: `transactionId` is the message's
+   idempotency key, so a producer that retries after a timeout cannot create a second order.
+
+3. **Consume it.** A pop leases the message to you. Until you ack it or the lease runs out
+   (60 seconds on a queue that a push created), nobody else reading through the same consumer
+   group gets this partition. This pop names no `consumerGroup`, so it reads through the queue's
+   own shared group, starting from the oldest message.
 
    ```bash
    POP=$(curl -s "$Q/api/v1/pop/queue/orders?batch=1&wait=true&timeout=5000")
-   echo "$POP" | jq '.messages[0] | {transactionId, partition, data}'
+   echo "$POP" | jq '.messages[0] | {transactionId, partition, offset, data}'
+   ```
 
+   ```json
+   {
+     "transactionId": "order-8891-created",
+     "partition": "customer-123",
+     "offset": 0,
+     "data": {
+       "orderId": 8891,
+       "total": 42
+     }
+   }
+   ```
+
+   Ack it with the `leaseId` the pop returned:
+
+   ```bash
    curl -s -X POST $Q/api/v1/ack -H 'content-type: application/json' -d "$(echo "$POP" | jq '{
      transactionId: .messages[0].transactionId,
      partitionId:   .messages[0].partitionId,
@@ -71,13 +108,18 @@ a whole step (the ack, the next event and a state change) as one transaction.
      status:        "completed" }')"
    ```
 
-   The ack answers `[{ "success": true, ... }]`. A refused ack also answers HTTP 200, with
-   `"success": false` on the item, so read the flag. An empty pop is a `204` with no body.
+   ```json
+   [{"index":0,"transactionId":"order-8891-created","success":true,"error":null,"leaseReleased":true,"dlq":false,"noop":false}]
+   ```
 
-4. **Commit one step.** Push a second order, pop it, and handle it the way a service would: ack
-   the order, push a receipt and record the order's state, in one `POST /api/v1/transaction`.
-   `kv` sits at the top level of the body, beside `operations`, and every KV write declares its
-   lifetime (`ttlSeconds`, or `forever: true`).
+   Read `success` on every item. An ack the broker refuses, because its lease expired for
+   instance, still answers HTTP 200, with `"success": false`. The queue is empty now, and a pop on
+   an empty queue answers `204` with no body.
+
+4. **Handle an order in one transaction.** A service that handles an order acks it, sends a
+   receipt and records the order's new state. Here the three writes travel in one
+   `POST /api/v1/transaction`, and the broker writes them as one log entry. Push a second order
+   and pop it:
 
    ```bash
    curl -s -X POST $Q/api/v1/push -H 'content-type: application/json' -d '{
@@ -86,7 +128,13 @@ a whole step (the ack, the next event and a state change) as one transaction.
                  "payload": { "orderId": 8892, "total": 42 } }]
    }'
    POP=$(curl -s "$Q/api/v1/pop/queue/orders?batch=1&wait=true&timeout=5000")
+   ```
 
+   Then commit the step. The pushes and the ack go in `operations`; the state goes in `kv`, a
+   top-level array beside it, and every KV write says how long it lives (`ttlSeconds`, or
+   `forever: true`), so nothing accumulates by accident.
+
+   ```bash
    curl -s -X POST $Q/api/v1/transaction -H 'content-type: application/json' -d "$(echo "$POP" | jq '{
      operations: [
        { type: "ack", transactionId: .messages[0].transactionId,
@@ -99,21 +147,70 @@ a whole step (the ack, the next event and a state change) as one transaction.
    }')" | jq '.success'
    ```
 
-   `true` means the ack, the receipt and the state were written as one entry. Check each:
+   `true` means all three were written. Look at each of them, the state, the receipt and the
+   empty `orders` queue:
 
    ```bash
-   curl -s $Q/api/v1/kv/orders/order-8892 | jq '.value'                      # {"status":"paid"}
-   curl -s "$Q/api/v1/pop/queue/receipts?batch=1" | jq '.messages[0].data'   # {"orderId":8892}
-   curl -s -o /dev/null -w '%{http_code}\n' "$Q/api/v1/pop/queue/orders"     # 204: nothing left
+   curl -s $Q/api/v1/kv/orders/order-8892 | jq -c '.value'
+   curl -s "$Q/api/v1/pop/queue/receipts?batch=1" | jq -c '.messages[0].data'
+   curl -s -o /dev/null -w '%{http_code}\n' "$Q/api/v1/pop/queue/orders"
    ```
 
-   **If any part is refused, nothing is written.** Commit the next order with the receipt's
-   `transactionId` still `receipt-8892` and the answer is `"success": false` with
-   `"reason": "duplicate"`: the ack and the KV write roll back with the push. An expired lease
-   does the same, with `"reason": "rejected_ack"`.
+   ```text
+   {"status":"paid"}
+   {"orderId":8892}
+   204
+   ```
 
-5. **The same step in JavaScript.** Install the SDK with `npm install queen-mq` (Node.js 24 or
-   later).
+5. **Try to commit half a step.** Push a third order and handle it the same way, except that
+   the receipt reuses `receipt-8892`, an id the `receipts` partition has already stored:
+
+   ```bash
+   curl -s -X POST $Q/api/v1/push -H 'content-type: application/json' -d '{
+     "items": [{ "queue": "orders", "partition": "customer-123",
+                 "transactionId": "order-8893-created",
+                 "payload": { "orderId": 8893, "total": 42 } }]
+   }'
+   POP=$(curl -s "$Q/api/v1/pop/queue/orders?batch=1&wait=true&timeout=5000")
+
+   commit_step() {
+     curl -s -X POST $Q/api/v1/transaction -H 'content-type: application/json' -d "$(echo "$POP" | jq --arg receipt "$1" '{
+       operations: [
+         { type: "ack", transactionId: .messages[0].transactionId,
+           partitionId: .messages[0].partitionId, leaseId: .leaseId, status: "completed" },
+         { type: "push", items: [{ queue: "receipts", partition: "customer-123",
+           transactionId: $receipt, payload: { orderId: 8893 } }] }
+       ],
+       kv: [{ op: "put", ns: "orders", key: "order-8893",
+              value: { status: "paid" }, ttlSeconds: 2592000 }]
+     }')"
+   }
+   commit_step receipt-8892 | jq '{success, reason}'
+   ```
+
+   ```json
+   {
+     "success": false,
+     "reason": "duplicate"
+   }
+   ```
+
+   The duplicate receipt rolled back the whole call, so the ack and the state change were not
+   written either. `curl -s $Q/api/v1/kv/orders/order-8893` answers `"found": false`, and the
+   order is still leased to you. Send the step again with the right id, and it commits:
+
+   ```bash
+   commit_step receipt-8893 | jq '.success'
+   ```
+
+   It prints `true`. This is what makes a retried step safe: if a step committed and its answer
+   got lost on the way back, the retry carries the same ack and the same receipt id, so the broker
+   refuses it and nothing is written twice. A lease that has expired fails the same way, with
+   `"reason": "rejected_ack"`, which means a worker that took too long cannot commit over the
+   worker that took the message after it.
+
+6. **The same step in JavaScript.** Install the SDK with `npm install queen-mq` (Node.js 24 or
+   later), save this as `step.mjs` and run it with `node step.mjs`:
 
    ```js
    import { Queen } from 'queen-mq'
@@ -121,38 +218,40 @@ a whole step (the ack, the next event and a state change) as one transaction.
    const queen = new Queen({ url: 'http://localhost:6632' })
 
    await queen.queue('orders').partition('customer-123')
-     .push([{ transactionId: 'order-8893-created', data: { orderId: 8893, total: 42 } }])
+     .push([{ transactionId: 'order-8894-created', data: { orderId: 8894, total: 42 } }])
 
    const [message] = await queen.queue('orders').batch(1).wait(true).pop()
 
    await queen.transaction()
      .ack(message)
      .queue('receipts').partition('customer-123')
-       .push([{ transactionId: 'receipt-8893', data: { orderId: 8893 } }])
-     .kv.put('orders', 'order-8893', { status: 'paid' }, { ttl: '30d' })
+       .push([{ transactionId: 'receipt-8894', data: { orderId: 8894 } }])
+     .kv.put('orders', 'order-8894', { status: 'paid' }, { ttl: '30d' })
      .commit()
 
+   console.log('committed', message.transactionId)
    await queen.close()
    ```
 
-   `commit()` throws when the broker refuses the transaction, so the line after it runs only if
-   all three were written. `ack(message)` sends the lease the pop returned. This pop named no
-   consumer group; when yours does, pass it to the ack as well:
-   `.ack(message, 'completed', { consumerGroup: 'billing' })`.
+   It prints `committed order-8894-created`. `commit()` throws when the broker refuses the
+   transaction, so the line after it runs only when all three writes happened. `ack(message)`
+   sends the lease the pop returned. This pop named no consumer group; when yours does, name it on
+   the ack as well, `.ack(message, 'completed', { consumerGroup: 'billing' })`, or the broker looks
+   for the lease in the wrong group and refuses the transaction.
 
 </Steps>
 
 <Aside type="caution">
-A node refuses writes that grow storage once its disk is 85% full (`QUEEN_RAFT_DISK_HIGH_PCT`):
-the push answers `507` with `"code":"storage_full"`. Under Docker Desktop, that is the disk of
-Docker's virtual machine.
+A node refuses writes that grow storage once its disk is 85% full (`QUEEN_RAFT_DISK_HIGH_PCT`),
+and accepts them again below 80%. The push answers `507` with `"code":"storage_full"`. Under
+Docker Desktop, the disk that counts is the one of Docker's virtual machine.
 </Aside>
 
 ## Runnable versions
 
-These programs do the same with assertions and exit non-zero if a check fails. They are the
-repository's tutorials (`examples/tutorials/`), and this site renders them from the files the
-suite runs.
+The repository's tutorials (`examples/tutorials/`) do the same with assertions, and exit non-zero
+when a check fails. This site renders them from the files the suite runs, and each one takes the
+broker's address from `QUEEN_URL`.
 
 ### One message in, one out
 
@@ -197,7 +296,7 @@ docker rm -f queen && docker volume rm queen-data
 ## Next
 
 <CardGrid>
-  <LinkCard title="The model" href="/concepts/" description="Partitions, progress, state, time and identity, and how one transaction covers them." />
-  <LinkCard title="One state machine per entity" href="/guides/state-machines/" description="Run every order or customer as a state machine with stateless workers." />
-  <LinkCard title="Clients" href="/start/clients/" description="Install and connect the six SDKs, queenctl, or the embedded Rust broker." />
+  <LinkCard title="The model" href="/concepts/" description="Partitions, consumer groups, state, time and identity, and the one commit that holds them together." />
+  <LinkCard title="Run a cluster" href="/operate/cluster/" description="Three nodes on your laptop with Docker Compose: replication, a leader hand-off and a rolling upgrade." />
+  <LinkCard title="Build with an AI agent" href="/start/ai-agents/" description="Connect Claude Code, Cursor, VS Code or Codex to Queen's MCP server: the model, tested code and the traps, while you build." />
 </CardGrid>

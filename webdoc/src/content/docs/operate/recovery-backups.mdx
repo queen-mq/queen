@@ -1,0 +1,216 @@
+---
+title: Backups and restore
+description: "What a backup of Queen holds, how to copy a node's data directory while it runs, and how to restore one node or a whole cluster from that copy, rehearsed on 2.0.0-beta.6."
+type: how-to
+tier: operate
+sidebar:
+  order: 8
+sourceOfTruth:
+  - server/src/rsm/replicator/raft/repair.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/local.rs
+  - server/src/rsm/store/integrity.rs
+  - server/src/encryption.rs
+  - test/recovery/README.md
+verifiedBy:
+  - test/recovery/sc12-restore-backup.sh
+  - test/recovery/k8s-K4-restore.sh
+---
+
+Three replicas protect you from losing a machine. They do not protect you from a mistake: a
+deleted queue, a retention setting that was too short or a bad deploy reaches every node as
+faithfully as a good write does. A backup is the copy that lives outside the cluster. Queen makes
+it a small job, because a node keeps everything it knows in one directory, and one copy of one
+node is enough to rebuild a whole cluster.
+
+## What a backup holds
+
+The data directory (`QUEEN_RAFT_DIR`, `/var/lib/queen/raft` by default) is the node's whole state:
+the queue logs with every message (`qlog/`), the ordered store with queues, partitions, cursors,
+leases, KV, timers and dedup records (`store/`), a cluster node's raft state (`raft/`), its own
+metrics (`local.db`, `dash.db`), and, with the [proxy](/operate/tenants/), the tenants, users and
+API-key hashes. Every node of a cluster holds the same data, so you copy one node, and that copy
+can come back as any node id: the rehearsals restored node 3's copy as node 1.
+
+Two things are not in it. Ephemeral queues keep their messages in memory, so there is nothing of
+them on disk. And the environment stays outside: `QUEEN_RAFT_TOKEN`, the JWT and proxy secrets,
+and `QUEEN_ENCRYPTION_KEY`. Keep that key apart from the data and with the same care, because the
+payloads of encrypted queues in a backup can only be read with it, and a node started with a
+different key hands consumers the ciphertext envelope without any error.
+
+A copy that freezes the whole directory at one instant is exactly what a power cut leaves behind,
+and Queen gets through a power cut without losing an acknowledged write (one of the
+[Jepsen-tested](/concepts/guarantees/) faults). So any tool that copies the directory at a single
+instant takes a consistent backup, and the table below is about which tools do.
+
+## Take one
+
+| Method | While the node runs | Why |
+|---|---|---|
+| A snapshot of the volume: a cloud disk snapshot, a CSI `VolumeSnapshot`, LVM, ZFS or btrfs | Yes | The volume at one instant, as a power cut would leave it. The whole data directory must be on that one volume |
+| Freeze the process, copy, thaw: SIGSTOP or `docker pause`, then `tar` or `cp -a`, then SIGCONT or `docker unpause` | Yes, paused for the copy | The same single instant. On a cluster, freeze a follower: the others commit without it. Freezing the leader costs an election |
+| Stop the node, copy, start it | No | Always consistent. On a cluster the other nodes keep serving; on a single node it is downtime |
+| `cp`, `tar` or `rsync` of a directory while the node runs | Never | Files are copied at different moments, and the store file can be copied in the middle of a write. It happened to work once on a small idle node in the rehearsal, which says nothing about a busy one |
+
+<Tabs>
+<TabItem label="Plain hosts">
+
+```bash
+# Freeze, copy, thaw.
+PID=$(pgrep -x queen)
+kill -STOP "$PID"
+tar -C /var/lib/queen -cf "/backup/queen-$(date -u +%Y%m%dT%H%MZ).tar" raft
+kill -CONT "$PID"          # thaw whether or not the copy worked
+```
+
+</TabItem>
+<TabItem label="Docker">
+
+```bash
+# Freeze the container, copy its volume through a helper container, thaw.
+docker pause queen
+docker run --platform linux/amd64 --rm --entrypoint tar -v queen-data:/data:ro -v /backup:/backup \
+  ghcr.io/queen-mq/queen:latest -C /data -cf "/backup/queen-$(date -u +%Y%m%dT%H%MZ).tar" .
+docker unpause queen
+```
+
+</TabItem>
+<TabItem label="Kubernetes">
+
+```yaml
+# A snapshot of one pod's volume. Needs a CSI driver with snapshot support.
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata: { name: queen-20261002, namespace: queen }
+spec:
+  volumeSnapshotClassName: <your snapshot class>
+  source: { persistentVolumeClaimName: data-queen-1 }
+```
+
+</TabItem>
+</Tabs>
+
+A copy holds what that node had written when it was taken. A follower can be a few entries behind
+the leader, so a write acknowledged in the instant before the copy may be missing from it, while
+everything earlier is there. In the beta.6 rehearsal a follower was frozen and copied while a
+writer sent 40 requests a second: every one of the 212 pushes and 5 KV writes acknowledged before
+the copy began came back from it.
+
+Take copies on a schedule that matches what you can afford to lose, keep several, and restore one
+now and then on a spare machine or in a scratch namespace. The first restore you run should not be
+the one during an outage.
+
+## Restore one node
+
+The node goes back to the moment of the copy. Stop it, put the copy in place of its data
+directory, start it:
+
+```bash
+systemctl stop queen                      # or docker stop; the node must be down
+mv /var/lib/queen/raft /var/lib/queen/raft.old
+tar -C /var/lib/queen -xf /backup/queen-20261002T1200Z.tar
+systemctl start queen
+```
+
+Keep the files owned by the user the node runs as (`tar` run as root preserves the owners). On
+beta.6 a single node was frozen and copied while a writer kept going, then killed with its
+directory deleted, and restored from the copy: every one of the 431 pushes and 15 KV writes
+acknowledged before the copy came back.
+
+## Restore a cluster
+
+When every disk is gone, one node's copy becomes node 1's directory, node 1 starts alone with
+`QUEEN_RAFT_FORCE_RECOVER=1`, and the other nodes join it empty. The forced recovery is needed
+because the copy still lists three voters, and node 1 alone is not a majority of them; it makes
+node 1 the only voter, keeping exactly the log the copy holds.
+
+<Tabs>
+<TabItem label="Plain hosts">
+
+```bash
+# Every node stopped, every data directory gone or moved away.
+# 1. On queen-1, unpack the copy (taken on any node) as its data directory.
+tar -C /var/lib/queen -xf /backup/queen-20261002T1200Z.tar
+# 2. Start queen-1 alone with QUEEN_RAFT_FORCE_RECOVER=1. Once the probe commits through it,
+#    restart it without the variable.
+# 3. Start queen-2 and queen-3 on empty directories with QUEEN_RAFT_JOIN=true, then:
+curl -s -X POST http://queen-1:6632/api/v1/system/raft/membership/learners \
+  -H 'content-type: application/json' -d '{"id":2,"raft":"queen-2:7400","http":"queen-2:6632"}'
+curl -s -X POST http://queen-1:6632/api/v1/system/raft/membership/learners \
+  -H 'content-type: application/json' -d '{"id":3,"raft":"queen-3:7400","http":"queen-3:6632"}'
+curl -s -X POST http://queen-1:6632/api/v1/system/raft/membership/promote \
+  -H 'content-type: application/json' -d '{"ids":[2,3]}'
+```
+
+</TabItem>
+<TabItem label="Kubernetes">
+
+```bash
+q() { kubectl -n queen exec "$1" -c queen -- curl -s -m 30 "${@:3}" "localhost:6632$2"; echo; }
+
+kubectl -n queen scale sts queen --replicas=0
+kubectl -n queen wait --for=delete pod -l app=queen --timeout=300s
+kubectl -n queen delete pvc data-queen-0 data-queen-1 data-queen-2
+
+# 1. Pod 0's volume, created from the snapshot (taken on any pod).
+kubectl -n queen apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: data-queen-0 }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: <your storage class>
+  resources: { requests: { storage: 50Gi } }
+  dataSource: { apiGroup: snapshot.storage.k8s.io, kind: VolumeSnapshot, name: queen-20261002 }
+EOF
+
+# 2. Pod 0 alone, force-recovered, then restarted without the variable.
+kubectl -n queen set env sts/queen QUEEN_RAFT_FORCE_RECOVER=1
+kubectl -n queen scale sts queen --replicas=1
+kubectl -n queen rollout status sts/queen
+kubectl -n queen set env sts/queen QUEEN_RAFT_FORCE_RECOVER-
+kubectl -n queen rollout status sts/queen
+
+# 3. The other two, empty. Add them once both pods are Running, then promote them.
+kubectl -n queen scale sts queen --replicas=3
+for i in 1 2; do
+  P=queen-$i.queen-headless.queen.svc.cluster.local
+  q queen-0 /api/v1/system/raft/membership/learners -X POST -H 'content-type: application/json' \
+    -d "{\"id\":$((i + 1)),\"raft\":\"$P:7400\",\"http\":\"$P:6632\"}"
+done
+q queen-0 /api/v1/system/raft/membership/promote -X POST -H 'content-type: application/json' -d '{"ids":[2,3]}'
+```
+
+</TabItem>
+</Tabs>
+
+If the copy came from a node that once ran a forced recovery, node 1 refuses to start with
+`QUEEN_RAFT_FORCE_RECOVER=1 is still set, but this node already recovered`. The copy carries that
+node's marker, `raft/force_recovered.json`: move it aside in the restored directory and start node
+1 again. This is exactly what happened in the beta.6 rehearsal, and it is listed among the
+[known gaps](/operate/recovery/#known-gaps).
+
+The cluster comes back at the moment of the copy, and that includes the consumers: whatever they
+acknowledged after it is delivered again, because their positions went back too. Producers can
+send the lost writes again. A push repeated with the same `transactionId` within the queue's dedup
+window (`dedupWindowSeconds`, an hour by default) is answered with the original message when the
+copy already holds it, so only the missing ones are written ([dedup](/concepts/dedup/)).
+
+On beta.6 a follower's frozen copy, restored as node 1 after all three directories were deleted,
+had three voters again 4 s after node 1 started: all 212 pushes and 5 KV writes acknowledged
+before the copy were there, and the 90 written after it were gone, as they should be. On k3s
+(beta.1), pod 2's frozen copy restored as pod 0's volume reached three voters in 66 s, with all
+1,200 writes from before the copy and none of the 300 after it. The `VolumeSnapshot` step itself
+was not rehearsed, because k3s ships no snapshot controller.
+
+## Limits
+
+Queen has no backup command and ships no log between copies, so a restore always goes back to the
+moment a copy was taken. A copy restores a single node or a whole cluster, and never one node of a
+running cluster: a node whose log went backwards is not repaired by the others and makes its
+clients hang. To rebuild one node, let it copy from its peers ([replace a
+node](/operate/recovery/#replace-a-node)). Ephemeral messages are never in a backup.
+
+<CardGrid>
+  <LinkCard title="Recovery" href="/operate/recovery/" description="How to tell what broke, and the procedures for every case, each rehearsed under load." />
+</CardGrid>

@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "queen": {
+      "type": "http",
+      "url": "https://queenmq.com/mcp"
+    }
+  }
+}

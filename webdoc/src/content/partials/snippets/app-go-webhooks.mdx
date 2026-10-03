@@ -10,22 +10,20 @@ description: "Verified snippet extracted from examples/apps/go/webhooks/main.go.
 
 ```go title="examples/apps/go/webhooks/main.go"
 //
-// A webhook delivery system.
+// A webhook sender: ordered per endpoint, retried by the broker, and
+// dead-lettered with its error when it never succeeds.
 //
-// Every SaaS product ends up writing this one, and it is harder than it looks:
-// deliveries to one customer's endpoint must arrive in order, a customer whose
-// endpoint is down must not slow down anybody else's, failures must be retried
-// a bounded number of times, and what never succeeds has to end up somewhere a
-// human can look at.
+// Deliveries to one endpoint have to arrive in the order the events happened,
+// an endpoint that is down must not slow anybody else down, a failure is
+// retried a bounded number of times, and what never succeeds has to end up
+// somewhere a person can read it. Each endpoint gets a partition of its own,
+// created by its first delivery, so a dead endpoint backs up its own partition
+// and nothing else. Retries are the broker's retry budget, and an exhausted
+// delivery lands in the dead-letter queue with the error attached.
 //
-// The shape here is one ordered lane per destination, created by the first
-// delivery to it. A dead endpoint backs up its own lane and no other; retries
-// are the broker's retry budget rather than a loop in your code; and what
-// exhausts the budget lands in the dead-letter queue with the error attached.
-//
-//	webhook-deliveries (one partition per destination)
-//	  |-- group "sender"  posts each delivery, fails on a dead endpoint
-//	        |-- retryLimit exhausted -> dead-letter queue
+//	webhook-deliveries (one partition per endpoint)
+//	  `-- group "sender"  POSTs each delivery; an error spends one retry
+//	        `-- RetryLimit spent -> dead-letter queue, with the error
 //
 // Run it:
 //
@@ -51,19 +49,20 @@ var deliveriesQueue = "app-go-webhooks-" + runID
 
 const group = "sender"
 
-// Three subscribers. One of them has let its certificate expire, which is the
-// most common way a webhook endpoint dies: it answers, but it answers 500. The
-// list is a slice rather than a map so the queuing order below is the same on
-// every run, which Go map iteration would not give.
+// Three subscribers. One of them answers 500 to everything. It is listed first,
+// so its deliveries are the oldest in the queue and its partition is usually
+// handed out first: a sender that let a failing endpoint hold up the others
+// would fail the checks below. The list is a slice so the queuing order is the
+// same on every run, which Go map iteration would not give.
 type endpoint struct {
 	host    string
 	healthy bool
 }
 
 var endpoints = []endpoint{
+	{host: "initech.example", healthy: false},
 	{host: "acme.example", healthy: true},
 	{host: "globex.example", healthy: true},
-	{host: "initech.example", healthy: false},
 }
 
 const (
@@ -82,9 +81,8 @@ func isHealthy(host string) bool {
 }
 
 // postToEndpoint stands in for the HTTP POST to the subscriber. A real sender
-// would use net/http and treat any non-2xx as a failure, which is exactly what
-// returning an error does here: with auto-ack on, an error from the handler is
-// what the client turns into a negative acknowledgement.
+// calls net/http and returns an error for any status that is not 2xx, which is
+// what this does.
 func postToEndpoint(host string, event map[string]interface{}) error {
 	if !isHealthy(host) {
 		return fmt.Errorf("%s answered 500", host)
@@ -117,8 +115,8 @@ func run() error {
 		brokerURL = "http://localhost:6632"
 	}
 
-	// One context bounds the whole program: a broker that stops answering ends
-	// the run instead of wedging it.
+	// One context bounds the whole program, so a broker that stops answering
+	// fails the run when it expires.
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
@@ -130,14 +128,11 @@ func run() error {
 
 	fmt.Printf("broker %s\n", brokerURL)
 
-	// RetryLimit is the delivery budget, and DlqAfterMaxRetries is what happens
-	// when it runs out. Without the second flag an exhausted message is simply
-	// marked failed and stays put; with it, the broker moves it to the
-	// dead-letter table with the last error on the row.
-	//
-	// LeaseTime is the other half of the contract: it is how long the broker
-	// waits for a sender that took a delivery and never came back before
-	// handing that delivery to someone else.
+	// RetryLimit is the delivery budget: a delivery that fails RetryLimit + 1
+	// times is filed in the dead-letter queue with its last error, because
+	// DlqAfterMaxRetries is on. LeaseTime is how long the broker waits for a
+	// sender that took a delivery and never came back before it hands the
+	// delivery to another sender.
 	if _, err := client.Queue(deliveriesQueue).
 		Config(queen.QueueConfig{
 			LeaseTime:          30,
@@ -150,15 +145,15 @@ func run() error {
 
 	// ------------------------------------------------------------------ queuing
 	//
-	// The application emits events. Each one goes into the partition of the
-	// endpoint it is destined for, which is what makes "in order per subscriber"
-	// a property of the storage rather than of the sender.
+	// The application emits events. Each delivery goes into the partition of
+	// the endpoint it is for, which is what makes "in order per subscriber" a
+	// property of the storage instead of something the sender has to arrange.
 	fmt.Println("\nqueuing deliveries")
 	for seq := 1; seq <= eventsPerEndpoint; seq++ {
 		for _, e := range endpoints {
-			// The event id makes the enqueue idempotent: an application that
-			// retries its own emit does not create a second delivery. This
-			// client carries it on the push builder, not in the payload.
+			// The event id, which this client takes on the push builder. An
+			// application that retries its own emit does not create a second
+			// delivery.
 			if _, err := client.Queue(deliveriesQueue).
 				Partition(e.host).
 				Push(map[string]interface{}{
@@ -177,31 +172,35 @@ func run() error {
 
 	// ------------------------------------------------------------------ sending
 	//
-	// The sender pool. Auto-ack is the default here, so a handler that returns
-	// nil acknowledges the delivery and one that returns an error nacks it: the
-	// broker then redelivers it until the retry budget is gone. That is the
-	// whole retry mechanism, and it survives the sender process dying
-	// mid-flight, which a loop inside the handler would not.
+	// The sender pool. Auto-ack is the default, so a handler that returns nil
+	// acknowledges the delivery and a handler that returns an error gives it
+	// back with the error: the broker redelivers it and counts one retry. The
+	// retries live in the broker, so they survive the sender dying halfway,
+	// which a retry loop inside the handler would not.
+	//
+	// Partitions(1): every pop takes ONE endpoint. After a failed delivery the
+	// client skips the rest of that pop, so deliveries to other endpoints that
+	// came in the same pop would wait for their lease to run out.
 	fmt.Println("\nsending")
 	var mu sync.Mutex
 	deliveredTo := map[string][]int{}
 	attempts := map[string]int{}
+	// The broker numbers every delivery (deliveryAttempt in the pop response),
+	// but this client's Message does not expose that field, and RetryCount is
+	// filled only on a dead-letter read. So the sender counts its own attempts
+	// at each event, by event id, for the log line.
+	tried := map[string]int{}
 
 	err = client.Queue(deliveriesQueue).
 		Group(group).
 		SubscriptionMode(queen.SubscriptionModeAll).
 		Concurrency(3).
+		Partitions(1).
 		Each().
-		// Enough turns for every good delivery plus every attempt at the bad
-		// ones. Limit is per worker rather than a budget shared by the pool,
-		// so it is a ceiling on a runaway goroutine; what actually
-		// ends the pool is the idle bound, once the healthy lanes are drained
-		// and the dead one has burnt its budget into the dead-letter queue.
-		// TimeoutMillis caps each poll at a second so that bound is noticed
-		// promptly instead of inside a 30 s long poll.
-		Limit(eventsPerEndpoint*2+eventsPerEndpoint*(retryLimit+1)).
-		IdleMillis(6000).
+		// Long polls end after a second and a sender stops after three quiet
+		// seconds, so the program finishes. A service runs without these two.
 		TimeoutMillis(1000).
+		IdleMillis(3000).
 		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
 			host, _ := msg.Data["endpoint"].(string)
 			seq, ok := msg.Data["seq"].(float64)
@@ -209,22 +208,16 @@ func run() error {
 				return fmt.Errorf("delivery %s has no numeric seq", msg.TransactionID)
 			}
 
-			// Three poll loops means three goroutines in this handler, so the
-			// bookkeeping is behind a mutex. The JavaScript version needs no
-			// lock because it has no threads.
+			// Three senders are three goroutines in this handler, so the
+			// bookkeeping is behind a mutex.
 			mu.Lock()
 			attempts[host]++
+			tried[msg.TransactionID]++
+			attempt := tried[msg.TransactionID]
 			mu.Unlock()
 
-			// msg.RetryCount exists on the struct but stays zero here: the
-			// broker's pop response carries no attempt counter, and the field is
-			// only filled on a dead-letter read. The budget is the broker's, and
-			// returning an error is how one attempt of it is spent. A sender
-			// that recognises a permanent error can skip the attempts it has
-			// left only through the HTTP ack route, which takes a status string:
-			// this client's Ack takes a bool, completed or failed, so unlike the
-			// JavaScript one it cannot mark a delivery dead on the spot.
 			if err := postToEndpoint(host, msg.Data); err != nil {
+				fmt.Printf("  %s <- event %d failed on attempt %d: %v\n", host, int(seq), attempt, err)
 				return err
 			}
 
@@ -249,36 +242,33 @@ func run() error {
 		seqs := deliveredTo[e.host]
 		if err := assert(
 			len(seqs) == eventsPerEndpoint,
-			fmt.Sprintf("%s received all %d events", e.host, eventsPerEndpoint),
+			fmt.Sprintf("%s received all %d events (got %d)", e.host, eventsPerEndpoint, len(seqs)),
 		); err != nil {
 			return err
 		}
 		if err := assert(
 			slices.Equal(seqs, []int{1, 2, 3}),
-			fmt.Sprintf("%s received them in the order they happened", e.host),
+			fmt.Sprintf("%s received its events in the order they happened (got %s)", e.host, orNone(joinInts(seqs))),
 		); err != nil {
 			return err
 		}
 	}
 
-	if err := assert(
-		len(deliveredTo[deadEndpoint]) == 0,
-		"the dead endpoint received nothing, as it should",
-	); err != nil {
+	if err := assert(len(deliveredTo[deadEndpoint]) == 0, "the dead endpoint received nothing"); err != nil {
 		return err
 	}
 	if err := assert(
-		attempts[deadEndpoint] > eventsPerEndpoint,
-		"the dead endpoint was retried rather than dropped on the first failure",
+		attempts[deadEndpoint] == eventsPerEndpoint*(retryLimit+1),
+		fmt.Sprintf("each dead delivery was tried %d times before it was given up (%d attempts)",
+			retryLimit+1, attempts[deadEndpoint]),
 	); err != nil {
 		return err
 	}
 
-	// The dead-letter queue is a table you can read, not a log line. Each row
-	// carries the payload, the endpoint it was for, and the last error, which is
-	// what a support engineer needs to answer "why did this customer not get
-	// it". DLQ takes a consumer group to filter by; empty means every group on
-	// this queue, which is what the check below wants.
+	// The dead letters are records you can query. Each one keeps the payload,
+	// so it names the endpoint and the invoice, and the last error, which is
+	// what answers "why did this customer not get the webhook". DLQ takes a
+	// consumer group to filter by; empty means every group on this queue.
 	dlq, err := client.Queue(deliveriesQueue).DLQ("").Limit(50).Get(ctx)
 	if err != nil {
 		return fmt.Errorf("read dead letters: %w", err)
@@ -304,17 +294,13 @@ func run() error {
 			carriesError = false
 		}
 	}
-	if err := assert(carriesError, "each dead-letter row carries the error that killed it"); err != nil {
+	if err := assert(carriesError, "each dead letter carries the error that killed it"); err != nil {
 		return err
 	}
-
-	onlyDead := true
-	for _, m := range dlq.Messages {
-		if host, _ := m.Data["endpoint"].(string); host != deadEndpoint {
-			onlyDead = false
-		}
-	}
-	if err := assert(onlyDead, "no healthy endpoint put anything in the dead-letter queue"); err != nil {
+	if err := assert(
+		len(dlq.Messages) == len(dead),
+		"no healthy delivery ended up in the dead-letter queue",
+	); err != nil {
 		return err
 	}
 
@@ -322,9 +308,9 @@ func run() error {
 	for _, m := range dead {
 		host, _ := m.Data["endpoint"].(string)
 		invoice, _ := m.Data["invoiceId"].(string)
-		names = append(names, host+"/"+invoice)
+		names = append(names, fmt.Sprintf("%s/%s: %s", host, invoice, m.ErrorMessage))
 	}
-	fmt.Printf("\n  dead letters: %s\n", strings.Join(names, ", "))
+	fmt.Printf("\n  dead letters: %s\n", strings.Join(names, "; "))
 
 	// Clean up on success only: a failed run leaves the queue and its dead
 	// letters on the broker to be looked at.
@@ -333,5 +319,20 @@ func run() error {
 	}
 
 	return nil
+}
+
+func joinInts(values []int) string {
+	parts := make([]string, len(values))
+	for i, v := range values {
+		parts[i] = strconv.Itoa(v)
+	}
+	return strings.Join(parts, ",")
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }
 ```

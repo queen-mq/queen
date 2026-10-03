@@ -11,10 +11,13 @@ sourceOfTruth:
   - server/src/handlers/data.rs
   - server/src/handlers/kv.rs
   - server/src/handlers/timers.rs
+  - server/src/handlers/ephemeral.rs
   - server/src/quota.rs
   - server/src/rsm/facade/mod.rs
   - server/src/rsm/facade/real.rs
   - server/src/rsm/facade/real/phase2.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/offsets.rs
   - server/src/rsm/entry.rs
   - server/src/rsm/batcher.rs
   - server/src/rsm/planner/kv.rs
@@ -24,8 +27,14 @@ sourceOfTruth:
   - server/src/rsm/maintenance.rs
 ---
 
-Every limit and default the broker applies, with the setting that changes it. Values are the
-defaults of server 2.0.0-beta.3; the generated list of settings is on
+Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
+on what one log entry may carry, a budget on how much a KV call may read. Few of them are about the
+data itself. The broker puts no cap on partitions per queue, on queues per tenant, or on how long a
+partition's history may grow: your disk and your memory bound those, and a proxy plan can cap them
+per tenant (see [tenants](/operate/tenants/)).
+
+Each limit below comes with the setting that moves it, when there is one, and the file that
+applies it. The values are the defaults of server 2.0.0-beta.6; the full list of settings is on
 [configuration](/reference/configuration/).
 
 ## Requests
@@ -33,14 +42,15 @@ defaults of server 2.0.0-beta.3; the generated list of settings is on
 | Limit | Default | Setting | Applied in |
 |---|---|---|---|
 | Request body | 64 MiB | `QUEEN_MAX_BODY_BYTES` | `server/src/handlers/raft.rs` |
-| One planned command (a push to one partition, a KV call, a timers call, a positions list) | 96 MiB | `QUEEN_RAFT_ENTRY_MAX_BYTES` | `server/src/rsm/entry.rs` |
+| One planned command (a push to one partition, a KV call, a timers call, a positions list) | 96 MiB | `QUEEN_RAFT_ENTRY_MAX_BYTES` | `server/src/rsm/planner/push.rs` |
 | Message `payload` | any JSON value, inside the two limits above | | `server/src/rsm/facade/real.rs` |
-| Items per push | no count limit | | `server/src/rsm/facade/real.rs` |
+| Items per push | no count limit in the broker; 10,000 through the proxy unless the plan says otherwise | `QUEEN_PROXY_MAX_BATCH_ITEMS` | `server/src/rsm/facade/real.rs` |
 | `transactionId` | 65,535 bytes | | `server/src/rsm/facade/real.rs` |
-| Deadline of an ack, a lease extend or a transaction | 30 s, at most 60 s | `QUEEN_STMT_TIMEOUT_MS` | `server/src/handlers/raft.rs` |
+| Deadline of a push | 30 s, at most 60 s | `POP_DEFAULT_TIMEOUT_MS` | `server/src/handlers/raft.rs` |
+| Deadline of an ack, a lease extension or a transaction | 30 s, at most 60 s | `QUEEN_STMT_TIMEOUT_MS` | `server/src/handlers/raft.rs` |
 
-A push whose items for one partition exceed the command limit is refused: those items answer
-`status: "error"`.
+The pushes to one partition travel as one command, so items for one partition that together exceed
+the command limit are refused, and those items answer `status: "error"` in the 201 body.
 
 ## Names
 
@@ -51,7 +61,7 @@ A push whose items for one partition exceed the command limit is refused: those 
 | Consumer group, when not named | `__QUEUE_MODE__` (queue mode) | `server/src/rsm/facade/real.rs` |
 | Queue namespace and task, for a queue a push creates | The first and second dot-separated parts of the queue name | `server/src/rsm/planner/timers.rs` |
 | KV namespace (`ns`) | `^[a-z0-9][a-z0-9._-]{0,63}$` | `server/src/rsm/planner/kv.rs` |
-| KV key | 1–512 bytes, no NUL, and tenant + namespace + key within the store's 511-byte key | `server/src/rsm/planner/kv.rs` |
+| KV key | 1 to 512 bytes, no NUL, and tenant + namespace + key within the store's 511-byte key | `server/src/rsm/planner/kv.rs` |
 | Position metadata | 4096 bytes | `server/src/rsm/planner/positions.rs` |
 
 ## Queues, leases and retries
@@ -67,10 +77,10 @@ A queue created by its first push (or by a timer firing into it) and a queue cre
 | `dedupWindowSeconds` | 3600 | 3600 | same |
 | `retentionEnabled` | off | off | same |
 
-- A pop's `leaseSeconds` overrides `leaseTime` for that pop.
-- `POST /api/v1/lease/:leaseId/extend` extends by `seconds`, default 60.
-- `configure` merges by default: an option you leave out keeps its value, and `null` restores its
-  default. With `"mode": "replace"` every option you leave out goes back to its default.
+A pop's `leaseSeconds` overrides `leaseTime` for that pop, and
+`POST /api/v1/lease/:leaseId/extend` extends by `seconds`, 60 by default. `configure` merges by
+default: an option you leave out keeps its value, and `null` restores its default. With
+`"mode": "replace"`, every option you leave out goes back to its default.
 
 ## Dedup
 
@@ -88,10 +98,21 @@ whatever the window.
 | Parameter | Default | Bound | Applied in |
 |---|---|---|---|
 | `batch` | 200 | none in the broker | `server/src/handlers/data.rs` |
-| `partitions` (wildcard pop) | 1 | 1–64 | `server/src/handlers/data.rs` |
+| `partitions` (wildcard pop) | 1 | 1 to 64 | `server/src/handlers/data.rs` |
 | `timeout` with `wait=true` | 30,000 ms (`POP_DEFAULT_TIMEOUT_MS`) | 60 s | `server/src/handlers/raft.rs` |
 
 A pop that finds nothing before its timeout answers `204`.
+
+## Reads by offset
+
+| Limit | `POST /api/v1/fetch` | `POST /api/v1/fetch/offsets` | `POST /api/v1/partitions/changed` |
+|---|---|---|---|
+| Entries per call | 1024 | 1024 | 1024 |
+| Bytes per entry | `maxBytes`, 1 MiB by default, 1 byte to 8 MiB | | |
+| Long-poll | `maxWaitMs`, at most 30,000 | none | none |
+| Partitions per entry | | | `limit`, 1000 by default and at most |
+
+Applied in `server/src/rsm/facade/real/phase2/reads.rs` and `offsets.rs`.
 
 ## KV
 
@@ -103,7 +124,7 @@ A pop that finds nothing before its timeout answers `204`.
 | `getPrefix` `limit` | 100 by default, at most 1000 | not allowed | |
 | Bytes read per call | 4 MiB | 4 MiB | |
 | Writes of one key per call | 1 | 1 | |
-| Expiry | `ttlSeconds` > 0 or `forever: true`, required on every `put`, `putIfAbsent` and `incr` | the same | |
+| Expiry | `ttlSeconds` above 0 or `forever: true`, required on every `put`, `putIfAbsent` and `incr` | the same | |
 | Calls per tenant | reads 200/s (burst 400), writes 100/s (burst 200) | not counted | `QUEEN_KV_READ_RATE`, `QUEEN_KV_READ_BURST`, `QUEEN_KV_WRITE_RATE`, `QUEEN_KV_WRITE_BURST` |
 
 A call over a tenant's rate answers 429 `rate_limited`. A tenant's quota row can set its own rates
@@ -120,9 +141,29 @@ and row and byte caps; see [tenants](/operate/tenants/).
 | One `(queue, timerKey)` per call | yes | yes | |
 
 The leader fires due timers every 50 ms (`QUEEN_RAFT_TIMER_TICK_MS`), at most 256 timers and 4 MiB
-per tick. A fire that fails is retried with a backoff from 1 s to 60 s; after 5 failed attempts
-(`QUEEN_SWEEPER_MAX_ATTEMPTS`, transient failures not counted) the timer is dead-lettered into its
-queue's DLQ.
+per tick. A fire that fails is retried with a backoff from 1 s to 60 s, and after 5 failed
+attempts (`QUEEN_SWEEPER_MAX_ATTEMPTS`; transient failures are not counted) the timer is
+dead-lettered into its queue's DLQ.
+
+## Ephemeral queues
+
+Ephemeral queues live in memory, so their limits are memory budgets. Each is a ceiling a
+`configure` cannot raise.
+
+| Limit | Default | Setting |
+|---|---|---|
+| Ephemeral bytes per node | 256 MiB; over it, 503 `ephemeral_unavailable` | `QUEEN_EPHEMERAL_MAX_BYTES` |
+| Bytes per queue | 16 MiB | `QUEEN_EPHEMERAL_QUEUE_MAX_BYTES` |
+| Messages per queue | 10,000 | `QUEEN_EPHEMERAL_QUEUE_MAX_LENGTH` |
+| Lease | 30 s (at most a day) | `QUEEN_EPHEMERAL_LEASE_S` |
+| Attempts before a message is dropped (there is no DLQ) | 5 | `QUEEN_EPHEMERAL_RETRY_LIMIT` |
+| Idle time before an implicit queue is collected | 300 s; `0` never | `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S` |
+| Pushed messages per tenant | 5,000/s, burst 10,000 | `QUEEN_EPHEMERAL_RATE`, `QUEEN_EPHEMERAL_BURST` |
+| Items per push or ack call, and pop `batch` | 10,000 | |
+| Pop `timeout` | 300,000 ms | |
+| Queue, partition and group names | 512 bytes | |
+
+The last three are constants in `server/src/handlers/ephemeral.rs`.
 
 ## Retention
 
@@ -130,6 +171,6 @@ queue's DLQ.
 |---|---|---|
 | Retention of messages | off per queue | `retentionEnabled`, `retentionSeconds`, `completedRetentionSeconds` on `configure` |
 | Retention pass | every 5000 ms | `RETENTION_INTERVAL` |
-| A partition with no retained messages, no dead letters and no live lease, unwritten for this long, is deleted | 30 days | `PARTITION_CLEANUP_DAYS`, `QUEEN_PARTITION_CLEANUP_ENABLED` |
+| A partition with no retained message, no dead letter and no live lease, unwritten for this long, is deleted | 30 days | `PARTITION_CLEANUP_DAYS`, `QUEEN_PARTITION_CLEANUP_ENABLED` |
 | Message traces | 7 days | `QUEEN_RAFT_TRACE_RETENTION_S` |
 | Disk high-water mark: writes that grow storage answer 507 | 85% | `QUEEN_RAFT_DISK_HIGH_PCT` (released at `QUEEN_RAFT_DISK_LOW_PCT`, 80%) |

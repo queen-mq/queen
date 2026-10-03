@@ -1,25 +1,28 @@
 ---
 title: Overview
-description: "Queen MQ is a transactional event broker: one ordered partition per entity, and every step a service takes on an event commits as one entry."
+description: "Queen MQ is a transactional event broker: every entity gets its own ordered partition, and every step a service takes on an event commits as one entry."
 type: overview
 tier: use
 sidebar:
   order: 1
 sourceOfTruth:
   - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/push.rs
   - server/src/rsm/facade/groups.rs
+  - server/src/rsm/replicator/raft/cluster.rs
   - clients/client-js/client-v2/builders/TransactionBuilder.js
 digest: >-
   Queen MQ is a transactional event broker written in Rust: one binary per node, state in a log
-  on local disk (replicated with raft in a cluster), no external database. Every entity (a customer, an order, a
-  conversation) gets its own ordered partition, created by the first message that names it, with
-  no partition count to choose. One call to POST /api/v1/transaction acknowledges input, writes KV
-  state, pushes the next events and schedules timers as one log entry: all of it applies or none
-  of it does. Delivery is at-least-once; effects inside Queen are exactly-once through
-  transactions and transactionId deduplication. A deployment is one node or a raft cluster of
-  three or five nodes; each tenant lives in one raft group, so every transaction is one entry with
-  no coordinator. Kafka clients connect through a built-in wire-protocol facade. Apache 2.0,
-  ghcr.io/queen-mq/queen.
+  on the node's local disk, replicated with raft across a cluster of three or five nodes, and no
+  external database (2.0 removed PostgreSQL). Every entity (a customer, an order, a conversation)
+  gets its own ordered partition, created by the first message that names it, with no partition
+  count to choose. One call to POST /api/v1/transaction acknowledges input, writes KV state, pushes
+  the next events and schedules timers as one log entry: all of it applies or none of it does.
+  Delivery is at-least-once; effects inside Queen are exactly-once through transactions and
+  transactionId deduplication. Each tenant lives in exactly one raft group, so every transaction is
+  one entry with no coordinator. Clients speak HTTP and JSON (SDKs for JavaScript, Python, Go,
+  Rust, C++ and PHP), and Kafka clients can connect to a wire-protocol facade built into the
+  broker. Apache 2.0; the image is ghcr.io/queen-mq/queen:latest, built for linux/amd64.
 ---
 
 **A message queue is the smallest thing Queen MQ does.**
@@ -28,89 +31,108 @@ It's a transactional event broker. Every customer, order or conversation gets it
 partition, created by the first message that names it. No partition count to choose. The ack, the
 state change, the next events and the timer commit as one entry. Nothing happens halfway.
 
-## One step, one commit
+## A step, in code
 
-When a service handles an event, it does five things. In most stacks they live in four systems,
-and each one commits on its own:
-
-| The service | Usually lives in | In Queen |
-|---|---|---|
-| takes the event and acks it | the broker | [consumer groups and leases](/concepts/consuming/) |
-| changes state | a database | [KV](/concepts/kv/) |
-| emits the next events | an outbox table, then the broker | [push](/concepts/partitions/) |
-| schedules what comes later | cron or a scheduler | [timers](/concepts/timers/) |
-| makes a retry harmless | an idempotency table | [`transactionId` and `once`](/concepts/dedup/) |
-
-Queen keeps all five in one replicated log. One call writes them as one entry:
+Here is what a worker in the `billing` consumer group does with one payment event, the `message`
+it took from the queue. It takes the event, marks the order paid, sends the customer a receipt and
+asks for a reminder tomorrow:
 
 ```js
 await queen.transaction()
-  .ack(message)                                                    // the event is done
-  .kv.put('orders', orderId, { status: 'paid' }, { ttl: '30d' })   // state
+  .ack(message, 'completed', { consumerGroup: 'billing' })                   // the event is done
+  .kv.put('orders', `order-${orderId}`, { status: 'paid' }, { ttl: '30d' })  // state
   .queue('receipts').partition(customerId)
-    .push([{ transactionId: `receipt-${orderId}`, data: receipt }]) // the next event, once
-  .timer('reminders').key(orderId).delay('24h')
-    .payload({ orderId }).schedule()                               // what comes later
+    .push([{ transactionId: `receipt-${orderId}`, data: receipt }])          // the next event, once
+  .timer('reminders').key(`order-${orderId}`).delay('24h')
+    .payload({ orderId }).schedule()                                         // what comes later
   .commit()
 ```
 
-If the lease has expired, if this receipt was already pushed by an earlier try, or if any part is
-refused, nothing in the call is written: a retry of a step that committed writes nothing twice. The outbox table, the idempotency table, the cron job and the reconciler
-that exist only to stitch four commits together are not needed. See
-[transactions](/concepts/transactions/).
+In most stacks those lines would reach four systems. The ack goes to the broker, the status to a
+database, the receipt to an outbox table that a relay publishes later, the reminder to a scheduler,
+and an idempotency table makes sure a retry doesn't send a second receipt. Each of them commits on
+its own, so a crash between two commits leaves the step half done, and somebody writes the code
+that finds those halves and repairs them.
+
+In Queen the step is one call, `POST /api/v1/transaction`, and the broker writes it as one entry of
+its log. All of it is there, or none of it is. If the worker was too slow and its lease ran out, the
+ack is refused and the rest of the call is refused with it, so a worker that lost its message can
+never write over the one that has it now. If the step committed and only the answer got lost, the
+retry carries the same receipt id, the broker finds that receipt already stored and refuses the
+whole call, and nothing is written twice. The outbox, the idempotency table, the cron job and the
+reconciler were all there to keep separate commits consistent, and with one commit there is nothing
+left for them to do. See [transactions](/concepts/transactions/).
 
 ## One partition per entity
 
-Most brokers order messages per shard: a fixed number of partitions, chosen up front, with your
-entities hashed onto them. Entities that share a shard wait for each other.
+The payment event above came from a partition, and so did every earlier event of the same order.
+Most brokers order messages per shard: you choose a number of partitions when you create a topic,
+your keys are hashed onto them, and every entity shares its shard with whoever else hashed there.
+A slow customer holds up the customers behind it, and changing the count later moves keys around.
 
-In Queen the partition is the entity. You name it on push (`customer-123`), and it exists from
-that message on. Order holds inside it, and a slow entity delays only itself. See
-[partitions](/concepts/partitions/).
+In Queen the partition is the entity. You name it when you push (`partition('customer-42')`), and the
+first push creates it, in the same log entry as the message. There is no count to choose and
+nothing to provision. Order holds inside the partition, and a consumer group works on one batch of
+a partition at a time, so a slow customer delays nobody but itself. A partition costs the broker a
+few rows of state, which is why millions of them are an ordinary number.
+See [partitions](/concepts/partitions/).
 
-Together, these two ideas let you run every entity as a small state machine: its partition is the
-input, its KV entry is the state, and each transaction is one transition. Workers stay stateless.
-See [one state machine per entity](/guides/state-machines/).
+Put the two ideas together and every entity becomes a small state machine. Its partition is the
+input, in order; its KV entry is the state; each transaction is one transition, and a timer is a
+transition that time triggers. The workers keep nothing between events, so you run as many as you
+need and restart any of them at any time. See
+[one state machine per entity](/guides/state-machines/).
 
-## What runs it
+## What you run
 
-- **One binary.** A node keeps its state in a log on its own disk. No database, no ZooKeeper, no
-  sidecars.
-- **One node, or a cluster of three or five.** Raft replicates every entry, and the cluster keeps
-  serving while a majority is up. See [cluster](/operate/cluster/).
-- **Tenants in raft groups.** Each tenant lives in exactly one raft group, so a transaction is one
-  entry with no coordinator and no two-phase commit. See [architecture](/internals/).
-- **Any client.** HTTP (curl is enough), six SDKs, and Kafka clients through the built-in Kafka
-  wire protocol. See [clients](/start/clients/) and [Kafka](/guides/kafka/).
-- **Built in:** dashboard, Prometheus metrics, API keys, JWT, quotas, payload encryption.
+Queen is one Rust binary. A node keeps everything in a log on its own disk, with no database,
+ZooKeeper or sidecar beside it. For availability you run three or five nodes as a raft cluster:
+every entry is written to a majority of them before you get an answer, any node takes any request
+(a follower forwards writes to the leader), and the cluster keeps serving while a majority is up.
+
+We keep each tenant inside one raft group, and that is what lets a transaction be a single log
+entry, with no coordinator and no two-phase commit. The price is that one leader orders all of a
+tenant's writes. A cluster can run several raft groups (`QUEEN_RAFT_GROUPS`), each with its own
+leader, so tenants spread their load over the nodes. See [cluster](/operate/cluster/).
+
+You talk to it in JSON over HTTP, so curl is a complete client, or through the SDKs for JavaScript,
+Python, Go, Rust, C++ and PHP, the last with a Laravel queue driver. Existing Kafka producers and
+consumers can connect, unchanged, to a Kafka wire-protocol facade that runs inside the same process
+once you turn it on. The binary serves the dashboard and Prometheus metrics too, and, when you
+enable them, checks JWTs, encrypts payloads at rest and runs a proxy for API keys and per-tenant
+limits. For traffic that should never touch a disk, such as typing indicators, ephemeral queues
+keep their messages in memory. See [clients](/start/clients/) and [Kafka](/guides/kafka/).
 
 ## Numbers
 
-Three nodes, 16 vCPU each, every write replicated:
-
-- **1,000,000 msg/s** pushed and consumed, one queue, 500,000 partitions, e2e p99 ~270 ms.
-- **10,000,000 partitions** in one queue at ~910,000 msg/s (60 s run, e2e p99 4.7 s).
-- **Jepsen-tested:** no acked message lost through kill -9, partitions, clock jumps and power loss.
-
-These runs measure push, pop and ack, not transactions. Conditions and sources:
-[benchmarks](/benchmarks/) and [guarantees](/concepts/guarantees/).
+On three 16-vCPU nodes, with every write fsynced on two of them before its answer, 2.0.0-beta.2
+pushed and consumed 1,000,000 messages a second through one queue at every partition count we
+tried, from 200 to ten million, with an end-to-end p99 between 103 and 163 ms. An exactly-once step
+of 10 messages committed in 3 ms at the median, and one raft group topped out between 7,000 and
+9,000 such transactions a second (2026-10-01, with Kafka, Redpanda and Pulsar measured on the same
+machines). The latest Jepsen campaign, on 2.0.0-beta.3, ran 65 tests under kill -9, partitions,
+pauses, clock jumps and power loss, and all 65 were valid. Every number, with its conditions and
+the places where other systems did better, is on [benchmarks](/benchmarks/), and what the
+guarantees cover is on [guarantees](/concepts/guarantees/).
 
 ## Limits
 
-- **Delivery is at-least-once.** Exactly-once holds for effects inside Queen (transactions,
-  dedup), not for a call your worker makes to another system.
-- **A hot partition is sequential by design.** Parallelism comes from many partitions, not from
-  splitting one.
-- **Transactions are one call**, inside one tenant. There is no interactive BEGIN and COMMIT.
-- **One leader orders every write of a raft group.** You scale out with more raft groups and more
-  clusters, not by spreading one tenant's writes.
-- **No routing.** There are no exchanges, bindings or header matching: the producer names the
-  queue and the partition.
+- Delivery is at-least-once. Effects inside Queen are exactly-once, through transactions and
+  `transactionId` dedup, and a call your worker makes to another system is outside any commit.
+- A hot partition is sequential, by design. Parallelism comes from having many partitions with
+  work.
+- A transaction is one call, inside one tenant. There is no interactive BEGIN and COMMIT.
+- One leader orders every write of a raft group, so one tenant's write rate is what one leader can
+  plan. You scale out with more raft groups and more clusters.
+- There is no routing: no exchanges, bindings or header matching. The producer names the queue and
+  the partition.
+- Ephemeral queues lose what a node held when it crashes, because their contents are not in the
+  log.
+- The image is `ghcr.io/queen-mq/queen:latest`, built for linux/amd64 only.
 
 ## Next
 
 <CardGrid>
-  <LinkCard title="Quickstart" href="/start/quickstart/" description="Run a node and commit your first step in five minutes." />
-  <LinkCard title="The model" href="/concepts/" description="Partitions, progress, state, time and identity on one page." />
-  <LinkCard title="Compare" href="/start/compare/" description="Queen next to Kafka, RabbitMQ, SQS, Temporal and the outbox pattern." />
+  <LinkCard title="Quickstart" href="/start/quickstart/" description="Run a node, push and consume with curl, and commit your first step." />
+  <LinkCard title="The model" href="/concepts/" description="Partitions, consumer groups, state, time and identity, and the commit that holds them together." />
 </CardGrid>

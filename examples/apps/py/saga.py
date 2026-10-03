@@ -1,28 +1,22 @@
 # docs:start(app-py-saga)
 #
-# A booking saga whose compensation is a timer, and whose every step is a KV
-# entry in the same broker state as the queue.
+# A booking saga: a room is held, paid for, and released by a timer when the
+# payment never comes.
 #
-# The war story is a room hold that never came back. A booking system held
-# inventory when a reservation started and released it when the payment either
-# settled or failed, and the release lived in a sleeping task inside the worker.
-# A rolling deploy replaced the workers; every hold in flight lost its release;
-# and a fortnight later somebody noticed a hotel had been sold out on paper for
-# nine nights it had spent empty.
-#
-# The release was not slow, it was in the wrong place. A compensation is not a
-# timeout, it is an obligation, and an obligation has to outlive the process
-# that took it on. Here the gate, the saga state, the compensation timer, the
-# payment request and the acknowledgement are ONE transaction, one entry in the
-# broker's replicated log. If the room is held, the compensation exists. If the
-# room is not held, nothing else happened either.
+# The release is the part that usually breaks. Kept as a sleeping task in a
+# worker, it dies with the worker, and a deploy in the middle of a hold leaves
+# the room held forever. Here the release is a timer in the broker, scheduled
+# in the same transaction that holds the room: the saga's state, the timer,
+# the payment request and the ack of the booking commit as one log entry. If
+# the room is held, its release exists; if anything failed, none of it
+# happened.
 #
 #   bookings
-#     `-- group "reserver"    ONE bundle: gate + state + timer + push + ack
-#           |-- payments (partitioned by booking)
-#           |     `-- group "payer"    confirm + CANCEL the timer + ack, one bundle
-#           `-- expiries (delivered by the timer, at the hold's expiry)
-#                 `-- group "compensator"   reads the state BEFORE compensating
+#     `-- group "reserver"     ONE transaction: state + timer + push + ack
+#           |-- payments (one partition per booking)
+#           |     `-- group "payer"        confirm + cancel the timer + ack
+#           `-- expiries (the timer delivers here when the hold runs out)
+#                 `-- group "compensator"  reads the state before it releases
 #
 # Run it:
 #   QUEEN_URL=http://localhost:6632 python3 saga.py
@@ -37,37 +31,31 @@ from queen import Queen
 
 QUEEN_URL = os.environ.get("QUEEN_URL", "http://localhost:6632")
 
-# A suffix on the queue names AND on the KV namespace. The queues need it
-# because delete-then-recreate leaves stale partition state for up to 30
-# seconds; the namespace needs it for the opposite reason -- a saga row outlives
-# the run that wrote it, so a second run under the same namespace would find
-# every booking already held and measure nothing.
+# Fresh queues and a fresh KV namespace per run. Saga entries outlive the
+# queues (they expire with their TTL), so a second run in the same namespace
+# would find every booking already held.
 RUN = f"{int(time.time() * 1000):x}"
 BOOKINGS = f"app-py-saga-bookings-{RUN}"
 PAYMENTS = f"app-py-saga-payments-{RUN}"
 EXPIRIES = f"app-py-saga-expiries-{RUN}"
 NS = f"app-py-saga-{RUN}"
 
-# How long a room stays held before the compensation fires. It has to outlast
-# the reserve and pay phases, or a timer would fire before the payment that
-# cancels it and the run would be measuring a race rather than a design.
-# deliverAt is a floor and never a ceiling, so a timer can only be late: a
-# margin here is sound, where a margin the other way would not be.
-HOLD_MS = 15000
+# How long a room stays held before it is released. In production this is
+# minutes; it is the only number that changes. It has to outlast the reserving
+# and paying phases below, or a release would fire before the payment that
+# cancels it and the run would measure a race.
+HOLD_MS = 10000
 
-# Every phase below ends on a COUNT, and this is the deadline behind the count.
-# Never wait for silence: a phase that stops when nothing has arrived for a
-# while passes on a broker that delivered nothing at all.
+# Each phase ends on a count of messages, with this deadline behind it so a
+# stall fails the run instead of hanging it.
 PHASE_MS = 20000
 
-# The compensation phase gets its own, longer deadline. A timer fires no earlier
-# than its delay plus one sweeper cycle, and a broker whose timer table has been
-# empty for a while wakes up lazily.
-TIMER_DEADLINE_MS = 90000
+# Timers fire on the leader's next tick after they are due (every 50 ms), so
+# the compensation phase only needs the hold plus a margin.
+TIMER_DEADLINE_MS = HOLD_MS + 20000
 
-# Four bookings, five submissions. B-2 is submitted twice: the same booking, two
-# messages, which is what a redelivery looks like from the reserver's side and
-# the reason the bundle opens with a gate rather than with a check.
+# Four bookings, five submissions: B-2 is submitted twice, which is what a
+# redelivery looks like from the reserver's side.
 BOOKINGS_IN = [
     {"bookingId": "B-1", "room": "101", "cents": 24000},
     {"bookingId": "B-2", "room": "102", "cents": 31000},
@@ -77,15 +65,13 @@ BOOKINGS_IN = [
 ]
 BOOKING_IDS = ["B-1", "B-2", "B-3", "B-4"]
 
-# B-3's card is declined, so its saga never reaches "confirmed" and the timer is
-# the thing that gives the room back.
+# B-3's card is declined, so its saga never reaches "confirmed" and the timer
+# is what gives the room back.
 DECLINED = "B-3"
 
-# B-4 pays, but its cancel is deliberately skipped, which makes the race
-# deterministic: a cancel that arrives after the fire answers `absent`, and
-# ABSENT MAY MEAN ALREADY DELIVERED. So the compensation for a confirmed booking
-# has to be refused by the consumer that receives it, never prevented by the
-# cancel alone.
+# B-4 pays, but its cancel is skipped on purpose. That is the cancel that comes
+# too late, made reproducible: the release is delivered for a booking that is
+# already confirmed, and the compensator has to refuse it.
 CANCEL_SKIPPED = "B-4"
 
 CHECKS = 0
@@ -105,10 +91,9 @@ def check(condition: bool, description: str) -> None:
 
 
 def saga_key(booking_id: str) -> str:
-    """The saga's state key. It derives from the booking id, which is also the
-    partition key of the payments queue: that is what makes the payer's
-    read-then-write safe, and it is stated here because it is a property of the
-    naming and nothing enforces it."""
+    """The saga's state key derives from the booking id, which is also the
+    partition key of the payments queue. That is what makes the payer's
+    read-then-write safe below."""
     return f"saga:{booking_id}"
 
 
@@ -121,8 +106,24 @@ async def main() -> int:
     compensations_delivered: list = []
     rooms_released: list = []
     compensations_refused: list = []
-    preconditions_lost = 0
+    gates_lost = 0
     verdict, failed = "", False
+
+    # A consumer for one phase: acks ride the transactions, so auto_ack is off,
+    # and the phase ends after `limit` messages or after `idle_millis` with
+    # none. Long polls end after a second, so the idle bound is checked at
+    # least once a second.
+    def phase(queue: str, group: str, limit: int, idle_millis: int):
+        return (
+            queen.queue(queue)
+            .group(group)
+            .subscription_mode("all")
+            .auto_ack(False)
+            .each()
+            .limit(limit)
+            .timeout_millis(1000)
+            .idle_millis(idle_millis)
+        )
 
     try:
         print(f"broker {QUEEN_URL}")
@@ -130,15 +131,12 @@ async def main() -> int:
         for queue in (BOOKINGS, PAYMENTS, EXPIRIES):
             await queen.queue(queue).config({"lease_time": 30, "retry_limit": 3}).create()
 
-        # ------------------------------------------------------------ queuing
         print("\nsubmitting bookings")
         for index, booking in enumerate(BOOKINGS_IN):
             await queen.queue(BOOKINGS).push(
                 {
-                    # Distinct transaction ids on purpose. Deduplication would
-                    # swallow the duplicate submission and the gate would never
-                    # be tested, and a real redelivery arrives with an identity
-                    # of its own too.
+                    # One id per submission, so the duplicate of B-2 is stored
+                    # and reaches the reserver, where the gate has to catch it.
                     "transactionId": f"submit-{index}-{booking['bookingId']}",
                     "data": booking,
                 }
@@ -147,99 +145,83 @@ async def main() -> int:
 
         # ---------------------------------------------------------- reserving
         #
-        # The bundle, and the whole point of the example: five things commit
-        # together, so there is no ordering between them left to get wrong.
+        # The transaction is the whole point of the example: four things commit
+        # together, so there is no order between them to get wrong. Written as
+        # four calls, a crash between the timer and the push leaves a release
+        # for a payment that was never asked for, and a crash the other way
+        # round leaves a hold with no release.
         print("\nreserving")
 
         async def reserve(msg) -> None:
-            nonlocal preconditions_lost
+            nonlocal gates_lost
             booking = msg["data"]
             booking_id, room, cents = booking["bookingId"], booking["room"], booking["cents"]
             group = msg.get("consumerGroup")
 
             tx = queen.transaction()
-            # 1. The gate AND the first state, in one row. required=True is what
-            #    makes it a gate instead of a verdict: without it a lost race
-            #    would come back applied=False while the payment and the timer
-            #    went out anyway.
+            # 1. The gate and the first state, in one KV entry. required=True
+            #    makes the put_if_absent a gate: if the booking is already
+            #    held, the whole transaction rolls back and nothing below
+            #    happens.
             tx.kv.put_if_absent(
                 NS,
                 saga_key(booking_id),
                 {"step": "held", "room": room, "cents": cents},
                 # The Python client takes a timedelta where the JavaScript one
-                # takes "1h"; both resolve to the one field the wire has,
-                # ttlSeconds.
+                # takes "1h"; both become ttlSeconds on the wire.
                 ttl=timedelta(hours=1),
                 required=True,
             )
-            # 2. The obligation. From the moment this commits it is a row in the
-            #    broker's own table, so it survives this handler, this process,
-            #    this deploy and this machine. The key is chosen by us, which is
-            #    the entire reason it can be cancelled later by name.
+            # 2. The release. From this commit on it is a record in the
+            #    broker's replicated state, independent of this process. The
+            #    key is ours, which is what lets the payer cancel it by name.
             tx.timer(EXPIRIES).key(booking_id).after_ms(HOLD_MS).payload(
                 {"bookingId": booking_id, "room": room}
             ).schedule()
-            # 3. The work. Partitioned by booking, so every message about one
-            #    booking is in one lane.
-            tx.queue(PAYMENTS).partition(booking_id).push(
-                {"transactionId": f"pay-{booking_id}", "data": {"bookingId": booking_id, "cents": cents}}
-            )
-            # 4. The acknowledgement, carrying this delivery's lease. An expired
-            #    lease refuses the ack and takes the other three down with it,
-            #    which is the guarantee no compare-and-swap can give.
+            # 3. The payment request, in the booking's own partition. It needs
+            #    no transactionId: it can only commit together with the saga
+            #    entry, so the gate above is its idempotency key.
+            tx.queue(PAYMENTS).partition(booking_id).push({"data": {"bookingId": booking_id, "cents": cents}})
+            # 4. The ack, with this delivery's lease. If the lease ran out, the
+            #    ack is refused and the other three are refused with it.
             res = await tx.ack(msg, "completed", {"consumer_group": group}).commit()
 
             reserve_decisions.append(booking_id)
 
-            # A lost gate is RETURNED, not raised: HTTP 200, success=False,
-            # reason "kv_precondition". It is the ordinary outcome of every
-            # legitimate redelivery, which makes it one of the most frequent
-            # answers this product gives, and it does not belong in an except
-            # block where the reflex is to retry.
+            # A lost gate comes back as a value (HTTP 200, success False,
+            # reason "kv_precondition"), because a duplicate is a normal
+            # outcome that must not be retried. Nothing was written, so the
+            # message is acked on its own.
             if res.get("success") is False and res.get("reason") == "kv_precondition":
-                # Nothing was written: no second payment, no second timer, no
-                # second row. The message still has to leave the cursor, so it
-                # is acknowledged on its own.
-                preconditions_lost += 1
+                gates_lost += 1
                 await queen.ack(msg, "completed", {"group": group})
-                print(f"  {booking_id}: already held, whole bundle rolled back ({res.get('kvReason')})")
+                print(f"  {booking_id}: already held, nothing written ({res.get('kvReason')})")
                 return
 
-            print(f"  {booking_id}: room {room} held, compensation armed for {HOLD_MS} ms")
+            print(f"  {booking_id}: room {room} held, release armed for {HOLD_MS} ms")
 
-        await (
-            queen.queue(BOOKINGS)
-            .group("reserver")
-            .subscription_mode("all")
-            .auto_ack(False)
-            .each()
-            # The count that ends the phase, with the deadline behind it.
-            .limit(len(BOOKINGS_IN))
-            .idle_millis(PHASE_MS)
-            .consume(reserve)
-        )
+        await phase(BOOKINGS, "reserver", len(BOOKINGS_IN), PHASE_MS).consume(reserve)
 
         check(
             len(reserve_decisions) == len(BOOKINGS_IN),
-            f"the reserver reached a decision on every submission ({len(BOOKINGS_IN)}, got {len(reserve_decisions)})",
+            f"the reserver decided every submission ({len(BOOKINGS_IN)}, got {len(reserve_decisions)})",
         )
-        check(preconditions_lost == 1, "the duplicate submission lost the gate exactly once")
+        check(gates_lost == 1, "the duplicate submission of B-2 lost the gate, once")
 
-        # Pending timers are a table you can read, not a promise you have to
-        # trust.
+        # Pending timers can be listed, because each release is a record in the
+        # broker.
         armed = await queen.timers.list(EXPIRIES, limit=50)
         print(f"  timers armed: {', '.join(sorted(row['timerKey'] for row in armed['rows']))}")
         check(
             len(armed["rows"]) == len(BOOKING_IDS),
-            f"one compensation is armed per booking and the duplicate added none "
-            f"({len(BOOKING_IDS)}, got {len(armed['rows'])})",
+            f"one release per booking, none for the duplicate ({len(BOOKING_IDS)}, got {len(armed['rows'])})",
         )
 
         # ------------------------------------------------------------- paying
         #
-        # The other end of the saga. A settled payment confirms the state and
-        # calls the compensation off in one commit; a declined card leaves the
-        # state where it is and lets the timer do its work.
+        # A settled payment confirms the saga and cancels the release in one
+        # commit. A declined card leaves the state alone and lets the timer do
+        # its work.
         print("\npaying")
 
         async def pay(msg) -> None:
@@ -247,27 +229,23 @@ async def main() -> int:
             group = msg.get("consumerGroup")
             payments_requested.append(booking_id)
 
-            # A read in one call and a write in the next. It is safe HERE
-            # because the key derives from the partition key: every message
-            # about this booking arrives in one lane of this queue, and a lane
-            # has one reader per group. Where a key does not derive from the
-            # partition key this shape is a race and the atomics are the answer,
-            # which is exactly the compensator's situation further down.
+            # A read now and a write in the transaction below. That is safe
+            # here because the key derives from the partition key: every
+            # message about this booking is in one partition, and a partition
+            # is held by one worker of the group at a time.
             state = await queen.kv.get(NS, saga_key(booking_id))
 
             if booking_id == DECLINED:
-                # A declined card is a business outcome, not a delivery failure:
-                # the message is done with. The room stays held, and nothing in
-                # this process is responsible for giving it back.
+                # A declined card is a business outcome, and the message is
+                # done. The room stays held, and nothing in this process is
+                # responsible for giving it back.
                 await queen.ack(msg, "completed", {"group": group})
                 print(f"  {booking_id}: card declined, hold left to expire")
                 return
 
             tx = queen.transaction()
-            # `expect` makes the serialisation assumption falsifiable instead of
-            # silent. If the lane really serialises, it never fails and costs
-            # nothing; the day it fails, two consumers are serving one partition
-            # and you learn it as a verdict rather than as a wrong total.
+            # expect makes the "one worker per booking" assumption checkable:
+            # if it ever fails, two consumers were serving one partition.
             tx.kv.put(
                 NS,
                 saga_key(booking_id),
@@ -278,64 +256,47 @@ async def main() -> int:
             )
 
             if booking_id != CANCEL_SKIPPED:
-                # The cancel rides the bundle. Either the booking is confirmed
-                # and the compensation is called off, or neither happened.
+                # The cancel rides the transaction: the booking is confirmed
+                # and its release cancelled, or neither happens.
                 tx.timer(EXPIRIES).key(booking_id).cancel()
 
             res = await tx.ack(msg, "completed", {"consumer_group": group}).commit()
             if res.get("success") is False:
                 raise AssertionError(f"{booking_id}: confirmation lost its fence ({res.get('kvReason')})")
 
-            tail = (
-                ", compensation deliberately NOT cancelled"
-                if booking_id == CANCEL_SKIPPED
-                else ", compensation cancelled"
-            )
-            print(f"  {booking_id}: paid and confirmed{tail}")
+            tail = "release deliberately NOT cancelled" if booking_id == CANCEL_SKIPPED else "release cancelled"
+            print(f"  {booking_id}: paid and confirmed, {tail}")
 
-        await (
-            queen.queue(PAYMENTS)
-            .group("payer")
-            .subscription_mode("all")
-            .auto_ack(False)
-            .each()
-            .limit(len(BOOKING_IDS))
-            .idle_millis(PHASE_MS)
-            .consume(pay)
-        )
+        await phase(PAYMENTS, "payer", len(BOOKING_IDS), PHASE_MS).consume(pay)
 
         check(
             len(payments_requested) == len(BOOKING_IDS),
-            f"every booking was asked to pay once and the duplicate produced no second payment "
-            f"({len(BOOKING_IDS)}, got {len(payments_requested)})",
+            f"every booking was asked to pay, B-2 included ({', '.join(payments_requested)})",
         )
         check(len(set(payments_requested)) == len(payments_requested), "no booking was asked to pay twice")
 
-        # The cancel is observable before anything is delivered: the row is gone
-        # from the staging table. A peek is how you ask, and a miss is
-        # {"found": false} with HTTP 200, never a 404.
+        # A cancelled timer is gone before it fires. peek answers
+        # {"found": False} with HTTP 200 for a timer that does not exist.
         peeked = {b: (await queen.timers.peek(EXPIRIES, b))["found"] for b in BOOKING_IDS}
-        check(peeked["B-1"] is False, "the compensation cancelled inside the confirming bundle is gone from the table")
-        check(peeked[DECLINED] is True, f"{DECLINED} was never confirmed, so its compensation is still armed")
+        check(peeked["B-1"] is False, "the release cancelled with the confirmation is gone")
+        check(peeked[DECLINED] is True, f"{DECLINED} was never confirmed, so its release is still armed")
         check(
             peeked[CANCEL_SKIPPED] is True,
-            f"{CANCEL_SKIPPED} is confirmed but its compensation is still armed on purpose",
+            f"{CANCEL_SKIPPED} is confirmed and its release is still armed, on purpose",
         )
 
         # ------------------------------------------------------- compensating
         #
-        # What the timers deliver, and the consumer that must not trust them.
+        # What the timers deliver, and the consumer that must not trust them. A
+        # release message asks a question: is this booking still only held? A
+        # fired timer leaves nothing behind, so a cancel that arrives a moment
+        # too late answers "absent" and the release is delivered anyway. The
+        # saga's state decides.
         #
-        # A compensation message is not an instruction, it is a question: is
-        # this saga still open? A fired timer leaves no tombstone, so a cancel
-        # that arrives a millisecond late answers `absent` and the message goes
-        # out anyway. The state is the authority and it is read first.
-        #
-        # And here the key does NOT derive from the partition key: this message
-        # arrives on another queue entirely, in a lane that has nothing to do
-        # with the payments lane, so no partitioning could serialise the two
-        # writers. That is what `expect` is for, and on this path it is
-        # load-bearing rather than an assertion.
+        # This message arrives on another queue, in a partition unrelated to
+        # the payments partition, so nothing serialises the compensator with
+        # the payer. Here expect is what stops a release computed from a stale
+        # read from overwriting a confirmation that landed in between.
         print("\ncompensating")
 
         async def compensate_one(msg) -> None:
@@ -344,14 +305,11 @@ async def main() -> int:
             compensations_delivered.append(booking_id)
 
             state = await queen.kv.get(NS, saga_key(booking_id))
-
             if not state["found"] or state["value"]["step"] != "held":
-                # The booking was confirmed before this fired. Compensating here
-                # is how a saga unwinds a sale that has already shipped.
                 compensations_refused.append(booking_id)
                 await queen.ack(msg, "completed", {"group": group})
                 step = state["value"]["step"] if state["found"] else "gone"
-                print(f"  {booking_id}: state is {step}, compensation refused")
+                print(f"  {booking_id}: state is {step}, release refused")
                 return
 
             res = await (
@@ -367,43 +325,29 @@ async def main() -> int:
                 .ack(msg, "completed", {"consumer_group": group})
                 .commit()
             )
-
             if res.get("success") is False:
-                # Somebody confirmed it between the read and the commit. The
-                # fence held, nothing was written, and the room stays sold.
+                # Confirmed between the read and the commit: nothing was
+                # written.
                 compensations_refused.append(booking_id)
                 await queen.ack(msg, "completed", {"group": group})
-                print(f"  {booking_id}: confirmed under us, compensation refused by the fence")
+                print(f"  {booking_id}: confirmed in the meantime, release refused")
                 return
 
             rooms_released.append(room)
             print(f"  {booking_id}: hold expired, room {room} released")
 
         def compensator(limit: int, idle_millis: int):
-            return (
-                queen.queue(EXPIRIES)
-                .group("compensator")
-                .subscription_mode("all")
-                .auto_ack(False)
-                .each()
-                .limit(limit)
-                .idle_millis(idle_millis)
-                .consume(compensate_one)
-            )
+            return phase(EXPIRIES, "compensator", limit, idle_millis).consume(compensate_one)
 
-        # Two timers were left armed, so two messages must arrive: that is the
-        # count, and TIMER_DEADLINE_MS is the deadline behind it.
+        # Two releases were left armed, so two messages have to arrive.
         await compensator(2, TIMER_DEADLINE_MS)
         check(
             len(compensations_delivered) == 2,
-            f"both uncancelled compensations were delivered (2, got {len(compensations_delivered)}"
-            f"{': ' + ', '.join(compensations_delivered) if compensations_delivered else ''})",
+            f"both armed releases were delivered (got {', '.join(compensations_delivered) or 'none'})",
         )
 
-        # Then a bounded second pass with room for two more. It is the only
-        # honest way to say "a cancelled timer never arrived": the first pass
-        # would have stopped at two whatever those two were, so the claim is
-        # really that nothing else shows up afterwards.
+        # A second, short pass with room for more: the only way to show that the
+        # cancelled releases never arrive is to wait for them and see nothing.
         await compensator(2, 4000)
 
         # ----------------------------------------------------------- checking
@@ -411,38 +355,40 @@ async def main() -> int:
 
         check(
             len(compensations_delivered) == 2,
-            f"nothing else arrived on a second pass: still 2 compensations (got {len(compensations_delivered)})",
+            f"nothing else arrived on the second pass (got {', '.join(compensations_delivered)})",
         )
         check(
             "B-1" not in compensations_delivered and "B-2" not in compensations_delivered,
-            "a cancelled compensation was never delivered",
+            "no cancelled release was ever delivered",
         )
         check(
             rooms_released == ["103"],
-            f"exactly one room went back on sale, the one whose card was declined "
-            f"(got {', '.join(rooms_released) or 'none'})",
+            f"exactly one room went back on sale, the declined one (got {', '.join(rooms_released) or 'none'})",
         )
         check(
             compensations_refused == [CANCEL_SKIPPED],
-            "the compensation for the confirmed booking was refused by the consumer, not prevented by the cancel",
+            f"the late release for {CANCEL_SKIPPED} was refused by the compensator",
         )
 
         states = await queen.kv.get_many(NS, [saga_key(b) for b in BOOKING_IDS])
         check(
             len(states["rows"]) == len(BOOKING_IDS) and len(states["missing"]) == 0,
-            f"every booking left exactly one saga row ({len(BOOKING_IDS)}, got {len(states['rows'])})",
+            f"every booking has exactly one saga entry ({len(states['rows'])})",
         )
 
         step = {row["key"].replace("saga:", ""): row["value"]["step"] for row in states["rows"]}
         check(
             step["B-1"] == "confirmed" and step["B-2"] == "confirmed",
-            "the two ordinary bookings ended confirmed",
+            "B-1 and B-2 ended confirmed",
         )
         check(
             step[CANCEL_SKIPPED] == "confirmed",
-            f"{CANCEL_SKIPPED} is still confirmed after its compensation was delivered",
+            f"{CANCEL_SKIPPED} is still confirmed after its late release was delivered",
         )
-        check(step[DECLINED] == "expired", f"{DECLINED} was unwound by its timer, with nobody awake to do it")
+        check(
+            step[DECLINED] == "expired",
+            f"{DECLINED} was released by its timer, with no process waiting for it",
+        )
 
         print("\n  final: " + ", ".join(f"{k}={v}" for k, v in sorted(step.items())))
 
@@ -450,21 +396,11 @@ async def main() -> int:
     except Exception as err:  # noqa: BLE001 - the program's verdict is its exit code
         verdict, failed = f"\nFAIL: {err}", True
     finally:
-        # ---------------------------------------------------------- purge
-        #
-        # Three things to remove, and the first two are the ones that are easy
-        # to forget. The saga rows live in their own table, and a pending timer
-        # lives in the staging table keyed by NAME: neither is reached by
-        # deleting the queue, and a timer whose queue no longer exists still
-        # fires and provisions it again on the way out.
-        #
-        # Unconditional, in a finally, because a run that FAILED is exactly the
-        # run whose leftovers matter: an armed timer would deliver into the next
-        # run and a surviving saga row would make the next run pass without
-        # holding anything.
-        #
-        # Best effort: a purge that raised would replace the real verdict with
-        # its own.
+        # Clean up in every case. Saga entries are in KV, and a pending timer
+        # is stored by its queue and key: deleting the queues removes neither,
+        # and a timer that fires into a deleted queue creates the queue again.
+        # Best effort: a cleanup that raised would replace the real verdict
+        # with its own.
         try:
             for booking_id in BOOKING_IDS:
                 await queen.timers.cancel(EXPIRIES, booking_id)
@@ -472,7 +408,7 @@ async def main() -> int:
             for queue in (BOOKINGS, PAYMENTS, EXPIRIES):
                 await queen.queue(queue).delete()
         except Exception as err:  # noqa: BLE001 - the run's verdict outranks this
-            print(f"  (purge incomplete: {err})")
+            print(f"  (cleanup incomplete: {err})")
         await queen.close()
 
     sys.stdout.flush()

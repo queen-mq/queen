@@ -72,7 +72,15 @@ const AUTH = "server/src/auth.rs";
 // published table says a read-only token cannot browse. Its GET sibling
 // (`/api/v1/resources/kv/namespaces`) needs no arm: it is already inside the
 // `m === "GET"` block's `/api/v1/resources/` read.
-const ACCESS_FINGERPRINT = "a336be99401b4b95";
+// 2026-10-02: re-read for 2.0.0-beta.6 (merge of raft into docs-2.0). One new
+// rule, mirrored below in the position the Rust evaluates it: `POST
+// /api/v1/fetch/offsets` (the first offset each partition appended at or after
+// a time, which the Kafka facade answers a timestamp ListOffsets with) is
+// read-only, immediately after the fetch arm it is the twin of and before the
+// partition-discovery arm. Method- and path-exact: a GET on it, or a longer
+// path under it, reaches the read-write fallthrough, as the Rust tests pin.
+// Nothing else in the function moved.
+const ACCESS_FINGERPRINT = "8a3404c92bea47a5";
 
 function accessLevel(method, path) {
   const m = method;
@@ -111,6 +119,11 @@ function accessLevel(method, path) {
   // PLAN_QUEEN_KAFKA.md C2: a pure read that takes no lease and moves no
   // cursor. Outside the GET block because the batch request is a body.
   if (m === "POST" && path === "/api/v1/fetch") return "read-only";
+
+  // The fetch arm's other twin: the offset a partition's log had reached at a
+  // time. Nothing leased, nothing moved, and strictly less than the payloads
+  // the fetch serves at this level. Method- and path-exact.
+  if (m === "POST" && path === "/api/v1/fetch/offsets") return "read-only";
 
   // The fetch arm's twin: partition discovery, nothing leased and nothing
   // moved, and it hands out strictly less than the fetch beside it.
@@ -195,7 +208,8 @@ const GROUPS = [
   ["Ephemeral queues", (p) => /^\/api\/v1\/ephemeral(\/|$)/.test(p)],
   ["Operator surfaces", (p) => p.startsWith("/api/v1/system")],
   ["Cluster (raft)", (p) => p.startsWith("/api/v1/raft/")],
-  ["Reads by offset", (p) => p === "/api/v1/fetch" || p === "/api/v1/partitions/changed"],
+  ["Reads by offset", (p) =>
+    p === "/api/v1/fetch" || p === "/api/v1/fetch/offsets" || p === "/api/v1/partitions/changed"],
   ["Dashboard identity (broker-direct)", (p) => p.startsWith("/auth/")],
 ];
 
@@ -216,7 +230,18 @@ function main() {
     ACCESS_FINGERPRINT,
   );
 
-  const routes = brokerRoutes();
+  // One row per method + path. A pair can be both a router route and an
+  // adapter arm (`DELETE /api/v1/ephemeral/queue/:queue` is both): axum answers
+  // the router route, the fallback never sees that request, and the adapter
+  // arm is reached only through the embedded API. `brokerRoutes` lists the
+  // router chain first, so the first occurrence is the one that answers.
+  const seenPairs = new Set();
+  const routes = brokerRoutes().filter((r) => {
+    const key = `${r.method} ${r.path}`;
+    if (seenPairs.has(key)) return false;
+    seenPairs.add(key);
+    return true;
+  });
   if (routes.length < 40) {
     throw new Error(`only parsed ${routes.length} routes out of ${RAFT_ROUTER} and ${RAFT_ADAPTER}: the parser is broken`);
   }

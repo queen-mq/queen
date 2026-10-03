@@ -52,7 +52,6 @@ const DIST = join(WEBDOC, "dist");
 const DOCS = join(WEBDOC, "src", "content", "docs");
 const PARTIALS = join(WEBDOC, "src", "content", "partials");
 const CORPUS = join(DIST, "llms-full.txt");
-const HOME_ASTRO = join(WEBDOC, "src", "pages", "index.astro");
 const HOME_MARKDOWN = join(DIST, "index.md");
 
 /** A fenced block with its opening indentation captured. */
@@ -95,6 +94,7 @@ const HANDLED = new Map([
   ["Chart", "src/lib/markdown-partials.ts (componentMap: alt text, caption, source)"],
   ["Screenshot", "src/lib/markdown-partials.ts (componentMap: alt text, caption)"],
   ["Partition", "src/lib/markdown-partials.ts (componentMap: alt text, caption)"],
+  ["Figure", "src/lib/markdown-partials.ts (componentMap: alt, caption, and the spec's data as a table or list)"],
   ["PackageManagers", "nimbus-docs downleveler (rendered as a sh block)"],
   ["LinkCard", "nimbus-docs downleveler (rendered as a link list item)"],
 ]);
@@ -355,109 +355,79 @@ for (const source of pages) {
   }
 }
 
+// The same for `<Figure />`: the spec it names must exist, and the page's
+// markdown must carry one "**Figure.**" block per figure, which is where the
+// spec's alt and data go (src/lib/figure-markdown.ts).
+const FIGURE_TAG = /<Figure\b([^>]*)\/>/g;
+let checkedFigures = 0;
+for (const source of pages) {
+  const body = prose(readFileSync(source, "utf8"));
+  const tags = [...body.matchAll(FIGURE_TAG)];
+  if (!tags.length) continue;
+  for (const [, rawAttrs] of tags) {
+    checkedFigures++;
+    const id = /\bid\s*=\s*"([^"]+)"/.exec(rawAttrs)?.[1];
+    if (!id) fail(relative(WEBDOC, source), '<Figure /> has no literal id="…"');
+    else if (!existsSync(join(WEBDOC, "src", "figures", `${id}.ts`))) {
+      fail(relative(WEBDOC, source), `<Figure id="${id}" /> has no spec at src/figures/${id}.ts`);
+    }
+  }
+  const dist = distMarkdownFor(source);
+  if (!existsSync(dist)) continue;
+  const carried = (readFileSync(dist, "utf8").match(/\*\*Figure\.\*\*/g) ?? []).length;
+  if (carried < tags.length) {
+    fail(relative(WEBDOC, dist), `${tags.length} <Figure /> tags but ${carried} figure blocks in the markdown`);
+  }
+}
+
 // 5. The landing page, which no content entry covers.
 //
-// `src/pages/index.md.ts` transcribes the copy out of `index.astro` because the
-// page is hand-written Astro with no MDX body to downlevel. Two transcriptions
-// of the same prose drift; this is what stops them. `index.astro` is the source
-// of truth, so every check below reads the page and looks for it in the output.
+// `src/pages/index.astro` and `src/pages/index.md.ts` both render the copy in
+// `src/lib/home.ts`, so they cannot drift in what they say. What can still go
+// wrong is a block the page shows and the twin forgets. The page marks every
+// element whose text must reach the markdown with `data-md`; this reads the
+// built page and looks for each one in `dist/index.md` and the corpus. Links
+// inside a marked element are page furniture and are left out.
 
-/**
- * Markup, emphasis and line wrapping removed, so JSX and markdown compare.
- *
- * Tags become a space rather than nothing, so `</p><p>` does not weld two
- * words together; the space is then taken back off in front of punctuation,
- * which is where `<strong>400,000 partitions</strong>,` and its markdown twin
- * `**400,000 partitions**,` would otherwise disagree.
- */
+/** Markup, emphasis, entities and line wrapping removed, so HTML and markdown compare. */
 function flatten(text) {
   return text
+    .replace(/<a\b[^>]*>[\s\S]*?<\/a>/g, " ")
     .replace(/<[^>]+>/g, " ")
+    .replace(/&#39;|&#x27;|&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
     .replace(/\*\*/g, "")
     .replace(/\s+/g, " ")
     .replace(/\s+([,.;:!?)\]])/g, "$1")
     .trim();
 }
 
-/**
- * Every `key: "value"` pair inside a named array literal in `index.astro`.
- * The optional type annotation is skipped: `const xs: { … }[] = [` is the same
- * array as `const xs = [`.
- */
-function astroStrings(astro, arrayName, key) {
-  const block = new RegExp(`const ${arrayName}\\b[^=\\n]*= \\[([\\s\\S]*?)\\n\\];`).exec(astro);
-  if (!block) return null;
-  const out = [];
-  if (key === null) {
-    for (const [, value] of block[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)) out.push(JSON.parse(`"${value}"`));
-    return out;
-  }
-  for (const [, value] of block[1].matchAll(new RegExp(`\\b${key}:\\s*"((?:[^"\\\\]|\\\\.)*)"`, "g"))) {
-    out.push(JSON.parse(`"${value}"`));
-  }
-  return out;
-}
-
 let checkedHome = 0;
-if (!existsSync(HOME_ASTRO)) {
-  fail("src/pages/index.astro", "missing — the landing page's markdown is transcribed from it");
+const HOME_HTML = join(DIST, "index.html");
+if (!existsSync(HOME_HTML)) {
+  fail("dist/index.html", "missing — build the site before checking its markdown");
 } else if (!existsSync(HOME_MARKDOWN)) {
   fail("dist/index.md", "missing — the landing page has no markdown alternate");
 } else {
-  const astro = readFileSync(HOME_ASTRO, "utf8");
-  const home = readFileSync(HOME_MARKDOWN, "utf8");
-  const flatHome = flatten(home);
-  const flatCorpus = corpus ? flatten(corpus) : null;
-
-  const probes = [];
-
-  const hero = /<h1\b[^>]*>([\s\S]*?)<\/h1>\s*<p\b[^>]*>([\s\S]*?)<\/p>/.exec(astro);
-  if (!hero) {
-    fail("src/pages/index.astro", "no <h1> followed by a hero <p> — check the probe in this script");
-  } else {
-    probes.push(["headline", flatten(hero[1])], ["hero paragraph", flatten(hero[2])]);
+  const html = readFileSync(HOME_HTML, "utf8");
+  const flatHome = flatten(readFileSync(HOME_MARKDOWN, "utf8").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1"));
+  const flatCorpus = corpus ? flatten(corpus.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")) : null;
+  const marked = [...html.matchAll(/<(h1|h2|h3|p|div)\b[^>]*\bdata-md\b[^>]*>([\s\S]*?)<\/\1>/g)];
+  if (marked.length < 10) {
+    fail("src/pages/index.astro", `only ${marked.length} elements marked data-md: the probe expects the page's copy to be marked`);
   }
-
-  // The limits used to be a `const notFor = [ … ]` and are a paragraph now, so
-  // they are probed out of the section itself. Only the prose before the link
-  // is taken: the link's own text and its arrow are page furniture.
-  const limits = /\{\/\* Limits \*\/\}[\s\S]*?<p\b[^>]*>([\s\S]*?)<a\b/.exec(astro);
-  if (!limits) {
-    fail("src/pages/index.astro", "no `{/* Limits */}` section with a paragraph — check the probe in this script");
-  } else {
-    probes.push(["limits paragraph", flatten(limits[1])]);
-  }
-
-  for (const [array, key, label] of [
-    ["differentiators", "title", "differentiator title"],
-    ["differentiators", "body", "differentiator body"],
-    ["proof", "figure", "proof figure"],
-    ["proof", "body", "proof body"],
-  ]) {
-    const values = astroStrings(astro, array, key);
-    if (values === null) {
-      fail("src/pages/index.astro", `no \`const ${array} = [ … ];\` — check the probe in this script`);
-      continue;
-    }
-    if (values.length === 0) {
-      fail("src/pages/index.astro", `\`${array}\` yielded no ${label} strings`);
-      continue;
-    }
-    for (const value of values) probes.push([label, flatten(value)]);
-  }
-
-  for (const [label, probe] of probes) {
+  for (const [, tag, inner] of marked) {
+    const probe = flatten(inner);
     if (!probe) continue;
     checkedHome++;
     if (!flatHome.includes(probe)) {
-      fail(
-        "dist/index.md",
-        `${label} in index.astro is not in the landing page's markdown: "${probe.slice(0, 70)}…". ` +
-          `src/pages/index.md.ts transcribes this copy by hand; update it to match the page.`,
-      );
+      fail("dist/index.md", `<${tag} data-md> on the landing page is not in its markdown: "${probe.slice(0, 70)}…"`);
     }
     if (flatCorpus && !flatCorpus.includes(probe)) {
-      fail("dist/llms-full.txt", `${label} from the landing page is missing: "${probe.slice(0, 70)}…"`);
+      fail("dist/llms-full.txt", `<${tag} data-md> from the landing page is missing: "${probe.slice(0, 70)}…"`);
     }
   }
 }
@@ -479,7 +449,7 @@ const componentSummary = [...usedComponents]
 
 console.log(
   `ok  markdown alternates (${pages.length} pages, ${checkedFences} fences, ` +
-    `${checkedPartials} partial inclusions, ${checkedCharts} charts, ` +
+    `${checkedPartials} partial inclusions, ${checkedCharts} charts, ${checkedFigures} figures, ` +
     `${checkedHome} landing-page probes)\n` +
     `    self-closing components in content: ${componentSummary || "none"}`,
 );

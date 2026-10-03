@@ -1,0 +1,129 @@
+---
+title: Jepsen
+description: "How Queen MQ's correctness is tested with Jepsen: the workloads and what each checker rejects, the faults, every campaign with its build and result, the bugs the tests found and the commits that fixed them, and the limits of testing."
+type: reference
+tier: operate
+sidebar:
+  order: 8
+sourceOfTruth:
+  - test/jepsen/src/jepsen/queen/core.clj
+  - test/jepsen/src/jepsen/queen/nemesis.clj
+  - test/jepsen/src/jepsen/queen/workload/log.clj
+  - test/jepsen/src/jepsen/queen/workload/queue.clj
+  - test/jepsen/src/jepsen/queen/workload/pipeline.clj
+  - test/jepsen/src/jepsen/queen/workload/dlq.clj
+  - test/jepsen/src/jepsen/queen/workload/timers.clj
+  - test/jepsen/run-campaign.sh
+---
+
+A million messages a second is worth nothing if one of them can go missing. We check that with
+Jepsen: five nodes, clients driving the native API as hard as they can, a nemesis that kills,
+pauses, partitions, skews clocks and cuts power, and checkers that read the whole history
+afterwards looking for a message lost, delivered twice, acked twice or seen out of order. The
+latest full campaign, on 2.0.0-beta.3, ran 65 tests and all 65 came back valid. That is evidence,
+not proof. Jepsen finds bugs and cannot show there are none, and further down is every bug it found
+in Queen 2.0.
+
+## How a test runs
+
+Each test starts a fresh five-node cluster, which needs three nodes for a quorum. It runs one
+workload for 300 seconds at 100 to 200 operations a second while the nemesis injects one class of
+fault (a few tests combine two), then heals everything, lets the clients finish (drain the queues,
+read every partition) and hands the full history to the workload's checkers. A test is valid only
+when every checker is. The harness is in `test/jepsen/` (Clojure, Jepsen 0.3.14), and
+`run-campaign.sh` runs a list of tests and writes one verdict line per test:
+
+<Figure id="benchmarks/jepsen-test" />
+
+```bash
+cd test/jepsen
+RUNS=/root/runs BIN=/root/bin/queen ./run-campaign.sh matrix-p11.txt
+```
+
+One test on its own, against nodes `n1` to `n5` reachable over SSH:
+
+```bash
+lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
+  --concurrency 2n --workload queue --nemesis kill --time-limit 300 --rate 200
+```
+
+## What each workload checks
+
+| Workload | What the clients do | What the checker rejects |
+|---|---|---|
+| W1 `log` | push, and read partitions by offset; with `--txn`, pushes to several partitions in one transaction | an acknowledged record lost or duplicated, two orders of one partition, a gap in the offsets, a transaction partly visible |
+| W2 `queue` | push, leased pop, one batch ack carrying the lease | an acknowledged message lost, a message acked twice, a redelivery after a successful ack, two unexpired leases on one message, order skipped within a partition |
+| W3 `register`, W3b `counter`, W3c `claim` | KV get, put and compare-and-set; increments; `putIfAbsent` | a history that is not linearizable; an increment lost or doubled; two winners of one claim |
+| W4 `elle` | KV calls that write and read several keys | any history that is not strict serializable, as Elle finds it: G0, G1, G-single, G2 and their real-time forms |
+| W5 `pipeline` | pop one message, then one `/api/v1/transaction` that acks it with its lease, pushes its output and increments a KV counter | an input lost, an input committed twice, output from a transaction that rolled back |
+| W6 `dedup` | pushes that reuse `transactionId`s, an unanswered one re-sent once to another node | two records for one id, an answer naming an offset that does not hold its record |
+| W7 `dlq` | acks that fail messages under a retry budget, or send them to the DLQ at once | a message neither completed nor dead-lettered, a dead letter that was never failed, a dead letter without its payload |
+| W8 `retention` | W2 with completed messages deleted 2 s after their push | a message deleted before its ack |
+| W9 `streams` | stream cycles: pop a batch, read the partition's state, one cycle that acks it, writes output and updates the state | a batch counted twice or never, state that disagrees with the output |
+| W10 `timers` | schedule, reschedule and cancel timers, and consume what fires | a timer that fires twice or early, a cancelled timer that fires, fires and cancels that do not add up to the timers created |
+
+## The faults
+
+- kill -9 of nodes, restarted after a while; with `lazyfs`, a kill also loses every write the node
+  had not fsynced, as a power cut does, and a slow-disk variant makes two nodes fsync 300 ms late
+- SIGSTOP pauses
+- network partitions: one node, a minority, a majority, a ring of overlapping majorities, and a
+  bridge where one node sees both halves
+- a deaf leader, whose followers receive its appends while their answers never reach it
+- clock jumps and strobes on any node, the leader included
+- graceful restarts (SIGTERM) of one node, or of every node in turn
+- membership changes through the admin API: a voter removed, wiped and added back, or two at once,
+  also while snapshots are being installed
+- a file bit-flipped or truncated on one node, which must refuse or repair the damage and never
+  serve it
+
+## The campaigns
+
+| Campaign | Date | Build | Tests | Result |
+|---|---|---|---|---|
+| P10, two full passes | 2026-09-26 | `ec9d88c4`, the commit that removed PostgreSQL | 82 per pass, W1 to W6 | 164 of 164 valid |
+| P11 | 2026-09-28 | 2.0.0-alpha.6 | 125: P10's tests, W7 to W10, snapshot installs during membership changes, slow-disk power loss | 123 valid; the other 2 were false positives of the new DLQ checker, fixed in `71031581` |
+| P16 to P24 | 2026-09-30 and 10-01 | the builds that became 2.0.0-beta.1 | 78 | 74 valid; the other 4 were the dead-letter payload bug below |
+| P26 | 2026-10-01 | 2.0.0-beta.3, `bff9f76d` | 65: queue, pipeline, KV register, counter and claim, log, Elle and timers, under kills, pauses, partitions, clock faults, restarts, membership changes, bridges, a deaf leader and power loss | 65 valid |
+| Kafka-facade build | 2026-10-02 | the code of 2.0.0-beta.5, before a fix inside the facade | 65 | 64 valid, 1 unknown |
+
+The unknown is W9 under bridge partitions. After the last heal, a follower's pops kept timing out
+for about 90 seconds although it had caught up, so the final reads did not finish within the
+test's time limit and the checker had no end state to judge. It is a liveness problem, and it is
+open. P8 to P10 are archived with every history in
+`benchmark-queen/2026-09-27-jepsen-archive/`.
+
+## What the tests found
+
+Every row is a bug in Queen that a campaign caught, and the commit that fixed it names the test
+that found it.
+
+| Campaign | Workload and fault | What went wrong | Fixed in |
+|---|---|---|---|
+| P8 | W4, pauses | a read saw half of one batch's writes (G-single) | `1d2efe84` |
+| P8 | W4, deaf leader | a call that wrote and read was answered seconds later from the node's current state, and its read saw writes made after its own (G1c) | `46a4539f` |
+| P9 | W3c, pauses | an acknowledged write was lost: a paused leader, already replaced, answered its client by log index, and the entry at that index was the new leader's | `0dc42c51` |
+| P9 | W2, clock jump | the leader's clock leapt about 300 s and ended leases early; a second worker got a message 10 ms after the first | `dd905cb4` |
+| P9 | W5 and W2, clock strobe | after a leader's clock excursion, every pop was answered empty for minutes | `50f45449` |
+| P14 | W2, clock strobe | the new consumption engine timed leases on the wall clock: 223 overlapping leases | `d013946d` |
+| P15 | W2, graceful restart | an ack whose answer was lost in a leader change was answered "stale" on the new leader, and its message never came back | `7a2a1711` |
+| P22 | W7, kill -9 | 1 to 8 of about 7,600 dead letters were filed without their payload | `7a2a1711` |
+
+Two of P8's failures were our own. The claim workload lost ids when a call timed out, and Elle
+reported version cycles that did not exist, because a set union in its `bifurcan` dependency
+modified its inputs. The W4 checker runs with that union replaced (`edc699b6`), until Elle ships on
+a fixed `bifurcan`.
+
+## Limits
+
+This is testing. A valid run shows that these histories, under these faults, broke no rule a
+checker knows, and every campaign ran one raft group with one tenant over the native HTTP API:
+several raft groups, several tenants, the Kafka facade and the embedded proxy were not part of any.
+Lease exclusivity across a leader change needs the nodes' clocks within
+`QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. Losing a majority of the disks for good can
+lose acknowledged writes, since raft survives the loss of a minority. And the current release,
+2.0.0-beta.6, has had no campaign of its own: its broker is that of 2.0.0-beta.3 plus the beta.5
+Kafka-facade work, which ran the 65-test campaign above.
+
+What each API guarantees, written for the developer using it, is on
+[guarantees](/concepts/guarantees/).

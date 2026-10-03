@@ -10,17 +10,17 @@ description: "Verified snippet extracted from examples/apps/rust/src/bin/rate_li
 
 ```rust title="examples/apps/rust/src/bin/rate_limiter.rs"
 //
-// A rate limiter, built out of a streaming query.
+// A rate limiter built from a streaming query.
 //
-// Counting requests per API key in a fixed window is the textbook rate limiter,
-// and the usual implementation is a counter in Redis: a second data system to
-// run, to size, and to lose when it restarts.
+// The textbook rate limiter counts requests per API key in a fixed window,
+// usually with a counter in Redis, which is one more system to run and one
+// more place where the count can drift from the requests.
 //
-// Here the counter is a windowed aggregation over the request stream itself.
-// The window state, the decisions it emits and the acknowledgement of the
-// requests it counted all commit as one entry in the broker's replicated log,
-// so the counter cannot drift from the stream it was computed from, and it
-// survives a restart because it lives in the broker, not in a process's memory.
+// Here the counter is a windowed aggregation over the request queue itself.
+// Each cycle of the stream commits the window state, the closed windows it
+// emits and the ack of the requests it counted as one entry in the broker's
+// log, so the count cannot drift from the requests, and it survives a restart
+// of this process because the state is in the broker.
 //
 //   api-requests (one partition per API key)
 //     └── streaming query: tumbling window, count per key
@@ -116,11 +116,13 @@ async fn run() -> Result<usize, String> {
 
     // ------------------------------------------------------------- the counter
     //
-    // A stream is a running process: it has to be listening before the requests
-    // arrive. Starting one over an existing backlog counts nothing.
+    // The stream runs in this process, as a consumer group of its own. A new
+    // group starts at the tail of the queue unless it asks otherwise, and a
+    // request pushed while the stream was still starting would be missed, so it
+    // asks for SubscriptionMode::All: every request in the queue is counted.
     //
     // The partition is the aggregation key, so the window state is per API key
-    // without anything being said about keys here: whoever pushes decides.
+    // without a word about keys here: the producer decides, by partition.
     //
     // Where the JavaScript client takes one options object for the window and
     // one for the aggregates, this client spells each of them as its own step in
@@ -131,9 +133,9 @@ async fn run() -> Result<usize, String> {
         .window_tumbling(WINDOW_SECONDS)
         .idle_flush_ms(800)
         // aggregate_count is the count of records in the window. The extractors
-        // below receive a Record over the payload, not the envelope: it is
-        // r.number("cost"), not the message's `data` field, and a missing or
-        // non-numeric field yields None — so a request that carries no cost is
+        // receive a Record over the payload itself, not the envelope, so it is
+        // r.number("cost") and not the message's `data` field. A missing or
+        // non-numeric field yields None, so a request that carries no cost is
         // billed as one.
         .aggregate_count("requests")
         .aggregate_sum("cost", |r| Some(r.number("cost").unwrap_or(1.0)))
@@ -143,16 +145,11 @@ async fn run() -> Result<usize, String> {
             RunOptions::new(&query_id)
                 .batch_size(200)
                 .max_partitions(8)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .map_err(|e| e.to_string())?;
-
-    // run() registers the query and spawns the poll loop, but does not wait for
-    // its first poll — and it is that first poll which creates the runner's
-    // cursor. A new cursor starts at the tail, so requests pushed into the gap
-    // would be counted by nobody. Waiting one poll window closes it.
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // ------------------------------------------------------------- the traffic
     println!("\ntaking traffic");
@@ -175,15 +172,14 @@ async fn run() -> Result<usize, String> {
     // ---------------------------------------------------------------- the gate
     //
     // The enforcement point. It reads each closed window and turns the ones over
-    // quota into throttle decisions. Splitting it from the counter is
-    // deliberate: the counting is exact and belongs to the broker, the policy is
-    // yours and changes on a different schedule.
+    // quota into throttle decisions. It is separate from the counter on purpose:
+    // the counting is exact and stays the same, while the policy is yours and
+    // changes on its own schedule.
     //
-    // A window is a slice of time, so a burst can arrive as two windows instead
-    // of one. That is why this accumulates per key and waits for the totals it
-    // expects, with a deadline. Waiting for a quiet period instead would be a
-    // race: the last window closes when its timer says so, not when the reader
-    // is tired of waiting.
+    // A window is a slice of time, so a burst can arrive as two windows. That is
+    // why this accumulates per key and waits for the totals it expects, with a
+    // deadline. Waiting for a quiet period would be a race: the last window
+    // closes when its timer fires, whatever the reader is doing.
     println!("\nenforcing");
     let mut counted: HashMap<String, i64> = HashMap::new();
     let mut decisions: Vec<(String, i64)> = Vec::new();
@@ -194,9 +190,9 @@ async fn run() -> Result<usize, String> {
     let deadline = Instant::now() + Duration::from_secs(30);
 
     while !complete(&counted) && Instant::now() < deadline {
-        // A pop claims one partition unless you say otherwise, and the two keys
-        // are two lanes: partitions(10) lets one call claim both, with batch as
-        // the budget shared across them.
+        // Each key's windows land in that key's partition. partitions(10) lets
+        // one pop take the windows of both keys, with batch as the budget they
+        // share.
         let windows = queen
             .queue(&usage)
             .group(GATE_GROUP)
@@ -212,39 +208,46 @@ async fn run() -> Result<usize, String> {
         for w in &windows {
             // The window's key is the partition it was computed for.
             let key = w.partition.clone();
-            // The aggregates come back as JSON floating-point numbers — the
-            // accumulator is an f64 whatever it counted — so `20` arrives as
+            // The aggregates come back as JSON floating-point numbers (the
+            // accumulator is an f64 whatever it counted), so `20` arrives as
             // `20.0` and as_i64() on it would be None. Read it as f64 and round.
             let in_window = w.data["requests"].as_f64().unwrap_or(0.0).round() as i64;
             *counted.entry(key.clone()).or_insert(0) += in_window;
             let over_by = in_window - QUOTA_PER_WINDOW;
 
             if over_by > 0 {
-                // The decision is a message, not a log line: whatever enforces
-                // it (an edge worker, a gateway, the API itself) subscribes to
-                // this queue and gets the decisions in order, per key.
+                // The decision is a message: whatever enforces it (an edge
+                // worker, a gateway, the API itself) reads this queue and gets
+                // the decisions in order, per key. It commits with the ack of
+                // the window it came from, so a crash in between cannot lose a
+                // decision or make two.
                 queen
-                    .queue(&throttled)
-                    .partition(&key)
-                    .push(json!({
-                        "key": key,
-                        "window": in_window,
-                        "quota": QUOTA_PER_WINDOW,
-                        "overBy": over_by,
-                    }))
+                    .transaction()
+                    .push_to(
+                        &throttled,
+                        &key,
+                        json!({
+                            "key": key,
+                            "window": in_window,
+                            "quota": QUOTA_PER_WINDOW,
+                            "overBy": over_by,
+                        }),
+                    )
+                    .map_err(|e| e.to_string())?
+                    .ack(w)
+                    .commit()
                     .await
                     .map_err(|e| e.to_string())?;
                 decisions.push((key.clone(), over_by));
                 println!("  {key}: {in_window} in a window, over by {over_by}");
             } else {
+                // pop() takes a lease and leaves the ack to the caller. This
+                // client reads the consumer group and the lease id off the
+                // message, so the ack cannot be pointed at the wrong cursor by
+                // forgetting one.
+                queen.ack(w).await.map_err(|e| e.to_string())?;
                 println!("  {key}: {in_window} in a window, within quota");
             }
-
-            // pop() takes a lease and leaves it to you; only consume() settles
-            // on your behalf. This client reads the consumer group and the lease
-            // id off the message rather than taking them as arguments, so the
-            // ack cannot be pointed at the wrong cursor by forgetting one.
-            queen.ack(w).await.map_err(|e| e.to_string())?;
         }
     }
 

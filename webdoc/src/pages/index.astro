@@ -2,234 +2,100 @@
 import { Code } from "astro:components";
 import BaseLayout from "../layouts/BaseLayout.astro";
 import Header from "../components/Header.astro";
+import Figure from "../components/Figure.astro";
 import { config } from "virtual:nimbus/config";
-import pushRaw from "../content/partials/snippets/js-push.mdx?raw";
-import consumeRaw from "../content/partials/snippets/js-consume.mdx?raw";
+import {
+  HOME_TITLE,
+  hero,
+  step,
+  stepSection,
+  roles,
+  partitionSection,
+  primitives,
+  doorsSection,
+  doors,
+  dashboardSection,
+  proofSection,
+  proof,
+  runSection,
+  differentiators,
+  limits,
+  start,
+} from "../lib/home";
 
 /**
- * The landing page.
+ * The landing page. Every word on it comes from src/lib/home.ts, which the
+ * markdown twin (index.md.ts) reads too. Elements marked `data-md` are the
+ * ones scripts/check-markdown.mjs looks for in dist/index.md.
  *
- * The code samples are pulled out of the generated snippet partials rather than
- * retyped, so the front page cannot drift from the test suite either. Imported
- * `?raw` so Vite resolves them at build time and tracks them for hot reload.
- * Reading the file at runtime would look in the bundled output, not the source.
- * See webdoc/scripts/gen-snippets.mjs.
+ * The rhythm: a split hero, then sections that alternate between the page and
+ * a card-coloured band, each with a small label, a title, one lead paragraph,
+ * and one piece of evidence (code, a drawn figure, a chart, a screenshot) that
+ * shows what the paragraph claims.
  */
-function snippet(raw: string, id: string): string {
-  const fenced = raw.match(/```[a-z]*[^\n]*\n([\s\S]*?)```/);
-  if (!fenced) throw new Error(`snippet ${id} has no fenced block`);
-  return fenced[1].trimEnd();
-}
 
 // The same pair Nimbus configures for MDX code blocks, with defaultColor off:
-// each span then carries the light colour plus a `--shiki-dark` custom
-// property, and globals.css flips it under [data-mode="dark"]. Using Astro's
-// default here would give the landing page a second, mismatched code theme.
+// each span carries the light colour plus a `--shiki-dark` custom property,
+// and globals.css flips it under [data-mode="dark"].
 const SHIKI = { light: "github-light", dark: "github-dark" } as const;
 
-/**
- * The `<title>` for this page. Deliberately not `config.title`: NimbusHead
- * appends " | Queen MQ" only when the page title differs from the site title,
- * so passing the site title emitted a bare `<title>Queen MQ</title>` on the one
- * page that most needs to say what this is. This renders as
- * "A transactional event broker with one ordered partition per entity | Queen MQ".
- * Leave the brand out of the string or it gets appended twice.
- */
-const HOME_TITLE = "A transactional event broker with one ordered partition per entity";
-
-const produce = snippet(pushRaw, "js-push");
-const consume = snippet(consumeRaw, "js-consume");
-
-/**
- * The anatomy of a step, verbatim from the Overview page
- * (src/content/docs/start/index.mdx) and from index.md.ts. Three copies of the
- * same seven lines: edit them together.
- */
-const step = `await queen.transaction()
-  .ack(message)                                                    // the event is done
-  .kv.put('orders', orderId, { status: 'paid' }, { ttl: '30d' })   // state
-  .queue('receipts').partition(customerId)
-    .push([{ transactionId: \`receipt-\${orderId}\`, data: receipt }]) // the next event, once
-  .timer('reminders').key(orderId).delay('24h')
-    .payload({ orderId }).schedule()                               // what comes later
-  .commit()`;
-
-// The five roles of a step, plus the call that commits them.
-const roles: { role: string; primitive: string; href: string }[] = [
-  { role: "Events", primitive: "Queues, one partition per entity", href: "/concepts/partitions/" },
-  {
-    role: "Progress",
-    primitive: "Consumer groups, leases, acks, retries, dead letters, replay",
-    href: "/concepts/consuming/",
-  },
-  { role: "State", primitive: "KV", href: "/concepts/kv/" },
-  { role: "Time", primitive: "Timers and delayed delivery", href: "/concepts/timers/" },
-  { role: "Identity", primitive: "transactionId dedup and once", href: "/concepts/dedup/" },
-  { role: "The commit", primitive: "POST /api/v1/transaction", href: "/concepts/transactions/" },
-];
-
-// "What runs it". The array keeps its old name because scripts/check-markdown.mjs
-// reads `const differentiators` out of this file and looks for every title and
-// body in dist/index.md. `href` is optional.
-const differentiators: { title: string; body: string; href?: string }[] = [
-  {
-    title: "One binary",
-    body: "A node keeps its state in a replicated log on its own disk. No database, no ZooKeeper, no sidecars. The dashboard, Prometheus metrics, API keys, JWT, quotas and payload encryption ship in the same binary.",
-    href: "/operate/",
-  },
-  {
-    title: "One node, or a cluster of three or five",
-    body: "Raft replicates every entry, and the cluster keeps serving while a majority of its nodes is up. Any node serves any client: a follower forwards writes to the leader, and a leader that stops gracefully hands leadership over first.",
-    href: "/operate/cluster/",
-  },
-  {
-    title: "Tenants in raft groups",
-    body: "Each tenant lives in exactly one raft group, so a transaction is one entry with no coordinator and no two-phase commit. You scale out with more raft groups and more clusters, not by spreading one tenant's writes.",
-    href: "/internals/",
-  },
-  {
-    title: "Any client",
-    body: "HTTP with JSON bodies, so curl is a client. Six SDKs: JavaScript, Python, Go, Rust, C++, and PHP with Laravel. A Rust program can also run the broker inside its own process.",
-    href: "/start/clients/",
-  },
-  {
-    title: "Kafka clients, unchanged",
-    body: "A Kafka wire-protocol facade runs inside the same process, off until you set QUEEN_KAFKA_EMBEDDED=true. Existing producers and consumers connect to it on port 9092.",
-    href: "/guides/kafka/",
-  },
-];
-
-// The numbers strip. scripts/check-markdown.mjs reads every figure and body
-// out of this array, so index.md.ts carries the same strings.
-const proof = [
-  {
-    figure: "1,000,000",
-    unit: "msg/s pushed and consumed",
-    body: "One queue, 500,000 partitions, deduplication on, e2e p99 ~270 ms, in 90 s runs on three nodes with 16 vCPU each, every write replicated.",
-    href: "/benchmarks/",
-  },
-  {
-    figure: "10,000,000",
-    unit: "partitions in one queue",
-    body: "913,000 msg/s in and 905,000 out on the same three nodes, e2e p99 4.7 s, in a 60 s run. No partition count was chosen: each partition was created by a push.",
-    href: "/benchmarks/",
-  },
-  {
-    figure: "Jepsen",
-    unit: "tested",
-    body: "No acked message lost or duplicated, and one order per partition, through kill -9, network partitions, clock jumps and power loss on five nodes. Testing, not proof.",
-    href: "/concepts/guarantees/",
-  },
-];
-
-const featureLine = [
-  "One partition per entity",
-  "One-entry transactions",
-  "Consumer groups",
-  "Replay and seek",
-  "Dead-letter queue",
-  "transactionId dedup",
-  "KV",
-  "Timers",
-  "Streams",
-  "Ephemeral queues",
-  "Tenants and quotas",
-  "Kafka wire protocol",
-  "Raft replication",
-];
+const eyebrow = "text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground";
+const h2 = "mt-3 text-3xl font-semibold tracking-tight text-foreground lg:text-[2.5rem] lg:leading-[1.1]";
+const lead = "mt-5 max-w-3xl text-lg leading-relaxed text-muted-foreground";
+const card =
+  "block rounded-xl border border-border bg-background p-5 no-underline transition-colors hover:border-border-strong";
 ---
 
 <BaseLayout title={HOME_TITLE} description={config.description}>
-  <div class="flex flex-col min-h-screen">
+  <div class="flex min-h-screen flex-col">
     <Header transparentTop />
 
-    <main class="flex-1 w-full">
-      {/* Hero. The headline and the paragraph are Alice's approved frame; the
-          same words open start/index.mdx and index.md.ts. */}
-      <section class="mb-16 lg:mb-20 lg:-mt-[calc(3.5rem+1px)] lg:grid lg:min-h-svh lg:grid-cols-[minmax(0,1fr)_42%]">
-        {/* The text column. Below lg it is the page's own column (max-w-5xl,
-            px-6). From lg the hero is two halves, full width and full height
-            under the header, and the text sits in the middle of the left half,
-            both ways, at most 34rem wide (the width the headline breaks into
-            three lines and the first three buttons share a row). */}
+    <main class="w-full flex-1">
+      {/* Hero: full height, two halves from lg up; the scene fills the right
+          42% under the clear header. Below lg the scene sits under the text. */}
+      <section class="lg:-mt-[calc(3.5rem+1px)] lg:grid lg:min-h-svh lg:grid-cols-[minmax(0,1fr)_42%]">
         <div class="flex lg:items-center lg:justify-center lg:px-12">
-          <div class="mx-auto w-full max-w-5xl px-6 pt-12 pb-12 lg:max-w-[34rem] lg:px-0 lg:py-16">
-            <p class="text-sm font-medium text-muted-foreground">
-              Queen MQ · Apache 2.0
-            </p>
+          <div class="mx-auto w-full max-w-6xl px-6 pb-12 pt-12 lg:max-w-[36rem] lg:px-0 lg:py-20">
+            <p class={eyebrow}>{hero.eyebrow}</p>
             <h1
-              class="mt-3 max-w-3xl text-foreground leading-[1.08]"
-              style="font-size: clamp(2rem, 4.2vw, 3rem); font-weight: var(--nb-h1-weight); letter-spacing: -0.02em;"
+              data-md
+              class="mt-5 text-foreground"
+              style="font-size: clamp(2.6rem, 5.4vw, 4.25rem); line-height: 1.02; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
             >
-              A message queue is the smallest thing Queen MQ does.
+              {hero.headline}
             </h1>
-            <p class="mt-6 max-w-2xl text-lg text-muted-foreground leading-relaxed">
-              It's a transactional event broker. Every customer, order or conversation gets its own
-              ordered partition, created by the first message that names it. No partition count to
-              choose. The ack, the state change, the next events and the timer commit as one entry.
-              Nothing happens halfway.
-            </p>
+            <p data-md class="mt-7 text-xl leading-relaxed text-foreground/85">{hero.lead}</p>
+            <p data-md class="mt-4 text-base leading-relaxed text-muted-foreground">{hero.second}</p>
 
             <div class="mt-9 flex flex-wrap items-center gap-3">
               <a
-                href="/start/quickstart/"
+                href={hero.primary.href}
                 class="rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background no-underline transition-opacity hover:opacity-90"
               >
-                Run it in five minutes
+                {hero.primary.label}
               </a>
               <a
-                href="/start/clients/"
+                href={hero.secondary.href}
                 class="rounded-lg border border-border px-5 py-2.5 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
               >
-                Pick a client
-              </a>
-              <a
-                href="/concepts/"
-                class="rounded-lg border border-border px-5 py-2.5 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
-              >
-                The model, in one page
-              </a>
-              <a
-                href="/start/compare/"
-                class="rounded-lg border border-border px-5 py-2.5 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
-              >
-                Compared to Kafka, SQS and Temporal
+                {hero.secondary.label}
               </a>
               <a
                 href="https://github.com/queen-mq/queen"
                 class="px-2 py-2.5 text-sm text-muted-foreground no-underline transition-colors hover:text-foreground"
               >
-                Source on GitHub →
+                GitHub →
               </a>
             </div>
-            <p class="mt-8 text-sm text-muted-foreground">
-              {
-                featureLine.map((f, i) => (
-                  <Fragment>
-                    {i > 0 && " · "}
-                    <strong>{f}</strong>
-                  </Fragment>
-                ))
-              }
-            </p>
+
+            <div class="mt-9 rounded-lg border border-border bg-card px-4 py-3">
+              <pre class="overflow-x-auto text-[0.8125rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{hero.run}</code></pre>
+            </div>
+            <p class="mt-3 text-sm text-muted-foreground">{hero.runNote}</p>
           </div>
         </div>
 
-        {/* The sunflower scene: the queen bee flying to the sunflower, filling
-            the right 42% edge to edge, from the header to the bottom of the
-            screen, and from lg up under the header, which stays clear until the
-            page scrolls (Header transparentTop; the section is pulled up by the
-            bar's 3.5rem + 1px). The scene is plum in the light theme and cream in
-            the dark one, so it stands off the page either way. A 1200 x 1536
-            picture composed for that column (0.55 to 0.85
-            wide on real screens) and cropped by object-fit at its edges, where
-            there is only sky and field; the crop leans left (35%) so the bee and
-            its trail survive the narrowest column, at the cost of petal tips on
-            the right edge. Decorative: the text says what this is. Below lg it
-            sits under the text, 4:5: full bleed on a phone, a framed picture on
-            anything wider, where a full-width 4:5 box would be taller than the
-            screen. */}
-        <div class="relative aspect-[4/5] w-full sm:mx-auto sm:mb-12 sm:max-w-xl sm:overflow-hidden sm:rounded-xl lg:mx-0 lg:mb-0 lg:max-w-none lg:rounded-none lg:aspect-auto">
+        <div class="relative aspect-[4/5] w-full sm:mx-auto sm:mb-12 sm:max-w-xl sm:overflow-hidden sm:rounded-xl lg:mx-0 lg:mb-0 lg:aspect-auto lg:max-w-none lg:rounded-none">
           <img
             src="/queen-scene.svg"
             alt=""
@@ -249,181 +115,84 @@ const featureLine = [
         </div>
       </section>
 
-      {/* The step. Duplicated in index.md.ts (homepageBody), like the rest of
-          this page's copy: edit both together. */}
-      <section class="mx-auto max-w-5xl w-full px-6 pb-16">
-        <h2 class="text-xl font-semibold text-foreground">One step, one commit</h2>
-        <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
-          When a service handles an event, it takes the event, changes state, emits the next
-          events, schedules what comes later and makes a retry harmless. In most stacks those live
-          in four systems, and each commits on its own. Queen keeps all five in one replicated log,
-          so one call writes them as one entry.
-        </p>
-
-        <div class="mt-6 rounded-lg border border-border overflow-hidden">
-          <div class="border-b border-border px-4 py-2 text-xs font-medium text-muted-foreground">
-            One step
-          </div>
-          <div class="p-4 text-sm overflow-x-auto">
-            <Code code={step} lang="js" themes={SHIKI} defaultColor={false} />
-          </div>
-        </div>
-        <div class="mt-6 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-6">
-          {
-            roles.map((r) => (
-              <div>
-                <h3 class="font-medium text-foreground">
-                  <a href={r.href}>{r.role}</a>
-                </h3>
-                <p class="mt-0.5 text-sm text-muted-foreground leading-relaxed">{r.primitive}</p>
-              </div>
-            ))
-          }
-        </div>
-
-        <p class="mt-4 max-w-3xl text-sm text-muted-foreground leading-relaxed">
-          If the lease has expired, if this receipt was already pushed by an earlier try, or if any
-          part is refused, nothing in the call is written. The outbox table, the idempotency table
-          and the cron job that exist only to stitch separate commits together are not needed. Atomicity
-          covers state inside Queen: a call your worker makes to another system is outside any
-          commit.
-          <a href="/concepts/transactions/"> Transactions →</a>
-        </p>
-      </section>
-
-      {/* One partition per entity */}
-      <section class="mx-auto max-w-5xl w-full px-6 pb-16">
-        <div class="grid gap-x-10 gap-y-8 lg:grid-cols-2">
-          <div>
-            <h2 class="text-xl font-semibold text-foreground">One partition per entity</h2>
-            <p class="mt-2 text-muted-foreground leading-relaxed">
-              Most brokers order messages per <em>shard</em>: a fixed number of partitions, chosen
-              up front, with your entities hashed onto them. Entities that share a shard wait for
-              each other.
-            </p>
-            <p class="mt-4 text-muted-foreground leading-relaxed">
-              In Queen the partition is the entity. You name it on push
-              (<code>customer-123</code>), and it exists from that message on. Order holds inside
-              it, and there is no partition count to choose.
-            </p>
-            <p class="mt-4 text-foreground leading-relaxed">
-              <strong>A slow entity delays only itself.</strong>
-            </p>
-          </div>
-
-          <div>
-            <pre class="mt-1 overflow-x-auto rounded-lg border border-border bg-card p-4 text-xs leading-relaxed text-muted-foreground"><code>customer A  ──► A1 ──► A2 ──► A3   in order
-customer B  ──► B1 ──► B2          waits for no one
-customer C  ──► C1 ──► C2 ──► C3   waits for no one</code></pre>
-            <p class="mt-4 text-sm text-muted-foreground leading-relaxed">
-              A hot partition stays sequential, by design: parallelism comes from many partitions,
-              not from splitting one.
-              <a href="/concepts/partitions/"> Partitions →</a>
-            </p>
-            <p class="mt-4 text-sm text-muted-foreground leading-relaxed">
-              With the one-entry commit, every entity can run as a small state machine: its
-              partition is the input, its KV entry is the state, each transaction is one
-              transition, and the workers stay stateless.
-              <a href="/guides/state-machines/"> One state machine per entity →</a>
-            </p>
-          </div>
-        </div>
-      </section>
-
-      {/* Code */}
-      <section class="mx-auto max-w-5xl w-full px-6 pb-20">
-        <h2 class="text-xl font-semibold text-foreground">It looks like this</h2>
-        <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
-          Queues and partitions are created on first use, so there is nothing to provision
-          before the first line runs.
-        </p>
-
-        <div class="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <div class="rounded-lg border border-border overflow-hidden">
-            <div class="border-b border-border px-4 py-2 text-xs font-medium text-muted-foreground">
-              Produce
-            </div>
-            <div class="p-4 text-sm overflow-x-auto">
-              <Code code={produce} lang="js" themes={SHIKI} defaultColor={false} />
-            </div>
-          </div>
-          <div class="rounded-lg border border-border overflow-hidden">
-            <div class="border-b border-border px-4 py-2 text-xs font-medium text-muted-foreground">
-              Consume
-            </div>
-            <div class="p-4 text-sm overflow-x-auto">
-              <Code code={consume} lang="js" themes={SHIKI} defaultColor={false} />
-            </div>
-          </div>
-        </div>
-
-        <p class="mt-3 text-sm text-muted-foreground">
-          There are <a href="/start/clients/">SDKs for JavaScript, Python, Go, Rust, C++ and PHP</a>, <a href="/reference/queenctl/">an operator CLI</a>, and a <a href="/reference/http/">plain HTTP API</a> that curl speaks.
-        </p>
-      </section>
-
-      {/* What runs it */}
+      {/* One step, one commit */}
       <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-16">
-          <h2 class="text-xl font-semibold text-foreground">What runs it</h2>
-          <div class="mt-8 grid grid-cols-1 gap-x-10 gap-y-8 sm:grid-cols-2">
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <p class={eyebrow}>{stepSection.eyebrow}</p>
+          <h2 data-md class={h2}>{stepSection.title}</h2>
+          <p data-md class={lead}>{stepSection.lead}</p>
+
+          <div class="home-code mt-12 overflow-hidden rounded-xl border border-border bg-card">
+            <div class="flex items-center justify-between border-b border-border px-5 py-2.5 text-xs text-muted-foreground">
+              <span class="font-medium">One step, as one call</span>
+              <span>JavaScript</span>
+            </div>
+            <div class="overflow-x-auto px-5 py-4 text-[0.8125rem]">
+              <Code code={step} lang="js" themes={SHIKI} defaultColor={false} />
+            </div>
+            <ol class="grid grid-cols-2 border-t border-border sm:grid-cols-3 lg:grid-cols-6">
+              {
+                roles.map((r) => (
+                  <li class="border-b border-r border-border px-5 py-4 lg:border-b-0">
+                    <a href={r.href} class="font-medium text-foreground no-underline hover:underline">
+                      {r.role}
+                    </a>
+                    <p data-md class="mt-1 text-sm leading-snug text-muted-foreground">{r.primitive}</p>
+                  </li>
+                ))
+              }
+              <li class="bg-background px-5 py-4">
+                <span class="font-medium text-foreground">One entry</span>
+                <p class="mt-1 text-sm leading-snug text-muted-foreground">committed whole, or not at all</p>
+              </li>
+            </ol>
+          </div>
+
+          <div class="mt-12 grid grid-cols-1 gap-10 lg:grid-cols-12 lg:items-center">
+            <div class="lg:col-span-8">
+              <Figure id="concepts/four-systems" />
+            </div>
+            <div class="lg:col-span-4">
+              <p data-md class="leading-relaxed text-muted-foreground">{stepSection.after}</p>
+              <a href={stepSection.link.href} class="mt-4 inline-block text-sm font-medium">
+                {stepSection.link.label} →
+              </a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Partitions */}
+      <section class="border-t border-border bg-card">
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <div class="grid grid-cols-1 gap-10 lg:grid-cols-12">
+            <div class="lg:col-span-5">
+              <p class={eyebrow}>{partitionSection.eyebrow}</p>
+              <h2 data-md class={h2}>{partitionSection.title}</h2>
+              <p data-md class="mt-5 text-lg leading-relaxed text-muted-foreground">{partitionSection.lead}</p>
+              <p data-md class="mt-4 leading-relaxed text-muted-foreground">{partitionSection.after}</p>
+              <a href={partitionSection.link.href} class="mt-4 inline-block text-sm font-medium">
+                {partitionSection.link.label} →
+              </a>
+            </div>
+            <div class="lg:col-span-7 lg:pt-2">
+              <Figure id="benchmarks/partitions-p99" />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Primitives */}
+      <section class="border-t border-border">
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <p class={eyebrow}>Everything in one log</p>
+          <h2 class={h2}>The pieces a step needs, sharing one commit</h2>
+          <div class="mt-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {
-              differentiators.map((d) => (
-                <div>
-                  <h3 class="font-medium text-foreground">
-                    {d.href ? <a href={d.href}>{d.title}</a> : d.title}
-                  </h3>
-                  <p class="mt-1.5 text-sm text-muted-foreground leading-relaxed">{d.body}</p>
-                </div>
-              ))
-            }
-          </div>
-        </div>
-      </section>
-
-      {/* Dashboard */}
-      <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-16">
-          <h2 class="text-xl font-semibold text-foreground">
-            <a href="/operate/monitoring/" class="no-underline text-foreground">The dashboard is already in there</a>
-          </h2>
-          <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
-            Queues, partitions, consumer groups, lag and dead letters. Nothing was installed to get
-            this: it is the same binary, on the port you already opened.
-          </p>
-          <img
-            src="/screenshots/dashboard-overview.png"
-            alt="The bundled dashboard's overview: stored messages, queues, partitions, consumer groups, pending and completed counts above a table of throughput, lag and error series with sparklines."
-            width="2880"
-            height="1800"
-            loading="lazy"
-            class="mt-6 w-full h-auto rounded-xl border border-border"
-          />
-        </div>
-      </section>
-
-      {/* Proof */}
-      <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-16">
-          <h2 class="text-xl font-semibold text-foreground">Measured, with the conditions attached</h2>
-          <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
-            Queen MQ 2.0 on three nodes, 16 vCPU each, every write replicated. These runs measure
-            push, pop and ack, not transactions. Every figure names its run, and 1.x results,
-            measured when Queen's storage was PostgreSQL, are not repeated here.
-          </p>
-
-          <div class="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-3">
-            {
-              proof.map((p) => (
-                <a
-                  href={p.href}
-                  class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
-                >
-                  <div class="text-3xl font-semibold text-foreground">{p.figure}</div>
-                  <div class="mt-0.5 text-xs uppercase tracking-wide text-muted-foreground">
-                    {p.unit}
-                  </div>
-                  <p class="mt-3 text-sm text-muted-foreground leading-relaxed">{p.body}</p>
+              primitives.map((p) => (
+                <a href={p.href} class={card}>
+                  <div class="font-medium text-foreground">{p.title}</div>
+                  <p data-md class="mt-1.5 text-sm leading-relaxed text-muted-foreground">{p.body}</p>
                 </a>
               ))
             }
@@ -431,15 +200,129 @@ customer C  ──► C1 ──► C2 ──► C3   waits for no one</code></pr
         </div>
       </section>
 
-      {/* Limits */}
+      {/* Doors */}
+      <section class="border-t border-border bg-card">
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <p class={eyebrow}>{doorsSection.eyebrow}</p>
+          <h2 data-md class={h2}>{doorsSection.title}</h2>
+          <p data-md class={lead}>{doorsSection.lead}</p>
+
+          <div class="mt-12 grid grid-cols-1 gap-8 lg:grid-cols-12">
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:col-span-6">
+              {
+                doors.map((d, i) => (
+                  <a href={d.href} class={i === doors.length - 1 && doors.length % 2 === 1 ? `${card} sm:col-span-2` : card}>
+                    <div class="font-medium text-foreground">{d.title}</div>
+                    <p data-md class="mt-1.5 text-sm leading-relaxed text-muted-foreground">{d.body}</p>
+                  </a>
+                ))
+              }
+            </div>
+            <div class="home-code overflow-hidden rounded-xl border border-border bg-background lg:col-span-6 lg:self-start">
+              <div class="border-b border-border px-4 py-2.5 text-xs font-medium text-muted-foreground">
+                {doorsSection.snippetTitle}
+              </div>
+              <div class="overflow-x-auto px-5 py-4 text-[0.8125rem]">
+                <Code code={doorsSection.snippet} lang="bash" themes={SHIKI} defaultColor={false} />
+              </div>
+              <p class="border-t border-border px-4 py-3 text-sm text-muted-foreground">
+                The source copies the rows already there, then streams every committed change. A
+                sink is the same call with <code>"kind": "sink"</code>.
+                <a href="/guides/postgres/"> PostgreSQL →</a>
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Dashboard */}
       <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-10">
-          <p class="max-w-3xl text-sm text-muted-foreground leading-relaxed">
-            Queen has real limits. Delivery is at-least-once: exactly-once holds for effects inside
-            Queen, not for a call your worker makes to another system. A hot partition is
-            sequential by design. A transaction is one call inside one tenant, with no interactive
-            BEGIN and COMMIT. One leader orders every write of a raft group. And there is no
-            routing: no exchanges, bindings or header matching.
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <div class="grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-end">
+            <div class="lg:col-span-7">
+              <p class={eyebrow}>{dashboardSection.eyebrow}</p>
+              <h2 data-md class={h2}>{dashboardSection.title}</h2>
+            </div>
+            <div class="lg:col-span-5">
+              <p data-md class="leading-relaxed text-muted-foreground">{dashboardSection.lead}</p>
+              <a href={dashboardSection.link.href} class="mt-3 inline-block text-sm font-medium">
+                {dashboardSection.link.label} →
+              </a>
+            </div>
+          </div>
+          <div class="mt-12 overflow-hidden rounded-xl border border-border">
+            <img
+              src={`/screenshots/${dashboardSection.image}-light.png`}
+              alt={dashboardSection.alt}
+              width="2880"
+              height="1800"
+              loading="lazy"
+              decoding="async"
+              class="home-shot-light block h-auto w-full"
+            />
+            <img
+              src={`/screenshots/${dashboardSection.image}-dark.png`}
+              alt={dashboardSection.alt}
+              width="2880"
+              height="1800"
+              loading="lazy"
+              decoding="async"
+              class="home-shot-dark block h-auto w-full"
+            />
+          </div>
+        </div>
+      </section>
+
+      {/* Proof */}
+      <section class="border-t border-border bg-card">
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <p class={eyebrow}>{proofSection.eyebrow}</p>
+          <h2 data-md class={h2}>{proofSection.title}</h2>
+          <p data-md class={lead}>{proofSection.lead}</p>
+          <div class="mt-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {
+              proof.map((p) => (
+                <a href={p.href} class={card}>
+                  <div class="text-3xl font-semibold tracking-tight text-foreground">{p.figure}</div>
+                  <div class="mt-1 text-xs uppercase tracking-wide text-muted-foreground">{p.unit}</div>
+                  <p data-md class="mt-4 text-sm leading-relaxed text-muted-foreground">{p.body}</p>
+                </a>
+              ))
+            }
+          </div>
+          <a href={proofSection.link.href} class="mt-8 inline-block text-sm font-medium">
+            {proofSection.link.label} →
+          </a>
+        </div>
+      </section>
+
+      {/* Operations */}
+      <section class="border-t border-border">
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <p class={eyebrow}>{runSection.eyebrow}</p>
+          <h2 class={h2}>{runSection.title}</h2>
+          <div class="mt-12 grid grid-cols-1 gap-x-12 gap-y-10 sm:grid-cols-2">
+            {
+              differentiators.map((d) => (
+                <div class="border-t border-border pt-5">
+                  <h3 class="font-medium text-foreground">
+                    <a href={d.href} class="no-underline">
+                      {d.title}
+                    </a>
+                  </h3>
+                  <p data-md class="mt-2 leading-relaxed text-muted-foreground">{d.body}</p>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      </section>
+
+      {/* Limits */}
+      <section class="border-t border-border bg-card">
+        <div class="mx-auto w-full max-w-6xl px-6 py-12">
+          <p data-md class="max-w-4xl leading-relaxed text-muted-foreground">
+            {limits}
             <a href="/reference/limits/"> Read the full list before you design around it →</a>
           </p>
         </div>
@@ -447,53 +330,23 @@ customer C  ──► C1 ──► C2 ──► C3   waits for no one</code></pr
 
       {/* Start */}
       <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-16">
-          <h2 class="text-xl font-semibold text-foreground">Start</h2>
-          <div class="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <a
-              href="/start/quickstart/"
-              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
-            >
-              <div class="font-medium text-foreground">Quickstart</div>
-              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
-                Run a node and commit your first step in five minutes.
-              </p>
-            </a>
-            <a
-              href="/start/clients/"
-              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
-            >
-              <div class="font-medium text-foreground">Pick a client</div>
-              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
-                Six SDKs, curl, queenctl and the embedded Rust broker.
-              </p>
-            </a>
-            <a
-              href="/concepts/"
-              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
-            >
-              <div class="font-medium text-foreground">The model</div>
-              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
-                Partitions, progress, state, time and identity, and the commit that joins them.
-              </p>
-            </a>
-            <a
-              href="/operate/"
-              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
-            >
-              <div class="font-medium text-foreground">Run it</div>
-              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
-                A node, a cluster of three or five, Kubernetes, tenants and monitoring.
-              </p>
-            </a>
+        <div class="mx-auto w-full max-w-6xl px-6 py-20">
+          <h2 class="text-2xl font-semibold tracking-tight text-foreground">Start here</h2>
+          <div class="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {
+              start.map((s) => (
+                <a href={s.href} class={card}>
+                  <div class="font-medium text-foreground">{s.title}</div>
+                  <p class="mt-1 text-sm leading-relaxed text-muted-foreground">{s.body}</p>
+                </a>
+              ))
+            }
           </div>
         </div>
       </section>
 
       <footer class="border-t border-border">
-        <div
-          class="mx-auto max-w-5xl w-full px-6 py-8 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-muted-foreground"
-        >
+        <div class="mx-auto flex w-full max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-6 py-8 text-sm text-muted-foreground">
           <span>Apache 2.0</span>
           <a href="https://github.com/queen-mq/queen">GitHub</a>
           <a href="/reference/">Reference</a>
@@ -507,16 +360,29 @@ customer C  ──► C1 ──► C2 ──► C3   waits for no one</code></pr
 </BaseLayout>
 
 <style>
-  /* The hero's two scenes, one per theme. BaseLayout stamps data-mode="dark"
-     on <html> for the dark theme only (light is its absence), the same switch
-     globals.css uses for the charts. */
-  .hero-scene-dark {
+  /* Code on this page sits in a card that already has a frame and a header:
+     Shiki's own background, padding and border would be a box in a box. */
+  .home-code :global(pre.astro-code) {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent !important;
+    /* the wrapper scrolls; a second scroller here showed an empty track */
+    overflow: visible !important;
+  }
+  /* The hero scene and the dashboard screenshot exist once per theme.
+     BaseLayout stamps data-mode="dark" on <html> for the dark theme only. */
+  .hero-scene-dark,
+  .home-shot-dark {
     display: none;
   }
-  :global(:root[data-mode="dark"]) .hero-scene-light {
+  :global(:root[data-mode="dark"]) .hero-scene-light,
+  :global(:root[data-mode="dark"]) .home-shot-light {
     display: none;
   }
-  :global(:root[data-mode="dark"]) .hero-scene-dark {
+  :global(:root[data-mode="dark"]) .hero-scene-dark,
+  :global(:root[data-mode="dark"]) .home-shot-dark {
     display: block;
   }
 </style>

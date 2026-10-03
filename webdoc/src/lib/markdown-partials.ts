@@ -58,6 +58,7 @@
 
 import { getCollection } from "astro:content";
 import { renderEntryAsMarkdown } from "@cloudflare/nimbus-docs";
+import { figureMarkdown } from "@/lib/figure-markdown";
 
 /** The shape this module needs from a content entry — docs page or partial. */
 interface MarkdownEntry {
@@ -193,6 +194,18 @@ const componentMap = {
     else if (src) parts.push(`**Screenshot.** \`${src}\``);
     if (caption) parts.push(caption);
     return parts.length > 0 ? `\n${parts.join("\n\n")}\n` : "";
+  },
+
+  /**
+   * A drawn figure becomes its words and its data: the `alt`, the caption, the
+   * source, and what the picture was drawn from, as markdown an agent can
+   * read (a chart's numbers as a table, a diagram's arrows as a list). The
+   * spec is the same one `<Figure />` renders, so the two cannot disagree.
+   */
+  Figure: ({ attrs }: { attrs: Record<string, string | boolean> }): string => {
+    const id = typeof attrs.id === "string" ? attrs.id.trim() : "";
+    if (!id) throw new Error('[markdown-partials] <Figure /> without a literal id="…"');
+    return `\n${figureMarkdown(id)}\n`;
   },
 
   /**

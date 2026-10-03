@@ -1,0 +1,177 @@
+---
+title: Webhook sender
+description: "A webhook sender with one partition per endpoint: deliveries arrive in order, a dead endpoint slows nobody else down, retries are the broker's, and what never succeeds waits in the dead-letter queue with its error."
+type: example
+tier: use
+sidebar:
+  order: 3
+sourceOfTruth:
+  - examples/apps/js/webhooks.mjs
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+  - server/src/rsm/consume/ack.rs
+verifiedBy:
+  - examples/apps/js/webhooks.mjs
+  - examples/apps/py/webhooks.py
+  - examples/apps/go/webhooks/main.go
+  - examples/apps/rust/src/bin/webhooks.rs
+  - examples/apps/php/webhooks.php
+  - examples/apps/cpp/webhooks.cpp
+  - examples/apps/http/webhooks.sh
+---
+
+Every product with an API ends up writing this one. Deliveries to one subscriber have to arrive in
+the order the events happened, a subscriber whose endpoint is down must not hold up anybody else,
+a failure is retried a bounded number of times, and what never succeeds has to end up somewhere a
+person can read it. With one partition per endpoint the first two come from the storage, and the
+last two are queue settings, so the sender itself is a function that POSTs and throws. The
+program queues three events for three subscribers, one of which answers 500 to everything, and
+checks all four properties.
+
+## Run it
+
+```bash
+docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+npm install queen-mq
+node webhooks.mjs     # the JavaScript tab below, saved as webhooks.mjs
+```
+
+What it printed against a 2.0.0-beta.6 node:
+
+```text
+queuing deliveries
+  9 deliveries queued
+
+sending
+  initech.example <- event 1 failed on attempt 1: initech.example answered 500
+  acme.example <- event 1
+  globex.example <- event 1
+  acme.example <- event 2
+  globex.example <- event 2
+  acme.example <- event 3
+  initech.example <- event 1 failed on attempt 2: initech.example answered 500
+  globex.example <- event 3
+  initech.example <- event 1 failed on attempt 3: initech.example answered 500
+  initech.example <- event 2 failed on attempt 1: initech.example answered 500
+  initech.example <- event 2 failed on attempt 2: initech.example answered 500
+  initech.example <- event 2 failed on attempt 3: initech.example answered 500
+  initech.example <- event 3 failed on attempt 1: initech.example answered 500
+  initech.example <- event 3 failed on attempt 2: initech.example answered 500
+  initech.example <- event 3 failed on attempt 3: initech.example answered 500
+
+checking
+  ok: acme.example received its 3 events in the order they happened (got 1,2,3)
+  ok: globex.example received its 3 events in the order they happened (got 1,2,3)
+  ok: the dead endpoint received nothing
+  ok: each dead delivery was tried 3 times before it was given up (9 attempts)
+  ok: all 3 dead deliveries are in the dead-letter queue
+  ok: each dead letter carries the error that killed it
+  ok: no healthy delivery ended up in the dead-letter queue
+
+  dead letters: initech.example/INV-3: initech.example answered 500; initech.example/INV-2: initech.example answered 500; initech.example/INV-1: initech.example answered 500
+
+PASS: 7 checks
+```
+
+The failing endpoint's deliveries are the oldest in the queue, and the healthy endpoints were
+served while it was still on its first attempt. Each of its events was tried three times, in
+order, and then filed with the error that killed it.
+
+## The program
+
+<Tabs>
+
+<TabItem label="JavaScript">
+
+<Render file="snippets/app-js-webhooks" />
+
+</TabItem>
+
+<TabItem label="Python">
+
+<Render file="snippets/app-py-webhooks" />
+
+</TabItem>
+
+<TabItem label="Go">
+
+<Render file="snippets/app-go-webhooks" />
+
+</TabItem>
+
+<TabItem label="Rust">
+
+<Render file="snippets/app-rust-webhooks" />
+
+</TabItem>
+
+<TabItem label="PHP">
+
+<Render file="snippets/app-php-webhooks" />
+
+</TabItem>
+
+<TabItem label="C++">
+
+<Render file="snippets/app-cpp-webhooks" />
+
+</TabItem>
+
+<TabItem label="curl">
+
+<Render file="snippets/app-http-webhooks" />
+
+</TabItem>
+
+</Tabs>
+
+## How it works
+
+The application pushes each delivery into the partition of the endpoint it is for, with the event
+id as `transactionId`, so an application that retries its own emit does not create a second
+delivery. Order per subscriber is then a property of the partition: the sender group holds one
+lease per partition, and the next delivery to an endpoint is not handed out while the previous
+one is in flight.
+
+<Figure id="guides/webhooks-endpoints" />
+
+The sender is a handler that returns or throws. Returning acknowledges the delivery; throwing
+gives it back with the error, which spends one unit of the queue's `retryLimit`, and the broker
+hands it out again with `deliveryAttempt` one higher. When the budget is spent, the queue's
+`dlqAfterMaxRetries` files the delivery in the dead-letter queue with its last error and the
+endpoint's next delivery goes out. The retries live in the broker, so they survive the sender
+crashing halfway, which a retry loop inside the handler would not.
+
+`.partitions(1)` keeps one endpoint per pop. After a failed delivery the JavaScript client skips the
+rest of that pop, because the failure released the endpoint's lease and those deliveries will come
+back; if the same pop had also carried other endpoints' deliveries, they would wait for their lease
+to run out. We checked that it matters: without `.partitions(1)` and with the dead endpoint first in
+the queue, the healthy endpoints received nothing before the program gave up.
+
+[Deliver webhooks](/guides/webhooks/) goes further into the pattern: re-queueing dead letters once
+an endpoint is fixed, skipping the budget for a permanent error, and putting a pause between
+attempts.
+
+## Why it is short
+
+Without per-endpoint partitions, a sender has to build the isolation itself: a queue per
+subscriber to provision and clean up, or a shared queue plus a table of failing endpoints to skip
+and a scheduler to come back to them, and a retry counter stored next to every delivery. Here
+each of those is a setting or a side effect of the partition, and the sending code is the HTTP
+call.
+
+## Limits
+
+- A failing delivery holds up its own endpoint. Later deliveries to that endpoint wait until
+  it succeeds or is dead-lettered. That is the price of order, and other endpoints do not pay it.
+- Retries come back immediately. For a pause between attempts, see the
+  [guide](/guides/webhooks/).
+- Only a failure that is reported spends the budget. A sender that hangs or dies costs
+  nothing: the lease expires and the delivery comes back, forever if it kills every sender. Read
+  `deliveryAttempt` and dead-letter the delivery yourself past a threshold.
+- Delivery to the endpoint is at least once. A sender that dies after the POST and before the
+  ack sends it again, so send the event id in a header and let the receiver drop repeats.
+
+## Next
+
+[Consuming](/concepts/consuming/) has the ack statuses and the retry budget in full, and the
+[card charger](/examples/exactly-once/) shows how to make a repeated delivery harmless.

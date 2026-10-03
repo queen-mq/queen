@@ -1,0 +1,228 @@
+---
+title: Rate limiters
+description: "Two ways to hold a tenant to a quota with the count kept in the broker: a streaming window that throttles, and an admission controller that moves work to the next window instead of refusing it."
+type: example
+tier: use
+sidebar:
+  order: 6
+sourceOfTruth:
+  - examples/apps/js/rate-limiter.mjs
+  - examples/apps/js/deferred-work.mjs
+  - clients/client-js/client-v2/streams/Stream.js
+  - clients/client-js/client-v2/streams/runtime/Runner.js
+  - clients/client-js/client-v2/kv/Kv.js
+  - server/src/rsm/planner/kv.rs
+verifiedBy:
+  - examples/apps/js/rate-limiter.mjs
+  - examples/apps/py/rate_limiter.py
+  - examples/apps/go/rate-limiter/main.go
+  - examples/apps/rust/src/bin/rate_limiter.rs
+  - examples/apps/js/deferred-work.mjs
+---
+
+A rate limiter needs a count that is exact and survives restarts, and the usual place for it is a
+Redis next to the broker. These two programs keep it in the broker instead, in the same log as the
+requests, and they answer the question every limiter has to answer differently. The first counts
+requests per API key in a two-second window and turns every window over the quota into a throttle
+decision for a gateway to enforce. The second never says no: it admits a tenant's requests up to
+the quota and puts the rest on a timer that brings them back when the window opens again.
+
+## Run them
+
+```bash
+docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+npm install queen-mq
+node rate-limiter.mjs     # the counter, saved from the first set of tabs below
+node deferred-work.mjs    # the admission controller, saved from the second
+```
+
+## The counter
+
+What the counter printed against a 2.0.0-beta.6 node:
+
+```text
+starting the counter
+
+taking traffic
+  key-quiet: 3 requests
+  key-noisy: 20 requests
+
+enforcing
+  key-noisy: 9 in a window, over by 4
+  key-quiet: 3 in a window, within quota
+  key-noisy: 11 in a window, over by 6
+
+checking
+  ok: every request reached a closed window before the deadline
+  ok: the quiet key was counted exactly
+  ok: the noisy key was counted exactly
+  ok: the noisy key was throttled
+  ok: the quiet key was never throttled, so the limiter is not just firing at everything
+  ok: every decision is on the queue the gateway reads
+  ok: each decision carries the count and the quota that produced it
+
+PASS: 7 checks
+```
+
+This run caught a window boundary in the middle of the noisy burst, so its twenty requests were
+counted as 9 and 11, both over the quota of 5. That is why the program sends twenty: split any way
+at all, one side holds at least ten, so the noisy key is always throttled, while the quiet key's
+three requests can never reach five.
+
+<Tabs>
+
+<TabItem label="JavaScript">
+
+<Render file="snippets/app-js-rate-limiter" />
+
+</TabItem>
+
+<TabItem label="Python">
+
+<Render file="snippets/app-py-rate-limiter" />
+
+</TabItem>
+
+<TabItem label="Go">
+
+<Render file="snippets/app-go-rate-limiter" />
+
+</TabItem>
+
+<TabItem label="Rust">
+
+<Render file="snippets/app-rust-rate-limiter" />
+
+</TabItem>
+
+</Tabs>
+
+Each API key's requests land in a partition named after the key, and a stream counts them: a
+tumbling window of two seconds and an aggregate of one per request. The stream runs inside the
+program as a consumer group of its own, and each of its cycles commits the window state, the
+windows it closed and the ack of the requests it counted as one entry in the log, so the count
+can neither lose a request nor count one twice when the process restarts. It starts with
+`subscriptionMode: 'all'`, because a new group otherwise begins at the tail and can miss a
+request pushed while it is starting. Before the program asked for it, that happened in 3 of 14
+runs; after, in none of 20.
+
+<Figure id="examples/rate-counter" />
+
+The gate is a plain consumer of the closed windows. For each window over the quota it pushes a
+throttle decision to the queue a gateway would read, in the same transaction as the ack of the
+window, so a crash between the two can neither lose a decision nor make two. Keeping the gate out
+of the stream is deliberate: the counting stays exact and fixed, and the policy, which is yours,
+changes on its own schedule. [Streams](/guides/streams/) covers the operators, the windows and
+what one cycle commits.
+
+## The admission controller
+
+What the admission controller printed on the same node, with a quota of three exports per tenant
+per eight-second window:
+
+```text
+a duplicate request, and the budget it must not spend
+  G-1: admitted
+  globex counter: 1
+  G-1: already admitted, nothing written
+  globex counter: 1
+  ok: the duplicate lost the gate
+  ok: the duplicate produced no second export
+  ok: the rolled-back transaction gave the budget back (counter still 1)
+
+six requests against a quota of 3
+  R-1: admitted
+  R-2: admitted
+  R-3: admitted
+  R-4: over quota, moved to the next window in 7975 ms
+  R-5: over quota, moved to the next window in 7967 ms
+  R-6: over quota, moved to the next window in 7959 ms
+  ok: 3 of acme's requests ran now and none was refused
+  ok: the other 3 were moved to the next window
+
+withdrawing one deferred request
+  ok: R-6 was cancelled while it waited
+
+the next window
+  R-5: admitted
+  R-4: admitted
+
+the work that ran
+  exported R-1
+  exported R-2
+  exported R-3
+  exported R-5
+  exported R-4
+  exported G-1
+
+checking
+  ok: exactly the requests not withdrawn ran, once each (G-1, R-1, R-2, R-3, R-4, R-5)
+  ok: every export that ran was admitted by the counter
+  ok: the gate refused only the one duplicate, never a returning request
+  ok: no timer is left pending
+
+  ran: R-1, R-2, R-3, R-5, R-4, G-1; withdrawn: R-6
+
+PASS: 10 checks
+```
+
+Six requests met a quota of three, and all five that were still wanted ran: three at once, two
+when the window rolled over eight seconds later, with nobody retrying anything.
+
+<Tabs>
+
+<TabItem label="JavaScript">
+
+<Render file="snippets/app-js-deferred-work" />
+
+</TabItem>
+
+</Tabs>
+
+One transaction decides a request: an `incr` of the tenant's counter with `max` set to the quota,
+a `putIfAbsent` of an `admitted:` entry for the request, the push of the work, and the ack. Both KV
+operations carry `required: true`, so either of them can stop the whole transaction, and the
+answer's `kvReason` says which one did. `limit` means the tenant is over the quota for this window;
+`exists` means this request was admitted before, which is what a redelivery looks like.
+
+<Figure id="examples/rate-admission" />
+
+When the quota is spent nothing is written, so the refused request has not used any budget. The
+program reads the counter's expiry, which is the end of the window, because `incr` sets a TTL
+only when it creates the key, and schedules a timer that pushes the same request back onto the
+same partition at that moment. The timer and the ack go in one transaction too, so a request is
+either deferred or still on the queue. Until it fires, the timer can be read and cancelled by
+name, which is how R-6 was withdrawn.
+
+The duplicate shows the other half. G-1's second submission increments the counter on its way to
+losing the `admitted:` gate, and the counter still reads 1 afterwards, because the lost gate
+rolled the increment back together with everything else in the transaction.
+
+## Why they are short
+
+A Redis counter and a broker commit separately, so a crash between counting and acknowledging
+either counts a request that was never processed or processes one that was never counted, and the
+code that tries to repair that is longer than the limiter. A refusing limiter also creates work
+somewhere else: every 429 comes back as a retry, fastest when the service is busiest. Here the
+count commits with the work it counts, and the deferral is a timer instead of a refusal, so both
+programs are mostly the policy.
+
+## Limits
+
+- Windows are fixed. A burst that straddles a boundary is split between two windows, as in the
+  run above. A sliding window (`windowSliding`), or one of the ready-made gates described in
+  [streams](/guides/streams/), counts across the boundary.
+- Stream cycles are not part of the Jepsen pass, and the idle flush that closes a window on a
+  quiet partition commits without a lease, so in rare cases a window can be emitted twice. The
+  [streams guide](/guides/streams/) has the details.
+- Deferred requests compete again. When the window opens, they are decided like new requests,
+  with no priority over requests made in the meantime, and requests whose timers come due at the
+  same moment come back in no particular order (R-5 before R-4 above).
+- Every admitted request leaves a KV entry (`admitted:<id>`) that lives as long as its TTL,
+  an hour here. KV inside a transaction is not rate-limited; the counter read on the deferral path
+  is a KV call of its own and counts against the tenant's read rate.
+
+## Next
+
+The [booking saga](/examples/saga/) uses the same timer-in-a-transaction for a different kind of
+deadline, and [KV](/concepts/kv/) covers `incr`, bounds and expiry.

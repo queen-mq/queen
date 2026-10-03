@@ -81,13 +81,14 @@ const nimbusConfig = defineNimbusConfig({
     defaultCollapsed: true,
     overviewLabel: "Overview",
     indexDisplay: "overview-leaf",
-    // Seven sections, in the order a reader meets them: what it is, the model,
-    // what to build with it, how to run it, the exhaustive tables, how it works
-    // inside, and the evidence.
+    // Eight sections, in the order a reader meets them: what it is, the model,
+    // what to build with it, whole programs built with it, how to run it, the
+    // exhaustive tables, how it works inside, and the evidence.
     items: [
       { label: "Start", icon: "ph:rocket-launch", autogenerate: { directory: "start" } },
       { label: "Concepts", icon: "ph:graph", autogenerate: { directory: "concepts" } },
       { label: "Guides", icon: "ph:code", autogenerate: { directory: "guides" } },
+      { label: "Examples", icon: "ph:app-window", autogenerate: { directory: "examples" } },
       { label: "Operate", icon: "ph:hard-drives", autogenerate: { directory: "operate" } },
       { label: "Reference", icon: "ph:book-open-text", autogenerate: { directory: "reference" } },
       { label: "Internals", icon: "ph:cpu", autogenerate: { directory: "internals" } },

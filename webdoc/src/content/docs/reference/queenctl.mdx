@@ -1,6 +1,6 @@
 ---
 title: queenctl
-description: "The operator CLI: install it, connect it to a node, and the command groups it has, with the flags that matter."
+description: "The command-line client: build it, connect it to a node, and the command groups it has, with the flags and exit codes scripts rely on."
 type: reference
 tier: operate
 sidebar:
@@ -13,32 +13,35 @@ sourceOfTruth:
   - clients/client-cli/cmd/tail.go
   - clients/client-cli/cmd/tx.go
   - clients/client-cli/cmd/apply.go
+  - clients/client-cli/cmd/seek_helper.go
+  - clients/client-cli/cmd/messages.go
   - clients/client-cli/internal/config/config.go
   - clients/client-cli/internal/errors/exit.go
   - clients/client-cli/Makefile
+  - clients/client-cli/.goreleaser.yaml
+  - go.work
 ---
 
-`queenctl` is a single static binary over the HTTP API, built on the Go SDK. Use it to push and
-tail messages, inspect queues, partitions, consumer groups and the DLQ, rewind a group, and apply
-queue manifests.
+`queenctl` is a single static binary over the HTTP API, built on the Go SDK. It is what we reach
+for when we want to look at a running broker without writing code: push a few messages, follow a
+queue, see who is lagging, put a dead letter back, rewind a consumer group. Everything it does is
+an HTTP call you could make with `curl`, so its output always tells you what the broker said.
 
 ## Install
 
-- **Pre-built:** each `clients/client-cli/vX.Y.Z` tag publishes archives on the
-  [queen-mq/queen GitHub Releases](https://github.com/queen-mq/queen/releases), named
-  `queenctl_<version>_<os>_<arch>`: `linux` and `macos` on `x86_64` and `arm64`, `windows` on
-  `x86_64` (a `.zip`).
-- **Go 1.24 or later:**
+There is no `queenctl` release built for Queen 2.0 yet: the newest published tag,
+`clients/client-cli/v1.3.0`, predates it, and so does what `go install ...@latest` resolves to.
+Build it from a checkout of the repository, where the Go workspace (`go.work`, which declares
+Go 1.26) links the CLI to the SDK in the same tree:
 
-  ```bash
-  go install github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@latest
-  ```
+```bash
+cd clients/client-cli && make build    # ./bin/queenctl
+```
 
-- **From source:**
-
-  ```bash
-  cd clients/client-cli && make build    # ./bin/queenctl
-  ```
+Releases are published from `clients/client-cli/vX.Y.Z` tags on the
+[queen-mq/queen GitHub Releases](https://github.com/queen-mq/queen/releases), as archives named
+`queenctl_<version>_<os>_<arch>`: `linux` and `macos` on `x86_64` and `arm64`, and `windows` on
+`x86_64` as a `.zip`.
 
 ## Connect
 
@@ -47,19 +50,20 @@ queenctl config set-context local --server http://localhost:6632
 queenctl ping
 ```
 
-Contexts live in `~/.queen/config.yaml` (`--config` moves it); the first one you create becomes the
-current one. A setting is taken from, lowest to highest: the file's `current-context`,
-`$QUEEN_CONTEXT`, `--context`, then `$QUEEN_SERVER` / `$QUEEN_TOKEN`, then `--server` / `--token`.
+Contexts live in `~/.queen/config.yaml` (`--config` or `$QUEEN_CONFIG` moves it), and
+`set-context` makes the context current when none is. Each setting is taken from, lowest to
+highest: the file's `current-context`, `$QUEEN_CONTEXT`, `--context`, then `$QUEEN_SERVER` and
+`$QUEEN_TOKEN`, then `--server` and `--token`.
 
 | Credential | Command |
 |---|---|
-| A JWT or a proxy API key (`qk_...`) | `queenctl login --method token` |
+| A JWT or a proxy API key (`qk_...`) | `queenctl login --method token` (or `--token <value>` with no prompt) |
 | Email and password on the proxy | `queenctl login --method password -u you@example.com` |
 | Google or GitHub through the proxy | `queenctl login --method google` (or `github`) |
 
-A token is stored in the OS keychain; `config set-context --no-keychain` keeps it in the file
-instead, and `--token-ref env` reads `$QUEEN_TOKEN` at run time. For CI, use an API key: it does
-not expire.
+A token is stored in the OS keychain. `config set-context --no-keychain` keeps it in the file in
+plain text, and `--token-ref env` reads `$QUEEN_TOKEN` at run time instead. A token pasted after a
+Google or GitHub sign-in lasts 15 minutes, so for CI use an API key, which does not expire.
 
 ## Commands
 
@@ -73,10 +77,10 @@ not expire.
 | Node | `ping`, `version`, `status`, `metrics [--prometheus]`, `analytics overview\|queue-lag\|queue-ops\|queue-parked\|retention\|system\|worker`, `bench` |
 | Plumbing | `config view\|current-context\|get-contexts\|set-context\|use-context\|delete-context`, `login`, `logout`, `completion`, `docs` |
 
-`queenctl <command> --help` lists every flag. Commands that remove data (`queue delete`,
-`cg delete`, `messages delete`, `dlq retry`, `dlq drain`, `ephemeral reset|delete`) refuse to run
-without `--yes`. `push`, `tx`, `apply`, `replay`, `cg seek`, `dlq retry` and `dlq drain` take
-`--dry-run`.
+`queenctl <command> --help` lists every flag. The commands that remove data (`queue delete`,
+`cg delete`, `messages delete`, `dlq retry`, `dlq drain`, `ephemeral reset`, `ephemeral delete`)
+refuse to run without `--yes`. `push`, `tx`, `apply`, `replay`, `cg seek`, `dlq retry` and
+`dlq drain` take `--dry-run`, which prints what would happen and needs no `--yes`.
 
 ## Examples
 
@@ -84,10 +88,10 @@ without `--yes`. `push`, `tx`, `apply`, `replay`, `cg seek`, `dlq retry` and `dl
 # Push NDJSON, one partition per user, 500 messages per request
 cat events.ndjson | queenctl push events --batch 500 --partition-key user_id
 
-# Follow a queue as consumer group "debug" (tail acks what it prints for that group)
-queenctl tail orders --cg debug --follow | jq '.data'
+# Follow a queue as consumer group "debug", acking what it prints
+queenctl tail orders --cg debug --follow --auto-ack | jq '.data'
 
-# Rewind a consumer group fifteen minutes, then check its lag
+# Rewind a consumer group fifteen minutes, then check who is lagging
 queenctl replay orders --cg analyzer --to '15m ago'
 queenctl lag --min-seconds 30
 
@@ -95,44 +99,53 @@ queenctl lag --min-seconds 30
 queenctl dlq list --queue orders
 queenctl dlq retry <partitionId> <transactionId> --yes
 
-# Declare a queue and a consumer group
+# Declare a queue from a manifest
 cat <<EOF | queenctl apply -f -
 kind: Queue
 name: orders
 config:
   leaseTime: 60
   retryLimit: 5
----
-kind: ConsumerGroup
-name: analyzer
-queue: orders
-seek-to: beginning
 EOF
 ```
 
-A manifest is the whole configuration of its queue: an option it leaves out goes back to its
-default. `queue configure --flag` changes only the flags you pass.
+`tail` acks nothing unless you pass `--auto-ack`: without it the messages it prints stay leased to
+its group (`queenctl-tail` when you name none) and are delivered again when the lease expires.
+Without `--follow` it stops once it has printed `--batch` messages (100 when unset), which on a
+quiet queue can take a long time, so give it `-n` or `--idle-millis` there.
+
+A `Queue` manifest is the whole configuration of its queue: `apply` sends `mode: "replace"`, so an
+option the manifest leaves out goes back to its default, and applying the same file twice
+converges on the file. `queue configure --flag` merges and changes only the flags you pass. A
+manifest can also carry a `ConsumerGroup` document (`queue`, `seek-to: beginning|end|<time>`);
+it seeks an existing group's cursor and registers nothing, so on a queue nobody has pushed to yet
+the seek answers 404.
 
 ## Output and exit codes
 
-Output is a table on a terminal and JSON in a pipe; `-o table|wide|json|ndjson|yaml|jsonpath=<expr>`
-overrides it. `tail` always writes NDJSON.
+Output is a table on a terminal and JSON in a pipe; describe-shaped commands show YAML on a
+terminal. `-o table|wide|json|ndjson|yaml|jsonpath=<expr>` overrides it. `tail`, `pop` and
+`ephemeral pop` always write NDJSON.
 
 | Exit code | Meaning |
 |---|---|
-| 0 | Success |
-| 1 | User error: a bad flag, input or argument |
-| 2 | Server error, or the server is unreachable |
-| 3 | Authentication or authorization failure |
-| 4 | Success with nothing to do: an empty pop, no dead letters |
+| 0 | Success. |
+| 1 | A user error the command itself detected: bad input, a manifest that does not parse, a route the proxy does not serve to tenants. |
+| 2 | The server answered an error (a 401 or 403 included) or could not be reached. Flag and argument errors caught by the parser also exit 2. |
+| 3 | `login --method password` was refused, or `set-context` could not write the keychain. |
+| 4 | Success with nothing to do: an empty pop, nothing pushed, `dlq drain` with nothing matched, no documents applied, no current context. |
 
 ## Limits
 
 - There is no `kv` or `timer` command. Use `curl` against `/api/v1/kv` and `/api/v1/timers`, or an
   SDK.
-- `tx -f` sends only ack and push operations. It does not forward `requiredLeases`, a `leaseId` or
-  the items' `transactionId`, so its acks are not fenced and a retried push is not deduplicated.
-  For a fenced, idempotent transaction, use the [HTTP API](/reference/transaction/) or an SDK.
-- Through the proxy, routes that cannot be scoped to one tenant answer 404: `status` without a
+- `tx -f` sends only ack and push operations, and drops `requiredLeases`, every `leaseId` and the
+  items' `transactionId`, so its acks are not fenced and a retried push is not deduplicated. For a
+  fenced, idempotent transaction, use the [HTTP API](/reference/transaction/) or an SDK.
+- `messages delete` removes dead-letter rows only: a live message sits in the immutable queue log
+  and answers 404. `cg refresh-stats` changes nothing on 2.0, whose counters are kept at apply.
+  `metrics` without `--prometheus` prints `{}` on 2.0; use `--prometheus`.
+- `--insecure` affects only `login`. The broker calls of every other command verify TLS.
+- Through the proxy, the routes that cannot be scoped to one tenant answer 404: `status` without a
   queue, `metrics`, `analytics system|worker`, `cg refresh-stats`, and `pop --namespace/--task`
-  without a queue. They work against a node directly.
+  without a queue. They work against a node's own port.

@@ -1,16 +1,21 @@
 ---
 title: Run a node
-description: "Start one Queen node with Docker or the binary, what lives in its data directory, what it survives, and how to upgrade it."
+description: "Start one Queen node with Docker or from source: what it needs, what lives in its data directory, what it survives, and how to upgrade it. The front door of the Operate section."
 type: how-to
 tier: operate
 sidebar:
   order: 1
 sourceOfTruth:
   - Dockerfile
+  - app/vite.config.js
+  - server/Cargo.toml
   - server/src/main.rs
   - server/src/config.rs
+  - server/src/handlers/ephemeral.rs
   - server/src/rsm/replicator/node.rs
   - server/src/rsm/replicator/mod.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/facade/real.rs
   - test/compose/docker-compose.single.yml
 digest: >-
   A Queen node is one process, `queen`, from the image ghcr.io/queen-mq/queen, serving HTTP on
@@ -19,17 +24,19 @@ digest: >-
   fsynced to its own disk: acked writes survive kill -9 and power loss, not the loss of the disk,
   and the node serves nothing while its process is down. A cluster of three or five nodes
   (`QUEEN_RAFT_REPLICATOR=openraft`, `QUEEN_RAFT_NODE_ID`, `QUEEN_RAFT_PEERS`, `QUEEN_RAFT_TOKEN`)
-  replicates every write to a majority with Raft and keeps serving while a majority is up. Broker
-  JWT authentication is off by default; the proxy built into the same binary
-  (`QUEEN_PROXY_EMBEDDED=true`) adds tenants, API keys, quotas and TLS. `GET /health` answers 200
-  `healthy` or 503 `settling`, `GET /metrics/prometheus` serves the metrics, and the dashboard is
-  served by the same binary.
+  replicates every write to a majority with Raft and keeps serving while a majority is up; on
+  SIGTERM a node hands its ephemeral partitions and its leadership to the others. Broker JWT
+  authentication is off by default; the proxy built into the same binary
+  (`QUEEN_PROXY_EMBEDDED=true`, its own `QUEEN_PROXY_PORT`) adds tenants, API keys, quotas, TLS
+  and a control plane over `/api/cp/*`. `GET /health` answers 200 `healthy` or 503 `settling`,
+  `GET /metrics/prometheus` serves the metrics, and the dashboard is served by the same binary.
 ---
 
-A node is one process and one data directory. It listens on port 6632 and needs nothing else
-running: no database, no coordinator. A single node runs the local replicator; a cluster is the
-same binary three or five times with `QUEEN_RAFT_REPLICATOR=openraft` set
-([cluster](/operate/cluster/)).
+A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its
+metrics on port 6632, keeps everything it knows in its data directory, and needs nothing else
+running beside it: no database and no coordinator. One node is enough for development and for a
+good share of production loads, and when you need failover, a cluster is the same binary three or
+five times.
 
 ## Start it
 
@@ -37,7 +44,7 @@ same binary three or five times with `QUEEN_RAFT_REPLICATOR=openraft` set
 <TabItem label="Docker">
 
 ```bash
-docker run -d --name queen -p 6632:6632 \
+docker run --platform linux/amd64 -d --name queen -p 6632:6632 \
   -v queen-data:/var/lib/queen/raft \
   ghcr.io/queen-mq/queen:latest
 ```
@@ -50,8 +57,6 @@ services:
   queen:
     image: ghcr.io/queen-mq/queen:latest
     ports: ["6632:6632"]
-    environment:
-      QUEEN_RAFT_DIR: /var/lib/queen/raft
     volumes:
       - queen-data:/var/lib/queen/raft
     stop_grace_period: 60s
@@ -60,107 +65,121 @@ volumes:
 ```
 
 </TabItem>
-<TabItem label="Binary">
+<TabItem label="From source">
 
 ```bash
-git clone https://github.com/queen-mq/queen && cd queen/server
-cargo build --release          # Rust 1.88 or later
+git clone https://github.com/queen-mq/queen && cd queen
+(cd app && npm ci && npm run build)    # the dashboard, Node 24; it lands in server/webapp/dist
+cd server && cargo build --release     # Rust 1.88 or later; embeds the dashboard
 QUEEN_RAFT_DIR=./data ./target/release/queen
 ```
 
 </TabItem>
 </Tabs>
 
-The dashboard and the proxy console are compiled into the binary, so the build needs no Node.js.
-Pin a version tag in production instead of `latest`.
-
 ```bash
-curl -s http://localhost:6632/health
+curl -s localhost:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.0-beta.3","raft":{"role":"leader","leader":true,"term":1,"applied":12,"commit":12,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3}}
+{"status":"healthy","engine":"raft","version":"2.0.0-beta.6","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3}}
 ```
 
-The dashboard is at `http://localhost:6632/`, and the image carries `queenctl`
-(`docker exec -it queen queenctl status`, see [queenctl](/reference/queenctl/)).
+The dashboard is at `http://localhost:6632/`, and the image carries the CLI, so
+`docker exec -it queen queenctl status` works out of the box ([queenctl](/reference/queenctl/)).
+Pin a version tag in production; `latest` moves.
 
 ## The settings a first node needs
 
 | Variable | Default | What it does |
 |---|---|---|
 | `PORT` | `6632` | The HTTP port: API, dashboard, `/health`, metrics |
-| `QUEEN_BIND_ADDR` | `0.0.0.0` | The host the port binds. A host only; a value with a port fails the boot |
+| `QUEEN_BIND_ADDR` | `0.0.0.0` | The host the port binds. A host only; a value with a port stops the boot |
 | `QUEEN_RAFT_DIR` | `/var/lib/queen/raft` | The data directory. Put it on a persistent volume |
-| `QUEEN_RAFT_DISK_HIGH_PCT` / `_LOW_PCT` | `85` / `80` | Writes that grow storage answer `507 storage_full` above the high mark, and resume below the low one |
-| `JWT_ENABLED` | `false` | Broker authentication. Off, every route answers any caller ([security](/operate/security/)) |
-| `QUEEN_ENCRYPTION_KEY` | unset | 64 hex characters: payload encryption for queues that ask for it |
-| `LOG_LEVEL`, `QUEEN_LOG_JSON` | `info`, `false` | Log verbosity and one JSON object per line |
+| `QUEEN_RAFT_DISK_HIGH_PCT`, `QUEEN_RAFT_DISK_LOW_PCT` | `85`, `80` | Above the high mark, writes that grow storage answer `507 storage_full`; they resume below the low one |
+| `JWT_ENABLED` | `false` | The broker's own authentication. Off, every route answers any caller ([security](/operate/security/)) |
+| `QUEEN_ENCRYPTION_KEY` | unset | 64 hex characters: payload encryption for the queues that ask for it |
+| `LOG_LEVEL`, `QUEEN_LOG_JSON` | `info`, `false` | Log verbosity, and one JSON object per line |
 | `QUEEN_SERVER_ID` | `HOSTNAME` | The node's name in the dashboard and the logs |
 
-Booleans accept `true/false`, `1/0`, `yes/no` and `on/off`; any other value stops the boot with
-the variable's name, so a typo never falls back to a default. The node prints its effective
-configuration at boot (lines `config: server`, `config: storage`, `config: auth`, ...), secrets
-masked. Every variable: [configuration](/reference/configuration/).
+Booleans accept `true/false`, `1/0`, `yes/no` and `on/off`, and any other value stops the boot with
+the variable's name, so a typo never quietly becomes a default. The node prints its effective
+configuration at boot, one line per area with secrets masked, which is the first thing to read
+when a setting does not seem to apply:
+
+```text
+INFO boot: config: storage data_dir=/var/lib/queen/raft ready_lag_ms=2000 disk_high_pct=85.0 disk_low_pct=80.0 planner_queue_depth=1024
+INFO boot: config: auth enabled=false algorithm=HS256 secret=<unset> public_key=<unset> jwks_url= issuer= audience= clock_skew_s=30 skip_paths=["/health", "/metrics/prometheus", "/metrics", "/"]
+```
+
+Every variable is in [configuration](/reference/configuration/).
 
 ## The data directory
 
-Everything the node knows is under `QUEEN_RAFT_DIR`, on one volume. The main entries:
+Everything the node knows is under `QUEEN_RAFT_DIR`, on one volume. The queue logs in `qlog/` hold
+the message payloads, written and fsynced once. `store/data.mdb` is the embedded ordered store:
+queues, partitions, consumer positions, leases, KV, timers, the dedup index and, with the
+[proxy](/operate/tenants/) on, its tenants, users and API-key hashes. A single node keeps its
+replication log in `log/`; a cluster node keeps its vote and membership in `raft/` instead.
+`local.db` and `dash.db` are this node's own metrics history and dashboard rows.
 
-| Path | Holds |
-|---|---|
-| `qlog/` | The queue logs: message payloads, written and fsynced once. On a cluster they are also the Raft log |
-| `store/data.mdb` | The embedded ordered store: queues, partitions, cursors, leases, KV, timers, dedup |
-| `raft/` | Cluster nodes only: the vote, the membership, the purge point |
-| `local.db`, `dash.db` | This node's own metrics and dashboard rows |
-| `groups/g<N>/` | Raft group N, when `QUEEN_RAFT_GROUPS` is above 1 |
-
-With the [proxy](/operate/tenants/) on, its tenants, users and API-key hashes are KV rows in the
-same store. **Never delete files inside the data directory to free space:** a missing queue-log
-file is not detected at boot, and the node then serves holes. Grow the volume instead.
+Never delete files inside the data directory to free space. A missing queue-log file is not
+detected at boot, so the node comes up and serves holes. Grow the volume instead.
 
 ## What one node survives
 
-| Event | Result |
+| Event | What happens |
 |---|---|
-| kill -9, crash, OOM | Restart on the same directory. Every acked write is there: a write is answered after its fsync |
+| kill -9, a crash, out of memory | Restart it on the same directory. Every acknowledged write is there, because a write is answered only after its fsync |
 | Power loss | The same |
 | The process is down | Nothing is served. Clients get connection errors and retry |
-| The disk is lost | Everything is lost. Restore a crash-consistent volume snapshot taken while the node ran |
-| Disk at 85% | Writes that grow storage answer `507`; reads, acks and deletes still work |
+| The disk is lost | Everything is lost, unless you restore a snapshot of the volume ([backups and restore](/operate/recovery-backups/)) |
+| The disk passes 85% | Writes that grow storage answer `507`, while reads, acks and deletes keep working |
 
-Ephemeral queues live in RAM and survive none of these, by contract ([ephemeral](/guides/ephemeral/)).
+Ephemeral queues live in memory, and on a single node any restart empties them, graceful or not,
+because there is no other node to hand them to. A declared ephemeral queue comes back configured.
+In a cluster, a node that stops gracefully hands its ephemeral partitions to the others first
+([ephemeral queues](/guides/ephemeral/)).
 
-## Upgrade a node
+## Upgrade it
 
-Stop it with SIGTERM, start the new image on the same directory:
+Stop the node with SIGTERM and start the new image on the same directory:
 
 ```bash
 docker stop -t 60 queen && docker rm queen
-docker run -d --name queen -p 6632:6632 -v queen-data:/var/lib/queen/raft \
+docker run --platform linux/amd64 -d --name queen -p 6632:6632 -v queen-data:/var/lib/queen/raft \
   ghcr.io/queen-mq/queen:<new-version>
 ```
 
-SIGTERM drains in-flight requests before the process exits, and a parked long-poll pop is one
-(30 s by default), so give the stop more than that. A build refuses to start on a directory whose
-cluster version is above what it reads, naming the release to run instead: a downgrade below the
-data's format is a boot error, never a silent misread.
+On SIGTERM the node stops accepting connections and lets the requests in flight finish. A parked
+long-poll pop is one of them and can wait 30 seconds by default, so give the stop a minute. A
+release never misreads data written by a newer one: a node whose directory belongs to a cluster
+that writes a format above what the build reads refuses to start and says so (`run a release that
+reads it ... never an older one`).
 
 ## Limits
 
-- **One node is not highly available.** While its process is down nothing is served, and its
-  disk is the only copy. For failover run [three or five nodes](/operate/cluster/).
-- **A default single node does not grow into a cluster in place.** It runs the local
-  replicator, and the cluster's openraft replicator refuses a directory the local one wrote.
-  Moving to a cluster is a cutover: start the cluster beside the node, move producers, drain, move
-  consumers.
-- **No upgrade from 1.x.** A 2.0 node does not read a 1.x PostgreSQL database; the move is the
-  same cutover.
-- **The broker port is plain HTTP.** TLS is on the proxy's listener or in front of the node
-  ([security](/operate/security/)).
+One node is not highly available. While its process is down nothing is served, and its disk is the
+only copy; for failover, run [three or five nodes](/operate/cluster/).
 
-<CardGrid>
-  <LinkCard title="Three or five nodes" href="/operate/cluster/" description="Replication, quorum, rolling upgrades and recovery." />
-  <LinkCard title="Kubernetes" href="/operate/kubernetes/" description="The StatefulSet, its probes and its volumes." />
-  <LinkCard title="Monitoring" href="/operate/monitoring/" description="The dashboard, /health, metrics and the log lines to alert on." />
-</CardGrid>
+A single node started with the defaults does not grow into a cluster in place. It runs the local
+replicator, and the cluster's replicator refuses a directory the local one wrote, so moving to a
+cluster is a cutover: start the cluster beside the node, move the producers, let the consumers
+drain the old node, then move them.
+
+A 2.0 node does not read a 1.x PostgreSQL database, so coming from 1.x is the same cutover. The
+broker's port is plain HTTP; TLS is on the proxy's listener or in front of the node
+([security](/operate/security/)).
+
+## The rest of this section
+
+- [Run a cluster](/operate/cluster/): three or five nodes as one Raft cluster, starting from the
+  tested Compose file in `deploy/compose/three-node/`, with quorum, failures and rolling upgrades.
+- [Kubernetes](/operate/kubernetes/): the StatefulSet, its volumes, probes and upgrades.
+- [Tenants, API keys and quotas](/operate/tenants/): the proxy inside the broker and its control
+  plane.
+- [Security](/operate/security/): which port serves what, authentication, the raft token, TLS and
+  encryption at rest.
+- [Monitoring](/operate/monitoring/): the dashboard, `/health`, the metrics and the log lines worth
+  an alert.
+- [Recovery](/operate/recovery/): what to do when a node, a disk or the majority is gone.

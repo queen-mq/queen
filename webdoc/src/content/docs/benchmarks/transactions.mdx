@@ -1,0 +1,132 @@
+---
+title: Transactions
+description: "Exactly-once consume-transform-produce on Queen, Kafka, Redpanda and Pulsar on the same machines: commit and end-to-end latency, each system's ceiling, what partition count does to it, and the one thread that sets Queen's limit."
+type: reference
+tier: operate
+sidebar:
+  order: 4
+sourceOfTruth:
+  - server/src/rsm/batcher_lanes.rs
+---
+
+A transaction is the step Queen is built around: take a message, do the work, then ack it and
+write what comes next, all of it or none of it. So we built a transactional benchmark and ran it on
+all four systems. A pipeline reads an input, transforms each batch and commits the ack and the
+output together, and at the end a verifier reads every output and checks that every input appears
+in it exactly once. It passed on every point that ran to the end, on all four systems; one Pulsar
+point needed a second run because our verifier stopped reading too early.
+
+## The pipeline
+
+A feeder pushes 256-byte messages into an input queue (or topic) of 200 partitions. Workers, one
+per partition at a time, take a batch of up to 10 messages, transform it, and commit one
+transaction that acknowledges the inputs and writes the outputs to the same partition of an output
+queue. Readers consume the output, and only what committed. When the run ends, the verifier reads
+the whole output and what is left of the input and checks every input id: in the output exactly
+once, or still waiting in the input.
+
+Each system commits its own way. A Queen 2.0.0-beta.2 worker pops with a lease, then sends one
+`POST /api/v1/transaction` that acks every input with its lease and pushes the outputs; that is one
+log entry, and the lease fences it, so a worker whose lease ran out commits nothing. Kafka 4.3.1
+and Redpanda 26.2.3 run franz-go's `GroupTransactSession`: one transactional producer per worker
+with the consumer offsets inside the transaction, transactions v2, `read_committed` readers and
+classic consumer groups. Pulsar 4.2.4 runs with its transaction coordinator on (16 coordinators)
+and batched writes of the transaction log and the pending acks.
+
+All four ran on 2026-10-01 on the rig of the other pages, with the durability of each system
+unchanged: Queen, Redpanda and Pulsar acknowledge after two of three copies are fsynced, Kafka
+after three replicas have the data in page cache. Runs: `benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/`.
+
+## Latency at 9,000 messages a second
+
+Ten messages per transaction, 200 partitions in and out, 198 workers. Commit is from the
+transaction's start to its acknowledged commit; e2e is from the input's scheduled send to the
+consumption of its committed output, so it holds two hops and a commit.
+
+| | Queen | Kafka | Redpanda | Pulsar |
+|---|---|---|---|---|
+| Commit p50 / p99 | 3 / 4 ms | 12 / 34 ms | 15 / 151 ms | 22 / 32 ms |
+| e2e p50 / p99 | 12 / 19 ms | 21 / 51 ms | 241 / 338 ms | 29 / 50 ms |
+| Cores, three brokers | 4.3 | 7.2 | 5.7 | 4.4 |
+
+<Figure id="benchmarks/txn-latency" />
+
+A Queen transaction is one entry in the log, so it costs about what one write costs. A Kafka
+transaction ends with a call to its transaction coordinator, which writes a commit marker into
+every partition the transaction touched, and a Pulsar transaction goes through a coordinator and a
+transaction log of its own.
+
+## The ramp
+
+Output delivered and e2e p99, ten messages per transaction, 200 partitions. "Behind" means
+output under 97% of the offered rate, or an e2e p99 over 5 seconds.
+
+| Offered msg/s | Queen | Kafka | Redpanda | Pulsar |
+|---|---|---|---|---|
+| 9,000 | 9.0k, 19 ms | 9.0k, 51 ms | 9.0k, 338 ms | 9.0k, 50 ms |
+| 18,000 | 18.0k, 34 ms | behind: 17.5k, p99 26 s | behind: 17.8k, p99 22 s | 18.0k, 55 ms |
+| 36,000 | 36.0k, 22 ms | behind: 13.2k | behind: 13.7k | 36.0k, 64 ms |
+| 72,000 | 72.0k, 33 ms | not run | not run | behind: 71.2k, p99 24 s |
+| 144,000 | behind: 66.7k | not run | not run | behind: 69.8k |
+
+<Figure id="benchmarks/txn-ramp" />
+
+At 200 partitions Queen and Pulsar top out close together, near 7,000 transactions of ten messages
+a second, and Queen gets there with less than half of Pulsar's e2e latency. With feeder batches of
+100 and one partition per pop, Queen delivered 8,900 transactions a second at 144,000 offered,
+still behind. Kafka and Redpanda fell behind at 18,000 msg/s, about 1,750 transactions a second,
+with this client and one transaction per partition at a time; another client or layout may do
+better.
+
+With one message per transaction at 9,000 msg/s, Queen committed all 9,000 transactions a second
+(commit p50 / p99 4 / 6 ms), while Kafka managed 1,644, Redpanda 1,313 and Pulsar 7,511, each
+falling behind.
+
+## The ceiling, and what moves it
+
+Queen plans pushes on its lanes in parallel (eight by default, sixteen in these runs), but a
+transaction that acks, writes KV or schedules a timer is planned on one thread, the control step,
+because those parts are checked against state that every partition shares. That thread is Queen's
+transaction ceiling, and more workers only queue more transactions for it: with 900 partitions and
+900 workers Queen committed 5,100 transactions a second, at a commit p50 of 155 ms. Pulsar spreads
+its transactions over the broker's threads, and the same change doubled its rate to 14,400 a second
+(143,700 msg/s, e2e p99 799 ms). With 1,800 partitions and 1,800 workers Pulsar reached 17,600 a
+second while falling behind.
+
+Bigger transactions raise Queen's ceiling in messages, because much of that thread's work is paid
+once per transaction:
+
+| Offered msg/s, 100 per transaction | Queen | Pulsar |
+|---|---|---|
+| 144,000 | 144k; commit 5 / 9 ms, e2e 19 / 29 ms | 144k; commit 25 / 35 ms, e2e 32 / 56 ms |
+| 288,000 | behind: 250.5k, commit 61 / 80 ms | 288k; commit 26 / 45 ms, e2e 33 / 98 ms |
+| 576,000 | not run | behind: 572.4k, e2e p99 22 s |
+| 1,152,000 | not run | behind: 548.8k |
+
+Below about 250,000 msg/s Queen commits faster; above it, Pulsar carries more. Until that thread is
+split, the way to more transactional throughput on Queen is more messages per transaction. Tenants
+spread over several raft groups each get a planner of their own, which we have not measured.
+
+## Partition count
+
+e2e p50 / p99 in milliseconds at 9,000 msg/s, ten messages per transaction, with that many
+partitions in the input and as many in the output.
+
+| Partitions | Queen | Kafka | Redpanda | Pulsar |
+|---|---|---|---|---|
+| 200 | 12 / 19 | 21 / 51 | 241 / 338 | 29 / 50 |
+| 10,000 | 12 / 32 | behind: 1.8k delivered | 375 / 758 | 30 / 42 |
+| 100,000 | 12 / 43 | did not start | did not start | did not start |
+
+At 100,000 partitions Kafka created the two topics in 15 minutes, then a load process exited
+before it was ready; Redpanda refused to create the output partitions; Pulsar's producers timed out
+during setup for an hour. Pulsar's first run at 10,000 failed its check because our verifier gave
+up after 10 seconds without a new record, before it had read every partition; with 120 seconds it
+passed. Both runs are in the archive.
+
+## What this page does not show
+
+Kafka and Redpanda were not run with more workers, or with 100 messages per transaction above
+9,000 msg/s. No run used transactions through Queen's Kafka facade, and the Queen transactions
+carried acks and pushes only, with no KV writes or timers. Each point offered load for 70 seconds,
+a 10-second ramp included.

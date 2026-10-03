@@ -1,25 +1,22 @@
 # docs:start(app-py-chat)
 #
-# A chat messaging system.
+# A chat backend: one ordered partition per conversation.
 #
-# This is the application Queen was written for. A hotel messaging product ran
-# on Kafka and kept stalling: some conversations need a translation or an agent
-# reply before the next message can be handled, and on a shared partition one
-# slow conversation holds up every conversation behind it.
-#
-# The fix is structural rather than operational: one ordered lane per
-# conversation, created by the first message sent to it. A conversation that
-# takes ten seconds delays itself and nothing else.
-#
-# What this program builds:
+# Queen started as the broker of a hotel messaging product. Some conversations
+# need a translation or an agent before their next message can be handled, and
+# on a hashed Kafka topic one slow conversation held up every conversation that
+# shared its partition. Here every conversation is a partition of its own,
+# created by the first message sent to it, so a slow conversation waits on
+# itself and on nothing else.
 #
 #   chat-messages (one partition per conversation)
-#     |-- group "delivery"    fast, marks each message as delivered
-#     `-- group "enrichment"  slow on conversations that need translation
+#     |-- group "delivery"    marks each message delivered, fast
+#     |-- group "enrichment"  translates the Japanese conversation, slow
+#     `-- group "sentiment"   added later, reads the whole history
 #
-# And what it proves: every message reaches both groups exactly once, in the
-# order it was sent inside its own conversation, and the conversations that
-# need no translation finish while the slow one is still working.
+# The program checks what the design promises: every message reaches each
+# group once and in the order of its conversation, and the English
+# conversations finish while the Japanese one is still being translated.
 #
 # Run it:
 #   QUEEN_URL=http://localhost:6632 python3 chat.py
@@ -34,16 +31,20 @@ from queen import Queen
 QUEEN_URL = os.environ.get("QUEEN_URL", "http://localhost:6632")
 
 # The name is prefixed per language and suffixed per run, so every application
-# in every language can share one broker and no run inherits state from another.
+# in every language can share one broker and two runs never read each other's
+# messages.
 RUN = f"{int(time.time() * 1000):x}"
 MESSAGES = f"app-py-chat-{RUN}"
 
-# Three conversations. The one in Japanese needs a translation pass, which is
-# the slow work: 400 ms a message against 10 ms for the rest.
+# Three conversations. The Japanese one needs a translation pass, 400 ms a
+# message against 10 ms for the others. It is listed first, so its messages are
+# the oldest in the queue and its partition is usually handed out first: a
+# consumer that let one conversation hold up another would fail the timing
+# check below.
 CONVERSATIONS = {
+    "conv-jp-1": {"locale": "jp", "needs_translation": True},
     "conv-en-1": {"locale": "en", "needs_translation": False},
     "conv-en-2": {"locale": "en", "needs_translation": False},
-    "conv-jp-1": {"locale": "jp", "needs_translation": True},
 }
 MESSAGES_PER_CONVERSATION = 6
 
@@ -71,46 +72,67 @@ async def main() -> int:
     queen = Queen(url=QUEEN_URL)
     verdict, failed = "", False
 
+    # Three workers in one consumer group: concurrency(3) runs three poll loops
+    # on this event loop. partitions(1) makes every pop take ONE conversation:
+    # by default a pop may sweep up several ready conversations, and a worker
+    # handles the messages of one pop in order, so a slow conversation would
+    # delay the others that came with it. Long polls end after a second and a
+    # worker stops after two quiet seconds, which is what lets this program
+    # finish; a service calls consume() without those two lines and runs until
+    # stopped.
+    def workers(group: str):
+        return (
+            queen.queue(MESSAGES)
+            .group(group)
+            # A group created after the messages were pushed starts at the tail,
+            # so without this it would see nothing.
+            .subscription_mode("all")
+            .concurrency(3)
+            .partitions(1)
+            .each()
+            .timeout_millis(1000)
+            .idle_millis(2000)
+        )
+
     try:
         print(f"broker {QUEEN_URL}")
 
-        # Leases are what make a crashed worker safe: a message whose handler
-        # dies is redelivered once the lease expires. retry_limit bounds how
-        # many times that can happen before the message is dead-lettered
-        # instead. The config keys are snake_case in Python and the client
-        # converts them to the camelCase the broker expects.
+        # A crashed worker's messages come back when its lease expires, and
+        # retry_limit bounds how often a failing message is retried before it
+        # goes to the dead-letter queue. The config keys are snake_case in
+        # Python and the client converts them to the camelCase the broker
+        # expects.
         await queen.queue(MESSAGES).config({"lease_time": 60, "retry_limit": 3}).create()
 
-        # ---------------------------------------------------------- producing
+        # ------------------------------------------------------------ sending
         #
-        # A chat client sends a message: one push, into the partition named
-        # after the conversation. Nothing was declared for this conversation in
-        # advance, and nothing has to be cleaned up when it goes quiet.
+        # Sending a message is one push into the conversation's partition.
+        # Nothing was declared for the conversation beforehand, and nothing has
+        # to be cleaned up when it goes quiet.
         print("\nsending")
-        sent = []
+        sent = 0
         for seq in range(1, MESSAGES_PER_CONVERSATION + 1):
             for conversation_id, meta in CONVERSATIONS.items():
-                message = {
-                    "conversationId": conversation_id,
-                    "seq": seq,
-                    "locale": meta["locale"],
-                    "body": f"message {seq} in {conversation_id}",
-                    "sentAt": int(time.time() * 1000),
-                }
-                # The transaction id is the client's own idempotency key: a
-                # retry of this send, from a phone on a flaky network, writes
-                # nothing the second time and answers with the first message's
-                # id. The item key stays camelCase here, because it is the wire
-                # name rather than a client option.
                 await queen.queue(MESSAGES).partition(conversation_id).push(
-                    {"transactionId": f"{conversation_id}-{seq}", "data": message}
+                    {
+                        # The phone's own id for the message. A phone that
+                        # retries a send it never saw answered writes nothing
+                        # the second time. The key is camelCase because it is
+                        # the broker's wire name.
+                        "transactionId": f"{conversation_id}-{seq}",
+                        "data": {
+                            "conversationId": conversation_id,
+                            "seq": seq,
+                            "locale": meta["locale"],
+                            "body": f"message {seq} in {conversation_id}",
+                        },
+                    }
                 )
-                sent.append(message)
-        print(f"  {len(sent)} messages across {len(CONVERSATIONS)} conversations")
+                sent += 1
+        print(f"  {sent} messages across {len(CONVERSATIONS)} conversations")
 
-        # A resend of the same message: the client retried because it never saw
-        # the first answer. The broker recognises the transaction id and stores
-        # nothing. What comes back is the broker's own reply, one entry per
+        # The phone resends message 1 because the answer got lost on a bad
+        # network. What comes back is the broker's own reply, one entry per
         # item, with the broker's own key names.
         results = await queen.queue(MESSAGES).partition("conv-en-1").push(
             {
@@ -120,19 +142,15 @@ async def main() -> int:
         )
         check(
             results[0]["status"] == "duplicate",
-            "a resent message was deduplicated, not stored twice",
+            "a resent message was recognised and not stored twice",
         )
 
         # --------------------------------------------------------- delivering
         #
-        # The delivery worker is what marks a message as delivered to the
-        # recipients. It is fast and must never fall behind, which is why it is
-        # its own consumer group: it shares no cursor with the slow work below.
-        #
-        # concurrency(3) runs three poll loops, and each pop claims a partition,
-        # so the three conversations are drained in parallel by three workers.
+        # Marking messages delivered is fast work and must never wait behind
+        # slow work, so it is a consumer group of its own, with its own cursor.
         # The handler is an async def taking one message: consume() awaits it
-        # for every message and acknowledges on return.
+        # for every message and acknowledges the message when it returns.
         print("\ndelivering")
         delivered: dict = {}
 
@@ -140,43 +158,31 @@ async def main() -> int:
             await asyncio.sleep(0.01)
             delivered.setdefault(msg["data"]["conversationId"], []).append(msg["data"]["seq"])
 
-        await (
-            queen.queue(MESSAGES)
-            .group("delivery")
-            # A group created after the messages were pushed starts at the tail,
-            # so without this it would see nothing.
-            .subscription_mode("all")
-            .concurrency(3)
-            .each()
-            .limit(len(sent))
-            # Stop after 10s of silence, so a lost message fails the run instead
-            # of hanging it.
-            .idle_millis(10000)
-            .consume(deliver)
-        )
+        await workers("delivery").consume(deliver)
 
+        delivered_count = sum(len(seqs) for seqs in delivered.values())
         check(
-            sum(len(seqs) for seqs in delivered.values()) == len(sent),
-            "delivery saw every message exactly once",
+            delivered_count == sent,
+            f"delivery saw all {sent} messages once (got {delivered_count})",
         )
         for conversation_id, seqs in delivered.items():
-            check(seqs == sorted(seqs), f"{conversation_id} was delivered in order")
+            check(
+                seqs == list(range(1, len(seqs) + 1)),
+                f"{conversation_id} was delivered in order: {','.join(map(str, seqs))}",
+            )
 
         # --------------------------------------------------------- enrichment
         #
-        # The slow group. It reads the same messages through its own cursor, and
-        # the Japanese conversation costs 400 ms a message because it has to be
-        # translated before it can be answered.
-        #
-        # This is where a shared partition would hurt: on a hashed topic these
-        # messages would sit in the same lane as the English ones and hold them
-        # up. Here each conversation has its own lane, so the English
-        # conversations finish while the Japanese one is still being translated.
-        # The timings below are the proof.
+        # The slow group reads the same messages through its own cursor. On a
+        # topic with a few hashed partitions, the Japanese conversation would
+        # sit in a partition shared with English ones and hold them up. Here
+        # each worker holds one conversation at a time, so the English
+        # conversations finish while the Japanese one is still being
+        # translated.
         print("\nenriching")
         finished_at: dict = {}
-        # monotonic() rather than time(): these are durations, and a clock that
-        # steps sideways mid-run must not turn a real ordering into a fake one.
+        # time.monotonic(), because these are durations: a wall clock that
+        # steps mid-run could turn a real ordering into a fake one.
         started = time.monotonic()
 
         async def enrich(msg) -> None:
@@ -184,54 +190,34 @@ async def main() -> int:
             await asyncio.sleep(0.4 if meta["needs_translation"] else 0.01)
             finished_at[msg["data"]["conversationId"]] = int((time.monotonic() - started) * 1000)
 
-        await (
-            queen.queue(MESSAGES)
-            .group("enrichment")
-            .subscription_mode("all")
-            .concurrency(3)
-            .each()
-            .limit(len(sent))
-            .idle_millis(15000)
-            .consume(enrich)
-        )
+        await workers("enrichment").consume(enrich)
 
         slow = finished_at["conv-jp-1"]
         fast = max(finished_at["conv-en-1"], finished_at["conv-en-2"])
         print(f"  english done after {fast} ms, japanese after {slow} ms")
-
         check(
             fast < slow,
-            "the conversations needing no translation finished first, in the same worker pool",
+            "the English conversations finished while the Japanese one was still being translated",
         )
         check(
-            slow > MESSAGES_PER_CONVERSATION * 300,
-            "the slow conversation really was slow, so the comparison means something",
+            slow >= MESSAGES_PER_CONVERSATION * 400,
+            "the Japanese conversation really took its six translations",
         )
 
-        # -------------------------------------------------------------- replay
+        # ----------------------------------------------------------- backfill
         #
-        # A new feature needs the history: sentiment scoring over everything ever
-        # said. It is a new consumer group reading from the beginning, and it
-        # costs no producer change and no second copy of the data.
-        print("\nbackfilling a new consumer")
+        # A feature added later, sentiment scoring, wants every message ever
+        # sent. It is one more consumer group starting from the oldest message:
+        # no producer change, and no second copy of the data.
+        print("\nbackfilling a new group")
         scored = 0
 
         async def score(msg) -> None:
             nonlocal scored
             scored += 1
 
-        await (
-            queen.queue(MESSAGES)
-            .group("sentiment")
-            .subscription_mode("all")
-            .concurrency(3)
-            .each()
-            .limit(len(sent))
-            .idle_millis(10000)
-            .consume(score)
-        )
-
-        check(scored == len(sent), "a group added today read the whole history")
+        await workers("sentiment").consume(score)
+        check(scored == sent, f"a group created now read the whole history ({scored} messages)")
 
         # Clean up on success only: a failed run leaves the queue on the broker
         # to be looked at.
@@ -243,8 +229,7 @@ async def main() -> int:
     finally:
         # close() flushes the client-side buffers and closes the HTTP pool. It
         # narrates its own shutdown on stdout, which is why the verdict is
-        # printed after it rather than before: PASS or FAIL stays the last line
-        # of a run.
+        # printed after it: PASS or FAIL stays the last line of a run.
         await queen.close()
 
     # A failure goes to stderr, like the rest of the set. Flush stdout first so

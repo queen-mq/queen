@@ -1,0 +1,204 @@
+---
+params: []
+description: "Verified snippet extracted from examples/cross-protocol/bridge.mjs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/cross-protocol/bridge.mjs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```js title="examples/cross-protocol/bridge.mjs"
+//
+// Kafka producers in, a Queen worker in the middle, a Kafka consumer out, all
+// on one broker and the same queues.
+//
+// An order service that already produces to Kafka keeps its Kafka client and
+// changes only bootstrap.servers. Billing is written against Queen: for each
+// order it commits the ack, an invoice and the customer's running total as one
+// transaction. Analytics keeps its Kafka consumer and reads the invoices. There
+// is no connector and no second copy of anything: a Kafka topic is a Queen
+// queue, and Kafka partition n is the Queen partition named "n".
+//
+//   order service (Kafka producer) -> orders            (Kafka topic = Queen queue)
+//   billing (Queen worker)         -> ack + invoices + KV, one transaction
+//   analytics (Kafka consumer)     <- invoices
+//
+// Needs a node with the Kafka listener on:
+//   docker run -d -p 6632:6632 -p 9092:9092 -e QUEEN_KAFKA_EMBEDDED=true \
+//     -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 ghcr.io/queen-mq/queen:latest
+//
+// Run it:
+//   npm install && node bridge.mjs
+
+import Confluent from '@confluentinc/kafka-javascript'
+import { Queen } from 'queen-mq'
+
+const QUEEN_URL = process.env.QUEEN_URL || 'http://localhost:6632'
+const KAFKA = process.env.KAFKA || 'localhost:9092'
+const RUN = Date.now().toString(36)
+const ORDERS = `bridge-orders-${RUN}`
+const INVOICES = `bridge-invoices-${RUN}`
+const TOTALS = `bridge-totals-${RUN}` // KV namespace: revenue per customer
+
+const CUSTOMERS = ['alice', 'bob', 'carol']
+const ORDERS_PER_CUSTOMER = 4
+const TOTAL_ORDERS = CUSTOMERS.length * ORDERS_PER_CUSTOMER
+
+let checks = 0
+const assert = (condition, description) => {
+  if (!condition) throw new Error(description)
+  checks++
+  console.log(`  ok: ${description}`)
+}
+
+const { Kafka, logLevel } = Confluent.KafkaJS
+const kafka = new Kafka({ 'bootstrap.servers': KAFKA, kafkaJS: { logLevel: logLevel.WARN } })
+const queen = new Queen({ url: QUEEN_URL, handleSignals: false })
+
+// The facade stores a Kafka record as JSON with base64 bytes, because a Kafka
+// key or value is arbitrary bytes and a Queen payload is JSON:
+//   { k: key, v: value, h: [{ k: name, v: value }], t: timestamp }
+// h is left out when the record has no headers, t when it has no timestamp.
+const b64 = (s) => (s == null ? null : Buffer.from(s, 'base64').toString())
+const decode = (data) => ({
+  key: b64(data.k),
+  value: b64(data.v),
+  headers: Object.fromEntries((data.h ?? []).map(h => [h.k, b64(h.v)])),
+})
+
+let analytics = null
+
+try {
+  console.log(`queen ${QUEEN_URL}, kafka ${KAFKA}`)
+
+  // Both topics are created up front through the Kafka admin API, as a Kafka
+  // deployment would. Four partitions each: the producer hashes customers onto
+  // them, so each customer's orders stay in one partition, in order.
+  const admin = kafka.admin()
+  await admin.connect()
+  await admin.createTopics({
+    topics: [ORDERS, INVOICES].map(topic => ({ topic, numPartitions: 4 })),
+  })
+  await admin.disconnect()
+
+  // -------------------------------------------------- the order service, Kafka
+  console.log('\nproducing orders with a Kafka client')
+  const producer = kafka.producer({ kafkaJS: { acks: -1 } })
+  await producer.connect()
+  for (let n = 1; n <= ORDERS_PER_CUSTOMER; n++) {
+    for (const customer of CUSTOMERS) {
+      await producer.send({
+        topic: ORDERS,
+        messages: [{
+          key: customer,
+          value: JSON.stringify({ customer, n, cents: 1000 * n }),
+          headers: { source: 'shop' },
+        }],
+      })
+    }
+  }
+  await producer.disconnect()
+  console.log(`  ${TOTAL_ORDERS} orders for ${CUSTOMERS.length} customers`)
+
+  // ---------------------------------------------------------- billing, Queen
+  //
+  // A Queen consumer group on the topic. For each order, one transaction acks
+  // it, pushes the invoice into the same partition number of the invoices
+  // topic, and adds the order to the customer's total in KV. If the worker dies
+  // halfway, none of the three happened and the order comes back.
+  console.log('\nbilling with a Queen worker')
+  const billed = []
+  let shownRaw = false
+  await queen
+    .queue(ORDERS)
+    .group('billing')
+    .subscriptionMode('all')
+    .autoAck(false) // the ack rides the transaction
+    .each()
+    .limit(TOTAL_ORDERS)
+    .timeoutMillis(1000)
+    .idleMillis(10000)
+    .consume(async (msg) => {
+      if (!shownRaw) {
+        console.log(`  stored payload: ${JSON.stringify(msg.data)}`)
+        shownRaw = true
+      }
+      const record = decode(msg.data)
+      const order = JSON.parse(record.value)
+
+      await queen
+        .transaction()
+        .ack(msg, 'completed', { consumerGroup: 'billing' })
+        .queue(INVOICES).partition(msg.partition)
+        .push({ data: { invoice: `INV-${order.customer}-${order.n}`, ...order } })
+        .kv.incr(TOTALS, order.customer, order.cents, { ttl: '1h' })
+        .commit()
+
+      billed.push({ partition: msg.partition, key: record.key, source: record.headers.source, ...order })
+    })
+
+  for (const customer of CUSTOMERS) {
+    const mine = billed.filter(b => b.customer === customer)
+    assert(
+      mine.map(b => b.n).join(',') === '1,2,3,4' && new Set(mine.map(b => b.partition)).size === 1,
+      `${customer}'s orders arrived in order, all from Kafka partition ${mine[0]?.partition}`
+    )
+  }
+  assert(
+    billed.length === TOTAL_ORDERS && billed.every(b => b.key === b.customer && b.source === 'shop'),
+    `billing saw all ${TOTAL_ORDERS} orders with their Kafka key and header`
+  )
+
+  // ------------------------------------------------------- analytics, Kafka
+  //
+  // A Kafka consumer group on the invoices that Queen wrote. A native payload
+  // reaches a Kafka client as its JSON text, with no key.
+  console.log('\nreading invoices with a Kafka consumer')
+  analytics = kafka.consumer({ kafkaJS: { groupId: `analytics-${RUN}`, fromBeginning: true } })
+  await analytics.connect()
+  await analytics.subscribe({ topics: [INVOICES] })
+  const invoices = []
+  await new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => resolve(), 30000)
+    analytics.run({
+      eachMessage: async ({ partition, message }) => {
+        invoices.push({ partition, key: message.key, invoice: JSON.parse(message.value.toString()) })
+        if (invoices.length === TOTAL_ORDERS) {
+          clearTimeout(deadline)
+          resolve()
+        }
+      },
+    }).catch(reject)
+  })
+  console.log(`  first: partition ${invoices[0]?.partition}, key ${invoices[0]?.key}, value ${JSON.stringify(invoices[0]?.invoice)}`)
+  assert(invoices.length === TOTAL_ORDERS, `analytics read all ${TOTAL_ORDERS} invoices (got ${invoices.length})`)
+  assert(
+    invoices.every(i => billed.some(b => b.n === i.invoice.n && b.customer === i.invoice.customer && Number(b.partition) === i.partition)),
+    'each invoice is in the partition number its order came from'
+  )
+
+  // ------------------------------------------------------------ the totals
+  const totals = await queen.kv.getMany(TOTALS, CUSTOMERS)
+  const expected = 1000 * (ORDERS_PER_CUSTOMER * (ORDERS_PER_CUSTOMER + 1)) / 2
+  console.log(`\n  totals: ${totals.rows.map(r => `${r.key}=${r.value}`).join(', ')}`)
+  assert(
+    totals.rows.length === CUSTOMERS.length && totals.rows.every(r => Number(r.value) === expected),
+    `each customer's total is ${expected}, counted once per order`
+  )
+
+  console.log(`\nPASS: ${checks} checks`)
+} catch (err) {
+  console.error(`\nFAIL: ${err.message}`)
+  process.exitCode = 1
+} finally {
+  try {
+    if (analytics) await analytics.disconnect()
+    for (const customer of CUSTOMERS) await queen.kv.delete(TOTALS, customer)
+    for (const q of [ORDERS, INVOICES]) await queen.queue(q).delete()
+  } catch (err) {
+    console.error(`  (cleanup incomplete: ${err.message})`)
+  }
+  await queen.close()
+}
+```

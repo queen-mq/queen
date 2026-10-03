@@ -1,47 +1,31 @@
 // docs:start(app-js-cross-producer)
-// Cross-protocol example, PRODUCER half.
+// Cross-protocol load pair, PRODUCER half: produce over the Kafka wire protocol
+// as fast as librdkafka will batch, forever. Its partner, consumer.mjs, reads the
+// same messages through Queen's own API. Nothing is copied between them: a Kafka
+// topic is a Queen queue. For a self-checking version of the same idea, see
+// bridge.mjs in this directory.
 //
 //   npm install
-//   node producer.mjs                  # foreground
-//   node producer.mjs &                # detached from this shell
-//
-// Produces to the Kafka facade on 9092. Its partner, consumer.mjs, reads the
-// same rows through Queen's own API on 6632. Nothing replicates between them:
-// a Kafka topic IS a Queen queue, and both halves address the same rows.
-//
 //   TOPIC=orders PARTITIONS=32 node producer.mjs
 //   BROKER=localhost:9092 TOPIC=orders node producer.mjs
 //
-// Split into its own process on purpose: run together, produce and consume
-// compete for one Node event loop and each one's number is really a measure of
-// the pair. Separately, each is its own measurement.
-
-// Setup the broker like:
-// docker run -d --name queen -e QUEEN_KAFKA_EMBEDDED=true -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092
-// -e QUEEN_KAFKA_DEFAULT_PARTITIONS=16 -e QUEEN_KV_WRITE_RATE=2000 -e QUEEN_KV_WRITE_BURST=4000
-// -p 6632:6632 -p 9092:9092 ghcr.io/queen-mq/queen:latest
+// Producer and consumer are separate processes on purpose: in one Node process
+// they compete for one event loop, and each one's rate is really a measure of
+// the pair.
+//
+// A node with the Kafka listener on:
+//   docker run -d -p 6632:6632 -p 9092:9092 -e QUEEN_KAFKA_EMBEDDED=true \
+//     -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 ghcr.io/queen-mq/queen:latest
 
 import Confluent from '@confluentinc/kafka-javascript'
 
-const TOPIC = process.env.TOPIC ?? 'cross-topic-big'
+const TOPIC = process.env.TOPIC ?? 'cross-topic'
 const BROKER = process.env.BROKER ?? 'localhost:9092'
 
-// The width to declare for TOPIC. Since M7 the facade stores a create's
-// numPartitions as that topic's own width FLOOR: it is advertised at
-// max(live lanes, this) instead of max(live lanes,
-// QUEEN_KAFKA_DEFAULT_PARTITIONS).
-//
-// TWO THINGS THAT WILL BITE:
-//
-// 1. The floor is set ONCE, AT CREATE. A create against a topic that already
-//    exists is answered TOPIC_ALREADY_EXISTS and changes nothing -- there is no
-//    alter for it. To change a width you delete the topic and make it again. So
-//    this has to run BEFORE anything produces to TOPIC, or the producer's own
-//    auto-create wins and makes it at the broker default with no floor.
-// 2. The floor REPLACES the broker default rather than being compared against
-//    it. Declaring 4 where QUEEN_KAFKA_DEFAULT_PARTITIONS is 8 gives a 4-wide
-//    topic, not an 8-wide one. It is a floor under the LIVE LANE COUNT, not
-//    under the default.
+// The width declared for TOPIC with CreateTopics. It has to be declared before
+// anything produces to the topic, because a producer's auto-create would make
+// it at the broker's default width first. How the facade advertises and stores
+// a topic's width is on https://queenmq.com/guides/kafka/.
 const PARTITIONS = Number(process.env.PARTITIONS ?? 1000)
 
 const { KafkaJS } = Confluent
@@ -51,9 +35,9 @@ const kafka = new KafkaJS.Kafka({
   kafkaJS: { clientId: 'cross-producer' },
 })
 
-// Declare the width before a single record exists, then report what the broker
-// actually advertises -- which is the only number that matters, and is what the
-// consumer half will see as Queen partition NAMES "0".."N-1".
+// Declare the width before a single record exists, then report the width the
+// broker advertises, which is what the consumer half sees as Queen partitions
+// named "0" to "N-1".
 async function declareWidth () {
   const admin = kafka.admin()
   await admin.connect()
@@ -61,15 +45,14 @@ async function declareWidth () {
     const created = await admin.createTopics({
       topics: [{ topic: TOPIC, numPartitions: PARTITIONS, replicationFactor: 1 }],
     })
-    // An ARRAY, not kafkajs's `{ topics: [...] }` — one more divergence to know
-    // about when porting: this client returns the topic list directly.
+    // This client returns the topic list itself, where kafkajs wraps it in
+    // { topics: [...] }.
     const [described] = await admin.fetchTopicMetadata({ topics: [TOPIC] })
     const width = described.partitions.length
     console.log(
       created
-        ? `created ${TOPIC} declaring ${PARTITIONS} partitions -> advertised at ${width}`
-        : `${TOPIC} already existed, so the declared ${PARTITIONS} was NOT applied -> still ${width}. ` +
-          `Delete it, or set TOPIC=<new name>, to see a different width.`
+        ? `created ${TOPIC} declaring ${PARTITIONS} partitions, advertised at ${width}`
+        : `${TOPIC} already existed with ${width} partitions; the declared ${PARTITIONS} was not applied`
     )
     return width
   } finally {

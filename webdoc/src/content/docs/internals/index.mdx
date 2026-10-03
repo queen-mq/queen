@@ -1,6 +1,6 @@
 ---
 title: Architecture
-description: "One process per node: an HTTP edge, the leader's planner, one raft log per raft group, a deterministic apply and a local store."
+description: "One process per node: an HTTP edge, a planner on the leader that turns commands into effects, one replicated log per raft group, a deterministic apply and an in-memory store checkpointed to disk."
 type: concept
 tier: internals
 sidebar:
@@ -9,100 +9,153 @@ sourceOfTruth:
   - server/src/rsm/mod.rs
   - server/src/rsm/facade/groups.rs
   - server/src/rsm/facade/intake.rs
+  - server/src/rsm/facade/remote.rs
   - server/src/rsm/batcher.rs
   - server/src/rsm/batcher_lanes.rs
-  - server/src/rsm/replicator/raft/mod.rs
   - server/src/rsm/apply.rs
+  - server/src/rsm/apply_shard.rs
   - server/src/rsm/consume/mod.rs
+  - server/src/rsm/consume/hooks.rs
+  - server/src/rsm/replicator/node.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/stream.rs
+  - server/clippy.toml
 digest: >-
   A Queen MQ node is one process: an HTTP edge, a planner on the raft leader, a replicated log
-  (openraft in a cluster) stored in per-queue log files, a deterministic apply thread, and an
-  ordered store held in RAM and checkpointed to LMDB. The leader turns client commands into log
-  entries of effects, and every node applies the committed entries in index order, so each node
-  holds a full copy; a follower serves a read once it has applied up to the leader's commit index.
-  Pops, acks and leases are served from the leader's memory by a consumption engine that logs
-  changed cursor rows as checkpoints every 5 ms by default. Each tenant lives in exactly one raft
-  group with one leader, so a multi-queue transaction is one log entry with no coordinator and no
-  two-phase commit; throughput grows with more raft groups and more clusters, not inside one tenant.
+  (openraft in a cluster) stored in per-queue log files, a deterministic apply, and an ordered store
+  held in RAM and checkpointed to LMDB. The leader turns client commands into log entries of effects
+  (offsets, ids, timestamps decided once), and every node applies the committed entries in index
+  order, so each node holds a full copy. Planning is split across lanes (QUEEN_LANES, default 8) by
+  partition and still produces one entry per cycle. Pops, acks and leases are served from the
+  leader's memory by a consumption engine that logs changed cursor rows as checkpoints every 5 ms by
+  default. Each tenant lives in exactly one raft group with one leader, so a multi-queue transaction
+  is one log entry with no coordinator and no two-phase commit; one tenant's writes go through one
+  leader and one log, and more raft groups and clusters add capacity across tenants.
 ---
 
-A Queen node is one process. The raft leader turns each batch of client commands into one log
-entry of effects, a majority of nodes makes it durable, and every node applies it to its own copy
-of the state. Read this page to know which part of the process does what before you read
-[life of a step](/internals/life-of-a-step/) or [storage](/internals/storage/).
+Queen is one process per node, built around one idea: decide every write once, on the leader, and
+apply the decision everywhere. The leader turns client commands into effects, absolute facts like
+"append these frames to partition 17 at offsets 4,210 to 4,309, created at this microsecond". A
+majority of nodes makes the log entry that carries them durable, and every node applies it to its
+own full copy of the state.
 
-<pre class="mermaid">{`
-flowchart LR
-  C["client"] --> E["HTTP edge<br/>any node"]
-  E --> I["intake<br/>leader"]
-  I -->|"pop, ack, renew"| CE["consumption engine<br/>leader memory"]
-  I -->|"push, transaction, KV, timers"| P["planner and lanes<br/>leader"]
-  CE -->|"checkpoints"| P
-  P -->|"one entry per cycle"| R["raft log<br/>queue log files"]
-  R --> A["apply<br/>every node"]
-  A --> S[("store<br/>every node")]
-`}</pre>
+This page is the map of that process: the parts of a node, what each one owns, and why the lines
+between them sit where they do. [Life of a step](/internals/life-of-a-step/) then follows one
+request through them, and [storage](/internals/storage/) covers what lands on disk.
+
+<Figure id="internals/node-parts" />
+
+## Commands in, effects out
+
+A client sends commands: push this, pop from there, commit this transaction. The planner runs only
+on the leader. It reads the committed state plus the entries still in flight, decides what each
+command means at that instant, and writes the answer down as effects. Message ids, offsets,
+timestamps, lease expiries and the ids of new partitions are all minted there, by one thread of one
+node, so an entry carries values and leaves nothing to decide later.
+
+That is what lets apply be a pure function of the committed state and the entry. Apply reads no
+clock, no environment and no random number, and it iterates nothing in hash-map order:
+`server/clippy.toml` turns each of those calls into a compile error inside `rsm/apply.rs`,
+`rsm/state/` and `rsm/store/`, and `test/raft/lint/deny-bites.sh` checks that the ban still bites.
+Every node that applies the same entries holds the same replicated state, byte for byte. An effect
+a node cannot decode stops that node; it is never skipped.
+
+Much of the rest of the design follows from this: a follower is a complete copy, recovery is a
+replay of the log, and a transaction across ten queues is one entry with nothing left to
+coordinate.
 
 ## The parts of a node
 
 | Part | Runs on | What it does | Code |
 |---|---|---|---|
-| HTTP edge | every node | Mints a 16-byte request id and a deadline per command, parses the body, mints message ids, hashes each `transactionId` (xxh3-128), packs one frame per message. | `handlers/raft.rs`, `rsm/facade/real.rs` |
-| Intake | leader | Sends pops, acks, nacks and renews to the consumption engine, has the engine validate a transaction's acks, and sends everything else to the planner's channel. | `rsm/facade/intake.rs` |
-| Planner | leader | Plans each command against committed state plus the entries still in flight, builds one entry per cycle, proposes it. | `rsm/batcher.rs`, `rsm/planner/` |
-| Raft log | every node | Orders and replicates entries; in a cluster, openraft decides who leads and what is committed. The log is the queue log files. | `rsm/replicator/` |
-| Apply | every node | Executes committed entries in index order. The only writer of the store. | `rsm/apply.rs` |
-| Store | every node | Queues, partitions, cursors, dedup rows, KV, timers, request ids, counters. In RAM, checkpointed to LMDB. | `rsm/store/` |
+| HTTP edge | every node | Admits the request, mints a 16-byte request id and a deadline, parses the body, mints message ids, hashes each `transactionId` (xxh3-128), packs one frame per message. | `handlers/raft.rs`, `rsm/facade/real.rs` |
+| Intake | leader | Sends pops, acks, nacks and renews to the consumption engine, has the engine validate a transaction's acks, and hands everything else to the planner. | `rsm/facade/intake.rs` |
+| Planner | leader | Plans each command against committed state plus the entries in flight, builds one entry per cycle, proposes it. | `rsm/batcher.rs`, `rsm/batcher_lanes.rs`, `rsm/planner/` |
+| Raft log | every node | Orders and replicates entries. In a cluster openraft decides who leads and what is committed; the log itself is the queue log files. | `rsm/replicator/` |
+| Apply | every node | Executes committed entries in index order. The only writer of the store. | `rsm/apply.rs`, `rsm/apply_shard.rs` |
+| Store | every node | Queues, partitions, cursors, dedup rows, KV, timers, request ids, counters. Held in RAM, checkpointed to LMDB. | `rsm/store/` |
 | Consumption engine | leader | Serves claims, leases and acks from memory and logs the changed cursor rows as checkpoints. | `rsm/consume/` |
 
 The same process can also run the Kafka wire facade (`QUEEN_KAFKA_EMBEDDED=true`) and the
-multi-tenant proxy (`QUEEN_PROXY_EMBEDDED=true`). Both call the broker's own HTTP router in
-process, so a Kafka produce is a push like any other.
+multi-tenant proxy (`QUEEN_PROXY_EMBEDDED=true`). Both call the broker in process, through the same
+router and the same pipeline, so a Kafka produce is a push like any other.
 
-### Planner and lanes
+## The planner and its lanes
 
-A planning cycle drains the command channel up to `QUEEN_RAFT_BATCH_MAX_CMDS` (4096) commands or
-`QUEEN_RAFT_BATCH_MAX_BYTES` (4 MiB), looks up each request id (a retry under the same id gets the
-recorded outcome), plans, and builds one entry. Up to `QUEEN_RAFT_PIPELINE` (8) entries are in
-flight at once. The planner stamps the time and mints every id, so an entry carries effects
-(absolute values), never commands.
+A planning cycle drains the command channel up to 4,096 commands or 4 MiB
+(`QUEEN_RAFT_BATCH_MAX_CMDS`, `QUEEN_RAFT_BATCH_MAX_BYTES`). It looks each request id up first, so a
+retry gets the outcome it missed and nothing is planned twice, then plans the rest and proposes one
+entry. Up to eight entries (`QUEEN_RAFT_PIPELINE`) are in flight while the next cycle plans on top of
+them; the overlay, the in-flight entries folded over the committed state, is what lets it see their
+effects before they commit.
 
-A **lane** is a planning thread that owns the partitions whose id modulo `QUEEN_LANES` (default 8)
-equals its number. Lanes plan the commands that touch only their own existing partitions (pushes,
-single-lane transactions, consumption checkpoints) in parallel. A control step then plans the
-rest on one thread: queue and group changes, new partitions, KV, timers, commands that span lanes.
-The result is still one entry, and it applies exactly as if one thread had planned it.
+For a long time the planner was one thread, and it was the wall. On 2026-09-23 a single 8-vCPU node
+held about 200,000 messages a second each way with its one planning loop busy 87% of the time and
+only 4.3 of its 8 cores in use (`benchmark-queen/2026-09-23-raft-soak-shape`). CPU and disk had
+room; the serial plan did not. So planning is split into lanes. A lane is a thread that owns the
+partitions whose id modulo `QUEEN_LANES` (8) is its number, and it plans every command that touches
+only its own existing partitions: pushes, the groups of a push that names several partitions,
+single-lane transactions, and the consumption engine's checkpoints. The lanes of a cycle run at the
+same time, and then a control step plans everything else on one thread with the full view: queue
+and group changes, new partitions, KV, timers, and commands that cross lanes.
 
-### Raft log and apply
+<Figure id="internals/lanes" />
 
-There is one log per raft group. A single node runs the local replicator
-(`QUEEN_RAFT_REPLICATOR=local`, the default): the same files, no network. A cluster runs openraft
-(`QUEEN_RAFT_REPLICATOR=openraft` with `QUEEN_RAFT_PEERS`). The leader streams entries to each
-follower over one long-lived connection with several appends in flight, and an entry commits once
-a majority has written and fsynced it.
+Lane effects touch disjoint state, and control comes after them in the entry, so the entry applies
+exactly as if one thread had planned it in that order. It is still one entry per cycle on one log.
+`rsm/tests/multipush.rs` holds us to that: the same commands through one planner and through eight
+lanes must give the same verdicts, the same offsets and one logged command.
 
-Apply is a pure function of committed state and the entry: no clock, no environment, no
-randomness, no hash-map order (`server/clippy.toml` makes those calls a compile error in
-`rsm/apply.rs`, `rsm/state/` and `rsm/store/`). Two nodes that apply the same entries hold the same
-replicated state. An effect kind a node cannot decode stops that node; it is never skipped.
-Partition-keyed effects run on `QUEEN_RAFT_APPLY_SHARDS` (4) threads, with the same result as one
-thread.
+## Apply, sharded
 
-### Consumption engine
+Apply executes committed entries in index order, and it is the only thing that writes the store.
+The effects keyed by one partition (appends, cursors, watermarks, fresh dead letters, partition
+creates) run on `QUEEN_RAFT_APPLY_SHARDS` (4) threads, chosen by `pid % shards`, between the global
+effects, which still run in entry order on the apply thread with no shard active. Two effects on
+different partitions touch disjoint rows, so any interleaving leaves the same bytes.
+`rsm/tests/apply_shards.rs` runs one workload at one shard and at several and compares the
+replicated state, the node-local files and every notification, which is why the shard count is a
+node-local setting that two nodes of one cluster may set differently.
+
+## The consumption engine
 
 Pops, acks and leases never go through the planner. The engine on the leader holds each consumer
-group's cursors and leases in memory, loaded lazily from the committed cursor rows. It serves only
-while its node leads and has heard from a quorum within `QUEEN_CONSUME_LEADER_LEASE_MS` (400 ms).
-Every `QUEEN_CONSUME_CHECKPOINT_MS` (5 ms) it logs the rows that changed, and it releases an answer
-only once the checkpoint holding its change has committed.
+group's cursors and leases in memory, loads them lazily from the committed cursor rows the first
+time a group is touched, and serves claims from ready lists, oldest partition first. Every
+`QUEEN_CONSUME_CHECKPOINT_MS` (5 ms) it logs the cursor rows that changed, as one checkpoint command
+per tenant and lane, and it releases an answer only once the checkpoint holding its change has
+committed. A long-poll pop that finds nothing is held right there, and apply wakes it the moment
+the partition's tail moves.
 
-### Followers
+One reason consumption left the planner shows in the same 2026-09-23 runs. With pushes, pops and
+acks in one serial queue, acks waited behind pushes: at 300,000 offered, the ack round trip went
+from 4 ms (at 100,000) to over 500 ms, a partition could be claimed again only after its ack
+committed, and the backlog grew by about 200,000 messages a second. Today an ack costs the planner
+nothing of its own: it rides in the next checkpoint, a handful of commands every 5 ms however many
+acks they carry.
 
-Every node applies every committed entry, so a follower holds a full copy of its raft groups.
-With `QUEEN_RAFT_CLIENT_OFFLOAD` (on by default in a cluster) a follower serves its own clients: it
-prepares the command, forwards only the prepared command to the leader, and renders the answer
-from its own state once it has applied the entry. A KV or position read on a follower first asks
-the leader for its read index and waits until it has applied that far.
+The engine serves only while its node leads and has heard from a quorum within
+`QUEEN_CONSUME_LEADER_LEASE_MS` (400 ms). A new leader loads the leases from the committed cursor
+rows and serves no pops or acks for one checkpoint interval plus `QUEEN_RAFT_MAX_CLOCK_SKEW_MS`
+(500 ms), so a batch leased under the old leader is not handed out twice.
+
+## Replication
+
+There is one log per raft group. A single node runs the local replicator
+(`QUEEN_RAFT_REPLICATOR=local`, the default): the same files and the same fsync, with no network.
+A cluster runs openraft (`QUEEN_RAFT_REPLICATOR=openraft` with `QUEEN_RAFT_PEERS`). openraft decides
+who leads and which entries are committed, and stores nothing of its own: its log is the queue logs,
+its state machine is the apply thread, and its snapshot is the store's checkpoint plus the queue-log
+files. The leader streams entries to each follower over one long-lived connection with several
+appends in flight, and an entry commits once a majority has written and fsynced it. A node reports
+itself leader only after it has applied an entry of its own term, so it always plans over complete
+committed state.
+
+Every node applies every committed entry, so a follower holds a full copy of its raft groups. With
+`QUEEN_RAFT_CLIENT_OFFLOAD` (on by default) it also serves its own clients: it parses and prepares
+each command, forwards only the prepared command to the leader, and renders the answer from its own
+state once it has applied the entry. That moves the HTTP, JSON and rendering work off the leader,
+which is left to plan, order, write and apply.
 
 ## One tenant, one leader
 
@@ -115,32 +168,32 @@ QUEEN_RAFT_GROUPS=3
 QUEEN_TENANT_GROUPS=acme=2
 ```
 
-Every command, a transaction included, carries one tenant, so it touches one group. One leader
+Every command, a transaction included, carries one tenant, so it touches one group, and one leader
 plans it into one entry. That is the whole transaction protocol: no coordinator, no two-phase
-commit, no transaction markers in the partitions, no isolation level for readers to choose. An
-entry is applied whole or not at all.
+commit, no transaction markers in the partitions and no isolation level for readers to choose. An
+entry applies whole or not at all. We chose this boundary because it makes the most useful
+transaction, a worker's whole step across any queues of its tenant, cost one log write.
 
-The price is that one tenant's writes do not scale out: they pass through one planner and one log.
-You scale out with more raft groups (with as many groups as nodes, group `g` prefers node
-`g mod n` as leader, so every node leads one) and with more clusters. See
+The price is that one tenant's writes do not scale out: they pass through one planner and one log,
+however many lanes plan them. Capacity grows with more raft groups (with as many groups as nodes,
+group `g` prefers node `g mod n` as its leader, so every node leads one) and with more clusters. See
 [tenants](/operate/tenants/).
 
 ## Limits
 
-- **Adding nodes adds copies, not write throughput for one tenant.**
-- **A tenant's group is fixed while it has data.** There is no migration yet; pin a large tenant
-  with `QUEEN_TENANT_GROUPS` before it writes.
-- **`QUEEN_RAFT_GROUPS` above 1 needs `QUEEN_RAFT_CLIENT_OFFLOAD` on**, and every node of a cluster
-  must use the same value.
-- **The store is loaded into RAM in full at boot.** Each node's memory grows with partitions,
-  cursors and KV keys of the groups it holds.
-- **A new leader serves no pops or acks** for one checkpoint interval plus
-  `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) after it takes over.
+Adding nodes adds copies and spreads the client work, but it does not add write throughput for one
+tenant, whose writes all go through its group's leader. A tenant's group is fixed while it has
+data, because there is no migration between groups yet, so pin a large tenant with
+`QUEEN_TENANT_GROUPS` before it writes. More than one group needs `QUEEN_RAFT_CLIENT_OFFLOAD` on and
+the same `QUEEN_RAFT_GROUPS` on every node.
+
+The store is loaded into RAM in full at boot, so each node's memory grows with the partitions,
+cursors and KV keys of the groups it holds. And a new leader serves no pops or acks for one
+checkpoint interval plus `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` after it takes over.
 
 ## Next
 
 <CardGrid>
   <LinkCard title="Life of a step" href="/internals/life-of-a-step/" description="One push, pop, ack and transaction through the pipeline, and when each is answered." />
   <LinkCard title="Storage" href="/internals/storage/" description="Queue log files, the store checkpoint, recovery and reclaim." />
-  <LinkCard title="Cluster" href="/operate/cluster/" description="Run three or five nodes." />
 </CardGrid>

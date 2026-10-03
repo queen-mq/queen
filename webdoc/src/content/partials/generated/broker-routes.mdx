@@ -132,7 +132,6 @@ Queen's broker serves **102 method + path pairs**. Every row below is read out o
 | `GET` | `/api/v1/ephemeral/pop` | read-write | yes |
 | `POST` | `/api/v1/ephemeral/push` | write-only | yes |
 | `DELETE` | `/api/v1/ephemeral/queue/:queue` | read-write | yes |
-| `DELETE` | `/api/v1/ephemeral/queue/:queue` | read-write | yes |
 | `GET` | `/api/v1/ephemeral/queues` | read-only | yes |
 | `GET` | `/api/v1/ephemeral/queues/:queue/depth` | read-only | yes |
 | `POST` | `/api/v1/ephemeral/reset` | read-write | yes |
@@ -167,6 +166,7 @@ Queen's broker serves **102 method + path pairs**. Every row below is read out o
 | Method | Path | Access level | Tenant-scoped |
 | --- | --- | --- | --- |
 | `POST` | `/api/v1/fetch` | read-only | yes |
+| `POST` | `/api/v1/fetch/offsets` | read-only | yes |
 | `POST` | `/api/v1/partitions/changed` | read-only | yes |
 
 ### Dashboard identity (broker-direct)

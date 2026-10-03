@@ -10,9 +10,11 @@ description: "Every Prometheus metric family the broker exposes, with its type a
       - server/src/rsm/timing.rs
       - server/src/rsm/facade/real.rs
       - server/src/rsm/admit.rs
+      - server/src/handlers/raft.rs
+      - server/src/rsm/replicator/raft/forward.rs
 */}
 
-`GET /metrics/prometheus` exposes **103 families**. Every one describes the node that answered: `queen_process_*` counts what this node did since it started, and the `queen_raft_*` families describe its replicated log, its store and its pipeline. Scrape every node. The pipeline timing and admission families are skipped when `QUEEN_RAFT_METRICS` is `0`, `false`, `off` or `no`; it is on by default.
+`GET /metrics/prometheus` exposes **107 families**. Every one describes the node that answered: `queen_process_*` counts what this node did since it started, and the `queen_raft_*` families describe its replicated log, its store and its pipeline. Scrape every node. The pipeline timing, admission and forwarding families are skipped when `QUEEN_RAFT_METRICS` is `0`, `false`, `off` or `no`; it is on by default. The per-queue families are written only for queues that have something to report. 27 families are declared but not written by this release; their Help says so.
 
 ### Process (this broker instance)
 
@@ -53,6 +55,12 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_raft_admit_forwarded_total` | counter | Commands followers forwarded to this node that it admitted, and that it refused as overloaded |
 | `queen_raft_admit_total` | counter | Commands that waited for admission room, and that were refused with 429 |
 | `queen_raft_admit_waiting` | gauge | Commands waiting for admission room now |
+
+### Forwarding between nodes
+
+| Family | Type | Help |
+| --- | --- | --- |
+| `queen_raft_forward_total` | counter | Batched forwarding: commands this node sent to the leader, commands it served as the leader, streams it opened, and leaders it found without batched forwarding |
 
 ### Pipeline timing
 
@@ -99,18 +107,26 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_raft_slow_commands_total` | counter | Commands over QUEEN_RAFT_SLOW_COMMAND_MS |
 | `queen_raft_writer_pickup_seconds` | summary | Entry proposed to the writer starting its group fsync (PERF-G) |
 
+### Per-queue rates and depth
+
+| Family | Type | Help |
+| --- | --- | --- |
+| `queen_dlq_depth_by_queue` | gauge | Dead letters per queue (exported by the raft leader only) |
+| `queen_queue_conflated_per_minute` | gauge | Messages conflated away per queue in the last metrics bucket (METRICS_FLUSH_MS) |
+| `queen_queue_pop_lag_milliseconds` | gauge | Per-queue pop lag (delivery time minus creation time) over the last metrics bucket (METRICS_FLUSH_MS), on this process |
+
 ### Engine internals
 
 | Family | Type | Help |
 | --- | --- | --- |
-| `queen_batch_items_fired_total` | counter | Items flushed across fusion batches |
-| `queen_batch_rtt_milliseconds` | gauge | Fusion batch round-trip latency |
-| `queen_batches_fired_total` | counter | Fusion batches flushed |
-| `queen_fusion_items_per_batch` | gauge | Mean items per fusion batch |
-| `queen_pop_fill_wait_microseconds_total` | counter | Total time pops spent fattening an under-full batch |
-| `queen_pop_fill_wait_total` | counter | Pops that held an under-full batch back (minPopWaitTime) |
-| `queen_pop_targeted_total` | counter | Hinted targeted single-partition pops issued |
-| `queen_pop_wildcard_total` | counter | Wildcard candidate-scan pops issued |
+| `queen_batch_items_fired_total` | counter | Items flushed across fusion batches. Nothing in this release writes it, so it reads 0. |
+| `queen_batch_rtt_milliseconds` | gauge | Fusion batch round-trip latency. Nothing in this release writes it, so it reads 0. |
+| `queen_batches_fired_total` | counter | Fusion batches flushed. Nothing in this release writes it, so it reads 0. |
+| `queen_fusion_items_per_batch` | gauge | Mean items per fusion batch. Nothing in this release writes it, so it reads 0. |
+| `queen_pop_fill_wait_microseconds_total` | counter | Total time pops spent fattening an under-full batch. Nothing in this release writes it, so it reads 0. |
+| `queen_pop_fill_wait_total` | counter | Pops that held an under-full batch back (minPopWaitTime). Nothing in this release writes it, so it reads 0. |
+| `queen_pop_targeted_total` | counter | Hinted targeted single-partition pops issued. Nothing in this release writes it, so it reads 0. |
+| `queen_pop_wildcard_total` | counter | Wildcard candidate-scan pops issued. Nothing in this release writes it, so it reads 0. |
 
 ### Ephemeral queues
 
@@ -128,26 +144,26 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | Family | Type | Help |
 | --- | --- | --- |
 | `queen_kv_bytes_total` | counter | KV value bytes written / read |
-| `queen_kv_expired_not_pruned` | gauge | Expired KV rows the sweeper has not pruned yet (capped) |
-| `queen_kv_expired_not_pruned_capped` | gauge | 1 when the unpruned count hit its cap and is a floor |
-| `queen_kv_expiry_lag_seconds` | gauge | Age of the oldest expired, unpruned KV row |
+| `queen_kv_expired_not_pruned` | gauge | Expired KV rows the sweeper has not pruned yet (capped). Nothing in this release writes it, so it reads 0. |
+| `queen_kv_expired_not_pruned_capped` | gauge | 1 when the unpruned count hit its cap and is a floor. Nothing in this release writes it, so it reads 0. |
+| `queen_kv_expiry_lag_seconds` | gauge | Age of the oldest expired, unpruned KV row. Nothing in this release writes it, so it reads 0. |
 | `queen_kv_op_duration_milliseconds` | gauge | KV operation latency |
 | `queen_kv_ops_total` | counter | KV operations by code path and outcome |
-| `queen_kv_pool` | gauge | Dedicated KV connection pool |
+| `queen_kv_pool` | gauge | Dedicated KV connection pool. Nothing in this release writes it, so it reads 0. |
 | `queen_kv_read_rejected_total` | counter | KV reads refused before reaching the database |
-| `queen_kv_singleflight_coalesced_total` | counter | KV reads that shared an in-flight query |
-| `queen_sweeper_cycle_milliseconds` | gauge | Sweeper phase duration |
-| `queen_sweeper_phase_skipped_total` | counter | Phases shed under pressure (the degradation ladder, made visible) |
-| `queen_sweeper_rows_total` | counter | Rows handled by each sweeper phase |
-| `queen_sweeper_skip_locked_total` | counter | Rows another broker was already holding |
-| `queen_sweeper_sleep_milliseconds` | gauge | Sleep the sweeper chose after the last cycle |
-| `queen_timers_dlq_total` | counter | Timers dead-lettered after exhausting attempts |
-| `queen_timers_due` | gauge | Timers due now, from the sweep probe (capped) |
-| `queen_timers_due_capped` | gauge | 1 when the due count hit its cap and is a floor |
-| `queen_timers_fire_failures_total` | counter | Failed fire transactions by SQLSTATE class |
-| `queen_timers_fire_lag_seconds` | gauge | Delivery lateness of fired timers, per tenant |
-| `queen_timers_fire_lag_tenants_dropped_total` | counter | Fire-lag samples dropped because the tenant cap was reached |
-| `queen_timers_fired_total` | counter | Fired timer segments by outcome |
-| `queen_timers_oldest_late_seconds` | gauge | Lateness of the oldest due timer |
-| `queen_timers_poisoned_total` | counter | Batches replayed one segment per call after a permanent error |
+| `queen_kv_singleflight_coalesced_total` | counter | KV reads that shared an in-flight query. Nothing in this release writes it, so it reads 0. |
+| `queen_sweeper_cycle_milliseconds` | gauge | Sweeper phase duration. Nothing in this release writes it, so it reads 0. |
+| `queen_sweeper_phase_skipped_total` | counter | Phases shed under pressure (the degradation ladder, made visible). Nothing in this release writes it, so it reads 0. |
+| `queen_sweeper_rows_total` | counter | Rows handled by each sweeper phase. Nothing in this release writes it, so it reads 0. |
+| `queen_sweeper_skip_locked_total` | counter | Rows another broker was already holding. Nothing in this release writes it, so it reads 0. |
+| `queen_sweeper_sleep_milliseconds` | gauge | Sleep the sweeper chose after the last cycle. Nothing in this release writes it, so it reads 0. |
+| `queen_timers_dlq_total` | counter | Timers dead-lettered after exhausting attempts. Nothing in this release writes it, so it reads 0. |
+| `queen_timers_due` | gauge | Timers due now, from the sweep probe (capped). Nothing in this release writes it, so it reads 0. |
+| `queen_timers_due_capped` | gauge | 1 when the due count hit its cap and is a floor. Nothing in this release writes it, so it reads 0. |
+| `queen_timers_fire_failures_total` | counter | Failed fire transactions by SQLSTATE class. Nothing in this release writes it, so it reads 0. |
+| `queen_timers_fire_lag_seconds` | gauge | Delivery lateness of fired timers, per tenant. Nothing in this release writes it, so it has no samples. |
+| `queen_timers_fire_lag_tenants_dropped_total` | counter | Fire-lag samples dropped because the tenant cap was reached. Nothing in this release writes it, so it reads 0. |
+| `queen_timers_fired_total` | counter | Fired timer segments by outcome. Nothing in this release writes it, so it reads 0. |
+| `queen_timers_oldest_late_seconds` | gauge | Lateness of the oldest due timer. Nothing in this release writes it, so it reads 0. |
+| `queen_timers_poisoned_total` | counter | Batches replayed one segment per call after a permanent error. Nothing in this release writes it, so it reads 0. |
 | `queen_timers_schedule_rejected_total` | counter | Timer schedules refused |

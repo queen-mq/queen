@@ -108,74 +108,80 @@ function parseAdvertised(text) {
 // CreatePartitions stopped being a refusal for an increase: it raises a tracked
 // topic's declared width, which is what `kafka-topics.sh --alter --partitions`
 // and kload's chunked creation need.
+// 2026-10-02: no window moved (the fingerprint is unchanged), but the prose
+// had gone stale under it. b51e4419 (2.0.0-beta.5) answers ListOffsets for a
+// concrete time from the broker's append stamps, a transaction's stage now
+// outlives its connection, and Queen 2.0's configure merges instead of
+// rewriting every column. Every reason below was re-read against versions.rs
+// and the handlers it names, and rewritten for a reader of the site: no
+// milestone names (M7, M9) and no internal suite names.
 const ADVERTISED_FINGERPRINT = "109b216bd2ff3a35";
 
-/** One sentence per API: what the boundary is, not what the API does. */
+/** One or two sentences per API: where the window stops, and why. */
 const WINDOW_REASON = {
   Produce:
-    "Floor: v3 is the first version whose records are RecordBatch v2. Ceiling: v10 adds the leader-change hint `current_leader`, which has no meaning against one broker with no elections, and v13 addresses topics by UUID.",
+    "Floor: v3 is the first version that carries RecordBatch v2, the format every client of the last decade sends. Ceiling: v10 adds a leader-change hint, which has nothing to point at because every node serves every partition, and v13 names topics by id.",
   Fetch:
-    "Ceiling: v7 introduces fetch sessions (KIP-227), which are per-connection broker state. The facade keeps none by design, so the cap deletes `session_id`, `session_epoch` and `forgotten_topics_data` rather than half-answering them. v4 is the schema's own floor.",
+    "Ceiling: v7 introduces fetch sessions (KIP-227), state a broker keeps per connection. The facade keeps none, so a request names every partition it wants every time. One side effect: librdkafka compresses zstd only for brokers at Fetch v10 or later, so librdkafka-based producers send their zstd batches uncompressed here.",
   ListOffsets:
-    "Ceiling: v7 adds the MAX_TIMESTAMP sentinel, a time-index question Queen cannot answer. v5 is the last version whose whole surface is the two watermark sentinels. v1 is the schema's own floor.",
+    "Ceiling: v7 adds MAX_TIMESTAMP, a question about the records' own timestamps, which the broker does not read. Up to v5 there are three questions (earliest, latest, a concrete time) and all three are answered; a time is looked up on the broker's append clock.",
   ApiVersions:
-    "Ceiling: one below the schema, on purpose. v3 is what every client in the compatibility matrix negotiates against a 3.x broker, and it keeps the v0 fallback on a path a real client reaches.",
+    "Ceiling: one below the schema, on purpose. v3 is what clients negotiate with a Kafka 3.x broker, and a client that opens at v4 (Java 4.x does) is answered with this window and retries at v3, as the protocol specifies.",
   Metadata:
-    "Ceiling: v10 adds topic ids, and a client may then address a topic by a UUID this facade has no registry to resolve. v9 is already the flexible encoding and carries every field a client needs.",
+    "Ceiling: v10 adds topic ids, and the facade has no registry to resolve a topic by id. v9 is already the flexible encoding and carries every field a client reads.",
   OffsetCommit:
-    "Ceiling: v7 carries `group_instance_id` (static membership, out of scope). Floor: v0 and v1 are the ZooKeeper-era offset store.",
+    "Ceiling: v7 carries `group_instance_id`, and static membership is not supported. Floor: v0 and v1 are the ZooKeeper-era offset store.",
   OffsetFetch:
-    "Ceiling: v8 fetches offsets for several groups in one request and changes the response shape. v7's `require_stable` is answered honestly rather than ignored: it asks the broker to withhold offsets belonging to an open transaction, and since M9 an offset belonging to an open transaction is not in the store at all: the store write happens at COMMIT, in the same Queen transaction as the records, one entry of the replicated log. Every offset returned is stable by construction, so UNSTABLE_OFFSET_COMMIT (88) is a code this facade never needs.",
+    "Ceiling: v8 asks about several groups in one request and changes the response shape. v7's `require_stable` costs nothing: a transaction's offsets are written at its commit, in the same raft entry as its records, so every offset returned is already stable.",
   FindCoordinator:
-    "Ceiling: v4 is the batched form, which exists for clusters where groups live on different brokers. In single-node mode the answer is this process for every key, group or transaction. In cluster mode a GROUP key resolves to the rendezvous owner over the live node set, and a TRANSACTION key is refused TRANSACTIONAL_ID_AUTHORIZATION_FAILED \u2014 fatal on purpose, so `initTransactions()` stops instead of looping on a retriable code for the whole of `max.block.ms`.",
+    "Ceiling: v4 is the batched form, for clusters where groups live on different brokers. In cluster mode a group key resolves to the node that coordinates it, and a transaction key is refused with TRANSACTIONAL_ID_AUTHORIZATION_FAILED, fatal on purpose, so `initTransactions()` fails at once instead of retrying for `max.block.ms`.",
   JoinGroup:
-    "Ceiling: v5 carries `group_instance_id` (static membership, out of scope). v4 is also where MEMBER_ID_REQUIRED lands, and that is implemented.",
-  Heartbeat: "Ceiling: v3 carries `group_instance_id` (static membership, out of scope).",
+    "Ceiling: v5 carries `group_instance_id`, and static membership is not supported. v4's MEMBER_ID_REQUIRED round trip is implemented.",
+  Heartbeat: "Ceiling: v3 carries `group_instance_id`.",
   LeaveGroup:
-    "Ceiling: v3 carries `group_instance_id`, and is also where one request may remove several members at once. Below it a request is exactly one member, which is the shape the coordinator has.",
-  SyncGroup: "Ceiling: v3 carries `group_instance_id` (static membership, out of scope).",
+    "Ceiling: v3 carries `group_instance_id` and lets one request remove several members.",
+  SyncGroup: "Ceiling: v3 carries `group_instance_id`.",
   SaslHandshake:
-    "Both versions, because they are the two SASL flows: after v0 the tokens travel as raw bytes in ordinary frames, after v1 inside SaslAuthenticate requests. Both are implemented.",
+    "Both versions, because they are the two SASL flows (raw tokens after v0, SaslAuthenticate requests after v1), and both are implemented.",
   SaslAuthenticate:
-    "Ceiling: v2 is the flexible encoding and adds no field. v1's `session_lifetime_ms` is answered 0, which is what stops every client re-authenticating on a timer this facade does not run.",
+    "Ceiling: v2 only changes the encoding. v1's `session_lifetime_ms` is answered 0, so no client re-authenticates on a timer.",
   CreateTopics:
-    "Ceiling: v7 answers a `topic_id` UUID this facade has no registry to mint, the same boundary Metadata stops at. v4 (KIP-464) is where -1 means 'you choose' for the partition count and replication factor, v5 carries the created topic's real configs back, and v6 is where a client understands THROTTLING_QUOTA_EXCEEDED. Floor: the schema's own.",
+    "Ceiling: v7 returns a topic id, which the facade does not mint. v4 lets a client send -1 for the partition count and the replication factor, v5 returns the created topic's configs, and v6 understands THROTTLING_QUOTA_EXCEEDED, the answer past 100 topics in one request.",
   DeleteTopics:
-    "Ceiling: v6 replaces the name list with entries carrying a name or a topic id, and an id is a name this facade cannot resolve. v5 adds `error_message`, which is where 'there is no such queue' gets to say so. Floor: the schema's own.",
+    "Ceiling: v6 accepts a topic id in place of a name. v5 adds `error_message`, which says in words that there is no such queue.",
   DescribeConfigs:
-    "The whole schema, and the only row here with no ceiling to argue: nothing in the window asks for something the facade cannot answer. v3's `config_type` and `documentation` are answered truthfully for the keys reported, and the answer is short because a key is reported only where the facade can name what enforces it.",
+    "The whole schema. A key is reported only where the facade can name what enforces it, or where it keeps what a client set; v3's `config_type` and `documentation` are filled in for those keys.",
   ListGroups:
-    "Ceiling: v5 adds `group_type`, the KIP-848 discriminator between a classic group and a consumer-protocol one, and KIP-848 is excluded by plan \u2014 answering a group TYPE question would claim a taxonomy the facade does not implement. v4 is KIP-518's `states_filter` and `group_state`, and both are honoured rather than ignored.",
+    "Ceiling: v5 adds `group_type`, which tells classic groups from KIP-848 ones, and KIP-848 is not supported. v4's state filter (`--state`) is honoured.",
   DescribeGroups:
-    "Ceiling: v4 carries `group_instance_id` (static membership, out of scope), the same rule that caps JoinGroup at 4. v3's `include_authorized_operations` is answered with Kafka's own omitted sentinel, because the facade has no ACL model and a computed bitfield would be an invented permission set.",
+    "Ceiling: v4 carries `group_instance_id`. v3's authorized operations are answered with Kafka's own 'omitted' value, because there is no ACL model.",
   DeleteGroups:
-    "The whole schema. v2 is the flexible encoding and adds no field, and there is no version of this API that asks for something the facade cannot answer.",
+    "The whole schema; v2 only changes the encoding. Deleting a group deletes the Queen consumer group of that name, with its position on every queue.",
   InitProducerId:
-    "Ceiling: v5 exists for KIP-890's transaction protocol 2, which this facade does not perform \u2014 the same ceiling argument the four transaction rows make. Since M9 this key grants a `transactional.id` as well as an idempotent one, so what stops at v5 is a PROTOCOL the facade does not run rather than a feature it refuses; in cluster mode a transactional id is still answered TRANSACTIONAL_ID_AUTHORIZATION_FAILED. v3 is load-bearing rather than a nicety: it is KIP-360's epoch bump, and it is what turns a sequence window this facade has lost (a restart, an evicted entry) into a reset the producer recovers from instead of a fatal error. Read the REQUEST schema for the cap, not the key's `valid_versions()`, which answers wider because it takes the maximum of request and response.",
+    "Ceiling: v5 exists for KIP-890's transaction protocol 2, which the facade does not run. v3 matters: it is KIP-360's epoch bump, which lets a producer recover when a node has lost its sequence window (a restart, an eviction). A transactional id is refused in cluster mode.",
   DescribeAcls:
-    "The whole schema window, and no ceiling to argue: every field of the request and the response is marked v1-v3, so nothing varies inside it but the flexible encoding (v2). Floor: the schema's own, which is KIP-896's, since v0 was dropped. What is advertised is a REFUSAL. Every call answers SECURITY_DISABLED, which is what an Apache Kafka broker with no authorizer answers, because Queen has no ACL model to answer anything else from.",
-  CreateAcls:
-    "The same window and the same refusal as DescribeAcls, with one difference on the wire that a client can read: the error is carried PER CREATION rather than at the top level, because Kafka's own error response maps over the request. An empty creations list therefore answers an empty result list and no error at all.",
+    "The whole window, and what it advertises is Kafka's own refusal: SECURITY_DISABLED, the answer of a Kafka broker with no authorizer. Authorization here is Queen's, on the token.",
+  CreateAcls: "The same window and the same refusal, one result per creation.",
   DeleteAcls:
-    "The same window and the same refusal, per FILTER, each with an empty matching_acls. Advertising these three rather than leaving them out is what turns \"this broker is too old\" into the sentence a real Kafka with security off prints.",
+    "The same window and the same refusal, one result per filter. Advertising the three turns 'this broker is too old' into the message a Kafka with security off prints.",
   AlterConfigs:
-    "The whole schema window: every field of both schemas is marked v0-v2, so nothing varies inside it but the flexible encoding (v2). Floor: the schema's own, and it is 0, because KIP-896 dropped nothing from this key and inventing a floor above 0 would refuse a version a real broker serves. This is the deprecated FULL-REPLACEMENT form, honoured literally: a key the request does not name is reset to its default. Prefer IncrementalAlterConfigs.",
+    "The whole window. This is the deprecated full-replacement form, honoured literally: a key the request does not name goes back to its default. Prefer IncrementalAlterConfigs.",
   IncrementalAlterConfigs:
-    "The whole schema window (v1 is the flexible encoding and adds no field), and the key that matters: `kafka-configs.sh --alter` has sent this since Kafka 2.3 and has no fallback to the deprecated key 33, so this is what an operator's command actually lands on. What it can write is bounded by what the facade can write LOSSLESSLY. Queen's configure route is a whole-row upsert whose columns mostly cannot be read back, so an alter lands only on a topic this facade created and every other topic is refused with the reason.",
+    "The whole window, and the request `kafka-configs.sh --alter` sends. It changes topics created through Kafka (by CreateTopics or on first use), whose configuration the facade keeps a record of; a queue created by a Queen client is refused, with the reason.",
   CreatePartitions:
-    "The whole schema window; nothing varies inside it but the flexible encoding (v2). An INCREASE raises the topic's declared width — the floor CreateTopics wrote — for a topic this facade tracks, so the next Metadata reports the new count and keys hash onto it, as on Apache Kafka. A DECREASE and an EQUAL count are refused with Apache Kafka's own sentences byte for byte, and a topic the facade did not create is refused with the knob that governs its width.",
+    "The whole window. An increase raises the width of a topic created through Kafka, and the next Metadata reports it; a decrease or an equal count is refused with Kafka's own sentences.",
   DescribeLogDirs:
-    "Floor: v1, since KIP-896 dropped v0. Ceiling: the schema's v4, whose volume sizes are answered -1. It answers only where it is true: a facade running inside a raft broker lists that node's data directory with every partition of every topic, because every voter holds every partition, each with the bytes the node's store counts for it. Over HTTP the facade knows nothing of the broker's storage and answers no directory at all.",
+    "Floor: v1, since KIP-896 dropped v0. Ceiling: the schema's v4, with volume sizes answered -1. The node's data directory is listed with every partition and the bytes it holds, because every raft voter holds every partition. A facade reaching the broker over an explicit `QUEEN_URL` lists no directory.",
   AddPartitionsToTxn:
-    "Ceiling: v4 is a DIFFERENT REQUEST, not a wider one. The flat (transactional_id, producer_id, producer_epoch, topics) of v0-v3 becomes a `transactions[]` array with a `verify_only` flag — KIP-890's coordinator-to-partition-leader verification, which a client never sends and only another broker does. Floor: the schema's own, since KIP-896 dropped nothing here.",
+    "Ceiling: v4 is a different request, KIP-890's broker-to-broker verification, which no client sends.",
   AddOffsetsToTxn:
-    "The whole window a client uses. Every field of the schema is marked v0-v4 and v3 is already the flexible encoding, so v3 answers everything v4 does; v4 exists for KIP-890's transaction protocol 2, in which the client stops sending this API at all and the coordinator infers the offsets partition. Advertising it would advertise a protocol this facade does not run.",
+    "v3 answers everything v4 does. v4 exists for KIP-890's transaction protocol 2, in which clients stop sending this request.",
   EndTxn:
-    "Ceiling: v5's RESPONSE carries `producer_id` and `producer_epoch` — the transaction-protocol-2 epoch bump performed inside EndTxn, which this facade does not perform — and v4 is the version pair that exists on the way to it. v3 is the flexible encoding and asks for nothing that cannot be answered.",
+    "Ceiling: v5 returns a new producer epoch from inside EndTxn (KIP-890's transaction protocol 2), which the facade does not do.",
   TxnOffsetCommit:
-    "The FLOOR is the load-bearing number here, and it is measured rather than preferred: TxnOffsetCommitRequest$Builder.build(short) in kafka-clients 3.9.2 throws UnsupportedVersionException below v3 whenever group metadata is set, and every KIP-447 consume-transform-produce loop sets it — so advertising this API below 3 would make the flagship use case throw before any wire traffic. Ceiling: the same transaction-protocol-2 bump as the other three, which adds no field a client fills in.",
+    "v3 has to be in the window: kafka-clients refuses to build this request below v3 when group metadata is set, which every consume-transform-produce loop does. Ceiling: KIP-890's transaction protocol 2.",
   OffsetDelete:
-    "One version, so there is no window to argue. It is the last thing `kafka-consumer-groups.sh` could not do here, and Kafka's guard for it is not membership but SUBSCRIPTION: a live consumer group's subscribed topics are refused and everything else is deletable. The facade keeps that rule exactly rather than approximating it, because the coordinator holds each member's JoinGroup metadata verbatim and those bytes are a ConsumerProtocolSubscription.",
+    "One version. Kafka's rule is kept exactly: the offsets of a topic a live member is subscribed to are refused (GROUP_SUBSCRIBED_TO_TOPIC), everything else can be deleted.",
 };
 
 // ---------------------------------------------------------------------------
@@ -198,25 +204,25 @@ const WINDOW_REASON = {
  * arriving here is usually holding a tool.
  */
 const ABSENT = [
-  ["ConsumerGroupHeartbeat", "The KIP-848 broker-side rebalance protocol.", "Excluded by plan; groups use the classic Join/Sync protocol."],
-  ["DeleteRecords", "Truncates a partition below an offset. `kafka-delete-records.sh`, and the \"Clear messages\" button in kafka-ui and AKHQ.", "Queen has no truncate-to-offset primitive: a queue's log start moves by retention and by dropping the queue, both time-driven. Implementing it would mean reporting a low watermark that did not move, which is a fabricated value a tool would act on. DeleteTopics then CreateTopics is the workaround, and both work."],
-  ["OffsetForLeaderEpoch", "Detects log truncation after a leader change.", "Every leader epoch this facade reports is -1, in Metadata, in ListOffsets, in OffsetFetch and in every record batch, so a consumer's subscription state never holds one and the request is never built. No tool sends it directly, and the cost of the absence is nothing measurable."],
-  ["CreateDelegationToken", "Mints a broker-signed token from an authenticated principal.", "A delegation token is derived from a SCRAM principal and signed with a cluster secret. This facade mints no credentials; Queen does. `kafka-delegation-tokens.sh` fails, and nothing in the client matrix uses it."],
-  ["RenewDelegationToken", "Extends a delegation token's life.", "Same reason."],
-  ["ExpireDelegationToken", "Revokes a delegation token early.", "Same reason."],
-  ["DescribeDelegationToken", "Lists the tokens a principal holds.", "Same reason."],
-  ["ElectLeaders", "Moves a partition's leadership to its preferred replica. `kafka-leader-election.sh`.", "One logical broker and no replicas: every Metadata answer is replicas=[0], isr=[0]. In cluster mode a partition's leader is a rendezvous hash over the live set, which is deterministic and not movable. There is no preferred replica to elect and no unclean election to permit."],
-  ["AlterPartitionReassignments", "Moves replicas between brokers. `kafka-reassign-partitions.sh`, Cruise Control.", "There are no Kafka replicas to move; durability is Queen's replicated log, which the broker manages itself. A reassignment API over one logical broker would accept a plan and then have nothing to do with it."],
-  ["ListPartitionReassignments", "Reports reassignments in flight.", "Same reason. No UI in the client matrix calls it on a render path."],
-  ["DescribeClientQuotas", "Reads the produce/fetch quotas for a (user, client-id).", "The facade DOES have quotas, as Queen's 429 with Retry-After surfaced as throttle_time_ms, but they are the Cloud proxy's and they are per TENANT, which is not expressible in Kafka's entity model. Describing them would mean inventing an entity mapping. The one absence with a real future story: a read-only version of this key mapping the tenant onto a user entity, once the proxy exposes the cap."],
-  ["AlterClientQuotas", "Writes those quotas.", "Same mapping problem, and a second and independent reason it must never work: it would let a tenant raise its own rate cap from a Kafka client, which is a privilege escalation. This key stays absent even if the read half ever lands."],
-  ["DescribeUserScramCredentials", "Lists SCRAM users.", "SASL here is PLAIN only and the credential is a Queen bearer token verified by Queen. There is no local user store to describe."],
-  ["AlterUserScramCredentials", "Creates or rotates a SCRAM credential.", "Supporting SCRAM would require the facade to hold salted password verifiers: to become a credential store, with its own rotation, its own secrets at rest and its own blast radius. That is a security posture change rather than a protocol gap, and it is not a decision this milestone could take."],
-  ["DescribeQuorum", "Describes the KRaft metadata quorum. `kafka-metadata-quorum.sh`.", "No Raft log and no voters, so every field would be invented. The one thing UIs actually render from it, a controller id, is already in every Metadata answer. kafka-ui feature-detects and hides its KRaft panel."],
-  ["DescribeCluster", "Cluster id, controller and broker list in one call.", "Answerable truthfully, and deliberately not answered: every client in the compatibility matrix already resolves describeCluster() from a plain Metadata request, so advertising it would move five live suites onto a code path none of them exercises today for a measured gain of zero. The trigger that flips this is the first client whose describeCluster() stops falling back."],
-  ["DescribeProducers", "Per-partition producer state: id, epoch, last sequence. `kafka-transactions.sh find-hanging`.", "The facade's idempotence window is PROCESS state and is deliberately lost on restart. Answering from it would advertise durable producer state the facade does not have; answering an empty list would say nothing is producing while producers produce. Both are lies."],
-  ["DescribeTransactions", "Describes one transaction's state.", "Transactions landed in M9 and this key still does not, for the reason that survived them: an open transaction is a stage held by ONE facade process, on the connection that opened it. A node can describe only its own, so an operator asking a load-balanced address would get a different answer per connection, and `kafka-transactions.sh` would report a transaction as absent because it asked the wrong node."],
-  ["ListTransactions", "Lists transactions in flight.", "Same reason, and it is the one that bites harder: a LIST that is per node reads as the whole cluster's and is not."],
+  ["ConsumerGroupHeartbeat", "The KIP-848 consumer group protocol (`group.protocol=consumer`).", "Not supported. Groups use the classic protocol, which every Kafka 4.x client still uses by default; a client set to `consumer` fails at once with an error that names `group.protocol=classic`."],
+  ["DeleteRecords", "Truncating a partition below an offset: `kafka-delete-records.sh`, the clear-messages buttons of kafka-ui and AKHQ, and Kafka Streams purging its repartition topics.", "Queen has no trim to an offset yet: a partition's start moves by retention and when the queue is deleted. Answering would report a low watermark that did not move. Delete and recreate the topic instead."],
+  ["OffsetForLeaderEpoch", "Detecting log truncation after a leader change.", "Every leader epoch the facade reports is -1, so no client ever builds this request."],
+  ["CreateDelegationToken", "A broker-signed token derived from a SCRAM login.", "The facade mints no credentials: the password of a SASL/PLAIN login is a Queen token, checked by Queen."],
+  ["RenewDelegationToken", "Extending a delegation token.", "Same reason."],
+  ["ExpireDelegationToken", "Revoking a delegation token.", "Same reason."],
+  ["DescribeDelegationToken", "Listing a principal's delegation tokens.", "Same reason."],
+  ["ElectLeaders", "Moving a partition's leadership to its preferred replica (`kafka-leader-election.sh`).", "A partition leader here is advertised to spread clients over the nodes, and every node serves every partition; raft elects the one leader of the log on its own."],
+  ["AlterPartitionReassignments", "Moving replicas between brokers (`kafka-reassign-partitions.sh`, Cruise Control).", "Every raft voter holds every partition, so there is nothing to move."],
+  ["ListPartitionReassignments", "Reassignments in flight.", "Same reason."],
+  ["DescribeClientQuotas", "Produce and fetch quotas per user and client id.", "Queen's limits are per tenant and reach a client as `throttle_time_ms`; Kafka's quota entities have nothing to map onto."],
+  ["AlterClientQuotas", "Changing those quotas.", "The same mapping problem, and it would let a client raise its own tenant's limit."],
+  ["DescribeUserScramCredentials", "Listing SCRAM users.", "SASL here is PLAIN, checked against Queen, and the facade keeps no user store."],
+  ["AlterUserScramCredentials", "Creating or rotating a SCRAM credential.", "Supporting SCRAM would make the facade a credential store, with secrets of its own at rest."],
+  ["DescribeQuorum", "KRaft's metadata quorum (`kafka-metadata-quorum.sh`).", "Queen's raft group is not a KRaft quorum. Its state is in `GET /health` and `GET /api/v1/raft/status`."],
+  ["DescribeCluster", "Cluster id, controller and brokers in one call.", "Answerable, and left out because the Java and librdkafka admin clients build `describeCluster()` from a Metadata request, which works."],
+  ["DescribeProducers", "Producer state per partition (`kafka-transactions.sh find-hanging`).", "The idempotent producers' sequence windows live in node memory and are lost on a restart. Answering would describe durable producer state the facade does not have."],
+  ["DescribeTransactions", "One transaction's state.", "An open transaction is staged in the memory of the node that holds it, so another node would answer that it does not exist."],
+  ["ListTransactions", "Transactions in flight.", "Same reason: a list from one node would read as the cluster's."],
 ];
 
 // ---------------------------------------------------------------------------
@@ -253,8 +259,8 @@ function main() {
   const lines = [];
   lines.push(
     `The facade advertises **${rows.length} Kafka APIs**. Every row is read out of ` +
-      `\`${VERSIONS}\` at build time, which is the same table the ApiVersions response is built ` +
-      `from and the same table every incoming request is checked against.`,
+      `\`${VERSIONS}\` when the site is built: the table the ApiVersions answer is made from, and ` +
+      `the one every incoming request is checked against.`,
     "",
     "| API | Versions | Where the window ends, and why |",
     "| --- | --- | --- |",
@@ -269,12 +275,11 @@ function main() {
     "",
     "### Not offered",
     "",
-    "A client that sends one of these gets no response frame at all: the connection closes, " +
-      "with the reason in the facade's log. That is Apache Kafka's own behaviour for an " +
-      "unparseable request, and it is unreachable for a client that read the ApiVersions " +
-      "answer, which is every client. Each row is a decision with a test behind it: the " +
-      "facade's own suite asserts that none of these keys is advertised, so offering one by " +
-      "accident fails a test rather than shipping.",
+    "A client that sends one of these gets no answer: the connection closes, with the reason " +
+      "in the node's log, which is what Apache Kafka does with a request it cannot parse. A " +
+      "client that read the ApiVersions answer never sends one. Each absence is a decision with " +
+      "a test behind it, so offering one of these by accident fails the facade's own suite " +
+      "before it ships.",
     "",
     "| API | What a client wants it for | Why it is not here |",
     "| --- | --- | --- |",

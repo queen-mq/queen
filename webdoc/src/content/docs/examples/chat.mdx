@@ -1,0 +1,168 @@
+---
+title: Chat backend
+description: "A chat backend with one ordered partition per conversation: every conversation keeps its order, a slow one delays only itself, and a feature added later reads the whole history."
+type: example
+tier: use
+sidebar:
+  order: 2
+sourceOfTruth:
+  - examples/apps/js/chat.mjs
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+verifiedBy:
+  - examples/apps/js/chat.mjs
+  - examples/apps/py/chat.py
+  - examples/apps/go/chat/main.go
+  - examples/apps/rust/src/bin/chat.rs
+  - examples/apps/php/chat.php
+  - examples/apps/cpp/chat.cpp
+  - examples/apps/http/chat.sh
+---
+
+Queen began as the broker of a hotel messaging product, so this is the application we know best.
+Every conversation is a partition of its own, created by its first message. The messages of a
+conversation are handled in the order they were sent, a conversation that needs a slow
+translation delays itself and no other, and a consumer you add months later can read every
+message ever sent. The program below is the whole backend, about 90 lines of code, and it checks
+each of those claims against a running node.
+
+## Run it
+
+```bash
+docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+npm install queen-mq
+node chat.mjs     # the JavaScript tab below, saved as chat.mjs
+```
+
+What it printed against a 2.0.0-beta.6 node:
+
+```text
+sending
+  18 messages across 3 conversations
+  ok: a resent message was recognised and not stored twice
+
+delivering
+  ok: delivery saw all 18 messages once (got 18)
+  ok: conv-jp-1 was delivered in order: 1,2,3,4,5,6
+  ok: conv-en-1 was delivered in order: 1,2,3,4,5,6
+  ok: conv-en-2 was delivered in order: 1,2,3,4,5,6
+
+enriching
+  english done after 127 ms, japanese after 2481 ms
+  ok: the English conversations finished while the Japanese one was still being translated
+  ok: the Japanese conversation really took its six translations
+
+backfilling a new group
+  ok: a group created now read the whole history (18 messages)
+
+PASS: 8 checks
+```
+
+The line to look at is `english done after 127 ms, japanese after 2481 ms`. The Japanese
+conversation is the oldest in the queue and costs 400 ms a message, and the two English
+conversations, served by the same group and the same pool of three workers, were done before its
+first translation finished.
+
+## The program
+
+<Tabs>
+
+<TabItem label="JavaScript">
+
+<Render file="snippets/app-js-chat" />
+
+</TabItem>
+
+<TabItem label="Python">
+
+<Render file="snippets/app-py-chat" />
+
+</TabItem>
+
+<TabItem label="Go">
+
+<Render file="snippets/app-go-chat" />
+
+</TabItem>
+
+<TabItem label="Rust">
+
+<Render file="snippets/app-rust-chat" />
+
+</TabItem>
+
+<TabItem label="PHP">
+
+<Render file="snippets/app-php-chat" />
+
+</TabItem>
+
+<TabItem label="C++">
+
+<Render file="snippets/app-cpp-chat" />
+
+</TabItem>
+
+<TabItem label="curl">
+
+<Render file="snippets/app-http-chat" />
+
+</TabItem>
+
+</Tabs>
+
+## How it works
+
+Sending a message is one push into the partition named after the conversation. Nothing was
+declared for the conversation beforehand: the first push creates the partition in the same log
+entry that stores the message, and there is nothing to tear down when the conversation goes
+quiet. The push carries the phone's own id for the message as `transactionId`, so when a phone on
+a bad network resends a message it never saw answered, the broker answers `duplicate` with the
+first message's id and stores nothing. [Queues and partitions](/concepts/partitions/) explains why
+a partition per entity costs so little that it is the shape to start from.
+
+Each kind of work is a consumer group: `delivery` marks messages delivered, `enrichment`
+translates, `sentiment` scores. A group is a set of cursors, one per partition, so the three read
+the same messages without copying them and without waiting for each other. Fast work never queues
+behind slow work, because they do not share a cursor.
+
+<Figure id="examples/chat" />
+
+Inside a group, a partition is leased to one worker at a time. That lease is what keeps a
+conversation in order with any number of workers, and it is also why `.partitions(1)` is in the
+program. By default the client lets the broker size each pop, and a pop can sweep up several ready
+conversations at once; a worker then handles that pop's messages one after another, so a slow
+conversation would delay the ones that came with it. With one conversation per pop, three workers
+hold three conversations. We checked that it matters: without `.partitions(1)`, the English
+conversations finished after 3.4 s, behind the Japanese one, and the program failed.
+
+The sentiment group shows what a new feature costs. It is created after every message was sent
+and asks for `subscriptionMode('all')`, so it starts at the oldest retained message and reads the
+whole history, with no change to the producer and no second copy of the data.
+
+## Why it is short
+
+A chat backend on a broker with a fixed number of partitions starts with a guess: how many
+partitions, and which conversations will share each one. Every conversation hashed onto a
+partition waits behind the others there, so the next step is often a consumer that pulls
+messages off the partition into per-conversation queues of its own, with locks, and offsets that
+no longer say what was processed. Here the partition is the conversation, so ordering, isolation
+and progress tracking are the broker's, and the program is left with the parts that are about
+chat: send, deliver, translate, score.
+
+## Limits
+
+- A conversation is sequential within a group. One busy conversation gets one worker at a
+  time; throughput comes from many conversations, not from splitting one.
+- `.partitions(1)` gives up batching across conversations. Each pop carries one
+  conversation's messages, so many tiny conversations cost more round trips. Leave the default for
+  groups whose work is uniformly fast.
+- Deduplication holds inside the dedup window, an hour by default (`dedupWindowSeconds`); a
+  resend after that is stored as a new message. See [dedup](/concepts/dedup/).
+- A new group starts at the tail unless it asks for `subscriptionMode('all')`, and it can only
+  read back what retention has kept.
+
+## Next
+
+[Consuming](/concepts/consuming/) covers groups, leases and the pop options used here, and the
+[webhook sender](/examples/webhooks/) applies the same shape to failures that have to be retried.

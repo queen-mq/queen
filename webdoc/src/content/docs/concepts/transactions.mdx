@@ -11,41 +11,57 @@ sourceOfTruth:
   - server/src/rsm/consume/ack.rs
   - server/src/rsm/facade/real.rs
   - server/src/rsm/facade/groups.rs
+  - server/src/handlers/raft.rs
   - clients/client-js/client-v2/builders/TransactionBuilder.js
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
 verifiedBy:
   - clients/client-js/test-v2/transaction.js
   - clients/client-js/test-v2/kv.js
   - clients/client-js/test-v2/timers.js
 ---
 
-A transaction is one call that writes one step: it acks what the worker took, pushes the next
-events, writes KV state and schedules or cancels timers, as a single entry of the replicated log.
-Either every part applies or none does. Use it whenever a worker's output must not come apart
-from its input.
-
-## One call, one entry
+A transaction is one call that writes one step. It acks what the worker took, pushes the next
+events, writes KV state and schedules or cancels timers, as a single entry of the broker's log, and
+either every part applies or none does. Use it whenever a worker's output must not come apart from
+its input, which in practice is almost always.
 
 ```js
-await queen.queue('orders').group('billing').autoAck(false).each()
+await queen.queue('payments').group('billing').autoAck(false).each()
   .consume(async (message) => {
-    const id = String(message.data.orderId)
-    const res = await queen.transaction()
-      .ack(message, 'completed', { consumerGroup: 'billing' })              // progress
-      .kv.put('orders', id, { status: 'paid' }, { ttl: '30d' })              // state
-      .queue('receipts').partition(message.data.customerId)
-        .push([{ data: { orderId: id } }])                                    // events
-      .timer('reminders').key(id).delay('24h').payload({ orderId: id }).schedule() // time
-      .once('payments', message.data.paymentId, { ttl: '30d' })              // identity
-      .commit()
-    if (res.success === false) await queen.ack(message, true, { group: 'billing' })
+    const { orderId, customerId, paymentId } = message.data
+    try {
+      const res = await queen.transaction()
+        .ack(message, 'completed', { consumerGroup: 'billing' })       // progress
+        .kv.put('orders', `order-${orderId}`, { status: 'paid' }, { ttl: '30d' }) // state
+        .queue('receipts').partition(customerId)
+          .push([{ data: { orderId, paymentId } }])                    // events
+        .timer('reminders').key(`order-${orderId}`).delay('24h')
+          .payload({ orderId }).schedule()                             // time
+        .once('payments', paymentId, { ttl: '30d' })                   // identity
+        .commit()
+      if (res.success === false) {
+        // `once` found its marker: this payment was handled before.
+        await queen.ack(message, 'completed', { group: 'billing' })
+      }
+    } catch (err) {
+      // rejected_ack: the lease ran out, and the message goes to the next worker as it is.
+      if (err.reason !== 'rejected_ack') {
+        await queen.ack(message, 'failed', { group: 'billing', error: err.message })
+      }
+    }
   })
 ```
 
-The same call over HTTP is `POST /api/v1/transaction` with `operations` (acks and pushes) and
-the top-level arrays `kv` and `timers`; [the model](/concepts/) shows a full body and
-[the reference](/reference/transaction/) every field. A commit answers HTTP 200 with
-`success: true` and one result per operation, KV op and timer op; a rollback answers HTTP 200
-with `success: false`, a `reason` and an empty `results`.
+The second delivery of the same payment (a provider retrying its webhook, a lease that expired after
+the commit) finds the `once` marker, and the whole transaction rolls back, receipt and timer
+included. The handler then acks the message on its own, because the ack rolled back with the rest.
+
+Over HTTP the same call is `POST /api/v1/transaction`, with the acks and pushes in `operations` and
+the KV and timer operations in the top-level arrays `kv` and `timers`; [the model](/concepts/) shows
+a whole body, and [the reference](/reference/transaction/) every field. A commit answers HTTP 200
+with `success: true` and one result per ack, pushed item, KV operation and timer operation. A
+rollback answers HTTP 200 too, with `success: false`, a `reason`, an `error` and an empty `results`,
+and it has written nothing.
 
 ## What can go in
 
@@ -56,78 +72,104 @@ with `success: false`, a `reason` and an empty `results`.
 | KV | `kv` | `put`, `putIfAbsent`, `delete`, `incr`, `get`, `getMany`. No `getPrefix`. See [KV](/concepts/kv/). |
 | Timers | `timers` | `schedule` (an upsert) and `cancel`. See [timers](/concepts/timers/). |
 
-Name the consumer group on every ack (`{ consumerGroup }` in the JS SDK): without it the ack
-goes to `__QUEUE_MODE__`, not to the group that popped the message. The entry is crash-atomic
-across every queue log it touches: after a crash, recovery replays it only when every copy is
-present, so a transaction is never partly visible.
+<Figure id="concepts/txn-anatomy" />
+
+Every ack belongs to a consumer group. The JS SDK takes it from the message, which every pop
+answers with (`message.consumerGroup`). Over HTTP, name it on every ack operation: an ack without
+one is judged in queue mode (`__QUEUE_MODE__`), finds no lease there, and the whole call rolls
+back. The entry is atomic across a crash, too: it is written into the log of every queue it
+touches, with the number of copies, and recovery replays it only when every copy is present, so a
+transaction is never partly visible.
 
 ## The lease is the fence
 
-When an ack carries the `leaseId` of the pop that delivered the message, the lease fences the
-whole call. **If that lease expired or another worker holds the partition now, the ack is refused
-and the whole transaction rolls back, KV write and timer included** (`reason: "rejected_ack"`).
-A compare-and-swap cannot give you this: an `expect` on a version that still matches succeeds
-even from a worker that no longer owns the message.
+When an ack carries the `leaseId` of the pop that delivered its message, that lease fences the whole
+call. If the lease has expired, or another worker holds the partition now, the ack is refused and
+the transaction rolls back with `reason: "rejected_ack"`, KV writes and timers included. A
+compare-and-swap cannot give you this: an `expect` on a version that still matches succeeds even
+for a worker that lost its message minutes ago.
 
-The lease must travel with the ack. Over HTTP, put `leaseId` on each ack operation. An ack
-without its own `leaseId` takes the lease in `requiredLeases` only when the call names exactly
-one lease; otherwise it is not lease-checked and still moves the cursor. The JS SDK sends each
-message's `leaseId` in `requiredLeases`, so its acks are fenced when they come from one pop.
+<Figure id="concepts/lease-fence" />
 
-## `once`: the gate
+The lease has to travel with the ack. Over HTTP, put `leaseId` on each ack operation, or name
+exactly one lease in `requiredLeases` and the acks without their own `leaseId` take it; an ack that
+ends up with no lease is not checked and still moves the cursor. The JS SDK sends each message's
+lease in `requiredLeases`.
 
-`.once(ns, key, { ttl })` is a `putIfAbsent` with `required: true`. When the marker already
-exists, the transaction rolls back and answers `success: false`,
-`reason: "kv_precondition"`, `kvReason: "exists"` and the `failedIndex` of the gate. The JS SDK
-returns that verdict from `commit()` instead of throwing, because a second event for the same key
-(a payment provider retrying its webhook, say) is the expected case, not an error. Key the gate on
-the business fact (`paymentId`), not on the message: a message that committed is already acked.
-The ack rolled back with the rest, so ack the message on its own, as the example above does, or
-it comes back.
+## `once`, the gate
+
+`.once(ns, key, { ttl })` writes a KV marker with `putIfAbsent` and `required: true`. When the marker
+already exists, the transaction rolls back and answers `success: false`,
+`reason: "kv_precondition"`, `kvReason: "exists"`, and the `failedIndex` of the gate. The JS SDK
+returns that verdict from `commit()` without throwing, because a second event for the same business
+fact (a provider retrying its webhook, a redelivery after a crash) is something your handler expects
+and answers with an ack. Key the gate on that fact (`paymentId`), and give the marker a TTL longer
+than any redelivery can arrive.
 
 ## Why a transaction rolls back
 
 | `reason` | Cause | JS `commit()` |
 |---|---|---|
-| `kv_precondition` | A KV op with `required: true` lost its precondition (`once` found its marker, an `expect` missed). | returns the verdict |
-| `duplicate` | A pushed `transactionId` is already in its partition's dedup window. | throws, `error.reason` |
-| `rejected_ack` | An ack's lease expired or moved, or the message was already acked. | throws |
+| `kv_precondition` | A KV operation with `required: true` lost its precondition (`once` found its marker, an `expect` missed). | returns the verdict |
+| `duplicate` | A pushed `transactionId` is already in its partition's dedup window. | throws, `err.reason` |
+| `rejected_ack` | An ack's lease has expired or moved, or the message it names is no longer leased to this worker. | throws |
 | `reserved` | Another transaction or a checkpoint holds that cursor at this moment. Retry. | throws |
 | `bad_request` | A malformed operation. Some shapes answer HTTP 400 instead. | throws |
+| `too_large` | One push group, KV call or timers part is over the entry limit. | throws |
 
-These are the common reasons; [errors](/reference/errors/) lists every code. A rolled-back
-transaction writes nothing and leaves nothing visible. A 503 (`outcome_unknown`,
-`timeout`, `no_leader`) is not a rollback: the outcome is not known yet, and the answer carries
-`Retry-After`.
+The broker checks the acks first, then the pushes and their dedup, then KV, then timers, and the
+first refusal decides the `reason`. [Errors](/reference/errors/) lists every code. A 503 is not a
+rollback: `retry`, `timeout` and `no_leader` mean the outcome is not known (the call may still
+commit), and they carry `Retry-After`.
 
 ## One tenant, one raft group
 
 A transaction carries the tenant of its request, and each tenant lives in exactly one raft group
-(`QUEEN_RAFT_GROUPS`, placed by a hash of the tenant or by `QUEEN_TENANT_GROUPS`). So every
-transaction is one entry in one log: no coordinator, no two-phase commit. It cannot span tenants.
+(`QUEEN_RAFT_GROUPS`, placed by a hash of the tenant name or by `QUEEN_TENANT_GROUPS`). So every
+transaction is one entry in one log, ordered by one leader, with no coordinator and no two-phase
+commit. That is the design decision the rest of this page leans on, and its cost is that a
+transaction cannot span tenants.
 
 ## Where exactly-once stops
 
-- **A lost response.** Send the same call again. If the first one committed, a retry that
-  carries the same acks or the same push `transactionId`s is refused (`rejected_ack` or
-  `duplicate`) and writes nothing. If it did not commit, the retry commits, or, once the lease
-  has expired, the message is redelivered and the next attempt commits. Deterministic push
-  `transactionId`s make both cases safe: see [dedup](/concepts/dedup/).
-- **External calls.** An HTTP call to a payment provider is outside the commit. Give the provider
-  an idempotency key derived from the message. See [exactly-once](/guides/exactly-once/).
+Answers get lost. The SDKs send a call again on their own when it fails with a 5xx or times out,
+and you may too, so a step can reach the broker twice. A retry of a step that already committed is
+refused whole when the step carries a gate: a `once` marker, or a push whose deterministic
+`transactionId` the first attempt stored (see [dedup](/concepts/dedup/)). The ack alone is not
+always a gate. If the first attempt released the lease, the repeated ack is refused, but while the
+same lease still covers other messages of the batch, re-acking an acked message is a no-op, and a
+retry without a gate writes its KV operations and timers again (an `incr` counts twice). So give
+every step a gate.
 
-`transactionRollback`, `kvTransactionGateBlocksTheSecondDelivery` and `timerRidesTheTransaction`
-in `clients/client-js/test-v2/` run these behaviours against a live broker.
+In JavaScript, a handler under `.autoAck(false)` that throws is nacked for whatever it had not
+acked, and the loop goes on, so an error before the commit spends one retry and the event comes
+back. Catch the errors you can answer better yourself, as the example above does with a lost lease.
+
+A call your worker makes to another system, such as a payment provider, is outside the commit.
+Give that system an idempotency key derived from the message. See
+[exactly-once](/guides/exactly-once/).
 
 ## Limits
 
-- **Single call, not interactive.** There is no BEGIN, read, decide, COMMIT. A `get` inside a
-  transaction is answered after the commit, so it cannot be a condition: use `expect` with
-  `required: true`.
-- **One tenant per transaction.**
-- **KV inside a transaction:** at most 64 ops and 256 keys, one write per key, no `getPrefix`.
-- **One timer op per queue and `timerKey`** per call.
-- **Size:** one body is at most 64 MiB (`QUEEN_MAX_BODY_BYTES`), one planned entry at most 96 MiB
+- A transaction is a single call, not an interactive session: there is no BEGIN, read, decide,
+  COMMIT. A `get` inside a transaction is answered after the entry has applied, so it cannot be a
+  condition; use `expect` with `required: true`.
+- One transaction belongs to one tenant.
+- KV inside a transaction takes at most 64 operations over 256 keys, one write per key, and no
+  `getPrefix`.
+- One call holds one timer operation per queue and `timerKey`.
+- One body is at most 64 MiB (`QUEEN_MAX_BODY_BYTES`), one planned entry at most 96 MiB
   (`QUEEN_RAFT_ENTRY_MAX_BYTES`).
-- **No published run measures transaction throughput.** The [benchmarks](/benchmarks/) measure
-  push, pop and ack.
+- Throughput has a ceiling per raft group. In our 2026-10-01 runs on three 16-vCPU nodes,
+  2.0.0-beta.2 committed up to about 7,200 transactions a second of 10 messages each on 200
+  partitions (8,900 in a tuned run), with a commit p99 of 4 ms at 900 a second
+  (`benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/`; see [transactions](/benchmarks/transactions/)).
+  Each raft group is a whole state machine with its own leader, so tenants in other groups have a
+  ceiling of their own.
+
+## Next
+
+<CardGrid>
+  <LinkCard title="Dedup and once" href="/concepts/dedup/" description="The gates that make a retried step harmless." />
+  <LinkCard title="Exactly-once" href="/guides/exactly-once/" description="A complete program that charges a card once, through crashes and replays." />
+</CardGrid>

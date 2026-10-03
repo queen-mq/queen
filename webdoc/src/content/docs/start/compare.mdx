@@ -1,6 +1,6 @@
 ---
 title: Compare
-description: "How Kafka, RabbitMQ, SQS, Temporal and Restate, and PostgreSQL with an outbox get per-entity order, what one commit covers in each, and where each is better."
+description: "Queen next to Kafka, Pulsar, RabbitMQ, SQS, Temporal and Restate, and PostgreSQL with an outbox: how each gets per-entity order, what one commit covers, and where each is better."
 type: concept
 tier: use
 sidebar:
@@ -8,111 +8,177 @@ sidebar:
 sourceOfTruth:
   - server/src/rsm/planner/txn.rs
   - server/src/rsm/planner/push.rs
-  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/groups.rs
+  - protocols/queen-kafka/src/topic_config.rs
 ---
 
-Two questions separate these systems: how you get order per entity when there are millions of
-entities, and what one commit covers when a service handles an event. Queen's answers are a
-partition per entity, created by its first message, and one transaction that writes the ack, the
-KV state, the next events and the timers as one entry. Each section says where the other system
-is better.
+Two questions separate these systems more than any feature list: how you keep order per entity when
+there are millions of entities, and what one commit covers when a service handles an event. Queen's
+answers are a partition per entity, created by its first message, and one transaction that writes
+the ack, the state, the next events and the timers as one entry. Every system below answers
+differently, and each is better than Queen at something, which each section says.
 
 ## Kafka
 
-A topic has a fixed number of partitions, chosen when you create it. The producer hashes each
-record's key onto one of them, so an entity shares its partition with every other entity that
-hashes there, and a slow one delays the rest. Adding partitions later moves keys to other
-partitions.
+A Kafka topic has a number of partitions chosen when you create it; it can grow but never shrink.
+The producer hashes each record's key onto a partition, so an entity shares its partition with
+every other entity that hashes there, and a slow one delays the rest of its partition. Growing the
+count can send a key's new records to a different partition, and then that key's order across the
+change is lost. Since 4.2, share groups give Kafka queue-style consumption, with per-record acks
+and a delivery limit, and they get there by giving up ordering.
 
 A Kafka transaction makes writes to several partitions and the consumer's offsets atomic: read,
-process, write. Kafka Streams keeps its state inside that boundary by writing it to changelog
-topics. State in a database is outside it, and Kafka has no delayed delivery.
+process, write. Kafka Streams, with `exactly_once_v2`, keeps its state inside that boundary by
+writing it to changelog topics. State in your database stays outside it (KIP-939, which would let
+Kafka join an external two-phase commit, is accepted but not released), and Kafka has no delayed
+delivery.
 
-**Where Kafka is better:** the ecosystem (Connect and its connectors, Streams, schema tooling),
-log compaction, and CPU per message, which was lower than Queen's in every shape of the
-cross-broker runs (those runs measured Queen 1.x). Queen's [Kafka facade](/guides/kafka/) lets
-existing clients connect; it does not bring that ecosystem.
+Kafka is better at throughput and latency at modest partition counts, and at the cost of getting
+them. In our runs (below) it kept up with 4,000,000 messages a second on 200 partitions, where
+Queen kept up with 1,000,000, at a lower p99 and with about half the CPU. Kafka acknowledges a
+write once its replicas hold it in the page cache, without waiting for an fsync, which is part of
+that difference. Then there is the ecosystem (Connect and its connectors, Streams, schema
+registries) and log compaction. Queen's [Kafka facade](/guides/kafka/) lets existing producers and
+consumers connect, and accepts the topic settings Streams and Connect create, but a compacted topic
+keeps every record, because Queen does not compact.
+
+## Pulsar
+
+Pulsar's Key_Shared subscription keeps per-key order without a partition per key, its transactions
+cover publishes and acks across topics, and it can delay delivery on shared subscriptions. Its
+storage acknowledges after an fsync on two of three bookies, the same durability Queen gives, which
+makes it the fairest comparison in our runs. A cluster runs brokers, BookKeeper bookies and a
+metadata store (ZooKeeper, in our runs).
+
+Pulsar is better at latency and CPU at 200 and at 10,000 partitions, where it beat Queen in our
+runs, and at transaction throughput. With 10 messages per transaction, Pulsar reached 17,600
+transactions a second over 1,800 partitions; Queen's best was 8,900, in one raft group. Pulsar's
+transactions cover messages and acks, so your application's state still lives in another system,
+and at 50,000 partitions Pulsar could not keep up with the load Queen carried.
 
 ## RabbitMQ
 
 Producers publish to exchanges, and bindings route each message into queues. A queue delivers in
 order, but competing consumers on one queue do not process in order. Per-entity order needs a
-queue per entity, or a consistent-hash exchange over a fixed set of queues, each with a single
-active consumer.
+queue per entity, a consistent-hash exchange over a fixed set of queues each with a single active
+consumer, or a super stream with single active consumers.
 
-AMQP 0-9-1 transactions make a batch of publishes and acks on one channel atomic. State in your
-database is outside them.
+Channel transactions group a channel's publishes and acks, but RabbitMQ does not make them atomic
+(a failure during the commit can leave some of them done), and AMQP 1.0, its core protocol since
+4.0, has no transactions. State in your database is outside either.
 
-**Where RabbitMQ is better:** routing. Exchanges, bindings, topic patterns and header matching
-have no Queen equivalent: the producer names the queue and the partition. RabbitMQ also speaks
-more protocols (AMQP, MQTT, STOMP); Queen speaks HTTP and the Kafka wire protocol.
+RabbitMQ is better at routing. Exchanges, bindings, topic patterns and header matching have no
+Queen equivalent; in Queen the producer names the queue and the partition. RabbitMQ also speaks
+more protocols (AMQP 0-9-1 and 1.0, MQTT, STOMP, its stream protocol), where Queen speaks HTTP and
+the Kafka wire protocol.
 
 ## Amazon SQS
 
 FIFO queues keep order within a message group ID, and while a group has messages in flight, SQS
-delivers no others from it. This is the closest idea to a Queen partition: a group needs no
+delivers no others from it. It is the closest idea to a Queen partition: a group needs no
 declaration and there is no count to choose. Deduplication uses a deduplication ID inside a fixed
 five-minute interval.
 
-There is no transaction. Deleting the input, sending the output and writing state are separate
-calls. One queue serves one set of consumers: fan-out goes through SNS or a queue per subscriber,
-and a deleted message cannot be read again.
+There is no transaction: deleting the input, sending the output and writing state are separate
+calls, and even a batch send can partly succeed. A queue serves one set of consumers, so fan-out
+goes through SNS or a queue per subscriber, and a deleted message cannot be read again. On FIFO
+queues, a delay is a queue setting of at most 15 minutes, never one message's own time.
 
-**Where SQS is better:** there is no server to run, patch or back up.
+SQS is better when you want nothing to operate: there is no server to run, patch or back up, you
+pay per request, and it scales without a partition count to think about.
 
 ## Temporal and Restate
 
 Both are durable execution engines. You write the workflow as code; they record each step in a
 history (Temporal) or a journal (Restate), and on recovery they replay your code against that
-record. Per-entity order comes from addressing one workflow, or one Restate virtual object, by
-the entity's key: Restate runs one exclusive handler at a time per key. What commits is a step of
-your code, so the code follows the SDK's rules for replay, such as deterministic workflow code in
-Temporal.
+record. Per-entity order comes from addressing one workflow, or one Restate virtual object, by the
+entity's key; Restate runs one exclusive handler at a time per key. Temporal needs deterministic
+workflow code and a database behind it (Cassandra, MySQL or PostgreSQL), and caps one history at
+51,200 events, so a long-lived workflow per entity has to continue-as-new. Restate journals an
+object's state, its outgoing calls and its timers together with each step, which is the idea on
+this page closest to Queen's. It is one Rust binary as well, clustered since 1.2, under the BSL
+1.1 license.
 
-Queen keeps the state machine as data instead: the partition is its input, KV is its state, and
-one transaction is one transition. Any language that speaks HTTP can be the worker, and nothing
-replays your code. See [one state machine per entity](/guides/state-machines/).
+Queen keeps the state machine as data instead of code: the partition is its input, KV is its
+state, and one transaction is one transition. Any language that speaks HTTP can be the worker, and
+nothing replays your code. It is also a broker, with consumer groups, fan-out to other groups and
+replay of history. See [one state machine per entity](/guides/state-machines/).
 
-**Where Temporal and Restate are better:** authoring long workflows as code. Loops, branches,
-waits of days and compensation read as one function.
+Temporal and Restate are better for authoring long workflows as code, where loops, branches, waits
+of days and compensations read as one function.
 
 ## PostgreSQL and a transactional outbox
 
-This is the stack Queen replaces, and the one Queen 1.x was built on. A service writes its state
-and an outbox row in one database transaction. A relay (a poller, or change data capture)
-publishes the outbox rows to a broker. Consumers keep an idempotency table so a redelivery is
-harmless, and a jobs table or a scheduler handles time. Per-entity order holds if the outbox
-carries a sequence per entity and the relay and the broker keep it.
+This is the stack most teams build. A service writes its state and an outbox row in one database
+transaction; a relay (a poller, or change data capture such as Debezium) publishes the outbox rows
+to a broker; consumers keep an idempotency table so a redelivery is harmless; and a jobs table or a
+scheduler handles time. Per-entity order holds if the relay publishes in commit order, keyed by the
+entity. Queen 1.x itself kept all of its state in PostgreSQL; 2.0 keeps it in its own log.
 
 The database transaction covers the state and the outbox row. The publish, the consumer's ack and
-the consumer's own state write are separate commits: the idempotency table and the reconciliation
-code exist to stitch them together.
+the consumer's own state write are separate commits, and the idempotency table and the
+reconciliation code exist to stitch them together.
 
-**Where PostgreSQL is better:** your state is relational. SQL, joins, constraints and ad hoc
-queries, with the backups and tooling you already run. Queen's [KV](/concepts/kv/) reads by key or
+PostgreSQL is better when your state is relational: SQL, joins, constraints and ad hoc queries,
+with the backups and tooling you already run. Queen's [KV](/concepts/kv/) reads by key or
 by prefix.
+
+## Also worth a look
+
+NATS JetStream deduplicates within a window (two minutes by default), and since 2.12 can publish
+an atomic batch to one stream and schedule messages, but no transaction joins an ack with
+publishes. Azure Service Bus sessions give FIFO per session ID on a session-enabled queue, with
+nothing to declare per session, its transactions group sends and completions, and scheduled
+messages are ordinary sends with a time attached. Of the managed services, it comes closest to the
+shape described here.
+
+## Measured side by side
+
+We ran Queen, Kafka and Pulsar on the same three DigitalOcean nodes (16 vCPU, 31 GB each, one VPC),
+with the same loaders: 256-byte JSON messages in batches of 100, one topic or queue, 1,000,000
+messages a second offered, latencies over the last 30 seconds, CPU summed over the three nodes
+(Kafka 4.3.1 on 2026-09-30, Pulsar 4.2.4 and Queen 2.0.0-beta.2 on 2026-10-01; the harness and
+every run are in `benchmark-queen/2026-09-30-kafka-pulsar/` and
+`benchmark-queen/2026-09-30-stage03-3node/`). Queen and Pulsar acknowledge after two of three
+fsyncs; Kafka acknowledges from the page cache.
+
+| Partitions | Kafka: e2e p99, cores | Pulsar: e2e p99, cores | Queen: e2e p99, cores |
+|---|---|---|---|
+| 200 | 18 ms, 9.7 | 21 ms, 7.1 | 146 ms, 17.2 |
+| 10,000 | 46 ms, 28.3 | 32 ms, 10.1 | 144 ms, 18.4 |
+| 50,000 | 1.5 s, 29.2 | fell behind (311k msg/s in) | 103 ms, 18.0 |
+| 100,000 | fell behind (p99 10.9 s) | fell behind (238k msg/s in) | 163 ms, 18.3 |
+
+Queen's cost stays flat as partitions grow, because a partition is a few rows of state; Kafka and
+Pulsar pay per partition. On 200 partitions, Kafka kept up to 4,000,000 messages a second and
+Pulsar to 2,000,000 (higher rates were not run); Queen kept up at 1,000,000, and at 1,500,000
+offered it took everything in but delivered about 1,340,000. With 10 messages per transaction on
+200 partitions at 9,000 messages a second, a Queen commit took 3 ms at p50 and 4 ms at p99,
+Kafka's 12 and 34 ms, Pulsar's 22 and 32 ms. These runs measure the brokers; your shape
+decides which of them matters. The full set, Redpanda included, is on [benchmarks](/benchmarks/).
 
 ## Summary
 
-| | Per-entity order from | Partitions to choose | One commit covers | You run |
+| | Per-entity order from | Partition count to choose | One commit covers | You run |
 |---|---|---|---|---|
 | **Queen** | a partition per entity, created by its first message | none | the ack, KV state, pushes and timers, as one entry | one binary: one node, or a cluster of three or five |
-| **Kafka** | the record key, hashed onto a partition | a fixed count per topic, chosen up front | records across partitions, and consumer offsets | Kafka brokers |
-| **RabbitMQ** | a queue per entity, or a hash onto a fixed set of queues | the queues you declare | publishes and acks on one channel | RabbitMQ nodes |
+| **Kafka** | the record key, hashed onto a partition | per topic, up front; it can only grow | records across partitions, and consumer offsets | Kafka brokers (KRaft) |
+| **Pulsar** | the key, with Key_Shared | per topic, up front | publishes and acks across topics | brokers, bookies and a metadata store |
+| **RabbitMQ** | a queue per entity, or a hash onto a fixed set of queues | the queues you declare | no atomic transaction | RabbitMQ nodes |
 | **SQS FIFO** | the message group ID | none | no transactions | nothing: a managed service |
-| **Temporal, Restate** | one workflow or virtual object per entity key | none | a step of your code, recorded for replay | their server (Temporal also needs a database) |
+| **Temporal, Restate** | one workflow or virtual object per entity key | none | a step of your code (Restate: with the object's state) | their server (Temporal also needs a database), or their cloud |
 | **PostgreSQL + outbox** | a sequence per entity, kept by the relay | none | the state and the outbox row; publish and ack commit separately | the database, a relay and a broker |
-
-This page carries no benchmark numbers: the cross-broker runs measured Queen 1.x, whose storage
-was PostgreSQL. The 2.0 numbers and their conditions are in [benchmarks](/benchmarks/).
 
 ## Limits
 
-- **No routing.** No exchanges, bindings, topic patterns or header matching.
-- **Delivery is at-least-once.** Effects inside Queen are exactly-once through
+These are Queen's, the ones that decide a comparison:
+
+- There is no routing: no exchanges, bindings, topic patterns or header matching.
+- Delivery is at-least-once. Effects inside Queen are exactly-once through
   [transactions](/concepts/transactions/) and [`transactionId` dedup](/concepts/dedup/); a call
   your worker makes to another system is outside any commit.
-- **A transaction is one call, inside one tenant.** There is no interactive BEGIN and COMMIT.
-- **One leader orders every write of a raft group.** A hot partition is sequential by design.
+- A transaction is one call, inside one tenant. There is no interactive BEGIN and COMMIT.
+- One leader orders every write of a raft group, which bounds one tenant's write rate. A hot
+  partition is sequential by design.
 
-The full list is in [limits](/reference/limits/).
+The full list is on [limits](/reference/limits/).

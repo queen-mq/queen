@@ -10,28 +10,37 @@ sourceOfTruth:
   - server/src/rsm/facade/real.rs
   - server/src/rsm/facade/mod.rs
   - server/src/config.rs
+  - proxy/src/cp.rs
 digest: >-
-  The Queen broker is an HTTP/JSON API on port 6632 of every node; a follower forwards /api/ and
-  /streams/ requests to the leader, so a client may call any node. POST /api/v1/transaction takes
-  `operations` (ack and push) plus top-level `kv`, `timers` and `positions` arrays and answers HTTP
-  200 for a commit (`success: true`) and for a rollback (`success: false` with a `reason`).
-  Engine errors are `{"error", "code"}`: 503 `retry`, `no_leader` or `timeout` mean retry,
-  503 `outcome_unknown` means an ack may or may not have applied, 429 `overloaded` and 507
-  `storage_full` mean wait. The broker is configured only by environment variables, exposes
-  Prometheus metrics on GET /metrics/prometheus, and accepts Kafka clients through a built-in
-  wire-protocol facade (QUEEN_KAFKA_EMBEDDED=true).
+  The Queen broker is an HTTP/JSON API on port 6632 of every node. In a cluster any node answers:
+  by default each node serves its own clients and sends the leader only the prepared command
+  (QUEEN_RAFT_CLIENT_OFFLOAD). POST /api/v1/transaction takes `operations` (ack and push) plus
+  top-level `kv`, `timers` and `positions` arrays and answers HTTP 200 both for a commit
+  (`success: true`) and for a rollback (`success: false` with a `reason`). Engine errors are
+  `{"error", "code"}`: 503 `retry`, `no_leader` or `timeout` mean retry, 503 `outcome_unknown`
+  means an ack may or may not have applied, 429 `overloaded` and 507 `storage_full` mean wait. The
+  broker is configured only by environment variables, exposes Prometheus metrics on GET
+  /metrics/prometheus, accepts Kafka clients through a built-in wire-protocol facade
+  (QUEEN_KAFKA_EMBEDDED=true), and with the embedded proxy (QUEEN_PROXY_EMBEDDED=true) a control
+  plane drives the node over /api/cp/* with a shared token (QUEEN_PROXY_CP_TOKEN).
 ---
 
-The exact contract, one page per question. The tables here are generated from the code at build
-time where the page says so.
+This section is the contract written down: what every route takes and answers, what each status
+code and error code tells your client to do, every setting with the default the code applies, and
+the limits you will meet first. It describes server 2.0.0-beta.6.
+
+Several tables here are generated from the Rust at build time (the route table, the environment
+variables `server/src/config.rs` reads, the metric families). The build fails when one of them
+falls behind the code, so those cannot quietly go stale. Everything else on these pages was checked
+by hand against the same source, and each page lists the files it describes.
 
 | Page | What it answers |
 |---|---|
-| [HTTP API](/reference/http/) | Base URL, authentication, status-code conventions, every route, the OpenAPI documents. |
-| [Transaction](/reference/transaction/) | Every field of `POST /api/v1/transaction`, its results, every rollback `reason`, retry rules. |
-| [Configuration](/reference/configuration/) | Every environment variable the broker reads, with its default. |
+| [HTTP API](/reference/http/) | Base URL, which node to call, authentication, status codes, every route, reads by offset, the control-plane API, the OpenAPI documents. |
+| [Transaction](/reference/transaction/) | Every field of `POST /api/v1/transaction`, its results, every rollback `reason`, when a retry is safe. |
+| [Configuration](/reference/configuration/) | The environment variables of the broker, its engine and the embedded proxy, with the defaults the code applies. |
 | [Metrics](/reference/metrics/) | Every Prometheus family `GET /metrics/prometheus` exposes. |
-| [Errors](/reference/errors/) | Error bodies, status codes and codes across the API, and what a client does with each. |
+| [Errors](/reference/errors/) | Error bodies and codes across the API, and what a client does with each. |
 | [Limits](/reference/limits/) | Sizes, name rules, windows and defaults, each with the setting that moves it. |
-| [Kafka](/reference/kafka/) | The Kafka APIs and versions the facade answers, and the ones it refuses. |
-| [queenctl](/reference/queenctl/) | The operator CLI: install, connect, command groups. |
+| [Kafka](/reference/kafka/) | Every `QUEEN_KAFKA_*` setting, topic configs, the APIs and versions the facade answers, where it differs from Apache Kafka, and notes on tested clients. |
+| [queenctl](/reference/queenctl/) | The command-line client: install, connect, every command group. |

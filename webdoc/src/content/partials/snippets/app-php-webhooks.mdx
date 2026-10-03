@@ -10,22 +10,20 @@ description: "Verified snippet extracted from examples/apps/php/webhooks.php."
 
 ```php title="examples/apps/php/webhooks.php"
 //
-// A webhook delivery system.
+// A webhook sender: ordered per endpoint, retried by the broker, and
+// dead-lettered with its error when it never succeeds.
 //
-// Every SaaS product ends up writing this one, and it is harder than it looks:
-// deliveries to one customer's endpoint must arrive in order, a customer whose
-// endpoint is down must not slow down anybody else's, failures must be retried
-// a bounded number of times, and what never succeeds has to end up somewhere a
-// human can look at.
+// Deliveries to one endpoint have to arrive in the order the events happened,
+// an endpoint that is down must not slow anybody else down, a failure is
+// retried a bounded number of times, and what never succeeds has to end up
+// somewhere a person can read it. Each endpoint gets a partition of its own,
+// created by its first delivery, so a dead endpoint backs up its own partition
+// and nothing else. Retries are the broker's retry budget, and an exhausted
+// delivery lands in the dead-letter queue with the error attached.
 //
-// The shape here is one ordered lane per destination, created by the first
-// delivery to it. A dead endpoint backs up its own lane and no other; retries
-// are the broker's retry budget rather than a loop in your code; and what
-// exhausts the budget lands in the dead-letter queue with the error attached.
-//
-//   webhook-deliveries (one partition per destination)
-//     └── group "sender"  posts each delivery, fails on a dead endpoint
-//           └── retryLimit exhausted -> dead-letter queue
+//   webhook-deliveries (one partition per endpoint)
+//     └── group "sender"  POSTs each delivery; a nack spends one retry
+//           └── retryLimit spent -> dead-letter queue, with the error
 //
 // Run it:
 //   QUEEN_URL=http://localhost:6632 php webhooks.php
@@ -39,12 +37,14 @@ $RUN = base_convert((string) (int) (microtime(true) * 1000), 10, 36);
 $DELIVERIES = "app-php-webhooks-{$RUN}";
 $GROUP = 'sender';
 
-// Three subscribers. One of them has let its certificate expire, which is the
-// most common way a webhook endpoint dies: it answers, but it answers 500.
+// Three subscribers. One of them answers 500 to everything. It is listed first,
+// so its deliveries are the oldest in the queue and its partition is usually
+// handed out first: a sender that let a failing endpoint hold up the others
+// would fail the checks below.
 $ENDPOINTS = [
+    'initech.example' => ['healthy' => false],
     'acme.example' => ['healthy' => true],
     'globex.example' => ['healthy' => true],
-    'initech.example' => ['healthy' => false],
 ];
 $EVENTS_PER_ENDPOINT = 3;
 $RETRY_LIMIT = 2;
@@ -58,8 +58,8 @@ $assert = function (bool $condition, string $description) use (&$checks): void {
     echo "  ok: {$description}\n";
 };
 
-// Stands in for the HTTP POST to the subscriber. A real sender would use Guzzle
-// and treat any non-2xx as a failure, which is exactly what throwing does here.
+// Stands in for the HTTP POST to the subscriber. A real sender calls Guzzle and
+// throws on any status that is not 2xx, which is what this does.
 $postToEndpoint = function (string $endpoint, array $event) use ($ENDPOINTS): array {
     if (!$ENDPOINTS[$endpoint]['healthy']) {
         throw new RuntimeException("{$endpoint} answered 500");
@@ -73,17 +73,12 @@ $exitCode = 0;
 try {
     echo "broker {$QUEEN_URL}\n";
 
-    // retryLimit is the delivery budget, and dlqAfterMaxRetries is what happens
-    // when it runs out. Without the second flag an exhausted message is simply
-    // marked failed and stays put; with it, the broker moves it to the
-    // dead-letter table with the last error on the row.
-    //
-    // leaseTime is the other half of the contract: it is how long the broker
-    // waits for a sender that took a delivery and never came back before handing
-    // that delivery to someone else.
-    //
-    // config() fills in the queue defaults around whatever you name here, so the
-    // three keys below are the whole configuration decision.
+    // retryLimit is the delivery budget: a delivery that fails RETRY_LIMIT + 1
+    // times is filed in the dead-letter queue with its last error, because
+    // dlqAfterMaxRetries is on. leaseTime is how long the broker waits for a
+    // sender that took a delivery and never came back before it hands the
+    // delivery to another sender. config() fills in the queue defaults around
+    // the keys named here.
     $queen->queue($DELIVERIES)->config([
         'leaseTime' => 30,
         'retryLimit' => $RETRY_LIMIT,
@@ -92,15 +87,15 @@ try {
 
     // ------------------------------------------------------------------ queuing
     //
-    // The application emits events. Each one goes into the partition of the
-    // endpoint it is destined for, which is what makes "in order per subscriber"
-    // a property of the storage rather than of the sender.
+    // The application emits events. Each delivery goes into the partition of the
+    // endpoint it is for, which is what makes "in order per subscriber" a
+    // property of the storage instead of something the sender has to arrange.
     echo "\nqueuing deliveries\n";
     for ($seq = 1; $seq <= $EVENTS_PER_ENDPOINT; $seq++) {
         foreach (array_keys($ENDPOINTS) as $endpoint) {
             $queen->queue($DELIVERIES)->partition($endpoint)->push([[
-                // The event id makes the enqueue idempotent: an application that
-                // retries its own emit does not create a second delivery.
+                // The event id. An application that retries its own emit does
+                // not create a second delivery.
                 'transactionId' => "{$endpoint}-evt-{$seq}",
                 'data' => [
                     'endpoint' => $endpoint,
@@ -116,22 +111,18 @@ try {
     // ------------------------------------------------------------------ sending
     //
     // The sender pool. concurrency(3) is three long polls in flight at once on
-    // one cURL multi-handle rather than three threads, and each poll claims a
-    // partition of its own, so the three destinations are drained side by side.
+    // one cURL multi-handle, and the handlers run one after another in this
+    // process. A failed delivery goes back to the broker with its error: the
+    // broker redelivers it and counts one retry, and deliveryAttempt says which
+    // attempt this is. The retries live in the broker, so they survive the
+    // sender dying halfway, which a retry loop inside the handler would not.
     //
-    // autoAck is off, and that is a deliberate choice rather than a formality.
-    // The automatic path in this client nacks a throwing handler with a status
-    // and nothing else: the delivery would be retried and eventually dead-
-    // lettered exactly the same way, but the row a support engineer opens would
-    // have an empty error. Acknowledging by hand is what puts the reason on it.
-    // Everything else about retrying is unchanged: the budget is the broker's,
-    // and it survives this process dying mid-flight, which a loop inside the
-    // handler would not.
-    //
-    // timeoutMillis(1000) caps how long one poll parks on the broker. A round
-    // ends only when every worker's poll has come back, so with the 30 s default
-    // the last round of a drained queue would sit there for half a minute before
-    // the idle bound could fire.
+    // autoAck(false): the handler acknowledges each delivery itself, because
+    // this client's automatic nack sends no error and the dead letter would
+    // keep none. partitions(1) and batch(1): every pop takes ONE delivery, from
+    // one endpoint. A nack releases the endpoint's lease, and the broker then
+    // refuses acks for anything else popped under it, so a sender holding more
+    // than the failed delivery could not acknowledge the rest.
     echo "\nsending\n";
     $deliveredTo = [];
     $attempts = [];
@@ -141,55 +132,47 @@ try {
         ->group($GROUP)
         ->subscriptionMode('all')
         ->concurrency(3)
+        ->partitions(1)
+        ->batch(1)
         ->each()
         ->autoAck(false)
-        // Enough turns for every good delivery plus every attempt at the bad
-        // ones. This client spreads the bound over the pool, so each of the
-        // three workers stops after a third of it, and the thirds add up to the
-        // same total: no delivery is left without a worker allowed to take it.
-        ->limit($EVENTS_PER_ENDPOINT * 2 + $EVENTS_PER_ENDPOINT * ($RETRY_LIMIT + 1))
-        ->idleMillis(6000)
+        // Long polls end after a second and a sender stops after three quiet
+        // seconds, so the program finishes. A service runs without these two.
         ->timeoutMillis(1000)
+        ->idleMillis(3000)
         ->consume(function (array $msg) use ($queen, $postToEndpoint, $GROUP, &$deliveredTo, &$attempts): void {
             $endpoint = $msg['data']['endpoint'];
             $seq = $msg['data']['seq'];
-
-            // A popped message here carries its payload, its ids and its lease,
-            // and no attempt counter, so a sender that wants to back off, or to
-            // give up early on an error it knows is permanent, counts its own
-            // attempts. That is what this map is.
             $attempts[$endpoint] = ($attempts[$endpoint] ?? 0) + 1;
 
             try {
                 $postToEndpoint($endpoint, $msg['data']);
             } catch (Throwable $failure) {
-                // The nack spends one unit of the retry budget, and the error
-                // travels with it: it is what the broker writes on the row when
-                // the budget finally runs out.
+                echo "  {$endpoint} <- event {$seq} failed on attempt {$msg['deliveryAttempt']}: {$failure->getMessage()}\n";
+                // The nack spends one retry, and its error is what the dead
+                // letter keeps once the budget is spent.
                 $nack = $queen->ack($msg, 'failed', ['group' => $GROUP, 'error' => $failure->getMessage()]);
                 if (($nack[0]['success'] ?? false) !== true) {
                     throw new RuntimeException("the broker refused the nack for {$endpoint}/{$seq}");
                 }
-                echo "  {$endpoint} <- event {$seq} failed: {$failure->getMessage()}\n";
                 return;
-            }
-
-            // Delivered. The ack names the consumer group explicitly: an ack sent
-            // without it commits the queue's own cursor instead of this group's.
-            // The reply arrives under an envelope whose outer success flag is set
-            // before the broker is even read, so the numbered row beneath it is
-            // the only proof the acknowledgement was taken.
-            $ack = $queen->ack($msg, 'completed', ['group' => $GROUP]);
-            if (($ack[0]['success'] ?? false) !== true) {
-                throw new RuntimeException("the broker refused the ack for {$endpoint}/{$seq}");
             }
 
             $deliveredTo[$endpoint][] = $seq;
             echo "  {$endpoint} <- event {$seq}\n";
+
+            // The ack names the consumer group: without it the broker looks for
+            // the lease on the queue's own cursor and refuses the ack. The
+            // client's outer success flag only says the request went through,
+            // and the broker's verdict is the first item of the reply.
+            $ack = $queen->ack($msg, 'completed', ['group' => $GROUP]);
+            if (($ack[0]['success'] ?? false) !== true) {
+                throw new RuntimeException("the broker refused the ack for {$endpoint}/{$seq}");
+            }
         })
         ->execute();
 
-    // ------------------------------------------------------------------ checking
+    // ----------------------------------------------------------------- checking
     echo "\nchecking\n";
 
     foreach ($ENDPOINTS as $endpoint => $meta) {
@@ -198,21 +181,25 @@ try {
         }
         $seqs = $deliveredTo[$endpoint] ?? [];
         $assert(count($seqs) === $EVENTS_PER_ENDPOINT, "{$endpoint} received all {$EVENTS_PER_ENDPOINT} events");
-        $assert($seqs === [1, 2, 3], "{$endpoint} received them in the order they happened");
+        $assert(
+            $seqs === [1, 2, 3],
+            "{$endpoint} received them in the order they happened (got " . (implode(',', $seqs) ?: 'none') . ')'
+        );
     }
 
     $assert(
         count($deliveredTo['initech.example'] ?? []) === 0,
-        'the dead endpoint received nothing, as it should'
+        'the dead endpoint received nothing'
     );
+    $deadAttempts = $attempts['initech.example'] ?? 0;
     $assert(
-        ($attempts['initech.example'] ?? 0) > $EVENTS_PER_ENDPOINT,
-        'the dead endpoint was retried rather than dropped on the first failure'
+        $deadAttempts === $EVENTS_PER_ENDPOINT * ($RETRY_LIMIT + 1),
+        'each dead delivery was tried ' . ($RETRY_LIMIT + 1) . " times before it was given up ({$deadAttempts} attempts)"
     );
 
-    // The dead-letter queue is a table you can read, not a log line. Each row
-    // carries the payload, the endpoint it was for, and the last error, which is
-    // what a support engineer needs to answer "why did this customer not get it".
+    // The dead letters are records you can query. Each one keeps the payload, so
+    // it names the endpoint and the invoice, and the last error, which is what
+    // answers "why did this customer not get the webhook".
     $dlq = $queen->queue($DELIVERIES)->dlq()->limit(50)->get();
     $messages = $dlq['messages'] ?? [];
     $dead = array_values(array_filter($messages, fn(array $m): bool => $m['data']['endpoint'] === 'initech.example'));
@@ -220,15 +207,15 @@ try {
     $assert(count($dead) === $EVENTS_PER_ENDPOINT, "all {$EVENTS_PER_ENDPOINT} dead deliveries are in the dead-letter queue");
     $assert(
         count(array_filter($dead, fn(array $m): bool => str_contains($m['errorMessage'] ?? '', 'answered 500'))) === count($dead),
-        'each dead-letter row carries the error that killed it'
+        'each dead letter carries the error that killed it'
     );
     $assert(
         count(array_filter($messages, fn(array $m): bool => $m['data']['endpoint'] === 'initech.example')) === count($messages),
-        'no healthy endpoint put anything in the dead-letter queue'
+        'no healthy delivery ended up in the dead-letter queue'
     );
 
-    echo "\n  dead letters: " . implode(', ', array_map(
-        fn(array $m): string => "{$m['data']['endpoint']}/{$m['data']['invoiceId']}",
+    echo "\n  dead letters: " . implode('; ', array_map(
+        fn(array $m): string => "{$m['data']['endpoint']}/{$m['data']['invoiceId']}: {$m['errorMessage']}",
         $dead
     )) . "\n";
 

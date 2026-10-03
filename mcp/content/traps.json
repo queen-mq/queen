@@ -1,0 +1,678 @@
+[
+  {
+    "id": "latest-tag-is-1x",
+    "title": "The `latest` image is still Queen 1.6, and the 2.0 betas are published for amd64 only",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "A container started from ghcr.io/queen-mq/queen:latest wants PostgreSQL and speaks the 1.x API; on an Apple Silicon Mac Docker warns that the image platform does not match the host.",
+    "cause": "`latest` still points at 1.6. The 2.0 betas carry version tags and exist for linux/amd64 only.",
+    "fix": "Pin the version tag and name the platform: `docker run -d --name queen --platform linux/amd64 -p 6632:6632 -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:{{broker}}`. On Apple Silicon it runs under emulation, slower but fine for development.",
+    "source": [
+      "https://queenmq.com/start/quickstart/"
+    ]
+  },
+  {
+    "id": "new-group-starts-at-tail",
+    "title": "A new consumer group starts at the tail and never sees messages pushed before its first pop",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "A new service, projection or renamed consumer group receives nothing, or only messages pushed after it started; the backlog stays unread.",
+    "cause": "A pop that names a consumer group and sends no subscriptionMode gets the broker's DEFAULT_SUBSCRIPTION_MODE, which defaults to `new`: the group starts after the messages that exist at its first pop. That start is stored on the first pop, so sending another mode later changes nothing. A pop without a group (queue mode) ignores the mode and starts from the oldest retained message. A stream query is a group too (`streams.<queryId>`) and starts at the tail the same way.",
+    "fix": "Choose the start on the group's first pop: subscriptionMode('all') reads everything retained, subscriptionFrom(<ISO time>) starts at a point in time; for a stream, pass subscriptionMode: 'all' to run(). Move a group that already exists with a seek (POST /api/v1/consumer-groups/:group/queues/:queue/seek; admin.seekConsumerGroup in JS). An operator can make `all` the broker default with DEFAULT_SUBSCRIPTION_MODE=all.",
+    "code": {
+      "js": "await queen.queue('orders').group('audit').subscriptionMode('all').each()\n  .consume(async (message) => { /* ... */ })",
+      "go": "err := client.Queue(\"orders\").Group(\"audit\").SubscriptionMode(\"all\").\n\tConsume(ctx, handler).Execute(ctx)",
+      "python": "await queen.queue('orders').group('audit').subscription_mode('all').each().consume(handler)",
+      "rust": "let audit = queen.queue(\"orders\").group(\"audit\")\n    .subscription_mode(queen_mq::SubscriptionMode::All);",
+      "http": "GET /api/v1/pop/queue/orders?consumerGroup=audit&subscriptionMode=all&wait=true&timeout=30000"
+    },
+    "source": [
+      "https://queenmq.com/concepts/consuming/",
+      "https://queenmq.com/guides/streams/",
+      "server/src/config.rs:688",
+      "server/src/handlers/data.rs:47",
+      "clients/client-js/client-v2/streams/runtime/Runner.js:76"
+    ]
+  },
+  {
+    "id": "ack-needs-consumer-group",
+    "title": "An ack that does not name the consumer group targets queue mode, and the group's message comes back",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "Messages consumed through a group are redelivered again and again. A plain ack answers HTTP 200 with success: false and \"invalid or expired lease\"; a transaction rolls back with reason rejected_ack.",
+    "cause": "An ack's consumerGroup defaults to __QUEUE_MODE__. The lease it carries belongs to the group that popped the message, so in queue mode it matches nothing and the ack is refused; an ack with no leaseId would instead move the queue-mode cursor and ack nothing the group read. Every popped message carries its consumerGroup and leaseId, but several SDKs take the group only from the ack options, and the option key differs between plain and transactional acks. The Rust client reads both from the message.",
+    "fix": "Pass the group on every ack and every transaction ack. JS: queen.ack(m, status, { group }) and transaction().ack(m, status, { consumerGroup }). Python: queen.ack(m, status, {'group': g}) and transaction().ack(m, status, {'consumer_group': g}). Go: queen.AckOptions{ConsumerGroup: g} on both. Over HTTP, send consumerGroup and the pop's leaseId on every ack. A refused plain ack does not throw in JS, Python or Go: check success on the result.",
+    "code": {
+      "js": "await queen.ack(message, true, { group: 'billing' })\nawait queen.transaction()\n  .ack(message, 'completed', { consumerGroup: 'billing' })\n  .queue('receipts').partition(customerId)\n  .push([{ transactionId: `receipt-${orderId}`, data: receipt }])\n  .commit()",
+      "go": "res, err := client.Ack(ctx, msg, true, queen.AckOptions{ConsumerGroup: \"billing\"})\nif err == nil && !res[0].Success {\n\tlog.Printf(\"ack refused: %s\", res[0].Error)\n}\ntx := client.Transaction().Ack(msg, \"completed\", queen.AckOptions{ConsumerGroup: \"billing\"})",
+      "python": "await queen.ack(message, True, {'group': 'billing'})\nawait queen.transaction().ack(message, 'completed', {'consumer_group': 'billing'}).commit()",
+      "http": "POST /api/v1/ack\n{\"transactionId\":\"order-9137-created\",\"partitionId\":\"4\",\"consumerGroup\":\"billing\",\n \"leaseId\":\"<leaseId from the pop>\",\"status\":\"completed\"}"
+    },
+    "source": [
+      "https://queenmq.com/reference/transaction/",
+      "https://queenmq.com/concepts/transactions/",
+      "server/src/handlers/raft.rs:382",
+      "server/src/rsm/consume/ack.rs:622",
+      "clients/client-go/queen.go:135",
+      "clients/client-py/queen/builders/transaction_builder.py:109",
+      "clients/client-rust/src/transaction.rs:116"
+    ]
+  },
+  {
+    "id": "push-201-check-items",
+    "title": "Push answers HTTP 201 even when items were refused",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "Messages you pushed never arrive, and no exception or error status told you.",
+    "cause": "POST /api/v1/push answers 201 with one verdict per item, in input order: status queued (stored, with its offset), duplicate (the partition already holds this transactionId inside the dedup window; nothing written) or error (refused, nothing written, no offset; for example pushes to one partition that exceed the 96 MiB entry limit). One push is not atomic across items. Go's Push returns err == nil with a per-item Status; the Python SDK and the released JS SDK (1.x) raise only for the 1.x status `failed`, so a 2.0 `error` item passes silently.",
+    "fix": "Read the status of every item and retry or report the error ones, with the same transactionId. When several messages must land together or not at all, push them in one transaction.",
+    "code": {
+      "js": "const res = await queen.queue('orders').partition('customer-42')\n  .push([{ transactionId: 'order-9137-created', data: { orderId: 9137 } }])\nconst refused = res.filter((r) => r.status === 'error')",
+      "go": "res, err := client.Queue(\"orders\").Partition(\"customer-42\").\n\tPush(map[string]interface{}{\"orderId\": 9137}).TransactionID(\"order-9137-created\").Execute(ctx)\nif err != nil {\n\treturn err\n}\nfor _, r := range res {\n\tif r.Status == \"error\" {\n\t\t// not stored: retry with the same TransactionID\n\t}\n}",
+      "python": "results = await queen.queue('orders').partition('customer-42').push(\n    [{'transactionId': 'order-9137-created', 'data': {'orderId': 9137}}])\nrefused = [r for r in results if r.get('status') == 'error']"
+    },
+    "source": [
+      "https://queenmq.com/concepts/partitions/",
+      "https://queenmq.com/reference/limits/",
+      "clients/client-go/push_builder.go:187",
+      "clients/client-py/queen/builders/push_builder.py:134"
+    ]
+  },
+  {
+    "id": "rollback-200-lost-gate-returned",
+    "title": "A rolled-back transaction answers HTTP 200, and a lost once/required gate is returned, not thrown",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "Code treats a commit as done because nothing threw, but the ack, pushes, KV writes and timers were not written and the input comes back; or a branch on `ack_rejected` never runs.",
+    "cause": "POST /api/v1/transaction answers 200 for a commit (success: true) and for a rollback (success: false, reason, error, empty results). All six SDKs return the response for reason kv_precondition (a once or required KV gate found its marker: the step already happened) and throw or return an error for every other reason. The broker checks acks, then pushes, positions, KV and timers, and the first refusal decides the reason, so a repeated step that also pushes a deterministic transactionId rolls back as duplicate (thrown) before its once gate is reached. A fenced ack that fails is rejected_ack in 2.x; the 1.x spelling ack_rejected, still in some SDK comments and the Rust protocol crate, is never sent.",
+    "fix": "Check success on every commit result. kv_precondition or duplicate: the step already happened, so ack the input on its own. rejected_ack: do not retry; the lease is gone and the message goes to whoever holds it. reserved: retry. A 503 (retry, timeout, no_leader) is not a rollback: the outcome is unknown, so retry with the same ids.",
+    "code": {
+      "js": "// inside consume(...) with .autoAck(false)\ntry {\n  const res = await queen.transaction()\n    .ack(message, 'completed', { consumerGroup: 'mailer' })\n    .queue('emails').push([{ transactionId: `welcome-${userId}`, data: mail }])\n    .once('welcome', String(userId), { ttl: '7d' })\n    .commit()\n  if (res.success === false) await queen.ack(message, 'completed', { group: 'mailer' }) // kv_precondition\n} catch (err) {\n  if (err.reason === 'duplicate') await queen.ack(message, 'completed', { group: 'mailer' })\n  else if (err.reason !== 'rejected_ack') await queen.ack(message, 'failed', { group: 'mailer', error: err.message })\n}",
+      "go": "resp, err := client.Transaction().\n\tAck(msg, \"completed\", queen.AckOptions{ConsumerGroup: \"mailer\"}).\n\tKV(queen.KVPutIfAbsentOp(\"welcome\", userID, true, queen.TTL(7*24*time.Hour), queen.KVWriteOptions{Required: true})).\n\tCommit(ctx)\nif err == nil && resp.IsKVPrecondition() {\n\t// already done: ack the input on its own\n\tclient.Ack(ctx, msg, true, queen.AckOptions{ConsumerGroup: \"mailer\"})\n}",
+      "python": "res = await queen.transaction().ack(message, 'completed', {'consumer_group': 'mailer'}) \\\n    .once('welcome', str(user_id), ttl=timedelta(days=7)).commit()\nif not res:  # success is False: kv_precondition, already done\n    await queen.ack(message, True, {'group': 'mailer'})"
+    },
+    "source": [
+      "https://queenmq.com/reference/transaction/",
+      "https://queenmq.com/reference/errors/",
+      "https://queenmq.com/concepts/dedup/",
+      "clients/client-js/client-v2/builders/TransactionBuilder.js:307",
+      "clients/client-go/transaction_builder.go:182",
+      "clients/client-py/queen/builders/transaction_builder.py:257"
+    ]
+  },
+  {
+    "id": "one-pop-per-transaction",
+    "title": "A transaction that acks messages from two pops can leave its acks unfenced",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "A worker whose lease already expired still commits: its acks move the cursor and its KV writes land while another worker holds the same messages.",
+    "cause": "Each ack in a transaction gets at most one lease: its own leaseId, or else the single lease named by requiredLeases and the other acks together, when they all name the same one. With two different leases, an ack without its own leaseId gets none, and an ack with no lease is not checked against the live lease (it can complete a batch another worker holds). Builders that send each message's lease only in requiredLeases leave every ack unfenced when one transaction acks two pops.",
+    "fix": "Commit one transaction per pop (ack only the messages of that pop's lease), or put leaseId on every ack operation. Over HTTP, always put leaseId on each ack.",
+    "source": [
+      "https://queenmq.com/reference/transaction/",
+      "https://queenmq.com/guides/exactly-once/",
+      "server/src/rsm/facade/real.rs:2052"
+    ]
+  },
+  {
+    "id": "deterministic-transaction-ids",
+    "title": "A fresh UUID per attempt deduplicates nothing, and the SDKs retry writes on their own",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "Duplicate orders, receipts or counter increments after timeouts, 503s, failovers or redeliveries.",
+    "cause": "Dedup compares a pushed transactionId with the ids already in the same partition inside the queue's dedupWindowSeconds (3600 s by default; 0 turns it off). A push without an id gets a new one each time (the SDKs mint a UUIDv7), so a retry is stored again, and the same id in another partition is a different message. A 503 (retry, timeout, no_leader, outcome_unknown) means the write may have committed, and the SDKs retry 5xx and network errors themselves (JS: three attempts by default). A transaction without a gate re-applies its KV writes and timers when retried: an incr counts twice.",
+    "fix": "Derive transactionId from the work, never the attempt: an upstream event id, a key with a version (order-9137-v3), or invoice-${message.transactionId} in a pipeline. Retry to the same partition. Give every transaction a gate (a pushed deterministic id or a once/required marker), and give external calls an idempotency key from the message.",
+    "code": {
+      "js": "await queen.queue('invoices').partition(customerId)\n  .push([{ transactionId: `invoice-${message.transactionId}`, data: invoice }])",
+      "python": "await queen.queue('invoices').partition(customer_id).push(\n    [{'transactionId': f\"invoice-{message['transactionId']}\", 'data': invoice}])"
+    },
+    "source": [
+      "https://queenmq.com/concepts/dedup/",
+      "https://queenmq.com/reference/errors/",
+      "https://queenmq.com/reference/transaction/"
+    ]
+  },
+  {
+    "id": "crash-loop-never-reaches-dlq",
+    "title": "Only a failed nack spends the retry budget: a message that crashes its worker never reaches the DLQ",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "One poison message is redelivered forever and holds up its partition, while the dead-letter queue stays empty.",
+    "cause": "The retry budget is one counter per partition and group, and only an ack with status failed spends it: retryLimit (3) failed acks redeliver, and the next one files the message in the DLQ (or drops it when the DLQ is off). An expired lease (a crash, an OOM, a handler that hangs) redelivers the batch with deliveryAttempt + 1 and spends nothing.",
+    "fix": "Catch what you can and ack it failed, or dlq to dead-letter it now. Read deliveryAttempt on the message and dead-letter it yourself past a threshold (the Go and Rust clients do not expose deliveryAttempt yet).",
+    "code": {
+      "js": "// after pop(), or in consume(...) with .autoAck(false)\nif (message.deliveryAttempt > 5) {\n  await queen.ack(message, 'dlq', { group: 'workers', error: 'gave up after 5 deliveries' })\n}",
+      "python": "if message.get('deliveryAttempt', 1) > 5:\n    await queen.ack(message, 'dlq', {'group': 'workers', 'error': 'gave up after 5 deliveries'})",
+      "http": "POST /api/v1/ack\n{\"transactionId\":\"...\",\"partitionId\":\"4\",\"consumerGroup\":\"workers\",\"leaseId\":\"...\",\n \"status\":\"dlq\",\"error\":\"gave up after 5 deliveries\"}"
+    },
+    "source": [
+      "https://queenmq.com/concepts/consuming/",
+      "https://queenmq.com/guides/webhooks/",
+      "https://queenmq.com/concepts/partitions/"
+    ]
+  },
+  {
+    "id": "lease-expiry-double-processing",
+    "title": "A handler that outlives its lease is processed twice",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "Two workers handle the same message; after slow work your ack answers invalid or expired lease, or the transaction rolls back with rejected_ack.",
+    "cause": "A pop leases the batch for leaseSeconds if the pop sends it, else the queue's leaseTime: 60 s for a queue a push created, 300 s for one /configure created (the JS create() also sends 300). When the lease expires the batch goes to the next pop with deliveryAttempt + 1, and an expired lease cannot be renewed. In JS and Python, renewLease without an interval renews nothing, and the C++ consume loop ignores renew_lease().",
+    "fix": "Set leaseTime above the worst-case handler time, or renew before expiry: POST /api/v1/lease/:leaseId/extend with {\"seconds\": N}. JS: queen.renew(message), or .renewLease(true, intervalMs) on consume. Python: await queen.renew(message), or .renew_lease(True, interval_millis). Go: client.Renew(ctx, msg), or .RenewLease(true, intervalMillis). Rust: queen.renew(&msg, None), or .renew_lease(Duration). C++: call client.renew(message) yourself.",
+    "code": {
+      "js": "await queen.queue('reports').group('builders').renewLease(true, 10000).each()\n  .consume(async (message) => { await buildReport(message.data) })",
+      "python": "await queen.queue('reports').group('builders').renew_lease(True, 10000).each().consume(build_report)",
+      "go": "err := client.Queue(\"reports\").Group(\"builders\").RenewLease(true, 10000).\n\tConsume(ctx, buildReport).Execute(ctx)"
+    },
+    "source": [
+      "https://queenmq.com/concepts/consuming/",
+      "https://queenmq.com/reference/limits/",
+      "https://queenmq.com/start/clients/",
+      "clients/client-js/client-v2/consumer/ConsumerManager.js:207",
+      "clients/client-py/queen/consumer/consumer_manager.py:251",
+      "clients/client-cpp/queen_client.hpp:4401"
+    ]
+  },
+  {
+    "id": "lease-extend-dead-lease-200",
+    "title": "Extending a dead lease answers HTTP 200 with success: false, and some SDKs report it as renewed",
+    "applies": [
+      "http",
+      "go",
+      "python",
+      "js"
+    ],
+    "severity": "breaks",
+    "symptom": "A renewal loop reports success while the messages are already on their way to another worker.",
+    "cause": "POST /api/v1/lease/:leaseId/extend always answers 200 with {leaseId, success, renewed, newExpiresAt}. A lease that expired, or that an ack or nack released, renews nothing: success false, renewed 0, newExpiresAt null. Go's Renew, Python's renew and the released JS SDK (1.x) set success from the HTTP status alone.",
+    "fix": "Over HTTP, check success (or renewed > 0). In the SDKs, treat a missing newExpiresAt (null in JS and Python, a zero time.Time in Go) as not renewed: stop working on that batch and expect a redelivery.",
+    "code": {
+      "js": "const r = await queen.renew(message)\nif (!r.newExpiresAt) { /* lease is gone: stop, the message will be redelivered */ }",
+      "go": "rs, err := client.Renew(ctx, msg)\nif err != nil || len(rs) == 0 || rs[0].NewExpiresAt.IsZero() {\n\t// lease is gone\n}",
+      "python": "r = await queen.renew(message)\nif not r.get('newExpiresAt'):\n    ...  # lease is gone",
+      "http": "POST /api/v1/lease/<leaseId>/extend {\"seconds\": 60}\n-> 200 {\"leaseId\":\"...\",\"success\":false,\"renewed\":0,\"newExpiresAt\":null, ...}"
+    },
+    "source": [
+      "https://queenmq.com/concepts/consuming/",
+      "server/src/rsm/facade/real.rs:4580",
+      "server/src/rsm/consume/ack.rs:1078",
+      "clients/client-go/queen.go:308",
+      "clients/client-py/queen/client.py:597"
+    ]
+  },
+  {
+    "id": "manual-ack-error-stops-worker",
+    "title": "With autoAck off, an error that escapes the handler stops the worker instead of nacking",
+    "applies": [
+      "go",
+      "python",
+      "js"
+    ],
+    "severity": "breaks",
+    "symptom": "After one failure a consumer goes quiet; the failed batch stays leased until the lease expires, comes back, and never reaches the DLQ.",
+    "cause": "With autoAck(false) the SDK does not settle messages. In Go and Python, and in the released JS SDK (1.x), an error the handler returns or throws ends that worker's loop without a nack.",
+    "fix": "Catch every error inside the handler and settle each message yourself: the transaction's ack on success, an ack with failed (spends a retry) or dlq otherwise; on rejected_ack do nothing, the lease is gone. Never let the error escape.",
+    "code": {
+      "js": "await queen.queue('payments').group('billing').autoAck(false).each()\n  .consume(async (message) => {\n    try {\n      await queen.transaction()\n        .ack(message, 'completed', { consumerGroup: 'billing' })\n        .kv.put('orders', String(message.data.orderId), { status: 'paid' }, { ttl: '30d' })\n        .commit()\n    } catch (err) {\n      if (err.reason !== 'rejected_ack') {\n        await queen.ack(message, 'failed', { group: 'billing', error: err.message })\n      }\n    }\n  })",
+      "go": "err := client.Queue(\"payments\").Group(\"billing\").AutoAck(false).Each().\n\tConsume(ctx, func(ctx context.Context, m *queen.Message) error {\n\t\tif err := handle(ctx, m); err != nil {\n\t\t\tclient.Ack(ctx, m, false, queen.AckOptions{ConsumerGroup: \"billing\", Error: err.Error()})\n\t\t}\n\t\treturn nil // with AutoAck(false) a returned error stops this worker\n\t}).Execute(ctx)",
+      "python": "async def handler(message):\n    try:\n        await commit_step(message)\n    except Exception as err:\n        await queen.ack(message, False, {'group': 'billing', 'error': str(err)})\n\nawait queen.queue('payments').group('billing').auto_ack(False).each().consume(handler)"
+    },
+    "source": [
+      "https://queenmq.com/concepts/consuming/",
+      "https://queenmq.com/concepts/transactions/",
+      "clients/client-go/consumer_manager.go:367",
+      "clients/client-py/queen/consumer/consumer_manager.py:453"
+    ]
+  },
+  {
+    "id": "kv-write-needs-lifetime",
+    "title": "Every KV write must declare its lifetime, and a lost precondition is a result, not an error",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "KV writes fail with 400 kv_bad_request (reason kv_expiry_not_specified), or a lost compare-and-swap is treated as success.",
+    "cause": "Every put, putIfAbsent and incr carries exactly one of ttlSeconds (an integer above 0) or forever: true; neither or both is a 400, and put does not keep the previous TTL. A lost precondition (expect, putIfAbsent, incr past min or max) answers applied: false with reason exists, absent, version or limit, plus the current value and version. In JS every write returns an object, which is always truthy, so if (await queen.kv.put(...)) tells you nothing.",
+    "fix": "Give every write a lifetime and branch on applied. JS: ttl takes a duration string ('30d'; a number throws, use ttlSeconds for numbers) and keys must be strings. Python: ttl=timedelta(...), ttl_seconds=int or forever=True. Go: queen.TTL(d), queen.TTLSeconds(n) or queen.Forever(). Give idempotency markers a TTL longer than any redelivery or replay.",
+    "code": {
+      "js": "const r = await queen.kv.put('orders', '9137', { status: 'shipped' }, { ttl: '30d', expect: row.version })\nif (!r.applied) console.log(r.reason, r.value) // someone wrote first",
+      "python": "r = await queen.kv.put('orders', '9137', {'status': 'shipped'}, ttl=timedelta(days=30), expect=row['version'])\nif not r['applied']:\n    print(r['reason'])",
+      "go": "op := queen.KVPutOp(\"orders\", \"9137\", state, queen.TTL(30*24*time.Hour))",
+      "http": "POST /api/v1/kv\n{\"operations\":[{\"op\":\"put\",\"ns\":\"orders\",\"key\":\"9137\",\"value\":{\"status\":\"paid\"},\"ttlSeconds\":2592000}]}"
+    },
+    "source": [
+      "https://queenmq.com/concepts/kv/",
+      "https://queenmq.com/reference/errors/",
+      "https://queenmq.com/reference/limits/",
+      "clients/client-js/client-v2/kv/expiry.js",
+      "clients/client-py/queen/kv/ops.py:101"
+    ]
+  },
+  {
+    "id": "kv-read-in-transaction-not-a-condition",
+    "title": "A KV get inside a transaction cannot decide what the transaction writes",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "Read-check-write logic written as one transaction protects nothing: the writes apply even when the value you meant to check had changed.",
+    "cause": "A transaction is one call, not an interactive session. Its get and getMany are answered after the entry has applied, so they cannot gate the writes beside them; there is no BEGIN, read, decide, COMMIT. getPrefix is refused inside a transaction, and a transaction holds at most 64 KV operations over 256 keys, one write per key.",
+    "fix": "Put the condition on the write: expect: <version> (or putIfAbsent for must-not-exist) with required: true, which rolls the whole transaction back with kv_precondition when it loses. When your logic needs the current state, read it before the transaction and fence the write with expect on the version you read.",
+    "code": {
+      "js": "const row = await queen.kv.get('bookings', bookingId)\nawait queen.transaction()\n  .ack(message, 'completed', { consumerGroup: 'bookings' })\n  .kv.put('bookings', bookingId, { ...row.value, state: 'held' },\n    { ttl: '7d', expect: row.version, required: true })\n  .commit()"
+    },
+    "source": [
+      "https://queenmq.com/concepts/transactions/",
+      "https://queenmq.com/concepts/kv/",
+      "https://queenmq.com/reference/transaction/",
+      "clients/client-js/client-v2/kv/Kv.js:116"
+    ]
+  },
+  {
+    "id": "kv-standalone-rate-limit",
+    "title": "Standalone KV and timer calls are rate-limited per tenant and node; KV inside a transaction is not",
+    "applies": [
+      "all"
+    ],
+    "severity": "perf",
+    "symptom": "429 rate_limited with Retry-After once a worker makes KV calls per message; the SDKs wait and retry, so the worker just slows down.",
+    "cause": "Per tenant and per node, /api/v1/kv takes 100 write calls a second (burst 200) and 200 read calls a second (burst 400) by default (QUEEN_KV_WRITE_RATE, QUEEN_KV_READ_RATE). A call with any write in it counts as a write, and each POST /api/v1/timers call spends a write token too. KV operations and timers inside a transaction are not counted.",
+    "fix": "Write state in the step's transaction instead of separate KV calls, batch operations into one /api/v1/kv call (up to 256 operations and 1,024 keys), and keep standalone reads off the per-message path.",
+    "source": [
+      "https://queenmq.com/concepts/kv/",
+      "https://queenmq.com/reference/limits/",
+      "https://queenmq.com/reference/errors/",
+      "server/src/config.rs:704"
+    ]
+  },
+  {
+    "id": "hot-partition-is-sequential",
+    "title": "One partition is sequential per group: more workers do not speed up a hot entity",
+    "applies": [
+      "all"
+    ],
+    "severity": "perf",
+    "symptom": "Throughput stays flat as you add workers, or one slow entity delays others handled by the same worker.",
+    "cause": "A group leases one batch per partition at a time, so a partition is worked by one worker at a time and parallelism comes from the number of partitions with work. One pop may also lease several partitions (the JS SDK's default autopilot lets the broker choose; partitions(N) pins it), and a worker that handles them one after another makes the second wait for the first.",
+    "fix": "Key partitions by the entity whose order matters (customer, order), not by a coarse bucket or the Default partition. When a slow partition must not delay others in the same pop, pin .partitions(1), at the cost of more round trips.",
+    "code": {
+      "js": "await queen.queue('webhooks').group('senders').partitions(1).concurrency(20).each()\n  .consume(deliver)"
+    },
+    "source": [
+      "https://queenmq.com/concepts/partitions/",
+      "https://queenmq.com/concepts/consuming/",
+      "https://queenmq.com/examples/chat/",
+      "server/src/handlers/data.rs:180"
+    ]
+  },
+  {
+    "id": "queue-options-without-effect",
+    "title": "retryDelay, priority, ttl, maxSize and minPopWaitTime are accepted and stored, and do nothing in 2.0",
+    "applies": [
+      "all"
+    ],
+    "severity": "surprise",
+    "symptom": "Failed messages come back immediately despite retryDelay; priorities and size caps are ignored.",
+    "cause": "POST /api/v1/configure stores these options and the 2.0 broker never reads them; a nacked message comes back on the next pop.",
+    "fix": "For a pause between attempts, ack the message and schedule a timer into the same partition in one transaction (it goes out behind newer messages of that partition). For the same delay on every message use delayedProcessing (seconds). To drop old messages use maxWaitTimeSeconds, or retentionEnabled with retentionSeconds or completedRetentionSeconds.",
+    "code": {
+      "js": "await queen.transaction()\n  .ack(message, 'completed', { consumerGroup: 'senders' })\n  .timer('webhooks').key(`retry-${message.transactionId}`).partition(message.partition)\n    .delay('30s').payload(message.data).schedule()\n  .commit()"
+    },
+    "source": [
+      "https://queenmq.com/concepts/partitions/",
+      "https://queenmq.com/guides/webhooks/",
+      "server/src/rsm/facade/real/phase2.rs:1256"
+    ]
+  },
+  {
+    "id": "timer-not-before-and-absent",
+    "title": "A timer fires not before deliverAt, never exactly at it, and a cancel that answers absent may mean it already fired",
+    "applies": [
+      "all"
+    ],
+    "severity": "surprise",
+    "symptom": "A compensation or timeout runs after you cancelled its timer, or a reminder arrives later than deliverAt.",
+    "cause": "The leader fires due timers on a 50 ms tick, and the fired message then waits for a consumer like any other. A fire deletes the timer and leaves no tombstone, so a later cancel answers ok: false, status absent, whether the timer was cancelled earlier or already delivered. Scheduling an existing (queue, timerKey) replaces it; a reschedule after the fire is a new message unless it reuses the txn inside the partition's dedup window. POST /api/v1/timers refuses delays over 90 days and payloads over 1 MiB, but a timer inside a transaction is checked against neither. A fire that fails 5 times is dead-lettered under the group __timer__.",
+    "fix": "In the handler of a timeout or compensating message, check the entity's state in KV before acting. Schedule in the transaction that enters a state and cancel or reschedule in the one that leaves it, keyed by the entity id, with the entity's partition. Cancel inside the transaction when it must be atomic with the ack; the standalone DELETE /api/v1/timers/:queue/:timerKey is never refused by a quota, a rate limit or the kill switch.",
+    "code": {
+      "js": "await queen.transaction()\n  .ack(message, 'completed', { consumerGroup: 'bookings' })\n  .kv.put('bookings', bookingId, { state: 'held' }, { ttl: '7d' })\n  .timer('bookings').key(bookingId).partition(bookingId).delay('15m')\n    .payload({ type: 'hold-expired', bookingId }).schedule()\n  .commit()"
+    },
+    "source": [
+      "https://queenmq.com/concepts/timers/",
+      "https://queenmq.com/reference/limits/",
+      "https://queenmq.com/reference/transaction/"
+    ]
+  },
+  {
+    "id": "http-wire-shapes",
+    "title": "Hand-written HTTP: partitionId is the pop's numeric id, an empty pop is a bodiless 204, timer payloads are base64",
+    "applies": [
+      "http"
+    ],
+    "severity": "breaks",
+    "symptom": "Acks or transactions fail on partitionId, JSON parsing breaks on empty pops, timer calls answer 400, kv or timer operations inside operations are refused.",
+    "cause": "An ack's partitionId is the broker's id from the pop (a JSON string of digits), not the partition name; a non-numeric one is a bad_request. A pop that finds nothing answers 204 with no body. A timer payload is base64 (the SDKs encode JSON for you) and delayMs is relative milliseconds. In a transaction, kv and timers are top-level arrays beside operations, never elements of it. An ack without leaseId is not fenced, and every ack answers 200 with a per-item success.",
+    "fix": "Copy transactionId, partitionId and leaseId from the pop response into each ack, with consumerGroup; handle 204 before parsing JSON; base64-encode timer payloads; keep kv and timers at the top level; read each ack item's success.",
+    "code": {
+      "http": "POST /api/v1/transaction\n{\n  \"operations\": [{\"type\":\"ack\",\"transactionId\":\"order-7-paid\",\"partitionId\":\"42\",\n                  \"consumerGroup\":\"billing\",\"leaseId\":\"<leaseId from the pop>\"}],\n  \"kv\": [{\"op\":\"put\",\"ns\":\"orders\",\"key\":\"order-7\",\"value\":{\"status\":\"paid\"},\"ttlSeconds\":2592000}],\n  \"timers\": [{\"op\":\"schedule\",\"queue\":\"reminders\",\"timerKey\":\"order-7\",\"delayMs\":86400000,\n              \"txn\":\"reminder-order-7\",\"payload\":\"eyJvcmRlcklkIjoib3JkZXItNyJ9\"}]\n}"
+    },
+    "source": [
+      "https://queenmq.com/reference/transaction/",
+      "https://queenmq.com/concepts/consuming/",
+      "https://queenmq.com/concepts/timers/",
+      "https://queenmq.com/start/quickstart/"
+    ]
+  },
+  {
+    "id": "js-callbacks-disable-autoack",
+    "title": "JS: adding .onSuccess() or .onError() to consume() turns auto-ack off",
+    "applies": [
+      "js"
+    ],
+    "severity": "breaks",
+    "symptom": "Messages are redelivered after every lease expiry even though the handler succeeded, and nothing reaches the DLQ.",
+    "cause": "When either callback is defined, the consume builder disables auto-ack: the SDK neither acks on success nor nacks on failure, and an error caught by onError is not rethrown. A callback that only logs leaves every message leased until it expires.",
+    "fix": "Ack in the callbacks yourself, or drop the callbacks and let a throwing handler be nacked by the SDK.",
+    "code": {
+      "js": "await queen.queue('tasks').group('workers').each().consume(handle)\n  .onSuccess(async (message) => { await queen.ack(message, true, { group: 'workers' }) })\n  .onError(async (message, err) => {\n    await queen.ack(message, false, { group: 'workers', error: err.message })\n  })"
+    },
+    "source": [
+      "clients/client-js/client-v2/builders/QueueBuilder.js:741",
+      "clients/client-js/client-v2/README.md:1446"
+    ]
+  },
+  {
+    "id": "consume-handler-gets-array",
+    "title": "JS and Python consume(): without .each() the handler gets an array, and .limit(n) stops the consumer",
+    "applies": [
+      "js",
+      "python"
+    ],
+    "severity": "breaks",
+    "symptom": "message.data is undefined because the handler received a list, or the worker exits after n messages.",
+    "cause": "consume() passes the whole popped batch unless .each() is set (Python passes a single message only when batch is pinned to 1 and one message arrived), and acks or nacks that batch as a whole. .limit(n) is a stop condition (process n messages, then return), not a batch size; the batch size is .batch(n), or the broker's choice (autopilot) when unset.",
+    "fix": "Use .each() for one message per call, or write the handler for an array. Use .batch(n) for size and keep .limit() for scripts and tests.",
+    "code": {
+      "js": "await queen.queue('orders').group('billing').each()\n  .consume(async (message) => { await handle(message.data) })",
+      "python": "await queen.queue('orders').group('billing').each().consume(handle)"
+    },
+    "source": [
+      "clients/client-js/client-v2/consumer/ConsumerManager.js:213",
+      "clients/client-js/client-v2/consumer/ConsumerManager.js:144",
+      "clients/client-py/queen/consumer/consumer_manager.py:285"
+    ]
+  },
+  {
+    "id": "js-create-resets-queue-options",
+    "title": "JS: queue(name).create() resets every option you leave out to SDK defaults",
+    "applies": [
+      "js"
+    ],
+    "severity": "breaks",
+    "symptom": "After a deploy, a queue's leaseTime, delay or retention changed, or encryption turned off.",
+    "cause": "create() sends your options merged over nine SDK defaults (leaseTime 300, retryLimit 3, encryptionEnabled false, and 0 for priority, delayedProcessing, windowBuffer, maxSize, retentionSeconds and completedRetentionSeconds) to POST /api/v1/configure, so each one you omit overwrites the stored value. /configure itself merges: an option you leave out keeps its value.",
+    "fix": "Name every option you care about in config(...) on every create(), or call POST /api/v1/configure with only the options you mean to change.",
+    "code": {
+      "js": "await queen.queue('orders')\n  .config({ leaseTime: 120, retryLimit: 5, retentionEnabled: true,\n            completedRetentionSeconds: 86400, encryptionEnabled: true })\n  .create()",
+      "http": "POST /api/v1/configure {\"queue\":\"orders\",\"options\":{\"leaseTime\":120}}"
+    },
+    "source": [
+      "https://queenmq.com/concepts/partitions/",
+      "clients/client-js/client-v2/builders/QueueBuilder.js:116",
+      "clients/client-js/client-v2/utils/defaults.js:42"
+    ]
+  },
+  {
+    "id": "go-push-transactionid-first-item",
+    "title": "Go: Push(...).TransactionID(id) sets the id of the first item only",
+    "applies": [
+      "go"
+    ],
+    "severity": "breaks",
+    "symptom": "Retried batch pushes store duplicates of every item but the first.",
+    "cause": "PushBuilder.TransactionID applies to item 0 and mints a fresh UUID for every other item; a transactionId key inside a map payload is just payload. In a transaction, TransactionQueueBuilder.Push honours TransactionID only on queen.PushItem values and unpacks only []interface{} and []map[string]interface{} slices, so a []queen.PushItem is sent as one message.",
+    "fix": "Push one message per call when each needs its own id. In a transaction pass queen.PushItem{Payload: ..., TransactionID: ...} values, several of them inside a []interface{}.",
+    "code": {
+      "go": "for _, o := range orders {\n\tres, err := client.Queue(\"orders\").Partition(o.Customer).Push(o.Payload).\n\t\tTransactionID(\"order-\" + o.ID + \"-created\").Execute(ctx)\n\tif err != nil || res[0].Status == \"error\" {\n\t\t// retry this one with the same id\n\t}\n}\n\ntx := client.Transaction().Queue(\"receipts\").Partition(customerID).\n\tPush(queen.PushItem{Payload: receipt, TransactionID: \"receipt-\" + orderID})"
+    },
+    "source": [
+      "clients/client-go/push_builder.go:84",
+      "clients/client-go/transaction_builder.go:288"
+    ]
+  },
+  {
+    "id": "pop-errors-look-empty",
+    "title": "JS, Python and C++ pop() return an empty result on errors, so a broken consumer looks like an empty queue",
+    "applies": [
+      "js",
+      "python",
+      "cpp"
+    ],
+    "severity": "surprise",
+    "symptom": "pop() keeps returning nothing while the queue has messages (a revoked token, a 403, an exhausted 429 budget, a wrong URL).",
+    "cause": "These clients log the failure and return an empty result from pop() instead of raising. The Go, Rust and PHP clients surface the error from pop().",
+    "fix": "When a pop-based worker gets nothing, check the client's error log (or the queue's backlog) before assuming the queue is empty. The JS and Python consume() loops stop on a terminal 403 instead of looping.",
+    "source": [
+      "https://queenmq.com/start/clients/",
+      "clients/client-js/client-v2/builders/QueueBuilder.js:526",
+      "clients/client-py/queen/builders/queue_builder.py:550"
+    ]
+  },
+  {
+    "id": "ephemeral-is-memory-only",
+    "title": "Ephemeral queues are memory-only: a crash loses their messages, and they cannot join a transaction",
+    "applies": [
+      "all"
+    ],
+    "severity": "surprise",
+    "symptom": "Replies or signals vanish when a node crashes, and there is no way to push an ephemeral message as part of a step's transaction.",
+    "cause": "/api/v1/ephemeral/* keeps each (queue, partition) in the memory of one owner node, outside the raft log. A SIGTERM hands the contents to the next owner; kill -9 or an OOM loses them. There are no transactions, DLQ, replay or subscriptionMode. Without autoAck a message is leased for 30 s and dropped after 5 attempts; with autoAck delivery is at-most-once. A popped message is {id, partition, payload, attempts}: payload, not data.",
+    "fix": "Use ephemeral queues for request/reply inboxes, presence and progress, with a timeout on the requester. Use a durable queue for anything that is part of a step that must commit.",
+    "code": {
+      "js": "const inbox = `rpc-inbox-${randomUUID()}`\nawait queen.ephemeral.push('rpc-requests', [{ n: 7, replyTo: inbox }])\nconst reply = await queen.ephemeral.pop(inbox, { wait: true, timeout: 5000, autoAck: true })\nif (reply.messages.length === 0) throw new Error('no reply within 5 s')\nconst answer = reply.messages[0].payload"
+    },
+    "source": [
+      "https://queenmq.com/guides/ephemeral/",
+      "https://queenmq.com/reference/limits/",
+      "clients/client-js/client-v2/ephemeral/Ephemeral.js:409"
+    ]
+  },
+  {
+    "id": "stream-cycle-exactly-once-scope",
+    "title": "A stream cycle commits the source ack, window state and sink pushes as one entry; foreach, late re-emits and the idle flush are not exactly-once",
+    "applies": [
+      "js",
+      "python",
+      "go",
+      "rust"
+    ],
+    "severity": "surprise",
+    "symptom": "A side effect in .foreach() runs twice after a crash, or a window result is emitted twice.",
+    "cause": "Each cycle of a partition becomes one transaction: a positional ack of the source batch under its lease, the state upserts and deletes, and the sink pushes. If the lease expired, the whole cycle is refused and the batch is processed again by the next holder; any other failure is not nacked, and the batch returns once the lease runs out. .foreach(fn) acks after fn resolves (at-least-once). The idle flush that closes a window on a quiet partition commits without a lease, so two processes, or a flush retried after a lost answer, can emit a window twice; onLate: 'include' emits a window again with only its late events.",
+    "fix": "For effects that must happen once, write results to a sink queue with .to(...) and act on them from a consumer that commits a gated transaction; make sink consumers tolerate a repeated window result.",
+    "code": {
+      "js": "const handle = await Stream\n  .from(queen.queue('sales'))\n  .filter((m) => m.data.amount > 0)\n  .windowTumbling({ seconds: 60 })\n  .aggregate({ count: () => 1, sum: (s) => s.amount })\n  .to(queen.queue('sales-per-minute'))\n  .run({ queryId: 'sales-per-minute', url, subscriptionMode: 'all' })"
+    },
+    "source": [
+      "https://queenmq.com/guides/streams/",
+      "clients/client-js/client-v2/streams/Stream.js:263"
+    ]
+  },
+  {
+    "id": "stream-poison-event-blocks-partition",
+    "title": "Streams have no retry limit or DLQ: an event that makes the chain throw blocks its partition",
+    "applies": [
+      "js",
+      "python",
+      "go",
+      "rust"
+    ],
+    "severity": "breaks",
+    "symptom": "One partition of a stream stops advancing while the others run, and the same events keep coming back.",
+    "cause": "A stream cycle has no retry budget and no dead-letter queue: a message that makes the operator chain throw (an extractor reading a field the event lacks) returns after every lease expiry and holds up its partition. A changed operator chain under an existing queryId answers 409 unless run() passes reset: true, which deletes every state row of the query while the group keeps its position. Window state is per source partition, so .keyBy() over several partitions yields one partial result per partition. windowCron takes `every`, not cron syntax.",
+    "fix": "Filter out events the chain cannot handle before the window and guard extractors against missing fields. Give a changed chain a new queryId (a new group: pass subscriptionMode: 'all' to replay the retained history) rather than reset: true when you need the old results. To aggregate across partitions, push to a queue partitioned by the new key and aggregate there.",
+    "source": [
+      "https://queenmq.com/guides/streams/",
+      "clients/client-js/client-v2/streams/Stream.js:271"
+    ]
+  },
+  {
+    "id": "kafka-consumers-skip-leases-share-position",
+    "title": "Kafka consumers read by offset: no leases, retries or DLQ, and their commits move the shared group position",
+    "applies": [
+      "kafka"
+    ],
+    "severity": "breaks",
+    "symptom": "Queen consumers in the same group lose their leases mid-batch or see redeliveries; failed Kafka records are never dead-lettered; a Kafka-only consumer shows no pops or acks in dashboards and metrics.",
+    "cause": "A Kafka fetch is a read by offset through the same path as POST /api/v1/fetch, not a pop, so Queen's leases, redelivery, retry budget and dead-letter queue do not apply and the pop and ack counters do not move (the group's lag does). A Kafka group is the Queen consumer group of the same name: a Kafka commit sets its position like a seek and releases any lease a Queen consumer holds on that partition. Committed offsets never expire, and deleting a group from a Kafka tool deletes the Queen group on every queue.",
+    "fix": "Do not run Kafka and Queen consumers in one group at the same time: hand a group from one kind to the other, or use separate group names. Watch group lag rather than pop and ack rates, and handle failures in the Kafka consumer as you would on Kafka, or consume with a Queen SDK to get leases, retries and the DLQ.",
+    "source": [
+      "https://queenmq.com/guides/kafka/",
+      "https://queenmq.com/reference/kafka/",
+      "server/src/kafka_inproc.rs:236",
+      "server/src/rsm/facade/real.rs:3974"
+    ]
+  },
+  {
+    "id": "kafka-client-settings",
+    "title": "Kafka clients need the classic group protocol, no static membership, a reachable advertised address and a few per-client settings",
+    "applies": [
+      "kafka"
+    ],
+    "severity": "breaks",
+    "symptom": "Consumers fail when they join, a consumer reconnects forever, clients cannot reach the broker after their first request, or a producer silently writes with acks=0.",
+    "cause": "The facade implements the classic group protocol (JoinGroup, SyncGroup, heartbeats) without KIP-848 or static membership. Clients reconnect to QUEEN_KAFKA_ADVERTISED_ADDR, which has no default (a node with the facade on refuses to boot without it). Measured client notes: a segmentio/kafka-go &kafka.Writer{} literal writes with acks=0 unless RequiredAcks is set, so errors and real offsets never reach it; sarama below 1.46.0 needs Config.Version = sarama.V1_0_0_0 or its consumer reconnects forever on EOF; aiokafka needs 0.13 or later for groups; kafka-python must not pin api_version above (0, 11, 0); a librdkafka consumer that must create its topic needs allow.auto.create.topics=true.",
+    "fix": "Keep group.protocol=classic (the Kafka 4.x default) and leave group.instance.id unset. Run the facade with QUEEN_KAFKA_EMBEDDED=true and an advertised address the client can reach (from a container, host.docker.internal:9092, not localhost); in a cluster each node advertises its own address, never one load-balanced address. Apply the per-client settings above.",
+    "code": {
+      "go": "w := &kafka.Writer{\n\tAddr:         kafka.TCP(\"localhost:9092\"),\n\tTopic:        \"orders\",\n\tRequiredAcks: kafka.RequireAll, // the literal's zero value is acks=0\n}"
+    },
+    "source": [
+      "https://queenmq.com/reference/kafka/",
+      "https://queenmq.com/guides/kafka/",
+      "protocols/queen-kafka/compat/kafka-go/produce_test.go:147",
+      "protocols/queen-kafka/compat/sarama/main.go:44"
+    ]
+  },
+  {
+    "id": "kafka-shared-queues",
+    "title": "Queues shared by Kafka and Queen clients: numeric partitions only, a base64 record envelope, and no dedup window",
+    "applies": [
+      "kafka"
+    ],
+    "severity": "surprise",
+    "symptom": "Kafka consumers never see what Queen clients pushed to entity-named partitions; Queen consumers get {k, v, t} objects instead of your JSON; repeated transactionIds are stored twice; a new Kafka consumer reads nothing for about 30 s.",
+    "cause": "Kafka partition n is the Queen partition named \"n\", and a Kafka client cannot address a partition named customer-123. A Kafka record reaches Queen clients as one message {k, v, t, h} with key and value base64-encoded; a Queen push reaches Kafka consumers as a record with no key whose value is the JSON. Topics created through Kafka get dedupWindowSeconds 0. A queue a Queen client created shows up in Kafka metadata within about 3 s, and a consumer that subscribed in that window saw no partitions for about 30 s.",
+    "fix": "Use numeric partition names (or let Kafka producers hash keys) on queues Kafka consumers read; decode k and v from base64 in Queen consumers; set dedupWindowSeconds on a Kafka-created queue if Queen producers rely on transactionId; create the topic before Kafka consumers subscribe.",
+    "source": [
+      "https://queenmq.com/guides/kafka/",
+      "https://queenmq.com/examples/kafka-bridge/",
+      "https://queenmq.com/concepts/dedup/"
+    ]
+  },
+  {
+    "id": "kafka-facade-gaps",
+    "title": "Kafka facade gaps: compaction keeps everything, no DeleteRecords, records stored uncompressed, no transactions in cluster mode",
+    "applies": [
+      "kafka"
+    ],
+    "severity": "surprise",
+    "symptom": "A compacted topic keeps growing; kafka-delete-records.sh fails; zstd brings no saving; initTransactions() throws TransactionalIdAuthorizationException on a cluster.",
+    "cause": "cleanup.policy=compact switches retention off and keeps every record, tombstones included. DeleteRecords is not offered. Records are stored decoded and fetched as uncompressed batches, so producer compression saves only inbound bandwidth; librdkafka-based producers send zstd uncompressed, and librdkafka 2.11.0 and older send gzip, snappy and lz4 uncompressed too. In cluster mode (QUEEN_KAFKA_NODE_ID set) transactions are refused; outside it, a transaction is staged in one node's memory (at most 8 MiB and 50,000 records) and a commit resumed after that node restarts is refused with INVALID_TXN_STATE.",
+    "fix": "Plan disk for compacted topics, delete and recreate a topic instead of truncating it, and run transactional producers against a facade outside cluster mode, inside the staging limits.",
+    "source": [
+      "https://queenmq.com/guides/kafka/",
+      "https://queenmq.com/reference/kafka/"
+    ]
+  },
+  {
+    "id": "js-kv-timer-strings",
+    "title": "JS: KV namespaces and keys and timer keys must be non-empty strings, and durations need a unit",
+    "applies": [
+      "js"
+    ],
+    "severity": "breaks",
+    "symptom": "kv.put('orders', 9137, ...) or timer(...).key(9137) throws \"must be a non-empty string\"; { ttl: 3600 } or .delay(5000) throws \"duration must be a string with a unit\".",
+    "cause": "The JS SDK refuses numbers for names and for durations on purpose: a bare number cannot say whether it means seconds or milliseconds.",
+    "fix": "Build keys as strings (`order-${orderId}`). Write durations with a unit ('30s', '24h', '30d'), or use the unit-named numeric options: ttlSeconds for KV, delayMs for timers.",
+    "code": {
+      "js": "await queen.kv.put('orders', `order-${orderId}`, { status: 'paid' }, { ttl: '30d' })\nawait queen.timer('reminders').key(`order-${orderId}`).delay('24h').payload({ orderId }).schedule()"
+    },
+    "source": [
+      "clients/client-js/client-v2/kv/Kv.js:59",
+      "clients/client-js/client-v2/builders/TimerBuilder.js:89",
+      "clients/client-js/client-v2/kv/expiry.js:49"
+    ]
+  },
+  {
+    "id": "js-legacy-stream-api",
+    "title": "JS: queen.stream() and queen.consumer() are the 1.x streaming API, and the 2.0 broker has no routes for them",
+    "applies": [
+      "js"
+    ],
+    "severity": "breaks",
+    "symptom": "A consumer built with queen.consumer(...) or queen.stream(...) gets errors from /api/v1/stream/poll, /ack or /seek instead of messages.",
+    "cause": "Both builders still call /api/v1/stream/*, which Queen 2.0 does not serve. Stream processing in 2.0 is the Stream runtime, which reads a queue as a consumer group.",
+    "fix": "Build streams with Stream.from(queen.queue(name)) and its operators; see setup(feature: \"streams\").",
+    "code": {
+      "js": "import { Queen, Stream } from 'queen-mq'\nconst stream = await Stream.from(queen.queue('events'))\n  .windowTumbling({ seconds: 60 })\n  // ...operators and a sink, as in setup(feature: \"streams\", language: \"js\")"
+    },
+    "source": [
+      "clients/client-js/client-v2/Queen.js:660",
+      "clients/client-js/client-v2/stream/StreamConsumer.js:59",
+      "https://queenmq.com/guides/streams/"
+    ]
+  },
+  {
+    "id": "python-stream-default-new",
+    "title": "Python: a stream starts at new messages unless subscription_mode='all' is passed, whatever the docstring says",
+    "applies": [
+      "python"
+    ],
+    "severity": "breaks",
+    "symptom": "A Python stream deployed after its source queue has data processes nothing until new messages arrive.",
+    "cause": "Stream.run documents subscription_mode as defaulting to 'all', but the runner sends a mode only when one is passed, so the broker's default for a new group, 'new', applies.",
+    "fix": "Pass subscription_mode='all' (or subscription_from) to Stream.run when the stream must read what is already queued.",
+    "source": [
+      "clients/client-py/queen/streams/stream.py:158",
+      "clients/client-py/queen/streams/runtime/runner.py:247",
+      "https://queenmq.com/concepts/consuming/"
+    ]
+  },
+  {
+    "id": "go-ack-takes-bool",
+    "title": "Go: client.Ack takes a bool, so a standalone ack can only say completed or failed",
+    "applies": [
+      "go"
+    ],
+    "severity": "surprise",
+    "symptom": "client.Ack(ctx, msg, \"dlq\", ...) does not compile (cannot use \"dlq\" as bool), and there is no standalone way to dead-letter now or retry without spending a retry.",
+    "cause": "In the Go SDK the standalone Ack's third argument is success bool. The broker's other statuses, retry and dlq, are reachable through TransactionBuilder.Ack, which takes the status as a string.",
+    "fix": "Ack completed or failed with client.Ack(ctx, msg, true|false, opts). To dead-letter or retry, ack in a transaction: client.Transaction().Ack(msg, \"dlq\", queen.AckOptions{ConsumerGroup: group, Error: reason}).Commit(ctx).",
+    "code": {
+      "go": "if _, err := client.Transaction().\n\tAck(msg, \"dlq\", queen.AckOptions{ConsumerGroup: \"billing\", Error: err.Error()}).\n\tCommit(ctx); err != nil {\n\treturn err\n}"
+    },
+    "source": [
+      "clients/client-go/queen.go:93",
+      "clients/client-go/transaction_builder.go:36",
+      "server/src/rsm/facade/real.rs:4040"
+    ]
+  }
+]

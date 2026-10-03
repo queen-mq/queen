@@ -1,28 +1,22 @@
 # docs:start(app-http-saga)
 #!/usr/bin/env bash
 #
-# A booking saga whose compensation is a timer, with nothing but curl.
+# A booking saga, with nothing but curl: a room is held, paid for, and released
+# by a timer when the payment never comes.
 #
-# The war story is a room hold that never came back. A booking system held
-# inventory when a reservation started and released it when the payment either
-# settled or failed, and the release lived in a sleeping worker. A rolling
-# deploy replaced the workers; every hold in flight lost its release; and a
-# fortnight later somebody noticed a hotel had been sold out on paper for nine
-# nights it had spent empty.
-#
-# The release was not slow, it was in the wrong place. A compensation is not a
-# timeout, it is an obligation, and an obligation has to outlive the process
-# that took it on. Here the gate, the saga state, the compensation timer, the
-# payment request and the acknowledgement are ONE transaction, one entry in the
-# broker's replicated log. If the room is held, the compensation exists. If the
-# room is not held, nothing else happened either.
+# The release is the part that usually breaks. Kept as a sleep in a worker, it
+# dies with the worker, and a deploy in the middle of a hold leaves the room
+# held forever. Here the release is a timer in the broker, scheduled in the same
+# transaction that holds the room: the saga's state, the timer, the payment
+# request and the ack of the booking commit as one log entry. If the room is
+# held, its release exists; if anything failed, none of it happened.
 #
 #   bookings
-#     |-- group "reserver"    ONE bundle: gate + state + timer + push + ack
-#     |     `-- payments (partitioned by booking)
-#     |           `-- group "payer"   confirm + CANCEL the timer + ack, one bundle
-#     `-- expiries (delivered by the timer, at the hold's expiry)
-#           `-- group "compensator"   reads the state BEFORE compensating
+#     `-- group "reserver"     ONE transaction: state + timer + push + ack
+#           |-- payments (one partition per booking)
+#           |     `-- group "payer"        confirm + cancel the timer + ack
+#           `-- expiries (the timer delivers here when the hold runs out)
+#                 `-- group "compensator"  reads the state before it releases
 #
 # There is no client library here and none is needed, and this file is worth
 # reading even if you use one. `kv` and `timers` are keys of the ROOT of the
@@ -36,12 +30,11 @@ set -euo pipefail
 
 QUEEN_URL="${QUEEN_URL:-http://localhost:6632}"
 
-# A suffix on the queue names AND on the KV namespace. The queues need it
-# because delete-then-recreate leaves stale partition state for up to 30
-# seconds; the namespace needs it for the opposite reason -- a saga row outlives
-# the run that wrote it, so a second run under the same namespace would find
-# every booking already held and measure nothing. $$ is the process id, which
-# keeps two runs in the same second apart.
+# Fresh queues and a fresh KV namespace per run, so runs never share state. The
+# namespace matters most: the saga's state is KV entries, which outlive the
+# queues (they expire with their TTL), so a second run in the same namespace
+# would find every booking already held. $$ is the process id, which keeps two
+# runs in the same second apart.
 RUN="$(date +%s)-$$"
 BOOKINGS="app-http-saga-bookings-$RUN"
 PAYMENTS="app-http-saga-payments-$RUN"
@@ -54,39 +47,37 @@ RESERVER=app-http-reserver
 PAYER=app-http-payer
 COMPENSATOR=app-http-compensator
 
-# Four bookings, five submissions. B-2 is submitted twice: the same booking, two
-# messages, which is what a redelivery looks like from the reserver's side and
-# the reason the bundle opens with a gate rather than with a check.
+# Four bookings, five submissions: B-2 is submitted twice, which is what a
+# redelivery looks like from the reserver's side, and the reason the
+# transaction opens with a gate.
 BOOKING_IDS="B-1 B-2 B-3 B-4"
 SUBMISSIONS="B-1 B-2 B-2 B-3 B-4"
 SUBMISSION_COUNT=5
 BOOKING_COUNT=4
 
 # B-3's card is declined, so its saga never reaches "confirmed" and the timer is
-# the thing that gives the room back.
+# what gives the room back.
 DECLINED=B-3
 
-# B-4 pays, but its cancel is deliberately skipped, which makes the race
-# deterministic: a cancel that arrives after the fire answers `absent`, and
-# ABSENT MAY MEAN ALREADY DELIVERED. So the compensation for a confirmed booking
-# has to be refused by the consumer that receives it, never prevented by the
-# cancel alone.
+# B-4 pays, but its cancel is skipped on purpose. That is the cancel that comes
+# too late, made reproducible: a cancel that arrives after the fire answers
+# `absent`, which may mean the release was already delivered. So the release
+# for a confirmed booking has to be refused by the compensator that receives
+# it.
 CANCEL_SKIPPED=B-4
 
-# How long a room stays held before the compensation fires. It has to outlast
-# the reserve and pay phases, or a timer would fire before the payment that
-# cancels it and the run would be measuring a race rather than a design.
-# deliverAt is a floor and never a ceiling, so a timer can only be late: a
-# margin here is sound, where a margin the other way would not be.
-HOLD_MS=15000
+# How long a room stays held before it is released. In production this is
+# minutes; it is the only number that changes. It has to outlast the reserving
+# and paying phases below, or a release would fire before the payment that
+# cancels it and the run would measure a race.
+HOLD_MS=10000
 
-# Every phase ends on a COUNT, and these are the deadlines behind the counts.
-# Never wait for silence; wait for a total, with a deadline. The compensation
-# phase gets a longer one: a timer fires no earlier than its delay plus one
-# sweeper cycle, and a broker whose timer table has been empty for a while wakes
-# up lazily.
+# Each phase ends on a count of messages, with a deadline behind it so a stall
+# fails the run instead of hanging it. Timers fire on the leader's next tick
+# after they are due (every 50 ms), so the compensation phase only needs the
+# hold plus a margin.
 PHASE_MS=20000
-TIMER_DEADLINE_MS=90000
+TIMER_DEADLINE_MS=$((HOLD_MS + 20000))
 
 # Every pop long-polls for this many milliseconds and no longer.
 POLL_MS=1000
@@ -100,8 +91,8 @@ TMP="$(mktemp -d)"
 OBSERVED="$TMP/observed"
 : > "$OBSERVED"
 
-# One line per room actually put back on sale. This is the compensation's
-# external effect, and the whole reason the program exists.
+# One line per room actually put back on sale. This is the release's external
+# effect, and the reason the program exists.
 RELEASED="$TMP/released"
 : > "$RELEASED"
 
@@ -112,13 +103,6 @@ check() {
   [ "$1" = "$2" ] || fail "$3 (expected [$2], got [$1])"
   CHECKS=$((CHECKS + 1))
   echo "  ok: $3"
-}
-
-# ok <description>: records a check whose condition was already tested, for the
-# assertions that are not an equality.
-ok() {
-  CHECKS=$((CHECKS + 1))
-  echo "  ok: $1"
 }
 
 # A millisecond clock. GNU date spells it %3N; BSD date (macOS) has no %N and
@@ -153,9 +137,9 @@ request() {
 # makes the payer's read-then-write safe further down.
 saga_key() { printf 'saga:%s' "$1"; }
 
-# kv_get <key>: prints the whole row as JSON, {"found":false,...} when absent.
-# `found` is a field of its own because null is a legal stored value: absence is
-# never inferred from the value being empty. Everything goes through
+# kv_get <key>: prints the whole result as JSON, {"found":false,...} when
+# absent. `found` is a field of its own because null is a legal stored value:
+# absence is never inferred from the value being empty. Everything goes through
 # POST /api/v1/kv, including single-key reads, which keeps the key out of access
 # logs, proxy samples and tracing spans.
 kv_get() {
@@ -171,17 +155,12 @@ kv_get() {
 # reason and exits 1; any other command that fails under `set -e` arrives here
 # too, with its own status. FAIL is printed exactly once, and only on failure.
 #
-# It also purges, and there are three things to remove. Two of them are the ones
-# that are easy to forget: the saga rows live in their own table, and a PENDING
-# TIMER lives in the staging table keyed by NAME, so neither is reached by
-# deleting the queue -- and a timer whose queue no longer exists still fires and
-# provisions the queue again on the way out.
-#
-# The purge is UNCONDITIONAL, because a run that failed is exactly the run whose
-# leftovers matter: an armed timer would deliver into the next run, and a
-# surviving saga row would make the next run pass without holding anything. And
-# it is best effort, with `|| true` throughout, so a purge that fails cannot
-# overwrite the verdict.
+# It also cleans up, in every case, a failed run included. Deleting the queues
+# is not enough: the saga's state is KV entries, and a pending timer is stored
+# by its queue and key, so deleting the queues removes neither, and a timer that
+# fires into a deleted queue creates the queue again. So the timers are
+# cancelled and the entries deleted first. The cleanup is best effort, with
+# `|| true` throughout, so a cleanup that fails cannot overwrite the verdict.
 cleanup() {
   local status=$?
   purge || true
@@ -196,8 +175,9 @@ cleanup() {
 purge() {
   local booking keys body
   for booking in $BOOKING_IDS; do
-    # The cancel route, DELETE /api/v1/timers/:queue/*timerKey. It is the one
-    # route a proxy may never block, because the fire never switches itself off.
+    # The cancel route, DELETE /api/v1/timers/:queue/*timerKey. Neither a quota
+    # nor an operator's switch ever blocks it: a pending timer fires whatever
+    # the quota says, so its cancel always has to get through.
     request DELETE "/api/v1/timers/$EXPIRIES/$booking" || true
   done
   keys="$(printf '%s\n' $BOOKING_IDS | jq -R 'sub("^"; "saga:")' | jq -sc .)" || return 0
@@ -214,18 +194,18 @@ echo "broker $QUEEN_URL"
 
 # Every broker serves /api/v1/kv and /api/v1/timers: there is no flag that turns
 # them on. What can still refuse is an operator's runtime kill switch (503) or a
-# quota (403), so probe once here and name that, rather than letting the first
-# real call fail with something that reads like a bug.
+# quota (403), so probe once here and name that. Otherwise the first real call
+# fails with something that reads like a bug.
 request POST /api/v1/kv '{"operations":[{"op":"get","ns":"probe","key":"probe"}]}'
 [ "$STATUS" = 200 ] \
-  || fail "the kv probe returned HTTP $STATUS: $(cat "$OUT") (503 is an operator's kill switch, 403 a quota; see /deploy/state)"
+  || fail "the kv probe returned HTTP $STATUS: $(cat "$OUT") (503 is an operator's kill switch, 403 a quota; GET /api/v1/system/kv-timers shows the switches)"
 request GET "/api/v1/timers/$EXPIRIES?limit=1"
 [ "$STATUS" = 200 ] \
-  || fail "the timers probe returned HTTP $STATUS: $(cat "$OUT") (503 is an operator's kill switch, 403 a quota; see /deploy/state)"
+  || fail "the timers probe returned HTTP $STATUS: $(cat "$OUT") (503 is an operator's kill switch, 403 a quota; GET /api/v1/system/kv-timers shows the switches)"
 
-# /configure merges rather than replacing, so an option not named here keeps
-# whatever the queue already has. These three names are unique per run, so what
-# is not named lands on its default.
+# /configure merges: an option not named here keeps whatever the queue already
+# has. These three names are unique per run, so what is not named lands on its
+# default.
 for queue in "$BOOKINGS" "$PAYMENTS" "$EXPIRIES"; do
   body="$(jq -n --arg queue "$queue" '{queue: $queue, options: {leaseTime: 30, retryLimit: 3}}')"
   request POST /api/v1/configure "$body"
@@ -240,9 +220,8 @@ index=0
 room=101
 cents=24000
 for booking in $SUBMISSIONS; do
-  # Distinct transaction ids on purpose. Deduplication would swallow the
-  # duplicate submission and the gate would never be tested, and a real
-  # redelivery arrives with an identity of its own too. The duplicate carries
+  # One transaction id per submission, so the duplicate of B-2 is stored and
+  # reaches the reserver, where the gate has to catch it. The duplicate carries
   # the same room and price, being the same booking submitted twice.
   case "$booking" in
     B-1) room=101; cents=24000 ;;
@@ -267,8 +246,11 @@ echo "  $SUBMISSION_COUNT submissions for $BOOKING_COUNT bookings"
 # ---------------------------------------------------------------------------
 # handle_reserve: one delivery from the bookings queue.
 #
-# The bundle, and the whole point of the example: five things commit together,
-# so there is no ordering between them left to get wrong.
+# The transaction is the whole point of the example: four things commit
+# together, so there is no order between them to get wrong. Written as four
+# calls, a crash between the timer and the push leaves a release for a payment
+# that was never asked for, and a crash the other way round leaves a hold with
+# no release.
 # ---------------------------------------------------------------------------
 handle_reserve() {
   local booking room cents txn partition lease body payload why ack_body
@@ -281,28 +263,30 @@ handle_reserve() {
   # message, and it is the reason the acknowledgement below can refuse.
   lease="$(jq -r '.leaseId' "$TMP/pop")"
 
-  # `kv` and `timers` are keys of the ROOT of this body, beside `operations` and
-  # not inside it. That is not a style choice: they are separate top-level
-  # fields precisely so that no client can send them under one key by accident.
+  # `kv` and `timers` are keys of the ROOT of this body, beside `operations`.
+  # They are separate top-level fields so that no client can send them under
+  # one key by accident.
   #
-  # kv:      required:true is what makes putIfAbsent a GATE rather than a
-  #          verdict. Without it a lost race would come back applied:false while
-  #          the payment and the timer went out anyway. ttlSeconds is mandatory
-  #          on every KV write: a row with no expiry is a row nothing will ever
-  #          delete. `forever: true` is the other legal answer, and it is
-  #          exactly what an example must never write.
-  # timers:  the obligation. From the moment this commits it is a row in the
-  #          broker's own table, so it survives this handler, this process, this
-  #          deploy and this machine. The key is ours, which is the entire
-  #          reason it can be cancelled later by name. The payload is base64,
-  #          and delayMs is milliseconds from now -- an absolute instant is not
-  #          expressible, because deliverAt is computed by the broker and there
-  #          is exactly one clock.
-  # push:    partitioned by booking, so every message about one booking is in
-  #          one lane.
-  # ack:     carrying this delivery's lease. An expired lease refuses the ack
-  #          and takes the other three down with it, which is the guarantee no
-  #          compare-and-swap can give.
+  # kv:      the gate and the first state, in one KV entry. required:true makes
+  #          the putIfAbsent a gate: if the booking is already held, the whole
+  #          transaction rolls back and nothing else in it happens. Without it
+  #          a lost race would come back applied:false while the payment and the
+  #          timer went out anyway. ttlSeconds is mandatory on every KV write
+  #          (`forever: true` is the only alternative), so an entry nobody
+  #          deletes still goes away.
+  # timers:  the release. From this commit on it is a record in the broker's
+  #          replicated state, independent of this process. The key is ours,
+  #          which is what lets the payer cancel it by name. The payload is
+  #          base64, and delayMs is milliseconds from now: an absolute instant
+  #          is not expressible, because the broker computes the due time on
+  #          its own clock.
+  # push:    the payment request, in the booking's own partition. It carries no
+  #          transactionId: it can only commit together with the saga's state,
+  #          so the gate is its idempotency key, and the broker mints an id.
+  #          With an id of our own, the duplicate of B-2 would be refused as a
+  #          duplicate push (reason "duplicate") before the gate could answer.
+  # ack:     with this delivery's lease. If the lease ran out, the ack is
+  #          refused and the other three are refused with it.
   payload="$(jq -rn --arg booking "$booking" --arg room "$room" \
     '{bookingId: $booking, room: $room} | tojson | @base64')"
   body="$(jq -cn --arg ns "$NS" --arg key "$(saga_key "$booking")" \
@@ -312,7 +296,6 @@ handle_reserve() {
     --arg txn "$txn" --arg pid "$partition" --arg grp "$RESERVER" --arg lease "$lease" '
     {operations: [{type: "push",
                    items: [{queue: $payments, partition: $booking,
-                            transactionId: ("pay-" + $booking),
                             payload: {bookingId: $booking, cents: $cents}}]},
                   {type: "ack", transactionId: $txn, partitionId: $pid,
                    consumerGroup: $grp, leaseId: $lease, status: "completed"}],
@@ -322,41 +305,39 @@ handle_reserve() {
      timers: [{op: "schedule", queue: $expiries, timerKey: $booking,
                delayMs: $hold, txn: ("hold-" + $booking), payload: $payload}]}')"
   request POST /api/v1/transaction "$body"
-  [ "$STATUS" = 200 ] || fail "the reserving bundle for $booking returned HTTP $STATUS: $(cat "$OUT")"
+  [ "$STATUS" = 200 ] || fail "the reserving transaction for $booking returned HTTP $STATUS: $(cat "$OUT")"
 
-  # A lost gate is RETURNED, not thrown: HTTP 200 with success:false and
-  # reason "kv_precondition". It is the ordinary outcome of every legitimate
-  # redelivery, which makes it one of the most frequent answers this product
-  # gives, and it does not belong in an error path, a retry policy or an error
-  # metric -- which is exactly why it is not a 409.
+  # A lost gate comes back as a value: HTTP 200 with success:false and reason
+  # "kv_precondition". A duplicate is a normal outcome, so it is handled here
+  # and kept out of the error path, where a retry would be the reflex.
   if [ "$(jq -r '.success' "$OUT")" != true ]; then
     [ "$(jq -r '.reason' "$OUT")" = kv_precondition ] \
-      || fail "the reserving bundle for $booking failed: $(jq -r '.error' "$OUT")"
-    # Read the verdict BEFORE the next call: $OUT is one file and the ack below
-    # overwrites it. `kvReason` is the closed taxonomy of the KV refusal --
-    # here `exists`, the row was already there.
+      || fail "the reserving transaction for $booking failed: $(jq -r '.error' "$OUT")"
+    # Read the verdict before the next call: $OUT is one file and the ack below
+    # overwrites it. `kvReason` says why the precondition failed: here
+    # `exists`, the booking's state was already there.
     why="$(jq -r '.kvReason' "$OUT")"
-    # Nothing was written: no second payment, no second timer, no second row.
-    # The message still has to leave the cursor, so it is acknowledged alone.
+    # Nothing was written: no second payment, no second timer, no second state.
+    # The message still has to leave the cursor, so it is acknowledged on its
+    # own.
     ack_body="$(jq -cn --arg txn "$txn" --arg pid "$partition" --arg grp "$RESERVER" --arg lease "$lease" \
       '{transactionId: $txn, partitionId: $pid, consumerGroup: $grp, leaseId: $lease, status: "completed"}')"
     request POST /api/v1/ack "$ack_body"
     [ "$STATUS" = 200 ] || fail "ack returned HTTP $STATUS"
     printf '%s %s rolled-back\n' "$RESERVER" "$booking" >> "$OBSERVED"
-    echo "  $booking: already held, whole bundle rolled back ($why)"
+    echo "  $booking: already held, nothing written ($why)"
     return 0
   fi
 
   printf '%s %s held\n' "$RESERVER" "$booking" >> "$OBSERVED"
-  echo "  $booking: room $room held, compensation armed for $HOLD_MS ms"
+  echo "  $booking: room $room held, release armed for $HOLD_MS ms"
 }
 
 # ---------------------------------------------------------------------------
 # handle_pay: one delivery from the payments queue.
 #
-# A settled payment confirms the state and calls the compensation off in one
-# commit; a declined card leaves the state where it is and lets the timer do its
-# work.
+# A settled payment confirms the saga and cancels the release in one commit. A
+# declined card leaves the state alone and lets the timer do its work.
 # ---------------------------------------------------------------------------
 handle_pay() {
   local booking txn partition lease state version value body timers ack_body
@@ -365,19 +346,19 @@ handle_pay() {
   partition="$(jq -r '.messages[0].partitionId' "$TMP/pop")"
   lease="$(jq -r '.leaseId' "$TMP/pop")"
 
-  # A read in one call and a write in the next. It is safe HERE because the key
-  # derives from the partition key: every message about this booking arrives in
-  # one lane of this queue, and a lane has one reader per group. Where a key
-  # does not derive from the partition key this shape is a race and the atomics
-  # are the answer, which is exactly the compensator's situation further down.
+  # A read now and a write in the transaction below. That is safe here because
+  # the key derives from the partition key: every message about this booking is
+  # in one partition, and a partition is held by one worker of the group at a
+  # time. Where a key does not derive from the partition key this shape is a
+  # race, which is the compensator's situation further down.
   state="$(kv_get "$(saga_key "$booking")")"
   version="$(printf '%s' "$state" | jq -r '.version')"
   value="$(printf '%s' "$state" | jq -c '.value')"
 
   if [ "$booking" = "$DECLINED" ]; then
-    # A declined card is a business outcome, not a delivery failure: the message
-    # is done with. The room stays held, and nothing in this process is
-    # responsible for giving it back.
+    # A declined card is a business outcome, not a failed delivery: the message
+    # is done. The room stays held, and nothing in this process is responsible
+    # for giving it back.
     ack_body="$(jq -cn --arg txn "$txn" --arg pid "$partition" --arg grp "$PAYER" --arg lease "$lease" \
       '{transactionId: $txn, partitionId: $pid, consumerGroup: $grp, leaseId: $lease, status: "completed"}')"
     request POST /api/v1/ack "$ack_body"
@@ -387,10 +368,9 @@ handle_pay() {
     return 0
   fi
 
-  # The cancel rides the bundle: either the booking is confirmed and the
-  # compensation is called off, or neither happened. Inside a transaction a
-  # cancel necessarily travels in the timers array and inherits the bundle's
-  # fate, which is the entire point of putting it there.
+  # The cancel rides the transaction: the booking is confirmed and its release
+  # cancelled, or neither happens. Inside a transaction a cancel travels in the
+  # timers array and shares the transaction's fate.
   if [ "$booking" = "$CANCEL_SKIPPED" ]; then
     timers='[]'
   else
@@ -398,10 +378,8 @@ handle_pay() {
       '[{op: "cancel", queue: $expiries, timerKey: $booking}]')"
   fi
 
-  # `expect` makes the serialisation assumption falsifiable instead of silent.
-  # If the lane really serialises, it never fails and costs nothing; the day it
-  # fails, two consumers are serving one partition and you learn it as a verdict
-  # rather than as a wrong total.
+  # `expect` makes the "one worker per booking" assumption checkable: if it ever
+  # fails, two consumers were serving one partition, and the run says so.
   body="$(jq -cn --arg ns "$NS" --arg key "$(saga_key "$booking")" \
     --argjson value "$value" --argjson version "$version" --argjson timers "$timers" \
     --arg txn "$txn" --arg pid "$partition" --arg grp "$PAYER" --arg lease "$lease" '
@@ -411,15 +389,15 @@ handle_pay() {
            ttlSeconds: 3600, expect: $version, required: true}],
      timers: $timers}')"
   request POST /api/v1/transaction "$body"
-  [ "$STATUS" = 200 ] || fail "the confirming bundle for $booking returned HTTP $STATUS: $(cat "$OUT")"
+  [ "$STATUS" = 200 ] || fail "the confirming transaction for $booking returned HTTP $STATUS: $(cat "$OUT")"
   [ "$(jq -r '.success' "$OUT")" = true ] \
     || fail "$booking: confirmation lost its fence ($(jq -r '.kvReason' "$OUT"))"
 
   printf '%s %s confirmed\n' "$PAYER" "$booking" >> "$OBSERVED"
   if [ "$booking" = "$CANCEL_SKIPPED" ]; then
-    echo "  $booking: paid and confirmed, compensation deliberately NOT cancelled"
+    echo "  $booking: paid and confirmed, release deliberately NOT cancelled"
   else
-    echo "  $booking: paid and confirmed, compensation cancelled"
+    echo "  $booking: paid and confirmed, release cancelled"
   fi
 }
 
@@ -427,15 +405,15 @@ handle_pay() {
 # handle_compensate: one delivery from the expiries queue, which is to say one
 # message a timer produced.
 #
-# A compensation message is not an instruction, it is a question: is this saga
-# still open? A fired timer leaves no tombstone, so a cancel that arrives a
-# millisecond late answers `absent` and the message goes out anyway. The state
-# is the authority and it is read first.
+# A release message asks a question: is this booking still only held? A fired
+# timer leaves nothing behind, so a cancel that arrives a moment too late
+# answers `absent` and the release is delivered anyway. The saga's state
+# decides, and it is read first.
 #
-# And here the key does NOT derive from the partition key: this message arrives
-# on another queue entirely, in a lane that has nothing to do with the payments
-# lane, so no partitioning could serialise the two writers. That is what
-# `expect` is for, and on this path it is load-bearing rather than an assertion.
+# This message arrives on another queue, in a partition unrelated to the
+# payments partition, so nothing serialises the compensator with the payer.
+# Here `expect` is what stops a release computed from a stale read from
+# overwriting a confirmation that landed in between.
 # ---------------------------------------------------------------------------
 handle_compensate() {
   local booking room txn partition lease state step version value body ack_body
@@ -454,12 +432,12 @@ handle_compensate() {
     '{transactionId: $txn, partitionId: $pid, consumerGroup: $grp, leaseId: $lease, status: "completed"}')"
 
   if [ "$step" != held ]; then
-    # The booking was confirmed before this fired. Compensating here is how a
-    # saga unwinds a sale that has already shipped.
+    # The booking was confirmed before this fired. Releasing the room now would
+    # put a sold room back on sale.
     request POST /api/v1/ack "$ack_body"
     [ "$STATUS" = 200 ] || fail "ack returned HTTP $STATUS"
     printf '%s %s refused\n' "$COMPENSATOR" "$booking" >> "$OBSERVED"
-    echo "  $booking: state is $step, compensation refused"
+    echo "  $booking: state is $step, release refused"
     return 0
   fi
 
@@ -471,17 +449,17 @@ handle_compensate() {
      kv: [{op: "put", ns: $ns, key: $key, value: ($value + {step: "expired"}),
            ttlSeconds: 3600, expect: $version, required: true}]}')"
   request POST /api/v1/transaction "$body"
-  [ "$STATUS" = 200 ] || fail "the compensating bundle for $booking returned HTTP $STATUS: $(cat "$OUT")"
+  [ "$STATUS" = 200 ] || fail "the compensating transaction for $booking returned HTTP $STATUS: $(cat "$OUT")"
 
   if [ "$(jq -r '.success' "$OUT")" != true ]; then
-    # Somebody confirmed it between the read and the commit. The fence held,
-    # nothing was written, and the room stays sold.
+    # Confirmed between the read and the commit. The fence held, nothing was
+    # written, and the room stays sold.
     [ "$(jq -r '.reason' "$OUT")" = kv_precondition ] \
-      || fail "the compensating bundle for $booking failed: $(jq -r '.error' "$OUT")"
+      || fail "the compensating transaction for $booking failed: $(jq -r '.error' "$OUT")"
     request POST /api/v1/ack "$ack_body"
     [ "$STATUS" = 200 ] || fail "ack returned HTTP $STATUS"
     printf '%s %s refused\n' "$COMPENSATOR" "$booking" >> "$OBSERVED"
-    echo "  $booking: confirmed under us, compensation refused by the fence"
+    echo "  $booking: confirmed in the meantime, release refused"
     return 0
   fi
 
@@ -521,16 +499,16 @@ echo "reserving"
 drain "$BOOKINGS" "$RESERVER" handle_reserve "$SUBMISSION_COUNT" "$PHASE_MS"
 
 check "$(grep -c "^$RESERVER " "$OBSERVED" || true)" "$SUBMISSION_COUNT" \
-  'the reserver reached a decision on every submission'
+  'the reserver decided every submission'
 check "$(grep -c "^$RESERVER .* rolled-back$" "$OBSERVED" || true)" 1 \
-  'the duplicate submission lost the gate exactly once'
+  'the duplicate submission of B-2 lost the gate, once'
 
-# Pending timers are a table you can read, not a promise you have to trust.
+# Pending timers can be listed: each release is a record in the broker.
 request GET "/api/v1/timers/$EXPIRIES?limit=50"
 [ "$STATUS" = 200 ] || fail "listing timers returned HTTP $STATUS"
 echo "  timers armed: $(jq -r '[.rows[].timerKey] | sort | join(", ")' "$OUT")"
 check "$(jq -r '.rows | length' "$OUT")" "$BOOKING_COUNT" \
-  'one compensation is armed per booking and the duplicate added none'
+  'one release per booking, none for the duplicate'
 
 # ----------------------------------------------------------------------- paying
 echo
@@ -538,37 +516,35 @@ echo "paying"
 drain "$PAYMENTS" "$PAYER" handle_pay "$BOOKING_COUNT" "$PHASE_MS"
 
 check "$(grep -c "^$PAYER " "$OBSERVED" || true)" "$BOOKING_COUNT" \
-  'every booking was asked to pay once and the duplicate produced no second payment'
+  'every booking was asked to pay once, B-2 included'
 check "$(awk -v g="$PAYER" '$1 == g {print $2}' "$OBSERVED" | sort -u | wc -l | tr -d ' ')" \
   "$BOOKING_COUNT" 'no booking was asked to pay twice'
 
-# The cancel is observable before anything is delivered: the row is gone from
-# the staging table. A peek is how you ask, and a miss is {"found":false} with
-# HTTP 200, never a 404.
+# A cancelled timer is gone before it fires. A peek is how you ask, and it
+# answers {"found":false} with HTTP 200 for a timer that does not exist.
 request GET "/api/v1/timers/$EXPIRIES/B-1"
 [ "$STATUS" = 200 ] || fail "peek returned HTTP $STATUS"
 check "$(jq -r '.found' "$OUT")" false \
-  'the compensation cancelled inside the confirming bundle is gone from the table'
+  'the release cancelled with the confirmation is gone'
 request GET "/api/v1/timers/$EXPIRIES/$DECLINED"
 check "$(jq -r '.found' "$OUT")" true \
-  "$DECLINED was never confirmed, so its compensation is still armed"
+  "$DECLINED was never confirmed, so its release is still armed"
 request GET "/api/v1/timers/$EXPIRIES/$CANCEL_SKIPPED"
 check "$(jq -r '.found' "$OUT")" true \
-  "$CANCEL_SKIPPED is confirmed but its compensation is still armed on purpose"
+  "$CANCEL_SKIPPED is confirmed and its release is still armed, on purpose"
 
 # ----------------------------------------------------------------- compensating
 echo
 echo "compensating"
-# Two timers were left armed, so two messages must arrive: that is the count,
-# and TIMER_DEADLINE_MS is the deadline behind it.
+# Two releases were left armed, so two messages have to arrive: that is the
+# count, and TIMER_DEADLINE_MS is the deadline behind it.
 drain "$EXPIRIES" "$COMPENSATOR" handle_compensate 2 "$TIMER_DEADLINE_MS"
 check "$(grep -c "^$COMPENSATOR " "$OBSERVED" || true)" 2 \
-  'both uncancelled compensations were delivered'
+  'both armed releases were delivered'
 
-# Then a bounded second pass with room for two more. It is the only honest way
-# to say "a cancelled timer never arrived": the first pass would have stopped at
-# two whatever those two were, so the claim is really that nothing else shows up
-# afterwards.
+# Then a short second pass with room for two more. The only way to show that
+# the cancelled releases never arrive is to wait for them and see nothing: the
+# first pass would have stopped at two, whatever those two were.
 drain "$EXPIRIES" "$COMPENSATOR" handle_compensate 4 4000
 
 # --------------------------------------------------------------------- checking
@@ -576,32 +552,31 @@ echo
 echo "checking"
 
 check "$(grep -c "^$COMPENSATOR " "$OBSERVED" || true)" 2 \
-  'nothing else arrived on a second pass: still 2 compensations'
+  'nothing else arrived on a second pass: still 2 releases'
 check "$(grep -c "^$COMPENSATOR B-1 \|^$COMPENSATOR B-2 " "$OBSERVED" || true)" 0 \
-  'a cancelled compensation was never delivered'
+  'no cancelled release was ever delivered'
 check "$(cat "$RELEASED" | tr -d ' \n')" 103 \
-  'exactly one room went back on sale, the one whose card was declined'
+  'exactly one room went back on sale, the declined one'
 check "$(grep -c "^$COMPENSATOR $CANCEL_SKIPPED refused$" "$OBSERVED" || true)" 1 \
-  'the compensation for the confirmed booking was refused by the consumer, not prevented by the cancel'
+  "the late release for $CANCEL_SKIPPED was refused by the compensator"
 
-# The saga rows are readable state, not an internal detail: a support engineer
-# can answer "what happened to this booking" without a second system. getMany
-# reports `missing` explicitly, because absence is a datum and not a hole
-# computed by difference.
+# The saga's state is readable: "what happened to this booking" has an answer
+# in the broker. getMany reports `missing` explicitly, so an absent key is named
+# in the answer and never inferred by difference.
 keys="$(printf '%s\n' $BOOKING_IDS | jq -R 'sub("^"; "saga:")' | jq -sc .)"
 body="$(jq -cn --arg ns "$NS" --argjson keys "$keys" \
   '{operations: [{op: "getMany", ns: $ns, keys: $keys}]}')"
 request POST /api/v1/kv "$body"
 [ "$STATUS" = 200 ] || fail "kv getMany returned HTTP $STATUS"
 check "$(jq -r '.results[0].rows | length' "$OUT")" "$BOOKING_COUNT" \
-  'every booking left exactly one saga row'
+  'every booking has exactly one saga entry'
 check "$(jq -r '.results[0].missing | length' "$OUT")" 0 \
-  'no booking is missing its saga row'
+  'no booking is missing its saga entry'
 check "$(jq -r '[.results[0].rows[] | select(.value.step == "confirmed") | .key] | sort | join(",")' "$OUT")" \
   "saga:B-1,saga:B-2,saga:$CANCEL_SKIPPED" \
-  "three bookings ended confirmed, $CANCEL_SKIPPED included, after its compensation was delivered"
+  "B-1, B-2 and $CANCEL_SKIPPED ended confirmed"
 check "$(jq -r --arg key "saga:$DECLINED" '.results[0].rows[] | select(.key == $key) | .value.step' "$OUT")" \
-  expired "$DECLINED was unwound by its timer, with nobody awake to do it"
+  expired "$DECLINED was released by its timer, with no process waiting for it"
 
 echo
 echo "  final: $(jq -r '[.results[0].rows[] | (.key | sub("^saga:"; "")) + "=" + .value.step] | sort | join(", ")' "$OUT")"

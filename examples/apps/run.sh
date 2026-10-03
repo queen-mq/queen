@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 # Run the complete applications, in every language, against one broker.
 #
-# These are the programs the documentation's Full examples section shows: whole
-# applications rather than fragments, each one asserting the property it exists
-# to demonstrate. A green run here is what lets those pages claim they work.
+# These are the programs the documentation's Examples section shows: whole
+# applications, each one checking the property it was written for and exiting
+# non-zero when a check fails. A green run here is what lets those pages say
+# they work.
 #
 #   examples/apps/run.sh                          # against http://localhost:6632
 #   QUEEN_URL=http://localhost:6642 examples/apps/run.sh
 #   QUEEN_URL=... examples/apps/run.sh js py       # a subset of the languages
 #
 # The rate limiter exists only where the client has a streaming SDK (js, py, go,
-# rust). PHP, C++ and the plain HTTP client carry chat and webhooks.
+# rust), and the deferred-work admission controller only in JavaScript. PHP, C++
+# and the plain HTTP client carry chat and webhooks; Python and HTTP also carry
+# exactly-once, and Python, Go and HTTP the saga. The Kafka bridge is in
+# examples/cross-protocol/ because it needs a node with the Kafka listener on.
 #
-# The exactly-once application needs the key/value surface and the saga needs
-# that one plus timers. Every broker serves both, so there is nothing to probe
-# for and nothing to skip: a cell that refuses them is an operator's kill switch
-# or a quota, and each program says which when it meets one.
-#
-# Needs, per language: node 22+, python 3.9+, go 1.24+, rust 1.75+, php 8.3+, a
-# C++17 compiler, and curl with jq. A language whose toolchain is missing is
-# skipped with a note rather than failing the run.
+# Needs, per language: node 24+, python 3.9+ with httpx, go 1.24+, rust 1.75+,
+# php 8.3+ with composer, a C++17 compiler with OpenSSL, and curl with jq. A
+# language whose toolchain is missing is skipped with a note instead of failing
+# the run.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,7 +41,7 @@ fi
 # literal lists at their own call site, because nothing about them varies.
 apps_for() {
   case "$1" in
-    js) printf 'chat webhooks rate-limiter exactly-once saga' ;;
+    js) printf 'chat webhooks rate-limiter exactly-once saga deferred-work' ;;
     py) printf 'chat webhooks rate_limiter exactly_once saga' ;;
     go) printf 'chat webhooks rate-limiter saga' ;;
     http) printf 'chat webhooks exactly-once saga' ;;
@@ -58,12 +58,12 @@ run() {
   local name="$1"
   shift
   printf '  %-30s ' "$name"
-  local out
+  local out started=$SECONDS
   if out=$("$@" 2>&1); then
-    echo "ok"
+    echo "ok ($((SECONDS - started)) s)"
     pass=$((pass + 1))
   else
-    echo "FAILED"
+    echo "FAILED ($((SECONDS - started)) s)"
     printf '%s\n' "$out" | tail -25 | sed 's/^/      /'
     fail=$((fail + 1))
     failed_names+=("$name")
@@ -79,7 +79,11 @@ if wanted js; then
   echo
   echo "JavaScript"
   if command -v node >/dev/null; then
-    [ -d "$HERE/js/node_modules" ] || (cd "$HERE/js" && npm install --silent)
+    # The applications import the client in clients/client-js through a file:
+    # dependency, and npm links that package without installing its own
+    # dependencies, so they are installed here first.
+    [ -d "$ROOT/clients/client-js/node_modules" ] || (cd "$ROOT/clients/client-js" && npm install --silent --no-audit --no-fund)
+    [ -d "$HERE/js/node_modules" ] || (cd "$HERE/js" && npm install --silent --no-audit --no-fund)
     for f in $(apps_for js); do
       run "$f" env -C "$HERE/js" node "$f.mjs"
     done

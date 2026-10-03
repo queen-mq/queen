@@ -1,0 +1,77 @@
+# Three Queen nodes on one machine: a real Raft cluster for trying replication,
+# leader failover and rolling restarts. Walkthrough in README.md next to this
+# file and at https://queenmq.com/operate/cluster/.
+#
+#   echo "QUEEN_RAFT_TOKEN=$(openssl rand -hex 32)" > .env
+#   docker compose up -d --wait
+#   curl -s localhost:16632/health
+#
+# Node N answers on localhost:N6632 (16632, 26632, 36632), so the cluster does
+# not collide with a single node on 6632. Each node keeps its state in its own
+# volume; `docker compose down -v` deletes them.
+
+name: queen-cluster
+
+x-node: &node
+  # QUEEN_VERSION in .env picks another release (README.md: rolling upgrade).
+  image: ghcr.io/queen-mq/queen:${QUEEN_VERSION:-latest}
+  # The images are published for linux/amd64 only. On an arm64 machine
+  # (Apple silicon) Docker runs them under emulation: slower, fine for a trial.
+  platform: linux/amd64
+  # A node that was away long enough to need a snapshot exits with code 75 to
+  # load it at start; the restart policy brings it back.
+  restart: unless-stopped
+  # On SIGTERM a node hands its ephemeral partitions and, if it leads, its
+  # leadership to a peer, then lets the long polls in flight finish (30 s by
+  # default). Docker's 10 s default would kill it halfway.
+  stop_grace_period: 60s
+  healthcheck:
+    # 200 once the node knows a leader and has caught up, 503 "settling" before.
+    test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:6632/health"]
+    interval: 5s
+    timeout: 3s
+    retries: 3
+    start_period: 60s
+
+x-env: &env
+  QUEEN_RAFT_REPLICATOR: openraft
+  # Every voter as id=raft_address/http_address, the same list on every node.
+  QUEEN_RAFT_PEERS: "1=queen-1:7400/queen-1:6632,2=queen-2:7400/queen-2:6632,3=queen-3:7400/queen-3:6632"
+  # The secret every Raft RPC carries. The raft port (7400) is not published, so
+  # only these three containers reach it.
+  QUEEN_RAFT_TOKEN: ${QUEEN_RAFT_TOKEN:?put QUEEN_RAFT_TOKEN in .env next to compose.yaml, see the header}
+  QUEEN_RAFT_DIR: /var/lib/queen/raft
+
+services:
+  queen-1:
+    <<: *node
+    hostname: queen-1
+    environment:
+      <<: *env
+      QUEEN_RAFT_NODE_ID: "1"
+    # The broker port has no authentication of its own: published on loopback.
+    ports: ["127.0.0.1:16632:6632"]
+    volumes: ["queen-1:/var/lib/queen/raft"]
+
+  queen-2:
+    <<: *node
+    hostname: queen-2
+    environment:
+      <<: *env
+      QUEEN_RAFT_NODE_ID: "2"
+    ports: ["127.0.0.1:26632:6632"]
+    volumes: ["queen-2:/var/lib/queen/raft"]
+
+  queen-3:
+    <<: *node
+    hostname: queen-3
+    environment:
+      <<: *env
+      QUEEN_RAFT_NODE_ID: "3"
+    ports: ["127.0.0.1:36632:6632"]
+    volumes: ["queen-3:/var/lib/queen/raft"]
+
+volumes:
+  queen-1:
+  queen-2:
+  queen-3:

@@ -1,30 +1,21 @@
 // docs:start(app-js-cross-consumer)
-// Cross-protocol example, CONSUMER half.
+// Cross-protocol load pair, CONSUMER half: read, through Queen's own API, what
+// producer.mjs writes over the Kafka wire protocol, forever.
 //
 //   npm install
-//   node consumer.mjs                  # foreground
-//   node consumer.mjs &                # detached from this shell
+//   TOPIC=orders node consumer.mjs     # the same TOPIC as the producer
 //
-//   TOPIC=orders node consumer.mjs     # must match the producer's TOPIC
-//
-// Reads, through Queen's OWN API on 6632, the rows a Kafka producer wrote
-// through the facade on 9092. Two translations make that work:
-//
-// 1. A Kafka topic IS a Queen queue, and the Kafka partition INDEX is the Queen
-//    partition NAME in decimal. Nothing converts; they are the same rows.
-//
-// 2. The facade wraps each record in an envelope, base64 in the byte slots,
-//    because a Queen payload is JSON and a Kafka key/value is arbitrary bytes:
-//      { k: <base64 key|null>, v: <base64 value|null>,
-//        h: [{ k: name, v: <base64> }],   // omitted when there are none
-//        t: <producer timestamp ms> }     // omitted when unset
+// A Kafka topic is a Queen queue, and Kafka partition n is the Queen partition
+// named "n", so nothing converts between the two. The facade stores each record
+// as JSON with base64 bytes, because a Kafka key or value is arbitrary bytes:
+//   { k: key, v: value, h: [{ k: name, v: value }], t: timestamp }
+// h is left out when there are no headers and t when there is no timestamp.
+// More on the mapping: https://queenmq.com/guides/kafka/
 
 import { Queen } from 'queen-mq'
 
-// Read from the environment, exactly as cross-producer.mjs does, so that ONE
-// variable moves both halves. They were separately hardcoded before, which is a
-// good way to spend ten minutes watching a consumer "hang" on an empty topic
-// while the producer fills a different one.
+// The same variable, and the same default, as producer.mjs, so one TOPIC moves
+// both halves.
 const TOPIC = process.env.TOPIC ?? 'cross-topic'
 const GROUP = process.env.GROUP ?? 'queen-side-group'
 const QUEEN = process.env.QUEEN ?? 'http://localhost:6632'
@@ -54,17 +45,15 @@ console.log(`consuming ${TOPIC} as group ${GROUP} via ${QUEEN} (pid ${process.pi
 await queen.queue(TOPIC)
   .group(GROUP)
   // The Queen equivalent of fromBeginning: a new group otherwise starts at the
-  // messages arriving from now on.
+  // messages that arrive from now on.
   .subscriptionMode('all')
   .concurrency(16)
-  // consume() hands the handler an ARRAY and acks the whole batch in one call.
-  // .each() switches to per-message, which is one ack round trip each.
+  // consume() hands the handler an array and acks the whole batch in one call;
+  // .each() would hand it one message at a time, with one ack each.
   .consume(async (messages) => {
-    // Show the raw envelope once, from the first REAL batch. Doing this with a
-    // throwaway consumer group instead would register a cursor that never
-    // advances -- and completed-message retention is capped at MIN(committed)
-    // across a partition's consumer groups, so that idle group would pin the
-    // whole backlog from ever being reclaimed (server/src/rsm/maintenance.rs).
+    // Show the stored payload once, from the first batch this group reads. (A
+    // throwaway group used just to peek would keep a cursor that never moves,
+    // and completed-message retention never reclaims past the slowest group.)
     if (!shownEnvelope) {
       shownEnvelope = true
       console.log('raw Queen payload as stored by the Kafka facade:')
@@ -74,10 +63,8 @@ await queen.queue(TOPIC)
 
     count += messages.length
 
-    // A threshold, never `count % N === 0`: the pop autopilot sizes each batch
-    // from live queue state, so the counter advances in irregular jumps and
-    // would step straight over the multiples -- going silent for minutes while
-    // consuming perfectly well.
+    // A threshold, never `count % N === 0`: batches are sized by the broker,
+    // so the counter moves in irregular jumps and would skip the multiples.
     if (count >= nextLog) {
       nextLog += LOG_EVERY
       const secs = (Date.now() - startTime) / 1000

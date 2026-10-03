@@ -1,0 +1,24 @@
+# docker compose -f compose.yaml -f compose.kafka.yaml up -d
+x-kafka: &kafka
+  QUEEN_KAFKA_EMBEDDED: "true"
+  QUEEN_TOKEN: kafka-facade
+
+services:
+  queen-1:
+    environment:
+      <<: *kafka
+      QUEEN_KAFKA_NODE_ID: "1"
+      QUEEN_KAFKA_ADVERTISED_ADDR: 127.0.0.1:16092
+    ports: ["127.0.0.1:16092:9092"]
+  queen-2:
+    environment:
+      <<: *kafka
+      QUEEN_KAFKA_NODE_ID: "2"
+      QUEEN_KAFKA_ADVERTISED_ADDR: 127.0.0.1:26092
+    ports: ["127.0.0.1:26092:9092"]
+  queen-3:
+    environment:
+      <<: *kafka
+      QUEEN_KAFKA_NODE_ID: "3"
+      QUEEN_KAFKA_ADVERTISED_ADDR: 127.0.0.1:36092
+    ports: ["127.0.0.1:36092:9092"]

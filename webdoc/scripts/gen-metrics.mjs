@@ -9,21 +9,123 @@
  *                                  and one `let pname = "..."` template
  *   server/src/rsm/facade/real.rs  raw `# HELP` / `# TYPE` strings
  *   server/src/rsm/admit.rs        raw `# HELP` / `# TYPE` strings
+ *   server/src/handlers/raft.rs    raw `# HELP` / `# TYPE` strings: the three
+ *                                  per-queue families `handle_prometheus`
+ *                                  writes itself
+ *   server/src/rsm/replicator/raft/forward.rs
+ *                                  raw `# HELP` / `# TYPE` strings: the batched
+ *                                  forwarding counter, rendered by admit.rs
  *
  * All are parsed. Every `"queen_*"` string literal in those files is then
  * checked against what was parsed, so a family can never quietly vanish from
  * the reference. The debug counters of server/src/rsm/dbgctr.rs carry no HELP
  * and are left out on purpose.
+ *
+ * 2026-10-02 (2.0.0-beta.6): the last two sources were missing, so the four
+ * families they emit (`queen_queue_pop_lag_milliseconds`,
+ * `queen_dlq_depth_by_queue`, `queen_queue_conflated_per_minute`,
+ * `queen_raft_forward_total`) were served and not published. And a family can
+ * be declared, exposed and never written: DORMANT below lists the ones whose
+ * recorder nothing calls in this release, and the table says so.
  */
 
-import { cell, emitPartial, isCheck, repoRead } from "./lib/source.mjs";
+import { cell, emitPartial, isCheck, repoRead, rustFiles } from "./lib/source.mjs";
 
 const SOURCES = [
   "server/src/metrics.rs",
   "server/src/rsm/timing.rs",
   "server/src/rsm/facade/real.rs",
   "server/src/rsm/admit.rs",
+  "server/src/handlers/raft.rs",
+  "server/src/rsm/replicator/raft/forward.rs",
 ];
+
+/**
+ * Families the broker declares and exposes but that nothing in this release
+ * writes. They are instruments of the PostgreSQL and segment engines (the
+ * timer fire loop and its sweeper, fusion batching, the pop hint mailbox) and
+ * a few KV gauges, kept on the exposition so existing dashboards do not break.
+ * In 2.0 timers fire through the planner and pops through the consumption
+ * engine, and no code feeds these, so their series read 0 (a per-tenant family
+ * has no samples at all).
+ *
+ * Each entry names what WOULD write the family: a recorder method of
+ * server/src/metrics.rs (`.name(`), searched in production code outside
+ * metrics.rs, or a field (`.name.fetch_add(` and the like), searched in every
+ * production file. `verifyDormant` fails generation when it finds one, or when
+ * a listed family no longer exists: a family that comes alive must lose its
+ * note, and the note must never outlive its family.
+ */
+// rustfmt breaks a long chain before each `.`, so whitespace may sit between them.
+const FIELD_WRITE = "\\s*\\.(?:fetch_add|fetch_sub|fetch_max|store|swap)\\(";
+const DORMANT = [
+  { writer: "set_kv_expiry", families: ["queen_kv_expired_not_pruned", "queen_kv_expired_not_pruned_capped", "queen_kv_expiry_lag_seconds"] },
+  { writer: "set_kv_pool", families: ["queen_kv_pool"] },
+  { writer: "kv_singleflight_coalesced", families: ["queen_kv_singleflight_coalesced_total"] },
+  { writer: "set_timers_due", families: ["queen_timers_due", "queen_timers_due_capped", "queen_timers_oldest_late_seconds"] },
+  { writer: "fire_lag", families: ["queen_timers_fire_lag_seconds", "queen_timers_fire_lag_tenants_dropped_total"] },
+  { writer: "timers_fired", families: ["queen_timers_fired_total"] },
+  { writer: "timers_dlq", families: ["queen_timers_dlq_total"] },
+  { writer: "timers_fire_failure", families: ["queen_timers_fire_failures_total"] },
+  { writer: "timers_poisoned", families: ["queen_timers_poisoned_total"] },
+  { writer: "sweeper_cycle", families: ["queen_sweeper_cycle_milliseconds", "queen_sweeper_rows_total"] },
+  { writer: "sweeper_skip_locked", families: ["queen_sweeper_skip_locked_total"] },
+  { writer: "sweeper_phase_skipped", families: ["queen_sweeper_phase_skipped_total"] },
+  { writer: "set_sweeper_sleep", families: ["queen_sweeper_sleep_milliseconds"] },
+  { writer: "record_batch", families: ["queen_batches_fired_total", "queen_batch_items_fired_total", "queen_fusion_items_per_batch", "queen_batch_rtt_milliseconds"] },
+  { field: "pop_targeted", families: ["queen_pop_targeted_total"] },
+  { field: "pop_wildcard", families: ["queen_pop_wildcard_total"] },
+  { field: "pop_fill_wait", families: ["queen_pop_fill_wait_total"] },
+  { field: "pop_fill_wait_us", families: ["queen_pop_fill_wait_microseconds_total"] },
+];
+
+/** Per-tenant families that, never written, expose no sample at all. */
+const DORMANT_NO_SERIES = new Set(["queen_timers_fire_lag_seconds"]);
+
+/** The production Rust under server/src: not the test or fuzzing trees. */
+function productionFiles() {
+  return rustFiles("server/src").filter(
+    ({ path }) => !/\/tests(\/|_|\.rs)|tests_unit|fuzzing/.test(path),
+  );
+}
+
+/** Where `entry`'s family would be written, if anywhere. */
+function writersOf(entry, files) {
+  const re = entry.writer
+    ? new RegExp(`\\.${entry.writer}\\(`)
+    : new RegExp(`\\.${entry.field}${FIELD_WRITE}`);
+  return files
+    .filter(({ path }) => !entry.writer || path !== "server/src/metrics.rs")
+    .filter(({ text }) => re.test(text))
+    .map(({ path }) => path);
+}
+
+function verifyDormant(families) {
+  const files = productionFiles();
+  const notes = new Map();
+  for (const entry of DORMANT) {
+    const writers = writersOf(entry, files);
+    if (writers.length) {
+      throw new Error(
+        `DORMANT is stale: \`${entry.writer ?? entry.field}\` (which feeds ${entry.families.join(", ")}) ` +
+          `is now written from ${writers.join(", ")}. Re-read it and take its families off the ` +
+          `DORMANT list in this script.`,
+      );
+    }
+    for (const n of entry.families) {
+      if (!families.has(n)) {
+        throw new Error(`DORMANT names ${n}, which the broker no longer declares: remove it.`);
+      }
+      notes.set(
+        n,
+        DORMANT_NO_SERIES.has(n)
+          ? "Nothing in this release writes it, so it has no samples."
+          : "Nothing in this release writes it, so it reads 0.",
+      );
+    }
+  }
+  return notes;
+}
 
 function collect(text, families) {
   const put = (name, help, type) => {
@@ -104,6 +206,7 @@ const GROUPS = [
     n.startsWith("queen_raft_store_") || n.startsWith("queen_raft_index") || n === "queen_raft_inflight" ||
     n === "queen_raft_proposals_total" || n === "queen_raft_log_storage" || n === "queen_raft_storage_full"],
   ["Admission", (n) => n.startsWith("queen_raft_admit_")],
+  ["Forwarding between nodes", (n) => n === "queen_raft_forward_total"],
   ["Pipeline timing", (n) => n.startsWith("queen_raft_")],
   ["Per-queue rates and depth", (n) => n.startsWith("queen_queue_") || n.startsWith("queen_dlq_")],
   ["Engine internals", (n) => n.startsWith("queen_seg_") || n.startsWith("queen_batch") || n.startsWith("queen_fusion") || n.startsWith("queen_pop_")],
@@ -150,6 +253,8 @@ function main() {
     throw new Error(`only parsed ${families.size} metric families — the parser is broken`);
   }
 
+  const dormant = verifyDormant(families);
+
   const byGroup = new Map();
   for (const f of [...families.values()].sort((a, b) => a.name.localeCompare(b.name))) {
     const g = groupOf(f.name);
@@ -162,8 +267,10 @@ function main() {
     `\`GET /metrics/prometheus\` exposes **${families.size} families**. Every one describes ` +
       `the node that answered: \`queen_process_*\` counts what this node did since it ` +
       `started, and the \`queen_raft_*\` families describe its replicated log, its store and ` +
-      `its pipeline. Scrape every node. The pipeline timing and admission families are ` +
-      `skipped when \`QUEEN_RAFT_METRICS\` is \`0\`, \`false\`, \`off\` or \`no\`; it is on by default.`,
+      `its pipeline. Scrape every node. The pipeline timing, admission and forwarding families ` +
+      `are skipped when \`QUEEN_RAFT_METRICS\` is \`0\`, \`false\`, \`off\` or \`no\`; it is on by ` +
+      `default. The per-queue families are written only for queues that have something to report. ` +
+      `${dormant.size} families are declared but not written by this release; their Help says so.`,
     "",
   );
 
@@ -173,7 +280,10 @@ function main() {
     lines.push(`### ${g}`, "");
     lines.push("| Family | Type | Help |");
     lines.push("| --- | --- | --- |");
-    for (const f of rows) lines.push(`| \`${f.name}\` | ${cell(f.type)} | ${cell(f.help)} |`);
+    for (const f of rows) {
+      const help = dormant.has(f.name) ? `${f.help}. ${dormant.get(f.name)}` : f.help;
+      lines.push(`| \`${f.name}\` | ${cell(f.type)} | ${cell(help)} |`);
+    }
     lines.push("");
   }
 

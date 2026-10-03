@@ -1,6 +1,6 @@
 ---
 title: Tenants, API keys and quotas
-description: "The proxy built into the binary: tenants and their clusters, API keys and roles, operators, plan quotas, metering, the console and the control plane."
+description: "The proxy built into the broker: tenants and their clusters, API keys and roles, plan quotas, metering, the console, and the /api/cp control plane a provisioning system drives."
 type: how-to
 tier: operate
 sidebar:
@@ -8,81 +8,139 @@ sidebar:
 sourceOfTruth:
   - server/src/proxy_embed.rs
   - server/src/main.rs
-  - proxy/src/config.rs
   - proxy/src/app.rs
+  - proxy/src/config.rs
+  - proxy/src/cp.rs
   - proxy/src/auth.rs
-  - proxy/src/acting.rs
   - proxy/src/routes.rs
   - proxy/src/gateway.rs
+  - proxy/src/cache.rs
   - proxy/src/limits.rs
   - proxy/src/meter.rs
   - proxy/src/console.rs
-  - proxy/src/cp.rs
+  - proxy/src/oauth.rs
   - proxy/src/store/data.rs
+  - proxy/src/store/schema.rs
 ---
 
-The broker has no users. The proxy, compiled into the same binary and on with
-`QUEEN_PROXY_EMBEDDED=true`, adds them: it checks API keys and human sessions, maps each credential
-to a tenant, applies the plan's limits, meters usage and serves a console. Its state is rows in
-the broker's own replicated KV, so every node of a cluster runs the same proxy and there is no
+The broker on its own has no users: anything that reaches its port can use it. The proxy compiled
+into the same binary adds them. With it on, every request presents an API key or a console
+session, and the proxy maps that credential to one tenant's cluster, checks it against the plan's
+limits, meters it, and hands the request to the broker inside the same process. The proxy keeps its
+own state (tenants, users, API-key hashes, plans and usage) as rows in the broker's replicated KV,
+under a reserved system tenant, so every node of a cluster runs the same proxy and there is no
 database to give it.
 
 ## Turn it on
 
+Generate the secrets once and keep them in your secret store, because every node needs the same
+values:
+
 ```bash
-QUEEN_PROXY_EMBEDDED=true
-QUEEN_PROXY_PORT=6711                        # the proxy's port; PORT stays the internal broker
-QUEEN_PROXY_JWT_SECRET=...                   # signs console sessions: the same on every node
-QUEEN_PROXY_CP_TOKEN=...                     # opens /api/cp/*; unset, those routes answer 404
-QUEEN_PROXY_SPOOL_DIR=/var/lib/queen/raft/proxy-spool
-QUEEN_PROXY_BOOTSTRAP_TENANT=acme            # a first tenant, its cluster `acme` and an admin
-QUEEN_PROXY_BOOTSTRAP_API_KEY=qk_live_...    # a known key with every scope on that cluster
-QUEEN_PROXY_DEFAULT_CLUSTER=acme             # the cluster a Host like `localhost` means
+SESSION_SECRET=$(openssl rand -hex 32)   # signs console sessions
+CP_TOKEN=$(openssl rand -hex 32)         # opens the control plane, /api/cp/*
+QUEEN_KEY="qk_live_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
 ```
 
-| `QUEEN_PROXY_PORT` | The proxy serves | `PORT` serves |
-|---|---|---|
-| unset, or equal to `PORT` | `PORT` | nothing else: every request needs a key or a session |
-| another port | that port | the broker itself, with its own JWT and tenancy settings: an internal port for trusted clients, probes and scrapers, never exposed |
+```bash
+docker run -d --name queen --platform linux/amd64 -p 6711:6711 -p 127.0.0.1:6632:6632 \
+  -v queen-data:/var/lib/queen/raft \
+  -e QUEEN_PROXY_EMBEDDED=true \
+  -e QUEEN_PROXY_PORT=6711 \
+  -e QUEEN_PROXY_JWT_SECRET="$SESSION_SECRET" \
+  -e QUEEN_PROXY_CP_TOKEN="$CP_TOKEN" \
+  -e QUEEN_PROXY_SPOOL_DIR=/var/lib/queen/raft/proxy-spool \
+  -e QUEEN_PROXY_BOOTSTRAP_TENANT=acme \
+  -e QUEEN_PROXY_BOOTSTRAP_API_KEY="$QUEEN_KEY" \
+  -e QUEEN_PROXY_DEFAULT_CLUSTER=acme \
+  ghcr.io/queen-mq/queen:latest
+```
 
-The bootstrap runs at every boot on every node and is idempotent. A key must start with `qk_`;
-generate one with `qk_live_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')`. A client sends
-it as a bearer token:
+The boot log says where each part went:
+
+```text
+INFO boot: single binary: proxy in-process on its own port; the broker router serves PORT (internal) proxy=0.0.0.0:6711 broker=0.0.0.0:6632
+INFO proxy: bootstrap tenant ready tenant=acme created=true
+```
+
+A push through the proxy's port now needs the key:
+
+```bash
+curl -s -X POST localhost:6711/api/v1/push -H "authorization: Bearer $QUEEN_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"items":[{"queue":"orders","partition":"customer-123","payload":{"orderId":8891}}]}'
+```
+
+```json
+[{"index":0,"message_id":"01a0fcca-5436-7000-ab29-ef2bea95314f","transaction_id":"01a0fcca-5436-7000-ab29-ef2bea95314f","queueName":"orders","status":"queued","offset":0}]
+```
+
+Without it the answer is `401 {"code":"unauthorized","error":"missing bearer credential"}`.
+Clients send the key the same way:
 
 ```js
 const queen = new Queen({ url: 'https://acme.queen.example.com', bearerToken: process.env.QUEEN_KEY })
 ```
 
-```bash
-curl -s -X POST http://localhost:6711/api/v1/push \
-  -H "authorization: Bearer $QUEEN_KEY" -H 'content-type: application/json' \
-  -d '{"items":[{"queue":"orders","partition":"customer-123","payload":{"orderId":8891}}]}'
-```
+The bootstrap runs at every boot on every node and changes nothing once its rows exist, so the
+same environment can stay on all nodes for good. It creates the tenant `acme`, a cluster of the
+same name on the `dev` plan (`QUEEN_PROXY_BOOTSTRAP_PLAN`), an admin user
+(`QUEEN_PROXY_BOOTSTRAP_EMAIL`, default `admin@localhost`, who can sign in with a password only if
+you set `QUEEN_PROXY_BOOTSTRAP_PASSWORD`), and a key with every scope on that cluster from
+`QUEEN_PROXY_BOOTSTRAP_API_KEY`. A key has to start with `qk_`, which is how the proxy tells an API
+key from a session token. Keep `QUEEN_PROXY_SPOOL_DIR` on the data volume; its default is relative
+to the working directory, which is read-only in a hardened container.
+
+## Two ports
+
+`QUEEN_PROXY_PORT` decides what the broker's own port, `PORT` (6632), still serves:
+
+| `QUEEN_PROXY_PORT` | The proxy listens on | `PORT` serves |
+|---|---|---|
+| unset, or equal to `PORT` | `PORT` | nothing else: every request needs a key or a session |
+| another port, e.g. `6711` | that port | the broker itself, under its own JWT setting (off by default) |
+
+Run a cluster with the proxy on its own port. The nodes talk to each other over `PORT` (ephemeral
+partitions are forwarded and handed over there), and the membership and kill-switch routes under
+`/api/v1/system/*` are blocked through the proxy for every credential, so a cluster needs a broker
+port the proxy is not in front of. That port is for trusted clients inside the network, probes and
+scrapers, and it never faces the internet. TLS for the proxy's port is `QUEEN_TLS_CERT` and
+`QUEEN_TLS_KEY` ([security](/operate/security/)).
 
 ## Tenants and clusters
 
-A **tenant** is an organisation: its users belong to it. A tenant owns **clusters**, and a
-cluster is what clients talk to: a slug, a plan, and its own broker tenant (a random UUID), so
-each cluster's queues, KV and timers are invisible to every other.
+A tenant is an organisation, and its users belong to it. A tenant owns clusters, and a cluster is
+what clients talk to: a slug, a plan, and a broker tenant of its own (a random UUID), so the
+queues, KV and timers of one cluster are invisible to every other.
 
-The proxy finds a request's cluster from the first DNS label of its `Host` (`acme.queen.example.com`
-is cluster `acme`). A Host that names no cluster falls back to `QUEEN_PROXY_DEFAULT_CLUSTER`. A host
-listed in `QUEEN_PROXY_SHARED_HOSTS` fronts many clusters and takes the cluster from the
-credential instead. An `x-queen-tenant` header from a client is always dropped.
+The proxy finds a request's cluster from the first DNS label of its `Host`, so
+`acme.queen.example.com` is cluster `acme`. A Host that names no cluster, like `localhost`, falls
+back to `QUEEN_PROXY_DEFAULT_CLUSTER`, and a host listed in `QUEEN_PROXY_SHARED_HOSTS` fronts many
+clusters and takes the cluster from the credential instead. Whatever `x-queen-tenant` header a
+client sends is dropped. A key is bound to its cluster for life, so presenting it on another
+cluster's host fails:
 
-`QUEEN_PROXY_TENANT_HEADER=false` sends every cluster to the broker's default tenant: all of them
-share the queues the internal port sees. Use it for a single-team front door, never for several
-customers.
+```json
+{"code":"forbidden","error":"key/cluster mismatch"}
+```
 
-A cluster's status (`PUT /api/cp/clusters/:id/status`) is `active`, `push_blocked`, `suspended` or
-`deleting`. A tenant's is `active`, `grace`, `suspended` or `deleting`, and the worse of the two
-applies: `push_blocked` and `grace` refuse pushes and keep consumption open, `suspended` and
+<Figure id="operate/tenants" />
+
+`QUEEN_PROXY_TENANT_HEADER=false` stops the proxy from scoping requests at all: every cluster lands
+in the broker's default tenant, the one the internal port sees. That suits a single team that
+wants keys and a console in front of one shared broker, and nothing else, because the clusters
+then share every queue. The control-plane routes that act on a cluster's broker data refuse to run
+in that mode (`409 system_tenant`).
+
+A cluster's status is `active`, `push_blocked`, `suspended` or `deleting`, a tenant's is `active`,
+`grace`, `suspended` or `deleting`, and the worse of the two applies. `push_blocked` and `grace`
+refuse pushes and keep consumption open, so a customer can drain what is there; `suspended` and
 `deleting` answer the whole data plane `403 cluster_suspended`.
 
 ## API keys and roles
 
-A key is `qk_<env>_` plus 43 base64url characters. Only its sha256 is stored, it belongs to one
-cluster for life, and it carries a non-empty set of scopes. Humans hold a role per cluster instead.
+A key is `qk_<env>_` followed by 43 base64url characters, and only its sha256 is stored. Each key
+carries a non-empty set of scopes, while humans hold one role per cluster:
 
 | Route class | Key scope | Human roles |
 |---|---|---|
@@ -90,106 +148,188 @@ cluster for life, and it carries a non-empty set of scopes. Humans hold a role p
 | Consume: pop, ack, lease extension | `consume` | admin, consumer |
 | Queue admin: configure, deletes, seeks, DLQ replay | `admin` | admin |
 | Read: listings, status, message and DLQ reads | `read` or `admin` | every role |
-| KV, timers, ephemeral, streams, traces (when the plan has the feature) | `produce` or `consume`; reads with any scope | every role but viewer; reads every role |
+| KV, timers, ephemeral, streams, traces, when the plan has the feature | `produce` or `consume`; their reads take any scope | every role but viewer; their reads every role |
 
-An API key is refused on another cluster's host, and on the console. Every broker route's class is
-in the table at the end of this page.
-
-## Operators
-
-```bash
-QUEEN_PROXY_OPERATOR_ENABLED=true
-QUEEN_PROXY_OPERATORS=ops@example.com,alice@example.com
-```
-
-An operator is a human who is admin on every cluster of this deployment and may open the
-cell-wide routes: node status, host metrics, the raft status and members behind the dashboard's
-System page. At each boot the listed accounts are granted and every other operator is revoked; an
-empty list revokes them all, and unset leaves the flags as they are. No route grants it, and with
-`QUEEN_PROXY_OPERATOR_ENABLED` off (the default) the operator routes answer `404` to everyone.
+A produce-only key that tries to list queues gets
+`403 {"code":"forbidden","error":"operation not permitted for this credential"}`. A revoked key stops
+working on every node within about a second, because each node polls the replicated invalidation
+feed every `QUEEN_PROXY_INVAL_POLL_MS` (1000). API keys are refused on the console, which is for
+humans only. The complete classification of every broker route is at the end of this page.
 
 ## Plans and quotas
 
-Four plans are seeded at first boot. A cluster takes its plan when it is created (default `free`
-through the control plane, `dev` through `QUEEN_PROXY_BOOTSTRAP_PLAN`), and per-cluster overrides
-change single limits:
+Four plans are seeded at the first boot. A cluster takes its plan when it is created (`free` by
+default through the control plane, `dev` through the bootstrap), and per-cluster overrides change
+single limits:
 
 | | `free` | `dev` | `pro` | `dedicated-s` |
 |---|---|---|---|---|
 | requests/s (burst) | 5 (25) | 10 (50) | 50 (200) | 200 (800) |
 | messages/s (burst) | 20 (100) | 40 (200) | 200 (800) | 600 (2000) |
 | queues, partitions per queue | 20, 8 | 50, 16 | 200, 32 | 1000, 64 |
-| payload, retained bytes | 256 KiB, 1 GiB | 512 KiB, 3 GiB | 1 MiB, 20 GiB | 4 MiB, 200 GiB |
-| features | KV, timers, ephemeral | KV, timers, ephemeral | + streams, traces | + streams, traces |
+| parked long-poll pops | 50 | 150 | 1000 | 5000 |
+| payload, items per batch | 256 KiB, 1000 | 512 KiB, 2000 | 1 MiB, 5000 | 4 MiB, 10000 |
+| retained bytes, longest retention | 1 GiB, 7 days | 3 GiB, 14 days | 20 GiB, 30 days | 200 GiB, 90 days |
+| features | KV, timers, ephemeral | KV, timers, ephemeral | the same, plus streams and traces | the same, plus streams and traces |
 
 ```bash
-curl -s -X PUT http://localhost:6711/api/cp/clusters/$CLUSTER_ID/overrides \
+curl -s -X PUT localhost:6711/api/cp/clusters/$CLUSTER_ID/overrides \
   -H "x-queen-cp-token: $CP_TOKEN" -H 'content-type: application/json' \
   -d '{"max_queues": 500, "max_retained_bytes": null}'
 ```
 
-A `null` value is unlimited; a body of `null` clears every override.
+A `null` limit is unlimited, and a body of `null` clears every override.
 
-`QUEEN_PROXY_ENFORCE=false` is the default: shadow mode. Rate limits, queue and partition caps and
-parked-pop caps are computed and logged (`target: limits`, `would_block=true`) and the request
-proceeds; with `true` they answer `429` with `Retry-After`, or `403`. **Three limits apply even in
-shadow mode:** the size caps (`413 payload_too_large`), the storage quota
-(`max_retained_bytes`, pushes `403 storage_quota_exceeded`) and the monthly message quota
-(`monthly_msgs_quota`, `null` on every seeded plan).
+The proxy starts in shadow mode (`QUEEN_PROXY_ENFORCE=false`): rate limits, queue and partition
+caps and parked-pop caps are computed and logged with `target: limits` and `would_block=true`, and
+the request goes through. That lets you watch a plan against real traffic before it bites. With
+`QUEEN_PROXY_ENFORCE=true` the same decisions answer `429` with `Retry-After`, or `403`. Three
+limits apply in shadow mode too, because they bound what the proxy itself has to hold or store: the
+size caps (`413 payload_too_large`), the storage quota (`max_retained_bytes`, after which pushes
+answer `403 storage_quota_exceeded`) and the monthly message quota (`monthly_msgs_quota`, unset on
+every seeded plan).
 
 ## Metering
 
 Every proxied request is metered per cluster, minute and class (`push`, `delivery`, `txn`,
-`configure`, `read`): requests, messages, bytes in and out. Items refused as `error` are not
-counted, and a `duplicate` is not counted twice. Each node writes its own rows every 15 s
-(`QUEEN_PROXY_METER_FLUSH_MS`), keeps minutes 90 days (`QUEEN_PROXY_USAGE_KEEP_DAYS`) and rolls
-them into days every hour. Usage it cannot write through a long store outage, or at shutdown, is
-spooled to `QUEEN_PROXY_SPOOL_DIR` and written back at the next start. Read it in the console, or
-the last hour with `GET /api/cp/clusters/:id/usage`.
+`configure`, `read`): requests, messages, and bytes in and out. Items the broker refused as `error`
+are not counted, and a duplicate is counted once. Each node writes its own rows every 15 seconds
+(`QUEEN_PROXY_METER_FLUSH_MS`), keeps the minutes for 90 days (`QUEEN_PROXY_USAGE_KEEP_DAYS`) and
+rolls them into days every hour. Usage a node cannot write during a long outage, or at shutdown,
+goes to `QUEEN_PROXY_SPOOL_DIR` and is written back at the next start. The control plane reads the
+last hour, summed over the nodes:
 
-## The console
+```bash
+curl -s localhost:6711/api/cp/clusters/$CLUSTER_ID/usage -H "x-queen-cp-token: $CP_TOKEN"
+```
 
-`/console` on the proxy's port is for humans: the cluster's plan, limits and month-to-date usage,
-usage graphs, a read-only queue list, API keys, and members (admins only). The dashboard is served
-at `/` on the same port, behind the same login. Sign-in is at `/auth/login`: a local password (the
-bootstrap admin's, `QUEEN_PROXY_BOOTSTRAP_PASSWORD`), Google (`GOOGLE_CLIENT_ID`,
-`GOOGLE_CLIENT_SECRET`, `GOOGLE_ALLOWED_DOMAINS`) or GitHub (`GITHUB_CLIENT_ID`,
-`GITHUB_CLIENT_SECRET`), with `QUEEN_PROXY_PUBLIC_URL` set for the callbacks. An unknown identity
-gets no account unless auto-provisioning is on (`QUEEN_PROXY_AUTOPROVISION`, role
-`QUEEN_PROXY_DEFAULT_ROLE`, default `viewer`).
+```json
+{"minutes":[{"bytes_in":70,"bytes_out":173,"minute":"2026-10-02T13:25:00Z","msgs":1,"op":"push","reqs":1}]}
+```
+
+## The console and sign-in
+
+`/console` on the proxy's port is for people: the cluster's plan, limits and month-to-date usage,
+usage graphs, a read-only queue list, its API keys and, for admins, its members. The dashboard is
+served at `/` on the same port behind the same login. Sign-in is at `/auth/login`, with a local
+password (the bootstrap admin's), Google (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+`GOOGLE_ALLOWED_DOMAINS`) or GitHub (`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`), and
+`QUEEN_PROXY_PUBLIC_URL` set so the callbacks have an address. An identity the proxy has never
+seen gets no account unless you turn on `QUEEN_PROXY_AUTOPROVISION=true` and name the tenant it
+joins with `QUEEN_PROXY_AUTOPROVISION_TENANT`; it then gets `QUEEN_PROXY_DEFAULT_ROLE` (`viewer`)
+on every cluster of that tenant.
+
+Operators are the people who run the deployment itself:
+
+```bash
+QUEEN_PROXY_OPERATOR_ENABLED=true
+QUEEN_PROXY_OPERATORS=ops@example.com,alice@example.com
+```
+
+An operator is admin on every cluster and can open the cell-wide pages: node status, host metrics,
+and the raft status and members behind the dashboard's System page. At each boot the listed
+accounts are granted and every other operator is revoked, so the list in your deployment is the
+whole truth; an empty list revokes everyone, and leaving the variable unset leaves the flags as they
+are. No API route grants the flag, and with `QUEEN_PROXY_OPERATOR_ENABLED` off (the default) the
+operator routes answer `404` to everyone.
 
 ## The control plane
 
-Everything after the bootstrap goes through `/api/cp/*` on the proxy's port, with
-`x-queen-cp-token: $QUEEN_PROXY_CP_TOKEN`:
+Everything after the bootstrap can be driven over `/api/cp/*` on the proxy's port, with
+`x-queen-cp-token: $CP_TOKEN` on every call. The token is checked before any body is read, bodies
+are capped at 1 MiB, and with `QUEEN_PROXY_CP_TOKEN` unset the whole surface answers `404`. We
+designed it for a provisioning system that delivers its commands at least once, so every route is
+safe to repeat: a retry of a call that already took effect answers success with the same ids.
 
-| Route | Does |
+| Route | What it does |
 |---|---|
-| `POST /api/cp/bootstrap` | A tenant, its cluster, an admin and a first key in one write. The key's plaintext is in this answer only |
+| `POST /api/cp/provision` | The tenant, its cluster, a user under your own id, that user's role, a key from your sha256 and the overrides, in one atomic write. A deleting tenant is refused |
+| `POST /api/cp/bootstrap` | A tenant, its cluster, an admin and a key the proxy generates. The key's plaintext is in this answer only |
 | `POST /api/cp/tenants` | A tenant, from `{slug, name?}` |
-| `POST /api/cp/clusters` | A cluster, from `{tenant_slug, slug, plan?}`, creating the tenant if needed |
-| `GET /api/cp/clusters/:slug` | The cluster's `id`, `tenant_id` and `broker_tenant_uuid` |
-| `PUT /api/cp/clusters/:id/overrides`, `/status` | Limits for one cluster; its status |
+| `PUT /api/cp/tenants/:slug/status` | `active`, `grace`, `suspended` or `deleting` |
+| `POST /api/cp/tenants/:slug/purge` | Deletes the broker data of every cluster of a `deleting` tenant. Repeat it until it answers `done: true` |
+| `DELETE /api/cp/tenants/:slug` | Removes a `deleting` tenant whose broker data is gone; `?force=true` skips both checks |
+| `GET /api/cp/clusters`, `POST /api/cp/clusters` | Every cluster (`?plan=` filters); ensure a cluster and its tenant exist |
+| `GET /api/cp/clusters/:slug` | The cluster with its tenant, plan, statuses and overrides |
+| `GET /api/cp/clusters/:slug/queues`, `POST .../configure` | The broker's queue listing and `configure`, run as that cluster. Refused while it is deleting |
+| `PUT /api/cp/clusters/:id/overrides`, `PUT .../status` | One cluster's limits; its status |
 | `GET /api/cp/clusters/:id/usage` | The last hour of metered minutes, summed over the nodes |
-| `POST /api/cp/keys`, `DELETE /api/cp/keys/:id` | A key from `{cluster_id, name, key_hash, scopes}` (the sha256: the plaintext never reaches the proxy); its revocation |
+| `POST /api/cp/activity` | For up to 256 slugs: the last active minute, the first push, the last key use, the retained bytes |
+| `POST /api/cp/keys`, `DELETE /api/cp/keys/:id` | A key from `{cluster_id, name, key_hash, scopes}`; its revocation |
+
+`provision` is the call to build on. You mint the key yourself and send only its sha256, so the
+plaintext never reaches the proxy, and you choose the user's id, which is the subject of the
+sessions your own sign-in issues:
 
 ```bash
-curl -s -X POST http://localhost:6711/api/cp/bootstrap \
-  -H "x-queen-cp-token: $CP_TOKEN" -H 'content-type: application/json' \
-  -d '{"tenant_slug":"globex","plan":"pro","admin_email":"ops@globex.example","key_name":"default"}'
+KEY="qk_live_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+HASH=$(printf %s "$KEY" | sha256sum | cut -d' ' -f1)
+curl -s -X POST localhost:6711/api/cp/provision -H "x-queen-cp-token: $CP_TOKEN" \
+  -H 'content-type: application/json' -d '{
+    "tenant_slug": "globex", "cluster_slug": "globex", "plan": "pro",
+    "user_id": "308d3f3d-2306-41de-95f1-e32b12ec7470", "email": "ops@globex.example",
+    "role": "admin", "key_name": "default", "key_hash": "'"$HASH"'",
+    "scopes": ["produce", "consume", "read"], "overrides": {"max_queues": 500}}'
 ```
+
+```json
+{
+  "broker_tenant_uuid": "ff2ab01d-c30e-45e3-960b-5bd7deecd6f5",
+  "cluster_id": "0acf78a8-567a-4a9b-b01d-89be075fe56a",
+  "created": { "cluster": true, "key": true, "tenant": true, "user": true },
+  "key_id": "76648399-b1b0-469e-ba7a-a2ebfb2466da",
+  "overrides": { "max_queues": 500 },
+  "plan_code": "pro",
+  "tenant_id": "b52683ee-7a9b-4e5d-b831-c4806931d866",
+  "user_id": "308d3f3d-2306-41de-95f1-e32b12ec7470"
+}
+```
+
+Sent again, the same call answers the same ids with every `created` flag `false`. Taking a tenant
+down is three steps, and the proxy refuses them out of order. The delete answers
+`409 not_deleting` while the tenant is active, and `409 not_purged` while its broker still lists a
+queue; the purge is done only on a pass that finds nothing left to delete, which is why the first
+pass below answers `done: false`:
+
+```bash
+curl -s -X PUT localhost:6711/api/cp/tenants/globex/status -H "x-queen-cp-token: $CP_TOKEN" \
+  -H 'content-type: application/json' -d '{"status":"deleting"}'
+curl -s -X POST localhost:6711/api/cp/tenants/globex/purge -H "x-queen-cp-token: $CP_TOKEN"
+curl -s -X POST localhost:6711/api/cp/tenants/globex/purge -H "x-queen-cp-token: $CP_TOKEN"
+curl -s -X DELETE localhost:6711/api/cp/tenants/globex -H "x-queen-cp-token: $CP_TOKEN"
+```
+
+```json
+{"clusters":[{"broker_tenant_uuid":"ff2ab01d-c30e-45e3-960b-5bd7deecd6f5","id":"0acf78a8-567a-4a9b-b01d-89be075fe56a","slug":"globex"}],"ok":true,"tenant_id":"b52683ee-7a9b-4e5d-b831-c4806931d866"}
+{"clusters":[{"broker_tenant_uuid":"ff2ab01d-c30e-45e3-960b-5bd7deecd6f5","done":false,"partitions_deleted":1,"slug":"globex"}],"done":false,"existed":true}
+{"clusters":[{"broker_tenant_uuid":"ff2ab01d-c30e-45e3-960b-5bd7deecd6f5","done":true,"partitions_deleted":0,"slug":"globex"}],"done":true,"existed":true}
+{"clusters":[{"broker_tenant_uuid":"ff2ab01d-c30e-45e3-960b-5bd7deecd6f5","cluster_id":"0acf78a8-567a-4a9b-b01d-89be075fe56a","slug":"globex"}],"existed":true}
+```
+
+From the moment the status is `deleting`, the tenant's own traffic answers
+`403 cluster_suspended`. The control plane never acts on the broker's default tenant or on the
+proxy's own system tenant, whatever a request names.
 
 ## Limits
 
-- **Counters are per node.** Rate buckets and parked-pop gauges live in each node's memory: behind
-  a load balancer over three nodes a cluster can reach three times its plan's rate.
-- **The internal port is open.** With the proxy on its own port, `PORT` answers whatever reaches
-  it, under the broker's own JWT setting ([security](/operate/security/)).
-- **Not isolation from the operator.** A live operator, and whoever holds `QUEEN_PROXY_CP_TOKEN`,
-  can act on every cluster.
-- **No route edits a plan** or moves a cluster to another deployment; overrides are the lever.
-- **`/api/v1/system/*` is blocked through the proxy** for every credential: membership changes and
-  kill switches go to the internal port, so a cluster runs the proxy on its own `QUEEN_PROXY_PORT`.
+Rate buckets and parked-pop gauges live in each node's memory, so behind a load balancer over three
+nodes a cluster can reach three times its plan's rate. The storage quota is read from the broker's
+own measurement, which every node shares.
+
+Ephemeral queues behind the proxy are safe on a single node only, for now. In a cluster, an
+ephemeral request that the receiving node forwards to the partition's owner does not keep its
+tenant and lands in the broker's default tenant; durable queues are isolated as described above.
+Separately, an ephemeral hand-over to a node that is still restarting can drop that partition's
+messages, which we have seen during rolling restarts ([ephemeral queues](/guides/ephemeral/)).
+
+The proxy does not isolate tenants from the people who run it. A live operator, and anyone who
+holds `QUEEN_PROXY_CP_TOKEN`, can act on every cluster, and the broker port behind the proxy
+answers whatever reaches it under the broker's own JWT setting ([security](/operate/security/)).
+
+No route edits a plan or moves a cluster to another deployment; overrides are how one cluster's
+limits change. When the replicated KV cannot answer (a cluster without a majority), a key the proxy
+has recently checked keeps authenticating for up to 10 more minutes
+(`QUEEN_PROXY_STALE_GRACE_MS`), while a key it has not seen is refused.
 
 ## Route classes
 

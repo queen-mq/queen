@@ -1,25 +1,22 @@
 // docs:start(app-rust-chat)
 //
-// A chat messaging system.
+// A chat backend: one ordered partition per conversation.
 //
-// This is the application Queen was written for. A hotel messaging product ran
-// on Kafka and kept stalling: some conversations need a translation or an agent
-// reply before the next message can be handled, and on a shared partition one
-// slow conversation holds up every conversation behind it.
-//
-// The fix is structural rather than operational: one ordered lane per
-// conversation, created by the first message sent to it. A conversation that
-// takes ten seconds delays itself and nothing else.
-//
-// What this program builds:
+// Queen started as the broker of a hotel messaging product. Some conversations
+// need a translation or an agent before their next message can be handled, and
+// on a hashed Kafka topic one slow conversation held up every conversation that
+// shared its partition. Here every conversation is a partition of its own,
+// created by the first message sent to it, so a slow conversation waits on
+// itself and on nothing else.
 //
 //   chat-messages (one partition per conversation)
-//     ├── group "delivery"    fast, marks each message as delivered
-//     └── group "enrichment"  slow on conversations that need translation
+//     ├── group "delivery"    marks each message delivered, fast
+//     ├── group "enrichment"  translates the Japanese conversation, slow
+//     └── group "sentiment"   added later, reads the whole history
 //
-// And what it proves: every message reaches both groups exactly once, in the
-// order it was sent inside its own conversation, and the conversations that
-// need no translation finish while the slow one is still working.
+// The program checks what the design promises: every message reaches each
+// group once and in the order of its conversation, and the English
+// conversations finish while the Japanese one is still being translated.
 //
 // Run it:
 //   QUEEN_URL=http://localhost:6632 cargo run --bin chat
@@ -31,14 +28,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use queen_mq::{Config, Message, PushItem, PushStatus, Queen, QueueOptions, SubscriptionMode};
 use serde_json::json;
 
-// Three conversations. The one in Japanese needs a translation pass, which is
-// the slow work: 400 ms a message against 10 ms for the rest.
+// Three conversations. The Japanese one needs a translation pass, 400 ms a
+// message against 10 ms for the others. It is listed first, so its messages are
+// the oldest in the queue and its partition is usually handed out first: a
+// consumer that let one conversation hold up another would fail the timing
+// check below.
 //
 // (conversationId, locale, needsTranslation)
 const CONVERSATIONS: [(&str, &str, bool); 3] = [
+    ("conv-jp-1", "jp", true),
     ("conv-en-1", "en", false),
     ("conv-en-2", "en", false),
-    ("conv-jp-1", "jp", true),
 ];
 const MESSAGES_PER_CONVERSATION: i64 = 6;
 
@@ -79,6 +79,7 @@ async fn main() {
 
 async fn run() -> Result<usize, String> {
     let url = std::env::var("QUEEN_URL").unwrap_or_else(|_| "http://localhost:6632".into());
+    // A fresh queue per run, so two runs never read each other's messages.
     let run_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -88,17 +89,16 @@ async fn run() -> Result<usize, String> {
     let mut checks = Checks(0);
     println!("broker {url}");
 
-    // Signal handlers are opt-in in this client — they sit behind the `signals`
-    // feature — so nothing process-wide is installed and this program owns its
-    // own shutdown, through close() at the bottom.
+    // Signal handlers are opt-in in this client (they sit behind the `signals`
+    // feature), so nothing process-wide is installed and this program owns its
+    // shutdown, through close() at the bottom.
     let queen = Queen::connect(Config::new(&url)).map_err(|e| e.to_string())?;
 
-    // Leases are what make a crashed worker safe: a message whose handler dies
-    // is redelivered once the lease expires. retry_limit bounds how many times
-    // that can happen before the message is dead-lettered instead. configure()
-    // merges, so an option left out keeps the value the queue already has; this
-    // queue name is unique per run, so the rest lands on the broker's own
-    // default.
+    // A crashed worker's messages come back when its lease expires, and
+    // retry_limit bounds how often a failing message is retried before it goes
+    // to the dead-letter queue. configure() merges, so an option left out keeps
+    // the value the queue already has; this queue is new, so those are the
+    // broker's defaults.
     queen
         .queue(&messages)
         .configure(QueueOptions {
@@ -109,31 +109,26 @@ async fn run() -> Result<usize, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    // ---------------------------------------------------------------- producing
+    // ------------------------------------------------------------------ sending
     //
-    // A chat client sends a message: one push, into the partition named after
-    // the conversation. Nothing was declared for this conversation in advance,
-    // and nothing has to be cleaned up when it goes quiet.
+    // Sending a message is one push into the conversation's partition. Nothing
+    // was declared for the conversation beforehand, and nothing has to be
+    // cleaned up when it goes quiet.
     println!("\nsending");
     let mut sent = 0usize;
     for seq in 1..=MESSAGES_PER_CONVERSATION {
         for (conversation_id, locale, _) in CONVERSATIONS {
-            let sent_at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
             let payload = json!({
                 "conversationId": conversation_id,
                 "seq": seq,
                 "locale": locale,
                 "body": format!("message {seq} in {conversation_id}"),
-                "sentAt": sent_at,
             });
 
-            // push() mints a UUIDv7 transaction id for you. Here the id has to
-            // be the client's own idempotency key — a retry of this send, from
-            // a phone on a flaky network, must write nothing the second time —
-            // so the item is built by hand and pushed through push_items().
+            // The transaction id is the phone's own id for the message. A
+            // phone that retries a send it never saw answered writes nothing
+            // the second time. push() would mint a UUIDv7 id of its own, so
+            // the item is built by hand and sent with push_items().
             queen
                 .queue(&messages)
                 .partition(conversation_id)
@@ -150,8 +145,7 @@ async fn run() -> Result<usize, String> {
         CONVERSATIONS.len()
     );
 
-    // A resend of the same message: the client retried because it never saw the
-    // first answer. The broker recognises the transaction id and stores nothing.
+    // The phone resends message 1 because the answer got lost on a bad network.
     let resent = queen
         .queue(&messages)
         .partition("conv-en-1")
@@ -163,41 +157,54 @@ async fn run() -> Result<usize, String> {
         .transaction_id("conv-en-1-1")])
         .await
         .map_err(|e| e.to_string())?;
-    let duplicate = resent
+    let resent = resent
         .first()
         .ok_or("the broker answered the resend with no result")?;
     checks.assert(
-        duplicate.status == PushStatus::Duplicate,
-        "a resent message was deduplicated, not stored twice",
+        resent.status == PushStatus::Duplicate,
+        "a resent message was recognised and not stored twice",
     )?;
+
+    // Three workers in one consumer group. partitions(1) makes every pop take
+    // ONE conversation: by default a pop may sweep up several ready
+    // conversations, and a worker handles the messages of one pop in order, so
+    // a slow conversation would delay the others that came with it.
+    //
+    // In this client limit() counts across the three workers, so a phase ends
+    // as soon as every message has been handled. idle() is the deadline behind
+    // that count, for a message that never comes, and it is pool-wide too: the
+    // first worker that has waited that long stops all three, even one that is
+    // halfway through a conversation, so it has to outlast the 2.4 s the
+    // Japanese conversation keeps one worker busy. Long polls end after a
+    // second, so both are noticed promptly. A service sets none of the three
+    // and runs until it is cancelled.
+    //
+    // The handlers run on three tasks at once, so what they record is behind a
+    // mutex.
+    let workers = |group: &str| {
+        queen
+            .queue(&messages)
+            .group(group)
+            // A group created after the messages starts at the tail otherwise.
+            .subscription_mode(SubscriptionMode::All)
+            .concurrency(3)
+            .partitions(1)
+            .limit(sent as u64)
+            .poll_timeout(Duration::from_secs(1))
+            .idle(Duration::from_secs(5))
+    };
 
     // --------------------------------------------------------------- delivering
     //
-    // The delivery worker is what marks a message as delivered to the
-    // recipients. It is fast and must never fall behind, which is why it is its
-    // own consumer group: it shares no cursor with the slow work below.
-    //
-    // concurrency(3) runs three poll loops, and each pop claims a partition, so
-    // the three conversations are drained in parallel by three workers. The
-    // handler is a plain async closure; returning Ok acks the message, returning
-    // Err nacks it. `limit` counts across all three workers, not per worker.
-    //
-    // idle() stops the loop after a stretch of silence, so a lost message fails
-    // the run instead of hanging it. It is checked between polls, so
-    // poll_timeout bounds how promptly it fires: with the default 30-second poll
-    // window a 10-second silence would be noticed 30 seconds late.
+    // Marking messages delivered is fast work and must never wait behind slow
+    // work, so it is a consumer group of its own, with its own cursor. A
+    // handler that returns Ok acks the message, and one that returns Err nacks
+    // it.
     println!("\ndelivering");
     let delivered: Arc<Mutex<HashMap<String, Vec<i64>>>> = Arc::new(Mutex::new(HashMap::new()));
     {
         let sink = Arc::clone(&delivered);
-        queen
-            .queue(&messages)
-            .group("delivery")
-            .subscription_mode(SubscriptionMode::All)
-            .concurrency(3)
-            .limit(sent as u64)
-            .poll_timeout(Duration::from_secs(1))
-            .idle(Duration::from_secs(10))
+        workers("delivery")
             .consume(move |msg: Message| {
                 let sink = Arc::clone(&sink);
                 async move {
@@ -220,50 +227,39 @@ async fn run() -> Result<usize, String> {
     }
 
     let delivered = delivered.lock().unwrap().clone();
+    let delivered_count: usize = delivered.values().map(Vec::len).sum();
     checks.assert(
-        delivered.values().map(|seqs| seqs.len()).sum::<usize>() == sent,
-        "delivery saw every message exactly once",
+        delivered_count == sent,
+        &format!("delivery saw all {sent} messages once (got {delivered_count})"),
     )?;
 
-    // A HashMap has no iteration order, so the lanes are checked by name: the
-    // output of a passing run should not depend on how the entries happened to
-    // land in the table.
-    let mut lanes: Vec<&String> = delivered.keys().collect();
-    lanes.sort_unstable();
-    for conversation_id in lanes {
-        let seqs = &delivered[conversation_id];
-        let mut in_order = seqs.clone();
-        in_order.sort_unstable();
+    // Checked in the order of CONVERSATIONS, because a HashMap has no iteration
+    // order of its own and a passing run should print the same lines each time.
+    for (conversation_id, _, _) in CONVERSATIONS {
+        let seqs = delivered.get(conversation_id).cloned().unwrap_or_default();
+        let listed: Vec<String> = seqs.iter().map(i64::to_string).collect();
         checks.assert(
-            *seqs == in_order,
-            &format!("{conversation_id} was delivered in order"),
+            seqs.iter().enumerate().all(|(i, &seq)| seq == i as i64 + 1),
+            &format!(
+                "{conversation_id} was delivered in order: {}",
+                listed.join(",")
+            ),
         )?;
     }
 
-    // -------------------------------------------------------------- enrichment
+    // --------------------------------------------------------------- enrichment
     //
-    // The slow group. It reads the same messages through its own cursor, and the
-    // Japanese conversation costs 400 ms a message because it has to be
-    // translated before it can be answered.
-    //
-    // This is where a shared partition would hurt: on a hashed topic these
-    // messages would sit in the same lane as the English ones and hold them up.
-    // Here each conversation has its own lane, so the English conversations
-    // finish while the Japanese one is still being translated. The timings below
-    // are the proof.
+    // The slow group reads the same messages through its own cursor. On a topic
+    // with a few hashed partitions, the Japanese conversation would sit in a
+    // partition shared with English ones and hold them up. Here each worker
+    // holds one conversation at a time, so the English conversations finish
+    // while the Japanese one is still being translated.
     println!("\nenriching");
     let finished_at: Arc<Mutex<HashMap<String, u128>>> = Arc::new(Mutex::new(HashMap::new()));
     let started = Instant::now();
     {
         let sink = Arc::clone(&finished_at);
-        queen
-            .queue(&messages)
-            .group("enrichment")
-            .subscription_mode(SubscriptionMode::All)
-            .concurrency(3)
-            .limit(sent as u64)
-            .poll_timeout(Duration::from_secs(1))
-            .idle(Duration::from_secs(15))
+        workers("enrichment")
             .consume(move |msg: Message| {
                 let sink = Arc::clone(&sink);
                 async move {
@@ -277,6 +273,8 @@ async fn run() -> Result<usize, String> {
                         10
                     };
                     tokio::time::sleep(Duration::from_millis(cost)).await;
+                    // One conversation is handled by one worker at a time, so
+                    // the last write for a conversation is when it finished.
                     sink.lock()
                         .unwrap()
                         .insert(conversation_id, started.elapsed().as_millis());
@@ -300,32 +298,23 @@ async fn run() -> Result<usize, String> {
 
     checks.assert(
         fast < slow,
-        "the conversations needing no translation finished first, in the same worker pool",
+        "the English conversations finished while the Japanese one was still being translated",
     )?;
     checks.assert(
-        slow > (MESSAGES_PER_CONVERSATION as u128) * 300,
-        "the slow conversation really was slow, so the comparison means something",
+        slow >= (MESSAGES_PER_CONVERSATION as u128) * 400,
+        "the Japanese conversation really took its six translations",
     )?;
 
-    // ------------------------------------------------------------------- replay
+    // ----------------------------------------------------------------- backfill
     //
-    // A new feature needs the history: sentiment scoring over everything ever
-    // said. It is a new consumer group reading from the beginning, and it costs
-    // no producer change and no second copy of the data. SubscriptionMode::All
-    // is what points the new cursor at the beginning — the default for a new
-    // group is the tail, so without it this group would sit idle.
-    println!("\nbackfilling a new consumer");
+    // A feature added later, sentiment scoring, wants every message ever sent.
+    // It is one more consumer group starting from the oldest message: no
+    // producer change, and no second copy of the data.
+    println!("\nbackfilling a new group");
     let scored = Arc::new(Mutex::new(0usize));
     {
         let counter = Arc::clone(&scored);
-        queen
-            .queue(&messages)
-            .group("sentiment")
-            .subscription_mode(SubscriptionMode::All)
-            .concurrency(3)
-            .limit(sent as u64)
-            .poll_timeout(Duration::from_secs(1))
-            .idle(Duration::from_secs(10))
+        workers("sentiment")
             .consume(move |_msg: Message| {
                 let counter = Arc::clone(&counter);
                 async move {
@@ -338,7 +327,10 @@ async fn run() -> Result<usize, String> {
     }
 
     let scored = *scored.lock().unwrap();
-    checks.assert(scored == sent, "a group added today read the whole history")?;
+    checks.assert(
+        scored == sent,
+        &format!("a group created now read the whole history ({scored} messages)"),
+    )?;
 
     // Clean up on success only: a failed run leaves the queue on the broker to
     // be looked at.

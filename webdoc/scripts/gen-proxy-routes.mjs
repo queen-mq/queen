@@ -101,7 +101,17 @@ const PROXY_ROUTES = "proxy/src/routes.rs";
 // `/api/v1/raft/members`, the System page's replicated log and members on a
 // raft cell; the liveness probe stays blocked with the rest of the family.
 // `classify` is untouched.
-const CLASSIFY_FINGERPRINT = "826f7c720cacd775";
+// 2026-10-02 (2.0.0-beta.6, raft merged into docs-2.0): `classify` grew ONE arm,
+// for `POST /api/v1/fetch/offsets` (the first offset each partition appended at
+// or after a time, how the Kafka facade answers a timestamp ListOffsets). It
+// sits right after the partition-discovery arm and answers `Consume` for the
+// fetch's reason: it hands out offsets and append times of a tenant's queues,
+// and a consume-scoped key must reach it. POST on the exact path only, every
+// other method `Blocked`. Re-read in full: nothing else in the function moved,
+// and `is_operator_route` is untouched. The control-plane routes beta.4 added
+// under `/api/cp/*` are the proxy's OWN routes, served before `classify` is
+// ever consulted, so they are not broker routes and are not in this table.
+const CLASSIFY_FINGERPRINT = "fa21620708d3a484";
 const OPERATOR_FINGERPRINT = "0eca43d77dc8c6f2";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -165,6 +175,11 @@ function classify(m, p) {
   // Partition discovery: the fetch arm with the path swapped, and method-exact
   // on the exact path for the same reason.
   if (p === "/api/v1/partitions/changed") {
+    return m === "POST" ? "consume" : "blocked";
+  }
+  // The offset for a time: the fetch arm's other twin, method-exact on the
+  // exact path, below the discovery arm exactly as in the Rust.
+  if (p === "/api/v1/fetch/offsets") {
     return m === "POST" ? "consume" : "blocked";
   }
 
@@ -266,7 +281,7 @@ const CLASS_MEANING = [
   ["produce", "Counted against the message quota. May create queues and partitions implicitly."],
   [
     "consume",
-    "Pop, ack, lease extension, the batched read-from-offset the Kafka facade consumes through, and the partition discovery a reader maps a queue with. A `wait=true` pop also holds a parked-consumer slot; the fetch does not, since its long poll is a body field rather than a query flag. Both reads are classified for the authority they need rather than for what they write: they are non-destructive and never quota-blocked, but one hands out message payloads and the other the partition names and offsets to read them by, so they carry the authority of the pop they stand in for instead of the read level every user role already has.",
+    "Pop, ack, lease extension, and the three reads a consumer positions itself with: the batched read from an offset that the Kafka facade consumes through, the lookup of the first offset a partition appended at or after a time, and the partition discovery a reader maps a queue with. A `wait=true` pop also holds a parked-consumer slot; a fetch does not, because its long poll is a field of the body. The three reads move nothing and are never quota-blocked, but between them they hand out message payloads and the offsets to read them by, so they need the authority of the pop they stand in for. The read level every user role has would let a Viewer read every queue by offset.",
   ],
   [
     "queue admin",
@@ -280,7 +295,7 @@ const CLASS_MEANING = [
   ["gated (traces)", "Writing a trace is available when the plan enables the traces feature."],
   [
     "gated (kv)",
-    "Available when the plan enables the KV feature, which a plan that has never heard of it does not. A `PUT` is the half a storage quota blocks; a `GET` is read level; a `DELETE` is how a tenant at its cap gets back under it and is never quota-blocked. The batch `POST` carries both halves in one array, so a quota refuses the whole call with a named reason rather than dropping part of it.",
+    "Available when the plan enables the KV feature, which a plan that has never heard of it does not. A `PUT` is the half a storage quota blocks; a `GET` is read level; a `DELETE` is how a tenant at its cap gets back under it and is never quota-blocked. The batch `POST` carries both halves in one array, so a quota refuses the whole call with a named reason and never drops part of it. One exception is decided on the body, which this table cannot show: a batch that addresses only the Kafka facade's own consumer-group keys (namespace `queen-kafka`, keys `qk:`) is classified consume, so a Kafka client needs neither the KV feature nor room under the storage quota to commit offsets.",
   ],
   [
     "gated (timers)",
@@ -290,13 +305,26 @@ const CLASS_MEANING = [
     "gated (ephemeral)",
     "Available when the plan enables the ephemeral feature, which a plan that has never heard of it does not. A `push` is the half a storage quota blocks and its messages are counted like any other; a pop is metered as a delivery and holds a parked-consumer slot while it waits; ack, configure, reset and the queue `DELETE` are write level and never quota-blocked, since dropping a queue is how a tenant gets its memory back. The two status reads are read level.",
   ],
-  ["operator", "Cell-wide surfaces. Not tenant-scopable, so a tenant credential gets the same 404 a blocked route returns."],
+  ["operator", "Cell-wide surfaces, which no tenant can be scoped to. Only an operator reaches them, on a node with `QUEEN_PROXY_OPERATOR_ENABLED=true` and an account listed in `QUEEN_PROXY_OPERATORS`; any other credential gets the same 404 a blocked route returns."],
   ["blocked", "Never exposed to a tenant, whatever the credential. Returns 404."],
 ];
 
-/** The broker's real routes: the same table gen-routes.mjs publishes. */
+/**
+ * The broker's real routes: the same table gen-routes.mjs publishes, one row
+ * per method + path. `DELETE /api/v1/ephemeral/queue/:queue` is both a router
+ * route and an `api_dynamic` arm; the router answers the HTTP request, so the
+ * pair is one route and the table lists it once.
+ */
 function brokerRoutes() {
-  return brokerRouteTable().map(({ path, method }) => ({ path, method }));
+  const seen = new Set();
+  return brokerRouteTable()
+    .filter(({ method, path }) => {
+      const key = `${method} ${path}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map(({ path, method }) => ({ path, method }));
 }
 
 /**

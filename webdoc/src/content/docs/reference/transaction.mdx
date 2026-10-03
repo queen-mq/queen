@@ -18,10 +18,16 @@ sourceOfTruth:
   - clients/client-js/client-v2/builders/TransactionBuilder.js
 ---
 
-`POST /api/v1/transaction` writes acks, pushes, KV changes, timers and consumer-group positions as
-one entry of the replicated log: all of it applies or none of it does. It answers HTTP 200 both
-when it commits (`success: true`) and when it rolls back (`success: false` with a `reason`). For
-the model, see [transactions](/concepts/transactions/).
+`POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step
+(the acks of what it took, the events it produces, the KV state it changes, the timers it sets,
+where a consumer group should read next) as one entry of the replicated log, so all of it applies
+or none of it does. There is no outbox table to poll and no idempotency table to consult before
+you act: the step and its effects are the same write.
+
+It answers HTTP 200 both when it commits (`success: true`) and when it rolls back
+(`success: false` with a `reason`), because a rollback is a verdict about your data, not a failure
+of the call. This page is every field, every result and every reason. For the model and the
+patterns built on it, read [transactions](/concepts/transactions/) first.
 
 ## Request
 
@@ -121,16 +127,18 @@ The same operations as `POST /api/v1/kv`, without `getPrefix`.
 | `delete` | `ns`, `key`, `expect`?, `required`? |
 | `incr` | `ns`, `key`, `delta` (number), `min`?, `max`?, expiry, `required`? |
 
-- **Expiry**: every `put`, `putIfAbsent` and `incr` carries exactly one of `ttlSeconds` (an integer
-  greater than 0) or `forever: true`. The JS SDK turns `ttl: '30d'` into `ttlSeconds`.
-- **`value`**: any JSON value, at most `QUEEN_KV_MAX_VALUE_BYTES` (64 KiB) as compact JSON.
-- **`expect`**: a version number; `0` means the key must not exist.
-- **`required: true`** turns the operation into a gate: if its precondition loses (`exists`,
-  `absent`, `version`, `limit`, `type`), the whole transaction rolls back with
-  `reason: "kv_precondition"`. Without `required`, a lost precondition is `applied: false` in the
-  results and the rest commits. The JS `.once(ns, key)` is `putIfAbsent` with `required: true`.
-- `ns` matches `^[a-z0-9][a-z0-9._-]{0,63}$`; a key is 1–512 bytes with no NUL; a key may be
-  written once per call. At most 64 operations and 256 named keys per transaction.
+Every `put`, `putIfAbsent` and `incr` carries exactly one expiry: `ttlSeconds` (an integer greater
+than 0) or `forever: true`; the JS SDK turns `ttl: '30d'` into `ttlSeconds`. A `value` is any JSON
+value of at most `QUEEN_KV_MAX_VALUE_BYTES` (64 KiB) as compact JSON. `expect` is a version number,
+and `0` means the key must not exist.
+
+`required: true` turns an operation into a gate. If its precondition loses (`exists`, `absent`,
+`version`, `limit`, `type`), the whole transaction rolls back with `reason: "kv_precondition"`.
+Without `required`, a lost precondition is `applied: false` in the results and the rest commits.
+The JS `.once(ns, key)` is `putIfAbsent` with `required: true`.
+
+`ns` matches `^[a-z0-9][a-z0-9._-]{0,63}$`, a key is 1 to 512 bytes with no NUL, and a key may be
+written once per call. A transaction carries at most 64 KV operations naming at most 256 keys.
 
 ### Timer operations
 
@@ -272,7 +280,7 @@ A lost `required` KV operation adds the operation that lost:
 ```
 
 `failedIndex` is in the same index space as `results`. The JS client returns this answer from
-`commit()` instead of throwing; every other `success: false` throws with `error.reason` set.
+`commit()`; every other `success: false` throws with `error.reason` set.
 
 | `reason` | HTTP | When | What to do |
 |---|---|---|---|
@@ -297,15 +305,16 @@ Some failures use the engine's error body `{"error", "code"}` instead, with no `
 
 ## Retries
 
-- **Inside one call** the broker retries a leader change itself, under the call's request id, until
-  the deadline (`QUEEN_STMT_TIMEOUT_MS`, 30 s). A transaction that committed before the change is
-  answered from its record, not run twice.
-- **There is no client-supplied request id.** A request you send again is a new transaction. After
-  a 503 or a lost connection the first attempt may have committed.
-- If it did, the retry rolls back instead of writing twice, but only because of what the body
-  carries: a fenced ack whose lease the first commit released (`rejected_ack`), a pushed
-  `transactionId` already in the partition (`duplicate`), or a `required` marker
-  (`kv_precondition`). An ack with no lease does not stop it: acking a message twice is a no-op.
+Inside one call, the broker retries a leader change itself, under the call's request id, until the
+deadline (`QUEEN_STMT_TIMEOUT_MS`, 30 s), and a transaction that committed before the change is
+answered from its record and does not run again.
+
+Across calls there is no client-supplied request id: a request you send again is a new
+transaction, and after a 503 or a lost connection the first attempt may have committed. If it did,
+the retry rolls back and writes nothing only because of what the body carries: a fenced ack whose
+lease the first commit released (`rejected_ack`), a pushed `transactionId` already in the partition
+(`duplicate`), or a `required` marker (`kv_precondition`). An ack with no lease does not stop it,
+because acking a message twice is a no-op.
 
 **Give every pushed item a deterministic `transactionId`, or gate the step with a `required`
 marker, so that a retry is harmless.** A transaction made only of KV writes and timers, with no
@@ -319,5 +328,6 @@ SDK calls too. See [dedup](/concepts/dedup/).
   and branch on it. `expect` and `required` are the conditions it can carry.
 - The timer horizon (`QUEEN_TIMERS_MAX_HORIZON_S`, 90 days), the 1 MiB timer payload ceiling and
   the 256-op cap of `POST /api/v1/timers` are not applied to the `timers` array of a transaction.
-- No published benchmark measures transaction throughput. See [benchmarks](/benchmarks/).
+- Throughput and commit latency, measured against Kafka, Redpanda and Pulsar on the same machines,
+  are on the [transactions benchmark](/benchmarks/transactions/).
 - An external side effect, such as an HTTP call to a payment provider, is outside the commit.

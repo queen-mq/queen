@@ -1,6 +1,6 @@
 ---
 title: Kafka
-description: "The Kafka APIs and version windows the built-in Kafka facade answers, the APIs it refuses, and how it maps onto Queen."
+description: "The Kafka facade's settings, the topic configs it accepts, the Kafka APIs and versions it answers, where it behaves differently from Apache Kafka, and what each client library needs."
 type: reference
 tier: use
 sidebar:
@@ -8,34 +8,197 @@ sidebar:
 sourceOfTruth:
   - protocols/queen-kafka/src/versions.rs
   - protocols/queen-kafka/src/boot.rs
+  - protocols/queen-kafka/src/conn.rs
+  - protocols/queen-kafka/src/sasl.rs
+  - protocols/queen-kafka/src/throttle.rs
+  - protocols/queen-kafka/src/topic_config.rs
+  - protocols/queen-kafka/src/txn.rs
+  - protocols/queen-kafka/src/idempotent.rs
+  - protocols/queen-kafka/src/coordinator/mod.rs
+  - protocols/queen-kafka/src/handlers/metadata.rs
+  - protocols/queen-kafka/src/handlers/produce.rs
+  - protocols/queen-kafka/src/handlers/fetch.rs
+  - protocols/queen-kafka/src/handlers/list_offsets.rs
+  - protocols/queen-kafka/compat/CLIENT_MATRIX.md
   - server/src/kafka_inproc.rs
   - server/src/config.rs
 ---
 
-Every Queen node can speak the Kafka wire protocol, so an unmodified Kafka producer or consumer
-connects by changing `bootstrap.servers`. The facade is part of the binary and off by default.
-Setup, client settings and a worked example are on [Kafka](/guides/kafka/).
+This is the contract a Kafka client gets from Queen, in the form you check things against: the
+settings the facade reads, the topic configs it accepts, the APIs and versions it answers, the
+places where it knowingly behaves differently from Apache Kafka, and what each client library needs.
+How it all fits together, with a working example, is on [Kafka clients](/guides/kafka/).
 
 ```bash
 QUEEN_KAFKA_EMBEDDED=true
-QUEEN_KAFKA_ADVERTISED_ADDR=queen-0.example.internal:9092   # required: what clients reconnect to
-QUEEN_KAFKA_ADDR=0.0.0.0:9092                               # the bind address (default)
+QUEEN_KAFKA_ADVERTISED_ADDR=kafka-1.example.internal:9092   # required: what clients reconnect to
 ```
 
-- A Kafka topic is a Queen queue. Records go through the same push and fetch paths as native
-  clients, and the facade keeps no durable state of its own.
-- Committed offsets are stored as Queen consumer-group positions (`QUEEN_KAFKA_OFFSET_STORE`,
-  default `positions`, or `kv`), so a Kafka group is also visible as a Queen consumer group.
-- A client reads the ApiVersions answer first, so it never sends an API outside the table below.
-- Authentication is SASL/PLAIN carrying a Queen bearer token; there is no SCRAM and no ACL model.
+## Settings
+
+Read once, when the node starts. An empty value counts as unset, and a value that does not parse
+stops the node with the variable's name, except for `QUEEN_KAFKA_THREADS`, `QUEEN_KAFKA_COALESCE` and
+`QUEEN_KAFKA_SHUTDOWN_GRACE_MS`, which fall back to their defaults.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `QUEEN_KAFKA_EMBEDDED` | `false` | `true` runs the facade inside the broker. Nothing below is read otherwise. |
+| `QUEEN_KAFKA_ADDR` | `0.0.0.0:9092` | The address the Kafka listener binds. |
+| `QUEEN_KAFKA_ADVERTISED_ADDR` | none, required | The `host:port` clients reconnect to after their first request. A wildcard host, a missing port and an unbracketed IPv6 address are refused at boot. |
+| `QUEEN_KAFKA_THREADS` | `min(4, cores / 2)`, at least 1 | Threads of the facade's own runtime, 1 to 256. |
+| `QUEEN_KAFKA_OFFSET_STORE` | `positions` | Where committed offsets live: `positions`, the consumer group's positions; or `kv`, rows under `qk:group:` in the key-value store, which the consumer-group views do not show. An explicit `QUEEN_URL` always uses `kv`. Offsets are not moved when this changes. |
+| `QUEEN_KAFKA_DEFAULT_PARTITIONS` | `1024` | The width of a topic created without one, 1 to `QUEEN_KAFKA_MAX_PARTITIONS`. Give every node the same value, or nodes advertise different widths for the same topic. |
+| `QUEEN_KAFKA_MAX_PARTITIONS` | `1000000` | The widest a topic may be created, grown or advertised, 1 to 1,500,000, which is what one metadata answer can carry. |
+| `QUEEN_KAFKA_COALESCE` | `5` | The most produce requests of one connection, already received, that are written as one push, 1 to 64. `1` turns it off. |
+| `QUEEN_KAFKA_MAX_CONNECTIONS` | `4096` | Connections served at once, 16 to 1,000,000. Past it a new connection is closed, and the client tries again. |
+| `QUEEN_KAFKA_MAX_PRODUCER_STATES` | `4194304` | Idempotent sequence windows kept per node, about 210 bytes each, 1,024 to 67,108,864. Past it the least recently written is evicted. |
+| `QUEEN_KAFKA_GROUP_JOIN_DELAY_MS` | `3000` | How long the first join of an empty group waits for more members (Kafka's `group.initial.rebalance.delay.ms`), 0 to 3,600,000. |
+| `QUEEN_KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS` | `6000` | Kafka's `group.min.session.timeout.ms`. |
+| `QUEEN_KAFKA_GROUP_MAX_SESSION_TIMEOUT_MS` | `300000` | Kafka's `group.max.session.timeout.ms`. A consumer asking for a session timeout outside the two is refused `INVALID_SESSION_TIMEOUT`. |
+| `QUEEN_KAFKA_TLS_CERT`, `QUEEN_KAFKA_TLS_KEY` | none | PEM certificate chain and private key of a TLS listener. Both or neither. |
+| `QUEEN_KAFKA_SASL` | none | `plain` turns on SASL/PLAIN ([security](#security)). |
+| `QUEEN_KAFKA_FORWARD_SNI_HOST` | `false` | Sends the TLS server name a client dialled as the `Host` of its calls into Queen. Needs TLS. |
+| `QUEEN_KAFKA_TXN_MAX_BYTES` | `8388608` (8 MiB) | Staged record bytes in one transaction, 64 KiB to 64 MiB. |
+| `QUEEN_KAFKA_TXN_MAX_RECORDS` | `50000` | Staged records in one transaction, 1 to 5,000,000. |
+| `QUEEN_KAFKA_TXN_MAX_STAGED_BYTES` | `134217728` (128 MiB) | Staged bytes across every open transaction on the node, 1 MiB to 8 GiB, and never below the per-transaction cap. |
+| `QUEEN_KAFKA_TXN_MAX_OPEN` | `1024` | Open transactions on the node, 1 to 1,000,000. |
+| `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS` | `3600000` | The longest `transaction.timeout.ms` a producer may ask for, 1,000 to 7,200,000. Kafka's `transaction.max.timeout.ms` is 15 minutes; one hour here because that is what Flink's sink asks for. |
+| `QUEEN_KAFKA_NODE_ID` | unset | Cluster mode: this node's broker id, 1 to 64, distinct per node. |
+| `QUEEN_KAFKA_CLUSTER` | `queen` | The cluster id clients see, and the prefix of the node registry. Only with a node id. |
+| `QUEEN_KAFKA_CLUSTER_HEARTBEAT_MS` | `2000` | How often a node refreshes its registry row, 500 to 30,000. |
+| `QUEEN_KAFKA_CLUSTER_TTL_MS` | `10000` | How long a node stays in the broker list without a sign of life, 3,000 to 120,000 and at least three heartbeats. |
+| `QUEEN_TOKEN` | none | The facade's credential for its calls into Queen. With SASL on, each connection's password takes its place. Required in cluster mode. |
+| `QUEEN_URL` | unset | Set, the facade calls this broker or proxy over HTTP instead of in memory, and keeps offsets as `kv` rows. |
+| `QUEEN_KAFKA_SHUTDOWN_GRACE_MS` | `5000` | How long a stopping node waits for the facade to close, so a cluster-mode node can hand back its registry row. |
+
+## Topic configs
+
+CreateTopics, AlterConfigs and IncrementalAlterConfigs share one vocabulary, and DescribeConfigs
+reports from it.
+
+| Config | Accepted | What it does |
+|---|---|---|
+| `cleanup.policy` | `delete` (default), `compact`, `compact,delete` | `delete` lets `retention.ms` delete by age. `compact` switches retention off and keeps every record. `compact,delete` deletes by age and compacts nothing. |
+| `retention.ms` | `-1` (default), or 1000 and more | The queue's retention, rounded down to whole seconds. Less than a second is refused, because it would round to zero, which deletes everything. |
+| `min.insync.replicas` | 1 up to the raft majority: 1 on one node, 2 of 3, 3 of 5 | Recorded. Every acknowledged write is already on a majority, and the default reports that number. |
+| `message.timestamp.type` | `CreateTime` | A fetched record carries the producer's timestamp, so `LogAppendTime` is refused. |
+| `segment.bytes`, `segment.ms`, `retention.bytes`, `max.message.bytes`, `min.compaction.lag.ms`, `max.compaction.lag.ms`, `delete.retention.ms`, `min.cleanable.dirty.ratio` | Kafka's own ranges | Recorded and reported back as set, documented as not enforced. Retention here is by age only, and message size is bounded by the broker's request ceiling. |
+| Anything else | | Refused with `INVALID_CONFIG`. |
+
+The alters work on topics created through Kafka, by CreateTopics or on first use, because the
+facade alters from its own record of what it applied to the queue. A queue that a Queen client
+created is refused with the reason; set its configuration in Queen. AlterConfigs is the old
+full-replacement form, and a key it does not name goes back to its default.
+`kafka-configs.sh --alter` sends IncrementalAlterConfigs, which changes only the keys it names. A
+topic not created through Kafka describes as `cleanup.policy=delete` and `min.insync.replicas` only.
+
+## APIs and versions
+
+Every Kafka client opens a connection by asking which APIs and versions the broker speaks, and then
+speaks only those. This is that answer, with the reason each window stops where it does.
 
 <Render file="generated/kafka-support-matrix" />
 
-## Limits
+## Where it differs from Apache Kafka
 
-- The Jepsen pass behind [guarantees](/concepts/guarantees/) ran on the native HTTP API. It did not
-  cover the Kafka facade.
-- Groups use the classic Join/Sync protocol. KIP-848 (`ConsumerGroupHeartbeat`) and static
-  membership (`group.instance.id`) are not supported.
-- In a cluster, a `transactional.id` is refused with `TRANSACTIONAL_ID_AUTHORIZATION_FAILED`;
-  Kafka transactions work against a single node.
+- Inside a transaction, a produce answers offset `-1`, because no offset exists until the commit;
+  the Java client keeps the `-1` and invents nothing. There are no commit markers, so a committed
+  transaction of N records advances the log by N and an aborted one by 0, and `read_committed` and
+  `read_uncommitted` read the same records.
+- A batch at a nonzero sequence from a producer id the node has not seen is refused with
+  `OUT_OF_ORDER_SEQUENCE_NUMBER`, where Kafka 3.9 accepts it. Here an unknown producer usually
+  means the node restarted, and the producer recovers by bumping its epoch.
+- `acks=1` is `acks=all`. `acks=0` gets no answer, so its errors exist only in the node's log.
+- A produce's `timeout_ms` is not acted on. A call into the broker is bounded at 10 seconds, below
+  every client's 30-second request timeout.
+- Topic names that begin with `__` do not exist: listings leave them out and requests that name
+  them are answered `UNKNOWN_TOPIC_OR_PARTITION`, so `__consumer_offsets` can be neither read nor
+  created.
+- Below Metadata v4 a request cannot decline auto-creation, and there is no broker-side switch.
+- Every leader epoch is -1, so clients skip truncation detection.
+- Fetch answers are uncompressed batches. Partitions are filled in request order up to 32 MiB per
+  answer, the rest come back empty with their watermarks, and the first batch always carries at
+  least one whole record.
+- A timestamp lookup (ListOffsets with a time) is answered on the broker's append clock, and the
+  records carry the producer's timestamps ([details](/guides/kafka-frameworks/#starting-from-a-point-in-time)).
+- Committed offsets never expire. DeleteGroups and OffsetDelete remove them, and DeleteGroups
+  removes the Queen consumer group of that name from every queue.
+- Group membership is held in memory by the node that coordinates the group. When that node
+  restarts, members are told `UNKNOWN_MEMBER_ID` or `NOT_COORDINATOR`, rejoin and resume from their
+  committed offsets, the same sequence as a Kafka broker failover.
+- When the broker pushes back (a full admission budget, or a rate limit through the proxy), Produce,
+  Fetch and Metadata answer with `throttle_time_ms`, between 1 and 30 seconds, which every client
+  waits out on its own. The offset APIs answer `COORDINATOR_NOT_AVAILABLE` instead, which clients
+  retry.
+
+## Clients
+
+Each row was run with a suite in `protocols/queen-kafka/compat/` in August and September 2026. On
+the raft broker of 2.0, with the facade in-process, franz-go, kafkajs, kcat, kafka-go, sarama,
+aiokafka, kafka-python and Java kafka-clients 3.9.2 were run again on 2026-09-23, and the franz-go
+suite on 2.0.0-beta.5. No version window has narrowed since, so the notes still hold.
+
+| Client | Versions run | Set | Watch for |
+|---|---|---|---|
+| Java kafka-clients, Spring Kafka | 3.6.2, 3.9.1, 3.9.2, 4.3.1; Spring Boot 3.5 | nothing | Keep `group.protocol=classic` on 4.x. Below 3.9, SASL fails on JDK 24 and later, which the node logs as `TLS handshake eof`: a client bug, fixed in 3.9. |
+| librdkafka: kcat, confluent-kafka-python, Confluent.Kafka (.NET), @confluentinc/kafka-javascript, node-rdkafka, rust-rdkafka, rdkafka-ruby, php-rdkafka | librdkafka 2.6.1 to 2.15 | `allow.auto.create.topics=true` on a consumer that has to create its topic | zstd batches go out uncompressed. librdkafka 2.11.0 and older send gzip, snappy and lz4 uncompressed too, which bites php-rdkafka built on a distribution's librdkafka. node-rdkafka cannot send binary header values. |
+| franz-go | 1.21 | nothing | |
+| segmentio/kafka-go | 0.4.51 | `RequiredAcks` on a `&kafka.Writer{}` literal, which otherwise writes with `acks=0`; TLS and SASL on both `Transport` and `Dialer` | Its `Conn` API sends OffsetCommit v2 and OffsetFetch v1 without asking, exactly the floors advertised here. |
+| IBM/sarama | 1.45.2, 1.60.2 | below 1.46.0, `Config.Version = sarama.V1_0_0_0` | Below 1.46.0 without it, producing works and the consumer reconnects forever on EOF. |
+| kafkajs | 2.2.4 | nothing | Unmaintained upstream since 2024. |
+| @platformatic/kafka | 2.11.0 | Node 22.22, or 24.6 and later; `mode: 'earliest'` to read from the start | |
+| kafka-python | 2.0.2, 2.3.2, 3.0.11 | do not pin `api_version` above `(0, 11, 0)` | 3.x retries a wrong SASL password forever. 2.0.2 needs Python 3.11 or older. |
+| aiokafka | 0.12, 0.14 | 0.13 or later for consumer groups | 0.12 hangs forever on JoinGroup. |
+| brod (Erlang, Elixir) | 4.6.3 | nothing | It pins Metadata v2, so it cannot decline auto-creation. |
+
+A client running in a container dials the advertised address too, so the node has to advertise one
+the container can reach, such as `host.docker.internal:9092`; `localhost` there is the container
+itself. A consumer configured for the KIP-848 group protocol (`group.protocol=consumer`) or for
+static membership (`group.instance.id`) fails when it joins, with an error from the client.
+
+## Security
+
+TLS is both files or neither, and a node with only one of them does not start. With
+`QUEEN_KAFKA_SASL=plain`, a client logs in with SASL/PLAIN: the password is a Queen token, the one an
+SDK sends as `Authorization: Bearer`, and the username is a label for the logs. Until a connection
+has logged in it may only negotiate versions and authenticate; anything else closes it.
+
+```properties
+bootstrap.servers=kafka-1.example.internal:9093
+security.protocol=SASL_SSL
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+  username="orders-service" password="<a Queen token>";
+```
+
+The token is checked by the broker's own authentication. On a broker that does not check tokens
+(`JWT_ENABLED` off) every password is accepted, so SASL means something only when the broker does.
+SASL on a listener without TLS puts tokens on the wire in clear, and the node warns about it at
+boot. Without SASL, every Kafka connection reaches Queen as `QUEEN_TOKEN`, which gives the Kafka
+port the trust boundary of the broker port: keep it on the same private network.
+
+To serve Kafka clients as tenants of the [proxy](/operate/tenants/), point `QUEEN_URL` at the
+proxy's port and turn SASL on; each connection's password is then an API key that the proxy checks,
+scopes and meters like any other client's, and offsets are kept as `kv` rows. This path was last
+run end to end before 2.0.
+
+## Ceilings
+
+Compiled in, and listed because each one explains an answer you might otherwise have to guess at.
+
+| Ceiling | Value | What happens past it |
+|---|---|---|
+| A request or response frame | 100 MiB | A larger request closes the connection; answers are bounded below it before they are built. |
+| A frame before authentication | 64 KiB | The connection closes. |
+| One fetch answer | 32 MiB | The remaining partitions come back empty, with their watermarks. |
+| Partitions in an all-topics listing | 200,000 | Further topics are left out of the listing, with a line in the node's log. |
+| Topics auto-created by one metadata request | 100 | The rest are answered `LEADER_NOT_AVAILABLE` and created when the client retries. |
+| Topics created by one CreateTopics request | 100 | The rest are answered `THROTTLING_QUOTA_EXCEEDED` (`REQUEST_TIMED_OUT` before v6), which the Java AdminClient retries. |
+| Consumer groups coordinated by one node | 10,000 | New groups are answered `COORDINATOR_NOT_AVAILABLE` until idle ones are dropped. |
+| Topic name | 249 characters | Kafka's own limit. |
+| Group id | 255 characters | `INVALID_GROUP_ID`. |
+| Commit metadata | 4,096 bytes | `OFFSET_METADATA_TOO_LARGE`, at Kafka's own default for `offset.metadata.max.bytes`. |
+| Partitions in one transaction | 200 | `INVALID_TXN_STATE` for the extra partitions; the transaction has to be aborted. |
+| Offsets in one transaction | 62 | `INVALID_COMMIT_OFFSET_SIZE`; the transaction has to be aborted. |
+| An idle connection | 10 minutes | Closed; a half-received frame gets 30 seconds. |
+| One call into the broker | 10 seconds | Below every client's 30-second request timeout, so the client's timer never fires first. |

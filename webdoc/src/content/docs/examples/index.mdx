@@ -1,0 +1,100 @@
+---
+title: Examples
+description: "Whole applications on Queen MQ: a chat backend, a webhook sender, a card charger, a booking saga, two rate limiters and a Kafka bridge, each one a program that checks what it claims."
+type: overview
+tier: use
+sidebar:
+  order: 1
+sourceOfTruth:
+  - examples/apps/run.sh
+  - examples/cross-protocol/bridge.mjs
+verifiedBy:
+  - examples/apps/run.sh
+---
+
+These are whole programs, the kind you would start a service from. Each one builds an
+application on Queen (a chat backend, a webhook sender, a card charger that charges each order
+once, a booking saga, two rate limiters, a Kafka bridge), runs it against a node, prints what
+happens, and checks the property the application exists for. A run ends with `PASS` and the
+number of checks, or with `FAIL` and a non-zero exit code, so you can see for yourself that the
+claim on the page holds on your machine.
+
+<CardGrid>
+  <LinkCard
+    href="/examples/chat/"
+    title="Chat backend"
+    description="One ordered partition per conversation. A conversation that needs a slow translation delays itself and no other, and a feature added later reads the whole history."
+  />
+  <LinkCard
+    href="/examples/webhooks/"
+    title="Webhook sender"
+    description="One partition per endpoint, the broker's retry budget, and a dead-letter queue that keeps the error that killed each delivery."
+  />
+  <LinkCard
+    href="/examples/exactly-once/"
+    title="Charge each order once"
+    description="Five orders, a failure, a full replay, five charges. The marker and the ack commit in one transaction."
+  />
+  <LinkCard
+    href="/examples/saga/"
+    title="Booking saga"
+    description="Hold a room, ask for payment and arm the release in one commit. A timer gives the room back when the payment never comes."
+  />
+  <LinkCard
+    href="/examples/rate-limiter/"
+    title="Rate limiters"
+    description="A streaming counter that commits with the requests it counted, and a quota that moves work to the next window instead of refusing it."
+  />
+  <LinkCard
+    href="/examples/kafka-bridge/"
+    title="Kafka bridge"
+    description="A Kafka producer in, a Queen worker with transactions in the middle, a Kafka consumer out, on the same queues."
+  />
+</CardGrid>
+
+## Run one
+
+Start a node, save the JavaScript version of a program from its page, install the client, and run
+it:
+
+```bash
+docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+npm install queen-mq
+node chat.mjs
+```
+
+Every program reads `QUEEN_URL` (default `http://localhost:6632`). The JavaScript versions need
+Node.js 24 or later. We ran them with `queen-mq` 1.3.0 from npm against a 2.0.0-beta.6 node in
+Docker on an Apple-silicon laptop (the amd64 image, emulated), and each one finished in under 20
+seconds, five of the seven in under 10 (2026-10-02).
+
+From a clone of [the repository](https://github.com/queen-mq/queen), `examples/apps/run.sh` runs
+every program in every language it finds a toolchain for, against the node at `QUEEN_URL`, and
+`examples/apps/run.sh py go` runs only those two. The pages show the programs from the same files,
+so what you read is what ran. The Kafka bridge lives in `examples/cross-protocol/`, because it
+needs a node with the Kafka listener on.
+
+## What they have in common
+
+The programs share a few habits, and they are worth copying into tests of your own.
+
+Each run works on fresh queue names and, where it uses KV, a fresh namespace, so two runs never
+read each other's data. The namespace matters more than the queue: KV entries outlive the queue
+that produced them and stay until their TTL, so a second run in the same namespace would find
+every order already charged and pass without charging anything.
+
+Every phase is followed by checks on counts: how many messages each consumer saw, how many cards
+were charged, how many rooms went back on sale. A program that only waited for things to go quiet
+would pass on a broker that had delivered nothing.
+
+The consumers poll with a one-second timeout and stop after a few quiet seconds, so that the
+programs end. A service calls `consume()` without `.timeoutMillis()` and `.idleMillis()`, runs
+until it is stopped, and stops on an `AbortSignal` passed as `consume(handler, { signal })`.
+
+They clean up what they wrote, KV entries and pending timers included, because deleting a queue
+removes neither.
+
+## Next
+
+The [guides](/guides/) explain the patterns these programs are made of, one at a time, and the
+[concepts](/concepts/) explain the mechanisms under them.

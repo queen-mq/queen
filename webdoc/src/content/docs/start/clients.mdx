@@ -1,6 +1,6 @@
 ---
 title: Clients
-description: "Six SDKs, curl, queenctl and the embedded Rust broker: how to install and connect each one, and what each SDK implements."
+description: "The six SDKs, curl, queenctl and the broker embedded in a Rust program: how to install and connect each, and where they differ."
 type: reference
 tier: use
 sidebar:
@@ -12,6 +12,7 @@ sourceOfTruth:
   - clients/client-rust/Cargo.toml
   - clients/client-cpp/queen_client.hpp
   - clients/client-php/composer.json
+  - clients/client-php/config/queen.php
   - Dockerfile
   - server/Cargo.toml
   - server/src/embedded/mod.rs
@@ -25,9 +26,12 @@ verifiedBy:
   - server/tests/embedded_raft_smoke.rs
 ---
 
-Every Queen client speaks the same API: JSON over HTTP/1.1, on port `6632`. Pick the SDK for your
-language, call the routes with curl, or run the broker inside a Rust process. The connect lines
-below are the ones the tutorials in `examples/tutorials/` run.
+Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same
+routes, and curl is a complete client. What an SDK adds is the part that is tedious to write by
+hand: consume loops that ack and nack for you, lease renewal, push buffering, retries with
+failover across the nodes of a cluster, and builders for transactions, KV and timers. Pick the one
+for your language. The tutorials in `examples/tutorials/` use these same packages, one program
+per language, and check themselves against a live broker.
 
 ## Install and connect
 
@@ -46,7 +50,10 @@ const queen = new Queen({ url: 'http://localhost:6632' })
 await queen.close()
 ```
 
-Node.js 24 or later. `urls: [...]` instead of `url` spreads requests over several nodes.
+Node.js 24 or later. With `urls: [...]` instead of `url`, the client sends each consumer's pops to
+the node that a consistent hash of its queue, partition and group picks (the default `affinity`
+strategy; `round-robin` and `session` are the others), and fails over to another node on a network
+error or a 5xx.
 [README](https://github.com/queen-mq/queen/tree/master/clients/client-js)
 
 </TabItem>
@@ -65,7 +72,7 @@ async def main():
     await queen.close()
 ```
 
-Python 3.9 or later. The client is asyncio throughout.
+Python 3.9 or later. The client is asyncio from end to end, and `url` is a keyword argument.
 [README](https://github.com/queen-mq/queen/tree/master/clients/client-py)
 
 </TabItem>
@@ -85,8 +92,9 @@ if err != nil {
 defer client.Close(context.Background())
 ```
 
-`queen.New` also takes a slice of URLs or a `ClientConfig`. The module path is
-`github.com/smartpricing/queen/clients/client-go`.
+Go 1.24 or later. `queen.New` also takes a slice of URLs or a `ClientConfig`. The repository
+lives at `github.com/queen-mq/queen`, but the module path still carries the organization it
+started in, so import it exactly as written above.
 [README](https://github.com/queen-mq/queen/tree/master/clients/client-go)
 
 </TabItem>
@@ -103,14 +111,17 @@ use queen_mq::{Config, Queen};
 let queen = Queen::connect(Config::new("http://localhost:6632"))?;
 ```
 
-Rust 1.86 or later, on tokio. `connect` validates the configuration and opens no socket; the
-first request does. [README](https://github.com/queen-mq/queen/tree/master/clients/client-rust)
+Rust 1.86 or later, on tokio. `connect` checks the configuration and opens no socket; the first
+request does.
+[README](https://github.com/queen-mq/queen/tree/master/clients/client-rust)
 
 </TabItem>
 <TabItem label="C++">
 
-The client is one header, `clients/client-cpp/queen_client.hpp`. Copy it into your include path
-with its dependencies: cpp-httplib, nlohmann/json and OpenSSL.
+The client is one header, `clients/client-cpp/queen_client.hpp`, used from a checkout of the
+repository: it includes the thread pool in `clients/server/include/` by a relative path, and
+`clients/server/vendor/` carries the nlohmann/json it needs. You install cpp-httplib and OpenSSL
+(`brew install cpp-httplib openssl` on macOS).
 
 ```cpp
 #include "queen_client.hpp"
@@ -120,8 +131,16 @@ queen::QueenClient client("http://localhost:6632");
 client.close();
 ```
 
-C++17 or later. Link with `-lssl -lcrypto -lpthread`, even over plain HTTP: the header turns on
-cpp-httplib's TLS support unconditionally.
+```bash
+g++ -std=c++17 -O2 -pthread \
+    -I clients/client-cpp -I clients/server/vendor \
+    -I /opt/homebrew/include -I "$(brew --prefix openssl)/include" \
+    app.cpp -o app \
+    -L "$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
+```
+
+C++17 or later. Link OpenSSL even over plain HTTP: the header turns on cpp-httplib's TLS support
+itself.
 [README](https://github.com/queen-mq/queen/tree/master/clients/client-cpp)
 
 </TabItem>
@@ -137,8 +156,8 @@ use Queen\Queen;
 $queen = new Queen('http://localhost:6632');
 ```
 
-PHP 8.3 or later. In a Laravel application, package discovery registers a `queen` queue
-connection, and your jobs stay ordinary Laravel jobs:
+PHP 8.3 or later. The same package carries the Laravel integration: package discovery registers a
+`queen` queue connection, and your jobs stay ordinary Laravel jobs.
 
 ```dotenv
 QUEUE_CONNECTION=queen
@@ -151,45 +170,51 @@ See [Laravel](/guides/laravel/).
 </TabItem>
 </Tabs>
 
+The SDKs are versioned apart from the broker: JavaScript 2.0 (`queen-mq` 2.0.0), PHP 1.9, and 1.3
+for the others. All of them talk to a 2.0 broker.
+
 ## curl is a client
 
-Every SDK is a wrapper over the same routes, so anything that can send an HTTP request is a full
-client: push, pop, ack, `POST /api/v1/transaction`, KV and timers. Nothing to install.
+Every SDK call is one of the broker's routes, so anything that can send an HTTP request can push,
+pop, ack, commit a transaction, and read and write KV and timers, with nothing to install:
 
 ```bash
 curl -s -X POST http://localhost:6632/api/v1/push -H 'content-type: application/json' \
   -d '{"items":[{"queue":"orders","partition":"customer-123","payload":{"orderId":8891}}]}'
 ```
 
-What the SDKs add is convenience built from those routes, such as client-side push buffering,
-consume loops and `once`. The [quickstart](/start/quickstart/) runs a whole step with curl and jq,
-and [the HTTP reference](/reference/http/) lists every route.
-
-`queenctl`, the operator CLI (tail, push, replay, lag, dead letters), ships in the Docker image and
-as release binaries. See [queenctl](/reference/queenctl/).
+The [quickstart](/start/quickstart/) runs a whole step this way, with curl and jq, and the
+[HTTP reference](/reference/http/) lists every route. `queenctl`, the operator CLI (status, tail,
+push, replay, lag, dead letters), ships inside the Docker image (`docker exec queen queenctl
+status`) and as release binaries for Linux, macOS and Windows. See [queenctl](/reference/queenctl/).
 
 ## What each SDK implements
 
+The SDKs cover the same core (push, pop, consume, ack, transactions) and differ at the edges. This
+table lists every row where one of them stops short; where an SDK lacks a method, the route is
+still there over HTTP.
+
 <Render file="sdk-capability-matrix" />
 
-## The embedded Rust broker
+## The broker inside a Rust program
 
 A Rust program can run the broker in its own process, as the library `queen::Broker`. Every call
-goes through the same handlers the HTTP broker dispatches to, so behaviour and defaults are the
-broker's. It runs a single node, with its data directory on local disk.
+goes through the same handler functions the HTTP router dispatches to, so behaviour and defaults are
+the broker's, and the data lives in a directory on local disk that you name.
+
+2.0 is not on crates.io yet (the `queen-engine` published there is 1.3, which ran on PostgreSQL),
+so depend on the repository, pinned to the 2.0.0-beta.6 commit:
 
 ```toml
 [dependencies]
-queen-engine = { version = "2.0.0-beta.3", default-features = false }
+queen-engine = { git = "https://github.com/queen-mq/queen", rev = "6df9df377", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde_json = "1"
 ```
 
-The crate is `queen-engine` and imports as `queen`; it needs Rust 1.88. `default-features = false`
-leaves out the HTTP listener, the dashboard, the proxy and the Kafka facade, which only the
-standalone binary needs.
-
-Start it on a data directory:
+The crate imports as `queen` and needs Rust 1.88. `default-features = false` leaves out what only
+the standalone binary needs: the HTTP listener, the dashboard, the embedded proxy and the Kafka
+facade. Start it on a data directory:
 
 <Render file="snippets/embedded-start" />
 
@@ -201,22 +226,17 @@ Ack one message and push the next in one transaction:
 
 <Render file="snippets/embedded-transaction" />
 
-## Limits
-
-- **The SDKs do not all stop in the same place.** The table above lists every row where one
-  diverges. Where an SDK lacks a method, the route is still there over HTTP.
-- **Embedded is one node and one tenant.** Its documented scope is a single node; a cluster is the
-  standalone binary. Never open one data directory from two brokers at once.
-- **Embedded leaves some surfaces out:** consumer-group administration, queue listings, traces
-  and streams. The dead-letter queue is covered.
-- **A panic in a core thread of the embedded broker aborts the process** (planner, log writer,
-  apply, checkpoint, raft). The next start replays from the data directory. Panics elsewhere,
-  including your own, unwind as usual.
+The embedded broker is one node and one tenant. It exposes push, pop, ack, lease renewal,
+transactions, queue configuration, the dead-letter queue and ephemeral queues. KV and timers are
+reachable only inside a transaction, so there is no standalone KV read or timer listing, and
+consumer-group administration, queue listings, traces and streams are not exposed. A panic in one
+of the broker's core threads (planner, log writer, apply, checkpoint, raft) aborts the process, and
+the next start replays from the data directory; any other panic, your own included, unwinds as
+usual. Never open one data directory from two brokers at once.
 
 ## Next
 
 <CardGrid>
-  <LinkCard title="Quickstart" href="/start/quickstart/" description="Run a node and commit your first step in five minutes." />
-  <LinkCard title="HTTP reference" href="/reference/http/" description="Every route, its body and its answers." />
-  <LinkCard title="Kafka clients" href="/guides/kafka/" description="Connect an unchanged Kafka producer or consumer to the built-in facade." />
+  <LinkCard title="Quickstart" href="/start/quickstart/" description="Run a node, push and consume with curl, and commit your first step." />
+  <LinkCard title="Kafka clients" href="/guides/kafka/" description="Point an unchanged Kafka producer or consumer at the facade built into the broker." />
 </CardGrid>
