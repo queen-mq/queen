@@ -38,7 +38,7 @@ import (
 	"sync"
 	"time"
 
-	queen "github.com/smartpricing/queen/clients/client-go"
+	queen "github.com/smartpricing/queen/clients/client-go/v2"
 )
 
 // One well-known queue for the requests. The inboxes are per-request and never

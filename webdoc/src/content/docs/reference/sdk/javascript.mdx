@@ -29,6 +29,7 @@ verifiedBy:
   - clients/client-js/test-v2/transaction.js
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): QUEUE_DEFAULTS is nine keys, the configure bullets are rewritten for the merge rule, and retryMessage carries the move primitive's consequences.
+# sourceOfTruth re-read 2026-10-03 (through ab432efd + this patch): a transaction ack now carries its own message's leaseId; requiredLeases is unchanged.
 ---
 
 One npm package, `queen-mq`, carries both the broker client and the streaming SDK. It is
@@ -400,13 +401,13 @@ See [Messages and dead letters](/reference/http/messages-dlq).
 
 | Method | Notes |
 | --- | --- |
-| `ack(messages, status = 'completed', context = {})` | `messages` is one message or an array. `context.consumerGroup` sets the group. Requires `transactionId` and `partitionId` on every message; a `leaseId` is collected into `requiredLeases`. Returns `this`. |
+| `ack(messages, status = 'completed', context = {})` | `messages` is one message or an array. `context.consumerGroup` sets the group. Requires `transactionId` and `partitionId` on every message. A message's `leaseId` is sent on its own ack, the lease the broker checks that ack against, and also collected into `requiredLeases`. Returns `this`. |
 | `queue(queueName)` | Returns a sub-builder with `.partition(key)` and `.push(items)`. `push()` returns the parent builder, so chains continue. |
 | `commit()` | `async`. Throws `Transaction has no operations to commit` on an empty bundle, and throws the broker's error when the response is not `success: true`. |
 
 <Render file="snippets/js-transaction" />
 
-Lease ids are deduplicated before `requiredLeases` is sent. Item payloads follow the same
+Lease ids are deduplicated before `requiredLeases` is sent. Each ack still names its own: a Queen 2 broker lends an ack the lease in `requiredLeases` only when the bundle names a single one, so in a bundle that acks two leases an ack without its own would go unchecked. Item payloads follow the same
 `data` / `payload` / bare-object rule as `push()`, and so does the id: a `transactionId` you set
 on the item is sent, and one you omit is minted client side. That id is the deduplication key of
 the pushed message, so setting it deterministically is what makes a retried transaction safe.

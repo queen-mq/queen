@@ -5,6 +5,28 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Every client is 2.0.0.** The JavaScript, Python and Rust packages (`queen-mq` on npm, PyPI and
+crates.io), the PHP client, the Go module, the C++ header and `queenctl` move to 2.0.0, with the
+Queen 2 broker. Go users change an import path: a major version above 1 is part of a Go module's
+path, so the client is now `github.com/smartpricing/queen/clients/client-go/v2` and the CLI
+installs with `go install github.com/smartpricing/queen/clients/client-cli/v2/cmd/queenctl@latest`.
+The tags keep their directory prefix (`clients/client-go/v2.0.0`, `clients/client-cli/v2.0.0`), and
+the client's has to be pushed first, since the CLI requires it. `queen-protocol` stays at 1.3.0.
+
+**JavaScript, Python, Go, C++ and PHP clients, `queenctl`: every ACK of a transaction names its own
+lease.** The transaction builders sent a message's lease only in `requiredLeases`. A Queen 2 broker
+fences each ACK with the `leaseId` its operation carries, and lends it the one in `requiredLeases`
+only when the bundle names a single lease, so in a bundle that acked messages of two leases (two
+pops, two queues, a Laravel worker handing back two batches) every ACK went unfenced: it could
+complete a message that another consumer had taken after the lease expired, and commit the rest
+of the bundle with it. Each ACK operation now carries `leaseId`, and the broker refuses the whole
+transaction once any of those leases is no longer the caller's. `requiredLeases` is still sent,
+and 1.x brokers already read the operation's lease first. `queenctl tx` sent no lease at all: it
+dropped the bundle file's `requiredLeases`. It now sends each ACK's own `leaseId`, lends an ACK
+without one the lease `requiredLeases` names when it names exactly one, and exits 1 before sending
+anything when an ACK without a lease sits in a bundle that names several. The Rust client already
+named the lease on each ACK. PHP 1.9.0 shipped without this fix, its two-batch hand-back included.
+
 **Laravel: up to 1,024 stripes per queue.** A stripe runs one job at a time, so the 64 stripes a
 queue could have capped its ordinary jobs at 64 busy workers. `QUEEN_PARTITIONS` now takes 1 to
 1,024 (64 by default, unchanged), and a pop still asks for at most the 64 partitions the broker

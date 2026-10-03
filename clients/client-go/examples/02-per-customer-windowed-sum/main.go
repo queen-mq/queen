@@ -16,8 +16,8 @@ import (
 	"os"
 	"time"
 
-	queen "github.com/smartpricing/queen/clients/client-go"
-	"github.com/smartpricing/queen/clients/client-go/streams"
+	queen "github.com/smartpricing/queen/clients/client-go/v2"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams"
 )
 
 func main() {

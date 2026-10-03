@@ -57,7 +57,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	qc "github.com/smartpricing/queen/clients/client-go"
+	qc "github.com/smartpricing/queen/clients/client-go/v2"
 
 	"crossbench/internal/broker"
 	"crossbench/internal/workload"

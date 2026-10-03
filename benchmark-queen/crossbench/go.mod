@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/rabbitmq/amqp091-go v1.13.0
-	github.com/smartpricing/queen/clients/client-go v0.0.0
+	github.com/smartpricing/queen/clients/client-go/v2 v2.0.0
 	github.com/twmb/franz-go v1.21.5
 	github.com/twmb/franz-go/pkg/kadm v1.18.0
 )
@@ -23,4 +23,4 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 )
 
-replace github.com/smartpricing/queen/clients/client-go => ../../clients/client-go
+replace github.com/smartpricing/queen/clients/client-go/v2 => ../../clients/client-go

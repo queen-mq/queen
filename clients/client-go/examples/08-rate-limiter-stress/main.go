@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	queen "github.com/smartpricing/queen/clients/client-go"
-	"github.com/smartpricing/queen/clients/client-go/streams"
-	"github.com/smartpricing/queen/clients/client-go/streams/helpers"
+	queen "github.com/smartpricing/queen/clients/client-go/v2"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams/helpers"
 )
 
 func main() {

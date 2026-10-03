@@ -32,14 +32,16 @@ verifiedBy:
   - clients/client-go/tests/ack_commit_test.go
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): Replace and Option are documented, the configure caution is rewritten for the merge rule, and RetryMessage for the move primitive.
+# sourceOfTruth re-read 2026-10-03 (through ab432efd + this patch): a transaction ack now carries its own message's leaseId; requiredLeases is unchanged.
+# sourceOfTruth re-read 2026-10-03 (through ab432efd + this patch): the module path is .../client-go/v2 from 2.0.0; both import lines say so.
 ---
 
-Import path `github.com/smartpricing/queen/clients/client-go`, package name `queen`. Requires Go
+Import path `github.com/smartpricing/queen/clients/client-go/v2`, package name `queen`. Requires Go
 1.24 or newer. Every network method takes a `context.Context` as its first argument. Version
 1.3.0, aligned with the broker's 1.3 line.
 
 ```go
-import queen "github.com/smartpricing/queen/clients/client-go"
+import queen "github.com/smartpricing/queen/clients/client-go/v2"
 ```
 
 The streaming SDK is a separate package under `.../client-go/streams`.
@@ -363,7 +365,7 @@ registers no force-move route.
 
 | Method | Notes |
 | --- | --- |
-| `Ack(messages interface{}, status string, opts AckOptions) *TransactionBuilder` | Same message forms as `Queen.Ack`. A `LeaseID` is collected into `requiredLeases`. |
+| `Ack(messages interface{}, status string, opts AckOptions) *TransactionBuilder` | Same message forms as `Queen.Ack`. A message's `LeaseID` is sent on its own ack as `leaseId`, the lease the broker checks that ack against, and also collected into `requiredLeases`. |
 | `Queue(name string) *TransactionQueueBuilder` | Sub-builder with `Partition(name)` and `Push(payload) *TransactionBuilder`. Pass a `PushItem` to control that item's `TransactionID`, `TraceID` and `Partition`; pass anything else and it is treated as a bare payload with a minted id. |
 | `Commit(ctx) (*TransactionResponse, error)` | `POST /api/v1/transaction`. Check `resp.Success` as well as `err`. |
 
@@ -539,7 +541,7 @@ Set by the `QUEEN_CLIENT_LOG` environment variable, read once at package init:
 ## Streaming SDK
 
 ```go
-import "github.com/smartpricing/queen/clients/client-go/streams"
+import "github.com/smartpricing/queen/clients/client-go/v2/streams"
 
 s := streams.From(queen.Queue("orders").AsStreamSource())
 ```

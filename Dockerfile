@@ -214,9 +214,9 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOFLAGS=-trimpath go build \
         -ldflags "-s -w \
-            -X 'github.com/smartpricing/queen/clients/client-cli/cmd.BuildVersion=${QUEENCTL_VERSION}' \
-            -X 'github.com/smartpricing/queen/clients/client-cli/cmd.BuildCommit=${QUEENCTL_COMMIT}' \
-            -X 'github.com/smartpricing/queen/clients/client-cli/cmd.BuildDate=docker'" \
+            -X 'github.com/smartpricing/queen/clients/client-cli/v2/cmd.BuildVersion=${QUEENCTL_VERSION}' \
+            -X 'github.com/smartpricing/queen/clients/client-cli/v2/cmd.BuildCommit=${QUEENCTL_COMMIT}' \
+            -X 'github.com/smartpricing/queen/clients/client-cli/v2/cmd.BuildDate=docker'" \
         -o /out/queenctl .
 
 # Sanity check: the binary must run without any dynamic deps.

@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	clierr "github.com/smartpricing/queen/clients/client-cli/internal/errors"
-	"github.com/smartpricing/queen/clients/client-cli/internal/output"
-	queen "github.com/smartpricing/queen/clients/client-go"
+	clierr "github.com/smartpricing/queen/clients/client-cli/v2/internal/errors"
+	"github.com/smartpricing/queen/clients/client-cli/v2/internal/output"
+	queen "github.com/smartpricing/queen/clients/client-go/v2"
 	"github.com/spf13/cobra"
 )
 

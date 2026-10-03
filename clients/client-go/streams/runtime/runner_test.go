@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/smartpricing/queen/clients/client-go/streams/operators"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams/operators"
 )
 
 // newRecencyRunner builds a Runner with a tumbling window and a fake clock the

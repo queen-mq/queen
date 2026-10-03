@@ -20,11 +20,12 @@ digest: >-
   leased batch per partition, so parallelism comes from partitions, not from more consumers on
   one. It is all HTTP: curl is a client and the SDKs are convenience over it. Packages: JavaScript
   `npm i queen-mq`, Python `pip install queen-mq`, Go `go get
-  github.com/smartpricing/queen/clients/client-go`, Rust crate `queen-mq`, PHP `composer require
+  github.com/smartpricing/queen/clients/client-go/v2`, Rust crate `queen-mq`, PHP `composer require
   queen-mq/php-client`, CLI `make -C clients/client-cli build`, C++ one header
   `clients/client-cpp/queen_client.hpp`.
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes; nothing this page describes moved.
+# sourceOfTruth re-read 2026-10-03 (through ab432efd + this patch): the Go client's import path is .../client-go/v2 from 2.0.0.
 ---
 
 The surface you write against is small: push a message, pop it, acknowledge it. The fourth call

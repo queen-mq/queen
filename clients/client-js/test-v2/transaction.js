@@ -1,3 +1,5 @@
+import { TEST_CONFIG } from './run.js'
+
 export async function transactionBasicPushAck(client) {
     const queueA = await client.queue('test-queue-v2-txn-basic-a').create()
     const queueB = await client.queue('test-queue-v2-txn-basic-b').create()
@@ -572,3 +574,124 @@ export async function transactionAckWithConsumerGroup(client) {
     }
 }
 
+// ============================================================================
+// A bundle that acks messages of two leases (2026-10-03, 2.0.0-beta.6)
+// ============================================================================
+//
+// A Queen 2 broker fences each ack with the leaseId the operation carries, and
+// lends requiredLeases to an ack without one only when the bundle names a
+// single lease. An ack that left its lease in requiredLeases alone was applied
+// in a bundle of two leases even after its lease expired and another consumer
+// took the message. The builder has no per-pop lease knob, so these pops go
+// through fetch, as in semantics.js.
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const fenceQueue = name => `test-queue-v2-txn-fence-${name}-${Date.now()}`
+
+/** One message of a queue-mode pop leased for `leaseSeconds`, or null. */
+async function popLeased(queue, leaseSeconds, tries = 20) {
+    const qs = new URLSearchParams({
+        batch: '1',
+        wait: 'false',
+        leaseSeconds: String(leaseSeconds),
+        subscriptionMode: 'all'
+    })
+    // Lazy: run.js imports this module before TEST_CONFIG is initialized.
+    const url = `${TEST_CONFIG.baseUrls[0]}/api/v1/pop/queue/${queue}?${qs}`
+    for (let i = 0; i < tries; i++) {
+        const res = await fetch(url)
+        if (res.status !== 204) {
+            if (!res.ok) throw new Error(`pop ${queue}: HTTP ${res.status}`)
+            const body = await res.json()
+            if (body.messages && body.messages.length > 0) return body.messages[0]
+        }
+        await sleep(150)
+    }
+    return null
+}
+
+/** The outcome of a commit, whether the client threw the refusal or returned it. */
+async function commitOutcome(transaction) {
+    try {
+        const result = await transaction.commit()
+        return { committed: result.success === true, error: result.error || null }
+    } catch (error) {
+        return { committed: false, error: error.message }
+    }
+}
+
+export async function transactionTwoLeaseBundleExpiredLeaseRefused(client) {
+    const queueA = fenceQueue('stale-a')
+    const queueB = fenceQueue('stale-b')
+    const qa = await client.queue(queueA).create()
+    const qb = await client.queue(queueB).create()
+    if (!qa.configured || !qb.configured) {
+        return { success: false, message: 'Queues not created' }
+    }
+    await client.queue(queueA).push([{ data: { name: 'a' } }])
+    await client.queue(queueB).push([{ data: { name: 'b' } }])
+
+    const a = await popLeased(queueA, 1)
+    const b = await popLeased(queueB, 60)
+    if (!a?.leaseId || !b?.leaseId || a.leaseId === b.leaseId) {
+        return { success: false, message: `Expected two messages under two leases, got a=${a?.leaseId} b=${b?.leaseId}` }
+    }
+
+    // Lease A expires, and another consumer takes the message.
+    const taken = await popLeased(queueA, 60, 100)
+    if (!taken || taken.transactionId !== a.transactionId || taken.leaseId === a.leaseId) {
+        return { success: false, message: 'The message of the expired lease was not delivered again under a new lease' }
+    }
+
+    const stale = await commitOutcome(client.transaction().ack(a).ack(b))
+    if (stale.committed) {
+        return { success: false, message: 'The bundle committed: the ack under the expired lease was applied unfenced' }
+    }
+    if (!/rolled back/.test(stale.error || '')) {
+        return { success: false, message: `The bundle was refused, but not as a rollback: ${stale.error}` }
+    }
+
+    // Nothing of the bundle happened: each holder still settles its own message.
+    const takenAck = await commitOutcome(client.transaction().ack(taken))
+    const bAck = await commitOutcome(client.transaction().ack(b))
+    const leftA = await client.queue(queueA).batch(10).wait(false).pop()
+    const leftB = await client.queue(queueB).batch(10).wait(false).pop()
+
+    const success = takenAck.committed && bAck.committed && leftA.length === 0 && leftB.length === 0
+    return {
+        success,
+        message: success
+            ? 'A bundle with an ack under an expired lease was refused whole; each holder then settled its own message'
+            : `new holder ack=${takenAck.committed} (${takenAck.error}), B ack=${bAck.committed} (${bAck.error}), left A=${leftA.length} B=${leftB.length}`
+    }
+}
+
+export async function transactionTwoLeaseBundleLiveLeasesCommit(client) {
+    const queueA = fenceQueue('live-a')
+    const queueB = fenceQueue('live-b')
+    const qa = await client.queue(queueA).create()
+    const qb = await client.queue(queueB).create()
+    if (!qa.configured || !qb.configured) {
+        return { success: false, message: 'Queues not created' }
+    }
+    await client.queue(queueA).push([{ data: { name: 'a' } }])
+    await client.queue(queueB).push([{ data: { name: 'b' } }])
+
+    const a = await popLeased(queueA, 60)
+    const b = await popLeased(queueB, 60)
+    if (!a?.leaseId || !b?.leaseId || a.leaseId === b.leaseId) {
+        return { success: false, message: `Expected two messages under two leases, got a=${a?.leaseId} b=${b?.leaseId}` }
+    }
+
+    const outcome = await commitOutcome(client.transaction().ack(a).ack(b))
+    const leftA = await client.queue(queueA).batch(10).wait(false).pop()
+    const leftB = await client.queue(queueB).batch(10).wait(false).pop()
+
+    const success = outcome.committed && leftA.length === 0 && leftB.length === 0
+    return {
+        success,
+        message: success
+            ? 'A bundle of two live leases completed both messages'
+            : `commit=${outcome.committed} (${outcome.error}), left A=${leftA.length} B=${leftB.length}`
+    }
+}

@@ -3,7 +3,7 @@
 // of client-go. Replaces the previous `replace` directive in
 // clients/client-cli/go.mod which broke downstream `go install`.
 //
-// End users running `go install github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@vX.Y.Z`
+// End users running `go install github.com/smartpricing/queen/clients/client-cli/v2/cmd/queenctl@vX.Y.Z`
 // are unaffected: `go install` ignores go.work and resolves modules via
 // the public Go proxy using the versions pinned in client-cli's go.mod.
 go 1.24.0
@@ -12,3 +12,9 @@ use (
 	./clients/client-cli
 	./clients/client-go
 )
+
+// client-go/v2 has no published version until the first clients/client-go/v2.x.y
+// tag, and the workspace would otherwise fetch the go.mod of the version
+// client-cli requires. Point that version at the local copy; go install and
+// `go mod tidy` ignore go.work, so they need the tag pushed first.
+replace github.com/smartpricing/queen/clients/client-go/v2 v2.0.0 => ./clients/client-go

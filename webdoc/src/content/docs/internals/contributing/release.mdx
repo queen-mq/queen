@@ -20,6 +20,7 @@ sourceOfTruth:
   - clients/client-go/go.mod
   - server/src/schema.rs
 # sourceOfTruth re-read 2026-09-11 (through 02ced48f): the version sentence now reads 1.6.0, which is the bump this page describes the mechanics of; nothing else moved.
+# sourceOfTruth re-read 2026-10-03 (through ab432efd + this patch): the clients move to 2.0.0 and the two Go modules to /v2 paths; the version table, the note and the tag shapes say so.
 ---
 
 A release touches the broker image, six client SDKs and the CLI, across seven package registries
@@ -48,10 +49,10 @@ Everything else carries its own version, or none at all.
 | JavaScript client | `clients/client-js/package.json` |
 | Python client | `clients/client-py/pyproject.toml` **and** `clients/client-py/queen/__init__.py`, whose `__version__` the package exports: bumping only the first ships a package that misreports itself |
 | PHP/Laravel client | nowhere: `composer.json` has no `version` field; the split repository receives a bare `vX.Y.Z` tag from `clients/client-php/vX.Y.Z` |
-| Go client | nowhere: the git tag *is* the version |
+| Go client | nowhere: the git tag *is* the version. From 2.0.0 the module path in `go.mod` ends in `/v2`, as Go requires of every major version above 1 |
 | Rust client | `clients/client-rust/Cargo.toml` |
 | `queen-protocol` | `crates/queen-protocol/Cargo.toml`, and the version requirement on EVERY dependency on it: both `clients/client-rust/Cargo.toml` and `server/Cargo.toml` pin it by version beside the path |
-| `queenctl` | nowhere: the tag is the version, injected at build time with `-ldflags` |
+| `queenctl` | nowhere: the tag is the version, injected at build time with `-ldflags`. From 2.0.0 its module path ends in `/v2` too, and the `-X` package paths in its `Makefile`, its `.goreleaser.yaml` and the root `Dockerfile` follow it: a stale one leaves `queenctl version` reporting `dev` |
 | C++ client | nowhere: header-only, taken at whatever tag you check out |
 | Dashboard (`app/`) | `app/package.json`, private, never published separately |
 
@@ -73,8 +74,9 @@ table above. A patch that rebuilds only one component moves only that component.
 
 <Aside type="note">
 Today the broker (`server/server.json`, mirrored in `server/Cargo.toml`) and proxy
-(`proxy/Cargo.toml`) carry `1.6.0`. The JavaScript, Python and Rust clients and
-`queen-protocol` carry `1.3.0`, with `v1.3.0` tags covering the Go module and the CLI. The first Packagist release
+(`proxy/Cargo.toml`) carry `1.6.0`. The JavaScript, Python and Rust clients carry `2.0.0`, the
+major version of the Queen 2 broker, and the Go module, the CLI and the PHP client take `2.0.0`
+when they are tagged; `queen-protocol` stays at `1.3.0`. The first Packagist release
 will receive its own bare tag in `queen-mq/php-client`, generated from the corresponding
 `clients/client-php/vX.Y.Z` source tag. The release before
 it is the exception the rule allows: `1.2.1` was a server-only patch, so the broker sat at
@@ -173,7 +175,7 @@ The PHP tag is then verified and mirrored by CI; no one commits to its split rep
 | --- | --- | --- |
 | npm | `queen-mq` | `npm publish` from `clients/client-js` |
 | PyPI | `queen-mq` | `clients/client-py/publish.sh`, which builds the wheel and sdist and uploads with twine |
-| Go modules | `github.com/smartpricing/queen/clients/client-go` | push a `clients/client-go/vX.Y.Z` tag; the module proxy picks it up |
+| Go modules | `github.com/smartpricing/queen/clients/client-go/v2` | push a `clients/client-go/vX.Y.Z` tag; the module proxy picks it up |
 | Packagist | `queen-mq/php-client` | push `clients/client-php/vX.Y.Z`; the verified release workflow mirrors it as `vX.Y.Z`, then the Packagist webhook indexes it |
 | crates.io | `queen-protocol`, then `queen-mq` and `queen-engine` | `cargo publish` from `crates/queen-protocol`, **then** from `clients/client-rust` and from `server/` (the broker package; its library is the embedded engine) |
 
@@ -200,7 +202,9 @@ directory-prefixed form (`clients/client-go/v1.0.0` and `clients/client-cli/v1.0
 that is how Go's module proxy resolves a module that is not at the repository root. The PHP
 client likewise uses `clients/client-php/v1.0.0`; the release workflow maps it to the bare
 `v1.0.0` tag required by Packagist in `queen-mq/php-client`. Without the Go prefix, `go get`
-reports no matching versions.
+reports no matching versions. From 2.0.0 the two Go module paths also end in `/v2` while the tags
+keep the same prefix (`clients/client-go/v2.0.0`), and the client's tag has to exist before the
+CLI's: the CLI's `go.mod` requires `client-go/v2`, which a `go install` resolves through the proxy.
 
 ## Order
 

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	queen "github.com/smartpricing/queen/clients/client-go"
-	"github.com/smartpricing/queen/clients/client-go/streams"
+	queen "github.com/smartpricing/queen/clients/client-go/v2"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams"
 )
 
 // amount extracts m["amount"] from the payload directly. Matches the JS /

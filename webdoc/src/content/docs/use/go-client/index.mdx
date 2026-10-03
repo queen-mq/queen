@@ -15,6 +15,7 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-go/tests/docs_test.go
 # sourceOfTruth re-read 2026-08-27 (through a6cbac22 + working tree): page matches the code.
+# sourceOfTruth re-read 2026-10-03 (through ab432efd + this patch): go.mod's module path is .../client-go/v2 from 2.0.0; the go get and import lines say so.
 ---
 
 The Go client takes a `context.Context` on every call and separates building from executing: a
@@ -22,11 +23,11 @@ chain is inert until `Execute(ctx)`, `Pop(ctx)` or `Get(ctx)`. It needs Go 1.24,
 direct dependencies are `github.com/google/uuid` and `github.com/jackc/pgx/v5`.
 
 ```bash
-go get github.com/smartpricing/queen/clients/client-go
+go get github.com/smartpricing/queen/clients/client-go/v2
 ```
 
 ```go
-import queen "github.com/smartpricing/queen/clients/client-go"
+import queen "github.com/smartpricing/queen/clients/client-go/v2"
 
 client, err := queen.New(queen.ClientConfig{
     URLs:           []string{"http://broker-a:6632", "http://broker-b:6632"},

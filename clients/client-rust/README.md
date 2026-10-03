@@ -5,7 +5,7 @@ data in PostgreSQL.
 
 ```toml
 [dependencies]
-queen-mq = "1.0.6"
+queen-mq = "2.0.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde_json = "1"
 ```

@@ -20,6 +20,7 @@ sourceOfTruth:
   - go.work
   - .gitignore
 # sourceOfTruth re-read 2026-09-11 (through 02ced48f): both manifests moved to 1.6.0, a bump this page describes the mechanics of rather than quotes; dev-cell.sh gained the cell-side kv/timers grant, which the development-cell paragraph now names.
+# sourceOfTruth re-read 2026-10-03 (through ab432efd + this patch): the two Go modules move to /v2 paths and go.work gains the version-pinned replace; the Go modules paragraph says so, and the Dockerfile change is the queenctl -ldflags path.
 ---
 
 Queen is one repository with two Rust binaries in it, a Vue dashboard that is compiled
@@ -268,7 +269,10 @@ there is no `QUEEN_STATIC_DIR`. It is there for humans to inspect.
 repository root joins them so a change to the client is immediately visible to the CLI without
 publishing. End users are unaffected: `go install` ignores `go.work` and resolves through the
 public proxy using the versions pinned in `client-cli/go.mod`. The CLI's own test suite needs
-that workspace, which is why the `cli` runner image is built with it.
+that workspace, which is why the `cli` runner image is built with it. From 2.0.0 both module
+paths end in `/v2`, and `go.work` also points the `client-go/v2` version the CLI requires at the
+local copy: until a `clients/client-go/v2.x.y` tag publishes it, the workspace would otherwise
+fail fetching that version's `go.mod`.
 
 ## Conventions
 

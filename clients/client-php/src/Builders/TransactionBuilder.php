@@ -55,6 +55,16 @@ class TransactionBuilder
                 $operation['consumerGroup'] = $context['consumerGroup'];
             }
 
+            // Each ACK names its own lease. A Queen 2 broker fences an ACK
+            // with the lease the operation carries, and lends it one from
+            // requiredLeases only when the bundle names a single lease: in a
+            // bundle spanning two leases, an ACK without its own would be
+            // applied whoever holds its partition now. 1.x brokers read the
+            // operation's lease before requiredLeases too.
+            if (is_string($leaseId) && $leaseId !== '') {
+                $operation['leaseId'] = $leaseId;
+            }
+
             $this->operations[] = $operation;
 
             if ($leaseId !== null) {

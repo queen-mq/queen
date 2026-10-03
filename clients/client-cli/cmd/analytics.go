@@ -3,9 +3,9 @@ package cmd
 import (
 	"context"
 
-	clierr "github.com/smartpricing/queen/clients/client-cli/internal/errors"
-	"github.com/smartpricing/queen/clients/client-cli/internal/output"
-	"github.com/smartpricing/queen/clients/client-cli/internal/timefmt"
+	clierr "github.com/smartpricing/queen/clients/client-cli/v2/internal/errors"
+	"github.com/smartpricing/queen/clients/client-cli/v2/internal/output"
+	"github.com/smartpricing/queen/clients/client-cli/v2/internal/timefmt"
 	"github.com/spf13/cobra"
 )
 

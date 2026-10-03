@@ -645,6 +645,60 @@ void test_transaction_timer_cancel_rides_the_bundle() {
 }
 
 // ============================================================================
+// The ack operations of a bundle: each one names its own lease
+// ============================================================================
+
+void test_every_ack_carries_the_lease_of_its_own_message() {
+    CaptureServer server;
+    QueenClient client({server.url()}, fast_config());
+
+    client.transaction()
+        .ack(json::array({
+            json{{"transactionId", "tx-1"}, {"partitionId", "p1"}, {"leaseId", "lease-1"}},
+            json{{"transactionId", "tx-2"}, {"partitionId", "p2"}, {"leaseId", "lease-2"}},
+            json{{"transactionId", "tx-3"}, {"partitionId", "p3"}}
+        }))
+        .commit();
+
+    json body = json::parse(server.last().body);
+    json ops = body["operations"];
+    check(ops.size() == 3, "three acks should make three operations, got " + ops.dump());
+    if (ops.size() != 3) return;
+
+    // A Queen 2 broker fences an ACK with the lease the operation carries, and
+    // lends it one from requiredLeases only when the bundle names a single
+    // lease. In this bundle of two, an ACK without its own lease would be
+    // applied whoever holds its partition now, after its lease expired too.
+    check(ops[0].value("leaseId", std::string()) == "lease-1",
+          "the first ack must carry its own lease, got " + ops[0].dump());
+    check(ops[1].value("leaseId", std::string()) == "lease-2",
+          "the second ack must carry its own lease, got " + ops[1].dump());
+    check(!ops[2].contains("leaseId"),
+          "the ack of a message without a lease must carry none, got " + ops[2].dump());
+    check(body["requiredLeases"] == json::array({"lease-1", "lease-2"}),
+          "requiredLeases should still be every lease of the bundle, once, got " +
+          body["requiredLeases"].dump());
+}
+
+void test_a_null_or_empty_lease_puts_no_lease_on_the_ack() {
+    CaptureServer server;
+    QueenClient client({server.url()}, fast_config());
+
+    client.transaction()
+        .ack(json::array({
+            json{{"transactionId", "tx-1"}, {"partitionId", "p1"}, {"leaseId", nullptr}},
+            json{{"transactionId", "tx-2"}, {"partitionId", "p2"}, {"leaseId", ""}}
+        }))
+        .commit();
+
+    json ops = json::parse(server.last().body)["operations"];
+    check(ops.size() == 2, "two acks should make two operations, got " + ops.dump());
+    for (const auto& op : ops) {
+        check(!op.contains("leaseId"), "a null or empty lease must not reach the ack, got " + op.dump());
+    }
+}
+
+// ============================================================================
 // commit(): the one wire change §10.2 requires of every client
 // ============================================================================
 
@@ -833,6 +887,11 @@ int main() {
     run_test("an entirely empty transaction still refuses",
              test_an_entirely_empty_transaction_still_refuses_to_commit);
     run_test("transaction timer cancel rides the bundle", test_transaction_timer_cancel_rides_the_bundle);
+
+    run_test("every ack carries the lease of its own message",
+             test_every_ack_carries_the_lease_of_its_own_message);
+    run_test("a null or empty lease puts no lease on the ack",
+             test_a_null_or_empty_lease_puts_no_lease_on_the_ack);
 
     run_test("commit() RETURNS on a lost kv precondition", test_commit_returns_on_a_lost_kv_precondition);
     run_test("commit() still throws on every other failure", test_commit_still_throws_on_every_other_failure);

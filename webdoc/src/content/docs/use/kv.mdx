@@ -15,6 +15,7 @@ verifiedBy:
   - clients/client-js/test-v2/kv.js
   - clients/client-py/tests/test_kv.py
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + this patch): the console list (PLAN_DASHBOARD_ACTIONS.md §2.5) is now in the reads section; the rest matches the code.
+# sourceOfTruth re-read 2026-10-03 (through ab432efd + this patch): TransactionBuilder.js puts each message's leaseId on its own ack; the fence sentence says so.
 ---
 
 `queen.kv` is a key/value store that lives in the same PostgreSQL as the log, and its value is not
@@ -162,8 +163,9 @@ arithmetic on it.
 Two ordering rules complete the picture. **The transaction is the primary fence and `expect` is the
 secondary assertion**: a state write sharing the transaction with an ack is undone when an expired
 lease makes that ack raise, which a compare-and-set cannot do, because an `expect` on a version that
-still matches succeeds from a zombie as happily as from the rightful holder. And a bundle may touch a
-given key **at most once**, so there is no intra-batch evaluation order to reason about.
+still matches succeeds from a zombie as happily as from the rightful holder. Each ack carries its own
+message's lease, so this holds in a bundle that acks messages of several leases too. And a bundle may
+touch a given key **at most once**, so there is no intra-batch evaluation order to reason about.
 
 ## `incr` is the way out of the retry loop
 

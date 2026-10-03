@@ -51,10 +51,16 @@ func (tb *TransactionBuilder) Ack(messages interface{}, status string, opts AckO
 
 	// Add ack operations
 	for _, msg := range msgs {
+		// Each ack names its own lease. A Queen 2 broker fences an ack with the
+		// lease the operation carries, and lends it one from requiredLeases only
+		// when the bundle names a single lease: in a bundle spanning two leases,
+		// an ack without its own would be applied whoever holds its partition
+		// now. 1.x brokers read the operation's lease before requiredLeases too.
 		op := Operation{
 			Type:          "ack",
 			TransactionID: msg.TransactionID,
 			PartitionID:   msg.PartitionID,
+			LeaseID:       msg.LeaseID,
 			Status:        status,
 			ConsumerGroup: opts.ConsumerGroup,
 		}

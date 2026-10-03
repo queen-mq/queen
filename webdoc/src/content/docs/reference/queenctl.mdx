@@ -62,6 +62,7 @@ digest: >-
   `partition seek` is end only.
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): queue configure now merges and sends only the flags that were typed (so --dlq=false disables dead-lettering), apply -f sends mode replace, refuses a manifest key it cannot bind, and now puts every key the manifest writes on the wire with the value it wrote (an explicit false and an explicit zero included), and dlq retry runs on the move primitive.
+# sourceOfTruth re-read 2026-10-03 (through ab432efd + this patch): tx sends each ack's lease; the module path is .../client-cli/v2, which moved imports only.
 ---
 
 `queenctl` is a single static Go binary built on the [Go client](/reference/sdk/go). It exposes the
@@ -346,12 +347,18 @@ The file shape maps directly to the route:
 ```json
 {
   "operations": [
-    {"type": "ack", "transactionId": "…", "partitionId": "…", "status": "completed"},
+    {"type": "ack", "transactionId": "…", "partitionId": "…", "status": "completed", "leaseId": "lease-uuid"},
     {"type": "push", "items": [{"queue": "orders", "payload": {"id": 1}}]}
   ],
   "requiredLeases": ["lease-uuid"]
 }
 ```
+
+Each ack is sent with the lease the broker fences it with: its own `leaseId`, or, when it has none,
+the one lease `requiredLeases` names. An ack without a `leaseId` in a bundle whose `requiredLeases`
+names several leases exits `1` before anything is sent, because nothing says which lease is its
+own. A bundle that names no lease acks without one. Before 2.0.0 the command dropped every lease in
+the file, so the broker applied its acks unfenced.
 
 Only `ack` and `push` operation types are accepted; anything else exits `1`. Push items are grouped
 by queue and partition before being handed to the builder, preserving first-seen order.

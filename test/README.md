@@ -20,7 +20,7 @@ parallel, without touching your live Postgres on `:5432`.
 | `go`   | `client-go/tests` + `streams_integration` | ✓ | ✓ | ✓ | — | Go 1.24, standalone module (`GOWORK=off`) |
 | `py`   | `client-py/tests` (pytest, incl. streams) | ✓ | ✓ | ✓ | — | Python 3.12 |
 | `cli`  | `queenctl` E2E (`client-cli/tests`) | ✓ | ✓ | ✓ | — | needs the Go **workspace** (local client-go) + `QUEEN_E2E=1` |
-| `cpp`  | `client-cpp/test_retry429` + `test_kv_timers` (both broker-free) then `client-cpp/test_client` (50 HTTP tests, 13 of them kv/timers) | ✓ | ✓ | ✓ | — | no Postgres access; the kv/timer HTTP tests run unconditionally — a 404 from those routes is a bug, not a cell without the surface |
+| `cpp`  | `client-cpp/test_retry429` + `test_kv_timers` (both broker-free) then `client-cpp/test_client` (52 HTTP tests, 13 of them kv/timers) | ✓ | ✓ | ✓ | — | no Postgres access; the kv/timer HTTP tests run unconditionally — a 404 from those routes is a bug, not a cell without the surface |
 | `rust` | 50 in-process broker unit tests (`cargo test`) | — | — | — | — | `unit` — no stack, no PG |
 | `mesh` | asserts the 2 brokers formed an authenticated mesh | — | ✓ | — | — | HA only |
 | `tenancy` | two-tenant isolation over the mesh pair | — | — | — | ✓ | flag-ON only |

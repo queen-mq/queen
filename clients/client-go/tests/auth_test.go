@@ -31,7 +31,7 @@ import (
 	"testing"
 	"time"
 
-	queen "github.com/smartpricing/queen/clients/client-go"
+	queen "github.com/smartpricing/queen/clients/client-go/v2"
 )
 
 // ---------------------------------------------------------------------------
