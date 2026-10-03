@@ -1,5 +1,5 @@
 BIN_NAME      := queenctl
-PKG           := github.com/smartpricing/queen/clients/client-cli
+PKG           := github.com/smartpricing/queen/clients/client-cli/v2
 CMD_PKG       := $(PKG)/cmd
 BUILD_DIR     := bin
 INSTALL_DIR   := $(or $(GOBIN),$(HOME)/go/bin)

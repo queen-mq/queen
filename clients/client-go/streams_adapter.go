@@ -3,7 +3,7 @@ package queen
 import (
 	"context"
 
-	"github.com/smartpricing/queen/clients/client-go/streams/runtime"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams/runtime"
 )
 
 // streamSourceAdapter wraps a *QueueBuilder so it satisfies the

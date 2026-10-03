@@ -2,7 +2,7 @@ name: Release CLI
 
 # Triggered by tags shaped 'clients/client-cli/vX.Y.Z'. The directory-prefixed
 # pattern is required so Go's module proxy can resolve the submodule at
-# github.com/smartpricing/queen/clients/client-cli — see
+# github.com/smartpricing/queen/clients/client-cli/v2 — see
 # https://go.dev/ref/mod#vcs-version and developer/14-release.md.
 on:
   push:

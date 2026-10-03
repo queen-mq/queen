@@ -17,9 +17,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/smartpricing/queen/clients/client-go/streams/operators"
-	"github.com/smartpricing/queen/clients/client-go/streams/runtime"
-	"github.com/smartpricing/queen/clients/client-go/streams/util"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams/operators"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams/runtime"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams/util"
 )
 
 // Re-exports for ergonomics.

@@ -150,6 +150,28 @@ facade and the S3 sink linked in, the dashboard and `queenctl`; the `queen-kafka
 Postgres stats panel, the database pool and the disk-spool cards are removed, and the replicated
 log's status takes their place.
 
+**Every client is 2.0.0.** The JavaScript, Python and Rust packages (`queen-mq` on npm, PyPI and
+crates.io), the PHP client, the Go module, the C++ header and `queenctl` move to 2.0.0, with the
+Queen 2 broker. Go users change an import path: a major version above 1 is part of a Go module's
+path, so the client is now `github.com/smartpricing/queen/clients/client-go/v2` and the CLI
+installs with `go install github.com/smartpricing/queen/clients/client-cli/v2/cmd/queenctl@latest`.
+The tags keep their directory prefix (`clients/client-go/v2.0.0`, `clients/client-cli/v2.0.0`), and
+the client's has to be pushed first, since the CLI requires it. `queen-protocol` stays at 1.3.0.
+
+**JavaScript, Python, Go, C++ and PHP clients, `queenctl`: every ACK of a transaction names its own
+lease.** The transaction builders sent a message's lease only in `requiredLeases`. A Queen 2 broker
+fences each ACK with the `leaseId` its operation carries, and lends it the one in `requiredLeases`
+only when the bundle names a single lease, so in a bundle that acked messages of two leases (two
+pops, two queues, a Laravel worker handing back two batches) every ACK went unfenced: it could
+complete a message that another consumer had taken after the lease expired, and commit the rest
+of the bundle with it. Each ACK operation now carries `leaseId`, and the broker refuses the whole
+transaction once any of those leases is no longer the caller's. `requiredLeases` is still sent,
+and 1.x brokers already read the operation's lease first. `queenctl tx` sent no lease at all: it
+dropped the bundle file's `requiredLeases`. It now sends each ACK's own `leaseId`, lends an ACK
+without one the lease `requiredLeases` names when it names exactly one, and exits 1 before sending
+anything when an ACK without a lease sits in a bundle that names several. The Rust client already
+named the lease on each ACK. PHP 1.9.0 shipped without this fix, its two-batch hand-back included.
+
 **The partitions sunflower names its seeds.** Each queue owns a wedge of the flower, and hovering a
 seed lights its queue and shows the queue, the partition, its pending and its lag. The per-partition
 figures come from a new read-only route, `GET /api/v1/resources/partitions?queue=&limit=`: the

@@ -109,6 +109,15 @@ class TransactionBuilder:
             if context.get("consumer_group"):
                 operation["consumerGroup"] = context["consumer_group"]
 
+            # Each ACK names its own lease. A Queen 2 broker fences an ACK
+            # with the lease the operation carries, and lends it one from
+            # requiredLeases only when the bundle names a single lease: in a
+            # bundle spanning two leases, an ACK without its own would be
+            # applied whoever holds its partition now. 1.x brokers read the
+            # operation's lease before requiredLeases too.
+            if lease_id:
+                operation["leaseId"] = lease_id
+
             self._operations.append(operation)
 
             if lease_id:

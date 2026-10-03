@@ -6,8 +6,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/smartpricing/queen/clients/client-cli/internal/config"
-	queen "github.com/smartpricing/queen/clients/client-go"
+	"github.com/smartpricing/queen/clients/client-cli/v2/internal/config"
+	queen "github.com/smartpricing/queen/clients/client-go/v2"
 )
 
 // Client is a typed handle bundling the *queen.Queen plus its Admin facet.

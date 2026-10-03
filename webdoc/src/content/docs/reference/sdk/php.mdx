@@ -82,6 +82,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot, and CurlTransport waits at most 250 ms to write a detached request without a body; the console_url row and the Transport section still hold.
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): the Laravel driver's prefetch paragraph says the renewer hands back a crashed worker's journal, and the supervisor section the start-up warnings; TransactionBuilder::wire() is @internal and stays undocumented.
 # sourceOfTruth re-read 2026-10-02 (stripes): the partitions row gives the 1 to 1,024 range and the 64-wide pop.
+# sourceOfTruth re-read 2026-10-03 (through ab432efd + this patch): a transaction ack now carries its own message's leaseId; requiredLeases is unchanged.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -379,7 +380,7 @@ removed. See [Messages and dead letters](/reference/http/messages-dlq).
 
 | Method | Notes |
 | --- | --- |
-| `ack(array\|object $messages, string $status = 'completed', array $context = []): static` | Requires `transactionId` and `partitionId`; a `leaseId` is collected into `requiredLeases`. |
+| `ack(array\|object $messages, string $status = 'completed', array $context = []): static` | Requires `transactionId` and `partitionId`. A message's `leaseId` is sent on its own ack, the lease the broker checks that ack against, and also collected into `requiredLeases`. |
 | `queue(string $queueName): TransactionQueueBuilder` | Sub-builder with `partition(string)` and `push(array): TransactionBuilder`. |
 | `addPushOperation(string $queueName, ?string $partition, array $items): void` | Lower-level entry used by the sub-builder. |
 | `commit(): array` | `POST /api/v1/transaction`. |

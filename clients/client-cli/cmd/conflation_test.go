@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	clierr "github.com/smartpricing/queen/clients/client-cli/internal/errors"
+	clierr "github.com/smartpricing/queen/clients/client-cli/v2/internal/errors"
 	"github.com/spf13/cobra"
 )
 

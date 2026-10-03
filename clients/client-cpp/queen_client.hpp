@@ -2729,6 +2729,16 @@ public:
             if (msg.contains("leaseId") && !msg["leaseId"].is_null()) {
                 std::string lease_id = msg["leaseId"].get<std::string>();
                 required_leases_.push_back(lease_id);
+
+                // Each ACK names its own lease. A Queen 2 broker fences an ACK
+                // with the lease the operation carries, and lends it one from
+                // requiredLeases only when the bundle names a single lease: in a
+                // bundle spanning two leases, an ACK without its own would be
+                // applied whoever holds its partition now. 1.x brokers read the
+                // operation's lease before requiredLeases too.
+                if (!lease_id.empty()) {
+                    ack_op["leaseId"] = lease_id;
+                }
             }
             
             operations_.push_back(ack_op);

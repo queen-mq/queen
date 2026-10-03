@@ -346,12 +346,18 @@ The file shape maps directly to the route:
 ```json
 {
   "operations": [
-    {"type": "ack", "transactionId": "…", "partitionId": "…", "status": "completed"},
+    {"type": "ack", "transactionId": "…", "partitionId": "…", "status": "completed", "leaseId": "lease-uuid"},
     {"type": "push", "items": [{"queue": "orders", "payload": {"id": 1}}]}
   ],
   "requiredLeases": ["lease-uuid"]
 }
 ```
+
+Each ack is sent with the lease the broker fences it with: its own `leaseId`, or, when it has none,
+the one lease `requiredLeases` names. An ack without a `leaseId` in a bundle whose `requiredLeases`
+names several leases exits `1` before anything is sent, because nothing says which lease is its
+own. A bundle that names no lease acks without one. Before 2.0.0 the command dropped every lease in
+the file, so the broker applied its acks unfenced.
 
 Only `ack` and `push` operation types are accepted; anything else exits `1`. Push items are grouped
 by queue and partition before being handed to the builder, preserving first-seen order.

@@ -1,4 +1,4 @@
-module github.com/smartpricing/queen/clients/client-cli
+module github.com/smartpricing/queen/clients/client-cli/v2
 
 go 1.24.0
 
@@ -6,7 +6,7 @@ require (
 	github.com/charmbracelet/lipgloss v0.13.1
 	github.com/dustin/go-humanize v1.0.1
 	github.com/mattn/go-isatty v0.0.20
-	github.com/smartpricing/queen/clients/client-go v1.2.0
+	github.com/smartpricing/queen/clients/client-go/v2 v2.0.0
 	github.com/spf13/cobra v1.8.1
 	github.com/zalando/go-keyring v0.2.5
 	golang.org/x/term v0.35.0

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/smartpricing/queen/clients/client-go/streams/util"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams/util"
 )
 
 // HTTPError carries the HTTP status + parsed body for failed POSTs.

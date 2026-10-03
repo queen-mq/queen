@@ -11,10 +11,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/smartpricing/queen/clients/client-cli/internal/config"
-	clierr "github.com/smartpricing/queen/clients/client-cli/internal/errors"
-	"github.com/smartpricing/queen/clients/client-cli/internal/output"
-	"github.com/smartpricing/queen/clients/client-cli/internal/sdk"
+	"github.com/smartpricing/queen/clients/client-cli/v2/internal/config"
+	clierr "github.com/smartpricing/queen/clients/client-cli/v2/internal/errors"
+	"github.com/smartpricing/queen/clients/client-cli/v2/internal/output"
+	"github.com/smartpricing/queen/clients/client-cli/v2/internal/sdk"
 	"github.com/spf13/cobra"
 )
 

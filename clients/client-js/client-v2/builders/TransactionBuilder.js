@@ -89,6 +89,15 @@ export class TransactionBuilder {
         operation.consumerGroup = consumerGroup
       }
 
+      // Each ack names its own lease. A Queen 2 broker fences an ack with the
+      // lease the operation carries, and lends it one from requiredLeases only
+      // when the bundle names a single lease: in a bundle spanning two leases,
+      // an ack without its own would be applied whoever holds its partition
+      // now. 1.x brokers read the operation's lease before requiredLeases too.
+      if (leaseId) {
+        operation.leaseId = leaseId
+      }
+
       this.#operations.push(operation)
 
       if (leaseId) {

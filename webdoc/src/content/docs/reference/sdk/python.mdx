@@ -30,6 +30,7 @@ verifiedBy:
   - clients/client-py/tests/test_pop.py
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): QUEUE_DEFAULTS is nine keys, the configure paragraph is rewritten for the merge rule, and retry_message reaches the move primitive unchanged.
+# sourceOfTruth re-read 2026-10-03 (through ab432efd + this patch): a transaction ack now carries its own message's leaseId; requiredLeases is unchanged.
 ---
 
 The PyPI package is `queen-mq`; the import name is `queen`. It is fully async, built on `httpx`,
@@ -335,7 +336,7 @@ all-or-nothing.
 
 | Method | Notes |
 | --- | --- |
-| `ack(messages, status="completed", context=None)` | One message or a list. Requires `transactionId` and `partitionId`; a `leaseId` is collected into `requiredLeases`. Returns `self`. |
+| `ack(messages, status="completed", context=None)` | One message or a list. Requires `transactionId` and `partitionId`. A message's `leaseId` is sent on its own ack, the lease the broker checks that ack against, and also collected into `requiredLeases`. Returns `self`. |
 | `queue(queue_name)` | Returns a `TransactionQueueBuilder` with `.partition(key)` and `.push(items)`; `push()` returns the parent builder. |
 | `commit()` | `async`. Raises on an empty bundle and on a non-success response. |
 

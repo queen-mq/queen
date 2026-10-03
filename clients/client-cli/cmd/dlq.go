@@ -7,10 +7,10 @@ import (
 	"os"
 	"strings"
 
-	clierr "github.com/smartpricing/queen/clients/client-cli/internal/errors"
-	"github.com/smartpricing/queen/clients/client-cli/internal/output"
-	"github.com/smartpricing/queen/clients/client-cli/internal/timefmt"
-	queen "github.com/smartpricing/queen/clients/client-go"
+	clierr "github.com/smartpricing/queen/clients/client-cli/v2/internal/errors"
+	"github.com/smartpricing/queen/clients/client-cli/v2/internal/output"
+	"github.com/smartpricing/queen/clients/client-cli/v2/internal/timefmt"
+	queen "github.com/smartpricing/queen/clients/client-go/v2"
 	"github.com/spf13/cobra"
 )
 

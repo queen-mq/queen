@@ -987,6 +987,138 @@ bool test_transaction_ack_with_consumer_group(const std::string& server_url) {
 }
 
 // ============================================================================
+// LEASE FENCING IN A BUNDLE
+// ============================================================================
+// A bundle that acks messages of two leases. A Queen 2 broker fences an ACK
+// with the lease the operation carries, and lends it one from requiredLeases
+// only when the bundle names a single lease: an ACK that does not carry its own
+// lease is applied in a bundle of two even after its lease expired and another
+// consumer took the message. The wire half -- each ack carries its own lease --
+// is asserted without a broker in test_kv_timers.cpp.
+//
+// This client's pop takes no lease of its own, so the queue's leaseTime sets
+// it. The queue names are unique per run, and dropped however a test returns.
+// ============================================================================
+
+/// Pop one message of `queue` without a long wait, retrying for up to
+/// `budget_millis`. A budget of 0 is a single look.
+json pop_one(QueenClient& client, const std::string& queue, int budget_millis) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_millis);
+    while (true) {
+        json messages = client.queue(queue).subscription_mode("all").batch(1).wait(false).pop();
+        if (!messages.empty() || std::chrono::steady_clock::now() >= deadline) {
+            return messages;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+}
+
+struct DropQueuesOnExit {
+    QueenClient& client;
+    std::vector<std::string> queues;
+
+    ~DropQueuesOnExit() {
+        for (const auto& queue : queues) {
+            try {
+                client.queue(queue).del();
+            } catch (...) {
+                // Best effort, like cleanup_test_queues().
+            }
+        }
+    }
+};
+
+bool test_transaction_refuses_an_ack_under_an_expired_lease(const std::string& server_url) {
+    QueenClient client(server_url);
+
+    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::string queue_a = "test-queue-cpp-fence-a-" + std::to_string(timestamp);
+    std::string queue_b = "test-queue-cpp-fence-b-" + std::to_string(timestamp);
+    DropQueuesOnExit drop{client, {queue_a, queue_b}};
+
+    QueueConfig short_lease;
+    short_lease.lease_time = 1;
+    QueueConfig long_lease;
+    long_lease.lease_time = 60;
+    client.queue(queue_a).config(short_lease).create();
+    client.queue(queue_b).config(long_lease).create();
+
+    client.queue(queue_a).push({{{"data", {{"name", "a"}}}}});
+    client.queue(queue_b).push({{{"data", {{"name", "b"}}}}});
+
+    json a = pop_one(client, queue_a, 5000);
+    json b = pop_one(client, queue_b, 5000);
+    if (a.size() != 1 || b.size() != 1 || a[0]["leaseId"] == b[0]["leaseId"]) {
+        std::cerr << "expected one message under each of two leases, got " << a.dump()
+                  << " and " << b.dump() << std::endl;
+        return false;
+    }
+
+    // Lease A expires, and another consumer takes the message. The broker reads
+    // the queue's leaseTime at every pop, so the new holder's lease is long.
+    client.queue(queue_a).config(long_lease).create();
+    json taken = pop_one(client, queue_a, 15000);
+    if (taken.size() != 1 || taken[0]["transactionId"] != a[0]["transactionId"] ||
+        taken[0]["leaseId"] == a[0]["leaseId"]) {
+        std::cerr << "the message of the expired lease should come back under a new lease, got "
+                  << taken.dump() << std::endl;
+        return false;
+    }
+
+    std::string refusal;
+    try {
+        json result = client.transaction().ack(a[0]).ack(b[0]).commit();
+        std::cerr << "a bundle with an ACK under an expired lease committed: "
+                  << result.dump() << std::endl;
+        return false;
+    } catch (const std::exception& e) {
+        refusal = e.what();
+    }
+    if (refusal.find("rolled back") == std::string::npos) {
+        std::cerr << "the bundle should be refused whole, got: " << refusal << std::endl;
+        return false;
+    }
+
+    // Nothing of the bundle happened: each holder still settles its own message.
+    if (!client.transaction().ack(taken[0]).commit().value("success", false) ||
+        !client.transaction().ack(b[0]).commit().value("success", false)) {
+        return false;
+    }
+    return pop_one(client, queue_a, 0).empty() && pop_one(client, queue_b, 0).empty();
+}
+
+bool test_transaction_acks_two_live_leases(const std::string& server_url) {
+    QueenClient client(server_url);
+
+    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::string queue_a = "test-queue-cpp-fence-live-a-" + std::to_string(timestamp);
+    std::string queue_b = "test-queue-cpp-fence-live-b-" + std::to_string(timestamp);
+    DropQueuesOnExit drop{client, {queue_a, queue_b}};
+
+    QueueConfig long_lease;
+    long_lease.lease_time = 60;
+    client.queue(queue_a).config(long_lease).create();
+    client.queue(queue_b).config(long_lease).create();
+
+    client.queue(queue_a).push({{{"data", {{"name", "a"}}}}});
+    client.queue(queue_b).push({{{"data", {{"name", "b"}}}}});
+
+    json a = pop_one(client, queue_a, 5000);
+    json b = pop_one(client, queue_b, 5000);
+    if (a.size() != 1 || b.size() != 1 || a[0]["leaseId"] == b[0]["leaseId"]) {
+        std::cerr << "expected one message under each of two leases, got " << a.dump()
+                  << " and " << b.dump() << std::endl;
+        return false;
+    }
+
+    json result = client.transaction().ack(a[0]).ack(b[0]).commit();
+    return result.value("success", false) &&
+           pop_one(client, queue_a, 0).empty() && pop_one(client, queue_b, 0).empty();
+}
+
+// ============================================================================
 // DLQ TEST
 // ============================================================================
 
@@ -1638,6 +1770,10 @@ int main(int argc, char** argv) {
     runner.run_test("Transaction Multiple ACKs", [&]() { return test_transaction_multiple_acks(server_url); });
     runner.run_test("Transaction Empty Commit (Error)", [&]() { return test_transaction_empty_commit(server_url); });
     runner.run_test("Transaction ACK with Consumer Group", [&]() { return test_transaction_ack_with_consumer_group(server_url); });
+    runner.run_test("Transaction refuses an ACK under an expired lease",
+                    [&]() { return test_transaction_refuses_an_ack_under_an_expired_lease(server_url); });
+    runner.run_test("Transaction ACKs two live leases",
+                    [&]() { return test_transaction_acks_two_live_leases(server_url); });
     
     // DLQ TEST
     std::cout << YELLOW << "\n=== DLQ TESTS ===" << RESET << "\n" << std::endl;

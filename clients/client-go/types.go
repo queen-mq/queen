@@ -402,6 +402,10 @@ type Operation struct {
 	Type          string      `json:"type"` // "ack" or "push"
 	TransactionID string      `json:"transactionId,omitempty"`
 	PartitionID   string      `json:"partitionId,omitempty"`
+	// LeaseID is the lease an ack operation is fenced with: the one its message
+	// was delivered under. Omitted on a push, and on an ack of a lease-less
+	// message.
+	LeaseID       string      `json:"leaseId,omitempty"`
 	Status        string      `json:"status,omitempty"`
 	ConsumerGroup string      `json:"consumerGroup,omitempty"`
 	Items         []PushItem  `json:"items,omitempty"`

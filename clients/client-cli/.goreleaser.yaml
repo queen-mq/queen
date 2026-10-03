@@ -28,9 +28,9 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
-      - -X github.com/smartpricing/queen/clients/client-cli/cmd.BuildVersion={{ .Version }}
-      - -X github.com/smartpricing/queen/clients/client-cli/cmd.BuildCommit={{ .ShortCommit }}
-      - -X github.com/smartpricing/queen/clients/client-cli/cmd.BuildDate={{ .CommitDate }}
+      - -X github.com/smartpricing/queen/clients/client-cli/v2/cmd.BuildVersion={{ .Version }}
+      - -X github.com/smartpricing/queen/clients/client-cli/v2/cmd.BuildCommit={{ .ShortCommit }}
+      - -X github.com/smartpricing/queen/clients/client-cli/v2/cmd.BuildDate={{ .CommitDate }}
 
 archives:
   - id: queenctl-archive
@@ -71,7 +71,7 @@ release:
       # Download the matching tar.gz / zip from the assets below and put `queenctl` on $PATH.
 
       # Or with Go (1.22+):
-      go install github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@v{{ .Version }}
+      go install github.com/smartpricing/queen/clients/client-cli/v2/cmd/queenctl@v{{ .Version }}
 
 changelog:
   sort: asc

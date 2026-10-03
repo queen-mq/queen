@@ -256,7 +256,7 @@ describe('Transaction wire — the ack op carries the group the message was popp
       await queen.transaction().ack(fromGroup('__QUEUE_MODE__')).commit()
       await queen.transaction().ack(MSG).commit()   // hand-built, no group at all
       for (const hit of hits) {
-        assert.deepEqual(Object.keys(hit.body.operations[0]).sort(), ['partitionId', 'status', 'transactionId', 'type'])
+        assert.deepEqual(Object.keys(hit.body.operations[0]).sort(), ['leaseId', 'partitionId', 'status', 'transactionId', 'type'])
       }
     })
   })
@@ -274,6 +274,48 @@ describe('Transaction wire — the ack op carries the group the message was popp
     await withQueen([success()], async (queen, hits) => {
       await queen.transaction().ack([fromGroup('a', 1), fromGroup('b', 2)]).commit()
       assert.deepEqual(hits[0].body.operations.map(op => op.consumerGroup), ['a', 'b'])
+    })
+  })
+})
+
+// The lease of an ack op. A Queen 2 broker fences each ack with the leaseId
+// the operation carries, and lends it one from requiredLeases only when every
+// lease in the bundle is the same lease. An ack whose lease travelled in
+// requiredLeases alone was applied unfenced in a bundle of two leases, even
+// after that lease expired and another consumer took the message (found
+// 2026-10-03 against 2.0.0-beta.6).
+// ---------------------------------------------------------------------------
+
+describe('Transaction wire — each ack op carries its own lease', () => {
+  const leased = (n, leaseId) => ({
+    transactionId: `aaaaaaaa-aaaa-7aaa-8aaa-00000000000${n}`,
+    partitionId: `pppppppp-pppp-7ppp-8ppp-00000000000${n}`,
+    ...(leaseId === undefined ? {} : { leaseId })
+  })
+
+  it('a bundle spanning two leases names each lease on its own ack', async () => {
+    await withQueen([success()], async (queen, hits) => {
+      await queen.transaction()
+        .ack(leased(1, 'lease-1'))
+        .ack(leased(2, 'lease-2'))
+        .ack(leased(3))
+        .commit()
+
+      const [first, second, third] = hits[0].body.operations
+      assert.equal(first.leaseId, 'lease-1')
+      assert.equal(second.leaseId, 'lease-2')
+      assert.ok(!('leaseId' in third), 'a message without a lease adds no leaseId key')
+      assert.deepEqual(hits[0].body.requiredLeases, ['lease-1', 'lease-2'])
+    })
+  })
+
+  it('a null or empty lease adds no leaseId key either', async () => {
+    await withQueen([success()], async (queen, hits) => {
+      await queen.transaction().ack([leased(1, null), leased(2, '')]).commit()
+      for (const op of hits[0].body.operations) {
+        assert.ok(!('leaseId' in op))
+      }
+      assert.deepEqual(hits[0].body.requiredLeases, [])
     })
   })
 })

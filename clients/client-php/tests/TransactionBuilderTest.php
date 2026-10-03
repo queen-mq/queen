@@ -134,6 +134,35 @@ class TransactionBuilderTest extends TestCase
         $tx->commit();
     }
 
+    /**
+     * A Queen 2 broker lends an ACK a lease from requiredLeases only when the
+     * bundle names one lease, so in a bundle of two leases every ACK must
+     * carry its own, or it is applied unfenced.
+     */
+    public function testEveryAckCarriesTheLeaseOfItsOwnMessage(): void
+    {
+        $httpClient = $this->createMock(HttpClient::class);
+        $httpClient->expects($this->once())
+            ->method('post')
+            ->with('/api/v1/transaction', [
+                'operations' => [
+                    ['type' => 'ack', 'transactionId' => 'tx-1', 'partitionId' => 'p1', 'status' => 'completed', 'consumerGroup' => 'workers', 'leaseId' => 'lease-1'],
+                    ['type' => 'ack', 'transactionId' => 'tx-2', 'partitionId' => 'p2', 'status' => 'completed', 'consumerGroup' => 'workers', 'leaseId' => 'lease-2'],
+                    ['type' => 'ack', 'transactionId' => 'tx-3', 'partitionId' => 'p3', 'status' => 'completed', 'consumerGroup' => 'workers'],
+                ],
+                'requiredLeases' => ['lease-1', 'lease-2'],
+            ])
+            ->willReturn(['success' => true]);
+
+        (new TransactionBuilder($httpClient))
+            ->ack([
+                ['transactionId' => 'tx-1', 'partitionId' => 'p1', 'leaseId' => 'lease-1'],
+                ['transactionId' => 'tx-2', 'partitionId' => 'p2', 'leaseId' => 'lease-2'],
+                ['transactionId' => 'tx-3', 'partitionId' => 'p3'],
+            ], 'completed', ['consumerGroup' => 'workers'])
+            ->commit();
+    }
+
     public function testWireOperationsAreSentAsTheyAre(): void
     {
         $ack = ['type' => 'ack', 'transactionId' => 'tx-1', 'partitionId' => 'p1', 'status' => 'completed', 'leaseId' => 'lease-1'];

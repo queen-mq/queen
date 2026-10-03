@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/smartpricing/queen/clients/client-go/streams/operators"
-	"github.com/smartpricing/queen/clients/client-go/streams/util"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams/operators"
+	"github.com/smartpricing/queen/clients/client-go/v2/streams/util"
 )
 
 const watermarkStateKey = "__wm__"

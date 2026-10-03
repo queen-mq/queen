@@ -7,8 +7,8 @@ import (
 	"io"
 	"os"
 
-	clierr "github.com/smartpricing/queen/clients/client-cli/internal/errors"
-	queen "github.com/smartpricing/queen/clients/client-go"
+	clierr "github.com/smartpricing/queen/clients/client-cli/v2/internal/errors"
+	queen "github.com/smartpricing/queen/clients/client-go/v2"
 	"github.com/spf13/cobra"
 )
 
@@ -24,11 +24,14 @@ var (
 //
 // {
 //   "operations": [
-//     {"type":"ack","transactionId":"...","partitionId":"...","status":"completed"},
+//     {"type":"ack","transactionId":"...","partitionId":"...","status":"completed","leaseId":"lease-uuid"},
 //     {"type":"push","items":[{"queue":"orders","payload":{"id":1}}]}
 //   ],
 //   "requiredLeases": ["lease-uuid"]
 // }
+//
+// Each ack is sent with a lease, which the broker fences it with: its own
+// leaseId, or else the one lease requiredLeases names (see ackMessage).
 type txBundle struct {
 	Operations     []queen.Operation `json:"operations"`
 	RequiredLeases []string          `json:"requiredLeases"`
@@ -78,12 +81,12 @@ command: all of it applies, or none of it does.`,
 		defer cleanup()
 
 		tb := c.Q.Transaction()
-		for _, op := range bundle.Operations {
+		for i, op := range bundle.Operations {
 			switch op.Type {
 			case "ack":
-				msg := &queen.Message{
-					TransactionID: op.TransactionID,
-					PartitionID:   op.PartitionID,
+				msg, err := ackMessage(i, op, bundle.RequiredLeases)
+				if err != nil {
+					return err
 				}
 				tb = tb.Ack(msg, op.Status, queen.AckOptions{ConsumerGroup: op.ConsumerGroup})
 			case "push":
@@ -126,6 +129,42 @@ command: all of it applies, or none of it does.`,
 		}
 		return nil
 	},
+}
+
+// ackMessage is the message the builder acks for operation i of a bundle. The
+// builder sends the message's lease on that ack, and a Queen 2 broker fences
+// the ack with the lease the operation carries. An operation without its own
+// leaseId borrows the lease requiredLeases names when it names exactly one,
+// as the broker itself would. When it names several, nothing says which is
+// this ack's, and an ack sent without one would be applied unfenced, so the
+// bundle is refused before anything is sent. A bundle that names no lease at
+// all acks as before, without one.
+func ackMessage(i int, op queen.Operation, requiredLeases []string) (*queen.Message, error) {
+	msg := &queen.Message{
+		TransactionID: op.TransactionID,
+		PartitionID:   op.PartitionID,
+		LeaseID:       op.LeaseID,
+	}
+	if msg.LeaseID != "" {
+		return msg, nil
+	}
+	named := map[string]bool{}
+	for _, l := range requiredLeases {
+		if l != "" {
+			named[l] = true
+		}
+	}
+	switch len(named) {
+	case 0:
+	case 1:
+		for l := range named {
+			msg.LeaseID = l
+		}
+	default:
+		return nil, clierr.Userf("operation %d is an ack without a leaseId, and requiredLeases names %d leases: "+
+			"put the lease each ack was popped under on its operation as \"leaseId\"", i, len(named))
+	}
+	return msg, nil
 }
 
 func init() {

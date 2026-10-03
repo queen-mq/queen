@@ -3,9 +3,9 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/smartpricing/queen/clients/client-cli/internal/config"
-	clierr "github.com/smartpricing/queen/clients/client-cli/internal/errors"
-	"github.com/smartpricing/queen/clients/client-cli/internal/output"
+	"github.com/smartpricing/queen/clients/client-cli/v2/internal/config"
+	clierr "github.com/smartpricing/queen/clients/client-cli/v2/internal/errors"
+	"github.com/smartpricing/queen/clients/client-cli/v2/internal/output"
 	"github.com/spf13/cobra"
 )
 

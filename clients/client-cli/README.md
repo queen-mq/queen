@@ -24,7 +24,7 @@ extract, and drop `queenctl` somewhere on `$PATH`.
 ### `go install`
 
 ```bash
-go install github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@latest
+go install github.com/smartpricing/queen/clients/client-cli/v2/cmd/queenctl@latest
 ```
 
 This installs a `queenctl` binary into `$GOBIN` (defaults to `~/go/bin`).
