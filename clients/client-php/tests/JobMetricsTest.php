@@ -12,6 +12,8 @@ use Queen\Tests\Support\PlanHandler;
 
 final class JobMetricsTest extends TestCase
 {
+    private const LIST_ROUTE = '/api/v1/resources/kv/list';
+
     private float $now = 1_790_000_100.0;
 
     public function testAWorkerWritesItsCountsOncePerFlushWindow(): void
@@ -179,11 +181,85 @@ final class JobMetricsTest extends TestCase
         $this->assertSame(['App\Jobs\Send', 'App\Jobs\Resize'], array_column($metrics['classes'], 'class'));
         $this->assertSame(93, $metrics['classes'][0]['average_ms']);
         $this->assertSame(1000, $metrics['classes'][1]['average_ms']);
-        $first = $this->operations($handler, 0)[0];
+        // The read route, so the dashboard's read-only token can call it.
+        $this->assertSame([self::LIST_ROUTE, self::LIST_ROUTE], $this->paths($handler));
+        $first = $this->body($handler, 0);
+        $this->assertSame('queen-metrics', $first['namespace']);
         // The window starts at the first bucket still inside the last hour.
         $this->assertSame('jobs/v1/1789997099', $first['after']);
         $this->assertSame('jobs/v1/', $first['prefix']);
-        $this->assertSame('jobs/v1/1790000100/bbbb', $this->operations($handler, 1)[0]['after']);
+        $this->assertSame('jobs/v1/1790000100/bbbb', $this->body($handler, 1)['after']);
+    }
+
+    public function testABrokerWithoutTheListRouteIsReadThroughGetPrefix(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 404, 'json' => ['error' => 'Not Found', 'code' => 'no_such_route']],
+            ['status' => 200, 'json' => ['results' => [['rows' => [
+                ['key' => 'jobs/v1/1790000100/aaaa', 'value' => ['classes' => ['App\Jobs\Send' => ['processed' => 4, 'failed' => 1, 'runtime_ms' => 50]]]],
+            ], 'truncated' => true]]]],
+            ['status' => 200, 'json' => ['results' => [['rows' => [
+                ['key' => 'jobs/v1/1790000400/bbbb', 'value' => ['classes' => ['App\Jobs\Send' => ['processed' => 2, 'failed' => 0, 'runtime_ms' => 20]]]],
+            ], 'truncated' => false]]]],
+        ]);
+        $reader = new JobMetricsReader($this->queen($handler), 'queen-metrics', null, fn (): int => 1_790_000_500);
+
+        $metrics = $reader->read('1h');
+
+        $this->assertTrue($metrics['available']);
+        $this->assertSame(['processed' => 6, 'failed' => 1], $metrics['totals']);
+        $this->assertSame([self::LIST_ROUTE, '/api/v1/kv', '/api/v1/kv'], $this->paths($handler), 'one refusal per read');
+        $first = $this->operations($handler, 1)[0];
+        $this->assertSame(['getPrefix', 'queen-metrics', 'jobs/v1/', 'jobs/v1/1789997099', 1000], [
+            $first['op'], $first['ns'], $first['prefix'], $first['after'], $first['limit'],
+        ]);
+        $this->assertSame('jobs/v1/1790000100/aaaa', $this->operations($handler, 2)[0]['after']);
+    }
+
+    /** A proxy API key with `consume` and no `read` scope may use the KV surface and not the list route. */
+    public function testACredentialTheListRouteRefusesIsReadThroughGetPrefix(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 403, 'json' => ['error' => 'Insufficient permissions', 'code' => 'forbidden']],
+            ['status' => 200, 'json' => ['results' => [['rows' => [
+                ['key' => 'jobs/v1/1790000100/aaaa', 'value' => ['classes' => ['App\Jobs\Send' => ['processed' => 3, 'failed' => 0, 'runtime_ms' => 30]]]],
+            ], 'truncated' => false]]]],
+        ]);
+        $reader = new JobMetricsReader($this->queen($handler), 'queen-metrics', null, fn (): int => 1_790_000_500);
+
+        $metrics = $reader->read('1h');
+
+        $this->assertTrue($metrics['available']);
+        $this->assertSame(3, $metrics['totals']['processed']);
+        $this->assertSame([self::LIST_ROUTE, '/api/v1/kv'], $this->paths($handler));
+    }
+
+    public function testEveryReadTriesTheListRouteFirst(): void
+    {
+        $page = ['status' => 200, 'json' => ['rows' => [
+            ['key' => 'jobs/v1/1790000100/aaaa', 'value' => ['classes' => ['App\Jobs\Send' => ['processed' => 1, 'failed' => 0, 'runtime_ms' => 5]]]],
+        ], 'truncated' => false]];
+        $handler = new PlanHandler([
+            ['status' => 404, 'json' => ['error' => 'Not Found', 'code' => 'no_such_route']],
+            ['status' => 200, 'json' => ['results' => [$page['json']]]],
+            // The broker was upgraded between two renders.
+            $page,
+        ]);
+        $reader = new JobMetricsReader($this->queen($handler), 'queen-metrics', null, fn (): int => 1_790_000_500);
+
+        $this->assertTrue($reader->read('1h')['available']);
+        $this->assertTrue($reader->read('1h')['available']);
+
+        $this->assertSame([self::LIST_ROUTE, '/api/v1/kv', self::LIST_ROUTE], $this->paths($handler));
+    }
+
+    public function testARejectedTokenIsNotTriedOnTheOtherRoute(): void
+    {
+        $handler = new PlanHandler([], ['status' => 401, 'json' => ['error' => 'Invalid token signature']]);
+        $reader = new JobMetricsReader($this->queen($handler), 'queen-metrics', null, fn (): int => 1_790_000_500);
+
+        $this->assertFalse($reader->read('1h')['available']);
+        $this->assertSame([self::LIST_ROUTE], $this->paths($handler), 'a token the broker rejects is rejected on both routes');
     }
 
     public function testAWindowLargerThanOneReadIsFlaggedPartial(): void
@@ -199,7 +275,7 @@ final class JobMetricsTest extends TestCase
         $this->assertTrue($metrics['available']);
         $this->assertTrue($metrics['truncated']);
         $this->assertSame(50, $handler->count());
-        $this->assertSame(1000, $this->operations($handler, 0)[0]['limit']);
+        $this->assertSame(1000, $this->body($handler, 0)['limit']);
     }
 
     public function testAnUnreachableBrokerIsReportedUnavailable(): void
@@ -241,6 +317,18 @@ final class JobMetricsTest extends TestCase
     /** @return list<array<string, mixed>> */
     private function operations(PlanHandler $handler, int $request): array
     {
-        return json_decode((string) $handler->requests[$request]->getBody(), true)['operations'];
+        return $this->body($handler, $request)['operations'];
+    }
+
+    /** @return array<string, mixed> */
+    private function body(PlanHandler $handler, int $request): array
+    {
+        return json_decode((string) $handler->requests[$request]->getBody(), true);
+    }
+
+    /** @return list<string> */
+    private function paths(PlanHandler $handler): array
+    {
+        return array_map(static fn ($request): string => $request->getUri()->getPath(), $handler->requests);
     }
 }

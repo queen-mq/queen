@@ -663,6 +663,53 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame(1, $renewer->closed);
     }
 
+    /**
+     * A worker on a queue list keeps one queue's prefetched tail while it runs
+     * a batch of the next, so its hand-back spans two leases. A Queen 2 broker
+     * lends requiredLeases to ACKs only when it names one lease: each ACK has
+     * to name its own, or it is applied whoever holds the partition by then.
+     */
+    public function testAHandBackSpanningTwoLeasesFencesEveryAckWithItsOwnLease(): void
+    {
+        $high = $this->popBatchResponse([$this->payload('job-h1'), $this->payload('job-h2')]);
+        $high['leaseId'] = 'lease-2';
+        foreach ($high['messages'] as $index => $message) {
+            $high['messages'][$index] = array_replace($message, [
+                'transactionId' => 'transaction-h' . ($index + 1),
+                'partitionId' => '0298f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83',
+                'partition' => 'job-0002',
+                'leaseId' => 'lease-2',
+            ]);
+        }
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([$this->payload('job-l1'), $this->payload('job-l2')])],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
+            ['status' => 200, 'json' => $high],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        $queue = $this->queueWithLeaseRenewer($handler, new RecordingLeaseRenewer(), prefetch: 2);
+
+        $queue->pop('low')->delete();
+        $this->assertSame('job-h1', $queue->pop('high')->getJobId());
+        $queue->shutdown();
+
+        $this->assertCount(4, $handler->requests);
+        $handBack = $this->handBack($handler->requests[3]);
+        $copied = $this->copiedJobs($handBack);
+        sort($copied);
+        $this->assertSame(['job-h1', 'job-h2', 'job-l2'], $copied);
+        $leases = array_column($handBack['acks'], 'leaseId', 'transactionId');
+        ksort($leases);
+        $this->assertSame(
+            ['transaction-2' => 'lease-1', 'transaction-h1' => 'lease-2', 'transaction-h2' => 'lease-2'],
+            $leases,
+            'each ACK names the lease of its own delivery',
+        );
+        $required = $handBack['body']['requiredLeases'];
+        sort($required);
+        $this->assertSame(['lease-1', 'lease-2'], $required);
+    }
+
     public function testAJobStillRunningAtShutdownIsHandedBackWithItsRunCounted(): void
     {
         // Laravel's timeout handler dispatches WorkerStopping while the job
@@ -1644,11 +1691,7 @@ class LaravelQueueDriverTest extends TestCase
 
         $shutdown = $this->handBack($handler->requests[1]);
         $this->assertSame(['lease-1'], $journaled['body']['requiredLeases']);
-        $this->assertSame(
-            array_map(fn (array $ack): array => [...$ack, 'leaseId' => 'lease-1'], $shutdown['acks']),
-            $journaled['acks'],
-            'every ACK is fenced by the lease',
-        );
+        $this->assertSame($shutdown['acks'], $journaled['acks'], 'every ACK is fenced by its lease, at shutdown as after a crash');
         $withoutId = static fn (array $copy): array => array_diff_key($copy, ['transactionId' => true]);
         $this->assertSame(array_map($withoutId, $shutdown['copies']), array_map($withoutId, $journaled['copies']));
         $this->assertSame(['job-a1', 'job-a2', 'job-b1', 'job-c1'], $this->copiedJobs($journaled));

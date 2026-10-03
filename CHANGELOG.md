@@ -172,6 +172,14 @@ without one the lease `requiredLeases` names when it names exactly one, and exit
 anything when an ACK without a lease sits in a bundle that names several. The Rust client already
 named the lease on each ACK. PHP 1.9.0 shipped without this fix, its two-batch hand-back included.
 
+**Laravel dashboard: the Jobs page reads with a read-only token.** It read the job metrics through
+`POST /api/v1/kv`, which takes read-write access, so with a `read_bearer_token` that may only read
+the page showed the metrics as unavailable on any broker that checks tokens. It now reads
+`POST /api/v1/resources/kv/list`, the read route the console's KV browser uses (broker 1.6.0 and
+later), through the new `Admin::listKv()`. It falls back to `getPrefix` when the broker has no such
+route (404) and when the credential may not read but may use the KV surface (403), such as a
+proxy API key with `consume` and no `read` scope.
+
 **The partitions sunflower names its seeds.** Each queue owns a wedge of the flower, and hovering a
 seed lights its queue and shows the queue, the partition, its pending and its lag. The per-partition
 figures come from a new read-only route, `GET /api/v1/resources/partitions?queue=&limit=`: the

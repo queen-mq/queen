@@ -3,13 +3,14 @@
 namespace Queen\Laravel\Dashboard;
 
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
+use Queen\Exceptions\HttpException;
 use Queen\Laravel\Monitoring\JobMetricsRecorder;
 use Queen\Queen;
 
 /**
  * Sums the per-job-class metrics every worker records (see
- * JobMetricsRecorder) over a window: one paged getPrefix from the window's
- * first bucket, since keys sort by time.
+ * JobMetricsRecorder) over a window: one paged read from the window's first
+ * bucket, since keys sort by time.
  *
  * The rows are untrusted input: every count is validated and a class list is
  * bounded, so a malformed or hostile row cannot distort the table.
@@ -102,13 +103,10 @@ final class JobMetricsReader
         $truncated = false;
         // The last key before the window's first bucket; `after` is exclusive.
         $after = JobMetricsRecorder::PREFIX . sprintf('%010d', $first - 1);
+        $listRoute = true;
         try {
             for ($page = 0; $page < self::MAX_PAGES; ++$page) {
-                $result = $this->queen->kv()->getPrefix(
-                    $this->namespace,
-                    JobMetricsRecorder::PREFIX,
-                    ['after' => $after, 'limit' => self::PAGE_LIMIT],
-                );
+                $result = $this->page($after, $listRoute);
                 $rows = $result['rows'] ?? null;
                 if (!is_array($rows) || !array_is_list($rows)) {
                     return $empty;
@@ -151,6 +149,32 @@ final class JobMetricsReader
             ],
             'classes' => $table,
         ];
+    }
+
+    /**
+     * One page of records. The KV list route first: it takes read access, so
+     * the dashboard's read_bearer_token can call it, while POST /api/v1/kv
+     * needs read-write access. getPrefix serves a broker before 1.6.0,
+     * which has no list route (404), and a credential the list route refuses
+     * where the KV surface accepts it, such as a proxy API key with `consume`
+     * and no `read` scope (403). The choice holds for the rest of one read,
+     * so the next read finds a broker upgraded since.
+     */
+    private function page(string $after, bool &$listRoute): mixed
+    {
+        $options = ['after' => $after, 'limit' => self::PAGE_LIMIT];
+        if ($listRoute) {
+            try {
+                return $this->queen->admin()->listKv($this->namespace, ['prefix' => JobMetricsRecorder::PREFIX, ...$options]);
+            } catch (HttpException $exception) {
+                if ($exception->statusCode !== 403 && $exception->statusCode !== 404) {
+                    throw $exception;
+                }
+                $listRoute = false;
+            }
+        }
+
+        return $this->queen->kv()->getPrefix($this->namespace, JobMetricsRecorder::PREFIX, $options);
     }
 
     private function cacheStore(): ?CacheRepository

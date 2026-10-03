@@ -33,6 +33,24 @@ class Admin
         return $this->httpClient->get('/api/v1/resources/tasks');
     }
 
+    /**
+     * One keyset page of a key/value namespace, from the route the console's
+     * KV browser reads: {rows, truncated, nextAfter, bytes}, each row
+     * {key, value, version, expiresAt, updatedAt}, timestamps in UTC with a
+     * Z. It takes read access, so a read-only token can call it; POST
+     * /api/v1/kv needs read-write access.
+     *
+     * $options: prefix (plain text; absent lists the whole namespace), after
+     * (exclusive cursor), limit (clamped to 1-1000, default 100), keysOnly,
+     * includeExpired (rows past their expiry the sweeper has not removed,
+     * marked `expired`). Requires broker >= 1.6.0 — an older broker answers
+     * 404 no_such_route, so fall back to Kv::getPrefix() there.
+     */
+    public function listKv(string $namespace, array $options = []): mixed
+    {
+        return $this->httpClient->post('/api/v1/resources/kv/list', ['namespace' => $namespace] + $options);
+    }
+
     // ===========================
     // Queues API
     // ===========================
