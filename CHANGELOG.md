@@ -197,7 +197,7 @@ its memory limit, and the node's own disk write gate. `GET /api/v1/raft/status` 
 remembered per browser. Members and Users share one row: an operator switches between the acting
 cluster's members and every account on the cell from the Members page.
 
-## Unreleased (PHP client and Laravel supervisor)
+## PHP client and Laravel supervisor
 
 **Laravel: up to 1,024 stripes per queue.** A stripe runs one job at a time, so the 64 stripes a
 queue could have capped its ordinary jobs at 64 busy workers. `QUEEN_PARTITIONS` now takes 1 to
