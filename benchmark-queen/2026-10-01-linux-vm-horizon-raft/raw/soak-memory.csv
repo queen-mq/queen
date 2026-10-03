@@ -1,0 +1,11 @@
+engine,target,measure,fifth_1_mib,fifth_2_mib,fifth_3_mib,fifth_4_mib,fifth_5_mib
+horizon,app,cgroup_memory,535.1,575.9,615.5,659.9,705.8
+horizon,app,process_anon_rss,507.9,507.9,507.9,507.9,507.9
+horizon,app,process_pss,528.5,528.5,528.5,528.6,528.6
+horizon,backend-redis,cgroup_memory,90.1,239.6,388.5,562.8,766.6
+horizon,backend-redis,process_anon_rss,67.2,194.0,323.1,457.3,610.9
+queen-rust,app,cgroup_memory,94.1,137.9,181.4,224.3,267.8
+queen-rust,app,process_anon_rss,220.3,220.3,220.4,220.4,220.4
+queen-rust,app,process_pss,81.1,81.2,81.2,81.2,81.3
+queen-rust,backend-broker,cgroup_memory,119.5,236.0,349.9,459.5,573.2
+queen-rust,backend-broker,process_anon_rss,59.4,75.4,92.2,105.0,116.8

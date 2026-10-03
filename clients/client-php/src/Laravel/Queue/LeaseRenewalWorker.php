@@ -11,6 +11,12 @@ final class LeaseRenewalWorker
 
     private const MAX_ERROR_BYTES = 128;
 
+    /** How long the worker may take to exit once its pipe has closed. */
+    private const PARENT_EXIT_WAIT_MILLIS = 1000;
+
+    /** Whether the worker asked to stop: it then owes nothing. */
+    private static bool $shutdown = false;
+
     /**
      * Line-oriented worker protocol. Configuration and bearer credentials are
      * received over stdin, never exposed in argv or written to disk.
@@ -55,13 +61,19 @@ final class LeaseRenewalWorker
             + self::RETRY_DELAY_MILLIS
             + $killGraceMillis
             + $safetyMarginMillis;
+        $journal = self::journalPrefix($init['hand_back_journal'] ?? null);
+        // Once the worker has left, without a shutdown: hand back what it
+        // journaled for its lease.
+        $handBack = static function (array $leases) use ($init, $journal, $parentPid, $requestBudgetMillis, $safetyMarginMillis): void {
+            self::handBackAfterParent($init['client'], $journal, $parentPid, $leases, $requestBudgetMillis + $safetyMarginMillis);
+        };
 
         stream_set_blocking(STDIN, false);
         // Startup/tracking handshakes are safety-critical and very low volume.
         // Unsafe diagnostics switch temporarily to a bounded best-effort write
         // only after TERM/KILL fencing has been armed.
         stream_set_blocking(STDOUT, true);
-        if (!self::emit(['event' => 'ready'])) {
+        if (!self::emit(['event' => 'ready', 'hand_back' => $journal !== null])) {
             return;
         }
 
@@ -73,6 +85,7 @@ final class LeaseRenewalWorker
                 $intervalMillis,
                 $initialReserveMillis,
             )) {
+                $handBack($leases);
                 return;
             }
 
@@ -142,6 +155,7 @@ final class LeaseRenewalWorker
                     $intervalMillis,
                     $initialReserveMillis,
                 )) {
+                    $handBack($leases);
                     return;
                 }
                 if (!isset($leases[$leaseId])) {
@@ -202,6 +216,7 @@ final class LeaseRenewalWorker
                 continue;
             }
             if (($command['command'] ?? null) === 'shutdown') {
+                self::$shutdown = true;
                 return false;
             }
 
@@ -278,6 +293,84 @@ final class LeaseRenewalWorker
             'lease_id' => $leaseId,
             'error' => self::boundedError($error),
         ]);
+    }
+
+    /**
+     * The worker's journal path, as ProcessLeaseRenewer names it: a
+     * `hand-back-<pid>` file prefix in a private `queen-hand-back-*`
+     * directory. Anything else turns the hand-back off.
+     */
+    private static function journalPrefix(mixed $path): ?string
+    {
+        if (!is_string($path) || $path === '' || $path[0] !== '/' || str_contains($path, "\0")
+            || !str_starts_with(basename($path), 'hand-back-')
+            || !str_starts_with(basename(dirname($path)), 'queen-hand-back-')) {
+            return null;
+        }
+
+        return $path;
+    }
+
+    /**
+     * The worker left without a shutdown. Once it has exited, send the
+     * transaction it journaled for the lease it held, while that lease is
+     * still its own, as the supervisor's lease service does: its jobs that
+     * never started go back without an extra attempt. Otherwise, and on any
+     * failure, they return when the lease expires.
+     *
+     * @param array<string, mixed> $client
+     * @param array<array-key, array{expires: int, next: int, kill_at: ?int, error: ?string}> $leases
+     */
+    private static function handBackAfterParent(
+        array $client,
+        ?string $journal,
+        int $parentPid,
+        array $leases,
+        int $requiredMillis,
+    ): void {
+        if ($journal === null || self::$shutdown || !self::parentExits($parentPid)) {
+            return;
+        }
+        try {
+            if (count($leases) !== 1) {
+                return;
+            }
+            $leaseId = (string) array_key_first($leases);
+            $lease = $leases[array_key_first($leases)];
+            // The renewal's own bound: an attempt that might outlive the lease.
+            if ($lease['kill_at'] !== null || self::monotonicMillis() + $requiredMillis >= $lease['expires']) {
+                return;
+            }
+            $owed = HandBackJournal::owed($journal, $leaseId);
+            if ($owed === null) {
+                return;
+            }
+            // One attempt on one endpoint: once the request may have reached
+            // a broker its outcome is unknown, and sending it again could
+            // push its copies twice.
+            $queen = new Queen([...$client, 'retryAttempts' => 1, 'enableFailover' => false]);
+            $queen->transaction()->wire($owed['operations'], [$leaseId])->commit();
+        } catch (\Throwable) {
+            // Nobody reads this helper's output any more: lease expiry
+            // hands the jobs back, as before.
+        } finally {
+            HandBackJournal::remove($journal);
+            @rmdir(dirname($journal));
+        }
+    }
+
+    /** Whether the worker exits soon: this helper is then handed to another parent. */
+    private static function parentExits(int $parentPid): bool
+    {
+        $deadline = self::monotonicMillis() + self::PARENT_EXIT_WAIT_MILLIS;
+        while (posix_getppid() === $parentPid) {
+            if (self::monotonicMillis() >= $deadline) {
+                return false;
+            }
+            usleep(10_000);
+        }
+
+        return true;
     }
 
     private static function killParent(int $parentPid, int $signal): void

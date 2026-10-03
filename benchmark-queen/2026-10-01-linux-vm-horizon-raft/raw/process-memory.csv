@@ -1,0 +1,9 @@
+lane,engine,role,processes,rss_mib_each,private_mib_each,pss_mib_each,pss_mib_total
+drain-32,horizon,orchestrator,2,48.0,28.4,29.0,58.1
+drain-32,horizon,worker,32,48.0,28.2,28.8,922.1
+drain-32,queen-rust,orchestrator,2,29.3,8.6,11.7,23.5
+drain-32,queen-rust,worker,32,32.9,1.4,2.4,75.3
+drain-64,horizon,orchestrator,2,48.7,28.9,29.3,58.6
+drain-64,horizon,worker,64,48.0,28.2,28.5,1825.3
+drain-64,queen-rust,orchestrator,2,29.7,9.4,12.1,24.3
+drain-64,queen-rust,worker,64,32.7,1.4,1.9,121.2

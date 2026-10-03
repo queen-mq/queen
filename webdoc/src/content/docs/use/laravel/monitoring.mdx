@@ -1,0 +1,220 @@
+---
+title: Monitoring and alerts
+description: "Per-job-class metrics, monitored tags, long-wait alerts and a Prometheus endpoint for Kubernetes autoscaling, recorded by every worker of every host."
+type: how-to
+tier: operate
+status: preview
+sidebar:
+  order: 6
+sourceOfTruth:
+  - clients/client-php/config/queen.php
+  - clients/client-php/routes/dashboard.php
+  - clients/client-php/src/Laravel/QueenServiceProvider.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Monitoring/JobMetricsRecorder.php
+  - clients/client-php/src/Laravel/Monitoring/JobTags.php
+  - clients/client-php/src/Laravel/Monitoring/TagMonitor.php
+  - clients/client-php/src/Laravel/Monitoring/QueueWaits.php
+  - clients/client-php/src/Laravel/Dashboard/JobMetricsReader.php
+  - clients/client-php/src/Laravel/Dashboard/PrometheusMetrics.php
+  - clients/client-php/src/Laravel/Commands/CheckWaitsCommand.php
+  - clients/client-php/src/Laravel/Events/LongWaitDetected.php
+  - clients/client-php/src/Laravel/Notifications/LongWaitDetected.php
+  - clients/client-php/src/Laravel/Http/Controllers/MetricsController.php
+  - clients/client-php/src/Laravel/Http/Controllers/TagController.php
+  - clients/client-php/src/Laravel/Http/Middleware/AuthorizeMetrics.php
+  - clients/client-php/resources/views/dashboard/partials/jobs.blade.php
+  - clients/client-php/resources/views/dashboard/partials/tags.blade.php
+verifiedBy:
+  - clients/client-php/tests/JobMetricsTest.php
+  - clients/client-php/tests/JobTagsTest.php
+  - clients/client-php/tests/TagMonitorTest.php
+  - clients/client-php/tests/QueueWaitsTest.php
+  - clients/client-php/tests/LaravelCheckWaitsTest.php
+  - clients/client-php/tests/LaravelMetricsTest.php
+  - clients/client-php/tests/LaravelMetricsDisabledTest.php
+  - clients/client-php/tests/LaravelDashboardTest.php
+  - clients/client-php/tests/LaravelQueueDriverTest.php
+# sourceOfTruth re-read 2026-09-30 (through dc5b5994): the event_driven switch changes no metric, tag or alert; page matches the code.
+# sourceOfTruth re-read 2026-10-01 (through this patch): config/queen.php adds ack_async and pop_ahead; QueenQueue settles detached ACKs and pops; neither changes the monitoring this page describes.
+# sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; nothing this page monitors changes.
+# sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): workers also record max_ms, the longest attempt per class, which the Configuration page's advice reads, and the Jobs per class section says so; a cache store that cannot be resolved now leaves the read uncached instead of failing; the retry route, console_url and the queue-contents reader add no metric.
+# sourceOfTruth re-read 2026-10-02 (through ad0f816b + this patch): job metric and tag writes now make one attempt of at most two seconds, and the Jobs per class section says so; the unstarted hand-back and the provider's exit-marker listener change nothing this page monitors.
+# sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-02 (crash hand-back): QueenQueue's hand-back journal changes no job metric, tag or monitoring path this page describes.
+# sourceOfTruth re-read 2026-10-02 (stripes, f5d20737): the wider stripe range changes nothing this page monitors.
+---
+
+The supervisor [dashboard](/use/laravel/dashboard) shows what the supervisors do. This page covers
+what the jobs do: throughput and runtime per job class, jobs carrying a tag you watch, queues whose
+oldest job waits too long, and a Prometheus endpoint an autoscaler can read.
+
+Everything here is recorded by the workers themselves into the broker's
+[key/value store](/use/kv), so it covers every worker of every host or pod, whichever engine
+supervises it, and a dashboard on any host reads the same numbers. No Redis, no snapshot command.
+
+| Feature | Horizon | Queen Laravel |
+| --- | --- | --- |
+| Per-job metrics | Snapshots taken by the scheduled `horizon:snapshot` | Live, from every worker, over the last hour, six hours or day |
+| Tags | Automatic and `tags()`, monitored from the dashboard | Automatic and `tags()`, monitored from the dashboard |
+| Long-wait alerts | Estimated from backlog and recent runtime | The broker's age of the oldest waiting job, per consumer group |
+| Alert routes | Mail, Slack, SMS | `LongWaitDetected` event and mail |
+| Autoscaler metrics | Not built in | Prometheus endpoint for HPA and KEDA |
+
+## Jobs per class
+
+The dashboard's **Jobs** page lists every job class that ran in the chosen window, with the jobs
+processed, the failed attempts, jobs per minute and the average runtime of an attempt.
+
+Each worker of a Queen connection counts these per class in memory and writes them at most once every
+ten seconds, also while it waits for the next job, and when it stops, to one key of its own in a
+five-minute bucket:
+
+```text
+jobs/v1/<bucket>/<worker>   {"classes": {"App\\Jobs\\SendInvoice": {"processed": 12, "failed": 1, "runtime_ms": 2600, "max_ms": 900}}}
+```
+
+`max_ms` is the longest single attempt. The Jobs page does not show it: the Configuration page's
+[tuning advice](/use/laravel/dashboard#tuning-advice-and-settings) compares it with the
+supervisor's `shutdown_grace`. Records of earlier workers have no `max_ms`, and a class without one
+is not compared.
+
+That is one write per worker every ten seconds, never one per job, and no two workers ever write the
+same key. Keys expire after a day, which bounds the longest window. Recording is best effort: one
+attempt of at most two seconds, with no failover and no retry, and a failed write is dropped and
+never reaches the job. A preforked worker starts its own counts after
+its fork.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_JOB_METRICS` | `true` | Record per-job-class metrics |
+| `QUEEN_JOB_METRICS_CONNECTION` | `queen` | Queen connection whose broker stores them |
+| `QUEEN_JOB_METRICS_NAMESPACE` | `queen-metrics` | Key/value namespace |
+
+The dashboard reads them with the connection's read credential: one paged `getPrefix` from the
+window's first bucket, cached for fifteen seconds. One read takes at most 50,000 keys, a day of
+buckets for about 170 workers; past that the page marks the table as partial, covering the window's
+oldest part, and a shorter window shows the rest.
+
+## Monitored tags
+
+A job is tagged when it is pushed, as in Horizon: its `tags()` method when it has one, otherwise one
+`Model:key` tag per Eloquent model it carries. Queued listeners, mailables, notifications and
+broadcasts are unwrapped to the object that carries the models. The tags travel in the payload, so a
+worker reads them without unserializing the command. A model is always tagged by its key, even when
+it has a `tags()` relation, and a `tags()` that throws or returns no list is ignored: tagging never
+fails a dispatch.
+
+```php
+class ChargeCustomer implements ShouldQueue
+{
+    public function __construct(public Customer $customer, public Invoice $invoice) {}
+
+    // Optional: without it, the job is tagged App\Models\Customer:42 and App\Models\Invoice:7.
+    public function tags(): array
+    {
+        return ['billing', 'customer:'.$this->customer->id];
+    }
+}
+```
+
+On the dashboard's **Tags** page, add a tag to monitor. Within thirty seconds every worker records
+each completed or failed job carrying it, and the page lists the newest ones with their class,
+queue, attempts and runtime. The list of monitored tags is one key updated with compare-and-swap,
+so two operators adding tags at the same time do not overwrite each other.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_TAGS` | `true` | Tag jobs and record monitored ones |
+| `QUEEN_TAGS_CONNECTION` | `queen` | Queen connection whose broker stores them |
+| `QUEEN_TAGS_NAMESPACE` | `queen-metrics` | Key/value namespace |
+| `QUEEN_TAGS_RETENTION_MINUTES` | `1440` | How long a recorded job is listed |
+
+At most 50 tags can be monitored, and a job keeps at most 20 tags of up to 128 bytes. Horizon's
+silenced jobs have no equivalent.
+
+## Long-wait alerts
+
+`queen:check-waits` reports a queue whose oldest job has waited longer than its threshold. Schedule
+it every minute:
+
+```php
+// routes/console.php
+Schedule::command('queen:check-waits')->everyMinute();
+```
+
+```php
+// config/queen.php
+'waits' => [
+    'queen:default' => 60,
+    'queen:emails' => 300,
+],
+'notifications' => [
+    'mail' => env('QUEEN_NOTIFY_MAIL'),      // comma-separated addresses
+    'throttle_minutes' => 5,
+],
+```
+
+For every `connection:queue` it checks each consumer group a supervisor pool consumes that queue
+with. The wait is measured, not estimated: nothing waits when the group has no pending job;
+otherwise the broker's lag for the group is the wait, and for a queue the group never consumed, the
+age of the oldest pending message, which also covers a queue no worker serves at all.
+
+Above the threshold it dispatches `Queen\Laravel\Events\LongWaitDetected` (connection, queue,
+consumer group, seconds, threshold) and, when `queen.notifications.mail` is set, mails it. Each
+queue and group notifies at most once per throttle window; an alert that fails to send is tried again
+at the next run. Listen to the event to route alerts
+anywhere else, such as Slack.
+
+## Prometheus and Kubernetes autoscaling
+
+With a token set, `GET /queen/metrics` answers in the Prometheus text format. The scraper sends the
+token as a bearer token; the route has no session and no Gate, and answers `404` while disabled.
+
+```dotenv
+QUEEN_METRICS_ENABLED=true
+QUEEN_METRICS_TOKEN=a-secret-of-at-least-32-characters
+```
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `queen_queue_depth` | connection, consumer_group, queue | Jobs waiting, as last sampled by a supervisor |
+| `queen_supervisor_instances` | availability | Supervisor instances, live and stale |
+| `queen_supervisor_up` | instance_id, hostname | One while the instance's heartbeat is current |
+| `queen_supervisor_heartbeat_age_seconds` | instance_id, hostname | Age of the instance's last status |
+| `queen_workers`, `queen_workers_desired`, `queen_workers_draining` | instance_id, hostname, supervisor, queue | Worker processes per pool |
+| `queen_pool_replicas` | instance_id, hostname, supervisor, queue | Coordinated replicas sharing the pool's target |
+| `queen_shared_queue_supervisors` | connection, consumer_group, queue | Masters that autoscale one queue without coordinating |
+
+With [coordinated replicas](/use/laravel/supervisors#several-replicas), scale the supervisor
+Deployment on the backlog. With KEDA's Prometheus scaler, for pods of up to 10 workers each sizing
+10 jobs per worker:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: queen-workers
+spec:
+  scaleTargetRef:
+    name: queen-workers        # the supervisor Deployment
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        query: max(queen_queue_depth{queue="default",consumer_group="laravel"})
+        threshold: "100"       # max_processes x target_jobs_per_process
+```
+
+Each new pod joins the coordination and takes its share at its next poll; a pod removed by a
+scale-down leaves at once.
+
+## Next steps
+
+- [Several replicas](/use/laravel/supervisors#several-replicas) explains how pods share one target.
+- [Supervisor dashboard](/use/laravel/dashboard) covers access control for these pages.
+- [Queen or Horizon](/use/laravel/queen-vs-horizon) compares the two systems feature by feature.

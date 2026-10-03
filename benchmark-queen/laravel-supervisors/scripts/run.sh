@@ -20,11 +20,27 @@ RUNS=3
 SLEEP_MS=10
 CPU_ITERATIONS=0
 DISPATCH_MODE="${BENCH_DISPATCH_MODE:-single}"
+DISPATCH_RATE="${BENCH_DISPATCH_RATE:-0}"
+BACKLOG_FIRST="${BENCH_BACKLOG_FIRST:-0}"
 QUEEN_PREFETCH="${QUEEN_PREFETCH:-1}"
 QUEEN_ACK_BATCH="${QUEEN_ACK_BATCH:-1}"
 QUEEN_BULK_BATCH="${QUEEN_BULK_BATCH:-100}"
 QUEEN_PARTITIONS="${QUEEN_PARTITIONS:-64}"
 QUEEN_POP_FUSION="${QUEEN_POP_FUSION:-0}"
+# Supervisor features of the Queen lanes; Horizon ignores them.
+QUEEN_PREFORK="${BENCH_QUEEN_PREFORK:-0}"
+QUEEN_OPCACHE_CLI="${BENCH_QUEEN_OPCACHE_CLI:-0}"
+QUEEN_EVENT_DRIVEN="${BENCH_QUEEN_EVENT_DRIVEN:-0}"
+QUEEN_FAST_SCALE_UP="${BENCH_QUEEN_FAST_SCALE_UP:-0}"
+QUEEN_ACK_ASYNC="${BENCH_QUEEN_ACK_ASYNC:-0}"
+QUEEN_POP_AHEAD="${BENCH_QUEEN_POP_AHEAD:-0}"
+QUEEN_HTTP_TRANSPORT="${BENCH_QUEEN_HTTP_TRANSPORT:-curl}"
+QUEEN_LEASE_SERVICE="${BENCH_QUEEN_LEASE_SERVICE:-1}"
+QUEEN_POLL_INTERVAL="${BENCH_POLL_INTERVAL:-1}"
+# PostgreSQL durability, the Queen counterpart of --redis-appendfsync.
+POSTGRES_SYNCHRONOUS_COMMIT="${BENCH_POSTGRES_SYNCHRONOUS_COMMIT:-on}"
+# Broker storage: PostgreSQL, or Raft on a local data directory (compose.raft.yml).
+QUEEN_STORAGE="${BENCH_QUEEN_STORAGE:-postgres}"
 LEDGER_MODE="${BENCH_LEDGER_MODE:-off}"
 REDIS_APPENDONLY="${BENCH_REDIS_APPENDONLY:-yes}"
 REDIS_APPEND_FSYNC="${BENCH_REDIS_APPEND_FSYNC:-everysec}"
@@ -76,11 +92,33 @@ Options:
   --sleep-ms N                  Sleep in every job (default: 10)
   --cpu-iterations N            SHA-256 rounds in every job (default: 0)
   --dispatch-mode single|bulk   Producer API shape (default: single)
+  --dispatch-rate N             Measured jobs per second, single mode; 0 is
+                                as fast as possible (default: 0)
+  --backlog-first 0|1           Hold every worker while the measured jobs are
+                                dispatched, then release them: the rate is
+                                the drain of a full queue (default: 0)
   --queen-prefetch N            Jobs claimed by each Queen pop (default: 1)
   --queen-ack-batch N           Deferred Queen ACK batch; <= prefetch (default: 1)
   --queen-bulk-batch N          Jobs per bulk producer call/request (default: 100)
-  --queen-partitions N          Queen partitions scanned per pop (default: 64)
+  --queen-partitions N          Queen partition stripes jobs are spread over, 1 to 1024; a pop
+                                scans at most 64 of them (default: 64)
   --queen-pop-fusion 0|1        Broker pop-transaction fusion (default: 0)
+  --queen-prefork 0|1           Fork Queen workers from one booted Laravel (default: 0)
+  --queen-opcache-cli 0|1       CLI opcache in the Queen lanes only (default: 0)
+  --queen-event-driven 0|1      Wake Queen supervisors on new jobs (default: 0)
+  --queen-fast-scale-up 0|1     Close half the gap per Queen reconcile (default: 0)
+  --queen-ack-async 0|1         Send Queen ACKs without waiting (default: 0)
+  --queen-pop-ahead 0|1         Pop the next Queen batch during the last job
+                                of the current one (default: 0)
+  --queen-http-transport curl|guzzle
+                                The PHP client's HTTP transport (default: curl)
+  --queen-lease-service 0|1     Renew leases in the Queen supervisor, not
+                                one PHP helper per worker (default: 1)
+  --queen-poll-interval N       Queen supervisor poll, seconds (default: 1)
+  --postgres-synchronous-commit on|off
+                                PostgreSQL commit durability (default: on)
+  --queen-storage postgres|raft Broker storage; raft needs the image
+                                queen-laravel-supervisor-broker:raft (default: postgres)
   --redis-appendonly yes|no     Redis AOF durability (default: yes)
   --redis-appendfsync MODE      Redis AOF fsync: always|everysec|no (default: everysec)
   --ledger                      Enable durable attempt/effect auditing; changes the workload
@@ -117,6 +155,11 @@ with Docker on cgroup v2. `--allow-foreign-containers` is incompatible with
 that mode and always makes the campaign diagnostic. Publishable campaigns
 must build their images in the same invocation; `--no-build` is rejected.
 EOF
+}
+
+# "true" or "false" for a 0|1 switch, the spelling Compose passes on.
+switch_word() {
+    if [ "$1" = 1 ]; then printf true; else printf false; fi
 }
 
 die() {
@@ -185,11 +228,24 @@ while [ "$#" -gt 0 ]; do
         --sleep-ms) SLEEP_MS="${2:?--sleep-ms requires a value}"; shift 2 ;;
         --cpu-iterations) CPU_ITERATIONS="${2:?--cpu-iterations requires a value}"; shift 2 ;;
         --dispatch-mode) DISPATCH_MODE="${2:?--dispatch-mode requires a value}"; shift 2 ;;
+        --dispatch-rate) DISPATCH_RATE="${2:?--dispatch-rate requires a value}"; shift 2 ;;
+        --backlog-first) BACKLOG_FIRST="${2:?--backlog-first requires a value}"; shift 2 ;;
         --queen-prefetch) QUEEN_PREFETCH="${2:?--queen-prefetch requires a value}"; shift 2 ;;
         --queen-ack-batch) QUEEN_ACK_BATCH="${2:?--queen-ack-batch requires a value}"; shift 2 ;;
         --queen-bulk-batch) QUEEN_BULK_BATCH="${2:?--queen-bulk-batch requires a value}"; shift 2 ;;
         --queen-partitions) QUEEN_PARTITIONS="${2:?--queen-partitions requires a value}"; shift 2 ;;
         --queen-pop-fusion) QUEEN_POP_FUSION="${2:?--queen-pop-fusion requires a value}"; shift 2 ;;
+        --queen-prefork) QUEEN_PREFORK="${2:?--queen-prefork requires a value}"; shift 2 ;;
+        --queen-opcache-cli) QUEEN_OPCACHE_CLI="${2:?--queen-opcache-cli requires a value}"; shift 2 ;;
+        --queen-event-driven) QUEEN_EVENT_DRIVEN="${2:?--queen-event-driven requires a value}"; shift 2 ;;
+        --queen-fast-scale-up) QUEEN_FAST_SCALE_UP="${2:?--queen-fast-scale-up requires a value}"; shift 2 ;;
+        --queen-ack-async) QUEEN_ACK_ASYNC="${2:?--queen-ack-async requires a value}"; shift 2 ;;
+        --queen-pop-ahead) QUEEN_POP_AHEAD="${2:?--queen-pop-ahead requires a value}"; shift 2 ;;
+        --queen-lease-service) QUEEN_LEASE_SERVICE="${2:?--queen-lease-service requires a value}"; shift 2 ;;
+        --queen-http-transport) QUEEN_HTTP_TRANSPORT="${2:?--queen-http-transport requires a value}"; shift 2 ;;
+        --queen-poll-interval) QUEEN_POLL_INTERVAL="${2:?--queen-poll-interval requires a value}"; shift 2 ;;
+        --postgres-synchronous-commit) POSTGRES_SYNCHRONOUS_COMMIT="${2:?--postgres-synchronous-commit requires a value}"; shift 2 ;;
+        --queen-storage) QUEEN_STORAGE="${2:?--queen-storage requires a value}"; shift 2 ;;
         --redis-appendonly) REDIS_APPENDONLY="${2:?--redis-appendonly requires a value}"; shift 2 ;;
         --redis-appendfsync) REDIS_APPEND_FSYNC="${2:?--redis-appendfsync requires a value}"; shift 2 ;;
         --ledger) LEDGER_MODE="durable"; shift ;;
@@ -246,11 +302,20 @@ require_positive_int "--queen-ack-batch" "$QUEEN_ACK_BATCH"
 require_positive_int "--queen-bulk-batch" "$QUEEN_BULK_BATCH"
 require_positive_int "--queen-partitions" "$QUEEN_PARTITIONS"
 require_uint "--queen-pop-fusion" "$QUEEN_POP_FUSION"
+require_uint "--queen-prefork" "$QUEEN_PREFORK"
+require_uint "--queen-opcache-cli" "$QUEEN_OPCACHE_CLI"
+require_uint "--queen-event-driven" "$QUEEN_EVENT_DRIVEN"
+require_uint "--queen-fast-scale-up" "$QUEEN_FAST_SCALE_UP"
+require_uint "--queen-ack-async" "$QUEEN_ACK_ASYNC"
+require_uint "--queen-pop-ahead" "$QUEEN_POP_AHEAD"
+require_uint "--queen-lease-service" "$QUEEN_LEASE_SERVICE"
+require_positive_int "--queen-poll-interval" "$QUEEN_POLL_INTERVAL"
 require_uint "--warmup-jobs" "$WARMUP_JOBS"
 require_positive_int "--timeout" "$WAIT_TIMEOUT"
 require_positive_int "--worker-timeout" "$WORKER_TIMEOUT"
 LEASE_RENEWAL=false
-if [ "$QUEEN_PREFETCH" -gt 1 ]; then
+# A batch popped ahead is a local tail too: both require renewal.
+if [ "$QUEEN_PREFETCH" -gt 1 ] || [ "$QUEEN_POP_AHEAD" = 1 ]; then
     LEASE_RENEWAL=true
 fi
 if [ "$RETRY_AFTER" = "0" ]; then
@@ -276,8 +341,29 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$QUEEN_PREFETCH" -le 1000 ] || die "--queen-prefetch must not exceed 1000"
 [ "$QUEEN_ACK_BATCH" -le "$QUEEN_PREFETCH" ] || die "--queen-ack-batch must not exceed --queen-prefetch"
 [ "$QUEEN_BULK_BATCH" -le 1000 ] || die "--queen-bulk-batch must not exceed 1000"
-[ "$QUEEN_PARTITIONS" -le 64 ] || die "--queen-partitions must not exceed 64"
+[ "$QUEEN_PARTITIONS" -le 1024 ] || die "--queen-partitions must not exceed 1024"
 [ "$QUEEN_POP_FUSION" -le 1 ] || die "--queen-pop-fusion must be 0 or 1"
+[ "$QUEEN_PREFORK" -le 1 ] || die "--queen-prefork must be 0 or 1"
+[ "$QUEEN_OPCACHE_CLI" -le 1 ] || die "--queen-opcache-cli must be 0 or 1"
+[ "$QUEEN_EVENT_DRIVEN" -le 1 ] || die "--queen-event-driven must be 0 or 1"
+[ "$QUEEN_FAST_SCALE_UP" -le 1 ] || die "--queen-fast-scale-up must be 0 or 1"
+[ "$QUEEN_ACK_ASYNC" -le 1 ] || die "--queen-ack-async must be 0 or 1"
+[ "$QUEEN_POP_AHEAD" -le 1 ] || die "--queen-pop-ahead must be 0 or 1"
+[ "$QUEEN_LEASE_SERVICE" -le 1 ] || die "--queen-lease-service must be 0 or 1"
+case "$QUEEN_HTTP_TRANSPORT" in curl|guzzle) ;; *) die "--queen-http-transport must be curl or guzzle" ;; esac
+if [ "$QUEEN_ACK_ASYNC" = 1 ] && [ "$QUEEN_ACK_BATCH" -gt 1 ]; then
+    die "--queen-ack-async requires --queen-ack-batch 1"
+fi
+[ "$QUEEN_POLL_INTERVAL" -le 60 ] || die "--queen-poll-interval must not exceed 60"
+case "$POSTGRES_SYNCHRONOUS_COMMIT" in on|off) ;; *) die "--postgres-synchronous-commit must be on or off" ;; esac
+case "$QUEEN_STORAGE" in
+    postgres) ;;
+    raft)
+        COMPOSE_FILE="${BENCH_DIR}/compose.raft.yml"
+        BROKER_IMAGE="queen-laravel-supervisor-broker:raft"
+        ;;
+    *) die "--queen-storage must be postgres or raft" ;;
+esac
 [ "$WORKER_TIMEOUT" -le 86400 ] || die "--worker-timeout must not exceed 86400"
 [ "$RETRY_AFTER" -le 86401 ] || die "--retry-after must not exceed 86401"
 if [ "$LEASE_RENEWAL" = true ]; then
@@ -286,6 +372,14 @@ else
     [ "$RETRY_AFTER" -gt $(( QUEEN_PREFETCH * WORKER_TIMEOUT )) ] || die "--retry-after must exceed --queen-prefetch multiplied by --worker-timeout without lease renewal"
 fi
 case "$DISPATCH_MODE" in single|bulk) ;; *) die "--dispatch-mode must be single or bulk" ;; esac
+require_uint "--dispatch-rate" "$DISPATCH_RATE"
+if [ "$DISPATCH_RATE" -gt 0 ] && [ "$DISPATCH_MODE" != single ]; then
+    die "--dispatch-rate requires --dispatch-mode single"
+fi
+case "$BACKLOG_FIRST" in 0|1) ;; *) die "--backlog-first must be 0 or 1" ;; esac
+if [ "$BACKLOG_FIRST" = 1 ] && [ "$DISPATCH_RATE" -gt 0 ]; then
+    die "--backlog-first excludes --dispatch-rate"
+fi
 case "$SCALING_STRATEGY" in size|time) ;; *) die "--strategy must be size or time" ;; esac
 case "$LEDGER_MODE" in off|durable) ;; *) die "BENCH_LEDGER_MODE must be off or durable" ;; esac
 case "$REDIS_APPENDONLY" in yes|no) ;; *) die "BENCH_REDIS_APPENDONLY must be yes or no" ;; esac
@@ -733,6 +827,45 @@ producer() {
     compose_current exec --no-TTY producer "$@"
 }
 
+# Run artisan in the lane's supervisor container.
+supervisor_artisan() {
+    compose_current exec --no-TTY "$CURRENT_ENGINE" php artisan --no-ansi "$@"
+}
+
+# Stop every worker from taking jobs, and return once none can. Horizon
+# pauses its workers in place; the Queen supervisor drains them.
+hold_workers() {
+    deadline=$(( $(date +%s) + 60 ))
+    if [ "$CURRENT_ENGINE" = horizon ]; then
+        supervisor_artisan horizon:pause >/dev/null
+        # A supervisor reports paused only after it has signalled its workers.
+        until supervisor_artisan horizon:supervisors 2>/dev/null \
+            | awk '/paused/ { paused++ } /running/ { running++ } END { exit !(paused > 0 && running == 0) }'; do
+            [ "$(date +%s)" -lt "$deadline" ] || die "Horizon did not pause its supervisors"
+            sleep 0.5
+        done
+    else
+        supervisor_artisan queen:supervisor pause >/dev/null
+        until supervisor_artisan queen:supervisor status --json 2>/dev/null | python3 -c '
+import json, sys
+status = json.load(sys.stdin)
+budget = status.get("process_budget") or {}
+sys.exit(0 if status.get("paused") and budget.get("active_worker_processes") == 0
+         and status.get("draining") == 0 else 1)'; do
+            [ "$(date +%s)" -lt "$deadline" ] || die "the Queen supervisor did not drain its workers"
+            sleep 0.5
+        done
+    fi
+}
+
+release_workers() {
+    if [ "$CURRENT_ENGINE" = horizon ]; then
+        supervisor_artisan horizon:continue >/dev/null
+    else
+        supervisor_artisan queen:supervisor continue >/dev/null
+    fi
+}
+
 capture_backend_metrics() {
     phase="$1"
     case "$phase" in
@@ -777,16 +910,19 @@ done
 if [ "$contains_horizon_engine" -eq 1 ]; then
     docker compose --file "$COMPOSE_FILE" pull redis
 fi
-if [ "$contains_queen_engine" -eq 1 ]; then
+if [ "$contains_queen_engine" -eq 1 ] && [ "$QUEEN_STORAGE" = postgres ]; then
     docker compose --file "$COMPOSE_FILE" pull postgres
 fi
 
 if [ "$BUILD_IMAGES" -eq 1 ]; then
     printf 'Building benchmark application image...\n'
     docker compose --file "$COMPOSE_FILE" --profile tools build producer
-    if [ "$contains_queen_engine" -eq 1 ]; then
+    if [ "$contains_queen_engine" -eq 1 ] && [ "$QUEEN_STORAGE" = postgres ]; then
         printf 'Building Queen broker image...\n'
         docker compose --file "$COMPOSE_FILE" --profile queen-php build broker
+    elif [ "$contains_queen_engine" -eq 1 ]; then
+        # The Raft broker is built from its own branch, outside this checkout.
+        [ -n "$(image_id "$BROKER_IMAGE")" ] || die "missing image: $BROKER_IMAGE"
     fi
 else
     [ -n "$(image_id "$APP_IMAGE")" ] || die "missing image: $APP_IMAGE"
@@ -806,9 +942,11 @@ if [ "$contains_horizon_engine" -eq 1 ]; then
 fi
 if [ "$contains_queen_engine" -eq 1 ]; then
     EXPECTED_BROKER_IMAGE_ID="$(image_id "$BROKER_IMAGE")"
-    EXPECTED_POSTGRES_IMAGE_ID="$(image_id 'postgres:16.10-bookworm')"
     [ -n "$EXPECTED_BROKER_IMAGE_ID" ] || die "unable to resolve immutable broker image ID"
-    [ -n "$EXPECTED_POSTGRES_IMAGE_ID" ] || die "unable to resolve immutable PostgreSQL image ID"
+    if [ "$QUEEN_STORAGE" = postgres ]; then
+        EXPECTED_POSTGRES_IMAGE_ID="$(image_id 'postgres:16.10-bookworm')"
+        [ -n "$EXPECTED_POSTGRES_IMAGE_ID" ] || die "unable to resolve immutable PostgreSQL image ID"
+    fi
 fi
 
 campaign_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
@@ -835,6 +973,8 @@ export BENCHMARK_RUNS="$RUNS"
 export BENCHMARK_SLEEP_MS="$SLEEP_MS"
 export BENCHMARK_CPU_ITERATIONS="$CPU_ITERATIONS"
 export BENCHMARK_DISPATCH_MODE="$DISPATCH_MODE"
+export BENCHMARK_DISPATCH_RATE="$DISPATCH_RATE"
+export BENCHMARK_BACKLOG_FIRST="$BACKLOG_FIRST"
 export BENCHMARK_QUEUE="$TIMED_QUEUE"
 export BENCHMARK_QUEUES=""
 export BENCHMARK_FAILED_DRIVER="null"
@@ -844,6 +984,18 @@ export BENCHMARK_QUEEN_ACK_BATCH="$QUEEN_ACK_BATCH"
 export BENCHMARK_QUEEN_BULK_BATCH="$QUEEN_BULK_BATCH"
 export BENCHMARK_QUEEN_PARTITIONS="$QUEEN_PARTITIONS"
 export BENCHMARK_QUEEN_POP_FUSION="$QUEEN_POP_FUSION"
+export BENCHMARK_QUEEN_PREFORK="$QUEEN_PREFORK"
+export BENCHMARK_QUEEN_OPCACHE_CLI="$QUEEN_OPCACHE_CLI"
+export BENCHMARK_QUEEN_EVENT_DRIVEN="$QUEEN_EVENT_DRIVEN"
+export BENCHMARK_QUEEN_FAST_SCALE_UP="$QUEEN_FAST_SCALE_UP"
+export BENCHMARK_QUEEN_ACK_ASYNC="$QUEEN_ACK_ASYNC"
+export BENCHMARK_QUEEN_POP_AHEAD="$QUEEN_POP_AHEAD"
+export BENCHMARK_QUEEN_LEASE_SERVICE="$QUEEN_LEASE_SERVICE"
+export BENCHMARK_QUEEN_HTTP_TRANSPORT="$QUEEN_HTTP_TRANSPORT"
+export BENCHMARK_QUEEN_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
+export BENCHMARK_POSTGRES_SYNCHRONOUS_COMMIT="$POSTGRES_SYNCHRONOUS_COMMIT"
+export BENCHMARK_QUEEN_STORAGE="$QUEEN_STORAGE"
+export BENCH_POSTGRES_SYNCHRONOUS_COMMIT="$POSTGRES_SYNCHRONOUS_COMMIT"
 export BENCHMARK_SAMPLE_INTERVAL="$SAMPLE_INTERVAL"
 export BENCHMARK_POST_DRAIN="$POST_DRAIN_SECONDS"
 export BENCHMARK_WARMUP_JOBS="$WARMUP_JOBS"
@@ -974,6 +1126,8 @@ settings = {
     "sleep_ms": int(os.environ["BENCHMARK_SLEEP_MS"]),
     "cpu_iterations": int(os.environ["BENCHMARK_CPU_ITERATIONS"]),
     "dispatch_mode": os.environ["BENCHMARK_DISPATCH_MODE"],
+    "dispatch_rate": int(os.environ["BENCHMARK_DISPATCH_RATE"]),
+    "backlog_first": os.environ["BENCHMARK_BACKLOG_FIRST"] == "1",
     "queues": [os.environ["BENCHMARK_QUEUE"]],
     "failed_driver": os.environ["BENCHMARK_FAILED_DRIVER"],
     "lease_renewal": os.environ["BENCHMARK_LEASE_RENEWAL"] == "true",
@@ -982,6 +1136,17 @@ settings = {
     "queen_bulk_batch": int(os.environ["BENCHMARK_QUEEN_BULK_BATCH"]),
     "queen_partitions": int(os.environ["BENCHMARK_QUEEN_PARTITIONS"]),
     "queen_pop_fusion": os.environ["BENCHMARK_QUEEN_POP_FUSION"] == "1",
+    "queen_prefork": os.environ["BENCHMARK_QUEEN_PREFORK"] == "1",
+    "queen_opcache_cli": os.environ["BENCHMARK_QUEEN_OPCACHE_CLI"] == "1",
+    "queen_event_driven": os.environ["BENCHMARK_QUEEN_EVENT_DRIVEN"] == "1",
+    "queen_fast_scale_up": os.environ["BENCHMARK_QUEEN_FAST_SCALE_UP"] == "1",
+    "queen_ack_async": os.environ["BENCHMARK_QUEEN_ACK_ASYNC"] == "1",
+    "queen_pop_ahead": os.environ["BENCHMARK_QUEEN_POP_AHEAD"] == "1",
+    "queen_lease_service": os.environ["BENCHMARK_QUEEN_LEASE_SERVICE"] == "1",
+    "queen_http_transport": os.environ["BENCHMARK_QUEEN_HTTP_TRANSPORT"],
+    "queen_poll_interval_seconds": int(os.environ["BENCHMARK_QUEEN_POLL_INTERVAL"]),
+    "postgres_synchronous_commit": os.environ["BENCHMARK_POSTGRES_SYNCHRONOUS_COMMIT"],
+    "queen_storage": os.environ["BENCHMARK_QUEEN_STORAGE"],
     "sample_interval_seconds": float(os.environ["BENCHMARK_SAMPLE_INTERVAL"]),
     "warmup_jobs": int(os.environ["BENCHMARK_WARMUP_JOBS"]),
     "completion_timeout_seconds": int(os.environ["BENCHMARK_COMPLETION_TIMEOUT"]),
@@ -1125,8 +1290,10 @@ run_lane() {
     else
         [ "$(image_id "$BROKER_IMAGE")" = "$EXPECTED_BROKER_IMAGE_ID" ] \
             || die "broker image tag changed after provenance capture"
-        [ "$(image_id 'postgres:16.10-bookworm')" = "$EXPECTED_POSTGRES_IMAGE_ID" ] \
-            || die "PostgreSQL image tag changed after provenance capture"
+        if [ "$QUEEN_STORAGE" = postgres ]; then
+            [ "$(image_id 'postgres:16.10-bookworm')" = "$EXPECTED_POSTGRES_IMAGE_ID" ] \
+                || die "PostgreSQL image tag changed after provenance capture"
+        fi
     fi
     preflight_current_resources_absent
 
@@ -1157,6 +1324,27 @@ run_lane() {
         export BENCH_CONNECTION="redis"
     else
         export BENCH_CONNECTION="queen"
+    fi
+    # Queen supervisor features. CLI opcache is a Queen-lane factor: with
+    # spawned Horizon workers each process would keep its own copy.
+    BENCH_QUEEN_PREFORK="$(switch_word "$QUEEN_PREFORK")"
+    export BENCH_QUEEN_PREFORK
+    BENCH_QUEEN_EVENT_DRIVEN="$(switch_word "$QUEEN_EVENT_DRIVEN")"
+    export BENCH_QUEEN_EVENT_DRIVEN
+    BENCH_QUEEN_FAST_SCALE_UP="$(switch_word "$QUEEN_FAST_SCALE_UP")"
+    export BENCH_QUEEN_FAST_SCALE_UP
+    BENCH_QUEEN_ACK_ASYNC="$(switch_word "$QUEEN_ACK_ASYNC")"
+    export BENCH_QUEEN_ACK_ASYNC
+    BENCH_QUEEN_POP_AHEAD="$(switch_word "$QUEEN_POP_AHEAD")"
+    export BENCH_QUEEN_POP_AHEAD
+    BENCH_QUEEN_LEASE_SERVICE="$(switch_word "$QUEEN_LEASE_SERVICE")"
+    export BENCH_QUEEN_LEASE_SERVICE
+    export BENCH_QUEEN_HTTP_TRANSPORT="$QUEEN_HTTP_TRANSPORT"
+    export BENCH_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
+    if [ "$engine" = "horizon" ]; then
+        export BENCH_OPCACHE_CLI=0
+    else
+        export BENCH_OPCACHE_CLI="$QUEEN_OPCACHE_CLI"
     fi
 
     printf '\n[%02d] %s / %s / %s\n' "$lane_number" "$engine" "$profile" "$repetition_label"
@@ -1193,11 +1381,13 @@ run_lane() {
         SAMPLER_TARGETS+=(--target "backend-redis=${backend_pid}")
     else
         broker_id="$(compose_current ps --quiet broker)"
-        postgres_id="$(compose_current ps --quiet postgres)"
         broker_pid="$(docker inspect --format '{{.State.Pid}}' "$broker_id")"
-        postgres_pid="$(docker inspect --format '{{.State.Pid}}' "$postgres_id")"
         SAMPLER_TARGETS+=(--target "backend-broker=${broker_pid}")
-        SAMPLER_TARGETS+=(--target "backend-postgres=${postgres_pid}")
+        if [ "$QUEEN_STORAGE" = postgres ]; then
+            postgres_id="$(compose_current ps --quiet postgres)"
+            postgres_pid="$(docker inspect --format '{{.State.Pid}}' "$postgres_id")"
+            SAMPLER_TARGETS+=(--target "backend-postgres=${postgres_pid}")
+        fi
     fi
 
     sampler_output="/stats/${run_id}.jsonl"
@@ -1254,6 +1444,10 @@ run_lane() {
         fi
     fi
 
+    if [ "$BACKLOG_FIRST" = 1 ]; then
+        hold_workers
+    fi
+
     # Establish counter baselines after warm-up. This happens before the
     # dispatch timestamp used by the resource and latency windows.
     capture_backend_metrics before
@@ -1268,7 +1462,14 @@ run_lane() {
         --jobs="$JOBS" \
         --sleep-ms="$SLEEP_MS" \
         --cpu-iterations="$CPU_ITERATIONS" \
-        --dispatch-mode="$DISPATCH_MODE" >"${CURRENT_HOST_RUN}/dispatch-command.json"
+        --dispatch-mode="$DISPATCH_MODE" \
+        --rate="$DISPATCH_RATE" >"${CURRENT_HOST_RUN}/dispatch-command.json"
+    if [ "$BACKLOG_FIRST" = 1 ]; then
+        # Evidence that the whole backlog waited for the workers.
+        producer php artisan bench:count --no-ansi "$run_id" \
+            >"${CURRENT_HOST_RUN}/backlog-count.json"
+        release_workers
+    fi
 
     set +e
     producer php artisan bench:results --no-ansi "$run_id" \

@@ -3,6 +3,9 @@
 namespace Queen\Http;
 
 use GuzzleHttp\Client;
+use GuzzleHttp\Handler\CurlMultiHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Promise\Promise;
 use GuzzleHttp\Promise\PromiseInterface;
 use GuzzleHttp\Promise\Utils as PromiseUtils;
 use JsonException;
@@ -12,6 +15,16 @@ use UnexpectedValueException;
 
 class HttpClient
 {
+    /**
+     * Waiting for a detached answer polls, since a tick must not block: from
+     * 50 µs, doubling to 1 ms, so a long wait costs little CPU.
+     */
+    private const DETACHED_POLL_MIN_MICROS = 50;
+    private const DETACHED_POLL_MAX_MICROS = 1_000;
+
+    /** A detached request is written within the connect timeout, or dropped. */
+    private const DETACHED_WRITE_MILLIS = 5_000;
+
     private ?string $baseUrl;
     private ?LoadBalancer $loadBalancer;
     private int $timeoutMillis;
@@ -22,6 +35,13 @@ class HttpClient
     private array $headers;
     private array $retry429;
     private Client $guzzle;
+    private bool $customHandler;
+    private ?CurlMultiHandler $detachedHandler = null;
+    private ?Client $detachedGuzzle = null;
+    /** Synchronous and detached requests without Guzzle, when allowed. */
+    private ?CurlTransport $transport;
+    /** @var \WeakMap<PromiseInterface, DetachedRequest> */
+    private \WeakMap $detached;
 
     public function __construct(array $options = [])
     {
@@ -41,7 +61,30 @@ class HttpClient
         // 'handler' overrides Guzzle's handler stack, the seam tests use to
         // drive the retry/failover paths without a live server.
         $handler = $options['handler'] ?? null;
+        $this->customHandler = $handler !== null;
         $this->guzzle = new Client($handler !== null ? ['handler' => $handler] : []);
+        $this->transport = $handler === null && self::curlTransportAllowed() ? new CurlTransport() : null;
+        $this->detached = new \WeakMap();
+    }
+
+    /**
+     * The cURL transport replaces Guzzle for synchronous and detached
+     * requests, the hot path of a worker. Guzzle stays where its behavior
+     * would differ: a proxy from the environment, which Guzzle and libcurl
+     * read differently, and QUEEN_SDK_HTTP_TRANSPORT=guzzle as an escape.
+     */
+    private static function curlTransportAllowed(): bool
+    {
+        if (!CurlTransport::isAvailable() || strtolower((string) getenv('QUEEN_SDK_HTTP_TRANSPORT')) === 'guzzle') {
+            return false;
+        }
+        foreach (['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'] as $name) {
+            if ((string) getenv($name) !== '') {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     // ===========================
@@ -126,6 +169,160 @@ class HttpClient
         return $this->executeRequestAsync($this->resolveUrl($affinityKey) . $path, 'DELETE', null, $requestTimeoutMillis);
     }
 
+    // ===========================
+    // Detached requests
+    // ===========================
+    //
+    // A detached request is on the wire when it is sent, and nothing else runs
+    // until settleDetached(): the caller does other work meanwhile, such as
+    // the next job. One attempt against one backend, no 429 retry; the caller
+    // retries a rejection synchronously. A request that cannot be written
+    // within the connect timeout throws at once: nothing reached the server.
+
+    public function postDetached(string $path, array $body, ?string $affinityKey = null): PromiseInterface
+    {
+        return $this->sendDetached('POST', $path, $body, $affinityKey);
+    }
+
+    public function getDetached(string $path, ?string $affinityKey = null): PromiseInterface
+    {
+        return $this->sendDetached('GET', $path, null, $affinityKey);
+    }
+
+    private function sendDetached(string $method, string $path, ?array $body, ?string $affinityKey): PromiseInterface
+    {
+        if ($this->transport !== null) {
+            $request = $this->transport->start(
+                $method,
+                $this->resolveUrl($affinityKey) . $path,
+                $this->requestHeaders(),
+                $body === null ? null : json_encode($body, JSON_THROW_ON_ERROR),
+            );
+            // wait() settles like settleDetached(). The promise reaches itself
+            // weakly, so dropping it still frees the request.
+            $self = new \stdClass();
+            $promise = new Promise(function () use ($self): void {
+                $promise = $self->promise->get();
+                if ($promise !== null && isset($this->detached[$promise])) {
+                    $this->settleDetached($promise);
+                }
+            });
+            $self->promise = \WeakReference::create($promise);
+            $this->detached[$promise] = $request;
+
+            return $promise;
+        }
+
+        $options = $this->buildRequestOptions($method, $body, null);
+        // The answer may be settled long after it arrived, when the caller's
+        // work ends: curl must not count that time against the request.
+        // settleDetached() bounds the wait instead.
+        $options['timeout'] = 0;
+        $options['connect_timeout'] = 0;
+        // Guzzle hides the handle: the upload progress tells when a body is
+        // written.
+        $written = $body === null;
+        if (!$written) {
+            $options['progress'] = static function (
+                int $downloadTotal,
+                int $downloaded,
+                int $uploadTotal,
+                int $uploaded,
+            ) use (&$written): void {
+                $written = $written || ($uploadTotal > 0 && $uploaded >= $uploadTotal);
+            };
+        }
+
+        $promise = $this->detachedClient()->requestAsync($method, $this->resolveUrl($affinityKey) . $path, $options)
+            ->then(fn (ResponseInterface $response) => $this->parseResponse($response));
+        if ($this->detachedHandler === null) {
+            return $promise;
+        }
+        // cURL writes only while it is driven. One pass writes the whole
+        // request on a reused keep-alive connection; a new connection is
+        // driven until the body is written, as CurlTransport::start() does:
+        // the caller may settle only after its next job, and an ACK still
+        // unwritten when the process dies is lost. A request without a body
+        // (a pop sent ahead) is not tracked: losing it loses no work.
+        $deadline = hrtime(true) + self::DETACHED_WRITE_MILLIS * 1_000_000;
+        $pause = self::DETACHED_POLL_MIN_MICROS;
+        $this->detachedHandler->tick();
+        while (!$written && $promise->getState() === PromiseInterface::PENDING) {
+            if (hrtime(true) >= $deadline) {
+                $promise->cancel();
+                throw new TransportException(
+                    'Queen could not send a detached request within ' . self::DETACHED_WRITE_MILLIS . ' ms.',
+                    28,
+                );
+            }
+            usleep($pause);
+            $pause = min($pause * 2, self::DETACHED_POLL_MAX_MICROS);
+            $this->detachedHandler->tick();
+        }
+
+        return $promise;
+    }
+
+    /**
+     * The detached request's result, waiting at most $timeoutMillis (the
+     * client timeout by default).
+     *
+     * @throws \Throwable the transport or HTTP failure; a request still
+     *         unanswered at the deadline is cancelled.
+     */
+    public function settleDetached(PromiseInterface $promise, ?int $timeoutMillis = null): mixed
+    {
+        $timeoutMillis ??= $this->timeoutMillis;
+        if ($this->transport !== null && isset($this->detached[$promise])) {
+            $request = $this->detached[$promise];
+            unset($this->detached[$promise]);
+            try {
+                $answer = $this->transport->settle($request, $timeoutMillis);
+                $result = $this->parseAnswer($answer['status'], $answer['body'], $answer['retryAfter']);
+            } catch (\Throwable $failure) {
+                $promise->reject($failure);
+                throw $failure;
+            }
+            $promise->resolve($result);
+
+            return $result;
+        }
+        if ($this->detachedHandler !== null) {
+            $deadline = hrtime(true) + $timeoutMillis * 1_000_000;
+            $pause = self::DETACHED_POLL_MIN_MICROS;
+            while (true) {
+                $this->detachedHandler->tick();
+                if ($promise->getState() !== PromiseInterface::PENDING) {
+                    break;
+                }
+                if (hrtime(true) >= $deadline) {
+                    $promise->cancel();
+                    throw new \RuntimeException("Queen did not answer a detached request within {$timeoutMillis} ms.");
+                }
+                usleep($pause);
+                $pause = min($pause * 2, self::DETACHED_POLL_MAX_MICROS);
+            }
+        }
+
+        return $promise->wait();
+    }
+
+    private function detachedClient(): Client
+    {
+        // Tests drive every request through their own handler.
+        if ($this->customHandler) {
+            return $this->guzzle;
+        }
+        if ($this->detachedGuzzle === null) {
+            // A tick must never wait in select() for the answer: that would
+            // make a detached request synchronous again.
+            $this->detachedHandler = new CurlMultiHandler(['select_timeout' => 0]);
+            $this->detachedGuzzle = new Client(['handler' => HandlerStack::create($this->detachedHandler)]);
+        }
+
+        return $this->detachedGuzzle;
+    }
+
     /**
      * Wait for multiple promises to resolve concurrently.
      *
@@ -179,10 +376,9 @@ class HttpClient
         return $this->baseUrl;
     }
 
-    private function buildRequestOptions(string $method, ?array $body, ?int $requestTimeoutMillis): array
+    /** @return array<string, string|list<string>> */
+    private function requestHeaders(): array
     {
-        $effectiveTimeout = $requestTimeoutMillis ?? $this->timeoutMillis;
-
         $headers = ['Content-Type' => 'application/json'];
         foreach ($this->headers as $name => $value) {
             // An explicitly configured bearer token is authoritative. This is
@@ -197,8 +393,15 @@ class HttpClient
             $headers['Authorization'] = "Bearer {$this->bearerToken}";
         }
 
+        return $headers;
+    }
+
+    private function buildRequestOptions(string $method, ?array $body, ?int $requestTimeoutMillis): array
+    {
+        $effectiveTimeout = $requestTimeoutMillis ?? $this->timeoutMillis;
+
         $options = [
-            'headers' => $headers,
+            'headers' => $this->requestHeaders(),
             'timeout' => $effectiveTimeout / 1000,
             'connect_timeout' => 5,
             'http_errors' => false,
@@ -216,13 +419,18 @@ class HttpClient
 
     private function parseResponse(ResponseInterface $response): mixed
     {
-        $statusCode = $response->getStatusCode();
+        return $this->parseAnswer(
+            $response->getStatusCode(),
+            (string) $response->getBody(),
+            $response->getHeaderLine('Retry-After'),
+        );
+    }
 
+    private function parseAnswer(int $statusCode, string $responseBody, string $retryAfter): mixed
+    {
         if ($statusCode === 204) {
             return null;
         }
-
-        $responseBody = (string) $response->getBody();
 
         if ($statusCode >= 400) {
             $error = "HTTP {$statusCode}";
@@ -257,7 +465,7 @@ class HttpClient
             }
 
             $retryAfterSeconds = $statusCode === 429
-                ? $this->parseRetryAfter($response->getHeaderLine('Retry-After'))
+                ? $this->parseRetryAfter($retryAfter)
                 : null;
 
             // The message stays the code so existing string-free branching is
@@ -319,6 +527,18 @@ class HttpClient
 
     private function executeRequest(string $url, string $method, ?array $body = null, ?int $requestTimeoutMillis = null): mixed
     {
+        if ($this->transport !== null) {
+            $answer = $this->transport->request(
+                $method,
+                $url,
+                $this->requestHeaders(),
+                $body === null ? null : json_encode($body, JSON_THROW_ON_ERROR),
+                $requestTimeoutMillis ?? $this->timeoutMillis,
+            );
+
+            return $this->parseAnswer($answer['status'], $answer['body'], $answer['retryAfter']);
+        }
+
         $options = $this->buildRequestOptions($method, $body, $requestTimeoutMillis);
         $response = $this->guzzle->request($method, $url, $options);
         return $this->parseResponse($response);

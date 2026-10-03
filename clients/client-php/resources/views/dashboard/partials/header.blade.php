@@ -1,5 +1,5 @@
 <header class="topbar">
-    <a class="brand" href="{{ $refreshUrl }}" aria-label="Queen Supervisor dashboard">
+    <a class="brand" href="{{ $sectionUrls['overview'] }}" aria-label="Queen Supervisor dashboard">
         @include('queen::dashboard.partials.mark')
         <span>
             <span class="brand-name"><strong>Queen</strong> <span>Supervisor</span></span>
@@ -8,6 +8,8 @@
     </a>
 
     <div class="topbar-meta">
+        {{-- Enabled by dashboard.js; without scripts the <noscript> meta refresh applies. --}}
+        <button type="button" class="refresh-toggle" data-refresh-toggle aria-pressed="false" hidden>Pause auto-refresh</button>
         <span>
             Updated
             @if ($supervisor['updated_at'])

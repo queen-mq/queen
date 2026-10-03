@@ -3,6 +3,7 @@
 namespace Queen\Laravel\Supervisor;
 
 use InvalidArgumentException;
+use Queen\Laravel\Queue\QueenQueue;
 
 final class SupervisorConfiguration
 {
@@ -133,6 +134,22 @@ final class SupervisorConfiguration
             }
             if ($balance === 'simple' && $processes < count($queues)) {
                 throw new InvalidArgumentException("Queen supervisor [{$name}] processes must cover every queue when balance is simple.");
+            }
+            // Like Horizon's per-queue minProcesses: every queue of an auto
+            // pool keeps this many workers, even without backlog.
+            $minPerQueue = self::nonNegativeInteger(
+                $options['min_processes_per_queue'] ?? 0,
+                "supervisor [{$name}] min_processes_per_queue",
+            );
+            if ($minPerQueue > 0 && $balance !== 'auto') {
+                throw new InvalidArgumentException(
+                    "Queen supervisor [{$name}] min_processes_per_queue requires balance auto.",
+                );
+            }
+            if ($minPerQueue > intdiv($max, count($queues))) {
+                throw new InvalidArgumentException(
+                    "Queen supervisor [{$name}] min_processes_per_queue for every queue must fit max_processes [{$max}].",
+                );
             }
             $balanceMaxShift = self::positiveInteger(
                 $options['balance_max_shift'] ?? 1,
@@ -265,6 +282,13 @@ final class SupervisorConfiguration
                 'force' => self::boolean($options['force'] ?? false, "supervisor [{$name}] force"),
                 'quiet' => self::boolean($options['quiet'] ?? true, "supervisor [{$name}] quiet"),
             ];
+            if ($minPerQueue > 0) {
+                // Emitted only when set: engines reject unknown contract keys.
+                $resolved[$name]['min_processes_per_queue'] = $minPerQueue;
+            }
+            if (self::boolean($options['fast_scale_up'] ?? false, "supervisor [{$name}] fast_scale_up")) {
+                $resolved[$name]['fast_scale_up'] = true;
+            }
         }
 
         $totalMaxProcesses = array_sum(array_column($resolved, 'max_processes'));
@@ -282,6 +306,50 @@ final class SupervisorConfiguration
             $resolved,
             static fn (array $options): bool => $options['strategy'] === 'time' && $options['balance'] !== 'simple',
         ));
+        $remoteStatus = self::remoteStatusSettings($raw, $queen, $queueConnections);
+        if ($remoteStatus !== null) {
+            // One synchronous publish per endpoint may run inside a control
+            // loop iteration, so it belongs to the heartbeat budget.
+            $publishBudget = count($remoteStatus['connection']['urls']) * $httpTimeout;
+            if ($maximumControlLoopSeconds > PHP_INT_MAX - $publishBudget) {
+                throw new InvalidArgumentException('Queen supervisor remote status publish budget is too large.');
+            }
+            $maximumControlLoopSeconds += $publishBudget;
+        }
+        $coordination = self::coordinationSettings($raw, $queen, $queueConnections);
+        if ($coordination !== null) {
+            // Every control-loop iteration renews and lists the replicas of
+            // each autoscaling pool: one call per POOLS_PER_CALL pools, one
+            // attempt per endpoint.
+            $scopes = count(array_unique(array_map(
+                static fn (array $options): string => ReplicaCoordinator::scope(
+                    $connections[$options['connection']]['urls'],
+                    $options['consumer_group'],
+                    $options['queues'],
+                ),
+                array_filter($resolved, static fn (array $options): bool => $options['balance'] !== 'simple'),
+            )));
+            $calls = intdiv($scopes + ReplicaCoordinator::POOLS_PER_CALL - 1, ReplicaCoordinator::POOLS_PER_CALL);
+            $coordinationBudget = $calls * count($coordination['connection']['urls']) * $httpTimeout;
+            if ($maximumControlLoopSeconds > PHP_INT_MAX - $coordinationBudget) {
+                throw new InvalidArgumentException('Queen supervisor coordination budget is too large.');
+            }
+            $maximumControlLoopSeconds += $coordinationBudget;
+        }
+        $eventDriven = self::boolean($raw['event_driven'] ?? false, 'event_driven');
+        if ($eventDriven) {
+            // The PHP engine parks on one fetch per watched connection within
+            // a loop iteration, trying each endpoint: the wait plus one
+            // request per endpoint.
+            $watchBudget = 1 + array_sum(array_map(
+                static fn (array $connection): int => count($connection['urls']) * $httpTimeout,
+                $connections,
+            ));
+            if ($maximumControlLoopSeconds > PHP_INT_MAX - $watchBudget) {
+                throw new InvalidArgumentException('Queen supervisor event-driven budget is too large.');
+            }
+            $maximumControlLoopSeconds += $watchBudget;
+        }
         $controlLoopRemainder = ($totalMaxProcesses * self::PROCESS_START_BUDGET_SECONDS)
             + ($timeSupervisors * self::TELEMETRY_SCAN_BUDGET_SECONDS)
             + self::CONTROL_LOOP_MARGIN_SECONDS;
@@ -333,6 +401,36 @@ final class SupervisorConfiguration
             'connections' => $connections,
             'supervisors' => $resolved,
         ];
+        if ($remoteStatus !== null) {
+            // Emitted only when enabled: engines reject unknown contract keys,
+            // so a disabled feature keeps the document byte-identical.
+            $result['remote_status'] = self::remoteStatusTiming($remoteStatus, $pollInterval, $heartbeatTimeout);
+        }
+        if (self::boolean($raw['prefork'] ?? false, 'prefork')) {
+            // Emitted only when enabled: engines reject unknown contract keys.
+            $result['prefork'] = true;
+        }
+        if ($eventDriven) {
+            // Emitted only when enabled: the partition stripes the Laravel
+            // driver pushes to on each connection, which the engines watch.
+            $stripes = [];
+            foreach (array_keys($connections) as $connection) {
+                $stripes[$connection] = self::stripes(
+                    (string) $connection,
+                    self::connectionConfig((string) $connection, $queen, $queueConnections, $raw),
+                );
+            }
+            $result['event_driven'] = ['stripes' => $stripes];
+        }
+        if ($coordination !== null) {
+            // A live replica renews its key within every control-loop
+            // iteration; a crashed one stops counting when it expires, so the
+            // TTL is the loop bound, not a longer explicit heartbeat_timeout.
+            $result['coordination'] = [
+                ...$coordination,
+                'ttl' => min($heartbeatTimeout, max(15, $maximumControlLoopSeconds + 1)),
+            ];
+        }
         $encoded = json_encode($result, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         if (strlen($encoded) + 1 > self::MAX_CONFIG_BYTES) {
             throw new InvalidArgumentException(
@@ -393,6 +491,146 @@ final class SupervisorConfiguration
         return $stateDirectory;
     }
 
+    /**
+     * Where the supervisor publishes its status document, or null when remote
+     * status is disabled. The dashboard reads the same key through this
+     * method, so publisher and reader cannot drift apart.
+     *
+     * The connection is resolved without read_bearer_token: publishing is a
+     * key/value write, which a read-only credential cannot perform.
+     *
+     * @param array<string, mixed> $raw the `queen.supervisor` configuration
+     * @param array<string, mixed> $queen the `queen` configuration
+     * @param array<string, mixed> $queueConnections the `queue.connections` configuration
+     * @return array{connection: array{url: string, urls: list<string>, bearer_token: ?string, headers: array<string, string>}, namespace: string, key: string, interval: mixed, ttl: mixed}|null
+     */
+    public static function remoteStatusSettings(array $raw, array $queen, array $queueConnections): ?array
+    {
+        $settings = $raw['remote_status'] ?? null;
+        if ($settings === null) {
+            return null;
+        }
+        if (!is_array($settings)) {
+            throw new InvalidArgumentException('Queen supervisor remote_status must be an array.');
+        }
+        if (!self::boolean($settings['enabled'] ?? false, 'remote_status.enabled')) {
+            return null;
+        }
+
+        $connection = $settings['connection'] ?? 'queen';
+        $namespace = $settings['namespace'] ?? 'queen-supervisor';
+        $key = $settings['key'] ?? null;
+        foreach (['connection' => $connection, 'namespace' => $namespace, 'key' => $key] as $label => $value) {
+            if (!is_string($value)) {
+                throw new InvalidArgumentException(
+                    "Queen supervisor remote_status.{$label} must be a string when remote status is enabled.",
+                );
+            }
+            self::identifier($value, "supervisor remote_status.{$label}");
+        }
+
+        return [
+            'connection' => self::readConnection(self::connectionConfig($connection, $queen, $queueConnections, [])),
+            'namespace' => $namespace,
+            'key' => $key,
+            'interval' => $settings['interval'] ?? null,
+            'ttl' => $settings['ttl'] ?? null,
+        ];
+    }
+
+    /**
+     * Where replicas of the autoscaling pools register, or null when
+     * coordination is disabled. Registering is a key/value write, so the
+     * connection is resolved without read_bearer_token.
+     *
+     * @param array<string, mixed> $raw the `queen.supervisor` configuration
+     * @param array<string, mixed> $queen the `queen` configuration
+     * @param array<string, mixed> $queueConnections the `queue.connections` configuration
+     * @return array{connection: array{url: string, urls: list<string>, bearer_token: ?string, headers: array<string, string>}, namespace: string}|null
+     */
+    public static function coordinationSettings(array $raw, array $queen, array $queueConnections): ?array
+    {
+        $settings = $raw['coordination'] ?? null;
+        if ($settings === null) {
+            return null;
+        }
+        if (!is_array($settings)) {
+            throw new InvalidArgumentException('Queen supervisor coordination must be an array.');
+        }
+        if (!self::boolean($settings['enabled'] ?? false, 'coordination.enabled')) {
+            return null;
+        }
+
+        $connection = $settings['connection'] ?? 'queen';
+        $namespace = $settings['namespace'] ?? 'queen-supervisor';
+        foreach (['connection' => $connection, 'namespace' => $namespace] as $label => $value) {
+            if (!is_string($value)) {
+                throw new InvalidArgumentException(
+                    "Queen supervisor coordination.{$label} must be a string when coordination is enabled.",
+                );
+            }
+            self::identifier($value, "supervisor coordination.{$label}");
+        }
+
+        return [
+            'connection' => self::readConnection(self::connectionConfig($connection, $queen, $queueConnections, [])),
+            'namespace' => $namespace,
+        ];
+    }
+
+    /**
+     * The endpoints and read credential the dashboard uses for one of the
+     * supervisor's connections: read_bearer_token wins over the connection's
+     * token, as it does for the supervisor's depth sampling.
+     *
+     * @param array<string, mixed> $raw the `queen.supervisor` configuration
+     * @param array<string, mixed> $queen the `queen` configuration
+     * @param array<string, mixed> $queueConnections the `queue.connections` configuration
+     * @return array{url: string, urls: list<string>, bearer_token: ?string, headers: array<string, string>}
+     */
+    public static function readOnlyConnection(string $name, array $raw, array $queen, array $queueConnections): array
+    {
+        self::identifier($name, 'dashboard connection');
+
+        return self::readConnection(self::connectionConfig($name, $queen, $queueConnections, $raw));
+    }
+
+    /**
+     * @param array{connection: array<string, mixed>, namespace: string, key: string, interval: mixed, ttl: mixed} $settings
+     * @return array{connection: array<string, mixed>, namespace: string, key: string, interval: int, ttl: int}
+     */
+    private static function remoteStatusTiming(array $settings, int $pollInterval, int $heartbeatTimeout): array
+    {
+        $interval = $settings['interval'] === null || $settings['interval'] === ''
+            ? $pollInterval
+            : self::positiveDuration($settings['interval'], 'remote_status.interval');
+        if ($interval >= $heartbeatTimeout) {
+            throw new InvalidArgumentException(
+                "Queen supervisor remote_status.interval [{$interval}] must be shorter than heartbeat_timeout "
+                . "[{$heartbeatTimeout}], or every published document would already look stale.",
+            );
+        }
+
+        $ttl = $settings['ttl'] === null || $settings['ttl'] === ''
+            ? min(86400, max(300, 2 * $heartbeatTimeout))
+            : self::positiveInteger($settings['ttl'], 'remote_status.ttl');
+        if ($ttl < $heartbeatTimeout || $ttl > 86400) {
+            throw new InvalidArgumentException(
+                "Queen supervisor remote_status.ttl [{$ttl}] must be at least heartbeat_timeout "
+                . "[{$heartbeatTimeout}] and at most 86400 seconds, so a stopped supervisor shows as stale "
+                . 'before its document expires.',
+            );
+        }
+
+        return [
+            'connection' => $settings['connection'],
+            'namespace' => $settings['namespace'],
+            'key' => $settings['key'],
+            'interval' => $interval,
+            'ttl' => $ttl,
+        ];
+    }
+
     private static function connectionConfig(string $name, array $queen, array $queueConnections, array $supervisor): array
     {
         if ($name !== 'queen' && !array_key_exists($name, $queueConnections)) {
@@ -420,6 +658,31 @@ final class SupervisorConfiguration
         return $resolved;
     }
 
+    /**
+     * The stripes QueenConnector pushes to: `<partition_prefix>-0000` to
+     * `<partition_prefix>-<partitions - 1>`.
+     *
+     * @return array{prefix: string, count: int}
+     */
+    private static function stripes(string $name, array $connection): array
+    {
+        $count = $connection['partitions'] ?? 64;
+        if (is_string($count) && ctype_digit($count)) {
+            $count = (int) $count;
+        }
+        if (!is_int($count) || $count < 1 || $count > QueenQueue::MAX_PARTITIONS) {
+            throw new InvalidArgumentException(
+                "Queen connection [{$name}] partitions must be 1 to " . QueenQueue::MAX_PARTITIONS . ' for event_driven.',
+            );
+        }
+        $prefix = $connection['partition_prefix'] ?? 'laravel';
+        if (!is_string($prefix) || trim($prefix) === '' || preg_match('/[\x00-\x1F\x7F]/', $prefix) === 1) {
+            throw new InvalidArgumentException("Queen connection [{$name}] partition_prefix must be a non-empty string without control characters.");
+        }
+
+        return ['prefix' => $prefix, 'count' => $count];
+    }
+
     private static function readConnection(array $connection): array
     {
         $urls = $connection['urls'] ?? null;
@@ -440,7 +703,10 @@ final class SupervisorConfiguration
                 || isset($parts['pass'])
                 || isset($parts['query'])
                 || isset($parts['fragment'])) {
-                throw new InvalidArgumentException("Invalid Queen supervisor URL [{$url}].");
+                throw new InvalidArgumentException(
+                    'Invalid Queen supervisor URL [' . self::redactedUrl($url) . ']: use http or https with a host,'
+                    . ' and no user info, query or fragment.',
+                );
             }
         }
         unset($url);
@@ -477,6 +743,20 @@ final class SupervisorConfiguration
             'bearer_token' => $bearerToken,
             'headers' => $headers,
         ];
+    }
+
+    /**
+     * Scheme, host and port of a refused URL. The error reaches logs and error
+     * pages, and the user info or query is often why the URL was refused.
+     */
+    private static function redactedUrl(string $url): string
+    {
+        $parts = parse_url($url);
+        if (!is_array($parts) || !is_string($parts['host'] ?? null) || $parts['host'] === '') {
+            return 'unreadable URL';
+        }
+
+        return ($parts['scheme'] ?? '') . '://' . $parts['host'] . (isset($parts['port']) ? ':' . $parts['port'] : '');
     }
 
     private static function connectionBackendCount(array $connection): int

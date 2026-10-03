@@ -51,7 +51,26 @@ work as `effectivePending × observed runtime` and targets clearance within
 `target_clear_seconds`. Workers publish best-effort duration telemetry in the
 private state directory; `default_runtime_seconds` is used until samples exist.
 Both strategies remain bounded by `min_processes`, `max_processes`,
-`balance_cooldown` and `balance_max_shift`.
+`balance_cooldown` and `balance_max_shift`. In `auto` mode,
+`min_processes_per_queue` keeps that many workers on every queue even without
+backlog (Horizon's per-queue `minProcesses`), and `fast_scale_up` lets a
+reconcile close half of the gap to a higher target instead of one
+`balance_max_shift` step; scaling down keeps its step. With `prefork` enabled
+(`queen.supervisor.prefork`), workers are forked from one fork server
+(`php artisan queen:fork-server`) that booted Laravel once, instead of each
+booting it: the server receives fork requests on stdin and reports pids and
+exit statuses on fd 3, every worker leads its own session, and the server,
+started with SIGTERM as its parent-death signal, SIGKILLs its workers when the
+master dies. A failed fork makes the master spawn from then on. The code is in
+`src/prefork.rs` and mirrors the Laravel package's `Prefork` classes.
+With `event_driven` (`queen.supervisor.event_driven`), one thread per
+connection holds a read-only long poll (`POST /api/v1/fetch`: no lease, no
+consumer cursor) over the Laravel partition stripes of every autoscaling pool.
+When a watched queue grows, that pool reads its depth at once and may grow
+inside `balance_cooldown`, then again every second while it is below its
+target; scaling down keeps its cooldown and `scale_down_delay`. A broker
+without the endpoint, or a token that may not consume, turns the watcher off
+and polling continues. The code is in `src/watch.rs`.
 Startup and recovery establish `processes` in `simple` mode, or at least
 `min_processes` otherwise, without spreading baseline capacity across several
 cooldown windows. `balance_max_shift` limits subsequent elastic changes.
@@ -97,6 +116,11 @@ another configured endpoint. Both poll queues in waves of at most 16 concurrent
 requests. Multiple endpoints do not make the supervisor active-active: the
 single-master rule below still applies.
 
+Over HTTPS the Rust engine trusts what curl, and so the PHP workers, trust:
+the platform's certificate store, or `SSL_CERT_FILE` and `SSL_CERT_DIR` when
+set, besides its bundled Mozilla roots. A broker behind a private CA needs no
+other setting.
+
 ## Local control
 
 The engine holding `state_directory/supervisor.lock` publishes status and reads
@@ -134,18 +158,39 @@ a replaced supervisor is discarded. Status includes both an ISO-8601 UTC
 `updated_at` value and its `updated_at_epoch` counterpart, plus the number of
 workers currently draining.
 
+When `queen.supervisor.remote_status` is enabled, the engine also copies each
+status document to the broker's key/value store, so a Laravel dashboard served
+by other hosts (web pods beside a worker pod) can show it read-only. Both
+engines write the same `queen.supervisor.remote-status/v1` format into a slot
+named by the instance id: `<key>/<instance_id>/head` plus base64
+`<key>/<instance_id>/chunk/NNNN` slices, all in one `POST /api/v1/kv` batch, so
+supervisors sharing a key never overwrite each other and the document never
+depends on the 64 KiB value ceiling. Status also records the host name. Publishing is throttled
+to `interval`, forced on every state change (pause, terminate, stop), tries each
+broker endpoint once, and is budgeted into the heartbeat. It is best effort: a
+failure is reported once per failure streak and never stops supervision. The
+local `status.json` stays authoritative for control commands.
+
 ## Production topology
 
-> **Run exactly one supervisor replica for an application/consumer group.**
+> **Run exactly one supervisor replica for an application/consumer group,
+> unless every replica has coordination enabled.**
 
 The lock is local filesystem exclusion, not distributed leadership. Two
 supervisors on different hosts read the same global backlog and can each scale
-to the configured maximum. Queen does not yet expose a fenced leader lease for
-this control plane, and its expiring KV keys are not a safe substitute.
+to the configured maximum. With `queen.supervisor.coordination` enabled, each
+replica renews `coordination/v1/<scope>/<instance_id>` in the broker's
+key/value store on every poll (TTL: the heartbeat timeout), lists the replicas
+of the same scope (consumer group plus queue set) in the same call, and runs an
+even share of every autoscaling pool's target; `min_processes` and
+`max_processes` apply per replica, fixed pools are not split, and a replica
+that pauses or stops deletes its keys. This is capacity sharing, not leader
+election: a broker outage makes a replica size its pools alone once its last
+view is one heartbeat timeout old. The PHP engine uses the same keys and rule.
 
 Worker processes may be numerous; the restriction applies to the supervising
-master. In Kubernetes use one replica, no HPA and a `Recreate` deployment
-strategy. Mounting `state_directory` from a `ReadWriteOncePod` volume adds
+master. Without coordination, in Kubernetes use one replica, no HPA and a
+`Recreate` deployment strategy; with it, scale the Deployment or use an HPA. Mounting `state_directory` from a `ReadWriteOncePod` volume adds
 cluster-level single-pod exclusion, but is still defense in depth rather than a
 fenced Queen leadership lease. With systemd, run one foreground master with
 `Restart=always`; this also makes `queen:supervisor terminate` reload Laravel

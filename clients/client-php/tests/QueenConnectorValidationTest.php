@@ -52,7 +52,7 @@ class QueenConnectorValidationTest extends TestCase
             [['block_for' => -1], 'Queen Laravel block_for'],
             [['block_for' => '1.5'], 'Queen Laravel block_for'],
             [['partitions' => 0], 'Queen Laravel partitions'],
-            [['partitions' => 65], 'Queen Laravel partitions'],
+            [['partitions' => 1025], 'Queen Laravel partitions'],
             [['partitions' => 'many'], 'Queen Laravel partitions'],
             [['prefetch' => 0], 'Queen Laravel prefetch'],
             [['prefetch' => 1001], 'Queen Laravel prefetch'],
@@ -203,34 +203,55 @@ class QueenConnectorValidationTest extends TestCase
 
     public function testShutdownTailReleaseUsesOneBoundedNonFailoverAttempt(): void
     {
-        $handler = new PlanHandler([[
-            'status' => 200,
-            'json' => [['success' => true, 'leaseReleased' => true]],
-        ]]);
+        $messages = [];
+        foreach ([1, 2] as $number) {
+            $messages[] = [
+                'id' => "message-{$number}",
+                'transactionId' => "transaction-{$number}",
+                'partitionId' => 'partition-1',
+                'partition' => 'laravel-0001',
+                'leaseId' => 'lease-1',
+                'deliveryAttempt' => 1,
+                'data' => ['uuid' => "job-{$number}", 'job' => 'Handler@handle', 'data' => []],
+            ];
+        }
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => ['success' => true, 'messages' => $messages]],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
+            // An ambiguous answer is never retried: lease expiry is the fallback.
+            ['status' => 503, 'json' => ['error' => 'unavailable']],
+        ]);
         $queue = (new QueenConnector())->connect(array_replace($this->validConfig(), [
             'handler' => HandlerStack::create($handler),
             'timeout' => 30_000,
             'retry_attempts' => 9,
+            'prefetch' => 2,
         ]));
-        $releaser = (new \ReflectionProperty($queue, 'shutdownTailReleaser'))->getValue($queue);
-        $message = [
-            'transactionId' => 'transaction-1',
-            'partitionId' => 'partition-1',
-            'leaseId' => 'lease-1',
-            '_status' => 'retry',
-        ];
+        $queue->setContainer(new \Illuminate\Container\Container());
+        $queue->setConnectionName('queen');
 
-        $result = $releaser([$message], 'workers', 'emails:Default:workers');
+        $queue->pop('emails')->delete();
+        $logged = $this->capturingErrorLog(static fn () => $queue->shutdown());
 
-        $this->assertTrue($result['success']);
-        $this->assertCount(1, $handler->requests);
-        $this->assertSame(2, $handler->options[0]['timeout']);
-        $this->assertSame('retry', json_decode(
-            (string) $handler->requests[0]->getBody(),
-            true,
-            512,
-            JSON_THROW_ON_ERROR,
-        )['acknowledgments'][0]['status']);
+        $this->assertCount(3, $handler->requests);
+        $this->assertSame('/api/v1/transaction', $handler->requests[2]->getUri()->getPath());
+        $this->assertSame(2, $handler->options[2]['timeout']);
+        $this->assertStringContainsString('could not release its prefetched tail', $logged);
+    }
+
+    private function capturingErrorLog(\Closure $operation): string
+    {
+        $log = tempnam(sys_get_temp_dir(), 'queen-error-log-');
+        $previous = ini_set('error_log', $log);
+        try {
+            $operation();
+        } finally {
+            ini_set('error_log', $previous === false ? '' : $previous);
+        }
+        $logged = (string) file_get_contents($log);
+        @unlink($log);
+
+        return $logged;
     }
 
     public function testEmptyOptionalLeaseRenewalIntervalUsesTheRetryAfterDefault(): void
@@ -241,6 +262,34 @@ class QueenConnectorValidationTest extends TestCase
         ]));
 
         $this->assertInstanceOf(\Queen\Laravel\Queue\QueenQueue::class, $queue);
+    }
+
+    public function testMoreStripesThanOnePopChecksOutAreSweptSixtyFourAtATime(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => ['success' => true, 'messages' => []]],
+            ['status' => 201, 'json' => [['status' => 'queued', 'transactionId' => 'pushed']]],
+        ]);
+        $queue = (new QueenConnector())->connect(array_replace($this->validConfig(), [
+            'handler' => HandlerStack::create($handler),
+            'partitions' => 256,
+        ]));
+        // A job whose stripe lies past the first 64.
+        $uuid = null;
+        for ($candidate = 0; $uuid === null; ++$candidate) {
+            if (hexdec(substr(hash('sha256', "job-{$candidate}"), 0, 8)) % 256 >= 64) {
+                $uuid = "job-{$candidate}";
+            }
+        }
+
+        $this->assertNull($queue->pop());
+        $queue->pushRaw(json_encode(['uuid' => $uuid, 'job' => 'Handler@handle', 'data' => []], JSON_THROW_ON_ERROR));
+
+        parse_str($handler->requests[0]->getUri()->getQuery(), $query);
+        $this->assertSame('64', $query['partitions'], 'a pop checks out at most 64 partitions');
+        $push = json_decode((string) $handler->requests[1]->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        $slot = hexdec(substr(hash('sha256', $uuid), 0, 8)) % 256;
+        $this->assertSame(sprintf('laravel-%04d', $slot), $push['items'][0]['partition']);
     }
 
     private function validConfig(): array

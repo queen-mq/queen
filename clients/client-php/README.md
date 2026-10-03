@@ -31,6 +31,11 @@ Median proportional set size of the orchestrator alone, from the
 number, not a whole-stack claim: Queen still runs a broker. The PHP reference master measures
 35.1 MiB.
 
+With 8 workers and 10 ms jobs, on a broker and a Redis that both fsync every write, Queen completed
+643 jobs/s against Horizon's 417, and its master and workers used 70 MiB against 310 MiB. One Docker
+Desktop host, diagnostic; every lane and its limits are on the
+[benchmark page](https://queenmq.com/benchmarks/laravel-supervisors#horizon-against-queen-on-raft-2026-10-01).
+
 ---
 
 ## Why move off Horizon
@@ -44,14 +49,28 @@ fsynced — on a three- or five-node cluster, once a majority of the nodes have 
 and one data directory per node, and no external database to run next to it.
 
 **A control plane that is not a Laravel application.** The Rust supervisor loads Artisan once to
-resolve configuration, then leaves only Rust and your ordinary `queue:work` processes resident.
+resolve configuration, then leaves only Rust and your ordinary `queue:work` processes resident:
+2.9 MiB against Horizon's 65 MiB in the qualification campaign.
 
-**Stay on Horizon** if you need job tags, silencing, retained throughput graphs, long-wait
-notifications, or supervisor masters on more than one host. Queen does not have those yet. The
-honest, itemized comparison is [Queen or Horizon](https://queenmq.com/use/laravel/queen-vs-horizon).
+**Smaller workers.** With prefork, Laravel boots once and every worker is forked from it, sharing the
+framework and the opcache: 38 to 75% less worker memory in our measurements. The Rust master also
+renews the workers' leases itself, so prefetching workers need no helper process.
+
+**More jobs per worker.** The acknowledgement of a job and the pop for the next batch can travel
+while a job runs, so a worker does not wait for the broker's fsync between jobs.
+
+**Built for Kubernetes.** Coordinated replicas split every pool's target, and a Prometheus endpoint
+gives HPA or KEDA the backlog to scale pods on.
+
+**Metrics without a snapshot command.** Per-job-class throughput and runtime, monitored tags and
+long-wait alerts are recorded by every worker into the broker, across every host.
+
+**Stay on Horizon** if you need silenced jobs, job lists, batches, Slack or SMS notification routes,
+or per-supervisor controls. The honest, itemized comparison is
+[Queen or Horizon](https://queenmq.com/use/laravel/queen-vs-horizon).
 
 > **Preview.** The queue driver is usable on its own. The supervisor and dashboard are preview
-> features, Unix-only, and one master per application and consumer group. Read
+> features and Unix-only. Read
 > [Production checks](https://queenmq.com/use/laravel/supervisors#production-checks) before
 > replacing Horizon.
 
@@ -116,9 +135,13 @@ Same concepts, snake_case names, independent implementations.
 | `balance: simple` | `balance: simple` | fixed `processes`, evenly spread |
 | `balance: false` | `balance: off` | ordered queue list on every worker |
 | `autoScalingStrategy` | `strategy` | `size` or `time` |
-| `minProcesses` / `maxProcesses` | `min_processes` / `max_processes` | |
-| `balanceMaxShift` | `balance_max_shift` | |
-| `balanceCooldown` | `balance_cooldown` | |
+| `minProcesses` | `min_processes_per_queue` | Horizon's minimum is per queue; `min_processes` bounds the pool |
+| `maxProcesses` | `max_processes` | |
+| `balanceMaxShift` | `balance_max_shift` | add `fast_scale_up` to close half the gap per cycle |
+| `waits` | `waits` | schedule `queen:check-waits` every minute |
+| `tags()`, monitored tags | same `tags()`, Tags page | |
+| `horizon:snapshot` metrics | `job_metrics` | live, nothing to schedule |
+| `balanceCooldown` | `balance_cooldown` | add `event_driven` to grow as soon as jobs arrive |
 | `maxJobs` / `maxTime` | `max_jobs` / `max_time` | worker recycle limits |
 | `timeout` `tries` `memory` `sleep` `rest` `force` | same names | |
 | `nice` | — | keep OS priority outside Queen |
@@ -196,15 +219,19 @@ starting point for a migration.
 | `QUEEN_BLOCK_FOR` | `0` | long-poll seconds; `0` polls without blocking |
 | `QUEEN_BULK_BATCH` | `100` | bound for `Queue::bulk()`, not for `dispatch()` |
 | `QUEEN_LEASE_RENEWAL` | `false` | keeps the lease alive under a running job |
+| `QUEEN_ACK_ASYNC` | `false` | sends each ACK without waiting; the answer is read after the next job |
+| `QUEEN_POP_AHEAD` | `false` | pops the next batch while the last job of a full batch runs |
 
 Raising prefetch trades round trips for a wider redelivery window: a crash can redeliver the
 unflushed batch, and a paused worker can sit on prefetched jobs until the lease expires. So the
 connector **rejects `QUEEN_PREFETCH > 1` unless `QUEEN_LEASE_RENEWAL=true`**, however the worker was
-started.
+started. When a worker crashes holding a batch, its lease renewer (the Rust master or the PHP
+helper) hands back the jobs it had not started, without an extra attempt; a lost node still charges
+one, so keep `tries` at 2 or more with `QUEEN_PREFETCH > 1` or `QUEEN_POP_AHEAD=true`.
 
 `QUEEN_AUTOPILOT` is off here even though the SDK client enables pop autopilot by default: the
-queue driver keeps sending the fixed `QUEEN_PARTITIONS` width, so an upgrade changes nothing on its
-own. Turn it on to let the broker size the sweep width per `(queue, group)` from ready-partition
+queue driver keeps sending the fixed `QUEEN_PARTITIONS` width, at most 64, so an upgrade changes
+nothing on its own. Turn it on to let the broker size the sweep width per `(queue, group)` from ready-partition
 pressure and ready age. The pop batch stays pinned to `QUEEN_PREFETCH`. It needs a broker on 1.2 or
 later; an older one ignores the parameter and applies its own default width.
 
@@ -215,10 +242,22 @@ QUEEN_LEASE_RENEWAL=true
 QUEEN_LEASE_RENEWAL_INTERVAL=30
 ```
 
-Renewal starts one small PHP helper per worker, on Unix CLI PHP, that renews the lease under the
-active job and fences the worker if it cannot. Delivery stays at least once either way — handlers
-still need idempotency keys. Budget one extra process per renewed worker.
+Renewal keeps the lease alive under the active job and fences the worker if it cannot. Under the
+Rust supervisor on Linux the master renews the leases of all its workers; elsewhere each worker
+starts one small PHP helper, on Unix CLI PHP. Delivery stays at least once either way — handlers
+still need idempotency keys. `process_limit` still counts a slot for the helper, which a worker
+starts when the master refuses it.
 [The safe delivery profile](https://queenmq.com/use/laravel/#start-with-the-safe-delivery-profile).
+
+Requests go over the client's own kept-alive cURL handles, not Guzzle: a pop and an ACK cost the
+client about 60% less CPU, and with 10 ms jobs a whole worker used 13 to 25% less.
+`QUEEN_SDK_HTTP_TRANSPORT=guzzle` switches back; an HTTP proxy variable does so too.
+
+`QUEEN_ACK_ASYNC` and `QUEEN_POP_AHEAD` take the broker's round trip off the worker's path. A failed
+asynchronous ACK is reported one job later and the job is delivered again; `QUEEN_POP_AHEAD` needs
+`QUEEN_LEASE_RENEWAL`, and `QUEEN_ACK_ASYNC` needs `QUEEN_ACK_BATCH=1`. With both, 8 workers on the
+Raft broker went from 453 to 643 jobs/s of 10 ms jobs.
+[Asynchronous acknowledgements](https://queenmq.com/use/laravel/#asynchronous-acknowledgements).
 
 Keep `prefetch=1` for long jobs, strict per-job acknowledgement, or comma-separated priority queues.
 
@@ -252,6 +291,8 @@ vendor/bin/queen-supervisor --php php --artisan artisan
             'strategy'              => 'time',   // time | size
             'min_processes'         => 1,
             'max_processes'         => 20,
+            'min_processes_per_queue' => 1,     // every queue stays warm
+            'fast_scale_up'         => true,     // close half the gap per cycle
             'target_clear_seconds'  => 60,
             'balance_cooldown'      => 3,
             'balance_max_shift'     => 2,
@@ -278,6 +319,10 @@ Each pool reads these; the defaults are the ones shipped in `config/queen.php`.
 | `QUEEN_SUPERVISOR_DEFAULT_RUNTIME_SECONDS` | `1` | assumed runtime until samples exist |
 | `QUEEN_SUPERVISOR_BALANCE_COOLDOWN` | `3` | seconds between scaling decisions |
 | `QUEEN_SUPERVISOR_BALANCE_MAX_SHIFT` | `1` | processes added or removed per decision |
+| `QUEEN_SUPERVISOR_MIN_PROCESSES_PER_QUEUE` | `0` | `auto` only: workers every queue keeps without backlog |
+| `QUEEN_SUPERVISOR_FAST_SCALE_UP` | `false` | close half of the gap to the target per decision |
+| `QUEEN_SUPERVISOR_EVENT_DRIVEN` | `false` | wake on new jobs through a read-only long poll instead of the next poll |
+| `QUEEN_SUPERVISOR_LEASE_SERVICE` | `true` | Rust engine on Linux, master's environment: renew workers' leases in the master; `false` keeps one helper per worker |
 | `QUEEN_SUPERVISOR_SCALE_DOWN_DELAY` | `10` | idle seconds before shrinking |
 | `QUEEN_SUPERVISOR_RESTART_BACKOFF` | `1` | first restart delay |
 | `QUEEN_SUPERVISOR_RESTART_BACKOFF_MAX` | `30` | backoff ceiling |
@@ -293,10 +338,25 @@ php artisan queen:supervisor terminate
 php artisan queen:supervisor-config --pretty  # resolved config, credentials redacted
 ```
 
-> **One master per application and consumer group.** The state lock stops a second local owner, but
-> there is no distributed leader lease yet: two replicas on two hosts both see the whole backlog and
-> both scale to maximum. In Kubernetes use one replica with a `Recreate` strategy. Workers can be as
-> many as you like — the restriction is on the supervising master.
+> **Several replicas need coordination.** Each master sizes its pools from the whole backlog, so two
+> uncoordinated replicas on two hosts both scale to maximum. Set `QUEEN_SUPERVISOR_COORDINATION=true`
+> on every replica: they register in the broker's key/value store and each runs an even share of
+> every autoscaling pool's target, with `min_processes` and `max_processes` applied per replica.
+> Replicas coordinate when their broker, consumer group and queue set match; fixed pools are not
+> split. Without coordination, run one replica with a `Recreate` strategy.
+
+**Prefork workers.** `QUEEN_SUPERVISOR_PREFORK=true` boots Laravel once in a fork server and forks
+every worker from it, with the same arguments and environment a spawned worker gets. The server
+opens no connection before forking, purges database and Redis connections in each child, and
+SIGKILLs its workers if the master dies. A failed fork falls back to spawning. Needs `ext-pcntl`
+and `ext-posix`. Enable `opcache.enable_cli` with prefork, where the fork server's opcache is shared
+by every worker; without prefork, each worker keeps its own copy and opcache costs memory.
+
+**Monitoring.** The dashboard's Jobs and Tags pages, `queen:check-waits` with the
+`LongWaitDetected` event and mail, and a Prometheus endpoint at `/queen/metrics`
+(`QUEEN_METRICS_ENABLED`, `QUEEN_METRICS_TOKEN`) are described in
+[Monitoring and alerts](https://queenmq.com/use/laravel/monitoring).
+> [Several replicas](https://queenmq.com/use/laravel/supervisors#several-replicas).
 
 Requires Unix with `pcntl` and `posix`. Windows is rejected explicitly rather than left to fail;
 WSL runs the Linux artifact. Installer verification, air-gapped installs, Sigstore pinning and the
@@ -306,11 +366,30 @@ endpoint-failover read token are covered in
 ### Dashboard
 
 A server-rendered local panel at `/queen`, disabled by default, showing supervisor health, pools,
-restart state, sampled depth and bounded failed-job metadata.
+restart state, sampled depth and failed-job metadata. Each section is its own page (`/queen`,
+`/queen/workload`, `/queen/supervisors`, `/queen/failed-jobs`, `/queen/configuration`). Failed jobs
+are paged newest first with a keyset cursor, never an `OFFSET` or `COUNT(*)`, so a table with
+millions of rows costs the same per page. The Workload page charts jobs completed, failed and
+dispatched over the last hour, 6 hours, day or week from the broker's own per-queue counters
+(`GET /api/v1/analytics/queue-ops`), so it adds no write to the job path.
 
 ```dotenv
 QUEEN_DASHBOARD_ENABLED=true
 ```
+
+The panel refreshes in place with a small packaged script (header and main region only, with a
+**Pause auto-refresh** control) and falls back to a `<noscript>` meta refresh without JavaScript.
+If the web server answers every `*.css` or `*.js` from `public/` without reaching PHP (a common
+static-asset rule), publish the assets. The panel uses each copy only while it matches the package,
+and falls back to its own routes otherwise:
+
+```bash
+php artisan vendor:publish --tag=queen-assets --force
+```
+
+Each failed job opens in a drawer (or as a page at `/queen/failed-jobs/{id}`) that shows why it
+failed: the job class, maximum tries, the exception message and the stack trace (paths relative to
+the application root), each with a Copy button, but never the payload.
 
 In production it is **deny-by-default even when enabled** until the application defines the ability:
 
@@ -319,9 +398,40 @@ Gate::define('viewQueenDashboard', fn ($user) => $user?->canOperateQueues() === 
 ```
 
 Controls are POST-only, CSRF-protected and carry the exact supervisor `instance_id`, so a stale page
-cannot command a replaced master. The panel reads one local state directory; it is not a multi-host
-aggregator. Global backlog analytics and DLQ operations live in the Queen broker dashboard.
+cannot command a replaced master. Without remote status, the panel reads one local state directory.
+Global backlog analytics and DLQ operations live in the Queen broker dashboard.
 [Dashboard reference](https://queenmq.com/use/laravel/dashboard).
+
+**Supervisor on another host.** When the dashboard is served by other processes than the supervisor
+— Kubernetes web pods and a separate worker pod, for instance — either engine can also publish its
+status to the broker's key/value store:
+
+```dotenv
+QUEEN_SUPERVISOR_REMOTE_STATUS=true
+QUEEN_SUPERVISOR_REMOTE_STATUS_KEY=orders-production   # one per application and environment
+```
+
+Set both on every supervisor host and on the web hosts. Each supervisor instance publishes into its
+own slot under the key, so the dashboard lists every host or pod: a live local supervisor first,
+then each published one with its host name, and totals over the live ones. Published instances are
+**read-only**: pause, continue and terminate stay with `php artisan queen:supervisor` on their own
+host. Liveness comes from the published heartbeat alone. When two running masters autoscale the
+same queue and consumer group without coordinating, the dashboard warns. The
+document is split across `<key>/<instance_id>/head` and `<key>/<instance_id>/chunk/NNNN` in the
+`queen-supervisor` namespace, written in one transaction, so it never depends on the key/value value
+ceiling. A `<key>/head` document from an earlier release is still read. Publishing is best effort
+and budgeted into the heartbeat; a broker outage shows the supervisor as stale and never stops
+supervision. The Rust engine publishes the same format from supervisor 0.3.0 (this package pins
+0.6.0); 0.2.0 wrote the single `<key>/head` slot.
+
+| Variable | Default | |
+| --- | --- | --- |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS` | `false` | publish the status document |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_KEY` | — | required when enabled; shared by every supervisor of the application |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_CONNECTION` | `queen` | Queen connection whose broker and credentials are used |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_NAMESPACE` | `queen-supervisor` | key/value namespace |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_INTERVAL` | `poll_interval` | seconds between publishes; a state change publishes at once |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS_TTL` | `2 × heartbeat_timeout`, min 300 | expiry of the published copy |
 
 ---
 
@@ -406,7 +516,7 @@ ones worth knowing on day one:
 | `QUEEN_BEARER_TOKEN` | broker authentication |
 | `QUEEN_CONSUMER_GROUP` | the cursor identity; give each application its own |
 | `QUEEN_RETRY_AFTER` | lease seconds; must exceed the worker timeout |
-| `QUEEN_PARTITIONS` | default fan-out for jobs without `QueenPartitionable` (64) |
+| `QUEEN_PARTITIONS` | default fan-out for jobs without `QueenPartitionable` (64, up to 1024; one worker per stripe at a time) |
 | `QUEEN_SYNC_FAILED_JOBS` | keep `true` so Laravel commands clean the Queen DLQ too |
 
 Behind the Queen proxy, HTTP 429 is retried transparently with jitter and a cap; HTTP 403 is

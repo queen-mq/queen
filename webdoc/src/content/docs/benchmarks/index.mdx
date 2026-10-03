@@ -11,6 +11,7 @@ sourceOfTruth:
   - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
   - benchmark-queen/laravel-supervisors/QUALIFICATION_SUMMARY_20260829.md
   - benchmark-queen/laravel-supervisors/QUALIFICATION_REPORT_20260829.md
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/README.md
 digest: >-
   Every run on these pages measured Queen 1.x, whose storage was PostgreSQL; 2.0 replaced that
   storage with a replicated log, so the figures describe the 1.x engine and not 2.0, and no 2.0
@@ -45,7 +46,7 @@ build.
 | [A million ordered partitions](/benchmarks/cardinality-1m) | 1,000,000 ordered partitions in one queue, created during the run at 1,000/s, serving 200,000 msg/s with 0 push, pop or ack errors | **Explicit acks** (leased pops), retention on with `RETENTION_PARALLELISM=16`, **deduplication off**, 1,000 partitions active per second rotating through the space, 300 consumers, 32 vCPU / 62 GiB, Queen 1.0.0. One hour, of which 43 minutes on the completed space |
 | [Ordered pipeline](/benchmarks/ordered-pipeline) | 88,503,408 messages verified across 4 stages and 1000 partitions with 0 duplicates, 0 gaps and 0 order violations | 25,000 events/s for 600 s, deduplication window 300 s, explicit bulk acks, per-stage verifier over per-property logs |
 | [Multi-tenant cell](/benchmarks/multitenant-cell) | A 2-core cell behind the proxy holding above 2400 msg/s with zero loss; 12 tenants for 1 hour with zero cross-tenant deliveries | **Deduplication off**, **429 retry disabled**, enforcement on, all tenants sharing one queue and one consumer group |
-| [Laravel supervisors](/benchmarks/laravel-supervisors) | Queen Rust master PSS 2.9 MiB against Horizon's 65.0 MiB; 307.67 against 294.30 completed jobs/s | **Diagnostic only:** Docker Desktop arm64, four workers, 2,000 jobs with 10 ms work, three runs per engine, prefetch 4 without the renewal helper now required for production |
+| [Laravel supervisors](/benchmarks/laravel-supervisors) | 2,753 against 1,124 completed jobs/s with 32 workers and fsync on every write, 4,395 against 1,090 with 64; 64 workers in 183 MiB against Horizon's 1,892 MiB; p95 23 against 227 ms at 500 jobs/s | **Diagnostic only:** one 16-vCPU Linux VM, Queen on one Raft node against Horizon on Redis `appendfsync always`, 10 ms jobs, queue full before the workers start, three runs per engine, prefetch 4 with lease renewal. An earlier Docker Desktop run with 8 workers is on the same page |
 
 Also: [cross-broker comparison](/benchmarks/comparison) and
 [method, rig and archive](/benchmarks/method/).

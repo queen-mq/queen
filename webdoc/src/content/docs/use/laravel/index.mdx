@@ -1,6 +1,6 @@
 ---
 title: Laravel queues
-description: "Install the Queen queue connection, dispatch an existing Laravel job, run a worker, and choose how to supervise it."
+description: "Where to start with Queen for a Laravel application that runs Horizon, then the reference: install the queue connection, dispatch an existing job, run a worker and choose how to supervise it."
 type: quickstart
 tier: use
 status: preview
@@ -15,12 +15,85 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Queue/QueenQueue.php
   - clients/client-php/src/Laravel/Queue/QueenJob.php
   - clients/client-php/src/Laravel/Queue/ProcessLeaseRenewer.php
+  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/README.md
+  - benchmark-queen/2026-10-01-laravel-horizon-raft/README.md
+  - benchmark-queen/2026-09-30-laravel-supervisor-features/README.md
 verifiedBy:
   - clients/client-php/tests/LaravelServiceProviderTest.php
   - clients/client-php/tests/LaravelQueueDriverTest.php
   - clients/client-php/tests/ProcessLeaseRenewerTest.php
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): the publishable dashboard stylesheet is covered on the dashboard page; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through cd2c7135): dashboard pages, failed-job paging and the failed-job detail page are covered on the dashboard page; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through e54bb5b3): the jobs-processed chart and its throughput reader binding are covered on the dashboard page; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): either engine can publish remote status; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): the coordination, prefork, waits, notifications, job metrics, tags and Prometheus blocks in config/queen.php and the new provider bindings add nothing this overview describes; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through dc5b5994): the event_driven switch in config/queen.php adds nothing this overview describes; page matches the code.
+# sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; the Pop the next batch ahead section states the rule.
+# sourceOfTruth re-read 2026-10-01 (Linux server campaign): the pop_ahead section adds the measured effect of the full-batch rule.
+# sourceOfTruth re-read 2026-10-02 (Start here orientation): the new top section quotes the Linux-server, Raft and supervisor-features READMEs; QueenQueue subscribes every group with mode all, so the install step now says a consumer group does not separate applications; the reference sections are unchanged.
+# sourceOfTruth re-read 2026-10-02 (through 79204459): config/queen.php gains dashboard.console_url and the provider binds the queue-contents reader; both are covered on the dashboard page, and nothing this overview describes changes.
+# sourceOfTruth re-read 2026-10-02 (through ad0f816b + this patch): the Queen Rust choice row no longer gives crash-loop circuit breaking as a reason to pick Rust, since both engines have it; the unstarted hand-back that keeps its attempt, the forked child and the renewal helper, the bounded metrics client and the provider's exit-marker listener change nothing else this overview states.
+# sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-02 (failure tests): the Start here list gains the failure, replica, soak and Laravel-feature results of the 2026-10-02 dataset, as the comparison page reports them.
+# sourceOfTruth re-read 2026-10-02 (crash hand-back): the safe-profile section says a crashed worker's renewer hands back its unstarted prefetched jobs; ProcessLeaseRenewer's journal directory changes nothing else this overview states.
+# sourceOfTruth re-read 2026-10-02 (stripes, f5d20737): QUEEN_PARTITIONS now goes up to 1,024 with a 64-wide pop; this overview states no stripe count.
 ---
+
+## Start here
+
+Queen replaces two parts of a Horizon setup: Redis, where the jobs wait, and Horizon's master, which
+runs the workers. Your job classes stay as they are.
+
+<Chart
+  src="laravel-headline"
+  alt="Three bar panels, Horizon against Queen, medians of 3 runs. Jobs per second with the queue full: 1,124 against 2,753 with 32 workers, 1,090 against 4,395 with 64. Application memory with 64 workers: 1,892 against 183 MiB. p95 latency at 500 jobs/s asked: 227 against 23 ms."
+  caption="Diagnostic results from one server and one Raft broker node, with a protocol written by the Queen team."
+  source="benchmark-queen/2026-10-01-linux-vm-horizon-raft/raw/runs.csv"
+/>
+
+Each line below names the measurement behind it:
+
+- **More jobs per worker at the same durability.** On a dedicated Linux server, with every write
+  fsynced on both sides, 32 workers completed 2,753 jobs/s of 10 ms jobs against 1,124 for Horizon,
+  and 64 workers 4,395 against 1,090
+  ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-a-linux-server-2026-10-01)).
+- **Lower latency at a steady rate.** On the same server, with 16 workers and 500 jobs/s asked, 95%
+  of jobs completed within 23 ms of their dispatch, against 227 ms for Horizon, whose producer
+  reached 440 jobs/s
+  ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-a-linux-server-2026-10-01)).
+- **Smaller workers.** With 64 workers forked from one booted Laravel, the application container used
+  183 MiB against 1,892 MiB for Horizon
+  ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-a-linux-server-2026-10-01)).
+- **Long jobs on a short `retry_after`.** The lease of a running job is renewed, and a worker that
+  cannot renew it is stopped before the lease ends. In a fault test, a prefetched job ended 32.1 s
+  after it was queued, past its 30 s lease, on its first attempt
+  ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-raft-2026-10-01)).
+- **Workers within seconds of a burst.** Woken by the broker, one supervisor with `fast_scale_up`
+  reached 20 workers 5.6 s after a burst, against 13.9 s when it polled every 3 s; Horizon was not
+  part of that run
+  ([benchmark](/benchmarks/laravel-supervisors#event-driven-scaling)).
+- **Tested against failures.** On the Linux server, both Queen engines passed 15 failure scenarios
+  (crashes, deploys, job timeouts, backend restarts), two replica scenarios, a 45-minute soak with
+  kills and a deploy, and 32 Laravel queue features
+  ([the tables](/use/laravel/queen-vs-horizon#what-happens-when-something-fails)).
+
+These results are diagnostic: each comes from one host, and the protocol was written by the Queen
+team. Horizon keeps advantages too, such as less broker CPU at a low, steady rate and a more complete
+dashboard.
+
+Read these pages in this order:
+
+1. [How Queen runs Laravel jobs](/use/laravel/concepts): stripes, leases, timers, the dead-letter
+   queue and the supervisor, each beside what Horizon does.
+2. [Queen or Horizon](/use/laravel/queen-vs-horizon): the comparison at a glance, with the evidence
+   for every row.
+3. [Migrate from Horizon](/use/laravel/migrate-from-horizon): the checklist, the configuration map
+   and the pitfalls.
+
+The rest of this page is the reference for the queue connection.
+
+## The connection and the supervisor
 
 Queen can play two separate roles in a Laravel application:
 
@@ -80,7 +153,9 @@ Unix-only today and add `pcntl` and `posix` requirements.
 
    Add `QUEEN_BEARER_TOKEN` when the broker requires authentication. Keep secrets outside source
    control. Give each logical application and environment a stable consumer-group name: two
-   applications sharing one group intentionally share one cursor and split the work.
+   applications sharing one group intentionally share one cursor and split the work. A group does
+   not separate applications, though: two groups on one queue each receive every job, so give each
+   application and environment its own queue names or its own broker as well.
 
 4. **Dispatch an existing job.** Nothing changes at the call site.
 
@@ -113,7 +188,9 @@ fits inside `retry_after`.
 Values above one reduce broker round trips, but they widen the at-least-once redelivery window. A
 Laravel worker may also pause while it still owns a prefetched tail. The Queen connector therefore
 rejects `prefetch > 1` unless lease renewal is enabled, whether workers are started by Queen or by
-another process manager.
+another process manager. When a worker crashes, its renewer hands back the prefetched jobs it had
+not started, without an extra attempt
+([prefetch](/use/laravel/concepts#prefetch-ack_async-and-pop_ahead)).
 
 ```dotenv
 QUEEN_PREFETCH=4
@@ -121,12 +198,57 @@ QUEEN_ACK_BATCH=1
 QUEEN_LEASE_RENEWAL=true
 ```
 
-Enable lease renewal even with `prefetch=1` when the longest runtime cannot be bounded safely. Lease
-renewal starts a small PHP helper beside each worker. It extends the active lease and fences the
-worker if renewal can no longer finish safely. An exact-PID `SIGCHLD` watchdog also kills the
-owning worker if that helper disappears while a lease is active. This Unix CLI path requires
-PCNTL/POSIX support, and application code must not replace Queen's signal handler. Renewal cannot
-make external side effects exactly once, so jobs must remain idempotent.
+Enable lease renewal even with `prefetch=1` when the longest runtime cannot be bounded safely.
+Renewal extends the active lease and fences the worker if renewal can no longer finish safely. Under
+the [Rust supervisor on Linux](/use/laravel/supervisors#lease-renewal-in-the-master), the master
+renews the leases of all its workers. Elsewhere, lease renewal starts a small PHP helper beside each
+worker, and an exact-PID `SIGCHLD` watchdog kills the owning worker if that helper disappears while
+a lease is active. This Unix CLI path requires PCNTL/POSIX support, and application code must not
+replace Queen's signal handler. Renewal cannot make external side effects exactly once, so jobs
+must remain idempotent.
+
+### Asynchronous acknowledgements
+
+With `ack_async`, a worker sends the acknowledgement of a completed job and starts the next job at
+once. The broker commits the acknowledgement while the next job runs, and the worker reads the
+answer when that job ends or before its next pop.
+
+```dotenv
+QUEEN_ACK_ASYNC=true
+```
+
+The cost is a later failure report. When the broker refuses an acknowledgement, the job after it
+has already run on the same lease. The worker reports the refusal through Laravel's exception
+handler, abandons the lease and discards the rest of its prefetched jobs, and the refused job is
+delivered again after its lease expires. Delivery stays at-least-once. `ack_async` requires
+`ack_batch=1`, because a batch already defers its acknowledgements.
+
+With `prefetch=1` and without `pop_ahead`, the worker must read the answer before its next pop,
+so `ack_async` gains little there. The gain is the broker's write latency per job. On the Raft broker, which fsyncs every acknowledged
+write, eight workers with 10 ms jobs and prefetch 4 went from 453 to 566 jobs/s with `ack_async`, and
+to 643 with `pop_ahead` too ([benchmark](/benchmarks/laravel-supervisors#horizon-against-queen-on-raft-2026-10-01)).
+
+### Pop the next batch ahead
+
+With `pop_ahead`, a worker that starts the last job of its local batch also sends the pop for the
+next batch. The broker leases that batch while the job runs, and the worker takes it in when the
+job ends, so the next job starts without a round trip.
+
+```dotenv
+QUEEN_LEASE_RENEWAL=true
+QUEEN_POP_AHEAD=true
+```
+
+The batch is leased one job earlier than without the option, so it needs `lease_renewal` like any
+prefetched job. The worker tracks the new lease as soon as the job ends, before it can pause. A
+worker does not pop ahead after a job that took more than a third of `retry_after`, and when a job
+still leaves too little of the new lease to renew it safely, the worker returns the batch to the
+queue at once. A worker that serves a comma-separated queue list never pops ahead, because its
+next job may come from another queue. A worker pops ahead only after a full batch: a batch that
+came back short shows that the queue was nearly empty, so a pop sent ahead would most likely come
+back empty too. Under a light load the worker then sends one pop per job, not two: at 500 jobs/s on
+the benchmark server that took 12% off the broker's CPU and 8% off the workers', with no change under
+a backlog. A pop sent ahead never waits for new jobs, so an idle queue behaves as before.
 
 ## What changes from another Laravel connection
 
@@ -145,17 +267,47 @@ make external side effects exactly once, so jobs must remain idempotent.
 | --- | --- | --- |
 | Existing process manager | You want a fixed number of `queue:work` processes | Whatever you already operate |
 | Queen PHP | You want Horizon-like local pools with no native artifact | Laravel remains loaded in one PHP master |
-| Queen Rust | You want the smallest control plane and crash-loop circuit breaking | Rust, after one temporary Artisan configuration load |
+| Queen Rust | You want the smallest control plane | Rust, after one temporary Artisan configuration load |
 
-The PHP and Rust engines read the same configuration and publish the same state protocol. Begin
-with [Worker supervisors](/use/laravel/supervisors), then enable the
+The PHP and Rust engines read the same configuration and publish the same state protocol. Either
+engine can also publish it to the broker for a dashboard served by other hosts. Begin with
+[Worker supervisors](/use/laravel/supervisors), then enable the
 [Laravel dashboard](/use/laravel/dashboard) only after authentication is in place.
 
+Both engines offer the same opt-in features beyond Horizon's pools, each off by default:
+
+| Feature | What it does | Measured |
+| --- | --- | --- |
+| [Coordinated replicas](/use/laravel/supervisors#several-replicas) | Several pods or hosts on one queue share one worker target | Two pods held the target at every sample, instead of up to twice it |
+| [Prefork workers](/use/laravel/supervisors#prefork-workers) | Laravel boots once per master; workers are forked from it and share its memory | 8 workers after 600 jobs: 85 MiB instead of 336 MiB |
+| [Event-driven scaling](/use/laravel/supervisors#event-driven-scaling) | The broker wakes the master when jobs arrive, instead of the next poll | 20 workers after a burst in 5.6 s instead of 13.9 s |
+| [Per-queue minimum and fast scale-up](/use/laravel/supervisors#dedicated-and-balancing-workers) | Every queue keeps a warm worker; a burst closes half the gap each cycle | |
+| [Monitoring and alerts](/use/laravel/monitoring) | Job metrics per class, monitored tags, long-wait alerts, a Prometheus endpoint for KEDA | |
+
+The measurements come from one host; the [benchmark page](/benchmarks/laravel-supervisors) has the
+method. [Scale Laravel queues on Kubernetes](/use/laravel/kubernetes) puts the features together
+for pods that follow the backlog.
+
 <CardGrid>
+  <LinkCard
+    href="/use/laravel/concepts"
+    title="How Queen runs Laravel jobs"
+    description="Stripes, leases, renewal and fencing, timers, the dead-letter queue and the supervisor, each beside what Horizon does."
+  />
   <LinkCard
     href="/use/laravel/supervisors"
     title="Worker supervisors"
     description="Configure pools, autoscaling, the PHP fallback and the optimized Rust engine."
+  />
+  <LinkCard
+    href="/use/laravel/kubernetes"
+    title="Scale on Kubernetes"
+    description="Pods that share one worker target, fork cheap workers, wake on new jobs and follow the backlog."
+  />
+  <LinkCard
+    href="/use/laravel/monitoring"
+    title="Monitoring and alerts"
+    description="Job metrics per class, monitored tags, long-wait alerts and a Prometheus endpoint."
   />
   <LinkCard
     href="/use/laravel/dashboard"

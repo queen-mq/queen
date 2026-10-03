@@ -1,6 +1,6 @@
 [package]
 name = "queen-supervisor"
-version = "0.1.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Low-memory process supervisor for Queen-backed Laravel workers"
@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 ctrlc = { version = "3", features = ["termination"] }
 libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

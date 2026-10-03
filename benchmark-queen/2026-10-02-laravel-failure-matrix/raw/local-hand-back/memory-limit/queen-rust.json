@@ -1,0 +1,175 @@
+{
+ "scenario": "memory-limit",
+ "profile": "queen-rust",
+ "run_id": "memory-limit-queen-rust-e41bc8bc",
+ "checks": [
+  {
+   "name": "a worker over its memory limit was replaced",
+   "passed": true,
+   "detail": "6 distinct worker PIDs for 6 jobs"
+  },
+  {
+   "name": "every job completed",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no two attempts overlapped",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no job completed twice",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no failed-job row",
+   "passed": true,
+   "detail": "[]"
+  }
+ ],
+ "passed": true,
+ "report": {
+  "run_id": "memory-limit-queen-rust-e41bc8bc",
+  "jobs": {
+   "000000": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938290.605,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938290.617,
+      null
+     ]
+    ],
+    "pids": [
+     85
+    ]
+   },
+   "000001": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938284.866,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938284.877,
+      null
+     ]
+    ],
+    "pids": [
+     43
+    ]
+   },
+   "000002": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938284.866,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938284.875,
+      null
+     ]
+    ],
+    "pids": [
+     38
+    ]
+   },
+   "000003": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938287.545,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938287.556,
+      null
+     ]
+    ],
+    "pids": [
+     68
+    ]
+   },
+   "000004": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938287.551,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938287.562,
+      null
+     ]
+    ],
+    "pids": [
+     72
+    ]
+   },
+   "000005": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938290.597,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938290.606,
+      null
+     ]
+    ],
+    "pids": [
+     81
+    ]
+   }
+  },
+  "failed_store": {
+   "available": true,
+   "job_ids": []
+  },
+  "dead_letter": {
+   "available": true,
+   "entries": 0
+  }
+ },
+ "extra": {},
+ "timeline": [
+  [
+   6.62,
+   "ready"
+  ],
+  [
+   6.81,
+   "dispatched 6 x memory (exit 0)"
+  ],
+  [
+   13.66,
+   "all completed: reached"
+  ]
+ ]
+}

@@ -23,4 +23,10 @@ interface LeaseRenewer
     public function assertHealthy(string $leaseId): void;
 
     public function close(): void;
+
+    /**
+     * Where this worker journals what a crash would owe for its leased batch,
+     * when something hands that back after the worker dies; null otherwise.
+     */
+    public function handBackJournal(): ?HandBackJournal;
 }

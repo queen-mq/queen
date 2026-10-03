@@ -6,6 +6,8 @@ use Illuminate\Queue\QueueManager;
 use Queen\Exceptions\HttpException;
 use Queen\Http\HttpClient;
 use Queen\Laravel\Queue\QueenQueue;
+use Queen\Laravel\Supervisor\Prefork\ForkedProcess;
+use Queen\Laravel\Supervisor\Prefork\ForkServerClient;
 use Queen\Queen;
 use Symfony\Component\Process\Process;
 
@@ -14,6 +16,10 @@ final class PhpSupervisor
     private const DEPTH_POLL_CONCURRENCY = 16;
 
     private const CRASH_CIRCUIT_THRESHOLD = 5;
+
+    private const FORK_SERVER_BOOT_SECONDS = 60;
+
+    private const FORK_TIMEOUT_SECONDS = 5;
 
     /** @var array<string, array<string, list<Process>>> */
     private array $processes = [];
@@ -51,6 +57,20 @@ final class PhpSupervisor
     private SupervisorState $state;
     /** @var array<string, Queen> */
     private array $depthClients = [];
+    private RemoteStatusPublisher|false|null $remoteStatus = null;
+    private ReplicaCoordinator|false|null $coordinator = null;
+    private ForkServerClient|false|null $forkServer = null;
+    private bool $preforkFailed = false;
+    /** @var array<string, QueueWatcher>|null event-driven watchers by connection; null when disabled */
+    private ?array $watchers = null;
+    /** @var array<string, true> pools a watched queue woke, kept until they are evaluated */
+    private array $woken = [];
+    /** @var array<string, true> pools still climbing towards a higher target */
+    private array $climbing = [];
+    /** @var array<string, float> when each pool was last evaluated, for the wake interval */
+    private array $lastEvaluated = [];
+    /** Where workers leave exit markers; null until it is ready. */
+    private ?string $exitMarkers = null;
 
     public function __construct(
         private QueueManager $queues,
@@ -71,6 +91,9 @@ final class PhpSupervisor
         $failure = null;
 
         try {
+            $this->prepareExitMarkers();
+            $this->startForkServer();
+            $this->startWatchers();
             $this->writeStatus('running');
             $lastPoll = 0.0;
             do {
@@ -85,9 +108,19 @@ final class PhpSupervisor
                 $this->reapDraining();
                 $this->observeStableWorkers();
 
-                if (microtime(true) - $lastPoll < $this->config['poll_interval']) {
-                    usleep(200_000);
+                $pollDue = microtime(true) - $lastPoll >= $this->config['poll_interval'];
+                if ($this->paused) {
+                    $this->woken = [];
+                    $this->climbing = [];
+                }
+                $eventDue = $this->paused ? [] : $this->eventDuePools(microtime(true));
+                if (!$pollDue && $eventDue === []) {
+                    $this->waitForWork();
                     continue;
+                }
+
+                if ($pollDue && !$this->paused) {
+                    $this->replicaCoordinator()?->heartbeat(array_values($this->coordinatedScopes()));
                 }
 
                 // One dead connection is sampled once per poll even when
@@ -95,14 +128,32 @@ final class PhpSupervisor
                 // performs its own fail-open reconcile from the last target.
                 $unavailableConnections = [];
                 foreach ($this->config['supervisors'] as $name => $options) {
+                    if (!$pollDue && !isset($eventDue[$name])) {
+                        continue;
+                    }
                     if ($this->paused) {
                         $this->lastDepths[$name] = [];
                         $this->depthsAvailable[$name] = false;
                         continue;
                     }
-                    if (time() - ($this->lastReconcile[$name] ?? 0) < $options['balance_cooldown']) {
+                    $ready = time() - ($this->lastReconcile[$name] ?? 0) >= $options['balance_cooldown'];
+                    // Woken or climbing inside the cooldown: this evaluation
+                    // may only add workers. Anything else waits for the cooldown.
+                    $growOnly = !$ready && isset($eventDue[$name]);
+                    if (!$ready && !$growOnly) {
                         continue;
                     }
+                    // Counted as evaluated even when skipped below, so a
+                    // skipped pool is due again only after a wake interval.
+                    $this->lastEvaluated[$name] = microtime(true);
+                    if (!$pollDue && $this->withoutReplicaView($name)) {
+                        // A replica that just resumed has no view of the
+                        // others and would size itself alone: keep the wake
+                        // for the poll's heartbeat.
+                        continue;
+                    }
+                    unset($this->woken[$name]);
+                    $depthFailed = false;
 
                     $runtimes = [];
                     try {
@@ -124,13 +175,18 @@ final class PhpSupervisor
                         $depths = $this->depths($options);
                         $this->lastDepths[$name] = $depths;
                         $this->depthsAvailable[$name] = true;
-                        $desired = $this->scaler->desired($options, $depths, $runtimes);
-                        $this->lastDesired[$name] = $desired;
+                        [$replica, $replicas] = $this->replicaPosition($name);
+                        $desired = $this->scaler->desired($options, $depths, $runtimes, $replica, $replicas);
                     } catch (\Throwable $error) {
                         $this->lastDepths[$name] = [];
                         $this->depthsAvailable[$name] = false;
                         $unavailableConnections[$options['connection']] = true;
                         $this->emit("[{$name}] depth failed: {$error->getMessage()}\n", 'err');
+                        $depthFailed = true;
+                        unset($this->climbing[$name]);
+                        if ($growOnly) {
+                            continue;
+                        }
                         // An observability outage must not tear down healthy
                         // capacity or stop replacement of crashed workers. On
                         // the very first poll, treat every configured queue as
@@ -147,9 +203,30 @@ final class PhpSupervisor
                         continue;
                     }
 
+                    $current = $this->currentAllocation($name, $options['queues']);
+                    $active = array_sum($current);
+                    if ($growOnly) {
+                        $desired = self::growOnlyTarget($options, $desired, $current);
+                        if ($desired === null) {
+                            // Not an increase: leave it, and the scale-down
+                            // window, to the regular cadence.
+                            unset($this->climbing[$name]);
+                            continue;
+                        }
+                    }
                     $desired = $this->stabilizeDownscale($name, $options, $desired);
                     $this->lastDesired[$name] = $desired;
                     $this->reconcile($name, $options, $desired);
+                    if ($this->watchers !== null && !$depthFailed) {
+                        $started = array_sum($this->currentAllocation($name, $options['queues']));
+                        // Held back by the step budget, not by a failing
+                        // restart: keep climbing at the wake cadence.
+                        if ($started > $active && $started < array_sum($desired)) {
+                            $this->climbing[$name] = true;
+                        } else {
+                            unset($this->climbing[$name]);
+                        }
+                    }
                     $this->lastReconcile[$name] = time();
                 }
 
@@ -157,7 +234,12 @@ final class PhpSupervisor
                     break;
                 }
                 $this->writeStatus($this->paused ? 'paused' : 'running');
-                $lastPoll = microtime(true);
+                if ($pollDue) {
+                    $lastPoll = microtime(true);
+                } else {
+                    // An event pass never runs back to back.
+                    usleep(200_000);
+                }
                 if ($once) {
                     break;
                 }
@@ -169,22 +251,8 @@ final class PhpSupervisor
             $failure = $error;
         }
 
-        $shutdownComplete = false;
         try {
-            try {
-                // External signals and --once do not pass through the control
-                // inbox, so publish the generation-specific drain fence here
-                // before touching children in every termination path.
-                $this->writeStatus('terminating');
-            } catch (\Throwable $error) {
-                $failure ??= $error;
-            }
-            try {
-                $this->shutdown();
-                $shutdownComplete = true;
-            } catch (\Throwable $error) {
-                $failure ??= $error;
-            }
+            $shutdownComplete = $this->drain($failure);
             if ($shutdownComplete) {
                 try {
                     $this->writeStatus('stopped');
@@ -192,6 +260,7 @@ final class PhpSupervisor
                     $failure ??= $error;
                 }
             }
+            $this->closeForkServer();
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -205,6 +274,41 @@ final class PhpSupervisor
     public function stop(): void
     {
         $this->running = false;
+    }
+
+    /**
+     * Fence controls, then drain every worker. True once every worker is
+     * observed gone; a failure is kept in $failure.
+     */
+    private function drain(?\Throwable &$failure): bool
+    {
+        $terminating = null;
+        try {
+            // External signals and --once do not pass through the control
+            // inbox, so publish the generation-specific drain fence here
+            // before touching children in every termination path.
+            $terminating = $this->writeStatus('terminating', publish: false);
+        } catch (\Throwable $error) {
+            $failure ??= $error;
+        }
+        try {
+            // The broker calls wait until every worker has its SIGTERM: on a
+            // slow or unreachable broker each may take http_timeout per
+            // endpoint, and the platform's stop deadline does not wait.
+            $this->shutdown(function () use ($terminating): void {
+                if ($terminating !== null) {
+                    $this->remoteStatusPublisher()?->publish($terminating);
+                }
+                // The other replicas take over this share while it drains.
+                $this->leaveReplicas();
+            });
+
+            return true;
+        } catch (\Throwable $error) {
+            $failure ??= $error;
+
+            return false;
+        }
     }
 
     /** @return array<string, int> */
@@ -325,7 +429,7 @@ final class PhpSupervisor
     private function reconcile(string $name, array $options, array $desired, ?int $maximumShift = null): void
     {
         $active = array_sum(array_map('count', $this->processes[$name] ?? []));
-        $budget = $maximumShift ?? $this->reconcileBudget($options, $active);
+        $budget = $maximumShift ?? $this->reconcileBudget($options, $active, array_sum($desired));
 
         // Free capacity first. Termination is asynchronous, so a single
         // reconcile never blocks for N * shutdown_grace.
@@ -394,22 +498,32 @@ final class PhpSupervisor
         return ($options['lease_renewal'] ?? false) ? 2 : 1;
     }
 
-    private function reconcileBudget(array $options, int $active): int
+    private function reconcileBudget(array $options, int $active, int $desired = 0): int
     {
         // balance_max_shift bounds elastic changes, but it must never make a
         // supervisor take several cooldown windows to establish or restore
         // its configured baseline capacity.
-        $baseline = $options['balance'] === 'simple'
-            ? (int) $options['processes']
-            : (int) $options['min_processes'];
+        $baseline = match ($options['balance']) {
+            'simple' => (int) $options['processes'],
+            'auto' => max(
+                (int) $options['min_processes'],
+                (int) ($options['min_processes_per_queue'] ?? 0) * count($options['queues'] ?? []),
+            ),
+            default => (int) $options['min_processes'],
+        };
+        $budget = max((int) $options['balance_max_shift'], $baseline - $active);
+        if (($options['fast_scale_up'] ?? false) === true && $desired > $active) {
+            // A burst closes half of the remaining gap every cycle instead of
+            // one balance_max_shift step; scaling down stays gradual.
+            $budget = max($budget, intdiv($desired - $active + 1, 2));
+        }
 
-        return max((int) $options['balance_max_shift'], $baseline - $active);
+        return $budget;
     }
 
     private function startWorker(string $name, string $queue, array $options): Process
     {
-        $workerCommand = [
-            $this->config['php_binary'], $this->config['artisan'], 'queue:work',
+        $arguments = [
             $options['connection'],
             '--queue=' . ($options['balance'] === 'off' ? implode(',', $options['queues']) : $queue),
             '--sleep=' . $options['sleep'],
@@ -422,16 +536,11 @@ final class PhpSupervisor
             '--rest=' . $options['rest'],
         ];
         if ($options['force']) {
-            $workerCommand[] = '--force';
+            $arguments[] = '--force';
         }
         if ($options['quiet'] ?? false) {
-            $workerCommand[] = '--quiet';
+            $arguments[] = '--quiet';
         }
-        $command = [
-            $this->config['php_binary'],
-            __DIR__ . DIRECTORY_SEPARATOR . 'worker_launcher.php',
-            ...$workerCommand,
-        ];
 
         $environment = [
             // `false` also removes a value inherited by the supervisor.
@@ -444,6 +553,36 @@ final class PhpSupervisor
             'QUEEN_LARAVEL_SUPERVISOR' => $name,
             'QUEEN_LARAVEL_RETRY_AFTER' => (string) ($options['retry_after'] ?? ($options['timeout'] + 1)),
             'QUEEN_LARAVEL_BLOCK_FOR' => $options['balance'] === 'off' ? '0' : null,
+            // Where the worker says why it exits; see WorkerExitMarker.
+            WorkerExitMarker::ENVIRONMENT => $this->exitMarkers ?? false,
+        ];
+        $process = $this->forkWorker($name, $queue, $arguments, $environment)
+            ?? $this->spawnWorker($name, $queue, $arguments, $environment);
+        $objectId = spl_object_id($process);
+        $this->startedAt[$objectId] = microtime(true);
+        $pid = $process->getPid();
+        if (is_int($pid)) {
+            $this->workerPids[$objectId] = $pid;
+            // A marker an earlier process left under this pid explains nothing.
+            $this->forgetExitMarker($pid);
+        }
+        $this->emit("started {$name}:{$queue} pid=" . ($pid ?? 'unknown') . ($process instanceof ForkedProcess ? ' (forked)' : '') . "\n", 'out');
+        return $process;
+    }
+
+    /**
+     * @param list<string> $arguments
+     * @param array<string, string|false|null> $environment
+     */
+    private function spawnWorker(string $name, string $queue, array $arguments, array $environment): Process
+    {
+        $command = [
+            $this->config['php_binary'],
+            __DIR__ . DIRECTORY_SEPARATOR . 'worker_launcher.php',
+            $this->config['php_binary'],
+            $this->config['artisan'],
+            'queue:work',
+            ...$arguments,
         ];
         $process = new Process($command, $this->config['cwd'], $environment, timeout: null);
         // `--quiet` suppresses per-job chatter while retaining startup/fatal
@@ -452,14 +591,82 @@ final class PhpSupervisor
         $process->start(function (string $type, string $buffer) use ($name, $queue): void {
             $this->emit("[{$name}:{$queue}] {$buffer}", $type);
         });
-        $objectId = spl_object_id($process);
-        $this->startedAt[$objectId] = microtime(true);
-        $pid = $process->getPid();
-        if (is_int($pid)) {
-            $this->workerPids[$objectId] = $pid;
-        }
-        $this->emit("started {$name}:{$queue} pid=" . ($pid ?? 'unknown') . "\n", 'out');
+
         return $process;
+    }
+
+    /**
+     * A worker forked from the booted fork server, or null to spawn one.
+     * After a failed fork the rest of this run spawns, while the server stays
+     * open to report the exits of the workers it already forked.
+     *
+     * @param list<string> $arguments
+     * @param array<string, string|false|null> $environment
+     */
+    private function forkWorker(string $name, string $queue, array $arguments, array $environment): ?ForkedProcess
+    {
+        if (!$this->forkServer instanceof ForkServerClient || $this->preforkFailed) {
+            return null;
+        }
+        try {
+            $pid = $this->forkServer->fork(
+                $arguments,
+                array_map(fn (string|false|null $value): ?string => is_string($value) ? $value : null, $environment),
+                self::FORK_TIMEOUT_SECONDS,
+            );
+        } catch (\Throwable $error) {
+            $this->emit("[{$name}:{$queue}] prefork failed, spawning workers from now on: {$error->getMessage()}\n", 'err');
+            $this->preforkFailed = true;
+
+            return null;
+        }
+
+        return new ForkedProcess($this->forkServer, $pid);
+    }
+
+    /**
+     * With prefork enabled, boot Laravel once in a fork server that every
+     * worker is forked from; see Prefork\ForkServer.
+     */
+    private function startForkServer(): void
+    {
+        if (($this->config['prefork'] ?? false) !== true || $this->forkServer !== null) {
+            return;
+        }
+        // The server is no worker: none of their variables may leak into it.
+        $environment = [
+            ...array_filter(
+                getenv(),
+                fn (string $name): bool => !in_array($name, ['QUEEN_SUPERVISOR_TELEMETRY_DIR', WorkerExitMarker::ENVIRONMENT], true)
+                    && !str_starts_with($name, 'QUEEN_LARAVEL_'),
+                ARRAY_FILTER_USE_KEY,
+            ),
+            'QUEEN_FORK_SERVER' => Prefork\ForkServer::PROTOCOL,
+        ];
+        try {
+            $this->forkServer = ForkServerClient::start(
+                [$this->config['php_binary'], $this->config['artisan'], 'queen:fork-server'],
+                $this->config['cwd'],
+                $environment,
+                self::FORK_SERVER_BOOT_SECONDS,
+                fn (): bool => !$this->running,
+            );
+            $this->emit("prefork: fork server started\n", 'out');
+        } catch (\Throwable $error) {
+            $this->forkServer = false;
+            $this->emit("prefork disabled, spawning workers: {$error->getMessage()}\n", 'err');
+        }
+    }
+
+    private function closeForkServer(): void
+    {
+        if ($this->forkServer instanceof ForkServerClient) {
+            try {
+                $this->forkServer->close(5);
+            } catch (\Throwable $error) {
+                $this->emit("prefork: fork server did not close cleanly: {$error->getMessage()}\n", 'err');
+            }
+        }
     }
 
     private function reap(string $name, array $options): void
@@ -488,11 +695,25 @@ final class PhpSupervisor
                 $this->scheduleTelemetryCleanup($name, $options, $pid);
                 $exitCode = $process->getExitCode();
                 $this->emit("exited {$name}:{$queue} pid=" . ($pid ?? 'unknown') . " code=" . ($exitCode ?? 'unknown') . "\n", $exitCode === 0 ? 'out' : 'err');
+                $announced = $this->announcedExit($pid, $exitCode);
                 if ($poolHadProbe && !$wasProbe) {
                     continue;
                 }
-                if ($exitCode === 0) {
+                // Backoff is for short-lived exits. A worker that ran this
+                // long is not crash-looping: queue:work exits 12 at --memory,
+                // and a job timeout kills the worker. Nor is a worker that
+                // stopped at --memory after a job: it made progress.
+                if ($exitCode === 0
+                    || $announced === WorkerExitMarker::MEMORY
+                    || (!$wasProbe && $runtime >= (float) $options['stable_after'])) {
                     $this->resetCrashes($name, $queue);
+                } elseif ($announced === WorkerExitMarker::TIMEOUT) {
+                    // The job failed, not the worker, however soon it came. A
+                    // probe proved nothing either way: the next starts at once.
+                    if ($wasProbe) {
+                        $this->releaseRestartProbe($restartKey);
+                    }
+                    $this->emit("[{$name}:{$queue}] worker pid={$pid} exited after Laravel's job timeout; restarted without backoff\n", 'err');
                 } else {
                     $this->registerCrash(
                         $name,
@@ -537,6 +758,71 @@ final class PhpSupervisor
         $this->restartPhase[$key] = $circuitOpen ? 'open' : 'backoff';
         $state = $circuitOpen ? 'circuit open' : 'backoff';
         $this->emit("[{$name}:{$queue}] worker crash ({$reason}); {$state} for {$delay}s (failure {$count})\n", 'err');
+    }
+
+    /**
+     * What the worker announced before this exit (see WorkerExitMarker):
+     * Laravel's job timeout, when SIGKILL ended it, or its memory limit after
+     * a job, when it exited 12. A marker explains no other exit. Either way
+     * the marker is consumed.
+     *
+     * @return WorkerExitMarker::TIMEOUT|WorkerExitMarker::MEMORY|null
+     */
+    private function announcedExit(?int $pid, ?int $exitCode): ?string
+    {
+        if ($this->exitMarkers === null || !is_int($pid) || $pid < 1) {
+            return null;
+        }
+        try {
+            $marker = $this->state->takeExitMarker($pid);
+        } catch (\Throwable $error) {
+            $this->emit("exit marker read failed for pid={$pid}: {$error->getMessage()}\n", 'err');
+
+            return null;
+        }
+
+        return match (true) {
+            $marker === WorkerExitMarker::TIMEOUT && $exitCode === 128 + SIGKILL => WorkerExitMarker::TIMEOUT,
+            $marker === WorkerExitMarker::MEMORY && $exitCode === WorkerExitMarker::MEMORY_EXIT_CODE => WorkerExitMarker::MEMORY,
+            default => null,
+        };
+    }
+
+    /** Admit the next restart probe at once, with the failure count unchanged. */
+    private function releaseRestartProbe(string $key): void
+    {
+        if (($this->restartPhase[$key] ?? null) !== 'probe') {
+            return;
+        }
+        $this->restartPhase[$key] = ($this->crashCount[$key] ?? 0) >= self::CRASH_CIRCUIT_THRESHOLD ? 'open' : 'backoff';
+        $this->restartAfter[$key] = microtime(true);
+    }
+
+    /**
+     * Empty the directory where workers say why they exit (see
+     * WorkerExitMarker): a marker left by an earlier generation explains no
+     * exit of this one. Without the directory, every exit counts as before.
+     */
+    private function prepareExitMarkers(): void
+    {
+        try {
+            $this->exitMarkers = $this->state->resetExitMarkers();
+        } catch (\Throwable $error) {
+            $this->exitMarkers = null;
+            $this->emit("exit markers disabled, a job timeout counts as a crash: {$error->getMessage()}\n", 'err');
+        }
+    }
+
+    private function forgetExitMarker(mixed $pid): void
+    {
+        if ($this->exitMarkers === null || !is_int($pid) || $pid < 1) {
+            return;
+        }
+        try {
+            $this->state->removeExitMarker($pid);
+        } catch (\Throwable $error) {
+            $this->emit("exit marker cleanup failed for pid={$pid}: {$error->getMessage()}\n", 'err');
+        }
     }
 
     private function resetCrashes(string $name, string $queue): void
@@ -620,6 +906,135 @@ final class PhpSupervisor
         return $desired;
     }
 
+    /**
+     * The pools to evaluate before the next regular poll: woken or still
+     * climbing, with room to grow, a wake interval after their last
+     * evaluation. A pool at its maximum drops its wake.
+     *
+     * @return array<string, true>
+     */
+    private function eventDuePools(float $now): array
+    {
+        if ($this->watchers === null) {
+            return [];
+        }
+        $due = [];
+        foreach ($this->config['supervisors'] as $name => $options) {
+            $room = array_sum($this->currentAllocation($name, $options['queues'])) < $options['max_processes'];
+            if (!$room) {
+                unset($this->woken[$name]);
+            }
+            if (!QueueWatcher::followsBacklog($options) || !$room
+                || $now - ($this->lastEvaluated[$name] ?? 0.0) < QueueWatcher::WAKE_INTERVAL_SECONDS) {
+                continue;
+            }
+            if (isset($this->woken[$name]) || isset($this->climbing[$name])) {
+                $due[$name] = true;
+            }
+        }
+
+        return $due;
+    }
+
+    /**
+     * Inside the cooldown a woken pool may only add workers: no queue loses
+     * one, and the pool grows by what the target adds overall, filling the
+     * queues short of their target in declared order. Null when that adds
+     * nothing. The Rust engine's grow_only_target is the same rule.
+     *
+     * @param array<string, mixed> $options
+     * @param array<string, int> $raw
+     * @param array<string, int> $current
+     * @return array<string, int>|null
+     */
+    public static function growOnlyTarget(array $options, array $raw, array $current): ?array
+    {
+        $active = array_sum($current);
+        $room = max(0, array_sum($raw) - $active);
+        if ($room === 0) {
+            return null;
+        }
+        $target = $current;
+        foreach ($options['queues'] as $queue) {
+            $added = min(max(0, ($raw[$queue] ?? 0) - ($current[$queue] ?? 0)), $room);
+            $target[$queue] = ($target[$queue] ?? 0) + $added;
+            $room -= $added;
+        }
+
+        return array_sum($target) > $active ? $target : null;
+    }
+
+    private function withoutReplicaView(string $name): bool
+    {
+        $scope = $this->coordinatedScopes()[$name] ?? null;
+        $coordinator = $scope !== null ? $this->replicaCoordinator() : null;
+
+        return $coordinator !== null && !$coordinator->hasView($scope);
+    }
+
+    /**
+     * Between polls: park on the broker until a watched queue grows, for at
+     * most QueueWatcher::WAIT_MILLIS, or sleep when nothing is watched.
+     */
+    private function waitForWork(): void
+    {
+        $watchers = $this->paused ? [] : array_filter(
+            $this->watchers ?? [],
+            static fn (QueueWatcher $watcher): bool => $watcher->ready(),
+        );
+        if ($watchers === []) {
+            usleep(200_000);
+
+            return;
+        }
+        $wait = intdiv(QueueWatcher::WAIT_MILLIS, count($watchers));
+        $keys = [];
+        foreach ($watchers as $connection => $watcher) {
+            foreach ($watcher->wait($wait) as $queue) {
+                $keys[QueueWatcher::key((string) $connection, $queue)] = true;
+            }
+        }
+        foreach ($this->config['supervisors'] as $name => $options) {
+            if (!QueueWatcher::followsBacklog($options)) {
+                continue;
+            }
+            foreach ($options['queues'] as $queue) {
+                if (isset($keys[QueueWatcher::key($options['connection'], $queue)])) {
+                    $this->woken[$name] = true;
+                }
+            }
+        }
+    }
+
+    /** With event_driven enabled, one watcher per connection with autoscaling pools. */
+    private function startWatchers(): void
+    {
+        if (!is_array($this->config['event_driven'] ?? null) || $this->watchers !== null) {
+            return;
+        }
+        $this->watchers = [];
+        foreach (QueueWatcher::lanes($this->config) as $connection => $lanes) {
+            $connection = (string) $connection;
+            $settings = $this->config['connections'][$connection] ?? ($connection === 'queen' ? ($this->config['queen'] ?? null) : null);
+            if (!is_array($settings)) {
+                $this->emit("event-driven: connection [{$connection}] is missing from the resolved contract, polling continues\n", 'err');
+                continue;
+            }
+            if (count($lanes) > QueueWatcher::MAX_ENTRIES) {
+                $this->emit("event-driven: connection [{$connection}] has " . count($lanes) . ' partition(s) to watch, over the broker\'s '
+                    . QueueWatcher::MAX_ENTRIES . " per fetch; the rest are found by the regular poll\n", 'err');
+            }
+            $this->watchers[$connection] = new QueueWatcher(
+                ['urls' => $settings['urls'] ?? [$settings['url']], 'bearer_token' => $settings['bearer_token'] ?? null, 'headers' => $settings['headers'] ?? []],
+                $connection,
+                $lanes,
+                (float) ($this->config['http_timeout'] ?? 5),
+                $this->output,
+            );
+            $this->emit('event-driven: watching ' . min(count($lanes), QueueWatcher::MAX_ENTRIES) . " partition(s) on connection [{$connection}]\n", 'out');
+        }
+    }
+
     /** @return array<string, int> */
     private function currentAllocation(string $name, array $queues): array
     {
@@ -641,6 +1056,7 @@ final class PhpSupervisor
                 $this->config['supervisors'][$supervisor] ?? [],
                 $this->trackedPid($process),
             );
+            $this->forgetExitMarker($this->trackedPid($process));
             unset($this->workerPids[$objectId]);
             return;
         }
@@ -671,6 +1087,8 @@ final class PhpSupervisor
                     $this->config['supervisors'][$entry['supervisor']] ?? [],
                     $this->trackedPid($process),
                 );
+                // A drained worker's exit is not classified: drop its marker.
+                $this->forgetExitMarker($this->trackedPid($process));
                 unset($this->workerPids[$objectId]);
                 continue;
             }
@@ -702,7 +1120,13 @@ final class PhpSupervisor
         }
     }
 
-    private function shutdown(): void
+    /**
+     * SIGTERM every worker, wait for the grace, then SIGKILL. $whileDraining
+     * runs once every worker is signalled, inside the grace.
+     *
+     * @param (\Closure(): void)|null $whileDraining
+     */
+    private function shutdown(?\Closure $whileDraining = null): void
     {
         /** @var array<int, Process> $running */
         $running = [];
@@ -733,6 +1157,14 @@ final class PhpSupervisor
         }
 
         $deadline = microtime(true) + $this->config['shutdown_grace'];
+        if ($whileDraining !== null) {
+            try {
+                $whileDraining();
+            } catch (\Throwable $error) {
+                // Never at the cost of the drain.
+                $this->emit("Queen supervisor shutdown step failed: {$error->getMessage()}\n", 'err');
+            }
+        }
         do {
             foreach ($running as $objectId => $process) {
                 if (!$process->isRunning()) {
@@ -913,6 +1345,8 @@ final class PhpSupervisor
             return;
         }
         $this->paused = true;
+        // A paused replica serves nothing; the others take over its share.
+        $this->leaveReplicas();
         $this->lastDepths = [];
         $this->depthsAvailable = array_fill_keys(array_keys($this->config['supervisors']), false);
         // A suspended queue:work process may still own a prefetched tail of
@@ -937,7 +1371,12 @@ final class PhpSupervisor
         $this->paused = false;
     }
 
-    private function writeStatus(string $status): void
+    /**
+     * Write status.json and, unless told otherwise, publish it remotely.
+     *
+     * @return array<string, mixed> the document written
+     */
+    private function writeStatus(string $status, bool $publish = true): array
     {
         $pools = [];
         $poolStatus = [];
@@ -1008,6 +1447,8 @@ final class PhpSupervisor
                     'process_cost_per_worker' => $processCost,
                     'reserved_processes' => ($running + $draining) * $processCost,
                     'renewal_helpers_reserved' => ($running + $draining) * ($processCost - 1),
+                    // Live replicas sharing this pool's target; null when it is not coordinated.
+                    'replicas' => $this->replicaCount($name, $status),
                 ];
                 $poolStatus[] = $entry;
                 // Keep the original nested map and field names for consumers
@@ -1036,7 +1477,7 @@ final class PhpSupervisor
             && !in_array(false, array_column($poolStatus, 'ready'), true);
         $capacitySatisfied = $poolStatus !== []
             && !in_array(false, array_column($poolStatus, 'capacity_satisfied'), true);
-        $this->state->writeStatus([
+        $document = $this->state->writeStatus([
             'engine' => 'php',
             'state' => $status,
             'ready' => $ready,
@@ -1054,6 +1495,151 @@ final class PhpSupervisor
             'pool_status' => $poolStatus,
             'configuration' => $this->statusConfiguration(),
         ]);
+        if ($publish) {
+            $this->remoteStatusPublisher()?->publish($document);
+        }
+
+        return $document;
+    }
+
+    /**
+     * Built on first use from the resolved contract; null when remote status
+     * is disabled. The client gets one attempt per endpoint, like depth
+     * polling, because the resolver budgets exactly that into the heartbeat.
+     */
+    private function remoteStatusPublisher(): ?RemoteStatusPublisher
+    {
+        if ($this->remoteStatus !== null) {
+            return $this->remoteStatus ?: null;
+        }
+
+        $settings = $this->config['remote_status'] ?? null;
+        if (!is_array($settings)) {
+            $this->remoteStatus = false;
+
+            return null;
+        }
+
+        $connection = $settings['connection'];
+        $options = [
+            'urls' => $connection['urls'] ?? [$connection['url']],
+            'bearerToken' => $connection['bearer_token'] ?? null,
+            'headers' => $connection['headers'] ?? [],
+            'timeoutMillis' => ($this->config['http_timeout'] ?? 5) * 1000,
+            'retryAttempts' => 1,
+            'retryDelayMillis' => 0,
+        ];
+        $client = $this->queenFactory !== null
+            ? ($this->queenFactory)('remote_status', $options)
+            : new Queen($options);
+        if (!$client instanceof Queen) {
+            throw new \RuntimeException('Queen supervisor client factory must return a Queen client.');
+        }
+
+        return $this->remoteStatus = new RemoteStatusPublisher(
+            $client,
+            $settings['namespace'],
+            $settings['key'],
+            (int) $settings['interval'],
+            (int) $settings['ttl'],
+            $this->output,
+        );
+    }
+
+    /**
+     * Built on first use from the resolved contract, once this generation
+     * owns its instance id; null when coordination is disabled.
+     */
+    private function replicaCoordinator(): ?ReplicaCoordinator
+    {
+        if ($this->coordinator !== null) {
+            return $this->coordinator ?: null;
+        }
+
+        $settings = $this->config['coordination'] ?? null;
+        if (!is_array($settings)) {
+            $this->coordinator = false;
+
+            return null;
+        }
+
+        $connection = $settings['connection'];
+        $options = [
+            'urls' => $connection['urls'] ?? [$connection['url']],
+            'bearerToken' => $connection['bearer_token'] ?? null,
+            'headers' => $connection['headers'] ?? [],
+            'timeoutMillis' => ($this->config['http_timeout'] ?? 5) * 1000,
+            'retryAttempts' => 1,
+            'retryDelayMillis' => 0,
+        ];
+        $client = $this->queenFactory !== null
+            ? ($this->queenFactory)('coordination', $options)
+            : new Queen($options);
+        if (!$client instanceof Queen) {
+            throw new \RuntimeException('Queen supervisor client factory must return a Queen client.');
+        }
+        $hostname = gethostname();
+
+        return $this->coordinator = new ReplicaCoordinator(
+            $client,
+            $settings['namespace'],
+            (int) $settings['ttl'],
+            $this->state->instanceId(),
+            is_string($hostname) && $hostname !== '' ? $hostname : null,
+            $this->output,
+        );
+    }
+
+    /**
+     * The coordination scope of every autoscaling pool; fixed pools run their
+     * `processes` on every replica and do not coordinate.
+     *
+     * @return array<string, string> supervisor name => scope
+     */
+    private function coordinatedScopes(): array
+    {
+        $scopes = [];
+        foreach ($this->config['supervisors'] as $name => $options) {
+            if (($options['balance'] ?? 'auto') !== 'simple') {
+                $connection = $this->config['connections'][$options['connection']] ?? [];
+                $scopes[(string) $name] = ReplicaCoordinator::scope(
+                    $connection['urls'] ?? (isset($connection['url']) ? [$connection['url']] : []),
+                    $options['consumer_group'],
+                    $options['queues'],
+                );
+            }
+        }
+
+        return $scopes;
+    }
+
+    /** @return array{0: int, 1: int} [replica, replicas] */
+    private function replicaPosition(string $name): array
+    {
+        $coordinator = $this->replicaCoordinator();
+        $scope = $coordinator !== null ? ($this->coordinatedScopes()[$name] ?? null) : null;
+
+        return $scope !== null ? $coordinator->position($scope) : [0, 1];
+    }
+
+    private function replicaCount(string $name, string $status): ?int
+    {
+        if ($status !== 'running'
+            || $this->replicaCoordinator() === null
+            || !isset($this->coordinatedScopes()[$name])) {
+            return null;
+        }
+
+        return $this->replicaPosition($name)[1];
+    }
+
+    private function leaveReplicas(): void
+    {
+        try {
+            $this->replicaCoordinator()?->leave(array_values($this->coordinatedScopes()));
+        } catch (\Throwable $error) {
+            $this->emit("Queen supervisor replica coordination could not leave: {$error->getMessage()}\n", 'err');
+        }
     }
 
     /** @return array<string, mixed> */

@@ -1,0 +1,152 @@
+---
+/**
+ * A deploy as the old pod lives it, from the SIGTERM Kubernetes sends.
+ *
+ * What the drawing claims, and where the code says so:
+ *
+ * - The Rust supervisor is the container's main process. On SIGTERM it stops
+ *   starting workers, sends SIGTERM to every worker, waits up to
+ *   `shutdown_grace`, then SIGKILLs the process group of every worker still
+ *   running (`shutdown()` in supervisor/src/main.rs).
+ * - A Laravel worker finishes the job it is running and stops; on the way
+ *   out, QueenQueue::shutdown() hands back the prefetched jobs it never
+ *   started, so another worker gets them at once.
+ * - A job still running at the grace is killed without an acknowledgement.
+ *   The lease service in the master kept renewing it while the worker lived
+ *   (every `interval`, the rule in supervisor/src/lease/mod.rs, computed by
+ *   rollingUpdate() in src/lib/schematic-models.ts); after the
+ *   kill nobody does, so the lease ends `retry_after` after the last renewal
+ *   and a worker on the new pod runs the job again from the start.
+ * - `terminationGracePeriodSeconds` must be longer than `shutdown_grace`, or
+ *   Kubernetes kills the pod before the supervisor's own deadline.
+ */
+import Schematic from "./Schematic.astro";
+import { TOKEN, seconds, textWidth } from "../lib/schematic";
+import { rollingUpdate } from "../lib/schematic-models";
+
+interface Props {
+  /** `supervisor.shutdown_grace`. */
+  shutdownGrace?: number;
+  /** The pod's `terminationGracePeriodSeconds`. Must exceed shutdownGrace. */
+  terminationGracePeriod?: number;
+  /** `retry_after`, the lease each renewal extends to. */
+  retryAfter?: number;
+  /** `lease_renewal_interval`. Default: a third of retry_after. */
+  interval?: number;
+  /** When the short job ends, in seconds after the SIGTERM. */
+  shortJobEnds?: number;
+  /** When the long job was popped, in seconds before the SIGTERM. */
+  longJobStarted?: number;
+  /** Overrides the generated description. */
+  alt?: string;
+  /** One line under the figure. */
+  caption?: string;
+}
+
+const { caption } = Astro.props;
+const { shutdownGrace, terminationGracePeriod, shortJobEnds, leaseEnd, rerunAt, alt: defaultAlt } = rollingUpdate(Astro.props);
+const alt = Astro.props.alt ?? defaultAlt;
+
+// --- Geometry --------------------------------------------------------------
+const W = 680;
+const LABEL_W = 112;
+const X0 = LABEL_W + 12;
+const X1 = 660;
+const T0 = -30;
+const T_END = Math.ceil((rerunAt + 20) / 10) * 10;
+const x = (t: number) => X0 + ((Math.max(T0, Math.min(t, T_END)) - T0) / (T_END - T0)) * (X1 - X0);
+
+const BAR = 22;
+const rows = { pod: 66, short: 112, long: 158, next: 214 };
+const AXIS_Y = rows.next + BAR + 22;
+const H = AXIS_Y + 58;
+const ticks: number[] = [];
+for (let t = Math.ceil(T0 / 30) * 30; t <= T_END; t += 30) ticks.push(t);
+
+// The long job's label between SIGTERM and the kill, shortened if the grace is short.
+const LONG_LABEL = ["keeps running after SIGTERM", "keeps running"].find(
+  (label) => textWidth(label, 11.5) <= x(shutdownGrace) - x(0) - 16,
+);
+---
+
+<Schematic width={W} height={H} alt={alt} caption={caption}>
+  {/* The two deadlines, measured from the SIGTERM. */}
+  <path d={`M ${x(0)} 30 v -5 H ${x(terminationGracePeriod)} v 5`} fill="none" stroke={TOKEN.danger} stroke-width="1.25" />
+  <text x={x(terminationGracePeriod) + 6} y="22" class="s-small" fill={TOKEN.danger}>
+    <tspan class="s-code">terminationGracePeriodSeconds</tspan>: {seconds(terminationGracePeriod)}
+  </text>
+  <text x={x(terminationGracePeriod) + 6} y="35" class="s-small" fill={TOKEN.muted}>Kubernetes would SIGKILL the pod here</text>
+  <path d={`M ${x(0)} 52 v -5 H ${x(shutdownGrace)} v 5`} fill="none" stroke={TOKEN.warning} stroke-width="1.25" />
+  <text x={(x(0) + x(shutdownGrace)) / 2} y="42" text-anchor="middle" class="s-small" fill={TOKEN.warning}>
+    <tspan class="s-code">shutdown_grace</tspan>: {seconds(shutdownGrace)}
+  </text>
+  <line x1={x(terminationGracePeriod)} y1="25" x2={x(terminationGracePeriod)} y2={rows.pod + BAR} stroke={TOKEN.danger} stroke-width="1.25" stroke-dasharray="3 3" />
+
+  {/* Row labels: who, and which case. */}
+  {
+    [
+      [rows.pod, "Old pod", "supervisor master"],
+      [rows.short, "Worker 1", "short job"],
+      [rows.long, "Worker 2", "long job"],
+      [rows.next, "New pod", "another worker"],
+    ].map(([y, name, role]) => (
+      <g>
+        <text x={LABEL_W} y={(y as number) + 9} text-anchor="end" class="s-label" fill={TOKEN.fg}>{name}</text>
+        <text x={LABEL_W} y={(y as number) + 23} text-anchor="end" class="s-small" fill={TOKEN.muted}>{role}</text>
+      </g>
+    ))
+  }
+
+  {/* SIGTERM reaches every process; drawn first so the bars sit on it. */}
+  <line x1={x(0)} y1="22" x2={x(0)} y2={rows.long + BAR + 6} stroke={TOKEN.warning} stroke-width="2" />
+  <text x={x(0) - 6} y="22" text-anchor="end" class="s-label" fill={TOKEN.warning}>SIGTERM from Kubernetes</text>
+
+  {/* The old pod: the supervisor master is its main process. */}
+  <rect x={x(T0)} y={rows.pod} width={x(shutdownGrace + 1) - x(T0)} height={BAR} rx="4" fill={TOKEN.surface} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+  <text x={x(0) + 8} y={rows.pod + 15} class="s-note" fill={TOKEN.fg}>drains its workers</text>
+  <text x={x(shutdownGrace + 1) + 6} y={rows.pod + 15} class="s-note" fill={TOKEN.muted}>exits</text>
+
+  {/* Worker 1: the job ends within the grace. */}
+  <rect x={x(T0)} y={rows.short} width={x(shortJobEnds) - x(T0)} height={BAR} rx="4" fill={TOKEN.surface} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+  <text x={x(T0) + 8} y={rows.short + 15} class="s-note" fill={TOKEN.fg}>job</text>
+  <line x1={x(shortJobEnds)} y1={rows.short - 3} x2={x(shortJobEnds)} y2={rows.short + BAR + 3} stroke={TOKEN.success} stroke-width="2" />
+  <text x={x(shortJobEnds) + 6} y={rows.short + 10} class="s-label" fill={TOKEN.success}>ack, then exits</text>
+  <text x={x(shortJobEnds) + 6} y={rows.short + 24} class="s-small" fill={TOKEN.muted}>unstarted prefetched jobs handed back at once</text>
+
+  {/* Worker 2: the job outlasts the grace. */}
+  <rect x={x(T0)} y={rows.long} width={x(shutdownGrace) - x(T0)} height={BAR} rx="4" fill={TOKEN.surface} stroke={TOKEN.borderStrong} stroke-width="1.5" />
+  <rect x={x(shutdownGrace) - 4} y={rows.long} width="4" height={BAR} fill={TOKEN.danger} />
+  <text x={x(T0) + 8} y={rows.long + 15} class="s-note" fill={TOKEN.fg}>job</text>
+  {LONG_LABEL && <text x={x(0) + 8} y={rows.long + 15} class="s-note" fill={TOKEN.fg}>{LONG_LABEL}</text>}
+  <rect x={x(shutdownGrace)} y={rows.long + BAR / 2 - 3} width={x(leaseEnd) - x(shutdownGrace)} height="6" rx="3" fill={TOKEN.warning} opacity="0.35" />
+  <text x={x(shutdownGrace) + 8} y={rows.long + BAR / 2 - 7} class="s-small" fill={TOKEN.muted}>killed, no ack: its lease runs out</text>
+  <line x1={x(leaseEnd)} y1={rows.long - 4} x2={x(leaseEnd)} y2={rows.next + BAR + 4} stroke={TOKEN.warning} stroke-width="1.25" stroke-dasharray="3 3" />
+  <text x={x(leaseEnd) - 6} y={rows.long + BAR + 14} text-anchor="end" class="s-small" fill={TOKEN.warning}>
+    lease ends, {seconds(leaseEnd)}: <tspan class="s-code">retry_after</tspan> after the last renewal
+  </text>
+
+  {/* The new pod: the same job, from the start. */}
+  <rect x={x(rerunAt)} y={rows.next} width={X1 - x(rerunAt)} height={BAR} rx="4" fill={TOKEN.infoBg} stroke={TOKEN.info} stroke-width="1.5" />
+  <text x={x(rerunAt) + 8} y={rows.next + 15} class="s-note" fill={TOKEN.fg}>attempt 2</text>
+  <text x={x(rerunAt) - 8} y={rows.next + 15} text-anchor="end" class="s-note" fill={TOKEN.fg}>the same job, from the start</text>
+
+  {/* SIGKILL at the grace, to every worker still running. */}
+  <line x1={x(shutdownGrace)} y1={rows.pod - 6} x2={x(shutdownGrace)} y2={rows.long + BAR + 6} stroke={TOKEN.danger} stroke-width="2" />
+  <text x={x(shutdownGrace) + 6} y={rows.short - 6} class="s-small" fill={TOKEN.danger}>SIGKILL to workers still running</text>
+
+  {/* Time from the SIGTERM. */}
+  <line x1={X0} y1={AXIS_Y} x2={X1} y2={AXIS_Y} stroke={TOKEN.borderStrong} stroke-width="1" />
+  {
+    ticks.map((t) => (
+      <g>
+        <line x1={x(t)} y1={AXIS_Y} x2={x(t)} y2={AXIS_Y + 4} stroke={TOKEN.borderStrong} stroke-width="1" />
+        <text x={x(t)} y={AXIS_Y + 17} text-anchor="middle" class="s-small s-num" fill={TOKEN.muted}>{seconds(t)}</text>
+      </g>
+    ))
+  }
+
+  <text x={X0} y={H - 26} class="s-note" fill={TOKEN.fg}>
+    Keep <tspan class="s-code">terminationGracePeriodSeconds</tspan> longer than <tspan class="s-code">shutdown_grace</tspan>:
+  </text>
+  <text x={X0} y={H - 10} class="s-note" fill={TOKEN.fg}>otherwise Kubernetes kills the pod while jobs are still finishing.</text>
+</Schematic>

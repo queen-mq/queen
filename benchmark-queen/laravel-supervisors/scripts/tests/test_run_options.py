@@ -146,6 +146,39 @@ class RunOptionsTest(unittest.TestCase):
         self.assertIn('export BENCH_REDIS_APPENDONLY="$REDIS_APPENDONLY"', source)
         self.assertIn('export BENCH_REDIS_APPEND_FSYNC="$REDIS_APPEND_FSYNC"', source)
 
+    def test_backlog_first_accepts_only_zero_or_one(self) -> None:
+        result = self.run_before_docker("--backlog-first", "2")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("--backlog-first must be 0 or 1", result.stderr)
+
+    def test_backlog_first_excludes_a_paced_dispatch(self) -> None:
+        result = self.run_before_docker("--backlog-first", "1", "--dispatch-rate", "100")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("--backlog-first excludes --dispatch-rate", result.stderr)
+
+    def test_backlog_first_passes_validation(self) -> None:
+        result = self.run_before_docker("--backlog-first", "1", "--dispatch-mode", "bulk")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("required command not found: docker", result.stderr)
+
+    def test_backlog_first_holds_the_workers_around_the_measured_dispatch(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        hold = source.index('        hold_workers\n')
+        baseline = source.index("capture_backend_metrics before")
+        dispatch = source.index('--rate="$DISPATCH_RATE" >"${CURRENT_HOST_RUN}/dispatch-command.json"')
+        evidence = source.index('>"${CURRENT_HOST_RUN}/backlog-count.json"')
+        release = source.index('        release_workers\n')
+        results = source.index('producer php artisan bench:results --no-ansi "$run_id"')
+
+        self.assertLess(hold, baseline, "the workers are held before the counters' baseline")
+        self.assertLess(baseline, dispatch)
+        self.assertLess(dispatch, evidence, "the backlog is counted after the dispatch")
+        self.assertLess(evidence, release, "and before the workers are released")
+        self.assertLess(release, results)
+
 
 if __name__ == "__main__":
     unittest.main()

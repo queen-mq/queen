@@ -3,6 +3,7 @@
 echo json_encode([
     'arguments' => array_slice($argv, 1),
     'telemetry_directory' => getenv('QUEEN_SUPERVISOR_TELEMETRY_DIR'),
+    'exits_directory' => getenv('QUEEN_SUPERVISOR_EXITS_DIR'),
     'consumer_group' => getenv('QUEEN_LARAVEL_CONSUMER_GROUP'),
     'connection' => getenv('QUEEN_LARAVEL_CONNECTION'),
     'supervisor' => getenv('QUEEN_LARAVEL_SUPERVISOR'),

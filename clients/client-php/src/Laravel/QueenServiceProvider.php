@@ -4,20 +4,33 @@ namespace Queen\Laravel;
 
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Queue\QueueManager;
-use Illuminate\Queue\Events\JobExceptionOccurred;
-use Illuminate\Queue\Events\JobFailed;
-use Illuminate\Queue\Events\JobProcessed;
-use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Support\ServiceProvider;
+use Queen\Laravel\Dashboard\ConsoleLinks;
 use Queen\Laravel\Dashboard\DashboardRepository;
+use Queen\Laravel\Dashboard\DashboardScript;
 use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Queen\Laravel\Dashboard\FailedJobsReadModel;
+use Queen\Laravel\Dashboard\QueueContentsReader;
+use Queen\Laravel\Dashboard\RemoteStatusReader;
+use Queen\Laravel\Dashboard\JobMetricsReader;
+use Queen\Laravel\Monitoring\JobMetricsRecorder;
+use Queen\Laravel\Monitoring\QueueWaits;
+use Queen\Laravel\Monitoring\TagMonitor;
+use Illuminate\Queue\Events\JobFailed;
+use Queen\Laravel\Queue\QueenQueue;
+use Illuminate\Queue\Events\JobExceptionOccurred;
+use Illuminate\Queue\Events\JobProcessed;
+use Illuminate\Queue\Events\JobProcessing;
+use Illuminate\Queue\Events\Looping;
+use Illuminate\Queue\Events\WorkerStopping;
+use Queen\Laravel\Dashboard\ThroughputReader;
 use Queen\Laravel\Http\Middleware\AuthorizeDashboard;
 use Queen\Laravel\Http\Middleware\SecureDashboardResponse;
 use Queen\Laravel\Queue\QueenConnector;
 use Queen\Laravel\Queue\SyncedFailedJobProvider;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
 use Queen\Laravel\Supervisor\SupervisorState;
+use Queen\Laravel\Supervisor\WorkerExitMarker;
 use Queen\Laravel\Supervisor\WorkerTelemetry;
 use Queen\Queen;
 use RuntimeException;
@@ -192,7 +205,14 @@ class QueenServiceProvider extends ServiceProvider
 
     private function registerDashboardServices(): void
     {
-        $this->app->singleton(DashboardStylesheet::class);
+        $this->app->singleton(
+            DashboardStylesheet::class,
+            fn ($app): DashboardStylesheet => new DashboardStylesheet($app->publicPath()),
+        );
+        $this->app->singleton(
+            DashboardScript::class,
+            fn ($app): DashboardScript => new DashboardScript($app->publicPath()),
+        );
 
         $this->app->singleton(FailedJobsReadModel::class, function ($app): FailedJobsReadModel {
             return new FailedJobsReadModel(
@@ -216,9 +236,179 @@ class QueenServiceProvider extends ServiceProvider
             return new DashboardRepository(
                 new SupervisorState($directory),
                 $app['config'],
-                fn (int $limit): array => $app->make(FailedJobsReadModel::class)->read($limit),
+                fn (int $limit, ?int $cursor = null): array => $app->make(FailedJobsReadModel::class)->read($limit, $cursor),
+                $this->remoteStatusEnabled($app)
+                    ? fn (): ?array => $app->make(RemoteStatusReader::class)->read()
+                    : null,
+                fn (string $id): ?array => $app->make(FailedJobsReadModel::class)->find($id),
             );
         });
+
+        $this->app->singleton(JobMetricsRecorder::class, function ($app): JobMetricsRecorder {
+            $connection = (string) $app['config']->get('queen.job_metrics.connection', 'queen');
+
+            return new JobMetricsRecorder(
+                // Written from job events and WorkerStopping: one bounded try.
+                function () use ($app, $connection): ?Queen {
+                    $queue = $app['queue']->connection($connection);
+
+                    return $queue instanceof QueenQueue ? $queue->getBestEffortQueen() : null;
+                },
+                (string) $app['config']->get('queen.job_metrics.namespace', 'queen-metrics'),
+            );
+        });
+
+        $this->app->singleton(TagMonitor::class, function ($app): TagMonitor {
+            $connection = (string) $app['config']->get('queen.tags.connection', 'queen');
+
+            return new TagMonitor(
+                // Written from job events: one bounded try.
+                function () use ($app, $connection): ?Queen {
+                    $queue = $app['queue']->connection($connection);
+
+                    return $queue instanceof QueenQueue ? $queue->getBestEffortQueen() : null;
+                },
+                (string) $app['config']->get('queen.tags.namespace', 'queen-metrics'),
+                max(60, (int) $app['config']->get('queen.tags.retention_minutes', 1440) * 60),
+            );
+        });
+
+        $this->app->singleton(JobMetricsReader::class, function ($app): JobMetricsReader {
+            $resolved = SupervisorConfiguration::readOnlyConnection(
+                (string) $app['config']->get('queen.job_metrics.connection', 'queen'),
+                (array) $app['config']->get('queen.supervisor', []),
+                (array) $app['config']->get('queen', []),
+                (array) $app['config']->get('queue.connections', []),
+            );
+
+            return new JobMetricsReader(
+                new Queen([
+                    'urls' => $resolved['urls'],
+                    'bearerToken' => $resolved['bearer_token'],
+                    'headers' => $resolved['headers'],
+                    // A dashboard render must not queue behind retries.
+                    'timeoutMillis' => 5000,
+                    'retryAttempts' => 1,
+                    'retryDelayMillis' => 0,
+                ]),
+                (string) $app['config']->get('queen.job_metrics.namespace', 'queen-metrics'),
+                $app->bound('cache') ? fn () => $app['cache']->store() : null,
+            );
+        });
+
+        $this->app->singleton(ThroughputReader::class, function ($app): ThroughputReader {
+            $timeout = $this->dashboardReadTimeout($app);
+
+            return new ThroughputReader(
+                $this->dashboardReadClient($app, $timeout),
+                $app->bound('cache') ? fn () => $app['cache']->store() : null,
+                null,
+                $timeout * 1000,
+            );
+        });
+
+        $this->app->singleton(QueueContentsReader::class, function ($app): QueueContentsReader {
+            $timeout = $this->dashboardReadTimeout($app);
+
+            return new QueueContentsReader(
+                $this->dashboardReadClient($app, $timeout),
+                $app->bound('cache') ? fn () => $app['cache']->store() : null,
+                $timeout * 1000,
+            );
+        });
+
+        // Wait measurement for queen:check-waits, with the connection's
+        // read credential; bound so tests and applications can replace it.
+        $this->app->bind(QueueWaits::class, function ($app, array $parameters): QueueWaits {
+            $resolved = SupervisorConfiguration::readOnlyConnection(
+                (string) ($parameters['connection'] ?? 'queen'),
+                (array) $app['config']->get('queen.supervisor', []),
+                (array) $app['config']->get('queen', []),
+                (array) $app['config']->get('queue.connections', []),
+            );
+
+            return new QueueWaits(new Queen([
+                'urls' => $resolved['urls'],
+                'bearerToken' => $resolved['bearer_token'],
+                'headers' => $resolved['headers'],
+                'timeoutMillis' => 5000,
+                'retryAttempts' => 1,
+                'retryDelayMillis' => 0,
+            ]));
+        });
+
+        $this->app->singleton(RemoteStatusReader::class, function ($app): RemoteStatusReader {
+            $settings = SupervisorConfiguration::remoteStatusSettings(
+                (array) $app['config']->get('queen.supervisor', []),
+                (array) $app['config']->get('queen', []),
+                (array) $app['config']->get('queue.connections', []),
+            );
+            if ($settings === null) {
+                throw new RuntimeException('Queen supervisor remote status is disabled.');
+            }
+            $connection = $settings['connection'];
+            $timeout = $this->configurationInteger(
+                $app['config']->get('queen.supervisor.http_timeout', 5),
+                'queen.supervisor.http_timeout',
+                1,
+            );
+
+            return new RemoteStatusReader(
+                new Queen([
+                    'urls' => $connection['urls'],
+                    'bearerToken' => $connection['bearer_token'],
+                    'headers' => $connection['headers'],
+                    'timeoutMillis' => $timeout * 1000,
+                    // A dashboard render must not queue behind retries.
+                    'retryAttempts' => 1,
+                    'retryDelayMillis' => 0,
+                ]),
+                $settings['namespace'],
+                $settings['key'],
+            );
+        });
+    }
+
+    private function remoteStatusEnabled($app): bool
+    {
+        return $app['config']->get('queen.supervisor.remote_status.enabled', false) === true;
+    }
+
+    /** Seconds a dashboard read may take: a render must not queue behind a slow broker. */
+    private function dashboardReadTimeout($app): int
+    {
+        return min(5, $this->configurationInteger(
+            $app['config']->get('queen.supervisor.http_timeout', 5),
+            'queen.supervisor.http_timeout',
+            1,
+        ));
+    }
+
+    /**
+     * A read client per Laravel queue connection, with the supervisor's read
+     * credential and one attempt, so a render never waits for retries.
+     *
+     * @return \Closure(string): Queen
+     */
+    private function dashboardReadClient($app, int $timeout): \Closure
+    {
+        return function (string $connection) use ($app, $timeout): Queen {
+            $resolved = SupervisorConfiguration::readOnlyConnection(
+                $connection,
+                (array) $app['config']->get('queen.supervisor', []),
+                (array) $app['config']->get('queen', []),
+                (array) $app['config']->get('queue.connections', []),
+            );
+
+            return new Queen([
+                'urls' => $resolved['urls'],
+                'bearerToken' => $resolved['bearer_token'],
+                'headers' => $resolved['headers'],
+                'timeoutMillis' => $timeout * 1000,
+                'retryAttempts' => 1,
+                'retryDelayMillis' => 0,
+            ]);
+        };
     }
 
     private function configurationInteger(mixed $value, string $name, int $minimum): int
@@ -257,17 +447,28 @@ class QueenServiceProvider extends ServiceProvider
         $this->registerWorkerTelemetry();
         $this->loadViewsFrom(__DIR__ . '/../../resources/views', 'queen');
         $this->registerDashboardRoutes();
+        $this->registerMetricsRoute();
 
         if ($this->app->runningInConsole()) {
             $this->publishes([
                 __DIR__ . '/../../config/queen.php' => config_path('queen.php'),
             ], 'queen-config');
+            // Optional: only for web servers that serve every *.css or *.js
+            // from the public directory. The dashboard falls back to its own
+            // routes whenever a copy is missing or stale. `laravel-assets` makes
+            // the default skeleton's post-update-cmd republish them on upgrade.
+            $this->publishes([
+                __DIR__ . '/../../resources/css/dashboard.css' => public_path(DashboardStylesheet::PUBLISHED_FILE),
+                __DIR__ . '/../../resources/js/dashboard.js' => public_path(DashboardScript::PUBLISHED_FILE),
+            ], ['queen-assets', 'laravel-assets']);
 
             $this->commands([
                 Commands\ConsumeCommand::class,
                 Commands\SuperviseCommand::class,
                 Commands\SupervisorConfigCommand::class,
                 Commands\SupervisorControlCommand::class,
+                Commands\ForkServerCommand::class,
+                Commands\CheckWaitsCommand::class,
                 Commands\SupervisorInstallCommand::class,
             ]);
         }
@@ -324,32 +525,111 @@ class QueenServiceProvider extends ServiceProvider
             }
             $attributes['domain'] = $domain;
         }
+        // Only links depend on it, and this method runs in every process,
+        // workers included: report a wrong value instead of failing the boot.
+        // The Workload page checks it again, since cached routes skip this.
+        try {
+            ConsoleLinks::fromConfig($this->app['config']->get('queen.dashboard.console_url'));
+        } catch (\InvalidArgumentException $invalid) {
+            if ($this->app->bound(\Illuminate\Contracts\Debug\ExceptionHandler::class)) {
+                $this->app->make(\Illuminate\Contracts\Debug\ExceptionHandler::class)->report($invalid);
+            }
+        }
 
         $this->app['router']->group($attributes, function (): void {
             require __DIR__ . '/../../routes/dashboard.php';
         });
     }
 
-    private function registerWorkerTelemetry(): void
+    private function registerMetricsRoute(): void
     {
-        $directory = getenv('QUEEN_SUPERVISOR_TELEMETRY_DIR');
-        if (!is_string($directory) || $directory === '') {
+        if ($this->app['config']->get('queen.metrics.enabled', false) !== true
+            || $this->app->routesAreCached()) {
             return;
         }
 
-        $connection = getenv('QUEEN_LARAVEL_CONNECTION');
-        $supervisor = getenv('QUEEN_LARAVEL_SUPERVISOR');
-        $group = getenv('QUEEN_LARAVEL_CONSUMER_GROUP');
-        $telemetry = new WorkerTelemetry(
-            $directory,
-            is_string($connection) && $connection !== '' ? $connection : 'queen',
-            is_string($supervisor) && $supervisor !== '' ? $supervisor : 'default',
-            is_string($group) && $group !== '' ? $group : 'laravel',
-        );
+        $token = $this->app['config']->get('queen.metrics.token');
+        if (!is_string($token) || strlen($token) < 32) {
+            throw new \InvalidArgumentException('queen.metrics.token must be a secret of at least 32 characters.');
+        }
+        $path = $this->app['config']->get('queen.metrics.path', 'queen/metrics');
+        if (!is_string($path)
+            || trim($path, '/') === ''
+            || strlen($path) > 128
+            || preg_match('/\A[A-Za-z0-9][A-Za-z0-9._~\/-]*\z/D', trim($path, '/')) !== 1
+            || in_array('..', explode('/', trim($path, '/')), true)) {
+            throw new \InvalidArgumentException('queen.metrics.path must be a safe non-empty route path.');
+        }
+
+        $this->app['router']
+            ->get(trim($path, '/'), Http\Controllers\MetricsController::class)
+            ->middleware(Http\Middleware\AuthorizeMetrics::class)
+            ->name('queen.metrics');
+    }
+
+    private function registerWorkerTelemetry(): void
+    {
+        WorkerTelemetry::listenFromEnvironment($this->app['events']);
+        // Under a supervisor: tell the master when Laravel's job timeout, or
+        // --memory after a job, ends this worker, so it counts no crash.
+        WorkerExitMarker::listenFromEnvironment($this->app['events']);
+        $this->registerJobMetrics();
+    }
+
+    /**
+     * Per-job-class metrics for the dashboard's Jobs page, recorded by the
+     * workers of Queen connections; see Monitoring\JobMetricsRecorder.
+     */
+    private function registerJobMetrics(): void
+    {
+        if ($this->app['config']->get('queen.job_metrics.enabled', true) !== true) {
+            return;
+        }
+        $isQueen = fn (?string $connection): bool => $connection !== null
+            && $this->app['config']->get("queue.connections.{$connection}.driver") === 'queen';
+        $recorder = fn (): JobMetricsRecorder => $this->app->make(JobMetricsRecorder::class);
         $events = $this->app['events'];
-        $events->listen(JobProcessing::class, fn (JobProcessing $event) => $telemetry->start($event->connectionName, $event->job));
-        $events->listen(JobProcessed::class, fn (JobProcessed $event) => $telemetry->finish($event->connectionName, $event->job));
-        $events->listen(JobExceptionOccurred::class, fn (JobExceptionOccurred $event) => $telemetry->finish($event->connectionName, $event->job, true));
-        $events->listen(JobFailed::class, fn (JobFailed $event) => $telemetry->finish($event->connectionName, $event->job, true));
+        $events->listen(JobProcessing::class, function (JobProcessing $event) use ($isQueen, $recorder): void {
+            if ($isQueen($event->connectionName)) {
+                $recorder()->start($event->job);
+            }
+        });
+        $events->listen(JobProcessed::class, function (JobProcessed $event) use ($isQueen, $recorder): void {
+            if ($isQueen($event->connectionName)) {
+                $recorder()->finish($event->job, false);
+            }
+        });
+        // A final failure raises JobExceptionOccurred before JobFailed; count it once.
+        $events->listen(JobExceptionOccurred::class, function (JobExceptionOccurred $event) use ($isQueen, $recorder): void {
+            if ($isQueen($event->connectionName)) {
+                $recorder()->finish($event->job, true);
+            }
+        });
+        $events->listen(Looping::class, function (Looping $event) use ($isQueen, $recorder): void {
+            if ($isQueen($event->connectionName)) {
+                $recorder()->tick();
+            }
+        });
+        $events->listen(WorkerStopping::class, fn () => $recorder()->flush());
+
+        if ($this->app['config']->get('queen.tags.enabled', true) !== true) {
+            return;
+        }
+        $tags = fn (): TagMonitor => $this->app->make(TagMonitor::class);
+        $events->listen(JobProcessing::class, function (JobProcessing $event) use ($isQueen, $tags): void {
+            if ($isQueen($event->connectionName)) {
+                $tags()->start($event->job);
+            }
+        });
+        $events->listen(JobProcessed::class, function (JobProcessed $event) use ($isQueen, $tags): void {
+            if ($isQueen($event->connectionName)) {
+                $tags()->record($event->job, 'completed');
+            }
+        });
+        $events->listen(JobFailed::class, function (JobFailed $event) use ($isQueen, $tags): void {
+            if ($isQueen($event->connectionName)) {
+                $tags()->record($event->job, 'failed');
+            }
+        });
     }
 }

@@ -3,11 +3,14 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="{{ $refreshSeconds }};url={{ $refreshUrl }}">
-    <title>Queen Supervisor</title>
+    @if ($autoRefresh)
+    <noscript><meta http-equiv="refresh" content="{{ $refreshSeconds }};url={{ $refreshUrl }}"></noscript>
+    @endif
+    <title>{{ $pageTitle }} · Queen Supervisor</title>
     <link rel="stylesheet" href="{{ $stylesheetUrl }}" integrity="{{ $stylesheetIntegrity }}">
+    <script src="{{ $scriptUrl }}" integrity="{{ $scriptIntegrity }}" defer></script>
 </head>
-<body>
+<body @if ($autoRefresh) data-refresh-seconds="{{ $refreshSeconds }}" @endif>
 @php
     $supervisor = $snapshot['supervisor'];
     $queues = $snapshot['queues'];
@@ -32,27 +35,30 @@
     $budgetLabel = $processBudget['valid']
         ? number_format($processBudget['used']) . ' / ' . number_format($processBudget['limit'])
         : '—';
-    $masterStateLabel = match ($supervisor['state']) {
-        'running' => 'Active',
-        'paused' => 'Paused',
-        'terminating' => 'Stopping',
-        'starting' => 'Starting',
-        'stopped' => 'Stopped',
-        default => 'Unknown',
+    // Shared with the per-instance cards of the supervisors page.
+    $stateLabelFor = fn (array $supervisor): string => match ($supervisor['availability']) {
+        'live' => match ($supervisor['state']) {
+            'running' => 'Active',
+            'paused' => 'Paused',
+            'terminating' => 'Stopping',
+            'starting' => 'Starting',
+            'stopped' => 'Stopped',
+            'mixed' => 'Mixed',
+            default => 'Unknown',
+        },
+        'stale' => 'Stale',
+        default => 'Unavailable',
     };
-    if ($supervisor['availability'] === 'live') {
-        $stateLabel = $masterStateLabel;
-        $livenessLabel = 'Live';
-        $livenessTone = 'success';
-    } elseif ($supervisor['availability'] === 'stale') {
-        $stateLabel = 'Stale';
-        $livenessLabel = 'Stale';
-        $livenessTone = 'warning';
-    } else {
-        $stateLabel = 'Unavailable';
-        $livenessLabel = 'Unavailable';
-        $livenessTone = 'danger';
-    }
+    $stateLabel = $stateLabelFor($supervisor);
+    [$livenessLabel, $livenessTone] = match ($supervisor['availability']) {
+        'live' => ['Live', 'success'],
+        'stale' => ['Stale', 'warning'],
+        default => ['Unavailable', 'danger'],
+    };
+    $instanceCount = $supervisor['instances'];
+    $liveInstanceCount = $supervisor['live_instances'];
+    $stateSourceLabel = ($instanceCount > 1 ? $instanceCount . ' supervisor instances · ' : '')
+        . (($supervisor['source'] ?? null) === 'remote' ? 'supervisor state published through the broker' : 'local supervisor state only');
     $readinessLabel = $supervisor['ready'] ? 'Ready' : 'Not ready';
     $readinessTone = $supervisor['ready'] ? 'success' : ($supervisor['availability'] === 'live' ? 'warning' : 'danger');
     $capacityLabel = $supervisor['capacity_satisfied'] ? 'Satisfied' : 'Below desired';
@@ -69,18 +75,14 @@
 
         <main id="main-content" class="content" tabindex="-1">
             <div class="page-heading">
-                <h1>Overview</h1>
-                <p>Current state of this application's local Queen worker supervisor.</p>
+                <h1>{{ $pageTitle }}</h1>
+                <p>{{ $pageDescription }}</p>
             </div>
 
             @include('queen::dashboard.partials.notices')
-            @include('queen::dashboard.partials.overview')
-            @include('queen::dashboard.partials.workload')
-            @include('queen::dashboard.partials.supervisor')
-            @include('queen::dashboard.partials.failed-jobs')
-            @include('queen::dashboard.partials.configuration')
+            @include($contentView)
 
-            <footer class="footer">Auto-refreshes every {{ $refreshSeconds }} seconds · local supervisor state only</footer>
+            <footer class="footer">@if ($autoRefresh)<span data-refresh-state>Auto-refreshes every {{ $refreshSeconds }} seconds</span> · @endif{{ $stateSourceLabel }}</footer>
         </main>
     </div>
 </div>

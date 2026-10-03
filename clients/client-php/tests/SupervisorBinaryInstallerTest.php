@@ -54,6 +54,33 @@ class SupervisorBinaryInstallerTest extends TestCase
         }
     }
 
+    public function testThreadSafePhpExecutesThePinnedDirectoryByItsAbsoluteName(): void
+    {
+        $directory = realpath(sys_get_temp_dir()) . '/queen-exec-path-' . bin2hex(random_bytes(4));
+        mkdir($directory, 0700);
+        $previousDirectory = getcwd();
+
+        try {
+            chdir($directory);
+
+            // A non-thread-safe chdir() moved the process: the pinned relative path resolves there.
+            $this->assertNull(SupervisorBinary::pinnedDirectoryForExec(threadSafe: false));
+            $this->assertSame(
+                './queen-supervisor',
+                SupervisorBinary::executablePath('./queen-supervisor', threadSafe: false),
+            );
+            // A ZTS chdir() moved only PHP's virtual directory, which the kernel never sees.
+            $this->assertSame($directory, SupervisorBinary::pinnedDirectoryForExec(threadSafe: true));
+            $this->assertSame(
+                $directory . '/queen-supervisor',
+                SupervisorBinary::executablePath('./queen-supervisor', threadSafe: true),
+            );
+        } finally {
+            chdir($previousDirectory);
+            rmdir($directory);
+        }
+    }
+
     public function testManifestRequiresPinnedVersionHttpsAndSha256(): void
     {
         $valid = $this->manifest([
@@ -87,8 +114,8 @@ class SupervisorBinaryInstallerTest extends TestCase
             'target' => 'x86_64-pc-windows-msvc',
             'os' => 'windows',
             'arch' => 'amd64',
-            'filename' => 'queen-supervisor-0.1.0-windows-amd64.tar.gz',
-            'url' => 'https://github.example.test/queen-supervisor-0.1.0-windows-amd64.tar.gz',
+            'filename' => 'queen-supervisor-0.6.0-windows-amd64.tar.gz',
+            'url' => 'https://github.example.test/queen-supervisor-0.6.0-windows-amd64.tar.gz',
             'sha256' => str_repeat('b', 64),
         ];
         $parsed = SupervisorReleaseManifest::fromJson(json_encode($extensible, JSON_THROW_ON_ERROR));
@@ -113,7 +140,7 @@ class SupervisorBinaryInstallerTest extends TestCase
         );
 
         $this->assertTrue($result['installed']);
-        $this->assertSame('0.1.0', $result['version']);
+        $this->assertSame('0.6.0', $result['version']);
         $this->assertSame(str_repeat('c', 40), $result['source_commit']);
         $this->assertSame(hash_file('sha256', $manifest), $result['manifest_sha256']);
         $this->assertTrue(is_executable($result['binary']));
@@ -168,14 +195,29 @@ class SupervisorBinaryInstallerTest extends TestCase
             );
             $this->fail('Replacing the configured installation path must fail the install operation.');
         } catch (RuntimeException $exception) {
-            $this->assertStringContainsString('installation base path changed', $exception->getMessage());
+            // A ZTS chdir() pins by name, so its inode check reports the swap first.
+            $this->assertMatchesRegularExpression(
+                '/(installation base path|pinned installation base) changed/',
+                $exception->getMessage(),
+            );
         }
 
-        $this->assertSame(2, $downloads);
         $this->assertFileDoesNotExist(SupervisorBinary::binaryPath(
             $installBase,
             SupervisorBinary::platform('Linux', 'amd64'),
         ));
+        if (PHP_ZTS) {
+            // A ZTS chdir() follows the name into the replacement, where the base
+            // check refuses the install before the archive is even downloaded.
+            $this->assertSame(1, $downloads);
+            $this->assertFileDoesNotExist(SupervisorBinary::receiptPath(
+                $installBase,
+                SupervisorBinary::platform('Linux', 'amd64'),
+            ));
+
+            return;
+        }
+        $this->assertSame(2, $downloads);
         $this->assertFileExists(SupervisorBinary::binaryPath(
             $movedBase,
             SupervisorBinary::platform('Linux', 'amd64'),
@@ -397,7 +439,7 @@ class SupervisorBinaryInstallerTest extends TestCase
         $process->run();
 
         $this->assertSame(0, $process->getExitCode(), $process->getErrorOutput());
-        $this->assertSame("queen-supervisor 0.1.0\n", $process->getOutput());
+        $this->assertSame("queen-supervisor 0.6.0\n", $process->getOutput());
         $this->assertDirectoryDoesNotExist($storage . '/queen-supervisor');
 
         $defaultContext = new Process(
@@ -414,7 +456,8 @@ class SupervisorBinaryInstallerTest extends TestCase
         $launchDirectory = realpath($application);
         $this->assertIsString($launchDirectory);
         $this->assertSame([
-            realpath($installation),
+            // pcntl_exec() cannot move a ZTS process, so the binary starts where PHP was launched.
+            PHP_ZTS ? $launchDirectory : realpath($installation),
             '--artisan',
             $launchDirectory . '/artisan',
         ], preg_split('/\R/', trim($defaultContext->getOutput())));
@@ -438,7 +481,7 @@ class SupervisorBinaryInstallerTest extends TestCase
         $relativeContext->run();
         $this->assertSame(0, $relativeContext->getExitCode(), $relativeContext->getErrorOutput());
         $this->assertSame([
-            realpath($installation),
+            PHP_ZTS ? $launchDirectory : realpath($installation),
             '--php',
             $launchDirectory . '/./runtime/php',
             '--artisan',
@@ -462,7 +505,7 @@ class SupervisorBinaryInstallerTest extends TestCase
         $configContext->run();
         $this->assertSame(0, $configContext->getExitCode(), $configContext->getErrorOutput());
         $this->assertSame([
-            realpath($installation),
+            PHP_ZTS ? $launchDirectory : realpath($installation),
             '--config',
             $launchDirectory . '/config/supervisor.json',
         ], preg_split('/\R/', trim($configContext->getOutput())));
@@ -486,7 +529,7 @@ class SupervisorBinaryInstallerTest extends TestCase
         $pathPhpContext->run();
         $this->assertSame(0, $pathPhpContext->getExitCode(), $pathPhpContext->getErrorOutput());
         $this->assertSame([
-            realpath($installation),
+            PHP_ZTS ? $launchDirectory : realpath($installation),
             '--php',
             'php',
             '--artisan',
@@ -550,13 +593,13 @@ class SupervisorBinaryInstallerTest extends TestCase
         $installer->install(
             $this->temporaryDirectory() . '/installed',
             'https://mirror.example.test/releases/' . SupervisorBinary::MANIFEST_FILENAME,
-            releaseBaseUrl: 'https://cdn.example.test/queen/v0.1.0/',
+            releaseBaseUrl: 'https://cdn.example.test/queen/v0.6.0/',
             platform: SupervisorBinary::platform('Linux', 'amd64'),
         );
 
         $this->assertSame([
             'https://mirror.example.test/releases/' . SupervisorBinary::MANIFEST_FILENAME,
-            'https://cdn.example.test/queen/v0.1.0/queen-supervisor-0.1.0-linux-amd64.tar.gz',
+            'https://cdn.example.test/queen/v0.6.0/queen-supervisor-0.6.0-linux-amd64.tar.gz',
         ], $requested);
     }
 
@@ -700,7 +743,7 @@ if [ "${1:-}" = "--version" ]; then
     mkdir -m 0755 "$original" || exit 92
     printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'substituted binary'" > "$original/$filename" || exit 93
     chmod 0755 "$original/$filename" || exit 94
-    printf '%s\n' 'queen-supervisor 0.1.0'
+    printf '%s\n' 'queen-supervisor 0.6.0'
     exit 0
 fi
 exit 95
@@ -718,7 +761,11 @@ SH;
             );
             $this->fail('A target replacement during the executable smoke test must fail installation.');
         } catch (RuntimeException $exception) {
-            $this->assertStringContainsString('target directory changed during installation', $exception->getMessage());
+            // A ZTS chdir() pins by name, so the smoke test itself sees the substituted binary first.
+            $this->assertMatchesRegularExpression(
+                '/target directory changed during installation|changed during its version smoke test/',
+                $exception->getMessage(),
+            );
         }
 
         $this->assertFileDoesNotExist(SupervisorBinary::binaryPath($installBase, $platform));
@@ -759,6 +806,8 @@ SH;
         }
         $this->assertSame($previousDirectory, getcwd());
 
+        $absoluteTarget = realpath($target);
+        $this->assertIsString($absoluteTarget);
         try {
             $pinnedBinary = SupervisorBinary::pinInstalledForExecution($installBase, $platform);
             $movedTarget = $target . '.moved';
@@ -768,9 +817,16 @@ SH;
             $this->assertNotFalse(file_put_contents($replacement, "#!/bin/sh\necho attacker\n"));
             $this->assertTrue(chmod($replacement, 0755));
 
+            $this->assertNotSame($originalHash, hash_file('sha256', $replacement));
+            if (PHP_ZTS) {
+                // The kernel never saw the ZTS chdir(): exec re-resolves the verified directory by
+                // name, so this platform keeps every check but not the inode pin.
+                $this->assertSame($absoluteTarget . DIRECTORY_SEPARATOR . 'queen-supervisor', $pinnedBinary);
+
+                return;
+            }
             $this->assertSame('.' . DIRECTORY_SEPARATOR . 'queen-supervisor', $pinnedBinary);
             $this->assertSame($originalHash, hash_file('sha256', $pinnedBinary));
-            $this->assertNotSame($originalHash, hash_file('sha256', $replacement));
         } finally {
             if (is_string($previousDirectory)) {
                 $this->assertTrue(chdir($previousDirectory));
@@ -851,7 +907,7 @@ SH;
     ): array
     {
         $directory = $this->temporaryDirectory();
-        $tar = $directory . '/queen-supervisor-0.1.0-linux-amd64.tar';
+        $tar = $directory . '/queen-supervisor-0.6.0-linux-amd64.tar';
         $archive = $tar . '.gz';
         $fixtureBinary = __DIR__ . '/Fixtures/Supervisor/queen-supervisor';
         $phar = new \PharData($tar);
@@ -889,8 +945,8 @@ SH;
                 'target' => 'x86_64-unknown-linux-musl',
                 'os' => 'linux',
                 'arch' => 'amd64',
-                'filename' => 'queen-supervisor-0.1.0-linux-amd64.tar.gz',
-                'url' => 'https://github.example.test/queen-supervisor-0.1.0-linux-amd64.tar.gz',
+                'filename' => 'queen-supervisor-0.6.0-linux-amd64.tar.gz',
+                'url' => 'https://github.example.test/queen-supervisor-0.6.0-linux-amd64.tar.gz',
                 'sha256' => str_repeat('a', 64),
             ]],
         ];

@@ -50,6 +50,25 @@ class LaravelSupervisorProductionTest extends TestCase
         ], '/app');
     }
 
+    public function testARefusedBrokerUrlIsReportedWithoutItsCredentials(): void
+    {
+        try {
+            SupervisorConfiguration::readOnlyConnection(
+                'queen',
+                [],
+                ['url' => 'https://usr-7f3b:pw-5e2a@queen.example.test:6632/base?tenant=t-91c0'],
+                [],
+            );
+            $this->fail('A URL with user info was accepted.');
+        } catch (InvalidArgumentException $exception) {
+            // The message reaches logs and error pages.
+            $this->assertStringContainsString('https://queen.example.test:6632', $exception->getMessage());
+            foreach (['usr-7f3b', 'pw-5e2a', 't-91c0'] as $secret) {
+                $this->assertStringNotContainsString($secret, $exception->getMessage());
+            }
+        }
+    }
+
     public function testConfigurationRejectsAnUnsafeGlobalProcessLimit(): void
     {
         $this->expectException(InvalidArgumentException::class);
@@ -1655,6 +1674,42 @@ class LaravelSupervisorProductionTest extends TestCase
         $this->assertSame('open', $this->property($supervisor, 'restartPhase')[$key]);
         $this->assertSame(6, $this->property($supervisor, 'crashCount')[$key]);
         $this->assertSame([], $this->property($supervisor, 'restartProbes'));
+    }
+
+    /**
+     * queue:work exits 12 at --memory (128 MB by default here), and a job
+     * timeout kills the worker: routine for a worker that ran for a while,
+     * and no reason to hold its pool at one probe for stable_after.
+     */
+    public function testALongLivedWorkerExitIsNotACrash(): void
+    {
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            ['state_directory' => $this->temporaryDirectory()],
+        );
+        $reap = new ReflectionMethod(PhpSupervisor::class, 'reap');
+        $permission = new ReflectionMethod(PhpSupervisor::class, 'restartPermission');
+        $options = ['restart_backoff' => 1, 'restart_backoff_max' => 8, 'stable_after' => 60];
+
+        foreach ([12 => 3600, 137 => 3600, 1 => 5] as $exitCode => $ranSeconds) {
+            $worker = $this->createStub(\Symfony\Component\Process\Process::class);
+            $worker->method('isRunning')->willReturn(false);
+            $worker->method('getExitCode')->willReturn($exitCode);
+            $this->setProperty($supervisor, 'processes', ['orders' => ['high' => [$worker]]]);
+            $this->setProperty($supervisor, 'startedAt', [spl_object_id($worker) => microtime(true) - $ranSeconds]);
+
+            $reap->invoke($supervisor, 'orders', $options);
+
+            if ($ranSeconds >= 60) {
+                $this->assertSame(
+                    'normal',
+                    $permission->invoke($supervisor, 'orders', 'high'),
+                    "exit {$exitCode} after {$ranSeconds}s throttled the pool",
+                );
+            } else {
+                $this->assertNull($permission->invoke($supervisor, 'orders', 'high'), 'a worker that fails at once backs off');
+            }
+        }
     }
 
     public function testPhpOnlyTheStableProbeClosesAHalfOpenCircuit(): void

@@ -19,6 +19,9 @@ sourceOfTruth:
   - clients/client-php/src/Builders/OperationBuilder.php
   - clients/client-php/src/Consumer/HighLevelConsumer.php
   - clients/client-php/src/Http/Retry429Policy.php
+  - clients/client-php/src/Http/HttpClient.php
+  - clients/client-php/src/Http/CurlTransport.php
+  - clients/client-php/src/Http/TransportException.php
   - clients/client-php/src/Exceptions/HttpException.php
   - clients/client-php/src/Exceptions/ErrorCode.php
   - clients/client-php/src/Laravel/QueenServiceProvider.php
@@ -41,6 +44,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/PhpSupervisor.php
   - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
   - clients/client-php/src/Laravel/Supervisor/WorkerTelemetry.php
+  - clients/client-php/src/Laravel/Supervisor/WorkerExitMarker.php
   - clients/client-php/src/Laravel/Dashboard/DashboardRepository.php
   - clients/client-php/src/Laravel/Dashboard/FailedJobsReadModel.php
   - clients/client-php/src/Laravel/Http/Middleware/AuthorizeDashboard.php
@@ -51,10 +55,33 @@ sourceOfTruth:
   - server/src/main.rs
 verifiedBy:
   - clients/client-php/tests/ProcessLeaseRenewerTest.php
+  - clients/client-php/tests/CurlTransportTest.php
   - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
   - clients/client-php/tests/LaravelDashboardTest.php
+  - clients/client-php/tests/WorkerExitMarkerTest.php
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
 # sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): QUEUE_DEFAULTS is nine keys, the configure paragraph is rewritten for the merge rule, and retryMessage carries the move primitive's consequences.
+# sourceOfTruth re-read 2026-09-29 (through fc71b65b + this patch): adds the supervisor.remote_status keys and the dashboard's published-status source.
+# sourceOfTruth re-read 2026-09-29 (through cb253ff9 + this patch): the provider also publishes the dashboard stylesheet (queen-assets); transactions are described as broker transactions, not PostgreSQL ones.
+# sourceOfTruth re-read 2026-09-29 (through 5b7aabef + this patch): the dashboard has one route per section, keyset-paged failed jobs and a detail page per failed job; no new config key.
+# sourceOfTruth re-read 2026-09-29 (through 109b23c2 + this patch): Admin gains getQueueOps and getQueueOpsAsync, which the dashboard's jobs-processed chart reads; no new config key.
+# sourceOfTruth re-read 2026-09-29 (through 8ca3d2a9): the failed-job detail read is bounded in SQL and shows max tries instead of attempts; nothing this reference describes changes.
+# sourceOfTruth re-read 2026-09-29 (through f94b76ec + this patch): either engine publishes remote status and the package pins supervisor 0.2.0; page matches the code.
+# sourceOfTruth re-read 2026-09-29 (through 1ef4bb47 + this patch): thread-safe PHP support in the installer and launcher changes no setting or default listed here; page matches the code.
+# sourceOfTruth re-read 2026-09-30 (through 022337fb + this patch): remote status is published per supervisor instance, the package pins supervisor 0.3.0 and the panel lists every instance; no setting or default changes.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds the supervisor.coordination keys for coordinated replicas and pins supervisor 0.4.0.
+# sourceOfTruth re-read 2026-09-30 (through cd31d917 + this patch): adds the prefork, per-queue minimum, fast scale-up, waits, notifications, job metrics, tags and Prometheus keys, and pins supervisor 0.4.0.
+# sourceOfTruth re-read 2026-09-30 (through 708fd8b2): a skipped event-driven pool now counts as evaluated, and both coordinators expose whether they hold a replica view; no documented behavior changes; page matches the code.
+# sourceOfTruth re-read 2026-10-01 (through the ack_async and pop_ahead hardening): detached requests settle their own connect, a late popped batch is handed back untracked, and a failed detached send falls back to the synchronous ACK; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through db3f21b0): QueenQueue and Queen only gained private helpers (abandonDelivery, affinityKey, retryWire, affinityKeyOf); no behavior this page states changes.
+# sourceOfTruth re-read 2026-10-01 (through the cURL transport): HttpClient sends synchronous and detached requests over CurlTransport; the Transport subsection and the Errors section say so.
+# sourceOfTruth re-read 2026-10-01 (through the TCP keep-alive change): CurlTransport sets TCP keep-alive on every connection; the Transport subsection says so.
+# sourceOfTruth re-read 2026-10-01 (through the full-batch pop_ahead rule): QueenQueue pops ahead only after a full batch; the pop_ahead option row is unchanged.
+# sourceOfTruth re-read 2026-10-02 (through 79204459 + this patch): Admin gains getLaggingConsumersAsync, config/queen.php gains dashboard.console_url, and the dashboard routes add the failed-job retry; the consumer-group table, the configuration table and the Supervisor dashboard section say so. SupervisorConfiguration's refused-URL error, which no section quotes, no longer repeats credentials.
+# sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): the restart paragraph now says both engines open the circuit (the PHP engine already did) and which exits do not count (stable_after, Laravel's job timeout, --memory after a job, through WorkerExitMarker), and the state directory paragraph names the exit markers, says pause drains (no SIGUSR2/SIGCONT is sent) and gives the stop order; the unstarted hand-back that keeps its attempt, the forked child and the renewal helper, the detached request written before the next job, CURLOPT_QUICK_EXIT, the bounded metrics client and the Rust CA store change nothing else this reference states.
+# sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot, and CurlTransport waits at most 250 ms to write a detached request without a body; the console_url row and the Transport section still hold.
+# sourceOfTruth re-read 2026-10-02 (crash hand-back): the Laravel driver's prefetch paragraph says the renewer hands back a crashed worker's journal, and the supervisor section the start-up warnings; TransactionBuilder::wire() is @internal and stays undocumented.
+# sourceOfTruth re-read 2026-10-02 (stripes): the partitions row gives the 1 to 1,024 range and the 64-wide pop.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -104,6 +131,18 @@ The load-balancing keys are inert with a single URL: the `LoadBalancer` is only 
 the `Retry-After` contract and the jitter are in
 [What the clients do with a 429](/reference/errors#what-the-clients-do-with-a-429).
 `capMs` has a hard 300,000ms ceiling so a single retry sleep remains operationally bounded.
+
+### Transport
+
+With `ext-curl`, every synchronous request, and the detached ACK and pop of the Laravel driver, go
+over the client's own kept-alive cURL handles instead of Guzzle. A pop and an ACK then cost the
+client about 60% less CPU, and a Laravel worker with 10 ms jobs used 13 to 25% less in the
+benchmark; retries, failover, timeouts, TLS verification and errors behave as before. Its
+connections carry TCP keep-alive probes after 30 idle seconds, every 15 seconds after that, so a
+NAT gateway or load balancer that silently drops an idle connection does not leave the next
+request waiting for its timeout. Guzzle stays for the async API and carries every request when an HTTP proxy variable is set
+(`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` or a lower-case form), when `ext-curl` is missing, or when
+`QUEEN_SDK_HTTP_TRANSPORT=guzzle`.
 
 ## `Queen`
 
@@ -205,13 +244,9 @@ a UUID. A malformed value is sent as-is and rejected by the broker.
 </Aside>
 
 `PushBuilder` exposes `onSuccess(Closure)`, `onError(Closure)`, `onDuplicate(Closure)` and
-`execute(): mixed`. `execute()` returns the broker's per-item array for a direct push. A 2.0
-broker answers each item `queued`, `duplicate` or `error`. Per item, `onError` fires (and
-`execute()` throws when it is absent) only for `failed`, a status the 2.0 broker never returns:
-an `error` item reaches no callback and throws nothing, so check each item's `status` in the
-returned array. A buffered push returns without sending once the buffer accepts the message. At
-`maxSize` waiting messages the add flushes inline and keeps retrying under a `maxWaitMillis`
-deadline; if the deadline
+`execute(): mixed`. `execute()` returns the broker's per-item array for a direct push; a buffered
+push returns without sending once the buffer accepts the message. At `maxSize` waiting messages
+the add flushes inline and keeps retrying under a `maxWaitMillis` deadline; if the deadline
 expires it throws `RuntimeException` and the message was **not** accepted. PHP has no background
 flusher to wait on, which is why the bound is a deadline here rather than an open-ended park.
 
@@ -331,17 +366,16 @@ silent loss.
 
 Read-only. Replay lives on the admin façade: `retryMessage(string $partitionId, string $transactionId)`.
 
-Since broker 1.6.0 that route runs on a **move**: one transaction pushes a dead-letter row at the
-address back into the log and deletes the row (on a 2.0 broker, one entry in the replicated log),
-and the replayed message carries the deterministic transaction id `dlq:<dead-letter row id>`. A
-second call for the same address answers `404` rather than replaying a second copy, only the
-addressed consumer group's record is removed, and a `result: "duplicate"` verdict means nothing
-was written and nothing was removed. See [Messages and dead letters](/reference/http/messages-dlq).
+Since broker 1.6.0 that route runs on a **move**: one transaction claims the newest dead-letter
+row at the address, pushes it back into the log and deletes the row, and the replayed message
+carries the deterministic transaction id `dlq:<dead-letter row id>`. A second call for the same
+address answers `404` rather than replaying a second copy, only the addressed consumer group's
+record is removed, and a `result: "duplicate"` verdict means nothing was written and nothing was
+removed. See [Messages and dead letters](/reference/http/messages-dlq).
 
 ## `TransactionBuilder`
 
-`$queen->transaction()`. Pushes and acks in one transaction: one entry in the replicated log,
-all-or-nothing.
+`$queen->transaction()`. Pushes and acks in one atomic broker transaction, all-or-nothing.
 
 | Method | Notes |
 | --- | --- |
@@ -404,8 +438,10 @@ upgrade.
 | `getQueueStats(array $params = [])` | `GET /api/v1/status/queues` |
 | `getQueueDetail(string $name, array $params = [])` | `GET /api/v1/status/queues/:name` |
 | `getAnalytics(array $params = [])` | `GET /api/v1/status/analytics` |
+| `getQueueOps(array $params = [])`, `getQueueOpsAsync(array $params = [], ?int $timeoutMillis = null)` | `GET /api/v1/analytics/queue-ops` |
 | `getSystemMetrics(array $params = [])` | `GET /api/v1/analytics/system-metrics` |
 | `getWorkerMetrics(array $params = [])` | `GET /api/v1/analytics/worker-metrics` |
+| `getPostgresStats()` | `GET /api/v1/analytics/postgres-stats` |
 
 ### Consumer groups
 
@@ -414,13 +450,12 @@ upgrade.
 | `listConsumerGroups()` | `GET /api/v1/consumer-groups` |
 | `getConsumerGroup(string $name)` | `GET /api/v1/consumer-groups/:name` |
 | `getLaggingConsumers(int $minLagSeconds = 60)` | `GET /api/v1/consumer-groups/lagging?minLagSeconds=` |
+| `getLaggingConsumersAsync(int $minLagSeconds = 60, ?int $timeoutMillis = null)` | Same route through the failover-aware async client. |
 | `deleteConsumerGroupForQueue(string $consumerGroup, string $queueName, bool $deleteMetadata = true)` | `DELETE /api/v1/consumer-groups/:group/queues/:queue` |
 | `seekConsumerGroup(string $consumerGroup, string $queueName, array $options = [])` | `POST /api/v1/consumer-groups/:group/queues/:queue/seek` |
 | `refreshConsumerStats()` | `POST /api/v1/stats/refresh` |
 
 `seekConsumerGroup` posts `$options` verbatim: `['toEnd' => true]` or `['timestamp' => '<RFC3339>']`.
-A 2.0 broker answers `refreshConsumerStats()` with a 200 and `"refreshed": false`: its counters
-are updated as log entries apply, so there is nothing to refresh.
 
 ### System
 
@@ -428,11 +463,17 @@ are updated as log entries apply, so there is nothing to refresh.
 | --- | --- |
 | `health()` | `GET /health` |
 | `metrics()` | `GET /metrics` |
+| `getMaintenanceMode()` | `GET /api/v1/system/maintenance` |
+| `setMaintenanceMode(bool $enabled)` | `POST /api/v1/system/maintenance` |
+| `getPopMaintenanceMode()` | `GET /api/v1/system/maintenance/pop` |
+| `setPopMaintenanceMode(bool $enabled)` | `POST /api/v1/system/maintenance/pop` |
 
 ## Errors
 
 Non-2xx responses throw `Queen\Exceptions\HttpException`, with `isClusterSuspended()` and
-`isRateLimited()` helpers. The machine-readable codes are constants on
+`isRateLimited()` helpers. A request with no HTTP answer, because the connection failed or timed
+out, throws `Queen\Http\TransportException` on the cURL path; it is a Guzzle `TransferException`,
+like the exceptions of the Guzzle path. The machine-readable codes are constants on
 `Queen\Exceptions\ErrorCode`, one per proxy code listed under
 [Behind the proxy](/reference/errors#behind-the-proxy).
 
@@ -462,12 +503,14 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `headers` | none | `[]` |
 | `queue` | `QUEEN_QUEUE` | `default` |
 | `consumer_group` | `QUEEN_CONSUMER_GROUP` | `laravel` |
-| `partitions` | `QUEEN_PARTITIONS` | `64` (clamped to the broker maximum) |
+| `partitions` | `QUEEN_PARTITIONS` | `64` stripes, 1 to 1,024; a pop asks for at most 64 |
 | `partition_prefix` | `QUEEN_PARTITION_PREFIX` | `laravel` |
 | `retry_after` | `QUEEN_RETRY_AFTER` | `90` seconds |
 | `block_for` | `QUEEN_BLOCK_FOR` | `0` seconds |
 | `prefetch` | `QUEEN_PREFETCH` | `1` job |
 | `ack_batch` | `QUEEN_ACK_BATCH` | `1` job (cannot exceed `prefetch`) |
+| `ack_async` | `QUEEN_ACK_ASYNC` | `false` (requires `ack_batch=1`) |
+| `pop_ahead` | `QUEEN_POP_AHEAD` | `false` (requires `lease_renewal`) |
 | `lease_renewal` | `QUEEN_LEASE_RENEWAL` | `false` |
 | `lease_renewal_interval` | `QUEEN_LEASE_RENEWAL_INTERVAL` | derived from lease timing |
 | `lease_renewal_timeout` | `QUEEN_LEASE_RENEWAL_TIMEOUT` | `5` seconds |
@@ -489,13 +532,40 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `supervisor.process_limit` | `QUEEN_SUPERVISOR_PROCESS_LIMIT` | `256` |
 | `supervisor.state_directory` | `QUEEN_SUPERVISOR_STATE_DIRECTORY` | `storage/queen-supervisor` |
 | `supervisor.telemetry_ttl` | `QUEEN_SUPERVISOR_TELEMETRY_TTL` | `300` seconds |
+| `supervisor.remote_status.enabled` | `QUEEN_SUPERVISOR_REMOTE_STATUS` | `false` |
+| `supervisor.remote_status.key` | `QUEEN_SUPERVISOR_REMOTE_STATUS_KEY` | unset; required when enabled |
+| `supervisor.remote_status.connection` | `QUEEN_SUPERVISOR_REMOTE_STATUS_CONNECTION` | `queen` |
+| `supervisor.remote_status.namespace` | `QUEEN_SUPERVISOR_REMOTE_STATUS_NAMESPACE` | `queen-supervisor` |
+| `supervisor.remote_status.interval` | `QUEEN_SUPERVISOR_REMOTE_STATUS_INTERVAL` | unset; `poll_interval` |
+| `supervisor.remote_status.ttl` | `QUEEN_SUPERVISOR_REMOTE_STATUS_TTL` | unset; twice `heartbeat_timeout`, at least 300 seconds |
+| `supervisor.coordination.enabled` | `QUEEN_SUPERVISOR_COORDINATION` | `false` |
+| `supervisor.coordination.connection` | `QUEEN_SUPERVISOR_COORDINATION_CONNECTION` | `queen` |
+| `supervisor.coordination.namespace` | `QUEEN_SUPERVISOR_COORDINATION_NAMESPACE` | `queen-supervisor` |
+| `supervisor.prefork` | `QUEEN_SUPERVISOR_PREFORK` | `false` |
+| `supervisor.event_driven` | `QUEEN_SUPERVISOR_EVENT_DRIVEN` | `false` |
+| `supervisor.supervisors.*.min_processes_per_queue` | `QUEEN_SUPERVISOR_MIN_PROCESSES_PER_QUEUE` | `0` |
+| `supervisor.supervisors.*.fast_scale_up` | `QUEEN_SUPERVISOR_FAST_SCALE_UP` | `false` |
+| `waits` | `QUEEN_WAIT_THRESHOLD` for the default queue | `['queen:default' => 60]` seconds |
+| `notifications.mail` | `QUEEN_NOTIFY_MAIL` | unset |
+| `notifications.throttle_minutes` | `QUEEN_NOTIFY_THROTTLE_MINUTES` | `5` |
+| `job_metrics.enabled` | `QUEEN_JOB_METRICS` | `true` |
+| `job_metrics.connection` | `QUEEN_JOB_METRICS_CONNECTION` | `queen` |
+| `job_metrics.namespace` | `QUEEN_JOB_METRICS_NAMESPACE` | `queen-metrics` |
+| `tags.enabled` | `QUEEN_TAGS` | `true` |
+| `tags.connection` | `QUEEN_TAGS_CONNECTION` | `queen` |
+| `tags.namespace` | `QUEEN_TAGS_NAMESPACE` | `queen-metrics` |
+| `tags.retention_minutes` | `QUEEN_TAGS_RETENTION_MINUTES` | `1440` |
+| `metrics.enabled` | `QUEEN_METRICS_ENABLED` | `false` |
+| `metrics.path` | `QUEEN_METRICS_PATH` | `queen/metrics` |
+| `metrics.token` | `QUEEN_METRICS_TOKEN` | unset; 32+ characters when enabled |
 | `dashboard.enabled` | `QUEEN_DASHBOARD_ENABLED` | `false` |
 | `dashboard.path` | `QUEEN_DASHBOARD_PATH` | `queen` |
 | `dashboard.domain` | `QUEEN_DASHBOARD_DOMAIN` | unset |
 | `dashboard.middleware` | none | `['web']` |
 | `dashboard.refresh_seconds` | `QUEEN_DASHBOARD_REFRESH_SECONDS` | `5` seconds |
 | `dashboard.allow_local` | `QUEEN_DASHBOARD_ALLOW_LOCAL` | `true` |
-| `dashboard.failed_jobs_limit` | `QUEEN_DASHBOARD_FAILED_JOBS_LIMIT` | `50` rows |
+| `dashboard.failed_jobs_limit` | `QUEEN_DASHBOARD_FAILED_JOBS_LIMIT` | `50` rows per page |
+| `dashboard.console_url` | `QUEEN_DASHBOARD_CONSOLE_URL` | unset; an `http` or `https` URL without user info, query or fragment |
 | `supervisor_binary.install_path` | `QUEEN_SUPERVISOR_INSTALL_PATH` | `storage/queen-supervisor-bin` |
 | `supervisor_binary.release_base_url` | `QUEEN_SUPERVISOR_RELEASE_BASE_URL` | unset |
 | `supervisor_binary.manifest` | `QUEEN_SUPERVISOR_MANIFEST` | unset |
@@ -540,9 +610,16 @@ broker timeout and the HTTP client adds five seconds of transport slack.
 The default `prefetch=1` and `ack_batch=1` keep the per-job synchronous ACK
 boundary. Short, idempotent workloads can opt into a larger prefetch; the
 connector then requires `lease_renewal=true` on every worker path. One pop feeds
-the standard sequential Laravel worker, while the helper keeps the active job,
+the standard sequential Laravel worker, while the renewer keeps the active job,
 local tail and deferred acknowledgements leased. This remains at-least-once
-delivery and widens the crash duplicate window. An exact-PID `SIGCHLD` watchdog
+delivery and widens the crash duplicate window. When a worker dies holding its
+lease, the renewer sends what the worker journaled, so the jobs it had not
+started return at once without an extra attempt
+([prefetch](/use/laravel/concepts#prefetch-ack_async-and-pop_ahead)). The renewer is the Rust
+supervisor master on Linux, which exports `QUEEN_SUPERVISOR_LEASE_SOCKET` to its
+workers, and otherwise one PHP helper per worker. Set
+`QUEEN_SUPERVISOR_LEASE_SERVICE=false` in the master's environment to keep the
+helpers under the Rust supervisor too. An exact-PID `SIGCHLD` watchdog
 fences the worker if its helper disappears while a lease is active. The renewed
 profile requires Unix CLI PHP with PCNTL/POSIX support; application code must
 not replace Queen's signal handler. Leave prefetch at `1` for unsupported
@@ -631,6 +708,10 @@ vendor/bin/queen-supervisor --php php --artisan artisan
 php artisan queen:supervisor-config --pretty
 ```
 
+Both engines print configuration warnings when they start, such as a pool with `tries` 1 on a
+connection with `prefetch` above 1 or `pop_ahead`: `queen:supervise` on its output, and
+`queen:supervisor-config` on standard error, which the Rust binary logs.
+
 The online install succeeds only when a manifest and asset exist for the package-pinned
 `supervisor/v*` release. Preview packages do not guarantee published assets, so use the PHP engine
 or a verified local manifest/archive pair until the matching release is available. The immediate
@@ -660,10 +741,11 @@ an ordered `queues` list, Laravel worker options and its scaling policy.
 | `stable_after` | Runtime after which the crash backoff resets. |
 | `default_runtime_seconds` | Time-strategy fallback before worker telemetry exists. |
 
-Both engines use capped exponential restart backoff. Only the Rust engine opens
-a circuit after five consecutive crashes and permits one probe after the
-cooldown; the PHP engine has no open/probe phase and continues at
-`restart_backoff_max`.
+Both engines use capped exponential restart backoff, open a circuit after five
+consecutive crashes and permit one probe after the cooldown. A worker that ran
+for `stable_after`, that Laravel killed after a job timeout, or that stopped at
+`--memory` after a job is not a crash; for the last two, the worker leaves a
+marker in the state directory before it exits.
 
 The local control command is shared by both engines:
 
@@ -675,10 +757,11 @@ php artisan queen:supervisor continue
 php artisan queen:supervisor terminate
 ```
 
-Status, commands, the exclusive PID lock and duration telemetry live below
-`state_directory`. Pause/continue map to `SIGUSR2`/`SIGCONT`; termination sends
-`SIGTERM` and enforces `shutdown_grace`. This surface targets Unix and requires
-PHP `pcntl`.
+Status, commands, the exclusive PID lock, duration telemetry and the workers'
+exit markers live below `state_directory`. Pause drains every worker and starts
+none until continue; termination sends `SIGTERM` to every worker before it
+calls the broker, then enforces `shutdown_grace`. This surface targets Unix and
+requires PHP `pcntl`.
 
 `QUEEN_URLS` supplies failover broker endpoints for depth reads. Both v2 engines
 read the selected pool's resolved Queen `connections` entry directly and build
@@ -704,7 +787,14 @@ surge overlap, such as `Recreate`.
 
 The package also provides a disabled-by-default local panel. It reads bounded state from the one
 local master and protects HTML, JSON and controls with the same `viewQueenDashboard` Gate. In
-production, enabling the route without defining an allowing Gate still returns `403`.
+production, enabling the route without defining an allowing Gate still returns `403`. With
+`supervisor.remote_status` enabled, either engine also publishes that state to the broker's
+key/value store, one slot per supervisor instance, and a panel on another host lists every instance
+read-only. Failed jobs are paged with a
+keyset cursor, and each has a detail page with its exception and stack trace, never its
+payload, and a button that retries it. The Workload page shows the jobs waiting and running in
+each queue, with links to the Queen console when `dashboard.console_url` is set, and the
+Configuration page gives tuning advice beside every resolved setting, credentials never shown.
 
 The complete authorization example, route-cache procedure and local-versus-global scope are in
 [Supervisor dashboard](/use/laravel/dashboard).

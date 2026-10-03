@@ -176,6 +176,25 @@ class Admin
         return $this->httpClient->get('/api/v1/status/analytics' . $this->buildQueryString($params));
     }
 
+    /**
+     * Per-queue operation counters (pushes, pops, acks) in time buckets whose
+     * width follows the window: 1 minute up to an hour, 5 up to six hours,
+     * 15 up to a day, 60 up to a week. Filters: from, to, queue.
+     */
+    public function getQueueOps(array $params = []): mixed
+    {
+        return $this->httpClient->get('/api/v1/analytics/queue-ops' . $this->buildQueryString($params));
+    }
+
+    public function getQueueOpsAsync(array $params = [], ?int $timeoutMillis = null): PromiseInterface
+    {
+        return $this->httpClient->getAsyncWithFailover(
+            '/api/v1/analytics/queue-ops' . $this->buildQueryString($params),
+            $timeoutMillis,
+            is_string($params['queue'] ?? null) ? $params['queue'] : null,
+        );
+    }
+
     // ===========================
     // Consumer Groups API
     // ===========================
@@ -198,6 +217,14 @@ class Admin
     public function getLaggingConsumers(int $minLagSeconds = 60): mixed
     {
         return $this->httpClient->get("/api/v1/consumer-groups/lagging?minLagSeconds={$minLagSeconds}");
+    }
+
+    public function getLaggingConsumersAsync(int $minLagSeconds = 60, ?int $timeoutMillis = null): PromiseInterface
+    {
+        return $this->httpClient->getAsyncWithFailover(
+            "/api/v1/consumer-groups/lagging?minLagSeconds={$minLagSeconds}",
+            $timeoutMillis,
+        );
     }
 
     public function deleteConsumerGroupForQueue(string $consumerGroup, string $queueName, bool $deleteMetadata = true): mixed

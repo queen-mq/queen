@@ -37,6 +37,9 @@ ORCHESTRATOR_MARKERS = (
     "horizon:master",
     "queen:supervise",
     "queen-supervisor",
+    # The prefork server holds the booted Laravel its workers are forked
+    # from; its forked workers retitle themselves as queue:work.
+    "queen:fork-server",
 )
 _STOP = False
 

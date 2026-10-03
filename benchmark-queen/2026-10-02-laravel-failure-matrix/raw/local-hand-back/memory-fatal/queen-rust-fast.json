@@ -1,0 +1,118 @@
+{
+ "scenario": "memory-fatal",
+ "profile": "queen-rust-fast",
+ "run_id": "memory-fatal-queen-rust-fast-b8de6198",
+ "checks": [
+  {
+   "name": "two attempts, both died",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "failed() ran once",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "never completed",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "one failed-job row each",
+   "passed": true,
+   "detail": "['000000', '000001']"
+  },
+  {
+   "name": "one dead-letter entry each",
+   "passed": true,
+   "detail": "2 entries"
+  }
+ ],
+ "passed": true,
+ "report": {
+  "run_id": "memory-fatal-queen-rust-fast-b8de6198",
+  "jobs": {
+   "000000": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938343.169,
+      null
+     ],
+     [
+      "started",
+      2,
+      1790938379.311,
+      null
+     ],
+     [
+      "failed_hook",
+      null,
+      1790938409.312,
+      "Illuminate\\Queue\\MaxAttemptsExceededException"
+     ]
+    ],
+    "pids": [
+     43,
+     84,
+     92
+    ]
+   },
+   "000001": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938343.14,
+      null
+     ],
+     [
+      "started",
+      2,
+      1790938373.141,
+      null
+     ],
+     [
+      "failed_hook",
+      null,
+      1790938403.873,
+      "Illuminate\\Queue\\MaxAttemptsExceededException"
+     ]
+    ],
+    "pids": [
+     38,
+     68,
+     92
+    ]
+   }
+  },
+  "failed_store": {
+   "available": true,
+   "job_ids": [
+    "000000",
+    "000001"
+   ]
+  },
+  "dead_letter": {
+   "available": true,
+   "entries": 2
+  }
+ },
+ "extra": {},
+ "timeline": [
+  [
+   6.61,
+   "ready"
+  ],
+  [
+   6.8,
+   "dispatched 2 x memory (exit 0)"
+  ],
+  [
+   76.12,
+   "all failed: reached"
+  ]
+ ]
+}

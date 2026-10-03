@@ -66,6 +66,22 @@ class TransactionBuilder
     }
 
     /**
+     * @internal Operations already in the wire format, and the leases they
+     *           require, sent as they are: a hand-back that a Laravel worker
+     *           journaled before it crashed (HandBackJournal).
+     *
+     * @param list<array> $operations
+     * @param list<string> $requiredLeases
+     */
+    public function wire(array $operations, array $requiredLeases): static
+    {
+        array_push($this->operations, ...array_values($operations));
+        array_push($this->requiredLeases, ...array_values($requiredLeases));
+
+        return $this;
+    }
+
+    /**
      * Returns a sub-builder for push operations on a queue
      */
     public function queue(string $queueName): TransactionQueueBuilder

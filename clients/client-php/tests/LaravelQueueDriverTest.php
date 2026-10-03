@@ -12,6 +12,7 @@ use PHPUnit\Framework\TestCase;
 use Queen\Exceptions\ConflationPolicyMismatchException;
 use Queen\Exceptions\HttpException;
 use Queen\Laravel\Contracts\QueenPartitionable;
+use Queen\Laravel\Queue\HandBackJournal;
 use Queen\Laravel\Queue\LeaseRenewer;
 use Queen\Laravel\Queue\QueenConnector;
 use Queen\Laravel\Queue\QueenJob;
@@ -21,6 +22,20 @@ use Queen\Tests\Support\PlanHandler;
 
 class LaravelQueueDriverTest extends TestCase
 {
+    /** @var list<string> */
+    private array $journalDirectories = [];
+
+    protected function tearDown(): void
+    {
+        foreach ($this->journalDirectories as $directory) {
+            foreach (glob($directory . '/*') ?: [] as $file) {
+                @unlink($file);
+            }
+            @rmdir($directory);
+        }
+        parent::tearDown();
+    }
+
     public function testConnectorBuildsAQueenQueue(): void
     {
         [$queue] = $this->queueFor(new PlanHandler());
@@ -184,6 +199,17 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame('customer-42', $item['partition']);
         $this->assertSame(0, $item['payload']['_queen']['attempts']);
         $this->assertArrayNotHasKey('manual_retry', $item['payload']['_queen']);
+    }
+
+    public function testAPushedJobCarriesItsTagsInThePayload(): void
+    {
+        $handler = new PlanHandler([['status' => 201, 'json' => [['status' => 'queued']]]]);
+        [$queue] = $this->queueFor($handler);
+
+        $queue->push(new QueenTaggedTestJob(), '', 'emails');
+
+        $body = json_decode((string) $handler->requests[0]->getBody(), true);
+        $this->assertSame(['billing', 'customer:7'], $body['items'][0]['payload']['tags']);
     }
 
     public function testDuplicatePushIsAcceptedAsAnIdempotentSuccess(): void
@@ -540,22 +566,27 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame(['lease-1', 'lease-1', 'lease-1'], $renewer->healthChecks);
     }
 
-    public function testWorkerStoppingRetriesOneRepresentativePerPrefetchedPartition(): void
+    public function testWorkerStoppingHandsBackTheUnstartedTailWithoutChargingAnAttempt(): void
     {
-        $response = $this->popBatchResponse([
-            $this->payload('job-a1'),
-            $this->payload('job-a2'),
-            $this->payload('job-b1'),
-        ]);
+        $payloads = [];
+        foreach (['job-a1', 'job-a2', 'job-b1'] as $uuid) {
+            $payload = $this->payload($uuid);
+            // One earlier run, recorded when the job was released.
+            $payload['_queen'] = ['partition' => 'job-0001', 'attempts' => 1];
+            $payloads[] = $payload;
+        }
+        $payloads[2]['_queen']['partition'] = 'job-0002';
+        $response = $this->popBatchResponse($payloads);
         $response['messages'][2]['partitionId'] = '0298f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83';
         $response['messages'][2]['partition'] = 'job-0002';
+        foreach (array_keys($response['messages']) as $index) {
+            // The broker delivers this batch for the second time.
+            $response['messages'][$index]['deliveryAttempt'] = 2;
+        }
         $handler = new PlanHandler([
             ['status' => 200, 'json' => $response],
             ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
-            ['status' => 200, 'json' => [
-                ['success' => true, 'leaseReleased' => true],
-                ['success' => true, 'leaseReleased' => true],
-            ]],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
         ]);
         $renewer = new RecordingLeaseRenewer();
         $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 3);
@@ -564,17 +595,31 @@ class LaravelQueueDriverTest extends TestCase
         $container->instance('events', $events);
         $queue->setContainer($container);
 
-        $queue->pop('emails')->delete();
+        $first = $queue->pop('emails');
+        $attemptBeforeHandBack = $first->attempts();
+        $this->assertSame(3, $attemptBeforeHandBack);
+        $first->delete();
         $events->dispatch(new WorkerStopping());
 
         $this->assertCount(3, $handler->requests);
-        $this->assertSame('/api/v1/ack/batch', $handler->requests[2]->getUri()->getPath());
-        $body = json_decode((string) $handler->requests[2]->getBody(), true, 512, JSON_THROW_ON_ERROR);
-        $this->assertSame(
-            ['transaction-2', 'transaction-3'],
-            array_column($body['acknowledgments'], 'transactionId'),
-        );
-        $this->assertSame(['retry', 'retry'], array_column($body['acknowledgments'], 'status'));
+        $handBack = $this->handBack($handler->requests[2]);
+        $this->assertSame(['transaction-2', 'transaction-3'], array_column($handBack['acks'], 'transactionId'));
+        $this->assertSame(['completed', 'completed'], array_column($handBack['acks'], 'status'));
+        $this->assertSame(['workers', 'workers'], array_column($handBack['acks'], 'consumerGroup'));
+        $this->assertSame(['lease-1'], $handBack['body']['requiredLeases']);
+        $this->assertSame(['job-a2', 'job-b1'], $this->copiedJobs($handBack));
+        $this->assertSame(['emails', 'emails'], array_column($handBack['copies'], 'queue'));
+        $this->assertSame(['job-0001', 'job-0002'], array_column($handBack['copies'], 'partition'));
+        $this->assertNotContains('transaction-2', array_column($handBack['copies'], 'transactionId'));
+        // The release recorded one run, the first delivery of this batch another.
+        $this->assertSame([2, 2], $this->copiedAttempts($handBack));
+        foreach ($handBack['copies'] as $copy) {
+            $this->assertSame(
+                $attemptBeforeHandBack,
+                $this->redeliveredAttempts($copy),
+                'a job that never ran keeps its attempt number',
+            );
+        }
         $this->assertSame(['lease-1'], $renewer->forgotten);
         $this->assertSame(1, $renewer->closed);
 
@@ -583,7 +628,7 @@ class LaravelQueueDriverTest extends TestCase
         $queue->pop('emails');
     }
 
-    public function testShutdownCombinesDeferredSuccessWithThePrefetchedRetryBoundary(): void
+    public function testShutdownCompletesDeferredSuccessAndHandsBackTheTailInOneTransaction(): void
     {
         $handler = new PlanHandler([
             ['status' => 200, 'json' => $this->popBatchResponse([
@@ -591,10 +636,7 @@ class LaravelQueueDriverTest extends TestCase
                 $this->payload('job-2'),
                 $this->payload('job-3'),
             ])],
-            ['status' => 200, 'json' => [
-                ['success' => true, 'leaseReleased' => false],
-                ['success' => true, 'leaseReleased' => true],
-            ]],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
         ]);
         $renewer = new RecordingLeaseRenewer();
         $queue = $this->queueWithLeaseRenewer(
@@ -608,14 +650,145 @@ class LaravelQueueDriverTest extends TestCase
         $queue->shutdown();
 
         $this->assertCount(2, $handler->requests);
-        $body = json_decode((string) $handler->requests[1]->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        $handBack = $this->handBack($handler->requests[1]);
         $this->assertSame(
-            ['transaction-1', 'transaction-2'],
-            array_column($body['acknowledgments'], 'transactionId'),
+            ['transaction-1', 'transaction-2', 'transaction-3'],
+            array_column($handBack['acks'], 'transactionId'),
         );
-        $this->assertSame(['completed', 'retry'], array_column($body['acknowledgments'], 'status'));
+        $this->assertSame(['completed', 'completed', 'completed'], array_column($handBack['acks'], 'status'));
+        $this->assertSame(['job-2', 'job-3'], $this->copiedJobs($handBack), 'job-1 ran and succeeded');
+        $this->assertSame([0, 0], $this->copiedAttempts($handBack));
+        $this->assertSame(1, $this->redeliveredAttempts($handBack['copies'][0]));
         $this->assertSame(['lease-1'], $renewer->forgotten);
         $this->assertSame(1, $renewer->closed);
+    }
+
+    public function testAJobStillRunningAtShutdownIsHandedBackWithItsRunCounted(): void
+    {
+        // Laravel's timeout handler dispatches WorkerStopping while the job
+        // that timed out is still the current delivery.
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+                $this->payload('job-3'),
+            ])],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 3);
+
+        $timedOut = $queue->pop('emails');
+        $this->assertSame(1, $timedOut->attempts());
+        $queue->shutdown();
+
+        $this->assertCount(2, $handler->requests);
+        $handBack = $this->handBack($handler->requests[1]);
+        // The broker completes every position before the last one acknowledged:
+        // completing job-2 and job-3 alone would complete job-1 with them.
+        $this->assertSame(
+            ['transaction-1', 'transaction-2', 'transaction-3'],
+            array_column($handBack['acks'], 'transactionId'),
+        );
+        $this->assertSame(['job-1', 'job-2', 'job-3'], $this->copiedJobs($handBack));
+        $this->assertSame([1, 0, 0], $this->copiedAttempts($handBack));
+        $this->assertSame(2, $this->redeliveredAttempts($handBack['copies'][0]), 'the run that timed out counts');
+        $this->assertSame(1, $this->redeliveredAttempts($handBack['copies'][1]));
+        $this->assertSame(['lease-1'], $renewer->forgotten);
+    }
+
+    public function testAJobStillRunningAloneInItsPartitionIsLeftToLeaseExpiry(): void
+    {
+        $response = $this->popBatchResponse([$this->payload('job-a1'), $this->payload('job-b1')]);
+        $response['messages'][1]['partitionId'] = '0298f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83';
+        $response['messages'][1]['partition'] = 'job-0002';
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        $queue = $this->queueWithLeaseRenewer($handler, new RecordingLeaseRenewer(), prefetch: 2);
+
+        $queue->pop('emails');
+        $queue->shutdown();
+
+        $handBack = $this->handBack($handler->requests[1]);
+        $this->assertSame(['transaction-2'], array_column($handBack['acks'], 'transactionId'));
+        $this->assertSame(['job-b1'], $this->copiedJobs($handBack));
+    }
+
+    /**
+     * Laravel's timeout handler runs from SIGALRM, as soon as a blocking
+     * request returns: the broker has settled the job, the queue has not seen
+     * the answer yet. A copy of that job would run it twice.
+     */
+    #[\PHPUnit\Framework\Attributes\TestWith(['delete', '/api/v1/ack', false])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['delete', '/api/v1/ack', true])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['release', '/api/v1/transaction', false])]
+    public function testATimeoutWhileTheJobIsSettledNeverCopiesIt(string $settle, string $path, bool $ackAsync): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+                $this->payload('job-3'),
+            ])],
+            $settle === 'delete'
+                ? ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]]
+                : ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'release-1']],
+        ], ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']]);
+        $queue = null;
+        $timeout = new InterruptingHandler($handler, $path, static function () use (&$queue): void {
+            $queue->shutdown();
+        });
+        $queue = new QueenQueue(
+            new Queen(['url' => 'http://queen.test:6632', 'handler' => HandlerStack::create($timeout)]),
+            consumerGroup: 'workers',
+            retryAfter: 120,
+            prefetch: 3,
+            leaseRenewer: new RecordingLeaseRenewer(),
+            ackAsync: $ackAsync,
+        );
+        $queue->setContainer(new Container());
+        $queue->setConnectionName('queen');
+
+        $job = $queue->pop('emails');
+        $settle === 'delete' ? $job->delete() : $job->release();
+
+        $this->assertTrue($timeout->interrupted);
+        $copied = [];
+        foreach (array_slice($handler->requests, 2) as $request) {
+            if ($request->getUri()->getPath() === '/api/v1/transaction') {
+                array_push($copied, ...$this->copiedJobs($this->handBack($request)));
+            }
+        }
+        $this->assertNotContains('job-1', $copied, 'job-1 was already settled by the broker');
+    }
+
+    public function testACrashLeavesTheTailToLeaseExpiryWhichChargesItOneAttempt(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([$this->payload('job-1'), $this->payload('job-2')])],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 2);
+
+        $queue->pop('emails')->delete();
+        // SIGKILL, an out-of-memory error or a lost node runs no PHP code: the
+        // worker that crashed is an object whose consumer process is gone.
+        (new \ReflectionProperty(QueenQueue::class, 'consumerPid'))->setValue($queue, -1);
+        unset($queue);
+
+        $this->assertCount(2, $handler->requests, 'nothing hands the tail back');
+        $this->assertSame([], $renewer->forgotten);
+        $this->assertSame(0, $renewer->closed);
+
+        // The lease expires and the broker delivers job-2 again.
+        [$restarted] = $this->queueFor(new PlanHandler([[
+            'status' => 200,
+            'json' => $this->popResponse($this->payload('job-2'), deliveryAttempt: 2),
+        ]]));
+        $this->assertSame(2, $restarted->pop('emails')->attempts(), 'a crash charges the tail one attempt');
     }
 
     public function testUnrenewedJobSpecificTimeoutMustBeShorterThanRetryAfter(): void
@@ -1445,6 +1618,168 @@ class LaravelQueueDriverTest extends TestCase
         return [$queue, $handler];
     }
 
+    public function testACrashHandsBackFromTheJournalWhatShutdownWould(): void
+    {
+        $response = $this->popBatchResponse([
+            $this->payload('job-a1'),
+            $this->payload('job-a2'),
+            $this->payload('job-b1'),
+            $this->payload('job-c1'),
+        ]);
+        // job-c1 shares no partition lease with the running job-a1.
+        $response['messages'][3]['partitionId'] = '0298f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83';
+        $response['messages'][3]['partition'] = 'job-0002';
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->journal = new HandBackJournal($prefix = $this->journalPrefix());
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 4);
+
+        $queue->pop('emails');
+        $this->assertSame('ruuu', $this->journaledCodes($prefix));
+        $journaled = $this->journaledHandBack($prefix);
+        $queue->shutdown();
+
+        $shutdown = $this->handBack($handler->requests[1]);
+        $this->assertSame(['lease-1'], $journaled['body']['requiredLeases']);
+        $this->assertSame(
+            array_map(fn (array $ack): array => [...$ack, 'leaseId' => 'lease-1'], $shutdown['acks']),
+            $journaled['acks'],
+            'every ACK is fenced by the lease',
+        );
+        $withoutId = static fn (array $copy): array => array_diff_key($copy, ['transactionId' => true]);
+        $this->assertSame(array_map($withoutId, $shutdown['copies']), array_map($withoutId, $journaled['copies']));
+        $this->assertSame(['job-a1', 'job-a2', 'job-b1', 'job-c1'], $this->copiedJobs($journaled));
+        $this->assertSame([1, 0, 0, 0], $this->copiedAttempts($journaled), 'the running job counts its run');
+        $this->assertSame('----', $this->journaledCodes($prefix), 'shutdown withdrew the journal first');
+    }
+
+    public function testTheJournalNeverOwesAJobWhoseAcknowledgementIsOnTheWire(): void
+    {
+        $prefix = $this->journalPrefix();
+        $plan = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+                $this->payload('job-3'),
+            ])],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'release-1']],
+        ]);
+        $owedDuringRequests = [];
+        $handler = function ($request, array $options) use ($plan, $prefix, &$owedDuringRequests) {
+            $owedDuringRequests[] = is_file("{$prefix}.state") ? $this->journaledCodes($prefix) : null;
+
+            return $plan($request, $options);
+        };
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->journal = new HandBackJournal($prefix);
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 3);
+
+        $first = $queue->pop('emails');
+        $this->assertSame('ruu', $this->journaledCodes($prefix));
+        $first->delete();
+        $this->assertSame('-uu', $this->journaledCodes($prefix));
+        $second = $queue->pop('emails');
+        $this->assertSame('-ru', $this->journaledCodes($prefix));
+        $second->release();
+        $this->assertSame('--u', $this->journaledCodes($prefix));
+
+        // Nothing in the partition lease of an ACK or release on the wire.
+        $this->assertSame([null, '---', '---'], $owedDuringRequests);
+    }
+
+    public function testADeferredCompletionIsJournaledAsCompletedNotRunAgain(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+                $this->payload('job-3'),
+            ])],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->journal = new HandBackJournal($prefix = $this->journalPrefix());
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 3, ackBatch: 3);
+
+        $queue->pop('emails')->delete();
+        $this->assertSame('cuu', $this->journaledCodes($prefix));
+        $queue->pop('emails');
+        $this->assertSame('cru', $this->journaledCodes($prefix));
+
+        $journaled = $this->journaledHandBack($prefix);
+        $this->assertSame(
+            ['transaction-1', 'transaction-2', 'transaction-3'],
+            array_column($journaled['acks'], 'transactionId'),
+        );
+        $this->assertSame(['job-2', 'job-3'], $this->copiedJobs($journaled));
+    }
+
+    public function testABatchOfOneJobJournalsNothing(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popResponse($this->payload('job-1'))],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->journal = new HandBackJournal($prefix = $this->journalPrefix());
+        // A short batch on a prefetching worker: the queue held one job.
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 4);
+
+        $queue->pop('emails');
+
+        $this->assertFileDoesNotExist("{$prefix}.plan");
+        $this->assertFileDoesNotExist("{$prefix}.state");
+    }
+
+    private function journalPrefix(): string
+    {
+        $directory = sys_get_temp_dir() . '/qhb-' . bin2hex(random_bytes(4));
+        mkdir($directory, 0700);
+        $this->journalDirectories[] = $directory;
+
+        return "{$directory}/hand-back-1";
+    }
+
+    private function journaledCodes(string $prefix): string
+    {
+        $state = json_decode((string) file_get_contents("{$prefix}.state"), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('lease-1', $state['lease_id']);
+
+        return $state['entries'];
+    }
+
+    /**
+     * The transaction the supervisor's lease service builds from the journal
+     * (lease/hand_back.rs), split as handBack() splits a request.
+     *
+     * @return array{body: array, acks: list<array>, copies: list<array>}
+     */
+    private function journaledHandBack(string $prefix): array
+    {
+        $plan = json_decode((string) file_get_contents("{$prefix}.plan"), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('lease-1', $plan['lease_id']);
+        $operations = [];
+        foreach (str_split($this->journaledCodes($prefix)) as $index => $code) {
+            $entry = $plan['entries'][$index];
+            match ($code) {
+                '-' => null,
+                'c' => $operations[] = $entry['ack'],
+                'u' => array_push($operations, $entry['ack'], $entry['unstarted']),
+                'r' => array_push($operations, $entry['ack'], $entry['ran']),
+            };
+        }
+        $body = ['operations' => $operations, 'requiredLeases' => [$plan['lease_id']]];
+
+        return $this->handBack(new \GuzzleHttp\Psr7\Request(
+            'POST',
+            'http://queen.test:6632/api/v1/transaction',
+            [],
+            json_encode($body, JSON_THROW_ON_ERROR),
+        ));
+    }
+
     private function queueWithLeaseRenewer(
         callable $handler,
         LeaseRenewer $renewer,
@@ -1470,6 +1805,47 @@ class LaravelQueueDriverTest extends TestCase
         $queue->setConnectionName('queen');
 
         return $queue;
+    }
+
+    /** @return array{body: array, acks: list<array>, copies: list<array>} */
+    private function handBack(\Psr\Http\Message\RequestInterface $request): array
+    {
+        $this->assertSame('/api/v1/transaction', $request->getUri()->getPath());
+        $body = json_decode((string) $request->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        $acks = [];
+        $copies = [];
+        foreach ($body['operations'] as $operation) {
+            if ($operation['type'] === 'ack') {
+                $acks[] = $operation;
+            } else {
+                array_push($copies, ...$operation['items']);
+            }
+        }
+
+        return ['body' => $body, 'acks' => $acks, 'copies' => $copies];
+    }
+
+    /** @return list<string> */
+    private function copiedJobs(array $handBack): array
+    {
+        return array_map(static fn (array $copy): string => $copy['payload']['uuid'], $handBack['copies']);
+    }
+
+    /** @return list<int> */
+    private function copiedAttempts(array $handBack): array
+    {
+        return array_map(static fn (array $copy): int => $copy['payload']['_queen']['attempts'], $handBack['copies']);
+    }
+
+    /** The attempt Laravel sees when the broker delivers a copy for the first time. */
+    private function redeliveredAttempts(array $copy): int
+    {
+        [$queue] = $this->queueFor(new PlanHandler([[
+            'status' => 200,
+            'json' => $this->popResponse($copy['payload']),
+        ]]));
+
+        return $queue->pop($copy['queue'])->attempts();
     }
 
     private function payload(string $uuid): array
@@ -1589,6 +1965,38 @@ class RecordingLeaseRenewer implements LeaseRenewer
     {
         $this->closed++;
     }
+
+    public ?\Queen\Laravel\Queue\HandBackJournal $journal = null;
+
+    public function handBackJournal(): ?\Queen\Laravel\Queue\HandBackJournal
+    {
+        return $this->journal;
+    }
+}
+
+/**
+ * Runs $interrupt once, when the first request to $path is answered, before
+ * the caller reads the answer: a signal handler running as a blocking cURL
+ * call returns.
+ */
+class InterruptingHandler
+{
+    public bool $interrupted = false;
+
+    public function __construct(private PlanHandler $inner, private string $path, private \Closure $interrupt)
+    {
+    }
+
+    public function __invoke($request, array $options): mixed
+    {
+        $response = ($this->inner)($request, $options);
+        if (!$this->interrupted && $request->getUri()->getPath() === $this->path) {
+            $this->interrupted = true;
+            ($this->interrupt)();
+        }
+
+        return $response;
+    }
 }
 
 class DelayedPlanHandler
@@ -1620,5 +2028,17 @@ class DelayedPartitionedTestJob implements QueenPartitionable
     public function queenPartition(): string
     {
         return $this->partition;
+    }
+}
+
+final class QueenTaggedTestJob implements \Illuminate\Contracts\Queue\ShouldQueue
+{
+    public function handle(): void
+    {
+    }
+
+    public function tags(): array
+    {
+        return ['billing', 'customer:7'];
     }
 }

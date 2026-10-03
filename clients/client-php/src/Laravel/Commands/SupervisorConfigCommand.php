@@ -3,6 +3,7 @@
 namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
+use Queen\Laravel\Dashboard\TuningAdvisor;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
 
 class SupervisorConfigCommand extends Command
@@ -25,10 +26,21 @@ class SupervisorConfigCommand extends Command
 
             return self::FAILURE;
         }
+        // --for-engine is how the native (Rust) engine loads its contract,
+        // remote_status and coordination included: both engines use them.
         if (!$this->option('for-engine')) {
             $resolved = $this->redact($resolved);
         }
         $resolved = $this->normalizeJsonMaps($resolved);
+        // Standard error: the Rust engine reads the document from standard
+        // output, and logs this.
+        foreach (TuningAdvisor::startupWarnings([
+            'queen' => $this->laravel['config']->get('queen', []),
+            'queue' => ['connections' => $this->laravel['config']->get('queue.connections', [])],
+            'env' => [],
+        ]) as $warning) {
+            $this->output->getErrorStyle()->writeln("Queen warning: {$warning}");
+        }
 
         $flags = JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR;
         if ($this->option('pretty')) {
@@ -65,6 +77,14 @@ class SupervisorConfigCommand extends Command
         foreach ($config['queen']['headers'] ?? [] as $name => $_value) {
             $config['queen']['headers'][$name] = '[redacted]';
         }
+        foreach (['remote_status', 'coordination'] as $feature) {
+            if (($config[$feature]['connection']['bearer_token'] ?? null) !== null) {
+                $config[$feature]['connection']['bearer_token'] = '[redacted]';
+            }
+            foreach ($config[$feature]['connection']['headers'] ?? [] as $name => $_value) {
+                $config[$feature]['connection']['headers'][$name] = '[redacted]';
+            }
+        }
         return $config;
     }
 
@@ -80,6 +100,11 @@ class SupervisorConfigCommand extends Command
         foreach (array_keys($config['connections'] ?? []) as $connectionName) {
             if (($config['connections'][$connectionName]['headers'] ?? null) === []) {
                 $config['connections'][$connectionName]['headers'] = new \stdClass();
+            }
+        }
+        foreach (['remote_status', 'coordination'] as $feature) {
+            if (($config[$feature]['connection']['headers'] ?? null) === []) {
+                $config[$feature]['connection']['headers'] = new \stdClass();
             }
         }
 

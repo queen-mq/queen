@@ -1,0 +1,228 @@
+{
+ "scenario": "worker-kill",
+ "profile": "queen-rust",
+ "run_id": "worker-kill-queen-rust-01115c71",
+ "checks": [
+  {
+   "name": "the killed job ran again",
+   "passed": true,
+   "detail": "000000 ['started', 'started', 'completed']"
+  },
+  {
+   "name": "every job completed",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no two attempts overlapped",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no job completed twice",
+   "passed": true,
+   "detail": ""
+  },
+  {
+   "name": "no failed-job row",
+   "passed": true,
+   "detail": "[]"
+  }
+ ],
+ "passed": true,
+ "report": {
+  "run_id": "worker-kill-queen-rust-01115c71",
+  "jobs": {
+   "000000": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938720.841,
+      null
+     ],
+     [
+      "started",
+      2,
+      1790938750.842,
+      null
+     ],
+     [
+      "completed",
+      2,
+      1790938754.842,
+      null
+     ]
+    ],
+    "pids": [
+     38,
+     41
+    ]
+   },
+   "000001": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938720.841,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938724.841,
+      null
+     ]
+    ],
+    "pids": [
+     41
+    ]
+   },
+   "000002": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938724.861,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938728.863,
+      null
+     ]
+    ],
+    "pids": [
+     41
+    ]
+   },
+   "000003": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938725.186,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938729.196,
+      null
+     ]
+    ],
+    "pids": [
+     65
+    ]
+   },
+   "000004": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938728.876,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938732.88,
+      null
+     ]
+    ],
+    "pids": [
+     41
+    ]
+   },
+   "000005": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938729.211,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938733.217,
+      null
+     ]
+    ],
+    "pids": [
+     65
+    ]
+   },
+   "000006": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938732.892,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938736.901,
+      null
+     ]
+    ],
+    "pids": [
+     41
+    ]
+   },
+   "000007": {
+    "events": [
+     [
+      "started",
+      1,
+      1790938733.227,
+      null
+     ],
+     [
+      "completed",
+      1,
+      1790938737.228,
+      null
+     ]
+    ],
+    "pids": [
+     65
+    ]
+   }
+  },
+  "failed_store": {
+   "available": true,
+   "job_ids": []
+  },
+  "dead_letter": {
+   "available": true,
+   "entries": 0
+  }
+ },
+ "extra": {},
+ "timeline": [
+  [
+   5.45,
+   "ready"
+  ],
+  [
+   5.66,
+   "dispatched 8 x ok (exit 0)"
+  ],
+  [
+   8.02,
+   "a job started: reached"
+  ],
+  [
+   8.11,
+   "SIGKILL worker 38"
+  ],
+  [
+   41.52,
+   "all completed: reached"
+  ]
+ ]
+}

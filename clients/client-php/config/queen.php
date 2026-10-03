@@ -18,8 +18,9 @@ return [
     'queue' => env('QUEEN_QUEUE', 'default'),
     'consumer_group' => env('QUEEN_CONSUMER_GROUP', 'laravel'),
     // Fixed stripes preserve concurrency without creating one partition per
-    // job. Jobs implementing QueenPartitionable override the stripe with an
-    // explicit per-entity ordering key.
+    // job: 1 to 1024, each run by one worker at a time. A pop checks out at
+    // most 64 of them. Jobs implementing QueenPartitionable override the
+    // stripe with an explicit per-entity ordering key.
     'partitions' => env('QUEEN_PARTITIONS', 64),
     'partition_prefix' => env('QUEEN_PARTITION_PREFIX', 'laravel'),
     // Must be longer than the Laravel worker/job timeout.
@@ -35,17 +36,31 @@ return [
     // tail, so Queen supervisors require lease_renewal whenever prefetch > 1.
     'prefetch' => env('QUEEN_PREFETCH', 1),
     'ack_batch' => env('QUEEN_ACK_BATCH', 1),
+    // Send each successful ACK without waiting for the answer, which the
+    // worker reads when it finishes the next job or before its next pop. The
+    // broker writes the ACK while the next job runs. A failed ACK is then
+    // reported one job later: that job may already have run on the same
+    // lease, and the failed one is delivered again (at-least-once). Requires
+    // ack_batch 1, and gains little with prefetch 1 without pop_ahead, where
+    // the answer is read before the next pop.
+    'ack_async' => env('QUEEN_ACK_ASYNC', false),
+    // Pop the next batch while the last job of the current one runs, and take
+    // it in when that job ends. The batch is leased one job earlier. Only
+    // after a full batch: a short one means the queue was nearly empty, and a
+    // pop sent ahead would come back empty. Requires lease_renewal.
+    'pop_ahead' => env('QUEEN_POP_AHEAD', false),
     // Let the broker choose the pop sweep width instead of the fixed
     // `partitions` stripe count above. Only that one dimension is delegated:
     // `batch` stays pinned to prefetch because the local prefetch buffer, the
     // ack_batch <= prefetch bound and the lease budget all key off it, and
     // `partitions` still stripes pushes. Off keeps the wire bytes unchanged.
     'autopilot' => env('QUEEN_AUTOPILOT', false),
-    // Opt-in data-plane helper for jobs whose runtime cannot be bounded by the
-    // original pop lease. One small PHP subprocess per Laravel worker renews
-    // the single lease shared by its active and prefetched jobs. If renewal can
-    // no longer finish safely it TERM/KILL-fences the worker before expiry;
-    // effects already emitted by a job can still be duplicated (at-least-once).
+    // Opt-in lease renewal for jobs whose runtime cannot be bounded by the
+    // original pop lease. The Rust supervisor on Linux renews the single lease
+    // shared by a worker's active and prefetched jobs; elsewhere one small PHP
+    // subprocess per Laravel worker does. If renewal can no longer finish
+    // safely it TERM/KILL-fences the worker before expiry; effects already
+    // emitted by a job can still be duplicated (at-least-once).
     'lease_renewal' => env('QUEEN_LEASE_RENEWAL', false),
     'lease_renewal_interval' => env('QUEEN_LEASE_RENEWAL_INTERVAL'),
     'lease_renewal_timeout' => env('QUEEN_LEASE_RENEWAL_TIMEOUT', 5),
@@ -97,6 +112,43 @@ return [
         // is deployed as 0775.
         'state_directory' => env('QUEEN_SUPERVISOR_STATE_DIRECTORY', storage_path('queen-supervisor')),
         'telemetry_ttl' => env('QUEEN_SUPERVISOR_TELEMETRY_TTL', 300),
+        // Also publish the status document to the broker's key/value store,
+        // so a dashboard served by another host or pod (Kubernetes web pods,
+        // a separate web server) can show this supervisor. PHP engine only
+        // (php artisan queen:supervise). Read-only: pause, continue and
+        // terminate stay with the supervisor's own host. The key must be
+        // unique per application and environment on the broker. A null
+        // interval publishes at most once per poll_interval; a null TTL keeps
+        // the document for twice the heartbeat timeout (minimum 300s).
+        'remote_status' => [
+            'enabled' => env('QUEEN_SUPERVISOR_REMOTE_STATUS', false),
+            'connection' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_CONNECTION', 'queen'),
+            'namespace' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_NAMESPACE', 'queen-supervisor'),
+            'key' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_KEY'),
+            'interval' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_INTERVAL'),
+            'ttl' => env('QUEEN_SUPERVISOR_REMOTE_STATUS_TTL'),
+        ],
+        // Boot Laravel once in a fork server and fork every worker from it,
+        // instead of booting each worker: workers share the framework and the
+        // opcache copy-on-write. Needs ext-pcntl and ext-posix.
+        'prefork' => filter_var(env('QUEEN_SUPERVISOR_PREFORK', false), FILTER_VALIDATE_BOOL),
+        // Wake on new jobs instead of waiting for the next poll: a read-only
+        // long poll on the broker (no lease, no cursor) watches the partition
+        // stripes of every autoscaling pool, and a pool with new backlog is
+        // resized at once, then every second while it climbs. Needs a broker
+        // with POST /api/v1/fetch and a token that may consume.
+        'event_driven' => filter_var(env('QUEEN_SUPERVISOR_EVENT_DRIVEN', false), FILTER_VALIDATE_BOOL),
+        // Lets several replicas of this supervisor (Kubernetes pods, hosts)
+        // share one backlog. Each replica registers in the broker's key/value
+        // store and runs an even share of the worker target, so together they
+        // scale like one supervisor; min_processes and max_processes apply to
+        // each replica. Replicas coordinate when their consumer group and
+        // queue set are the same. Fixed pools (balance=simple) are not split.
+        'coordination' => [
+            'enabled' => filter_var(env('QUEEN_SUPERVISOR_COORDINATION', false), FILTER_VALIDATE_BOOL),
+            'connection' => env('QUEEN_SUPERVISOR_COORDINATION_CONNECTION', 'queen'),
+            'namespace' => env('QUEEN_SUPERVISOR_COORDINATION_NAMESPACE', 'queen-supervisor'),
+        ],
         'supervisors' => [
             'default' => [
                 'connection' => 'queen',
@@ -105,6 +157,12 @@ return [
                 'balance' => env('QUEEN_SUPERVISOR_BALANCE', 'auto'),
                 'strategy' => env('QUEEN_SUPERVISOR_STRATEGY', 'size'),
                 'min_processes' => env('QUEEN_SUPERVISOR_MIN_PROCESSES', 1),
+                // balance=auto only: workers every queue keeps even without
+                // backlog, like Horizon's per-queue minProcesses.
+                'min_processes_per_queue' => env('QUEEN_SUPERVISOR_MIN_PROCESSES_PER_QUEUE', 0),
+                // Close half of the gap to the target every cycle when the
+                // backlog grows, instead of one balance_max_shift step.
+                'fast_scale_up' => filter_var(env('QUEEN_SUPERVISOR_FAST_SCALE_UP', false), FILTER_VALIDATE_BOOL),
                 'max_processes' => env('QUEEN_SUPERVISOR_MAX_PROCESSES', 10),
                 'target_jobs_per_process' => env('QUEEN_SUPERVISOR_TARGET_JOBS', 10),
                 'target_clear_seconds' => env('QUEEN_SUPERVISOR_TARGET_CLEAR_SECONDS', 60),
@@ -146,7 +204,59 @@ return [
         'middleware' => ['web'],
         'refresh_seconds' => env('QUEEN_DASHBOARD_REFRESH_SECONDS', 5),
         'allow_local' => env('QUEEN_DASHBOARD_ALLOW_LOCAL', true),
+        // Page size of the failed-jobs page (keyset pagination, newest first).
         'failed_jobs_limit' => env('QUEEN_DASHBOARD_FAILED_JOBS_LIMIT', 50),
+        // Base URL of the Queen web console, such as https://queen.example.com.
+        // When set, each queue of the Workload page links to its console page
+        // and its waiting and running jobs. An http or https URL without user
+        // info, query or fragment; any other value fails at boot.
+        'console_url' => env('QUEEN_DASHBOARD_CONSOLE_URL'),
+    ],
+
+    // Like Horizon's `waits`: seconds the oldest job of a queue may wait
+    // before `queen:check-waits` reports it (schedule it every minute). Keys
+    // are connection:queue; the wait is measured by the broker per consumer
+    // group, not estimated.
+    'waits' => [
+        'queen:' . env('QUEEN_QUEUE', 'default') => (int) env('QUEEN_WAIT_THRESHOLD', 60),
+    ],
+
+    // Where queen:check-waits sends LongWaitDetected besides the event:
+    // comma-separated mail addresses. One notification per queue and group
+    // per throttle window.
+    'notifications' => [
+        'mail' => env('QUEEN_NOTIFY_MAIL'),
+        'throttle_minutes' => (int) env('QUEEN_NOTIFY_THROTTLE_MINUTES', 5),
+    ],
+
+    // Per-job-class metrics for the dashboard's Jobs page: every worker of a
+    // Queen connection counts jobs, failures and runtime per class and writes
+    // them to the broker's key/value store once every ten seconds.
+    'job_metrics' => [
+        'enabled' => filter_var(env('QUEEN_JOB_METRICS', true), FILTER_VALIDATE_BOOL),
+        'connection' => env('QUEEN_JOB_METRICS_CONNECTION', 'queen'),
+        'namespace' => env('QUEEN_JOB_METRICS_NAMESPACE', 'queen-metrics'),
+    ],
+
+    // Monitored tags, like Horizon's: jobs are tagged when pushed (their
+    // tags() method, or one Model:key tag per Eloquent model they carry),
+    // and workers record jobs carrying a tag chosen on the dashboard's Tags
+    // page, for retention_minutes.
+    'tags' => [
+        'enabled' => filter_var(env('QUEEN_TAGS', true), FILTER_VALIDATE_BOOL),
+        'connection' => env('QUEEN_TAGS_CONNECTION', 'queen'),
+        'namespace' => env('QUEEN_TAGS_NAMESPACE', 'queen-metrics'),
+        'retention_minutes' => (int) env('QUEEN_TAGS_RETENTION_MINUTES', 1440),
+    ],
+
+    // Prometheus text for scrapers and autoscalers (Kubernetes HPA through
+    // prometheus-adapter, KEDA): queue depth, supervisor instances, workers
+    // per pool, coordinated replicas. Off by default; the scraper sends
+    // `Authorization: Bearer <token>`, and the token needs 32+ characters.
+    'metrics' => [
+        'enabled' => filter_var(env('QUEEN_METRICS_ENABLED', false), FILTER_VALIDATE_BOOL),
+        'path' => env('QUEEN_METRICS_PATH', 'queen/metrics'),
+        'token' => env('QUEEN_METRICS_TOKEN'),
     ],
 
     // The Rust supervisor is version-pinned by this Composer package, but is
