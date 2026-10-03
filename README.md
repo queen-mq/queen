@@ -8,9 +8,13 @@
 
 Queen MQ is a transactional event broker. When a worker handles an event, the ack, the state it
 changes, the events it emits and the timer it sets commit as one entry of a replicated log, or not
-at all. On three nodes it carries 1M msg/s in and out of one queue of 10M partitions.
+at all. 
 
-[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.0.0
+On three nodes it carries 1M msg/s in and out of one queue of 10M partitions.
+
+Queen speaks HTTP but is also compatible with Kafka clients.
+
+[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/start/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.0.0
 
 </div>
 
@@ -94,6 +98,16 @@ curl -X POST http://localhost:6632/api/v1/push -H 'content-type: application/jso
 `transactionId` is your idempotency key: a retry of the same push writes nothing the second time.
 Open http://localhost:6632 for the dashboard, and take the
 [Quickstart](https://queenmq.com/start/quickstart/) from there.
+
+Building with a coding agent? Connect it to Queen's MCP server: it teaches the agent the 2.0 model
+and hands it tested code, the known traps and what each error means. No sign-in, and it never sees
+your code.
+
+```bash
+claude mcp add --transport http queen https://queenmq.com/mcp
+```
+
+Cursor, VS Code, Codex and Claude Desktop: [AI agents](https://queenmq.com/start/ai-agents/).
 
 ## Documentation
 
