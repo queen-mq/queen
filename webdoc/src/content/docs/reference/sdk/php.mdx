@@ -56,6 +56,8 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-php/tests/ProcessLeaseRenewerTest.php
   - clients/client-php/tests/CurlTransportTest.php
+  - clients/client-php/tests/TransactionBuilderTest.php
+  - clients/client-php/tests/AdminTest.php
   - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
   - clients/client-php/tests/LaravelDashboardTest.php
   - clients/client-php/tests/WorkerExitMarkerTest.php
@@ -81,6 +83,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through b602eea2, ad0f816b + this patch): the restart paragraph now says both engines open the circuit (the PHP engine already did) and which exits do not count (stable_after, Laravel's job timeout, --memory after a job, through WorkerExitMarker), and the state directory paragraph names the exit markers, says pause drains (no SIGUSR2/SIGCONT is sent) and gives the stop order; the unstarted hand-back that keeps its attempt, the forked child and the renewal helper, the detached request written before the next job, CURLOPT_QUICK_EXIT, the bounded metrics client and the Rust CA store change nothing else this reference states.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot, and CurlTransport waits at most 250 ms to write a detached request without a body; the console_url row and the Transport section still hold.
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): the Laravel driver's prefetch paragraph says the renewer hands back a crashed worker's journal, and the supervisor section the start-up warnings; TransactionBuilder::wire() is @internal and stays undocumented.
+# sourceOfTruth re-read 2026-10-02 (Queen 2 fixes): TransactionBuilder::ack() puts each message's leaseId on its ACK operation as well as in requiredLeases, and Admin gains listKv() for POST /api/v1/resources/kv/list; the TransactionBuilder and Resources tables say so.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -378,7 +381,7 @@ removed. See [Messages and dead letters](/reference/http/messages-dlq).
 
 | Method | Notes |
 | --- | --- |
-| `ack(array\|object $messages, string $status = 'completed', array $context = []): static` | Requires `transactionId` and `partitionId`; a `leaseId` is collected into `requiredLeases`. |
+| `ack(array\|object $messages, string $status = 'completed', array $context = []): static` | Requires `transactionId` and `partitionId`. A message's `leaseId` goes on its ACK operation, which the broker fences with that lease, and into `requiredLeases`. |
 | `queue(string $queueName): TransactionQueueBuilder` | Sub-builder with `partition(string)` and `push(array): TransactionBuilder`. |
 | `addPushOperation(string $queueName, ?string $partition, array $items): void` | Lower-level entry used by the sub-builder. |
 | `commit(): array` | `POST /api/v1/transaction`. |
@@ -405,6 +408,7 @@ turn it into a query string.
 | `getOverview()` | `GET /api/v1/resources/overview` |
 | `getNamespaces()` | `GET /api/v1/resources/namespaces` |
 | `getTasks()` | `GET /api/v1/resources/tasks` |
+| `listKv(string $namespace, array $options = [])` | `POST /api/v1/resources/kv/list` |
 | `listQueues(array $params = [])` | `GET /api/v1/resources/queues` |
 | `getQueue(string $name)` | `GET /api/v1/resources/queues/:name` |
 | `getQueueDepth(string $name, ?string $group = null, ?int $timeoutMillis = null)` | `GET /api/v1/resources/queues/:name/depth` |
@@ -416,6 +420,11 @@ Depth is the lightweight scaling read: total `pending`, live-lease
 rows carry `pending`, `processing` and `ready`. It has no message timestamps or
 segment scan; older brokers may omit the lease-aware fields during a rolling
 upgrade.
+
+`listKv` reads one keyset page of a key/value namespace, `{rows, truncated, nextAfter, bytes}`,
+with the options `prefix`, `after`, `limit` (1 to 1000, default 100), `keysOnly` and
+`includeExpired`. It needs read access only, while `Kv::getPrefix()` travels on `POST /api/v1/kv`,
+which needs read-write. A broker before 1.6.0 answers 404 `no_such_route`; use `getPrefix` there.
 
 ### Messages and traces
 

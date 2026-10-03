@@ -1170,20 +1170,22 @@ final class LaravelDashboardTest extends TestCase
     public function testTheJobsPageShowsEveryClassFromEveryWorker(): void
     {
         $this->liveSupervisor(['engine' => 'rust', 'state' => 'running', 'pool_status' => []]);
+        $broker = new PlanHandler([], ['status' => 200, 'json' => [
+            'rows' => [
+                ['key' => 'jobs/v1/' . sprintf('%010d', intdiv(time(), 300) * 300) . '/aaaa', 'value' => ['classes' => [
+                    'App\Jobs\SendInvoice' => ['processed' => 12, 'failed' => 1, 'runtime_ms' => 2600],
+                    'App\Jobs\ResizeImage' => ['processed' => 3, 'failed' => 0, 'runtime_ms' => 900],
+                ]]],
+            ],
+            'truncated' => false,
+            'nextAfter' => null,
+        ]]);
         $this->app->instance(\Queen\Laravel\Dashboard\JobMetricsReader::class, new \Queen\Laravel\Dashboard\JobMetricsReader(
             new Queen([
                 'url' => 'http://queen.test:6632',
                 'retryAttempts' => 1,
                 'retryDelayMillis' => 0,
-                'handler' => HandlerStack::create(new PlanHandler([], ['status' => 200, 'json' => ['results' => [[
-                    'rows' => [
-                        ['key' => 'jobs/v1/' . sprintf('%010d', intdiv(time(), 300) * 300) . '/aaaa', 'value' => ['classes' => [
-                            'App\Jobs\SendInvoice' => ['processed' => 12, 'failed' => 1, 'runtime_ms' => 2600],
-                            'App\Jobs\ResizeImage' => ['processed' => 3, 'failed' => 0, 'runtime_ms' => 900],
-                        ]]],
-                    ],
-                    'truncated' => false,
-                ]]]])),
+                'handler' => HandlerStack::create($broker),
             ]),
             'queen-metrics',
         ));
@@ -1194,6 +1196,8 @@ final class LaravelDashboardTest extends TestCase
             ->assertSee('200 ms');
         $xpath = $this->dashboardXPath($response->getContent());
         $this->assertSame('Jobs', trim($xpath->query('//a[@aria-current="page" and contains(@class, "nav-link")]')->item(0)->textContent));
+        // The read route: the supervisor's read-only token can call it.
+        $this->assertSame('/api/v1/resources/kv/list', $broker->requests[0]->getUri()->getPath());
         $this->get('/queen/jobs?range=24h')->assertOk()->assertSee('Last 24 hours');
     }
 
@@ -2484,10 +2488,11 @@ final class LaravelDashboardTest extends TestCase
                 'url' => 'http://queen.test:6632',
                 'retryAttempts' => 1,
                 'retryDelayMillis' => 0,
-                'handler' => HandlerStack::create(new PlanHandler([], ['status' => 200, 'json' => ['results' => [[
+                'handler' => HandlerStack::create(new PlanHandler([], ['status' => 200, 'json' => [
                     'rows' => $rows,
                     'truncated' => false,
-                ]]]])),
+                    'nextAfter' => null,
+                ]])),
             ]),
             'queen-metrics',
         ));

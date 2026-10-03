@@ -16,7 +16,10 @@
         </testsuite>
         <!-- Needs a live broker, and nothing else: KV and timers are part of
              every broker, so there is no flag to set first. Run by
-             test/runners/laravel; skips without QUEEN_HTTP_URL. -->
+             test/runners/laravel; skips without QUEEN_HTTP_URL.
+             DashboardReadOnlyTokenIntegrationTest needs a broker that checks
+             HS256 JWTs instead, QUEEN_JWT_HTTP_URL with its QUEEN_JWT_SECRET,
+             and skips without them. -->
         <testsuite name="Integration">
             <directory>tests/Integration</directory>
         </testsuite>

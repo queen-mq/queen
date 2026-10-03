@@ -31,6 +31,17 @@ never ran, and with `tries = 1` they failed with `MaxAttemptsExceeded` on their 
 The hand-back is now one transaction that completes each unstarted job and pushes a copy to its
 partition with the runs so far, as a release does. A crash is handled by the entry above.
 
+**PHP client: every ACK of a transaction names its own lease.** `TransactionBuilder::ack()` sent a
+delivery's lease only in `requiredLeases`. A Queen 2 broker fences an ACK with the lease its
+operation carries, and lends it the one in `requiredLeases` only when the bundle names a single
+lease, so in a bundle of two leases every ACK went unfenced. A Laravel worker's hand-back spans two
+leases when it settles two batches at once (the prefetched tails of two queues of a queue list, or
+the deferred ACKs of one batch with the batch popped ahead), and it could complete a job that
+another worker had taken after the lease expired, and push its copy, so the job ran twice. Each ACK
+operation now carries `leaseId`, and the broker refuses the whole transaction once any of those
+leases is no longer the worker's. `requiredLeases` is still sent; 1.x brokers already read the
+operation's lease first.
+
 **Laravel: a forked child no longer kills its worker.** With the PHP lease-renewal helper, a
 child forked by a job (Laravel's fork concurrency driver, `pcntl_fork()`) stopped the parent's
 helper when it exited, and the parent's watchdog then SIGKILLed the parent mid-job; the child
@@ -61,6 +72,14 @@ thread of their own.
 worker's job events and on `WorkerStopping`, and used the queue's ordinary client, whose
 retries held the worker on a slow or rate-limiting broker and could spend the shutdown grace
 before the prefetched tail was handed back. They now use one 2-second attempt.
+
+**Laravel dashboard: the Jobs page reads with a read-only token.** It read the job metrics through
+`POST /api/v1/kv`, which takes read-write access, so with a `read_bearer_token` that may only read
+the page showed the metrics as unavailable on any broker that checks tokens. It now reads
+`POST /api/v1/resources/kv/list`, the read route the console's KV browser uses (broker 1.6.0 and
+later), through the new `Admin::listKv()`. It falls back to `getPrefix` when the broker has no such
+route (404) and when the credential may not read but may use the KV surface (403), such as a
+proxy API key with `consume` and no `read` scope.
 
 **Laravel dashboard: retry a failed job in one click.** The failed-job page has a *Retry now*
 button. It runs `queue:retry` for that job, so the broker's dead-letter entry and the

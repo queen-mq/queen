@@ -44,6 +44,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-02 (through ad0f816b + this patch): job metric and tag writes now make one attempt of at most two seconds, and the Jobs per class section says so; the unstarted hand-back and the provider's exit-marker listener change nothing this page monitors.
 # sourceOfTruth re-read 2026-10-02 (review fixes): QueenServiceProvider reports an invalid dashboard.console_url instead of failing the boot; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-02 (crash hand-back): QueenQueue's hand-back journal changes no job metric, tag or monitoring path this page describes.
+# sourceOfTruth re-read 2026-10-02 (Queen 2 fixes): JobMetricsReader pages through POST /api/v1/resources/kv/list, which a read-only token may call, and falls back to getPrefix on a 404 or 403; the Jobs per class section says so.
 ---
 
 The supervisor [dashboard](/use/laravel/dashboard) shows what the supervisors do. This page covers
@@ -92,10 +93,14 @@ its fork.
 | `QUEEN_JOB_METRICS_CONNECTION` | `queen` | Queen connection whose broker stores them |
 | `QUEEN_JOB_METRICS_NAMESPACE` | `queen-metrics` | Key/value namespace |
 
-The dashboard reads them with the connection's read credential: one paged `getPrefix` from the
-window's first bucket, cached for fifteen seconds. One read takes at most 50,000 keys, a day of
-buckets for about 170 workers; past that the page marks the table as partial, covering the window's
-oldest part, and a shorter window shows the rest.
+The dashboard reads them with the connection's read credential: one keyset-paged read from the
+window's first bucket, cached for fifteen seconds. It reads `POST /api/v1/resources/kv/list`, which
+a read-only `read_bearer_token` may call. A broker before 1.6.0 has no such route, and a credential
+may be refused it while it may use the KV surface, such as a proxy API key with `consume` and no
+`read` scope: on a 404 or a 403 the read pages with `getPrefix` instead, which needs read-write
+access. One read takes at most 50,000 keys, a day of buckets for about 170 workers; past that the
+page marks the table as partial, covering the window's oldest part, and a shorter window shows the
+rest.
 
 ## Monitored tags
 
