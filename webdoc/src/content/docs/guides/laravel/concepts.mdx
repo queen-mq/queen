@@ -45,10 +45,14 @@ A Laravel queue name becomes a Queen queue with the same name, created by the fi
 driver spreads ordinary jobs over the queue's stripes, `laravel-0000` to `laravel-0063` by
 default, by a hash of each job's UUID. The broker leases a partition to one worker of a consumer
 group at a time, and that is how Queen keeps order inside a partition: a job waits until the job
-ahead of it in its stripe has ended ([consuming](/concepts/consuming/)). The stripe count, 64 at
-most because a pop claims at most 64 partitions, also caps how many workers can run a queue's
-ordinary jobs at once. Give long jobs a queue of their own, so they never hold the stripes of short
-ones.
+ahead of it in its stripe has ended ([consuming](/concepts/consuming/)). The stripe count, 64 by
+default and up to 1,024, also caps how many workers can run a queue's ordinary jobs at once. A pop
+checks out at most 64 stripes; with more, the broker serves the next ready ones in turn. On the
+Linux benchmark server, 128 workers drained 50,000 jobs 96% faster with 256 stripes than with 64,
+with no measured cost at 50 jobs/s
+([benchmark](/benchmarks/laravel/#more-partition-stripes-2026-10-02)). Raise the count for a queue
+that more than 64 workers serve, and give long jobs a queue of their own, so they never hold the
+stripes of short ones.
 
 <Figure id="laravel/stripes" />
 
@@ -87,7 +91,7 @@ names (or its own broker) and one group.
 Horizon keeps a queue in one Redis list. Any free worker takes the next job, so a long job delays no
 other job, and nothing keeps the order of one entity's jobs.
 
-`QUEEN_QUEUE` sets the default queue (`default`), `QUEEN_PARTITIONS` the stripes (1 to 64, default
+`QUEEN_QUEUE` sets the default queue (`default`), `QUEEN_PARTITIONS` the stripes (1 to 1,024, default
 64), `QUEEN_PARTITION_PREFIX` their prefix (`laravel`) and `QUEEN_CONSUMER_GROUP` the group
 (`laravel`).
 

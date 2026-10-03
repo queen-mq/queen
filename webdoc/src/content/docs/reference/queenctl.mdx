@@ -139,9 +139,11 @@ terminal. `-o table|wide|json|ndjson|yaml|jsonpath=<expr>` overrides it. `tail`,
 
 - There is no `kv` or `timer` command. Use `curl` against `/api/v1/kv` and `/api/v1/timers`, or an
   SDK.
-- `tx -f` sends only ack and push operations, and drops `requiredLeases`, every `leaseId` and the
-  items' `transactionId`, so its acks are not fenced and a retried push is not deduplicated. For a
-  fenced, idempotent transaction, use the [HTTP API](/reference/transaction/) or an SDK.
+- `tx -f` sends only ack and push operations. Each ack goes with its own `leaseId`, or, when it
+  has none, the one lease `requiredLeases` names; an ack without a lease in a bundle that names
+  several exits `1` before anything is sent. The items' `transactionId` is dropped, so a retried
+  push is not deduplicated. For an idempotent transaction, use the
+  [HTTP API](/reference/transaction/) or an SDK.
 - `messages delete` removes dead-letter rows only: a live message sits in the immutable queue log
   and answers 404. `cg refresh-stats` changes nothing on 2.0, whose counters are kept at apply.
   `metrics` without `--prometheus` prints `{}` on 2.0; use `--prometheus`.

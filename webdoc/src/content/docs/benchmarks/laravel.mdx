@@ -310,6 +310,28 @@ second early or late: for `backoff` `[1, 3]`, Horizon's retries came 1.81 and 4.
 failure, Queen's 1.02 to 1.04 and 3.05 s. `queue:clear` is not supported on Queen: the command
 fails, and the jobs still run.
 
+## More partition stripes, 2026-10-02
+
+The driver spreads ordinary jobs over a queue's partition stripes, and the broker leases each stripe
+to one worker at a time. The driver allowed at most 64, the partitions one pop checks out, so at
+most 64 workers could run a queue's ordinary jobs at once. It now allows up to 1,024 stripes while
+each pop still asks for at most 64, and this campaign measured 64, 128 and 256 stripes on the Linux
+server with the Rust supervisor, prefetch 4, `ack_async`, `pop_ahead` and the Raft broker. Medians of
+three runs, 10 ms jobs; every run completed its exact job set with no duplicate:
+
+| Lane | 64 stripes | 128 stripes | 256 stripes |
+| --- | ---: | ---: | ---: |
+| 50,000 jobs drained by 128 workers | 4,722 jobs/s | 7,895 jobs/s | 9,257 jobs/s |
+| 50,000 jobs drained by 64 workers | 4,580 jobs/s | 5,380 jobs/s | 5,519 jobs/s |
+| 500 jobs/s, 16 workers, p95 end to end | 23.4 ms | 17.6 ms | 16.7 ms |
+| 50 jobs/s, 16 workers, broker CPU per job | 1.49 ms | 1.53 ms | 1.49 ms |
+| Broker memory, 128-worker drain | 125 MiB | 122 MiB | 138 MiB |
+
+With 64 stripes, 128 workers drained no faster than 64. At 50 jobs/s the stripe count changed
+neither the broker's CPU per job nor the latency beyond run-to-run variation. Not measured: more
+than 256 stripes, several queues on one connection and the PHP supervisor. The dataset, with every
+run and the scripts, is `benchmark-queen/2026-10-02-laravel-partition-stripes/`.
+
 ## The supervisor's own features
 
 2026-09-30, Apple Silicon with Docker Desktop, against a Queen 1.6.0 broker on PostgreSQL 16, with

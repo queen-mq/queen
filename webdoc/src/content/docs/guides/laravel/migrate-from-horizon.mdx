@@ -138,7 +138,7 @@ though, so a pool configured to the same numbers will not make exactly the same 
 | `block_for` | `QUEEN_BLOCK_FOR` (default 0) | keep 0 when workers serve a comma-separated priority list |
 | `after_commit` | `QUEEN_AFTER_COMMIT` | same meaning |
 | none | `QUEEN_CONSUMER_GROUP` (default `laravel`) | one group per application and environment |
-| none | `QUEEN_PARTITIONS` (default and maximum 64) | the stripes of every queue |
+| none | `QUEEN_PARTITIONS` (default 64, up to 1,024) | the stripes of every queue |
 
 ### From `config/horizon.php`
 
@@ -316,7 +316,7 @@ hands its prefetched batch back at once. With renewal on, keep the default of 90
 A job waits for the job ahead of it in its stripe, so a long job on a queue of short ones delays the
 short jobs that hashed to its stripe, even while other workers are idle. On Redis that never
 happens. Move long jobs to a queue, and a pool, of their own. More workers than stripes on one queue
-gain nothing, and a queue has at most 64 stripes
+gain nothing: raise `QUEEN_PARTITIONS` for a queue that more than 64 workers serve
 ([queues and stripes](/guides/laravel/concepts/#queues-and-stripes)).
 
 ### Failed jobs also live in the broker's dead-letter queue

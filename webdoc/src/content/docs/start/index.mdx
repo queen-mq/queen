@@ -22,7 +22,8 @@ digest: >-
   transactionId deduplication. Each tenant lives in exactly one raft group, so every transaction is
   one entry with no coordinator. Clients speak HTTP and JSON (SDKs for JavaScript, Python, Go,
   Rust, C++ and PHP), and Kafka clients can connect to a wire-protocol facade built into the
-  broker. Apache 2.0; the image is ghcr.io/queen-mq/queen:latest, built for linux/amd64.
+  broker. PostgreSQL tables stream in and out through built-in connectors, and an S3 sink writes
+  queues to a bucket as JSONL or Parquet. Apache 2.0; the image is ghcr.io/queen-mq/queen:latest, built for linux/amd64.
 ---
 
 **A message queue is the smallest thing Queen MQ does.**
@@ -98,10 +99,12 @@ leader, so tenants spread their load over the nodes. See [cluster](/operate/clus
 You talk to it in JSON over HTTP, so curl is a complete client, or through the SDKs for JavaScript,
 Python, Go, Rust, C++ and PHP, the last with a Laravel queue driver. Existing Kafka producers and
 consumers can connect, unchanged, to a Kafka wire-protocol facade that runs inside the same process
-once you turn it on. The binary serves the dashboard and Prometheus metrics too, and, when you
+once you turn it on, PostgreSQL tables stream in and out through built-in connectors, and an S3
+sink writes queues to a bucket. The binary serves the dashboard and Prometheus metrics too, and, when you
 enable them, checks JWTs, encrypts payloads at rest and runs a proxy for API keys and per-tenant
 limits. For traffic that should never touch a disk, such as typing indicators, ephemeral queues
-keep their messages in memory. See [clients](/start/clients/) and [Kafka](/guides/kafka/).
+keep their messages in memory. See [clients](/start/clients/), [Kafka](/guides/kafka/), [PostgreSQL](/guides/postgres/) and
+[S3](/guides/s3/).
 
 ## Numbers
 

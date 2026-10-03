@@ -21,13 +21,14 @@ digest: >-
   means an ack may or may not have applied, 429 `overloaded` and 507 `storage_full` mean wait. The
   broker is configured only by environment variables, exposes Prometheus metrics on GET
   /metrics/prometheus, accepts Kafka clients through a built-in wire-protocol facade
-  (QUEEN_KAFKA_EMBEDDED=true), and with the embedded proxy (QUEEN_PROXY_EMBEDDED=true) a control
+  (QUEEN_KAFKA_EMBEDDED=true), streams PostgreSQL tables in and out through connectors
+  (/api/v1/connectors), writes queues to S3 through an in-process sink (QUEEN_S3_EMBEDDED=true), and with the embedded proxy (QUEEN_PROXY_EMBEDDED=true) a control
   plane drives the node over /api/cp/* with a shared token (QUEEN_PROXY_CP_TOKEN).
 ---
 
 This section is the contract written down: what every route takes and answers, what each status
 code and error code tells your client to do, every setting with the default the code applies, and
-the limits you will meet first. It describes server 2.0.0-beta.6.
+the limits you will meet first. It describes server 2.0.0.
 
 Several tables here are generated from the Rust at build time (the route table, the environment
 variables `server/src/config.rs` reads, the metric families). The build fails when one of them
