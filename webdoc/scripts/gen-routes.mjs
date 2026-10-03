@@ -250,7 +250,18 @@ function main() {
     ACCESS_FINGERPRINT,
   );
 
-  const routes = brokerRoutes();
+  // One row per method + path. A pair can be both a router route and an
+  // adapter arm (`DELETE /api/v1/ephemeral/queue/:queue` is both): axum answers
+  // the router route, the fallback never sees that request, and the adapter
+  // arm is reached only through the embedded API. `brokerRoutes` lists the
+  // router chain first, so the first occurrence is the one that answers.
+  const seenPairs = new Set();
+  const routes = brokerRoutes().filter((r) => {
+    const key = `${r.method} ${r.path}`;
+    if (seenPairs.has(key)) return false;
+    seenPairs.add(key);
+    return true;
+  });
   if (routes.length < 40) {
     throw new Error(`only parsed ${routes.length} routes out of ${RAFT_ROUTER} and ${RAFT_ADAPTER}: the parser is broken`);
   }

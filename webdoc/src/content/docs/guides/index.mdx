@@ -1,0 +1,64 @@
+---
+title: Guides
+description: "Things to build with Queen MQ: state machines, exactly-once charges, webhooks, streams, ephemeral request/reply, Kafka clients and Laravel queues, each with code that runs and the edges it has."
+type: overview
+tier: use
+sourceOfTruth:
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+  - server/src/ephemeral.rs
+digest: >-
+  The core Queen MQ pattern is one state machine per entity: the entity's partition is its input,
+  one KV entry is its state, and one POST /api/v1/transaction per event acks the event, writes the
+  state, pushes the next events and schedules or cancels timers; an expired lease makes the whole
+  commit fail (rejected_ack). Exactly-once effects inside Queen come from a putIfAbsent marker with
+  required: true committed in the same transaction as the ack; an external call such as a card
+  charge can still repeat if the worker dies between the call and the commit. Webhooks use one
+  partition per endpoint, the broker's retry budget (retryLimit + 1 attempts) and the dead-letter
+  queue, which is on by default. Streams run in the client process and commit the source ack,
+  window state and sink push as one entry. Ephemeral queues keep messages in memory only: every
+  node of a cluster serves every partition through one owner per (queue, partition), a graceful
+  stop (SIGTERM) hands the contents to the next owner, and a crash loses what the crashed node
+  held; behind the proxy they are tenant-safe on a single node only in 2.0.0-beta.6. Kafka
+  clients connect through the Kafka wire protocol built into the broker
+  (QUEEN_KAFKA_EMBEDDED=true), where a topic is a queue; Laravel uses the PHP client as a queue
+  connection.
+sidebar:
+  order: 1
+---
+
+Queen commits a few things together that usually live in different systems: the ack of a message,
+a write to its KV store, pushes to other queues, and timers. These guides put that to work on
+problems that normally need an outbox table, a lock service, a scheduler or a separate stream
+processor beside the broker. Each one starts from code that runs and ends with the edges it has.
+
+If you read one, read the state machine. The other patterns are variations of its single
+transaction.
+
+## Patterns
+
+- [One state machine per entity](/guides/state-machines/): an order that is created, paid and
+  shipped, or cancelled by its own timer, run by stateless workers without locks.
+- [Charge a card once](/guides/exactly-once/): a redelivered order made harmless by a marker that
+  commits with the ack.
+- [Deliver webhooks](/guides/webhooks/): in order per endpoint, retried by the broker, and
+  dead-lettered with the error when an endpoint never answers.
+
+## Features
+
+- [Streams](/guides/streams/): windows and aggregates in your own process, with the state kept in
+  Queen and one commit per cycle.
+- [Ephemeral queues](/guides/ephemeral/): in-memory queues for request/reply, presence and signals,
+  served by every node of a cluster and handed over when a node stops.
+
+## Integrations
+
+- [Kafka clients](/guides/kafka/): point an unmodified Kafka client at the broker. A topic is a
+  queue, so a native consumer reads what a Kafka producer wrote, and the other way round.
+- [Kafka Streams, Connect and Flink](/guides/kafka-frameworks/): what each framework asks of the
+  broker, what has run against it, and where each one stops.
+- [Postgres source and sink](/guides/postgres/): stream PostgreSQL tables into queues and queues
+  into tables from inside the broker, with exactly-once effects in both directions.
+- [S3 sink](/guides/s3/): mirror queues into an S3-compatible bucket as JSONL or Parquet from
+  inside the broker, exactly once, in a layout DuckDB and Spark read directly.
+- [Laravel](/guides/laravel/): Queen as a Laravel queue connection, with worker supervisors, their
+  dashboard, scaling on Kubernetes and monitoring.

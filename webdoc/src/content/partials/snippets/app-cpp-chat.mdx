@@ -10,31 +10,29 @@ description: "Verified snippet extracted from examples/apps/cpp/chat.cpp."
 
 ```cpp title="examples/apps/cpp/chat.cpp"
 //
-// A chat messaging system.
+// A chat backend: one ordered partition per conversation.
 //
-// This is the application Queen was written for. A hotel messaging product ran
-// on Kafka and kept stalling: some conversations need a translation or an agent
-// reply before the next message can be handled, and on a shared partition one
-// slow conversation holds up every conversation behind it.
-//
-// The fix is structural rather than operational: one ordered lane per
-// conversation, created by the first message sent to it. A conversation that
-// takes ten seconds delays itself and nothing else.
-//
-// What this program builds:
+// Queen started as the broker of a hotel messaging product. Some conversations
+// need a translation or an agent before their next message can be handled, and
+// on a hashed Kafka topic one slow conversation held up every conversation that
+// shared its partition. Here every conversation is a partition of its own,
+// created by the first message sent to it, so a slow conversation waits on
+// itself and on nothing else.
 //
 //   chat-messages (one partition per conversation)
-//     |-- group "delivery"    fast, marks each message as delivered
-//     `-- group "enrichment"  slow on conversations that need translation
+//     |-- group "delivery"    marks each message delivered, fast
+//     |-- group "enrichment"  translates the Japanese conversation, slow
+//     `-- group "sentiment"   added later, reads the whole history
 //
-// And what it proves: every message reaches both groups exactly once, in the
-// order it was sent inside its own conversation, and the conversations that
-// need no translation finish while the slow one is still working.
+// The program checks what the design promises: every message reaches each
+// group once and in the order of its conversation, and the English
+// conversations finish while the Japanese one is still being translated.
 //
-// Build it (see examples/tutorials/cpp/01-hello-world.cpp for the headers
-// queen_client.hpp expects but this repository does not vendor -- json.hpp
-// under clients/server/vendor, threadpool.hpp under clients/server/include --
-// and for why -lssl -lcrypto is required even over plain http):
+// Build it. queen_client.hpp needs json.hpp and threadpool.hpp, which this
+// repository carries under clients/server, and cpp-httplib, which it does not
+// (Homebrew puts httplib.h under /opt/homebrew/include). The client switches on
+// cpp-httplib's OpenSSL support, so -lssl -lcrypto are needed even over plain
+// http.
 //   mkdir -p build
 //   c++ -std=c++17 -O1 -pthread \
 //       -I../../../clients/client-cpp -I../../../clients/server/vendor \
@@ -61,7 +59,6 @@ description: "Verified snippet extracted from examples/apps/cpp/chat.cpp."
 #include <vector>
 
 using queen::QueenClient;
-using queen::QueueBuilder;
 using json = nlohmann::json;
 
 // The queue name is prefixed per language and suffixed per run, so every
@@ -86,12 +83,15 @@ struct Conversation {
     bool needs_translation;
 };
 
-// Three conversations. The one in Japanese needs a translation pass, which is
-// the slow work: 400 ms a message against 10 ms for the rest.
+// Three conversations. The Japanese one needs a translation pass, 400 ms a
+// message against 10 ms for the others. It is listed first, so its messages are
+// the oldest in the queue and its partition is usually handed out first: a
+// consumer that let one conversation hold up another would fail the timing
+// check below.
 static const std::vector<Conversation> CONVERSATIONS = {
+    {"conv-jp-1", "jp", true},
     {"conv-en-1", "en", false},
     {"conv-en-2", "en", false},
-    {"conv-jp-1", "jp", true},
 };
 static const int MESSAGES_PER_CONVERSATION = 6;
 static const int TOTAL_MESSAGES =
@@ -122,7 +122,7 @@ static void sleep_millis(int millis) {
 static std::string join(const std::vector<int>& values) {
     std::ostringstream out;
     for (size_t i = 0; i < values.size(); ++i) {
-        if (i) out << ", ";
+        if (i) out << ",";
         out << values[i];
     }
     return out.str();
@@ -139,9 +139,9 @@ int main() {
     const std::string QUEEN_URL = env_url ? env_url : "http://localhost:6632";
     const std::string MESSAGES = "app-cpp-chat-" + run_id();
 
-    // Unlike the JavaScript client there is no handleSignals switch:
-    // QueenClient always installs its own SIGINT/SIGTERM handlers, so a Ctrl-C
-    // during a run is the client's exit, not yours.
+    // There is no signal-handling option to turn off on this client:
+    // QueenClient always installs its own SIGINT and SIGTERM handlers, and its
+    // SIGINT handler ends the process on the spot, with exit status 0.
     QueenClient client(QUEEN_URL);
 
     std::string verdict;
@@ -150,21 +150,20 @@ int main() {
     try {
         std::cout << "broker " << QUEEN_URL << std::endl;
 
-        // Leases are what make a crashed worker safe: a message whose handler
-        // dies is redelivered once the lease expires. retry_limit bounds how
-        // many times that can happen before the message is dead-lettered
-        // instead. The C++ QueueConfig is a struct rather than an option bag,
-        // and every field it does not carry keeps the broker's own default.
+        // A crashed worker's messages come back when its lease expires, and
+        // retry_limit bounds how often a failing message is retried before it
+        // goes to the dead-letter queue. The C++ QueueConfig is a struct, and an
+        // option it has no field for keeps the broker's default.
         queen::QueueConfig config;
         config.lease_time = 60;
         config.retry_limit = 3;
         client.queue(MESSAGES).config(config).create();
 
-        // ------------------------------------------------------------ producing
+        // -------------------------------------------------------------- sending
         //
-        // A chat client sends a message: one push, into the partition named
-        // after the conversation. Nothing was declared for this conversation in
-        // advance, and nothing has to be cleaned up when it goes quiet.
+        // Sending a message is one push into the conversation's partition.
+        // Nothing was declared for the conversation beforehand, and nothing has
+        // to be cleaned up when it goes quiet.
         std::cout << "\nsending" << std::endl;
         int sent = 0;
         for (int seq = 1; seq <= MESSAGES_PER_CONVERSATION; ++seq) {
@@ -172,10 +171,9 @@ int main() {
                 // push() takes a vector of items because one call can carry a
                 // batch; the broker answers with one result per item, in order.
                 //
-                // The transaction id is the client's own idempotency key: a
-                // retry of this send, from a phone on a flaky network, writes
-                // nothing the second time and answers with the first message's
-                // id.
+                // The transaction id is the phone's own id for the message. A
+                // phone that retries a send it never saw answered writes nothing
+                // the second time, and gets the first message's id back.
                 client.queue(MESSAGES).partition(conv.id).push({
                     json{{"transactionId", conv.id + "-" + std::to_string(seq)},
                          {"data", {{"conversationId", conv.id},
@@ -190,9 +188,8 @@ int main() {
         std::cout << "  " << sent << " messages across " << CONVERSATIONS.size()
                   << " conversations" << std::endl;
 
-        // A resend of the same message: the client retried because it never saw
-        // the first answer. The broker recognises the transaction id and stores
-        // nothing. push() hands back the broker's reply unwrapped, so the
+        // The phone resends message 1 because the answer got lost on a bad
+        // network. push() hands back the broker's reply unwrapped, so the
         // per-item verdict is read straight off the array.
         json duplicate = client.queue(MESSAGES).partition("conv-en-1").push({
             json{{"transactionId", "conv-en-1-1"},
@@ -202,43 +199,38 @@ int main() {
         });
         check(duplicate.is_array() && duplicate.size() == 1 &&
                   duplicate[0]["status"] == "duplicate",
-              "a resent message was deduplicated, not stored twice");
+              "a resent message was recognised and not stored twice");
 
         // ----------------------------------------------------------- delivering
         //
-        // The delivery worker is what marks a message as delivered to the
-        // recipients. It is fast and must never fall behind, which is why it is
-        // its own consumer group: it shares no cursor with the slow work below.
+        // Marking messages delivered is fast work and must never wait behind
+        // slow work, so it is a consumer group of its own, with its own cursor.
         //
-        // concurrency(3) runs three poll loops, and each pop claims a
-        // partition, so the three conversations are drained in parallel by
-        // three workers. Nothing raises partitions() here: one lane per worker
-        // is exactly the point.
+        // concurrency(3) runs three workers, each a thread with a poll loop of
+        // its own. partitions(1) makes every pop take ONE conversation: by
+        // default a pop may sweep up several ready conversations, and a worker
+        // handles the messages of one pop in order, so a slow conversation
+        // would delay the others that came with it.
         //
-        // Three settings keep that loop honest:
+        // consume() blocks this thread until every worker has stopped, and
+        // three settings bound it:
         //
-        //   wait(false)     a long-polling pop parks server-side for up to 30
-        //                   seconds and the idle clock is only consulted
-        //                   between polls, so a blocking pop would stretch a 10
-        //                   second idle budget into half a minute.
+        //   wait(false)     every pop answers at once, and a worker that found
+        //                   nothing sleeps briefly before the next one. This
+        //                   client has no setter for the long-poll timeout,
+        //                   which is 30 seconds, and the stop flag and the idle
+        //                   deadline are only consulted between pops.
         //   idle_millis     the deadline: a lost message fails this run instead
         //                   of hanging it.
-        //   limit()         counts per worker, here and in the JavaScript
-        //                   alike: each worker keeps its own tally, so three
-        //                   workers sharing 18 messages never see one worker
-        //                   reach 18. It is a backstop, not the thing that ends
-        //                   the run.
+        //   limit()         counts per worker: each worker keeps its own tally,
+        //                   so three workers sharing 18 messages never see one
+        //                   worker reach 18. It is only a backstop.
         //
-        // What ends the run is the shared counter below, which raises the stop
-        // flag the moment every message has been handled. Without it every
-        // consume in this file would sit out its idle deadline after the last
-        // message, which is exactly what the JavaScript pays.
+        // What ends each phase is a shared counter, which raises the stop flag
+        // the moment every message has been handled.
         //
-        // consume() is synchronous in C++: it blocks this thread and runs
-        // concurrency() workers in a pool until the stop flag, the idle
-        // deadline or a worker's own limit ends every one of them. It also
-        // catches whatever the handler throws and turns it into a
-        // negative acknowledgement, so an exception raised in there never
+        // consume() also catches whatever the handler throws and turns it into
+        // a negative acknowledgement, so an exception raised in there never
         // reaches main() on its own: record it, raise the stop flag, and
         // rethrow once consume() has returned.
         std::cout << "\ndelivering" << std::endl;
@@ -252,6 +244,7 @@ int main() {
             .group("delivery")
             .subscription_mode("all")
             .concurrency(3)
+            .partitions(1)
             .each()
             .limit(TOTAL_MESSAGES)
             .wait(false)
@@ -278,29 +271,29 @@ int main() {
 
         int delivered_total = 0;
         for (const auto& entry : delivered) delivered_total += entry.second.size();
-        check(delivered_total == sent, "delivery saw every message exactly once");
+        check(delivered_total == sent,
+              "delivery saw all " + std::to_string(sent) + " messages once (got " +
+                  std::to_string(delivered_total) + ")");
 
-        // One lane is only ever held by one worker at a time -- the lease is
-        // released by the acknowledgement -- so the sequence numbers inside a
-        // conversation come back in the order they were sent, however many
-        // workers are running.
+        // A conversation is leased to one worker at a time, and the lease moves
+        // on only when that worker has acknowledged what it took, so the
+        // sequence numbers inside a conversation come back in the order they
+        // were sent, however many workers are running.
         std::vector<int> in_order;
         for (int seq = 1; seq <= MESSAGES_PER_CONVERSATION; ++seq) in_order.push_back(seq);
         for (const Conversation& conv : CONVERSATIONS) {
-            check(delivered[conv.id] == in_order, conv.id + " was delivered in order");
+            check(delivered[conv.id] == in_order,
+                  conv.id + " was delivered in order: " + join(delivered[conv.id]));
         }
 
         // ----------------------------------------------------------- enrichment
         //
-        // The slow group. It reads the same messages through its own cursor,
-        // and the Japanese conversation costs 400 ms a message because it has
-        // to be translated before it can be answered.
-        //
-        // This is where a shared partition would hurt: on a hashed topic these
-        // messages would sit in the same lane as the English ones and hold them
-        // up. Here each conversation has its own lane, so the English
+        // The slow group reads the same messages through its own cursor. On a
+        // topic with a few hashed partitions, the Japanese conversation would
+        // sit in a partition shared with English ones and hold them up. Here
+        // each worker holds one conversation at a time, so the English
         // conversations finish while the Japanese one is still being
-        // translated. The timings below are the proof.
+        // translated.
         std::cout << "\nenriching" << std::endl;
         std::map<std::string, long long> finished_at;
         handled = 0;
@@ -311,6 +304,7 @@ int main() {
             .group("enrichment")
             .subscription_mode("all")
             .concurrency(3)
+            .partitions(1)
             .each()
             .limit(TOTAL_MESSAGES)
             .wait(false)
@@ -340,23 +334,22 @@ int main() {
                   << slow << " ms" << std::endl;
 
         check(fast < slow,
-              "the conversations needing no translation finished first, in the "
-              "same worker pool");
-        check(slow > MESSAGES_PER_CONVERSATION * 300,
-              "the slow conversation really was slow, so the comparison means "
-              "something");
+              "the English conversations finished while the Japanese one was "
+              "still being translated");
+        check(slow >= MESSAGES_PER_CONVERSATION * 400,
+              "the Japanese conversation really took its six translations");
 
-        // --------------------------------------------------------------- replay
+        // ------------------------------------------------------------- backfill
         //
-        // A new feature needs the history: sentiment scoring over everything
-        // ever said. It is a new consumer group reading from the beginning, and
-        // it costs no producer change and no second copy of the data.
+        // A feature added later, sentiment scoring, wants every message ever
+        // sent. It is one more consumer group starting from the oldest message:
+        // no producer change, and no second copy of the data.
         //
-        // subscription_mode("all") is what points the new cursor at the
-        // beginning: the default for a new group is the tail, so without it
-        // this group would sit idle waiting for the next message and the run
-        // would end on the idle deadline with nothing scored.
-        std::cout << "\nbackfilling a new consumer" << std::endl;
+        // subscription_mode("all") is what points the new cursor at the oldest
+        // message. A new group starts at the tail by default, so without it this
+        // group would wait for the next message, and the phase would end on the
+        // idle deadline with nothing scored.
+        std::cout << "\nbackfilling a new group" << std::endl;
         std::atomic<int> scored{0};
         handled = 0;
         stop = false;
@@ -365,6 +358,7 @@ int main() {
             .group("sentiment")
             .subscription_mode("all")
             .concurrency(3)
+            .partitions(1)
             .each()
             .limit(TOTAL_MESSAGES)
             .wait(false)
@@ -374,13 +368,12 @@ int main() {
                 if (++handled >= TOTAL_MESSAGES) stop = true;
             }, &stop);
 
-        check(scored.load() == sent, "a group added today read the whole history");
-
-        std::cout << "\n  delivery order in conv-jp-1: "
-                  << join(delivered["conv-jp-1"]) << std::endl;
+        check(scored.load() == sent,
+              "a group created now read the whole history (" +
+                  std::to_string(scored.load()) + " messages)");
 
         // Clean up on success only: a failed run leaves the queue on the broker
-        // to be looked at. del(), not delete: the word is taken.
+        // to be looked at. The method is del() because delete is a keyword.
         client.queue(MESSAGES).del();
 
         verdict = "\nPASS: " + std::to_string(checks) + " checks";
@@ -391,8 +384,8 @@ int main() {
 
     // close() flushes anything still sitting in the client-side push buffers
     // and drops them along with their timer threads. It narrates its own
-    // shutdown on stdout, which is why the verdict is printed after it rather
-    // than before: PASS or FAIL stays the last line of a run.
+    // shutdown on stdout, which is why the verdict is printed after it: PASS or
+    // FAIL stays the last line of a run.
     client.close();
 
     (failed ? std::cerr : std::cout) << verdict << std::endl;

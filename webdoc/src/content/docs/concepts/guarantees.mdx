@@ -1,0 +1,119 @@
+---
+title: Guarantees
+description: "What Queen MQ guarantees for each API, which faults the Jepsen tests injected, what an answered write means on disk, and where exactly-once stops."
+type: concept
+tier: use
+sidebar:
+  order: 8
+sourceOfTruth:
+  - server/src/rsm/replicator/mod.rs
+  - server/src/rsm/replicator/local.rs
+  - server/src/rsm/replicator/raft/log_store.rs
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/consume/checkpoint.rs
+  - server/src/rsm/consume/ack.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/ephemeral.rs
+  - test/jepsen/src/jepsen/queen/nemesis.clj
+  - test/jepsen/src/jepsen/queen/workload/log.clj
+  - test/jepsen/src/jepsen/queen/workload/queue.clj
+  - test/jepsen/src/jepsen/queen/workload/register.clj
+  - test/jepsen/src/jepsen/queen/workload/elle.clj
+  - test/jepsen/src/jepsen/queen/workload/pipeline.clj
+  - test/jepsen/src/jepsen/queen/workload/dedup.clj
+  - test/jepsen/src/jepsen/queen/workload/timers.clj
+---
+
+We test Queen with Jepsen, on five nodes, under kill -9, network partitions, process pauses, clock
+jumps, power loss and file corruption, because a broker that promises "all or nothing" has to keep
+that promise exactly when something breaks. This page lists what each API guarantees, the faults
+behind it, what an answered write means on disk, and the limits. Read the limits before you quote a
+guarantee.
+
+## Per API
+
+| API | Guarantee | Jepsen workload |
+|---|---|---|
+| KV, one key | Linearizable. | W3 `register` |
+| KV, several keys in one call | Strict serializable. | W4 `elle` |
+| KV `putIfAbsent` | One winner. | W3c `claim` |
+| KV `incr` | No lost and no doubled increments, for every call the broker committed. | W3b `counter` |
+| Log (push, read by offset) | No acked record lost or duplicated. One order per partition for every reader, and offsets without gaps. | W1 `log` |
+| Queue (pop, ack) | No acked message lost, none acked twice, no redelivery after a successful ack. Leases exclusive in real time. Order per partition without skips. | W2 `queue` |
+| `POST /api/v1/transaction` (an ack with its lease, a push, a KV `incr`) | Atomic, and each input's effects applied exactly once. | W5 `pipeline` |
+| `transactionId` dedup | Idempotent across failover: a retry gets the original offset. | W6 `dedup` |
+| Timers | A timer fires at most once, never after a cancel that reported removing it, and not before its delay (not judged under clock faults). | W10 `timers` |
+| Every answered write, with two exceptions below | Survives kill -9 and power loss. | all, with `lazyfs` |
+
+The workloads are in `test/jepsen/src/jepsen/queen/workload/`. Three more, for the dead-letter
+queue (W7), retention (W8) and streams (W9), have run since P11 (2.0.0-alpha.6, 2026-09-28) but were
+not part of P26, so the table above makes no claim for them. [Jepsen](/benchmarks/jepsen/) has their
+results: W7 caught a real bug (a dead letter filed without its payload), fixed in `7a2a1711`, and
+one W9 run under bridge partitions ended unknown on a liveness problem that is still open.
+
+## Faults and campaigns
+
+Every test runs on five nodes. The nemesis kills nodes with kill -9 and restarts them, restarts them
+gracefully and in rolling order, pauses them with SIGSTOP, partitions the network (one node, the
+primaries, majorities, a ring, a bridge), leaves a leader that hears nobody, jumps clocks by
+minutes in both directions, cuts the power (a kill that drops whatever was not fsynced, through
+lazyfs), changes the membership and corrupts files.
+
+Two campaigns back this page. P10 ran 82 tests twice, W1 to W6 under every fault class, on raft
+commit `ec9d88c4`, the first build without PostgreSQL, and all 82 were valid both times
+(2026-09-26 and 09-27; the results, the Jepsen stores and the tested binary are archived in
+`benchmark-queen/2026-09-27-jepsen-archive/`). P26 ran 65 tests on 2.0.0-beta.3 (2026-10-01): the
+queue, pipeline, register, counter, claim, log, Elle and timer workloads under kill -9, pauses,
+partitions, bridges, a deaf leader, clock jumps, restarts, membership changes and power loss, and
+all 65 were valid. The campaigns before them found real bugs, which is what they are for: a KV
+write that was acknowledged and never committed (a stale leader answering a read by index), a read
+that saw half a batch, a lease cut short by a forward jump of the leader's clock, and pops that
+stalled after a clock jump. Each was fixed. [Jepsen](/benchmarks/jepsen/) lists every campaign and
+every bug. No campaign is claimed for the exact build you run; the suite is in `test/jepsen/`, for
+you to run.
+
+## What an answered write means
+
+- A write is answered only after its entry is committed: a majority of the nodes have written it to
+  their logs and fsynced it, and each node fsyncs an entry before it counts toward the majority. A
+  single node fsyncs before it answers.
+- There are two exceptions. Ephemeral queues keep their messages in memory and answer from
+  there, so a node that crashes loses what it held, by design. And `QUEEN_CONSUME_FAST=1` (off by
+  default) answers pops and acks before their checkpoint commits, so a leader change can lose a
+  lease or an ack you were told about.
+- A 503 means the outcome is not known: the entry may still commit (`retry`, `timeout`, `no_leader`
+  on a transaction; `outcome_unknown` on an ack). Retry with the same ids, and
+  [dedup](/concepts/dedup/) makes the retry safe.
+
+<Figure id="concepts/write-durability" />
+
+## What exactly-once means here
+
+| Layer | What holds |
+|---|---|
+| Delivery | At-least-once. An expired lease, a nack or a crash delivers a message again. |
+| Effects inside Queen | Exactly-once, through [`/api/v1/transaction`](/concepts/transactions/) (the ack and the writes are one entry, fenced by the lease the ack carries) together with [`transactionId` dedup and `once`](/concepts/dedup/). |
+| A lost answer | A retry of a committed step writes nothing twice when the step carries a gate: a deterministic push id or a `once` marker. Without one, a retry under a lease that is still live can apply its KV writes and timers again. |
+| Side effects outside Queen | Not covered. An HTTP call to a payment provider is outside any commit. See [exactly-once](/guides/exactly-once/). |
+
+## Limits
+
+- This is testing, not proof. Jepsen finds bugs; it cannot show there are none.
+- The campaigns ran the HTTP API on one raft group. The Kafka facade, and several raft groups per
+  node, were not in them.
+- Lease exclusivity across a leader change needs the nodes' clocks within
+  `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other.
+- Losing a majority of the disks for good can lose acked data. Raft survives the failure of a
+  minority, and no more.
+- A node cut off from the majority keeps answering `/health` with 200 while every write it takes
+  times out with a 503 after 30 seconds, so check that a cluster can commit with a write, not with
+  `/health`.
+- Transactions are single calls, delivery is at-least-once, and a side effect outside Queen is
+  outside any commit.
+
+## Next
+
+<CardGrid>
+  <LinkCard title="Transactions" href="/concepts/transactions/" description="Where the guarantees come from, and how to keep a retried step safe." />
+  <LinkCard title="Cluster" href="/operate/cluster/" description="Running three or five nodes, and what happens when one fails." />
+</CardGrid>

@@ -1,128 +1,46 @@
 ---
 title: Reference
-description: "Routes, configuration, metrics, client APIs and defaults, generated from the source where possible."
-type: overview
+description: "The exact contract: every HTTP route, the transaction body, configuration, metrics, errors, limits, the Kafka API window and queenctl."
+type: reference
+tier: use
 sidebar:
   order: 1
 sourceOfTruth:
-  - server/src/main.rs
   - server/src/handlers/raft.rs
-  - server/src/auth.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/mod.rs
   - server/src/config.rs
+  - proxy/src/cp.rs
+digest: >-
+  The Queen broker is an HTTP/JSON API on port 6632 of every node. In a cluster any node answers:
+  by default each node serves its own clients and sends the leader only the prepared command
+  (QUEEN_RAFT_CLIENT_OFFLOAD). POST /api/v1/transaction takes `operations` (ack and push) plus
+  top-level `kv`, `timers` and `positions` arrays and answers HTTP 200 both for a commit
+  (`success: true`) and for a rollback (`success: false` with a `reason`). Engine errors are
+  `{"error", "code"}`: 503 `retry`, `no_leader` or `timeout` mean retry, 503 `outcome_unknown`
+  means an ack may or may not have applied, 429 `overloaded` and 507 `storage_full` mean wait. The
+  broker is configured only by environment variables, exposes Prometheus metrics on GET
+  /metrics/prometheus, accepts Kafka clients through a built-in wire-protocol facade
+  (QUEEN_KAFKA_EMBEDDED=true), and with the embedded proxy (QUEEN_PROXY_EMBEDDED=true) a control
+  plane drives the node over /api/cp/* with a shared token (QUEEN_PROXY_CP_TOKEN).
 ---
 
-This section is lookup material. Every page names the source files that govern it and the test
-suites that exercise them, listed at the foot of the page under **Source of truth** and
-**Verified by**, and the largest tables here are not written by hand at all: they are extracted
-from the code when the site is built. [The documentation site](/internals/contributing/docs)
-covers both mechanisms: what those two frontmatter fields oblige a page to, and which generator
-emits which table.
+This section is the contract written down: what every route takes and answers, what each status
+code and error code tells your client to do, every setting with the default the code applies, and
+the limits you will meet first. It describes server 2.0.0-beta.6.
 
-This section describes **Queen 2.0**: one binary, with the multi-tenant proxy, the Kafka
-facade and the S3 sink able to run in the same process, and all state in each node's data
-directory. The JavaScript, Python, Go and Rust clients, `queen-protocol` and `queenctl` remain on their compatible
-**1.3.0** releases; PHP is prepared for Packagist but has no tagged release, and C++ is consumed
-directly from a repository tag or commit.
+Several tables here are generated from the Rust at build time (the route table, the environment
+variables `server/src/config.rs` reads, the metric families). The build fails when one of them
+falls behind the code, so those cannot quietly go stale. Everything else on these pages was checked
+by hand against the same source, and each page lists the files it describes.
 
-## What is generated from source
-
-| Table | Extracted from | Appears on |
-| --- | --- | --- |
-| Every route, with its access level and whether it resolves a tenant | the broker's router plus the access-level map in `server/src/auth.rs` | [HTTP conventions](/reference/http) and [Route table](/reference/http/routes) |
-| Every environment variable `server/src/config.rs` reads, with the default the code applies | `server/src/config.rs` | the configuration page in this section, beside hand-written tables for the variables read elsewhere |
-| Every Prometheus metric family | the broker's metrics module | the Prometheus page in this section |
-| What a tenant may call through the multi-tenant gateway | `proxy/` | the proxy pages in [Self-hosting](/deploy/) |
-
-A generated table cannot drift into documenting a route that does not exist. Hand-written
-prose can, which is why the pages around those tables stay short and mechanical.
-
-Every row in those tables is answered by every broker. The key/value and timer routes are registered
-unconditionally, and their metric families are exposed by a broker that has never seen a key or a
-timer, at zero rather than absent, so an alert can be written before the first tenant arrives.
-
-## The message plane
-
-Five routes are the whole data path. Everything else in the HTTP API is queue management,
-inspection or operations.
-
-<CardGrid>
-  <LinkCard
-    href="/reference/http"
-    title="HTTP conventions"
-    description="Base URL, authentication and the access-level role set, error bodies, the empty-204 rule, the body cap. Read this before the route pages."
-  />
-  <LinkCard
-    href="/reference/http/push"
-    title="POST /api/v1/push"
-    description="Every request field, the per-item response array, every item status, and how deduplication decides."
-  />
-  <LinkCard
-    href="/reference/http/pop"
-    title="The pop routes"
-    description="All three of them, every query parameter with its default, the response field by field, and what a popped message does not carry."
-  />
-  <LinkCard
-    href="/reference/http/ack"
-    title="POST /api/v1/ack"
-    description="Ack as an offset commit: the status values, the per-item result fields, and what an already-committed or unresolvable ack returns."
-  />
-  <LinkCard
-    href="/reference/http/transaction"
-    title="POST /api/v1/transaction"
-    description="Pushes and acks in one entry of the replicated log: the bundle shape, every rollback cause, and the result array."
-  />
-  <LinkCard
-    href="/reference/http/lease"
-    title="POST /api/v1/lease/:leaseId/extend"
-    description="Extending a lease while a handler is still working, and what a failed extension means."
-  />
-  <LinkCard
-    href="/reference/http/routes"
-    title="Route table"
-    description="Every method and path the broker registers, with access level and tenant scoping, on one searchable page."
-  />
-</CardGrid>
-
-## The rest of this section
-
-The sidebar lists these pages under **Reference**. They are grouped by what you are looking
-up rather than by which component implements it.
-
-| Looking for | Where it lives |
-| --- | --- |
-| The remaining HTTP routes: queues, consumer groups, messages and DLQ, traces, status, analytics, system | [HTTP API](/reference/http/), one page per group |
-| The key/value routes and the timer routes, served by every broker | [kv](/reference/http/kv) and [timers](/reference/http/timers) |
-| The routes of the in-memory storage class, and what each refusal on it means | [ephemeral](/reference/http/ephemeral) |
-| A client library's methods and builder chain | [JavaScript](/reference/sdk/javascript/), [Python](/reference/sdk/python/), [Go](/reference/sdk/go/), [Rust](/reference/sdk/rust/), [PHP](/reference/sdk/php/), [C++](/reference/sdk/cpp/) |
-| The embedded broker's Rust surface: `BrokerConfig`, `Broker` methods, error mapping (beta) | [Engine (Rust)](/reference/engine/), argument by argument. [Embed the engine](/use/embed/) is the how-to that precedes it |
-| Command-line usage | [queenctl](/reference/queenctl/) |
-| Environment variables and their defaults | [Configuration](/reference/config/), generated |
-| Queue options accepted by `/api/v1/configure` | [Queue options](/reference/queue-options/) |
-| Prometheus metric families | [Prometheus](/reference/prometheus/), generated |
-| HTTP status codes and error strings | [Errors](/reference/errors/) |
-| Effective defaults, including the values that differ depending on how a queue was created | [Defaults](/reference/defaults/) |
-| Which client versions work with which broker | [Compatibility](/reference/compatibility/) |
-
-## Reading order
-
-Reference pages assume you already know what a partition, an offset commit and a lease are.
-When a route's behaviour looks arbitrary, the explanation is usually one level down in the
-model rather than in the route itself.
-
-| If you want | Go to |
-| --- | --- |
-| The concepts the routes are built on | [Use Queen](/use) |
-| To run the broker | [Self-hosting](/deploy/) |
-| Why the storage engine behaves this way | [Internals](/internals) |
-| Measured throughput, with the configuration that produced it | [Benchmarks](/benchmarks) |
-
-**The route pages tell you what a call does; the internals pages tell you why it cannot do
-otherwise.** The four questions readers of this section ask most often are answered one level
-down, not on the route page.
-
-| The question a route page raises | The page that answers it |
-| --- | --- |
-| What a push goes through before it is answered, and where deduplication sits | [Life of a push](/internals/life-of-a-push) |
-| Why a pop can return 204 while the queue has messages, and what a lease costs | [Life of a pop](/internals/life-of-a-pop) |
-| Why a push waits for room before the broker answers 429 | [Flow control](/internals/flow-control) |
-| What the suites named under **Verified by** at the foot of each page actually run | [Testing](/internals/contributing/testing) |
+| Page | What it answers |
+|---|---|
+| [HTTP API](/reference/http/) | Base URL, which node to call, authentication, status codes, every route, reads by offset, the control-plane API, the OpenAPI documents. |
+| [Transaction](/reference/transaction/) | Every field of `POST /api/v1/transaction`, its results, every rollback `reason`, when a retry is safe. |
+| [Configuration](/reference/configuration/) | The environment variables of the broker, its engine and the embedded proxy, with the defaults the code applies. |
+| [Metrics](/reference/metrics/) | Every Prometheus family `GET /metrics/prometheus` exposes. |
+| [Errors](/reference/errors/) | Error bodies and codes across the API, and what a client does with each. |
+| [Limits](/reference/limits/) | Sizes, name rules, windows and defaults, each with the setting that moves it. |
+| [Kafka](/reference/kafka/) | Every `QUEEN_KAFKA_*` setting, topic configs, the APIs and versions the facade answers, where it differs from Apache Kafka, and notes on tested clients. |
+| [queenctl](/reference/queenctl/) | The command-line client: install, connect, every command group. |

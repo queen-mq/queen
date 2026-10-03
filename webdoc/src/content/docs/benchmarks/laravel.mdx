@@ -1,0 +1,374 @@
+---
+title: Laravel workers
+description: "Horizon on Redis against Queen's Laravel driver and supervisors on the 2.0 Raft broker: jobs per second, latency, memory and CPU, 15 failures, a 45-minute soak and 32 Laravel features, each with its run and conditions."
+type: reference
+tier: operate
+status: preview
+sidebar:
+  order: 5
+  label: Laravel workers
+---
+
+The same Laravel application ran on Horizon with Redis and on Queen's queue driver and supervisor
+with the 2.0 Raft broker. These runs measure what an application team lives with: how many jobs a
+pool of workers completes, how soon a job runs after its dispatch, how much memory the workers
+take, and what happens when a worker, a master or the backend dies in the middle of a job. We
+wrote the protocol ourselves, so read every result as diagnostic: one host per run, one broker
+node, and the conditions next to each number. The guides that use these numbers start at
+[Laravel](/guides/laravel/).
+
+## The runs
+
+| Run | Host | Queen broker | What it measured | Archive |
+| --- | --- | --- | --- | --- |
+| 2026-10-01, Linux server | DigitalOcean droplet, 16 vCPUs (Intel Xeon Gold 6548N), 31 GiB, Ubuntu 24.04, Docker 29 | one Raft node, `2.0.0-beta.2` (`d82e785f`) | throughput, latency, memory and CPU, 16 to 64 workers, 119 runs | `benchmark-queen/2026-10-01-linux-vm-horizon-raft/` |
+| 2026-10-02, Linux server | the same droplet | one Raft node, `2.0.0-beta.3` | 15 failures, 2 replica scenarios, a 45-minute soak, 32 Laravel features | `benchmark-queen/2026-10-02-laravel-failure-matrix/` |
+| 2026-10-01, Docker Desktop | Apple Silicon Mac | one Raft node, `2.0.0-alpha.9` (`89e533ab`) | 8 workers, the worker-side features one at a time, 165 runs, two fault runs | `benchmark-queen/2026-10-01-laravel-horizon-raft/` |
+| 2026-09-30, Docker Desktop | Apple Silicon Mac | Queen 1.6.0 on PostgreSQL 16 | the supervisor's own features: prefork memory, replicas, scale-up, event-driven wake-up | `benchmark-queen/2026-09-30-laravel-supervisor-features/` |
+
+Every run used the Laravel 12 application in `benchmark-queen/laravel-supervisors` and its job
+`App\Jobs\BenchmarkJob`, which sleeps 10 ms unless a lane says otherwise; the three Raft runs ran
+it on PHP 8.3. Horizon ran on Redis 7.4 with its append-only file. Whenever both stacks ran, Redis
+used `appendfsync always` unless a lane says otherwise, so that Redis and the Raft log both fsync
+every write they acknowledge. A Raft node fsyncs every acknowledged write in a group commit, in
+every lane.
+
+The first three runs used the Raft broker, the only storage 2.0 has. The fourth is older and ran
+against a 1.6 broker on PostgreSQL. We keep it because what it measures lives in the PHP
+processes and in the supervisor's control loop, which the storage under the broker does not
+change; its section says where the broker matters.
+
+## Worker capacity on a Linux server
+
+2026-10-01. The application had 8 CPUs and 8 GiB, the broker and Redis 4 CPUs and 4 GiB each.
+Queen ran the Rust supervisor with prefork workers, the command-line opcache, lease renewal in
+the supervisor, `ack_async`, `pop_ahead`, prefetch 4 and the cURL transport. Horizon ran its own
+supervisor with `block_for` 1 s. Each lane ran 3 times per engine, engines alternating, each run
+on a fresh backend, and all 119 runs completed the exact job set with no duplicate and no failure.
+
+When the jobs are dispatched in one burst, Horizon's rate is its producer's: for every job it
+dispatches, Horizon writes its monitoring records to Redis too, and one producer sends about 860
+jobs/s with `appendfsync always`. So the capacity lanes hold every worker until the whole batch
+is enqueued (`run.sh --backlog-first 1`); in none of their 24 runs did a job start before the
+release.
+
+| Lane, medians of 3 | Horizon | Queen | Queen / Horizon |
+| --- | ---: | ---: | ---: |
+| 32 workers, 10 ms jobs, fsync on every write | 1,124 jobs/s | 2,753 jobs/s | 2.4 |
+| 32 workers, Redis `everysec` | 1,247 jobs/s | 2,752 jobs/s | 2.2 |
+| 32 workers, Redis `appendfsync no` | 1,313 jobs/s | 2,714 jobs/s | 2.1 |
+| 32 workers, empty jobs | 1,090 jobs/s | 5,995 jobs/s | 5.5 |
+| 64 workers, 10 ms jobs | 1,090 jobs/s | 4,395 jobs/s | 4.0 |
+
+<Figure id="benchmarks/laravel-capacity" />
+
+Horizon stays between 1,090 and 1,313 jobs/s whatever the worker count, the job length or the
+fsync mode of Redis, and relaxing that fsync moved it by less than a fifth. Each Horizon job cost
+about 33 Redis commands, against 1.3 HTTP requests to the Queen broker, and doubling the pool from
+32 to 64 workers took Queen from 2,753 to 4,395 jobs/s.
+
+With the producer included, as an application sees it:
+
+| Lane | Horizon | Queen |
+| --- | ---: | ---: |
+| 50,000 jobs, 32 workers, all done after | 58.5 s | 18.0 s |
+| 100,000 empty jobs, 32 workers | 889 jobs/s | 5,989 jobs/s |
+| 30,000 jobs, autoscaling from 1 to 64 workers, all done after | 37.0 s | 9.5 s |
+| 500 jobs/s asked, one dispatch per job | 440 jobs/s reached | 500 jobs/s |
+
+In the autoscaling lane Queen ran `event_driven` and `fast_scale_up` and reached 64 workers 8.2 s
+after the burst began; Horizon's producer sent its jobs too slowly for it to need more than 34.
+
+## Latency at a steady rate
+
+The paced lanes dispatch one job at a time at a fixed rate below capacity, with 16 workers, and
+measure from the dispatch to the end of the job (2026-10-01, Linux server).
+
+| Lane | Horizon p50 / p95 | Queen p50 / p95 |
+| --- | ---: | ---: |
+| 500 jobs/s asked, median of 3 | 75 / 227 ms | 15 / 23 ms |
+| 400 jobs/s for 15 minutes, one run | 71 / 249 ms | 14 / 22 ms |
+
+Horizon's producer reached 440 jobs/s of the 500 asked, because each dispatch also writes its
+monitoring records. On Docker Desktop (2026-10-01, 8 workers) the two stacks were equal at 100
+jobs/s, a p95 of 19 ms for Horizon and 21 ms for Queen; at 300 jobs/s Horizon's workers queued
+behind Redis's fsync and its p95 grew to 90 to 105 ms, while Queen's stayed at 19 to 21 ms.
+
+## Memory
+
+| Workers | Horizon, application / workers | Queen, application / workers |
+| --- | ---: | ---: |
+| 16 | 525 / 469 MiB | 83 / 58 MiB |
+| 32 | 988 / 922 MiB | 120 / 81 MiB |
+| 64 | 1,892 / 1,825 MiB | 183 / 122 MiB |
+
+<Figure id="benchmarks/laravel-memory" />
+
+Application is the container's cgroup memory, supervisor and workers together; workers is their
+summed proportional set size. A Horizon worker boots its own Laravel, and 28 MiB of its 48 MiB
+resident set was private. A Queen worker is forked from one booted Laravel and shares that
+process's pages until it writes to them: 1.4 MiB private of 33 MiB resident. The cgroup counts a
+shared page once, which is where the ratio comes from. The benchmark job is tiny, so a real
+application's workers keep more private memory each and the ratio will be smaller, while the boot
+that prefork saves stays saved.
+
+Over the 15-minute soak the workers stayed flat for both engines, 529 MiB of proportional set size
+for Horizon and 81 MiB for Queen. Redis grew from 67 to 611 MiB with Horizon's job records; the
+broker grew from 59 to 117 MiB, plus the page cache of its log. Whether the broker levels off
+after that was not measured.
+
+## CPU
+
+| Lane, CPU per job | Horizon, application and backend | Queen, application and backend |
+| --- | ---: | ---: |
+| 50,000 jobs, 32 workers | 1.83 and 0.37 ms | 0.91 and 0.23 ms |
+| 500 jobs/s, 16 workers | 1.46 and 0.49 ms | 1.35 and 0.87 ms |
+| 400 jobs/s for 15 minutes | 1.56 and 0.54 ms | 1.46 and 0.97 ms |
+
+Under load the Raft broker spends less CPU per job than Redis, and at a low, steady rate it spends
+more. A profile of the broker at 500 jobs/s explains it (`raw/broker-profile.md` in the archive):
+under a bulk load one Raft entry carries about 12 jobs and shares its fixed costs, while at 500
+jobs/s each job is its own entry, and about half of the broker's CPU goes to handing work between
+threads (waking them, system calls, scheduling). The fsync itself is about 3%.
+
+The same profile found a cost on the client side. `pop_ahead` sent a pop with the last job of
+every batch, and at a low rate the batch is one job, so that pop came back empty. The driver now
+pops ahead only after a full batch: at 500 jobs/s the workers sent 0.99 pops per job instead of
+1.97, which took 12% off the broker's CPU per job and 8% off the application's, with the same
+latency and no change under load.
+
+## The worker-side features, one at a time
+
+On the Linux server (2026-10-01), 50,000 jobs and 32 workers, adding one Queen setting at a time:
+
+| Queen settings | Jobs/s | Application memory |
+| --- | ---: | ---: |
+| prefork, the command-line opcache, a renewal helper per worker | 1,890 | 417 MiB |
+| renewal in the supervisor instead of the helpers | 1,879 | 116 MiB |
+| and `ack_async` | 2,270 | 120 MiB |
+| and `pop_ahead` | 2,794 | 120 MiB |
+
+Renewal in the supervisor saves memory, because the helper process beside each worker is gone.
+The asynchronous ACK and the pop ahead save time: a worker that waits for a write waits for an
+fsync, and these two send the ACK of a job and the pop of the next batch while a job runs, so the
+worker no longer waits for either. The cURL transport against Guzzle, with 100,000 empty jobs, ran
+6,030 against 5,441 jobs/s, at 1.03 against 1.41 ms of application CPU per job.
+
+On Docker Desktop (2026-10-01, 8 workers, 10 ms jobs, fsync on every write, medians of 5) the same
+steps read 453 jobs/s with a renewal helper per worker and a synchronous ACK, 453 with renewal in
+the supervisor, 566 with an asynchronous ACK alone, 571 with both, and 643 with the pop ahead too.
+Horizon ran 417.
+
+## Docker Desktop, 8 workers
+
+2026-10-01, Apple Silicon. Redis and the broker had 2 CPUs and 2 GiB each, the application 4 CPUs
+and 1 GiB. Queen ran the Rust supervisor with prefork, prefetch 4 and lease renewal unless a row
+says otherwise. Jobs were dispatched with `Queue::bulk()` at the start of each run, 5 runs per
+engine and lane on a fresh backend, and all 165 runs completed the exact job set with no duplicate
+and no failure.
+
+| Lane, medians of 5 | Horizon | Queen | Queen / Horizon |
+| --- | ---: | ---: | ---: |
+| 10 ms jobs, fsync on every write | 417 jobs/s | 643 jobs/s | 1.54 |
+| 10 ms jobs, Redis `everysec`, Raft still fsyncing | 548 jobs/s | 635 jobs/s | 1.16 |
+| Empty jobs | 670 jobs/s | 1,585 jobs/s | 2.37 |
+| CPU-bound jobs of about 20 ms | 389 jobs/s | 401 jobs/s | 1.03 |
+| Prefetch 1 | 410 jobs/s | 628 jobs/s | 1.53 |
+| A burst, autoscaling from 1 to 16 workers | 451 jobs/s | 709 jobs/s | 1.57 |
+| Workers at the peak of that burst, and when | 10 after 7.3 s | 15 after 4.3 s | |
+| Memory of master and 8 workers (PSS) | 310 MiB | 70 MiB | 0.23 |
+
+The CPU-bound lane shows where the round trips stop mattering: when the job itself dominates, the
+two are equal. Memory splits as 62 MiB of Horizon orchestrator and 248 MiB of workers, against 23
+MiB of Queen master and 47 MiB of workers; with a renewal helper per worker Queen used 161 MiB, 99
+of it helpers. The workers spent more CPU on Queen in most lanes on this host, 7.8 CPU seconds for
+5,000 jobs against Horizon's 3.1, with the PHP client's older Guzzle transport; on the Linux server
+above, with cURL, Queen's application CPU per job was the lower of the two under load.
+
+Seven lanes ran again on the final commit after the last review fixes (`raw/runs-final.csv`):
+throughput and latency moved by at most 3%, and the time to the burst's peak became 5.3 s for Queen
+against 6.3 s for Horizon.
+
+Two fault runs on the same broker checked the new paths. With 24 jobs of 2 s on 2 workers, a
+worker killed with SIGKILL during a job was back after 1.0 s under Horizon and 1.4 s under Queen,
+and both ran all 24 jobs with no duplicate effect; the killed job ran again, as at-least-once
+delivery allows. In the second, with 16 jobs of 8 s, prefetch 4 and a 30 s lease, the last job of a
+prefetched batch ended 32.1 s after its push on its first attempt, past its lease, because the
+master renewed it.
+
+## Failures, replicas, a soak and Laravel features
+
+2026-10-02, the Linux server of 2026-10-01, Queen on one Raft node of `2.0.0-beta.3`. The
+application had 4 CPUs and 1 GiB, the broker and Redis 2 CPUs and 2 GiB each, every lane on a
+fresh backend. Queen ran its production-like settings: prefetch 1, synchronous ACKs, lease renewal
+in the supervisor and prefork workers. A fourth column runs the Rust engine with prefetch 4,
+`ack_async` and `pop_ahead`. Every lane had 2 workers unless it says otherwise, a pool `timeout` of
+20 s, `retry_after` 30 s and `shutdown_grace` 35 s. Each job writes its attempts to a log on the
+lane's volume, so every check reads what the jobs did, not what an engine reports.
+
+A lane passes when every job ended as its kind says (completed once, or failed once into
+`failed_jobs`, and into the dead-letter queue on Queen) and no two attempts of one job overlapped.
+
+| What happens | Expected | Horizon | Queen PHP | Queen Rust | Queen Rust, prefetch 4 |
+| --- | --- | --- | --- | --- | --- |
+| A job throws on every attempt (`tries` 3, `backoff` 2) | 3 attempts at least 2 s apart, then one failed-job row | Pass | Pass | Pass | Pass |
+| A job throws on its first attempt only | It completes on its second attempt, once | Pass | Pass | Pass | Pass |
+| `release()` once, or `fail()` | A released job completes on its second attempt; `fail()` is final | Pass | Pass | Pass | Pass |
+| A 15 s job with `timeout` 3 (`tries` 2) | The worker is killed and replaced at each attempt; one failed-job row | Pass | Pass | Pass | Pass |
+| A job takes the worker over `--memory` (110 of 96 MiB) | The job completes once, then the worker is replaced | Pass | Pass | Pass | Pass |
+| A job exceeds PHP's `memory_limit` (256 of 128 MiB, `tries` 2) | The worker dies at each attempt; one failed-job row | Pass | Pass | Pass | 1 of 2 jobs failed without running; passed with the crash hand-back |
+| SIGKILL on a worker during a 4 s job | The killed job runs again; all 8 complete once | Pass | Pass | Pass | Pass |
+| SIGKILL on the master during 4 s jobs, then a restart | All 8 jobs complete once | Pass | Pass | Pass | Pass |
+| A deploy (SIGTERM) during 10 s jobs | The jobs finish during the grace and do not run again | Pass | Pass | Pass | Pass |
+| A deploy during 60 s jobs, longer than the grace | The killed jobs run again; each completes once | Pass | Pass | Pass | Pass |
+| One worker runs two 60 s jobs of one prefetched batch; a deploy kills it in the second | The first job, done before the deploy, does not run again | Pass | Pass | Pass | Pass |
+| The backend restarts while 300 jobs of 100 ms run | All 300 complete once | 2 of 300 jobs ran twice | Pass | Pass | Pass |
+| The backend freezes for 5 s during 10 s jobs | Nothing runs twice | Pass | Pass | Pass | Pass |
+| The backend freezes for 45 s, longer than the 30 s lease | All complete; a job may run twice | Pass | Pass | Pass | Pass |
+| `dispatch()` while the backend is stopped | It throws, and works again once the backend is back | Pass | Pass | Pass | Pass |
+| Two masters on one queue; SIGKILL on one, as a node loss would | All 40 jobs complete once | Pass | Pass | Pass | Pass |
+| A rolling restart of two masters while 60 jobs run | All 60 complete once | Pass | Pass | Pass | Pass |
+
+Horizon's two duplicates are worth understanding, because both stacks promise the same thing
+there. The two jobs finished while Redis restarted, so the worker could not remove them from
+Redis's reserved set; their reservation expired after `retry_after` and they ran again 30 s later.
+The Queen client tries a failed request up to three times, waiting 1 s and then 2 s, so the ACKs
+sent during the broker's restart landed when it came back. Both stacks deliver at least once, and a
+job must be safe to run twice on either.
+
+### What the failure lanes found
+
+The first run of these lanes, with the PHP client of 2026-10-01, found three defects in the client
+and the supervisors, all fixed in the release the guides describe. With prefetch above 1, a
+graceful stop handed the unstarted jobs of a batch back with a `retry` ACK, which the broker counts
+as a delivery, so jobs reached `failed_jobs` before running `tries` times. With `ack_async`, the ACK
+of a finished job could stay unwritten until the next job ended, so a worker killed during that job
+ran the finished job again. And both supervisors counted a worker that Laravel killed after a job
+timeout as a crash: after five of them the crash circuit cut the pool to one worker for 30 s.
+
+| Lane, Rust engine with prefetch 4 | First run | After the fixes |
+| --- | --- | --- |
+| A 15 s job with `timeout` 3 | 3 of 4 jobs reached `failed_jobs` after one run | Pass |
+| A job over `--memory` | 1 of 6 jobs failed instead of completing | Pass |
+| A deploy during 60 s jobs | 1 of 2 jobs completed twice | Pass |
+| A deploy during the second job of a prefetched batch | The job done before the deploy ran again | Pass |
+| A job over PHP's `memory_limit` | Both jobs failed after one run | 1 of 2 failed without running; passed with the crash hand-back |
+
+With the supervisor fix, the four jobs of the timeout lane reached `failed_jobs` after 44 s on both
+Queen engines, against 126 to 147 s while the crash circuit held the pool back.
+
+One limit remained after those fixes: a crash charged an attempt to every prefetched job its worker
+had not started. In the `memory_limit` lane with `tries` 2, a job that never ran reached
+`failed_jobs` because the job ahead of it crashed the worker twice, and in the worker-kill lane the
+three jobs the killed worker had not started ran 31 s later as their second attempt. The crash
+hand-back closes it: each worker journals the transaction its shutdown would send, and whatever
+renews its lease (the Rust master, or the PHP lease helper) sends it when the worker dies holding
+the lease. A rerun of five lanes on Docker Desktop with the Raft broker (`raw/local-hand-back` in
+the archive) passed all twenty, on both engines with prefetch 1 and with prefetch 4: in the
+worker-kill lane the master handed back the three jobs that never started and they ran 4 to 12 s
+after the kill as their first attempt, and in the `memory_limit` lane both jobs ran twice, as
+`tries` 2 says. Three cases still charge the attempt: a lost node, a crash that takes the lease
+helper with the worker, and a batch popped ahead whose answer the worker had not read yet.
+
+### The soak
+
+45 minutes at 5 jobs/s on 8 workers: 85% short jobs, 5% of 5 to 20 s, 5% that fail once and
+succeed on the retry, 3% that always fail (`tries` 2) and 2% delayed by 10 to 60 s. A worker was
+killed every 10 minutes, and a deploy restarted the application after 23 minutes. This table is the
+second soak, on the release candidate, with the four profiles running at once:
+
+|  | Horizon | Queen PHP | Queen Rust | Queen Rust, prefetch 4 |
+| --- | ---: | ---: | ---: | ---: |
+| Jobs dispatched | 13,501 | 13,501 | 13,501 | 13,501 |
+| Jobs that ended as their kind says | all | all | all | all |
+| Rows in `failed_jobs`, one per permanent failure | 398 | 398 | 398 | 398 |
+| Dead-letter entries | (no DLQ) | 398 | 398 | 398 |
+| Master resident memory, first third to last third | 49.1 to 49.1 MiB | 58.5 to 58.4 MiB | 7.0 to 7.0 MiB | 7.0 to 7.0 MiB |
+| Median worker, first third to last third | 51.0 to 56.6 MiB | 40.5 to 44.9 MiB | 40.4 to 43.0 MiB | 41.1 to 45.0 MiB |
+
+The first soak, on the three engines before the last client fixes, gave the same counts and the
+same flat masters (`tables.md` in the archive). Every median worker grows slowly over 45 minutes,
+as long-lived PHP workers do; the masters do not move.
+
+### Laravel queue features
+
+Each scenario dispatches ordinary Laravel jobs, listeners, notifications or batches and checks the
+behaviour the Laravel documentation states. Horizon is the reference: a check that failed on
+Horizon was a mistake in the test, and was fixed. All 32 passed on the four profiles.
+
+| Area | Features checked |
+| --- | --- |
+| Delays and retries | `delay()`, a `DateTimeInterface` delay, `backoff` as an array, `retryUntil()`, `release()` with a delay, `maxExceptions`, `failOnTimeout`, `ThrottlesExceptions` |
+| Uniqueness and limits | `ShouldBeUnique`, `ShouldBeUniqueUntilProcessing`, `WithoutOverlapping`, `RateLimited`, `Skip` |
+| Chains and batches | `Bus::chain()`, a failing chain's `catch()`, `Bus::batch()` with `then()`, `catch()` and `finally()`, a batch with a failing job, `allowFailures()`, `$batch->cancel()`, `queue:retry-batch` |
+| Other queued work | a queued event listener, a queued notification, a queued closure with `catch()`, `ShouldBeEncrypted`, `$deleteWhenMissingModels`, a job that calls `pcntl_fork()` |
+| Transactions and events | `afterCommit()`, `Queue::before()`, `after()` and `failing()` |
+| Commands | `queue:retry`, `queue:forget`, `queue:flush`, `queue:prune-failed`, `queue:monitor`, `Queue::size()` |
+
+Laravel's Redis queue stores a due time in whole seconds, so a Horizon retry can start up to a
+second early or late: for `backoff` `[1, 3]`, Horizon's retries came 1.81 and 4.03 s after the
+failure, Queen's 1.02 to 1.04 and 3.05 s. `queue:clear` is not supported on Queen: the command
+fails, and the jobs still run.
+
+## The supervisor's own features
+
+2026-09-30, Apple Silicon with Docker Desktop, against a Queen 1.6.0 broker on PostgreSQL 16, with
+PHP 8.4 and a debug build of the Rust supervisor. These runs measure what each feature changes in
+the PHP processes and in the control loop; the broker only feeds the jobs and answers the depth
+reads, except for the event-driven wake-up at the end.
+
+### Prefork memory
+
+Inside a Linux container with PHP 8.4, N workers were started one by one (spawned) or forked from
+one booted Laravel (forked, the fork server included), and the proportional set size of every
+process was summed 15 seconds after the start or after a burst of 600 jobs. Medians of three runs,
+which differed by at most 1 MiB:
+
+| Case | Opcache | Spawned | Forked | Saving |
+| --- | --- | ---: | ---: | ---: |
+| 4 idle workers | off | 146 MiB | 91 MiB | 38% |
+| 4 idle workers | on | 167 MiB | 69 MiB | 59% |
+| 8 workers after 600 jobs | off | 272 MiB | 142 MiB | 48% |
+| 8 workers after 600 jobs | on | 336 MiB | 85 MiB | 75% |
+
+With opcache on, every spawned worker compiles its own copy of the framework, which forking shares.
+The resident set barely moves (203 against 202 MiB for four idle workers) because it counts a
+shared page once in every process. A worker that runs for hours writes to more of the shared pages
+than one measured after 15 seconds, so expect a smaller saving in production.
+
+### Coordinated replicas
+
+Two Rust supervisors served one queue and consumer group, as two pods would, each with
+`max_processes` 8, the `size` strategy and 10 jobs per worker, against 150 jobs of 3 s, sampled
+every second for 30 seconds. Without coordination each sized the whole backlog on
+its own, and together they ran above the fleet target in all 30 samples, up to twice it (12
+workers for a target of 6). With coordination their shares added up to the target in all 30. The
+uncoordinated pair drained sooner because it ran more workers than configured; to go faster with
+coordination, raise `max_processes` or the replica count.
+
+### Fast scale-up
+
+One Rust supervisor with `max_processes` 20, `balance_max_shift` 1 and a one-second poll and
+cooldown received 600 jobs of 5 s. Stepping one worker per cycle it reached 20
+workers after 18.1 s; with `fast_scale_up` after 3.6 s. The production defaults are a three-second
+poll and cooldown, which roughly triple both times.
+
+### Event-driven wake-up
+
+At the production cadence, with `fast_scale_up`, the first extra worker started 1.6 s after the
+burst when the supervisor polled and 0.5 s when the broker woke it, and the pool reached 20 workers
+after 13.9 s against 5.6 s (medians of three runs). This one depends on the
+broker: the wake-up is the broker answering a parked `POST /api/v1/fetch`. The 2.0 broker serves
+the same long poll, and the autoscaling lane of the Linux server above ran it on the Raft broker.
+
+## What these runs do not show
+
+- Every Raft run used one node. A three-node cluster adds a network round trip to every write
+  before it is answered, and none of these runs measured one.
+- One virtual machine's disk, or Docker Desktop's, set the fsync cost and with it every absolute
+  number. Another server moves them.
+- The longest soak lasted 45 minutes. Whether the broker's memory levels off past the 15-minute
+  soak, and how workers behave over days, was not measured.
+- The benchmark job is tiny. Real jobs keep more private memory per worker and pull the
+  throughput ratios towards one as the job itself dominates, as the CPU-bound lane shows.
+- The Queen team wrote these lanes and their checks; nobody else has repeated them yet.

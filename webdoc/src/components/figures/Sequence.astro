@@ -1,0 +1,227 @@
+---
+/**
+ * A sequence diagram: who sends what to whom, in order. Lifelines are spaced
+ * evenly; each step is one row, so the spec reads top to bottom like the
+ * protocol it describes. See src/lib/figures.ts for the spec.
+ */
+import { domId, textWidth, type SequenceSpec } from "@/lib/figures";
+
+interface Props {
+  id: string;
+  spec: SequenceSpec;
+}
+const { id, spec } = Astro.props;
+const pid = domId(id);
+
+const GAP = spec.gap ?? 170;
+const PAD = 16;
+const W = PAD * 2 + spec.actors.length * GAP;
+
+const xOf = new Map<string, number>();
+spec.actors.forEach((a, i) => {
+  if (xOf.has(a.id)) throw new Error(`figure ${id}: two actors are called "${a.id}"`);
+  xOf.set(a.id, PAD + GAP * (i + 0.5));
+});
+const X = (aid: string, where: string): number => {
+  const x = xOf.get(aid);
+  if (x === undefined) throw new Error(`figure ${id}: ${where} names "${aid}", which is not an actor (${[...xOf.keys()].join(", ")})`);
+  return x;
+};
+
+const HEAD_H = spec.actors.some((a) => a.sub) ? 48 : 36;
+const heads = spec.actors.map((a) => {
+  const w = Math.min(GAP - 20, Math.max(104, textWidth(a.label, 12.5) + 28, a.sub ? textWidth(a.sub, 11) + 24 : 0));
+  if (textWidth(a.label, 12.5) + 16 > w || (a.sub && textWidth(a.sub, 11) + 12 > w)) {
+    throw new Error(`figure ${id}: actor "${a.id}" does not fit a ${GAP} px gap. Shorten it or raise gap.`);
+  }
+  return { ...a, x: X(a.id, "actor"), w };
+});
+
+type Row =
+  | { kind: "msg"; x1: number; x2: number; y: number; label: string; sub?: string; reply?: boolean; tone: string; self: boolean; left?: boolean }
+  | { kind: "note"; x: number; w: number; y: number; h: number; lines: string[]; tone: string }
+  | { kind: "divider"; y: number; label: string };
+
+const rows: Row[] = [];
+let y = PAD + HEAD_H + 20;
+let lastMsgTop = y;
+
+spec.steps.forEach((step, i) => {
+  const where = `step ${i + 1}`;
+  if ("divider" in step) {
+    rows.push({ kind: "divider", y: y + 14, label: step.divider });
+    y += 34;
+    return;
+  }
+  if ("note" in step) {
+    const lines = step.note.split("\n");
+    const over = Array.isArray(step.over) ? step.over : [step.over];
+    const xs = over.map((a) => X(a, where));
+    const widest = Math.max(...lines.map((l) => textWidth(l, 11.5)));
+    const span = Math.max(...xs) - Math.min(...xs);
+    const w = Math.max(widest + 24, span + (over.length > 1 ? 72 : 0), 96);
+    const h = 10 + lines.length * 15;
+    rows.push({ kind: "note", x: (Math.min(...xs) + Math.max(...xs)) / 2 - w / 2, w, y: y + 2, h, lines, tone: step.tone ?? "default" });
+    y += h + 14;
+    return;
+  }
+  const x1 = X(step.from, where);
+  const x2 = X(step.to, where);
+  const self = step.from === step.to;
+  const top = step.same ? lastMsgTop : y;
+  if (!self) {
+    const room = Math.abs(x2 - x1) - 12;
+    const need = Math.max(textWidth(step.label, 12), step.sub ? textWidth(step.sub, 11) : 0);
+    if (need > room) {
+      throw new Error(`figure ${id}: ${where} "${step.label}" needs ${Math.ceil(need)} px between lifelines ${Math.round(room)} px apart. Shorten it or raise gap.`);
+    }
+  }
+  // A message to itself loops out to the right, unless its label would run off
+  // the figure there; then it loops to the left, label ending at the loop.
+  let left = false;
+  if (self) {
+    const need = textWidth(step.label, 12) + (step.sub ? textWidth(step.sub, 11.5) + 6 : 0);
+    if (x1 + 40 + need > W - 6) {
+      left = true;
+      if (x1 - 40 - need < 6) {
+        throw new Error(`figure ${id}: ${where} "${step.label}" is too long to sit beside its lifeline on either side. Shorten it.`);
+      }
+    }
+  }
+  rows.push({ kind: "msg", x1, x2, y: top, label: step.label, sub: step.sub, reply: step.reply, tone: step.tone ?? "default", self, left });
+  if (!step.same) {
+    lastMsgTop = top;
+    y += self ? 46 : step.sub ? 44 : 32;
+  }
+});
+
+const H = y + 10;
+const TONES = ["default", "strong", "faint", "warn", "danger"];
+---
+
+<svg
+  class="qf-svg"
+  viewBox={`0 0 ${W} ${H}`}
+  width={W}
+  height={H}
+  style={`max-width: ${W}px; min-width: ${Math.min(W, 560)}px`}
+  role="img"
+  aria-label={spec.alt}
+  xmlns="http://www.w3.org/2000/svg"
+>
+  <title>{spec.alt}</title>
+  <defs>
+    {
+      TONES.map((t) => (
+        <marker
+          id={`${pid}-ah-${t}`}
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="8"
+          markerHeight="8"
+          markerUnits="userSpaceOnUse"
+          orient="auto-start-reverse"
+        >
+          <path d="M 0.5 1 L 9 5 L 0.5 9 z" class={`qf-ah qf-ah-${t}`} />
+        </marker>
+      ))
+    }
+  </defs>
+
+  {heads.map((a) => <line x1={a.x} y1={PAD + HEAD_H} x2={a.x} y2={H - 6} class="qf-life" />)}
+
+  {
+    heads.map((a) => (
+      <g class={`qf-n qf-n-${a.tone ?? "default"}`}>
+        <rect x={a.x - a.w / 2} y={PAD} width={a.w} height={HEAD_H} rx="8" />
+        <text x={a.x} y={PAD + (a.sub ? 20 : 22)} text-anchor="middle" class="qf-t qf-head">
+          {a.label}
+        </text>
+        {a.sub && (
+          <text x={a.x} y={PAD + 36} text-anchor="middle" class="qf-ts">
+            {a.sub}
+          </text>
+        )}
+      </g>
+    ))
+  }
+
+  {
+    rows.map((r) => {
+      if (r.kind === "divider") {
+        const w = textWidth(r.label, 11) + 20;
+        return (
+          <g class="qf-div">
+            <line x1={PAD} y1={r.y} x2={W - PAD} y2={r.y} />
+            <rect x={W / 2 - w / 2} y={r.y - 10} width={w} height="20" rx="10" />
+            <text x={W / 2} y={r.y + 4} text-anchor="middle">
+              {r.label}
+            </text>
+          </g>
+        );
+      }
+      if (r.kind === "note") {
+        return (
+          <g class={`qf-sn qf-sn-${r.tone}`}>
+            <rect x={r.x} y={r.y} width={r.w} height={r.h} rx="6" />
+            {r.lines.map((l, k) => (
+              <text x={r.x + r.w / 2} y={r.y + 17 + k * 15} text-anchor="middle">
+                {l}
+              </text>
+            ))}
+          </g>
+        );
+      }
+      const ay = r.y + 19;
+      if (r.self) {
+        const k = r.left ? -1 : 1;
+        const x = r.x1;
+        const d = `M ${x} ${ay} H ${x + k * 26} Q ${x + k * 32} ${ay} ${x + k * 32} ${ay + 6} V ${ay + 10} Q ${x + k * 32} ${ay + 16} ${x + k * 26} ${ay + 16} H ${x + k * 3}`;
+        return (
+          <g>
+            <path
+              d={d}
+              class={`qf-e qf-e-${r.tone}`}
+              stroke-dasharray={r.reply ? "5 4" : undefined}
+              marker-end={`url(#${pid}-ah-${r.tone})`}
+            />
+            {r.left ? (
+              <text x={x - 40} y={ay + 12} text-anchor="end" class={`qf-ml qf-ml-${r.tone}`}>
+                {r.sub && <tspan class="qf-ts">{r.sub} </tspan>}
+                <tspan dx={r.sub ? "6" : undefined}>{r.label}</tspan>
+              </text>
+            ) : (
+              <text x={x + 40} y={ay + 12} class={`qf-ml qf-ml-${r.tone}`}>
+                {r.label}
+                {r.sub && <tspan class="qf-ts" dx="6">{r.sub}</tspan>}
+              </text>
+            )}
+          </g>
+        );
+      }
+      const dir = r.x2 > r.x1 ? 1 : -1;
+      return (
+        <g>
+          <line
+            x1={r.x1}
+            y1={ay}
+            x2={r.x2 - dir * 1.5}
+            y2={ay}
+            class={`qf-e qf-e-${r.tone}`}
+            stroke-dasharray={r.reply ? "5 4" : undefined}
+            marker-end={`url(#${pid}-ah-${r.tone})`}
+          />
+          <text x={(r.x1 + r.x2) / 2} y={r.y + 12} text-anchor="middle" class={`qf-ml qf-ml-${r.tone}`}>
+            {r.label}
+          </text>
+          {r.sub && (
+            <text x={(r.x1 + r.x2) / 2} y={ay + 15} text-anchor="middle" class="qf-ts">
+              {r.sub}
+            </text>
+          )}
+        </g>
+      );
+    })
+  }
+</svg>

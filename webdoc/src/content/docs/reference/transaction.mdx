@@ -1,0 +1,333 @@
+---
+title: Transaction
+description: "Every field of POST /api/v1/transaction, how an ack finds its lease, the results, every rollback reason, and when a retry is safe."
+type: reference
+tier: use
+sidebar:
+  order: 3
+sourceOfTruth:
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/consume/txn.rs
+  - server/src/rsm/consume/ack.rs
+  - server/src/rsm/planner/kv.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/planner/positions.rs
+  - server/src/rsm/facade/intake.rs
+  - server/src/handlers/raft.rs
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+---
+
+`POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step
+(the acks of what it took, the events it produces, the KV state it changes, the timers it sets,
+where a consumer group should read next) as one entry of the replicated log, so all of it applies
+or none of it does. There is no outbox table to poll and no idempotency table to consult before
+you act: the step and its effects are the same write.
+
+It answers HTTP 200 both when it commits (`success: true`) and when it rolls back
+(`success: false` with a `reason`), because a rollback is a verdict about your data, not a failure
+of the call. This page is every field, every result and every reason. For the model and the
+patterns built on it, read [transactions](/concepts/transactions/) first.
+
+## Request
+
+```jsonc
+{
+  "operations": [],      // { "type": "ack" | "push", ... }, in order
+  "requiredLeases": [],  // lease ids, strings
+  "kv": [],              // { "op": "put" | "putIfAbsent" | ..., ... }
+  "timers": [],          // { "op": "schedule" | "reschedule" | "cancel", ... }
+  "positions": []        // { "queue", "consumerGroup", "partition", "offset" }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `operations` | array | Acks and pushes, in order. Each element has `type: "ack"` or `type: "push"`. |
+| `requiredLeases` | array of strings | Lease ids for the acks that name none. See [how an ack finds its lease](#how-an-ack-finds-its-lease). |
+| `kv` | array | KV operations. Top level, never inside `operations`. |
+| `timers` | array | Timer schedules and cancels. Top level, never inside `operations`. |
+| `positions` | array | Set or forget where a consumer group reads a partition. |
+
+At least one of `operations`, `kv`, `timers` and `positions` must be non-empty. A `kv` or `timer`
+element inside `operations` is refused with 400, and so is a top-level field that is present but
+not an array.
+
+### Push operation
+
+Either a list of `items`, or one item inline (`queue`, `partition`, `payload` on the operation).
+
+| Field | Required | Meaning |
+|---|---|---|
+| `items[].queue` | yes | Queue name. A queue that does not exist is created. |
+| `items[].partition` | no | Partition name, default `Default`. A partition that does not exist is created. |
+| `items[].payload` | yes | Any JSON value. |
+| `items[].transactionId` | no | The dedup key, at most 65,535 bytes. Default: the minted message id. |
+| `items[].traceId` | no | A UUID; an invalid one is ignored. |
+
+Two items with the same `(queue, partition, transactionId)` in one call store one message; the
+second result says `duplicate: true`. **An item whose `transactionId` is already in the partition's
+dedup window rolls the whole transaction back** with `reason: "duplicate"`.
+
+### Ack operation
+
+| Field | Required | Meaning |
+|---|---|---|
+| `transactionId` | yes | The popped message's `transactionId`. |
+| `partitionId` | yes | The popped message's `partitionId`: a JSON string of digits, as the pop returns it. |
+| `consumerGroup` | no | The group the message was popped for. Default `__QUEUE_MODE__` (queue mode). |
+| `leaseId` | no | The pop's `leaseId`. |
+| `status` | no | `completed` (default), `failed`, `retry` or `dlq`. Any other value reads as `completed`. |
+| `error` | no | The reason recorded on a dead letter (`failed`, `dlq`). |
+
+`failed` counts one attempt: the message is redelivered while the queue's `retryLimit` lasts, then
+dead-lettered (or dropped with `deadLetterQueue: false`). `retry` releases it for redelivery
+without counting an attempt. `dlq` dead-letters it now.
+
+<Aside type="caution">
+Set `consumerGroup` on every ack of a message popped for a group. Left out, the ack targets queue
+mode's cursor, the transaction acks nothing the consumer read, and the message is redelivered.
+</Aside>
+
+### How an ack finds its lease
+
+Each ack gets at most one lease, found in this order:
+
+1. its own `leaseId`;
+2. otherwise the one lease named by `requiredLeases` and the other acks' `leaseId`s together, when
+   they all name the same lease;
+3. otherwise none.
+
+An ack with a lease is fenced. The lease must be the one the partition holds for that group, not
+expired, and the message must be inside the leased batch. If not (the lease expired, the message
+went to another worker, an earlier commit already acked it and released the lease), the whole
+transaction rolls back with `reason: "rejected_ack"`.
+
+**An ack with no lease is not fenced.** The broker skips the lease check: it acks the message even
+if another worker holds it. It still rolls back with `rejected_ack` when the message is not found
+after the group's cursor, or was already acked with a `failed`, `retry` or `dlq` status. A
+`completed` ack of a message that was already acked is a no-op, and the rest of the transaction
+commits.
+
+`requiredLeases` fences nothing on its own: it only supplies the lease of the acks in the same
+body. The JS builder sends each acked message's `leaseId` in `requiredLeases`, so a transaction
+that acks messages from two different pops names two leases and its acks are not fenced. Over
+HTTP, put `leaseId` on every ack.
+
+### KV operations
+
+The same operations as `POST /api/v1/kv`, without `getPrefix`.
+
+| `op` | Fields |
+|---|---|
+| `get` | `ns`, `key` |
+| `getMany` | `ns`, `keys` (array) |
+| `put` | `ns`, `key`, `value`, expiry, `expect`?, `required`? |
+| `putIfAbsent` | `ns`, `key`, `value`, expiry, `required`? (it is `put` with `expect: 0`) |
+| `delete` | `ns`, `key`, `expect`?, `required`? |
+| `incr` | `ns`, `key`, `delta` (number), `min`?, `max`?, expiry, `required`? |
+
+Every `put`, `putIfAbsent` and `incr` carries exactly one expiry: `ttlSeconds` (an integer greater
+than 0) or `forever: true`; the JS SDK turns `ttl: '30d'` into `ttlSeconds`. A `value` is any JSON
+value of at most `QUEEN_KV_MAX_VALUE_BYTES` (64 KiB) as compact JSON. `expect` is a version number,
+and `0` means the key must not exist.
+
+`required: true` turns an operation into a gate. If its precondition loses (`exists`, `absent`,
+`version`, `limit`, `type`), the whole transaction rolls back with `reason: "kv_precondition"`.
+Without `required`, a lost precondition is `applied: false` in the results and the rest commits.
+The JS `.once(ns, key)` is `putIfAbsent` with `required: true`.
+
+`ns` matches `^[a-z0-9][a-z0-9._-]{0,63}$`, a key is 1 to 512 bytes with no NUL, and a key may be
+written once per call. A transaction carries at most 64 KV operations naming at most 256 keys.
+
+### Timer operations
+
+| Field | Required | Meaning |
+|---|---|---|
+| `op` | yes | `schedule`, `reschedule` (the same upsert) or `cancel`. |
+| `queue` | yes | The queue the message is pushed to when the timer fires. |
+| `timerKey` | yes | The timer's name, unique per queue. Scheduling an existing key replaces it. |
+| `partition` | no | Partition of the fired message, default `Default`. |
+| `delayMs` | schedule | A delay in milliseconds, counted on the leader when it plans the transaction. Zero or negative fires on the next tick. |
+| `txn` | schedule | The fired message's `transactionId`. On a cancel, echoed back. |
+| `payload` | schedule | The message payload, base64. |
+| `payloadZstd` | no | `true` when `payload` is zstd-compressed; the broker decompresses it. |
+
+The broker owns `producerSub`, `messageId`, `deliverAt`, `attempts`, the tenant fields and every
+field starting with `_`: a timer op that carries one is refused with 400. A `(queue, timerKey)` may
+appear once per call.
+
+### Positions
+
+| Field | Required | Meaning |
+|---|---|---|
+| `queue` | yes | Must exist, or the transaction rolls back with `queue_not_found`. |
+| `consumerGroup` | yes | The group. It is registered on the queue if it is new. |
+| `partition` | no | Default `Default`. A partition that does not exist is created. |
+| `offset` | yes | The next offset the group reads, or `null` to forget the position. |
+| `metadata` | no | A string of at most 4096 bytes, stored with the position. |
+| `subscriptionMode` | no | How a new group is registered, default `DEFAULT_SUBSCRIPTION_MODE`. |
+
+A position set here releases any lease the group holds on that partition. At most 16,384 per call.
+
+## Response
+
+```json
+{ "transactionId": "0199a7c2-61f0-7b02-9a4c-0e5d3f2b8c11", "success": true, "results": [] }
+```
+
+`results` has one element per part, in one index space: the `operations` first, in order, then
+`kv`, then `timers`, then `positions`. Every element carries `index` and `type`; KV, timer and
+position results also carry `opIndex`, their place in their own array. The top-level
+`transactionId` is minted for this call; it is not a dedup key.
+
+| `type` | Fields |
+|---|---|
+| `ack` | `success`, `transactionId`, `error`, `dlq` (true when the ack dead-lettered the message) |
+| `push` | `success`, `transactionId`, `messageId`, `queueName`, and `duplicate: true` for an in-call repeat |
+| `kv` | `op`, `applied`, `reason` (when not applied), `key`, `value`, `version`; a read has `found` or `rows`/`missing` |
+| `timer` | `ok`, `status` (`scheduled`, `rescheduled`, `cancelled`, or `absent` with `ok: false`), `queue`, `timerKey`, `txn`, `messageId`, `deliverAt` |
+| `position` | `success` |
+
+`absent` on a cancel means no pending timer has that key: it may already have fired.
+
+## Example
+
+An order worker acks the event, records the order state, pushes a receipt, schedules a reminder
+and gates the whole step on a marker:
+
+```bash
+curl -s http://localhost:6632/api/v1/transaction \
+  -H 'Content-Type: application/json' -d '{
+  "operations": [
+    { "type": "ack", "transactionId": "order-7-paid", "partitionId": "42",
+      "consumerGroup": "billing", "leaseId": "0199a7c2-5e1b-7f3a-8c21-4d9e0b6a1f37" },
+    { "type": "push", "items": [
+      { "queue": "receipts", "partition": "customer-123",
+        "transactionId": "receipt-order-7", "payload": { "orderId": "order-7", "total": 120.5 } } ] }
+  ],
+  "kv": [
+    { "op": "put", "ns": "orders", "key": "order-7", "value": { "status": "paid" },
+      "ttlSeconds": 2592000 },
+    { "op": "putIfAbsent", "ns": "paid", "key": "order-7-paid", "value": true,
+      "ttlSeconds": 86400, "required": true }
+  ],
+  "timers": [
+    { "op": "schedule", "queue": "reminders", "timerKey": "order-7", "delayMs": 86400000,
+      "txn": "reminder-order-7", "payload": "eyJvcmRlcklkIjoib3JkZXItNyJ9" }
+  ]
+}'
+```
+
+The commit:
+
+```json
+{
+  "transactionId": "0199a7c2-61f0-7b02-9a4c-0e5d3f2b8c11",
+  "success": true,
+  "results": [
+    { "index": 0, "type": "ack", "success": true, "transactionId": "order-7-paid",
+      "error": null, "dlq": false },
+    { "index": 1, "type": "push", "success": true, "transactionId": "receipt-order-7",
+      "messageId": "0199a7c2-61f1-7d55-b0e2-7a1c9e4f6d20", "queueName": "receipts" },
+    { "index": 2, "op": "put", "applied": true, "key": "order-7",
+      "value": { "status": "paid" }, "version": 90101, "opIndex": 0, "type": "kv" },
+    { "index": 3, "op": "putIfAbsent", "applied": true, "key": "order-7-paid",
+      "value": true, "version": 90102, "opIndex": 1, "type": "kv" },
+    { "ok": true, "status": "scheduled", "queue": "reminders", "timerKey": "order-7",
+      "txn": "reminder-order-7", "messageId": "0199a7c2-61f1-7d55-b0e2-8b3f0a2d4e71",
+      "deliverAt": "2026-10-02T09:14:03.512887Z", "opIndex": 0, "index": 4, "type": "timer" }
+  ]
+}
+```
+
+If the same event comes back (the group was seeked back and pops it again under a new lease), the
+step runs again. Its receipt carries the same `transactionId`, so the step rolls back and writes
+nothing:
+
+```json
+{
+  "transactionId": "0199a7c3-0a2e-7c11-8d40-5f6e7a8b9c02",
+  "success": false,
+  "reason": "duplicate",
+  "error": "QDUP a pushed message to receipts/customer-123 is a duplicate (original offset 17); the transaction rolled back",
+  "results": []
+}
+```
+
+## Rollback reasons
+
+A rolled-back transaction wrote nothing. The body is
+`{transactionId, success: false, reason, error, results: []}`. When several guards would fire, the
+reason is the first in this order: the acks (`rejected_ack`), the pushes (`duplicate`), the
+positions, the KV operations (`kv_precondition`), the timers.
+
+A lost `required` KV operation adds the operation that lost:
+
+```json
+{
+  "transactionId": "0199a7c3-0a2e-7c11-8d40-5f6e7a8b9c02",
+  "success": false,
+  "reason": "kv_precondition",
+  "error": "QKV a required KV precondition failed; the transaction rolled back",
+  "results": [],
+  "ok": false,
+  "failedIndex": 3,
+  "kvReason": "exists",
+  "version": 90102,
+  "value": true
+}
+```
+
+`failedIndex` is in the same index space as `results`. The JS client returns this answer from
+`commit()`; every other `success: false` throws with `error.reason` set.
+
+| `reason` | HTTP | When | What to do |
+|---|---|---|---|
+| `kv_precondition` | 200 | A `required` KV operation lost. The body adds `failedIndex`, `kvReason`, `version`, `value`. | The step already happened. The ack rolled back with it: ack the input on its own (`POST /api/v1/ack`). |
+| `duplicate` | 200 | A pushed item's `transactionId` is already in its partition, inside the queue's `dedupWindowSeconds`. | The step already happened. Ack the input on its own; do not retry. |
+| `rejected_ack` | 200 | A fenced ack's lease is not the partition's live lease, or its message is outside the leased batch; an ack's message is not found after the cursor; or the `partitionId` is unknown or belongs to another tenant. | Do not retry: the message is redelivered to whoever holds it, or was already done. |
+| `reserved` | 200 | Another transaction, or the engine's checkpoint, holds a cursor this transaction acks or positions. | Retry. |
+| `unavailable` | 200 | The leader could not read the state the transaction needs. | Retry. |
+| `queue_not_found` | 200 | A position names a queue that does not exist. | Create the queue. |
+| `too_large` | 200 | The pushes to one partition, or the positions, exceed `QUEEN_RAFT_ENTRY_MAX_BYTES` (96 MiB) once planned, or a position's metadata exceeds 4096 bytes. | Split the transaction. |
+| `name_too_long`, `kv_key_too_large` | 200 | A name passed the edge check but not the store's key limit. | Shorten it. |
+| `bad_request` | 400 or 200 | 400: the body is not valid JSON of this shape, an operation `type` is missing or not `push`/`ack`, or a timer op is invalid. 200: no parts at all, an inline push without `queue` or `payload`, a non-numeric `partitionId`, an invalid position, or `encrypted` on a timer for a queue that encrypts at rest. | Fix the request. |
+| `timers_server_owned_field` | 400 | A timer op carries `producerSub` or a field starting with `_`. | Remove it. |
+| `kv_*` | 400, 413 | A KV operation fails validation: `kv_bad_request`, `kv_unknown_op`, `kv_bad_namespace`, `kv_bad_key`, `kv_bad_ttl`, `kv_expiry_not_specified`, `kv_bad_expect`, `kv_too_many_ops`, `kv_too_many_keys`, `kv_duplicate_key_in_call`, `kv_tenant_not_an_input`, `kv_get_prefix_not_allowed_in_transaction`; 413 for `kv_key_too_large` and `kv_value_too_large`. | Fix the request. |
+| `internal`, `entry_encode_failed` | 200 | A broker fault. | Report it. |
+
+Some failures use the engine's error body `{"error", "code"}` instead, with no `reason`: 413
+`name_too_long` (a pushed queue or partition name over the key budget), 400 `bad_request` (a
+`transactionId` over 65,535 bytes), 429 `overloaded`, 503 `retry`, `no_leader` or `timeout`, 507
+`storage_full`, 500 `internal`, and the 401/403 of authentication. See
+[errors](/reference/errors/).
+
+## Retries
+
+Inside one call, the broker retries a leader change itself, under the call's request id, until the
+deadline (`QUEEN_STMT_TIMEOUT_MS`, 30 s), and a transaction that committed before the change is
+answered from its record and does not run again.
+
+Across calls there is no client-supplied request id: a request you send again is a new
+transaction, and after a 503 or a lost connection the first attempt may have committed. If it did,
+the retry rolls back and writes nothing only because of what the body carries: a fenced ack whose
+lease the first commit released (`rejected_ack`), a pushed `transactionId` already in the partition
+(`duplicate`), or a `required` marker (`kv_precondition`). An ack with no lease does not stop it,
+because acking a message twice is a no-op.
+
+**Give every pushed item a deterministic `transactionId`, or gate the step with a `required`
+marker, so that a retry is harmless.** A transaction made only of KV writes and timers, with no
+gate, runs again when retried: an `incr` counts twice, and a timer that already fired is scheduled
+again. The JS client retries 5xx answers itself (three attempts by default), so this applies to
+SDK calls too. See [dedup](/concepts/dedup/).
+
+## Limits
+
+- One call, one tenant. There is no interactive BEGIN and COMMIT: a transaction cannot read a value
+  and branch on it. `expect` and `required` are the conditions it can carry.
+- The timer horizon (`QUEEN_TIMERS_MAX_HORIZON_S`, 90 days), the 1 MiB timer payload ceiling and
+  the 256-op cap of `POST /api/v1/timers` are not applied to the `timers` array of a transaction.
+- Throughput and commit latency, measured against Kafka, Redpanda and Pulsar on the same machines,
+  are on the [transactions benchmark](/benchmarks/transactions/).
+- An external side effect, such as an HTTP call to a payment provider, is outside the commit.

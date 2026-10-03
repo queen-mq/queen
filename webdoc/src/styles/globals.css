@@ -18,50 +18,55 @@
  *     `shadow-lg`, etc. as color names — they collide with built-ins)
  * ============================================================ */
 
-/* ---- Light mode (default) ---- */
+/* ---- Light mode (default) ----
+ * The colours are the dashboard's (app/src/style.css, "sunflower on a cloudy
+ * day"): warm paper and warm near-black, never blue, no shadows, and colour
+ * only where something needs the reader (amber = attention, coral = failure).
+ * Light = the dashboard's html.light inks, dark = its :root inks. Change them
+ * there first and copy them here, so the two surfaces stay one product. */
 :root {
 	color-scheme: light;
 
 	/* Surfaces (paired with foregrounds for contrast) */
-	--nb-background: oklch(0.99 0 0);
-	--nb-foreground: oklch(0.21 0 0);
+	--nb-background: #f2f0ec;
+	--nb-foreground: #1f1d1a;
 
-	--nb-card: oklch(1 0 0);
+	--nb-card: #f9f7f4;
 	--nb-card-foreground: var(--nb-foreground);
 
-	--nb-muted: oklch(0.967 0 0);
-	--nb-muted-foreground: oklch(0.556 0 0);
+	--nb-muted: #f1eee9;
+	--nb-muted-foreground: #6c675f;
 
-	--nb-accent: oklch(0.967 0 0);
+	--nb-accent: #ebe7e1;
 	--nb-accent-foreground: var(--nb-foreground);
 
 	/* Primary action / brand */
-	--nb-primary: oklch(0.145 0 0);
-	--nb-primary-foreground: oklch(0.97 0 0);
-	--nb-primary-hover: oklch(0.371 0 0);
+	--nb-primary: #1f1d1a;
+	--nb-primary-foreground: #f9f7f4;
+	--nb-primary-hover: #4f4b45;
 
 	/* Borders / focus */
-	--nb-border: oklch(0.935 0 0);
-	--nb-border-strong: oklch(0.87 0 0);
-	--nb-selected: oklch(0.89 0 0);
-	--nb-ring: oklch(0.145 0 0 / 0.35);
+	--nb-border: #e0dcd6;
+	--nb-border-strong: #cfc9c1;
+	--nb-selected: #e2ded7;
+	--nb-ring: rgba(31, 29, 26, 0.35);
 
 	/* Status colors — paired (saturated for text/border + muted for bg) */
-	--nb-info: oklch(0.45 0.18 255);
-	--nb-info-foreground: oklch(0.45 0.18 255);
-	--nb-info-muted: oklch(0.965 0.015 255);
+	--nb-info: #4f4b45;
+	--nb-info-foreground: #4f4b45;
+	--nb-info-muted: #ebe7e1;
 
-	--nb-success: oklch(0.42 0.14 152);
-	--nb-success-foreground: oklch(0.42 0.14 152);
-	--nb-success-muted: oklch(0.965 0.015 152);
+	--nb-success: #6c675f;
+	--nb-success-foreground: #6c675f;
+	--nb-success-muted: #ebe7e1;
 
-	--nb-warning: oklch(0.48 0.15 65);
-	--nb-warning-foreground: oklch(0.48 0.15 65);
-	--nb-warning-muted: oklch(0.97 0.02 70);
+	--nb-warning: #9a5b07;
+	--nb-warning-foreground: #9a5b07;
+	--nb-warning-muted: color-mix(in srgb, #9a5b07 10%, #f9f7f4);
 
-	--nb-danger: oklch(0.47 0.18 25);
-	--nb-danger-foreground: oklch(0.47 0.18 25);
-	--nb-danger-muted: oklch(0.965 0.015 25);
+	--nb-danger: #c6452e;
+	--nb-danger-foreground: #c6452e;
+	--nb-danger-muted: color-mix(in srgb, #c6452e 9%, #f9f7f4);
 
 	/* Layout */
 	--nb-sidebar-width: 18.75rem;
@@ -87,9 +92,9 @@
 	--nb-h4-weight: 600;
 
 	/* Shadows */
-	--nb-shadow-sm: 0 1px 2px oklch(0 0 0 / 0.04);
-	--nb-shadow: 0 1px 3px oklch(0 0 0 / 0.06), 0 1px 2px oklch(0 0 0 / 0.04);
-	--nb-shadow-lg: 0 4px 12px oklch(0 0 0 / 0.08), 0 2px 4px oklch(0 0 0 / 0.04);
+	--nb-shadow-sm: none;
+	--nb-shadow: none;
+	--nb-shadow-lg: none;
 }
 
 /* Wider content area on large displays (e.g. MacBook Pro 16″) */
@@ -103,46 +108,46 @@
 [data-mode="dark"] {
 	color-scheme: dark;
 
-	--nb-background: oklch(0.085 0 0);
-	--nb-foreground: oklch(0.97 0 0);
+	--nb-background: #0b0a0a;
+	--nb-foreground: #eeebe6;
 
-	--nb-card: #0F0F0F;
+	--nb-card: #111010;
 	--nb-card-foreground: var(--nb-foreground);
 
-	--nb-muted: #060606;
-	--nb-muted-foreground: oklch(0.556 0 0);
+	--nb-muted: #070606;
+	--nb-muted-foreground: #8f8a83;
 
-	--nb-accent: oklch(0.269 0 0);
+	--nb-accent: #1c1b19;
 	--nb-accent-foreground: var(--nb-foreground);
 
-	--nb-primary: oklch(0.9 0 0);
-	--nb-primary-foreground: oklch(0.085 0 0);
-	--nb-primary-hover: oklch(0.7 0 0);
+	--nb-primary: #eeebe6;
+	--nb-primary-foreground: #0b0a0a;
+	--nb-primary-hover: #aaa59e;
 
-	--nb-border: oklch(0.269 0 0);
-	--nb-border-strong: oklch(0.371 0 0);
-	--nb-selected: oklch(0.371 0 0);
-	--nb-ring: oklch(0.9 0 0 / 0.35);
+	--nb-border: #1f1d1b;
+	--nb-border-strong: #34312e;
+	--nb-selected: #242220;
+	--nb-ring: rgba(238, 235, 230, 0.42);
 
-	--nb-info: oklch(0.75 0.12 255);
-	--nb-info-foreground: oklch(0.75 0.12 255);
-	--nb-info-muted: oklch(0.17 0.03 260);
+	--nb-info: #aaa59e;
+	--nb-info-foreground: #aaa59e;
+	--nb-info-muted: rgba(170, 165, 158, 0.08);
 
-	--nb-success: oklch(0.72 0.12 150);
-	--nb-success-foreground: oklch(0.72 0.12 150);
-	--nb-success-muted: oklch(0.17 0.025 153);
+	--nb-success: #8f8a83;
+	--nb-success-foreground: #8f8a83;
+	--nb-success-muted: rgba(143, 138, 131, 0.10);
 
-	--nb-warning: oklch(0.78 0.11 80);
-	--nb-warning-foreground: oklch(0.78 0.11 80);
-	--nb-warning-muted: oklch(0.19 0.03 70);
+	--nb-warning: #e8a849;
+	--nb-warning-foreground: #e8a849;
+	--nb-warning-muted: rgba(232, 168, 73, 0.12);
 
-	--nb-danger: oklch(0.72 0.14 25);
-	--nb-danger-foreground: oklch(0.72 0.14 25);
-	--nb-danger-muted: oklch(0.17 0.03 25);
+	--nb-danger: #f07a5f;
+	--nb-danger-foreground: #f07a5f;
+	--nb-danger-muted: rgba(240, 122, 95, 0.12);
 
-	--nb-shadow-sm: 0 1px 2px oklch(0 0 0 / 0.2);
-	--nb-shadow: 0 1px 3px oklch(0 0 0 / 0.3), 0 1px 2px oklch(0 0 0 / 0.2);
-	--nb-shadow-lg: 0 4px 12px oklch(0 0 0 / 0.4), 0 2px 4px oklch(0 0 0 / 0.2);
+	--nb-shadow-sm: none;
+	--nb-shadow: none;
+	--nb-shadow-lg: none;
 }
 
 /* ---- Tailwind theme mapping ----

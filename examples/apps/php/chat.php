@@ -1,25 +1,22 @@
 <?php // docs:start(app-php-chat)
 //
-// A chat messaging system.
+// A chat backend: one ordered partition per conversation.
 //
-// This is the application Queen was written for. A hotel messaging product ran
-// on Kafka and kept stalling: some conversations need a translation or an agent
-// reply before the next message can be handled, and on a shared partition one
-// slow conversation holds up every conversation behind it.
-//
-// The fix is structural rather than operational: one ordered lane per
-// conversation, created by the first message sent to it. A conversation that
-// takes ten seconds delays itself and nothing else.
-//
-// What this program builds:
+// Queen started as the broker of a hotel messaging product. Some conversations
+// need a translation or an agent before their next message can be handled, and
+// on a hashed Kafka topic one slow conversation held up every conversation that
+// shared its partition. Here every conversation is a partition of its own,
+// created by the first message sent to it, so a slow conversation waits on
+// itself and on nothing else.
 //
 //   chat-messages (one partition per conversation)
-//     ├── group "delivery"    fast, marks each message as delivered
-//     └── group "enrichment"  slow on conversations that need translation
+//     ├── group "delivery"    marks each message delivered, fast
+//     ├── group "enrichment"  translates the Japanese conversation, slow
+//     └── group "sentiment"   added later, reads the whole history
 //
-// And what it proves: every message reaches both groups exactly once, in the
-// order it was sent inside its own conversation, and the conversations that
-// need no translation finish while the slow one is still working.
+// The program checks what the design promises: every message reaches each
+// group once and in the order of its conversation, and the English
+// conversations finish while the Japanese one is still being translated.
 //
 // Run it:
 //   QUEEN_URL=http://localhost:6632 php chat.php
@@ -32,18 +29,21 @@ require __DIR__ . '/vendor/autoload.php';
 use Queen\Queen;
 
 $QUEEN_URL = getenv('QUEEN_URL') ?: 'http://localhost:6632';
+// A fresh queue per run, so two runs never read each other's messages.
 $RUN = base_convert((string) (int) (microtime(true) * 1000), 10, 36);
 $MESSAGES = "app-php-chat-{$RUN}";
 
-// Three conversations. The one in Japanese needs a translation pass, which is
-// the slow work: 400 ms a message against 10 ms for the rest.
+// Three conversations. The Japanese one needs a translation pass, 400 ms a
+// message against 10 ms for the others. It is listed first, so its messages are
+// the oldest in the queue and its partition is usually handed out first: a
+// consumer that let one conversation hold up another would fail the timing
+// check below.
 $CONVERSATIONS = [
+    'conv-jp-1' => ['locale' => 'jp', 'needsTranslation' => true],
     'conv-en-1' => ['locale' => 'en', 'needsTranslation' => false],
     'conv-en-2' => ['locale' => 'en', 'needsTranslation' => false],
-    'conv-jp-1' => ['locale' => 'jp', 'needsTranslation' => true],
 ];
 $MESSAGES_PER_CONVERSATION = 6;
-$TOTAL = $MESSAGES_PER_CONVERSATION * count($CONVERSATIONS);
 $WORKERS = 3;
 
 $checks = 0;
@@ -69,22 +69,22 @@ $exitCode = 0;
 try {
     echo "broker {$QUEEN_URL}\n";
 
-    // Checked before anything is created, so a build without pcntl says so
-    // instead of leaving a queue behind halfway through.
+    // Checked before anything is created, so a build without pcntl fails here
+    // and leaves no queue behind.
     if (!function_exists('pcntl_fork')) {
         throw new RuntimeException('this example forks its worker pool and needs the pcntl extension');
     }
 
-    // Leases are what make a crashed worker safe: a message whose handler dies is
-    // redelivered once the lease expires. retryLimit bounds how many times that
-    // can happen before the message is dead-lettered instead.
+    // A crashed worker's messages come back when its lease expires, and
+    // retryLimit bounds how often a failing message is retried before it goes to
+    // the dead-letter queue.
     $queen->queue($MESSAGES)->config(['leaseTime' => 60, 'retryLimit' => 3])->create()->execute();
 
-    // ---------------------------------------------------------------- producing
+    // ------------------------------------------------------------------ sending
     //
-    // A chat client sends a message: one push, into the partition named after the
-    // conversation. Nothing was declared for this conversation in advance, and
-    // nothing has to be cleaned up when it goes quiet.
+    // Sending a message is one push into the conversation's partition. Nothing
+    // was declared for the conversation beforehand, and nothing has to be
+    // cleaned up when it goes quiet.
     echo "\nsending\n";
     $sent = 0;
     for ($seq = 1; $seq <= $MESSAGES_PER_CONVERSATION; $seq++) {
@@ -96,9 +96,9 @@ try {
                 'body' => "message {$seq} in {$conversationId}",
                 'sentAt' => (int) (microtime(true) * 1000),
             ];
-            // The transaction id is the client's own idempotency key: a retry of
-            // this send, from a phone on a flaky network, writes nothing the second
-            // time and answers with the first message's id.
+            // The phone's own id for the message. A phone that retries a send
+            // it never saw answered writes nothing the second time, and gets
+            // the first message's id back.
             $queen->queue($MESSAGES)->partition($conversationId)->push([[
                 'transactionId' => "{$conversationId}-{$seq}",
                 'data' => $message,
@@ -108,79 +108,69 @@ try {
     }
     echo "  {$sent} messages across " . count($CONVERSATIONS) . " conversations\n";
 
-    // A resend of the same message: the client retried because it never saw the
-    // first answer. The broker recognises the transaction id and stores nothing.
-    // execute() hands back one row per item pushed, and the row is where the
-    // verdict is: this client does not throw on a duplicate.
+    // The phone resends message 1 because the answer got lost on a bad network.
+    // execute() hands back one result per item pushed, and the result carries
+    // the verdict: this client does not throw on a duplicate.
     $resend = $queen->queue($MESSAGES)->partition('conv-en-1')->push([[
         'transactionId' => 'conv-en-1-1',
         'data' => ['conversationId' => 'conv-en-1', 'seq' => 1, 'body' => 'resent by the phone'],
     ]])->execute();
-    $assert($resend[0]['status'] === 'duplicate', 'a resent message was deduplicated, not stored twice');
+    $assert($resend[0]['status'] === 'duplicate', 'a resent message was recognised and not stored twice');
 
     // --------------------------------------------------------------- delivering
     //
-    // The delivery worker is what marks a message as delivered to the recipients.
-    // It is fast and must never fall behind, which is why it is its own consumer
-    // group: it shares no cursor with the slow work below.
+    // Marking messages delivered is fast work and must never wait behind slow
+    // work, so it is a consumer group of its own, with its own cursor.
     //
-    // concurrency(3) on this client is three long polls in flight at once on one
-    // cURL multi-handle, not three threads: the polls overlap, the handlers still
-    // run one after another. Each poll claims a partition of its own, so the
-    // three conversations are drained side by side. That is all this section
-    // needs: exactly-once and in-order are properties of the claim, not of how
-    // many handlers run at the same instant. The timing proof further down needs
-    // more than overlapping polls, and gets it.
-    //
-    // timeoutMillis(1000) caps how long one poll parks on the broker. The default
-    // is 30 s, and a round here ends only when every worker's poll has come back,
-    // so the last round of a drained queue would otherwise sit there for half a
-    // minute before the idle bound could fire.
+    // concurrency(3) on this client is three long polls in flight at once on
+    // one cURL multi-handle. The polls overlap, and the handlers run one after
+    // another in this process. partitions(1) makes every pop take ONE
+    // conversation: by default a pop may sweep up several ready conversations,
+    // and a worker handles the messages of one pop in order, so a slow
+    // conversation would delay the others that came with it. Long polls end
+    // after a second and a worker stops after two quiet seconds, which is what
+    // lets this program finish; a service calls consume() without those two
+    // lines and runs until stopped.
     echo "\ndelivering\n";
     $delivered = [];
     $queen
         ->queue($MESSAGES)
         ->group('delivery')
-        ->subscriptionMode('all')
+        ->subscriptionMode('all') // a group created after the messages starts at the tail otherwise
         ->concurrency(3)
+        ->partitions(1)
         ->each()
-        ->limit($TOTAL)
-        ->idleMillis(10000)
         ->timeoutMillis(1000)
+        ->idleMillis(2000)
         ->consume(function (array $msg) use (&$delivered, $sleepMillis): void {
             $sleepMillis(10);
             $delivered[$msg['data']['conversationId']][] = $msg['data']['seq'];
         })
         ->execute();
 
-    $assert(
-        array_sum(array_map('count', $delivered)) === $sent,
-        'delivery saw every message exactly once'
-    );
+    $deliveredCount = array_sum(array_map('count', $delivered));
+    $assert($deliveredCount === $sent, "delivery saw all {$sent} messages once (got {$deliveredCount})");
     foreach ($delivered as $conversationId => $seqs) {
-        $sorted = $seqs;
-        sort($sorted);
-        $assert($seqs === $sorted, "{$conversationId} was delivered in order");
+        $assert(
+            $seqs === range(1, count($seqs)),
+            "{$conversationId} was delivered in order: " . implode(',', $seqs)
+        );
     }
 
-    // -------------------------------------------------------------- enrichment
+    // --------------------------------------------------------------- enrichment
     //
-    // The slow group. It reads the same messages through its own cursor, and the
-    // Japanese conversation costs 400 ms a message because it has to be
-    // translated before it can be answered.
-    //
-    // This is where a shared partition would hurt: on a hashed topic these
-    // messages would sit in the same lane as the English ones and hold them up.
-    // Here each conversation has its own lane, so the English conversations
-    // finish while the Japanese one is still being translated. The timings below
-    // are the proof.
+    // The slow group reads the same messages through its own cursor. On a topic
+    // with a few hashed partitions, the Japanese conversation would sit in a
+    // partition shared with English ones and hold them up. Here each worker
+    // holds one conversation at a time, so the English conversations finish
+    // while the Japanese one is still being translated.
     //
     // A worker pool in PHP is processes. There is no event loop to interleave a
     // sleeping handler with a running one, so three overlapping polls in one
     // process would still translate and deliver strictly one after another, and
-    // the clock would say nothing about lanes. Forking is what a PHP deployment
-    // actually does, a queue:work fleet of three, and it is what makes the
-    // measurement mean something.
+    // the clock would say nothing about partitions. Forking is what a PHP
+    // deployment actually does, a queue:work fleet of three, and it is what
+    // makes the measurement mean something.
     echo "\nenriching\n";
     $startedAt = microtime(true);
     $reportPaths = [];
@@ -209,15 +199,13 @@ try {
                     ->queue($MESSAGES)
                     ->group('enrichment')
                     ->subscriptionMode('all')
+                    // One conversation per pop, as above. Without it the first
+                    // process to poll can take all three conversations and
+                    // translate the Japanese one before the English ones.
+                    ->partitions(1)
                     ->each()
-                    // The bound is the whole run, not this worker's share: which
-                    // lane a worker claims is the broker's decision, so a worker
-                    // that is handed two of them must be allowed to finish both.
-                    // What ends a worker is the idle bound, once the lanes it can
-                    // still claim have gone quiet.
-                    ->limit($TOTAL)
-                    ->idleMillis(3000)
                     ->timeoutMillis(1000)
+                    ->idleMillis(2000)
                     ->consume(function (array $msg) use (
                         $CONVERSATIONS, $startedAt, $sleepMillis, &$finishedAt, &$enriched
                     ): void {
@@ -237,8 +225,8 @@ try {
                 file_put_contents($reportPath, json_encode(['error' => $error->getMessage()]));
                 $childCode = 1;
             }
-            // exit, not return: a child that fell through would run the parent's
-            // remaining checks and delete the queue underneath it.
+            // exit, and never return: a child that fell through would run the
+            // parent's remaining checks and delete the queue underneath it.
             exit($childCode);
         }
 
@@ -266,7 +254,7 @@ try {
         $enriched += $report['enriched'] ?? 0;
     }
 
-    $assert($enriched === $sent, 'the pool enriched every message exactly once, across three processes');
+    $assert($enriched === $sent, "the three processes enriched all {$sent} messages once (got {$enriched})");
 
     $slow = $finishedAt['conv-jp-1'] ?? 0;
     $fast = max($finishedAt['conv-en-1'] ?? 0, $finishedAt['conv-en-2'] ?? 0);
@@ -274,35 +262,35 @@ try {
 
     $assert(
         $fast < $slow,
-        'the conversations needing no translation finished first, in the same worker pool'
+        'the English conversations finished while the Japanese one was still being translated'
     );
     $assert(
-        $slow > $MESSAGES_PER_CONVERSATION * 300,
-        'the slow conversation really was slow, so the comparison means something'
+        $slow >= $MESSAGES_PER_CONVERSATION * 400,
+        'the Japanese conversation really took its six translations'
     );
 
-    // ------------------------------------------------------------------- replay
+    // ----------------------------------------------------------------- backfill
     //
-    // A new feature needs the history: sentiment scoring over everything ever
-    // said. It is a new consumer group reading from the beginning, and it costs
-    // no producer change and no second copy of the data.
-    echo "\nbackfilling a new consumer\n";
+    // A feature added later, sentiment scoring, wants every message ever sent.
+    // It is one more consumer group starting from the oldest message: no
+    // producer change, and no second copy of the data.
+    echo "\nbackfilling a new group\n";
     $scored = 0;
     $queen
         ->queue($MESSAGES)
         ->group('sentiment')
         ->subscriptionMode('all')
         ->concurrency(3)
+        ->partitions(1)
         ->each()
-        ->limit($TOTAL)
-        ->idleMillis(10000)
         ->timeoutMillis(1000)
+        ->idleMillis(2000)
         ->consume(function (array $msg) use (&$scored): void {
             $scored++;
         })
         ->execute();
 
-    $assert($scored === $sent, 'a group added today read the whole history');
+    $assert($scored === $sent, "a group created now read the whole history ({$scored} messages)");
 
     $queen->queue($MESSAGES)->delete()->execute();
 

@@ -1,0 +1,383 @@
+---
+title: Migrate from Horizon
+description: "From Horizon to Queen, step by step: the prerequisites, Queen installed beside Horizon, the configuration map, a canary, two safe cutovers, a rollback boundary, and the pitfalls that differ from Redis."
+type: how-to
+tier: operate
+status: preview
+sidebar:
+  order: 4
+sourceOfTruth:
+  - clients/client-php/src/Laravel/Queue/SyncedFailedJobProvider.php
+  - clients/client-php/src/Laravel/Http/Middleware/AuthorizeDashboard.php
+  - clients/client-php/src/Laravel/Commands/SupervisorControlCommand.php
+  - server/src/rsm/apply_shard.rs
+  - server/src/rsm/planner/timers.rs
+  - proxy/src/routes.rs
+# Describes clients/client-php and supervisor/ as they are on origin/master (PHP client 1.9.0,
+# tagged). Add config/queen.php, Queue/{QueenQueue,QueenConnector,QueenJob}.php,
+# Supervisor/{SupervisorConfiguration,AutoScaler,PhpSupervisor}.php, CheckWaitsCommand.php,
+# LongWaitDetected.php, Monitoring/{JobTags,TagMonitor,JobMetricsRecorder}.php and
+# supervisor/src/main.rs once the 2.0 line carries that tree.
+---
+
+A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place
+where jobs wait, and Horizon's PHP master gives way to a Queen supervisor. Your job classes move
+untouched. The stored backlog does not move with them: Redis jobs, Horizon's history, its metric
+snapshots and its tags are not imported. The steps below give each backend an explicit window of
+ownership, which is what makes the move safe to start and safe to undo. The pitfalls use the words
+of [how Queen runs Laravel jobs](/guides/laravel/concepts/); read that first.
+
+<Aside type="danger">
+Do not switch `QUEUE_CONNECTION` and stop Horizon while Redis still holds jobs. Queen workers cannot
+drain a Redis backlog, and Horizon workers cannot drain a Queen one.
+</Aside>
+
+<Steps>
+
+1. **[Check the prerequisites](#check-the-prerequisites)**, from the platform and the broker to an
+   inventory of what you use from Horizon.
+2. **[Install Queen beside Horizon](#install-queen-beside-horizon)**, with `QUEUE_CONNECTION` still
+   on Redis.
+3. **[Map the configuration](#map-the-configuration)** of `config/queue.php` and
+   `config/horizon.php` into `config/queen.php`.
+4. **[Run a canary](#run-a-canary)**, one idempotent job class on Queen, through success, failure,
+   retry, delay, a killed worker and a deploy.
+5. **[Roll out](#roll-out)** by draining and switching, or by sending new jobs to Queen while
+   Horizon drains the old ones.
+6. **[Keep a way back](#roll-back-without-losing-the-new-backlog)** until the rollback window
+   closes.
+
+</Steps>
+
+Then read the [pitfalls](#pitfalls) and tick the [acceptance checklist](#acceptance-checklist).
+
+## Check the prerequisites
+
+- PHP 8.3 or newer. The supervisors, lease renewal and prefork need Unix with the `pcntl` and
+  `posix` extensions; native Windows is not supported. The queue connection alone needs neither.
+- A Queen broker the application can reach. One node is a `docker run` away
+  ([quickstart](/start/quickstart/)); for production, run a [cluster](/operate/cluster/).
+- A process manager (systemd, Kubernetes, Supervisor) to restart the Queen master if it exits.
+- A private state directory for the supervisor, owned by the user that runs it, mode `0700`,
+  outside the web root ([prepare it](/guides/laravel/supervisors/#prepare-a-private-state-directory)).
+- A cache store whose locks every worker host can see, such as Redis or the database, for the
+  failed-job lock. `array` locks hold inside one process and `file` locks inside one host. Your
+  Redis cache can stay.
+- Idempotent jobs. Both systems deliver at least once
+  ([at-least-once delivery](/guides/laravel/concepts/#at-least-once-delivery)).
+
+Before you change a connection, write down what the application uses from Horizon beyond running
+workers: job tags and silenced jobs, wait-time notifications, retained throughput and runtime
+snapshots, dashboard access and multi-host visibility, `horizon:clear`, the failed-job workflows in
+your runbooks, per-supervisor pause and continue, and any deploy automation that calls
+`horizon:terminate`. Queen covers tags, wait notifications, per-job metrics and multi-host
+visibility with its own [monitoring](/guides/laravel/monitoring/). Silenced jobs, job lists,
+batches in the dashboard, Slack and SMS routes and per-supervisor controls have no equivalent yet,
+so decide where each of those will live before the cutover. [Queen or
+Horizon](/guides/laravel/queen-vs-horizon/) compares the two feature by feature.
+
+## Install Queen beside Horizon
+
+<Steps>
+
+1. **Install the package and publish its configuration.**
+
+   ```bash
+   composer require queen-mq/php-client
+   php artisan vendor:publish --tag=queen-config
+   ```
+
+2. **Point the Queen connection at the broker, and keep the default connection on Redis.**
+
+   ```dotenv
+   QUEUE_CONNECTION=redis
+   QUEEN_URL=http://queen.internal.example:6632
+   QUEEN_CONSUMER_GROUP=laravel
+   QUEEN_PREFETCH=1
+   QUEEN_ACK_BATCH=1
+   QUEEN_FAILED_JOBS_LOCK_STORE=redis
+   QUEEN_SUPERVISOR_STATE_DIRECTORY=/srv/example/queen-supervisor-state
+   ```
+
+   Add `QUEEN_BEARER_TOKEN` when the broker requires a credential (the
+   [install section](/guides/laravel/#install) says which).
+
+3. **Create the state directory** as the user that will run the supervisor.
+
+   ```bash
+   install -d -m 0700 /srv/example/queen-supervisor-state
+   ```
+
+4. **Choose the engine.** The PHP engine runs from the package with `php artisan queen:supervise`.
+   The Rust engine needs an explicit installation
+   ([run the Rust engine](/guides/laravel/supervisors/#run-the-rust-engine)):
+
+   ```bash
+   php artisan queen:supervisor-install
+   vendor/bin/queen-supervisor --php php --artisan artisan
+   ```
+
+5. **Add the master to the process manager**, but start no production pool before the canary
+   passes.
+
+</Steps>
+
+## Map the configuration
+
+Queen uses Horizon's concepts with snake_case names. The algorithms are our own implementations,
+though, so a pool configured to the same numbers will not make exactly the same decisions.
+
+### From `config/queue.php`
+
+| Redis connection | Queen | Note |
+| --- | --- | --- |
+| `QUEUE_CONNECTION=redis` | `QUEUE_CONNECTION=queen` | change it at the cutover |
+| `connection` (the Redis connection) | `QUEEN_URL` or `QUEEN_URLS`, and `QUEEN_BEARER_TOKEN` | the driver talks to the broker over HTTP |
+| `queue` | `QUEEN_QUEUE` (default `default`) | queue names stay the same |
+| `retry_after` | `QUEEN_RETRY_AFTER` (default 90) | the lease; read the [pitfall](#retry_after-with-and-without-lease-renewal) before you copy the value |
+| `block_for` | `QUEEN_BLOCK_FOR` (default 0) | keep 0 when workers serve a comma-separated priority list |
+| `after_commit` | `QUEEN_AFTER_COMMIT` | same meaning |
+| none | `QUEEN_CONSUMER_GROUP` (default `laravel`) | one group per application and environment |
+| none | `QUEEN_PARTITIONS` (default and maximum 64) | the stripes of every queue |
+
+### From `config/horizon.php`
+
+| Horizon | Queen | Note |
+| --- | --- | --- |
+| `use` | `QUEEN_URL` or `QUEEN_URLS`, and `QUEEN_BEARER_TOKEN` | Horizon's Redis connection becomes the broker's address |
+| `prefix` | `QUEEN_JOB_METRICS_NAMESPACE`, `QUEEN_TAGS_NAMESPACE`, `QUEEN_SUPERVISOR_COORDINATION_NAMESPACE`, `QUEEN_SUPERVISOR_REMOTE_STATUS_NAMESPACE` | only when several applications share a broker; their jobs are kept apart by queue names |
+| `path`, `domain`, `middleware` | `QUEEN_DASHBOARD_PATH` (default `queen`), `QUEEN_DASHBOARD_DOMAIN`, `dashboard.middleware` | the panel is off until `QUEEN_DASHBOARD_ENABLED=true` |
+| Gate `viewHorizon` | Gate `viewQueenDashboard` | production access is denied until you define it |
+| `waits` | `waits` | the same `connection:queue => seconds` shape; schedule `queen:check-waits` every minute |
+| `trim.recent`, `trim.pending`, `trim.completed` | none | Queen keeps no job lists |
+| `trim.failed`, `trim.recent_failed` | `failed_jobs` with `queue:prune-failed` | pruning removes the dead-letter entries too |
+| `trim.monitored` | `QUEEN_TAGS_RETENTION_MINUTES` (default 1440) | how long a job with a monitored tag stays listed |
+| `silenced`, `silenced_tags` | none | |
+| `metrics.trim_snapshots` and the `horizon:snapshot` schedule | `job_metrics` (`QUEEN_JOB_METRICS`, on by default) | every worker records live, kept a day; drop the schedule |
+| `fast_termination` | none | `queen:supervisor terminate` drains for up to `shutdown_grace` |
+| `memory_limit` | none | it restarts Horizon's master; Queen has no such setting |
+| `defaults` and `environments` | `supervisor.supervisors` | one set of pools; vary values per environment with `env()` |
+| `watch` (`horizon:listen`) | none | in development, restart the master after a change |
+| `Horizon::routeMailNotificationsTo()` | `notifications.mail` (`QUEEN_NOTIFY_MAIL`) | comma-separated addresses |
+| `Horizon::routeSlackNotificationsTo()`, `routeSmsNotificationsTo()` | a listener for `Queen\Laravel\Events\LongWaitDetected` | send the alert anywhere from the listener |
+| Horizon running on several hosts | `supervisor.coordination` (`QUEEN_SUPERVISOR_COORDINATION`) | replicas share the target of every pool |
+
+### Supervisor options
+
+| Horizon supervisor | Queen pool | Note |
+| --- | --- | --- |
+| `connection` | `connection` | change the value from `redis` to `queen` |
+| `queue` | `queues` | always an array |
+| `balance: auto` | `balance: auto` | the total and the split per queue follow the backlog |
+| `balance: simple` | `balance: simple` | fixed `processes`, evenly spread |
+| `balance: false` | `balance: off` | the ordered queue list on every worker |
+| `autoScalingStrategy` | `strategy` | `size` or `time`; Horizon's published configuration uses `time`, Queen defaults to `size` |
+| `processes` | `processes` | mostly for `simple` |
+| `minProcesses` | `min_processes_per_queue` | Horizon's minimum applies per queue; `min_processes` bounds the whole pool |
+| `maxProcesses` | `max_processes` | more workers than stripes on one queue find nothing to lease |
+| `balanceMaxShift` | `balance_max_shift` | add `fast_scale_up` to close half the gap per cycle |
+| `balanceCooldown` | `balance_cooldown` | with `event_driven`, increases come every second |
+| `maxJobs`, `maxTime` | `max_jobs`, `max_time` | worker recycling |
+| `timeout`, `tries`, `memory`, `sleep`, `rest`, `force` | the same names | the same worker settings |
+| `nice` | none | keep OS priority outside Queen |
+| an array `backoff` | none | the supervisor takes one integer |
+| none | `consumer_group`, `retry_after` | per pool; default to `QUEEN_CONSUMER_GROUP` and `QUEEN_RETRY_AFTER` |
+
+For strict priority such as `high,default`, use `balance=off`, `prefetch=1` and a non-blocking
+queue scan (`block_for` 0). Auto balancing allocates by measured pressure and ignores queue order.
+
+## Run a canary
+
+Keep the application's default connection on Redis while you prove the Queen path.
+
+<Steps>
+
+1. **Send one idempotent job explicitly to Queen.**
+
+   ```php
+   RebuildSearchIndex::dispatch($tenantId)
+       ->onConnection('queen')
+       ->onQueue('queen-canary');
+   ```
+
+2. **Run one fixed Queen worker.**
+
+   ```bash
+   php artisan queue:work queen --queue=queen-canary --timeout=60 --tries=3
+   ```
+
+3. **Walk the whole lifecycle.** Check the side effect and a delayed dispatch. Fail a job on
+   purpose: it must appear in `queue:failed` and in the broker's dead-letter queue, and
+   `queue:retry` must clear both. Kill a worker in the middle of your code and check that the
+   idempotent result is still right after the redelivery.
+
+4. **Start one Queen master**, with the PHP engine or the Rust one, and require
+   `php artisan queen:supervisor status --check` to pass.
+
+5. **Stop it as a deploy would.** Run `php artisan queen:supervisor terminate` while the longest
+   real job runs, and check that the job either finished or ran again.
+
+</Steps>
+
+Throughput is a poor canary. Check attempts, delay and backoff, timeouts, failed-job sync, the
+deploy drain and a broker that is briefly unreachable, with your own jobs.
+
+## Roll out
+
+There are two safe shapes for the cutover.
+
+### Drain, then switch
+
+Use it when a short pause in dispatching is acceptable. It has the simplest ownership boundary.
+
+1. Stop or pause the producers, without pausing Horizon's workers.
+2. Let Horizon drain every Redis queue in scope.
+3. Check that the Redis queues are empty and no reserved job remains.
+4. Terminate Horizon gracefully.
+5. Deploy `QUEUE_CONNECTION=queen` and start the Queen supervisor.
+6. Resume the producers and check Queen's status, backlog and failed jobs.
+
+### Send new jobs to Queen, then drain the old ones
+
+Use it when producers can pick a connection explicitly for a while.
+
+1. Deploy code that sends new jobs to `queen` while the existing Redis jobs stay with Horizon.
+2. Run Horizon and Queen workers side by side, each on its own backend.
+3. Watch Redis until every old queue and reserved set is empty.
+4. Run `php artisan horizon:terminate` and remove the temporary routing.
+5. Keep Queen as the default connection.
+
+Never let both systems consume the same logical work through a duplicated dispatch. If a temporary
+double write cannot be avoided, the application needs its own stable idempotency key and a plan to
+reconcile.
+
+### Change the deploy scripts
+
+Replace `php artisan horizon:terminate` with `php artisan queen:supervisor terminate`, or send the
+master SIGTERM. It drains its workers for up to `shutdown_grace` seconds and exits, and the process
+manager starts a fresh one with the new code. On Kubernetes, keep `terminationGracePeriodSeconds`
+above `shutdown_grace`, and run one replica with a `Recreate` strategy unless coordination is on
+([Kubernetes](/guides/laravel/kubernetes/)).
+
+## Roll back without losing the new backlog
+
+A rollback changes where new jobs go. It does not move the jobs Queen already holds back into
+Redis.
+
+1. Stop new Queen dispatches, or route them back to Redis.
+2. Keep the Queen workers running until their backlog is empty, or keep that backlog on purpose for
+   a later recovery window.
+3. Restart Horizon before Redis takes dispatches at full rate again.
+4. Check both failed-job indexes and both backends before you remove Queen's credentials or state.
+
+Keep the Queen package, the connection configuration and the deployment path until the rollback
+window closes. Removing the workers first turns a reversible routing decision into stranded work.
+
+## Pitfalls
+
+### Jobs longer than `shutdown_grace`
+
+At a deploy the master sends its workers SIGTERM and waits `shutdown_grace` seconds, 75 by
+default, before SIGKILL. A job still running then is stopped, and it runs again once its lease
+expires. The startup check compares `shutdown_grace` only with each pool's `timeout`, so a job class
+with a longer `$timeout` of its own gets past it; Horizon has the same exposure through the process
+manager's stop timeout. For each job that can outlive the grace, raise `shutdown_grace` above its
+runtime and `terminationGracePeriodSeconds` above `shutdown_grace`, or split it into chunks that
+each end within the grace (a job that does one chunk and dispatches the next). The dashboard's
+[tuning advice](/guides/laravel/dashboard/#tuning-advice-and-settings) names the classes whose
+longest run exceeds the grace.
+
+### `retry_after` with and without lease renewal
+
+On Redis `retry_after` must exceed the longest job, so a Horizon configuration may carry a large
+value. On Queen, pick one of two profiles:
+
+| | Without lease renewal (the default) | With lease renewal |
+| --- | --- | --- |
+| What `retry_after` sets | the longest a job may run | how soon the job a crashed worker was running runs again |
+| Checked at startup | a pool's `timeout` is shorter than `retry_after` | the same, and the renewal timing fits inside `retry_after` |
+| A job class whose own `$timeout` exceeds `retry_after` | refused, see below | runs, its lease renewed every third of `retry_after` |
+| Prefetch | 1 only | up to 1,000, and `pop_ahead` |
+
+Laravel's own timeout still stops a job in both profiles; a job that must run longer than the
+pool's `timeout` declares a longer `$timeout` in its class.
+
+Without renewal, the driver refuses a job whose own `$timeout` is not shorter than `retry_after`.
+The worker reports the error and leaves the job, which comes back after its lease expires and is
+refused again: it never runs and never reaches `tries`. Lower the job's `$timeout`, raise
+`retry_after`, or turn renewal on.
+
+A large `retry_after` also costs more on Queen than on Redis. When a worker dies, its lease holds
+the whole stripe, so the jobs behind its job wait up to `retry_after` seconds, unless its renewer
+hands its prefetched batch back at once. With renewal on, keep the default of 90 seconds.
+
+### A long job delays its stripe
+
+A job waits for the job ahead of it in its stripe, so a long job on a queue of short ones delays the
+short jobs that hashed to its stripe, even while other workers are idle. On Redis that never
+happens. Move long jobs to a queue, and a pool, of their own. More workers than stripes on one queue
+gain nothing, and a queue has at most 64 stripes
+([queues and stripes](/guides/laravel/concepts/#queues-and-stripes)).
+
+### Failed jobs also live in the broker's dead-letter queue
+
+A final failure now writes two records, Laravel's `failed_jobs` row and the broker's dead-letter
+entry, and keeps them in step ([failed jobs](/guides/laravel/concepts/#failed-jobs)).
+
+- Use Laravel's commands (`queue:failed`, `queue:retry`, `queue:forget`, `queue:prune-failed`).
+  They remove the dead-letter entry and the Laravel row together.
+- Do not delete `failed_jobs` rows with SQL. Their dead-letter entries stay, until the queue's
+  retention passes them if the queue has any.
+- Do not retry a Laravel job from the dead-letter page of the Queen dashboard. Laravel owns the
+  failed index, the attempt reset and the cleanup.
+- With more than one process or host, set `QUEEN_FAILED_JOBS_LOCK_STORE` to a cache store whose
+  locks every host can see.
+- Through the broker's embedded proxy, deleting a dead-letter entry is queue administration, so the
+  connection's API key needs the `admin` scope for these commands to work.
+- A delayed job whose timer the broker cannot deliver at all ends in the dead-letter queue under
+  the group `__timer__`, with no `failed_jobs` row. It is rare; watch that group in the Queen
+  dashboard anyway.
+
+### Clearing a queue
+
+`php artisan horizon:clear` and `php artisan queue:clear redis` delete the waiting, delayed and
+reserved jobs of a Redis queue. On a Queen connection, `php artisan queue:clear queen` prints
+`Clearing queues is not supported on [QueenQueue]` and deletes nothing: Queen has no atomic clear
+across waiting jobs, live leases and Laravel's timers yet. Update the runbooks that clear a queue.
+Let the workers drain it instead, and deploy a change that makes an unwanted job return at once
+when it must not do its work.
+
+### Horizon's tags, metrics and notifications
+
+| Horizon | Queen | What to change |
+| --- | --- | --- |
+| Automatic tags and `tags()` | the same tags, set at dispatch | nothing; monitor them on the panel's **Tags** page |
+| Monitored tags, kept `trim.monitored` minutes | jobs with a monitored tag, listed for `QUEEN_TAGS_RETENTION_MINUTES` (a day) | at most 50 monitored tags, and 20 tags of up to 128 bytes per job |
+| Silenced jobs and tags | none | no replacement yet |
+| Metrics from the scheduled `horizon:snapshot` | recorded live by every worker into the broker, kept a day | remove the `horizon:snapshot` schedule |
+| `waits`, from Horizon's estimate | `waits`, from the broker's age of the oldest waiting job | schedule `queen:check-waits` every minute |
+| Mail, Slack and SMS routes | mail through `QUEEN_NOTIFY_MAIL`, anything else through a listener | move listeners of `Laravel\Horizon\Events\LongWaitDetected` to `Queen\Laravel\Events\LongWaitDetected` |
+| The dashboard at `/horizon`, Gate `viewHorizon` | the panel at `/queen`, Gate `viewQueenDashboard` | turn it on with `QUEEN_DASHBOARD_ENABLED=true` |
+| none | a Prometheus endpoint at `/queen/metrics` | optional, for KEDA or an HPA: `QUEEN_METRICS_ENABLED=true` and a `QUEEN_METRICS_TOKEN` |
+
+[Monitoring and alerts](/guides/laravel/monitoring/) covers each of them.
+
+## Acceptance checklist
+
+- The canary covered successful, delayed, retried and failed jobs.
+- Every job with an external side effect is idempotent.
+- `retry_after` is longer than `timeout` and the lease covers the real runtime, or lease renewal is
+  on.
+- No job class has its own `$timeout` at or above `retry_after` while lease renewal is off.
+- `shutdown_grace` covers the longest job and `terminationGracePeriodSeconds` covers
+  `shutdown_grace`, or the long jobs run in chunks.
+- Long jobs have a queue of their own.
+- Prefetch is still 1, or lease renewal was tested with the broker failing.
+- The Queen state directory is private, owned by the application's user, mode `0700`.
+- Exactly one Queen master owns each application and consumer group, or every replica has
+  [coordination](/guides/laravel/supervisors/#several-replicas) on.
+- The outer process monitor restarts the master after an unexpected exit.
+- Who owns the Redis backlog and who owns the Queen backlog is explicit through the cutover and the
+  rollback.
+- Runbooks use Laravel's failed-job commands and no longer rely on `horizon:clear`.
+- Every Horizon tag, metric, notification or operator action the team uses has a replacement.

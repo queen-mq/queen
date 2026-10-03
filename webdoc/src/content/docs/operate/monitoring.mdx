@@ -1,0 +1,160 @@
+---
+title: Monitoring
+description: "The dashboard in the binary, what /health reports and why to pair it with a write probe, the Prometheus series worth an alert, and the log lines that mean something is wrong."
+type: how-to
+tier: operate
+sidebar:
+  order: 6
+sourceOfTruth:
+  - server/src/handlers/raft.rs
+  - server/src/rsm/facade/mod.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/groups.rs
+  - server/src/rsm/admit.rs
+  - server/src/rsm/timing.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/log_store.rs
+  - server/src/metrics.rs
+  - server/src/ephemeral.rs
+  - server/src/encryption.rs
+  - server/src/obs.rs
+  - server/src/obs/panic_policy.rs
+  - app/src/router/index.js
+---
+
+Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
+`/metrics/prometheus`, all on port 6632. Each one describes the node that answered, so scrape and
+probe every node by its own address, never through a load-balanced one. With the
+[proxy](/operate/tenants/) in front of 6632, the metrics need the control-plane token and the
+dashboard needs a login.
+
+## The dashboard
+
+The dashboard is compiled into the binary from `app/`, so there is nothing else to deploy: open
+`http://<node>:6632/`. It has an Overview, Queue operations, the queues and each queue on its own,
+Ephemeral queues, Consumer groups, Messages, KV, Timers, Traces, Analytics, Workload and Dead
+letter. System shows the replicated log, each node with its role, term, indexes and store usage,
+and the members; the bar at the top of every page says when a node refuses writes because its
+disk is full.
+
+On the broker's port with JWT off, the dashboard runs as an administrator and shows everything.
+With the broker's JWT on, it cannot sign anyone in and points you to the proxy. Through the proxy,
+the same dashboard sits behind the console login: admins also get Members and API keys, and
+[operators](/operate/tenants/#the-console-and-sign-in) get System and Users.
+
+## /health
+
+```bash
+curl -s http://queen-1:6632/health
+```
+
+```json
+{"status":"healthy","engine":"raft","version":"2.0.0-beta.6","raft":{"role":"follower","leader":true,"term":5,"applied":112,"commit":112,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"apply":{"failure":null,"skipped":[]}}}
+```
+
+It answers `200 healthy` when the node knows a leader and its `lag` is at most
+`QUEEN_RAFT_READY_LAG_MS` (2000), and `503 settling` otherwise. `lag` is 0 on the leader and on a
+single node. On a follower it is the age, in milliseconds, of the last entry it applied, counted
+once the follower is more than 1000 entries (`QUEEN_RAFT_READY_LAG_ENTRIES`) behind the leader's
+commit index, which it reads every second. A node that restarted far behind therefore reports
+`settling` until it has caught up, and a readiness probe keeps clients off it meanwhile.
+
+| Field | Meaning |
+|---|---|
+| `role` | `leader`, `follower`, `learner`, `candidate` or `stopped`. With several raft groups, group 0's role, plus `+leader` when the node leads another group |
+| `leader` | Whether the node knows a leader |
+| `term`, `applied`, `commit` | The raft term, and this node's applied and committed indexes |
+| `apply.failure` | The entry that stopped apply on this node: its index, term, digest, class and error. `null` while apply runs. Cluster nodes only |
+| `apply.skipped` | Entries an operator told the node to step over |
+| `clusterVersion`, `kinds` | The data format the cluster writes, and the highest this build reads |
+
+With several raft groups, the node is ready only when every group is.
+
+## A write probe
+
+`/health` describes what a node believes, and a node can believe in a leader that can no longer
+commit anything. Here is a three-node cluster with two nodes killed: thirty seconds later the
+survivor still reports itself healthy, while a write through it waits until the client gives up.
+
+```bash
+curl -s http://queen-1:6632/health
+```
+
+```json
+{"status":"healthy","engine":"raft","version":"2.0.0-beta.6","raft":{"role":"leader","leader":true,"term":4,"applied":111,"commit":111,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"apply":{"failure":null,"skipped":[]}}}
+```
+
+```bash
+curl -s -m 5 -o /dev/null -w '%{http_code} in %{time_total}s\n' -X PUT \
+  http://queen-1:6632/api/v1/kv/probe/queen-1 -H 'content-type: application/json' \
+  -d '{"value":{"at":"2026-10-02T13:47:00Z"},"ttlSeconds":120}'
+```
+
+```text
+000 in 5.005479s
+```
+
+So alongside `/health`, run a write probe against every node every minute and alert when it fails
+or takes longer than a few seconds. A KV write with a short `ttlSeconds` goes through the same
+replicated log as a push, leaves nothing behind once it expires, and on a healthy cluster answers
+`200` in a few tens of milliseconds. Recovery has the
+[procedures](/operate/recovery/) for the states this catches.
+
+## Metrics
+
+`GET /metrics/prometheus` is the Prometheus text format, public on port 6632; the reference lists
+the families in [metrics](/reference/metrics/). These are the series worth an alert:
+
+| Alert when | Expression |
+|---|---|
+| The disk gate is closed and growing writes answer `507` | `queen_raft_storage_full == 1` |
+| Apply falls behind the log | `queen_raft_inflight` keeps growing, or `queen_raft_index{kind="committed"} - ignoring(kind) queen_raft_index{kind="applied"}` |
+| Writes are refused for admission (`429`) | `rate(queen_raft_admit_total{outcome="refused"}[5m]) > 0` |
+| Commands take long to plan | `rate(queen_raft_slow_commands_total[5m]) > 0` (one command planned in 50 ms or more, `QUEEN_RAFT_SLOW_COMMAND_MS`) |
+| Dead letters accumulate | `queen_dlq_depth_by_queue` rises (on the leader, for queues that have dead letters) |
+| Consumers fall behind | `queen_queue_pop_lag_milliseconds{stat="max"}`, delivery time minus creation time over the last minute |
+| A node restarts | `queen_uptime_seconds < 300` |
+| Memory grows | `queen_process_resident_memory_bytes` against the container limit |
+| Ephemeral memory nears its ceiling (`503` above it) | `queen_ephemeral_bytes` against `QUEEN_EPHEMERAL_MAX_BYTES` (256 MiB) |
+| Ephemeral messages are dropped | `rate(queen_ephemeral_dropped_total[5m])` by `cause`: `bounds`, `ttl` or `retry` |
+| An ephemeral hand-over failed | `increase(queen_ephemeral_wipes_total[15m]) > 0` |
+
+Pop lag is measured per process from deliveries, so a consumer that stopped popping altogether
+shows no lag at all; watch the dead letters and the dashboard's pending counts as well. With
+`QUEEN_RAFT_GROUPS` above 1, the replicated-log series carry a `group` label. Per-queue series name
+every tenant's queues, so scrape port 6632 from inside the network.
+
+## Log lines to alert on
+
+Lines are `<RFC 3339 UTC> <LEVEL> <target>: <message> key=value ...`, or one JSON object per line
+with `QUEEN_LOG_JSON=true`. `LOG_LEVEL` and `RUST_LOG` take the full filter syntax, such as
+`info,rsm=debug`, and `RUST_LOG` wins when both are set.
+
+| Line (level, target) | What it means |
+|---|---|
+| `FATAL: ...` (ERROR, `boot`) | The process exits 1: a bad setting or a store that will not open, named in the line |
+| `APPLY FAILED at entry N (term T), a DETERMINISTIC refusal` (ERROR, `rsm`) | Every node stops on this entry. The line spells out the `QUEEN_RAFT_APPLY_SKIP` value that steps over it ([recovery](/operate/recovery/)) |
+| `APPLY FAILED at entry N (term T), a NODE-LOCAL failure` (ERROR, `rsm`) | This node's disk, space or files. Repair the node; do not skip the entry |
+| `raft log writer poisoned; node stops` (ERROR, `rsm`) | A log write, fsync or truncation failed (`why=` says which). The process stays up with role `stopped` |
+| `raft storage pressure changed` with `full=true` (WARN, `rsm`) | The disk gate closed |
+| `raft: no quorum acknowledgement: handing leadership to another voter` (WARN, `rsm`) | The leader has not heard from a majority and is trying to step down |
+| `refused this node's QUEEN_RAFT_TOKEN`, inside a replication error (WARN) | The nodes do not share one raft token. The node that refuses logs nothing |
+| `raft: the process exits to load a received snapshot` (ERROR, `rsm`) | Exit code 75 after a long absence. Normal once, trouble when it repeats |
+| `core panic: aborting` or `poisoned lock: aborting` (ERROR, `panic`, `fatal=true`) | The process aborts and replays from its durable state on restart |
+| `hand-over failed; the partition's contents are dropped` (WARN, `ephemeral`) | Ephemeral messages were lost while a partition moved |
+| `QUEEN_ENCRYPTION_KEY must be 64 hex chars; encryption DISABLED` (WARN, `encryption`) | Queues flagged for encryption are being stored in plaintext |
+
+## Limits
+
+`/health` can stay `200` when nothing commits: a node that lost its majority keeps the leader it
+knew, and an empty node that never applied an entry reports `lag` 0 (`F8` and `F2` in
+`test/recovery/FINDINGS.md`). That is why the write probe above is not optional.
+
+Probe liveness with a TCP connect, never with `/health`. A `503` during an election is no reason to
+restart a node ([Kubernetes](/operate/kubernetes/#the-probes)).
+
+In 2.0.0-beta.6 the `queen_timers_*` and `queen_sweeper_*` series are exported but nothing updates
+them, so they always read 0; do not alert on them. The Kafka facade and the proxy export no
+Prometheus series of their own. The facade reports its state in the `kafka` block of `GET /status`,
+and the proxy in its logs under the `limits` and `meter` targets.

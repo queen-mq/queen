@@ -1,0 +1,42 @@
+---
+/**
+ * A diagram or a chart drawn from a spec: `<Figure id="concepts/write-path" />`
+ * renders `src/figures/concepts/write-path.ts`. The spec format and the reasons
+ * for drawing figures this way are in src/lib/figures.ts; the look is in
+ * src/styles/figures.css.
+ */
+import { getFigure } from "@/lib/figures";
+import Flow from "./figures/Flow.astro";
+import Sequence from "./figures/Sequence.astro";
+import LineChart from "./figures/LineChart.astro";
+import BarChart from "./figures/BarChart.astro";
+
+interface Props {
+  /** The spec's path under src/figures, without `.ts`. */
+  id: string;
+}
+const { id } = Astro.props;
+const spec = getFigure(id);
+---
+
+<figure class="qf" data-kind={spec.kind}>
+  <div class="qf-frame">
+    {spec.kind === "flow" && <Flow id={id} spec={spec} />}
+    {spec.kind === "sequence" && <Sequence id={id} spec={spec} />}
+    {spec.kind === "line" && <LineChart id={id} spec={spec} />}
+    {spec.kind === "bar" && <BarChart id={id} spec={spec} />}
+  </div>
+  {
+    (spec.caption || spec.source) && (
+      <figcaption>
+        {spec.caption}
+        {spec.source && (
+          <span class="qf-source">
+            {spec.caption ? " " : ""}
+            Source: <code>{spec.source}</code>
+          </span>
+        )}
+      </figcaption>
+    )
+  }
+</figure>

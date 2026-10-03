@@ -1,0 +1,225 @@
+---
+title: Scale on Kubernetes
+description: "Laravel worker pods that share one worker target, fork cheap workers from one booted Laravel, wake when jobs arrive and change their replica count with the backlog."
+type: how-to
+tier: operate
+status: preview
+sidebar:
+  order: 8
+sourceOfTruth:
+  - clients/client-php/src/Laravel/Commands/SupervisorControlCommand.php
+  - clients/client-php/src/Laravel/Commands/SupervisorInstallCommand.php
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/handlers/kv.rs
+# Describes clients/client-php and supervisor/ as they are on origin/master (PHP client 1.9.0,
+# tagged). Add config/queen.php, ReplicaCoordinator.php, QueueWatcher.php,
+# PrometheusMetrics.php and supervisor/src/{main,coordination,prefork,watch}.rs once the 2.0 line
+# carries that tree.
+---
+
+This page puts the supervisor features together for the setup most teams end up with: Laravel
+workers in a Kubernetes Deployment, several pods sharing the backlog of the same queues, and a
+replica count that follows that backlog. Inside each pod a supervisor fills its share of the target
+within seconds of a burst; across pods, KEDA or an autoscaler adds and removes pods over minutes.
+Every feature is optional and off by default, so start from the table and turn on what your
+workload needs.
+
+| Situation | Feature | Switch |
+| --- | --- | --- |
+| Several pods work the same queues and consumer group | [Coordinated replicas](/guides/laravel/supervisors/#several-replicas) share one worker target | `QUEEN_SUPERVISOR_COORDINATION=true` |
+| Worker memory decides how many workers fit in a pod | [Prefork](/guides/laravel/supervisors/#prefork-workers): Laravel boots once per pod and every worker is forked from it | `QUEEN_SUPERVISOR_PREFORK=true` and `opcache.enable_cli=1` |
+| Short jobs, where the broker round trip dominates | [Asynchronous ACKs and popping ahead](/guides/laravel/#a-faster-profile) | `QUEEN_ACK_ASYNC=true` and `QUEEN_POP_AHEAD=true` |
+| Bursts must be served in seconds | [Event-driven scaling](/guides/laravel/supervisors/#event-driven-scaling) with fast scale-up | `QUEEN_SUPERVISOR_EVENT_DRIVEN=true` and `fast_scale_up` |
+| A quiet queue must not wait for a cold start | A per-queue minimum | `min_processes_per_queue` |
+| Some queues need workers of their own | A `simple` pool beside an `auto` pool | two entries in `supervisors` |
+| The number of pods follows the backlog | The [Prometheus endpoint](/guides/laravel/monitoring/#prometheus-and-kubernetes-autoscaling), read by KEDA or an HPA | `QUEEN_METRICS_ENABLED=true` |
+| A queue that waits too long must page someone | [Long-wait alerts](/guides/laravel/monitoring/#long-wait-alerts) | `queen:check-waits` every minute |
+
+Coordination, prefork, the per-queue minimum, fast scale-up and the Prometheus endpoint need PHP
+client 1.7.0; event-driven scaling 1.8.0; asynchronous ACKs, popping ahead and lease renewal in the
+master 1.9.0.
+
+## Configure the pools
+
+One configuration serves every pod. This one keeps two workers on `payments` in every pod and moves
+between 1 and 10 workers per pod across three other queues, by backlog:
+
+```php
+// config/queen.php
+'supervisor' => [
+    'shutdown_grace' => 75,
+    'process_limit' => 16,
+    'supervisors' => [
+        'payments' => [
+            'queues' => ['payments'],
+            'balance' => 'simple',
+            'processes' => 2,
+        ],
+        'shared' => [
+            'queues' => ['emails', 'default', 'reports'],
+            'balance' => 'auto',
+            'strategy' => 'size',
+            'min_processes' => 1,
+            'max_processes' => 10,
+            'min_processes_per_queue' => 1,
+            'target_jobs_per_process' => 10,
+            'fast_scale_up' => true,
+            'timeout' => 60,
+            'retry_after' => 90,
+        ],
+    ],
+],
+```
+
+```dotenv
+QUEEN_SUPERVISOR_COORDINATION=true
+QUEEN_SUPERVISOR_PREFORK=true
+QUEEN_SUPERVISOR_EVENT_DRIVEN=true
+QUEEN_SUPERVISOR_STATE_DIRECTORY=/var/lib/queen-supervisor
+QUEEN_SUPERVISOR_INSTALL_PATH=/opt/queen-supervisor-bin
+QUEEN_SUPERVISOR_REMOTE_STATUS=true
+QUEEN_SUPERVISOR_REMOTE_STATUS_KEY=orders-production
+```
+
+With coordination, `min_processes` and `max_processes` apply to each pod: three pods run the
+`shared` pool between 3 and 30 workers together, while `payments` runs 2 workers in each. If you
+also turn on lease renewal (the faster profile needs it), every worker reserves two process slots,
+one for its renewal helper, so these two pools need a `process_limit` of 24. Remote
+status lets the dashboard and the Prometheus endpoint on the web pods see every worker pod, so set
+the two `REMOTE_STATUS` variables on the web pods too. `event_driven` holds its long poll with the
+token the supervisor reads depth with, and through the broker's
+[embedded proxy](/operate/security/) that poll carries the authority of a pop: if the pods reach
+the broker through the proxy with a read-only key, the supervisor logs it once and keeps polling.
+
+## Build the image
+
+Install the native supervisor while the image builds, and create its state directory there. The
+state directory must be private to the supervisor's user, under parents only root can write to. A
+Kubernetes `emptyDir` is world-writable without the sticky bit, so it can be neither the state
+directory nor one of its parents.
+
+```dockerfile
+# The command-line opcache is shared by the forked workers.
+RUN echo "opcache.enable_cli=1" > "$PHP_INI_DIR/conf.d/opcache-cli.ini"
+RUN install -d -m 0755 /opt/queen-supervisor-bin \
+ && QUEEN_SUPERVISOR_INSTALL_PATH=/opt/queen-supervisor-bin php artisan queen:supervisor-install \
+ && install -d -o www-data -g www-data -m 0700 /var/lib/queen-supervisor
+USER www-data
+```
+
+`vendor/bin/queen-supervisor` verifies the installed binary and then replaces itself with it, so
+the Rust supervisor is the container's main process and receives Kubernetes' SIGTERM directly.
+
+## Deploy the worker pods
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: queen-workers
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate      # safe with coordination: old and new pods share the target
+  selector:
+    matchLabels: { app: queen-workers }
+  template:
+    metadata:
+      labels: { app: queen-workers }
+    spec:
+      terminationGracePeriodSeconds: 90   # longer than shutdown_grace (75)
+      containers:
+        - name: supervisor
+          image: registry.example.com/orders:1.42.0
+          workingDir: /var/www/html
+          command: ["vendor/bin/queen-supervisor", "--php", "php", "--artisan", "artisan"]
+          envFrom:
+            - secretRef: { name: orders-env }
+          livenessProbe:
+            exec:
+              command: ["php", "artisan", "queen:supervisor", "status", "--check-liveness"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+```
+
+On SIGTERM the supervisor stops starting workers and sends SIGTERM to each of them, so they finish
+their current job. While they drain, for up to `shutdown_grace` seconds, it leaves the coordination
+so that the other pods take its share at their next poll, and then it forces the rest down. Since
+PHP client 1.9.0 the workers get their SIGTERM before any broker call, so a slow broker cannot delay
+it. Keep
+`terminationGracePeriodSeconds` above `shutdown_grace`, or Kubernetes kills jobs that were still
+finishing. A pod that crashes still counts in the coordination until its key expires, so capacity
+can be short by its share for up to one control-loop bound.
+
+Each probe boots Laravel once, so keep its period in tens of seconds. `status --check-liveness`
+asks only whether the master is alive. `status --check` also requires every pool to be ready, and
+fits a readiness probe if anything routes traffic to the pod.
+
+Without coordination the rule is one master per application and consumer group: one replica, no
+autoscaler, and `strategy: { type: Recreate }`.
+
+## Scale the pods on the backlog
+
+The web pods serve the Prometheus endpoint, `GET /queen/metrics`, with a bearer token of at least
+32 characters. Point Prometheus at them, then let KEDA scale the worker Deployment on the depth the
+supervisors report:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: queen-workers
+spec:
+  scaleTargetRef:
+    name: queen-workers
+  minReplicaCount: 2
+  maxReplicaCount: 10
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        query: max(queen_queue_depth{consumer_group="laravel",queue=~"emails|default|reports"})
+        threshold: "100"   # max_processes (10) x target_jobs_per_process (10)
+```
+
+A new pod joins the coordination at its first poll and takes its share; a pod removed by a
+scale-down leaves at once and drains. Inside the pods, `event_driven` and `fast_scale_up` fill each
+pod's share within seconds, while KEDA changes the number of pods over minutes.
+
+## Check that it works
+
+1. `kubectl exec deploy/queen-workers -- php artisan queen:supervisor status --json`: in
+   `pool_status`, each autoscaling pool reports `replicas`, the number of pods sharing its target.
+2. The dashboard's **Supervisors** page lists one card per pod, and each `shared` pool shows its
+   share. A warning about masters that autoscale one queue means a pod runs without coordination.
+3. In Prometheus, `sum(queen_workers)` stays within the fleet limits and `queen_pool_replicas`
+   matches the replica count.
+4. The pod log says `event-driven: watching N partition(s)`. If watching is off, the line says why,
+   such as a token that may not consume.
+
+## What to expect
+
+Each row comes from the [Laravel benchmark](/benchmarks/laravel/). The first three ran on Docker
+Desktop against a Queen 1.6.0 broker on PostgreSQL (2026-09-30), the fourth and fifth on Docker
+Desktop against a single Raft node, the last two on a 16-vCPU Linux server against a single Raft
+node (2026-10-01). Read them as the size of each effect, not a promise for your cluster.
+
+| Feature | Without | With |
+| --- | ---: | ---: |
+| Coordination, two pods of 8 on a draining backlog | up to twice the fleet target (12 workers for 6) | the target at every sample |
+| Prefork and opcache, 8 workers after 600 jobs | 336 MiB | 85 MiB |
+| `event_driven` with `fast_scale_up`, time to 20 workers after a burst | 13.9 s | 5.6 s |
+| Lease renewal in the master, 8 prefetching workers and their master | 161 MiB | 70 MiB |
+| `ack_async` and `pop_ahead`, 10 ms jobs, 8 workers | 453 jobs/s | 643 jobs/s |
+| Lease renewal in the master, 32 workers | 417 MiB | 116 MiB |
+| `ack_async` and `pop_ahead`, 32 workers | 1,879 jobs/s | 2,794 jobs/s |
+
+<Aside type="caution">
+The prefork memory was measured 15 seconds after the burst. A worker that runs for hours writes to
+more of the pages it shares, so the saving shrinks. Measure the pods' memory after a day of real
+jobs before you lower their limits.
+</Aside>
+
+Next: [the supervisor settings](/guides/laravel/supervisors/) used here, and
+[monitoring](/guides/laravel/monitoring/) for job metrics, tags and long-wait alerts.

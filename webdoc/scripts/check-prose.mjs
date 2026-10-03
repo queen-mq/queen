@@ -27,6 +27,9 @@ import { WEBDOC } from "./lib/source.mjs";
 const TARGETS = [
   { dir: join(WEBDOC, "src", "content", "docs"), exts: [".mdx", ".md"] },
   { dir: join(WEBDOC, "public", "openapi"), exts: [".json"] },
+  // Figure specs: their alt, caption and labels are printed on the page and
+  // carried into the markdown twin.
+  { dir: join(WEBDOC, "src", "figures"), exts: [".ts"] },
 ];
 
 /** Authored here, and carrying copy rather than only code. */
@@ -34,6 +37,8 @@ const FILES = [
   join(WEBDOC, "src", "pages", "index.astro"),
   join(WEBDOC, "src", "components", "Chart.astro"),
   join(WEBDOC, "src", "components", "Header.astro"),
+  join(WEBDOC, "src", "lib", "figure-markdown.ts"),
+  join(WEBDOC, "src", "lib", "home.ts"),
 ];
 
 const BANNED = [

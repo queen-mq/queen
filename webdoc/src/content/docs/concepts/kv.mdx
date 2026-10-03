@@ -1,0 +1,143 @@
+---
+title: KV
+description: "KV keeps the state a step changes in the same replicated log as its messages: versioned keys, a declared lifetime on every write, compare-and-swap through expect."
+type: concept
+tier: use
+sidebar:
+  order: 5
+sourceOfTruth:
+  - server/src/rsm/planner/kv.rs
+  - server/src/rsm/facade/real/kv.rs
+  - server/src/rsm/kv_reads.rs
+  - server/src/handlers/kv.rs
+  - server/src/quota.rs
+  - server/src/config.rs
+  - clients/client-js/client-v2/kv/Kv.js
+verifiedBy:
+  - clients/client-js/test-v2/kv.js
+---
+
+KV holds the state a step changes, in the same replicated log as the messages, so a state change
+can commit in the same entry as the ack that caused it. Keep an entity's current state there, the
+markers that make a step idempotent, counters and rate limits. The point is that you no longer need
+a second database to stay consistent with the broker: there is only one commit.
+
+```js
+await queen.kv.put('orders', '9137', { status: 'paid' }, { ttl: '30d' })
+const row = await queen.kv.get('orders', '9137')   // { found, value, version, expiresAt, updatedAt }
+
+const r = await queen.kv.put('orders', '9137', { status: 'shipped' },
+  { ttl: '30d', expect: row.version })             // compare-and-swap
+if (!r.applied) console.log(r.reason, r.value)     // someone wrote first
+
+await queen.kv.incr('limits', `api:${customerId}:${minute}`, 1, { max: 100, ttl: '2m' })
+```
+
+Over HTTP, one call to `POST /api/v1/kv` carries a list of operations, and the answer is HTTP 200
+with one result per operation, in order:
+
+```bash
+curl -s -X POST http://localhost:6632/api/v1/kv -H 'content-type: application/json' -d '{"operations":[
+  {"op":"put","ns":"orders","key":"9137","value":{"status":"paid"},"ttlSeconds":2592000},
+  {"op":"get","ns":"orders","key":"9137"}]}'
+```
+
+A single key also has a path of its own, `GET`, `PUT` and `DELETE /api/v1/kv/:ns/:key`, which the
+[quickstart](/start/quickstart/) uses to read back a value. An absent key or a lost race is a field
+of the result, never an error status.
+
+## Operations
+
+| Op | Does |
+|---|---|
+| `get` | One key: `found`, `value`, `version`, `expiresAt`, `updatedAt`. `null` is a value: `found: true, value: null` is not absence. |
+| `getMany` | Keys of one namespace: `rows`, in key order, and an explicit `missing` list. |
+| `getPrefix` | One page of keys under a non-empty prefix: `limit` (default 100, at most 1,000), `after` (a keyset cursor), `nextAfter`. |
+| `put` | Writes a value with a new lifetime. It does not keep the previous TTL. |
+| `putIfAbsent` | `put` with `expect: 0`. Of several concurrent callers, one wins; the others get the winner's value and version. |
+| `delete` | Removes a key, optionally with `expect`. |
+| `incr` | Adds `delta` without a compare-and-swap loop. With `min` or `max`, an increment past the bound does not apply (`reason: "limit"`). The TTL is set when the counter is created; an expired counter counts from zero. |
+
+**Read `applied` on every write.** The JS SDK returns an object for each write, and an object is
+always truthy, so `if (await queen.kv.put(...))` tells you nothing.
+
+## Every write declares its lifetime
+
+Every `put`, `putIfAbsent` and `incr` names exactly one of `ttlSeconds` (an integer above 0) or
+`forever: true`. Neither, or both, is a 400 (`"error": "kv_bad_request"`, with
+`"reason": "kv_expiry_not_specified"`). We made the lifetime mandatory because state written by
+messages tends to outlive the reason it was written, and without an expiry it would stay on every
+node until somebody cleaned it up by hand. The JS SDK also takes `ttl: '30d'` or `until: date`. An expired key is never returned and
+never counts as existing, even before the sweep removes it.
+
+## Versions and `expect`
+
+Every write gives the key a new version. Versions are unique and never reused, but don't rely on
+their order. `expect: 0` means the key must not exist; `expect: N` means it must be at version N,
+and writes nothing when the key is absent. A lost precondition answers `applied: false` with a
+`reason` (`exists`, `absent` or `version`) and the key's current value and version, so you can see
+who won without a second read.
+
+The other operations of the call still apply. Add `required: true` to an operation and a lost
+precondition aborts the whole call instead: it answers HTTP 200 with `ok: false`,
+`reason: "kv_precondition"`, the `failedIndex` and the `kvReason`.
+
+## Consistency
+
+- A read of one key is linearizable. A read-only call first waits until this node has applied
+  everything the cluster had committed, so it sees a write that another node answered.
+- A call with writes is one log entry, and its reads see its own writes.
+- One call over several keys is strict serializable: `putIfAbsent` has exactly one winner, and an
+  `incr` the broker commits is counted once. These were
+  [Jepsen-tested](/concepts/guarantees/).
+- An answer you never got is a different matter. If a write call times out (503, outcome unknown)
+  and you send it again, a repeated `put` only writes the same value again, but a repeated `incr`
+  adds twice. The SDKs retry a failed request on their own (three attempts by default), so give a
+  counter that must be exact a `putIfAbsent` marker with `required: true` in the same call.
+
+## Inside a transaction
+
+`queen.transaction().kv.put(...)` commits the write with the ack, and when the ack carries its
+lease, an expired lease rolls the write back with everything else (see
+[transactions](/concepts/transactions/)). That is something a compare-and-swap alone cannot do: an
+`expect` on a version that still matches succeeds even for a worker that lost its message long ago.
+
+A transaction may also read with `get` and `getMany`, because you bound their cost, but the reads
+are answered after the entry has applied, so they cannot be a condition for the writes beside them:
+use `expect` with `required: true` for that. `getPrefix` is refused there
+(`kv_get_prefix_not_allowed_in_transaction`), because its work has no bound inside a commit. A
+transaction holds at most 64 KV operations over 256 keys.
+
+## What KV is for
+
+KV is the state a step needs next to its ack, and we kept it small on purpose. There are no
+queries, secondary indexes or joins: applications read by key, by a list of keys or by prefix, so
+records you search belong in your database. A `putIfAbsent` with a TTL is no lock either. It
+expires, nobody revokes it, and a holder that outlived it keeps working, so fence later writes
+with `expect` on the version you won, or keep the work inside a transaction whose ack carries the
+lease. Every value travels through the replicated log and is stored on every node, which is the
+price of committing it with the ack. And there is no way to watch a key: when a change matters to
+someone, push them a message in the same transaction.
+
+## Limits
+
+- A namespace matches `^[a-z0-9][a-z0-9._-]{0,63}$` and belongs to one tenant. A key is non-empty,
+  has no NUL byte and is at most 512 bytes (less with a long tenant and namespace).
+- A value is any JSON up to 64 KiB, measured compact (`QUEEN_KV_MAX_VALUE_BYTES`). The node that
+  receives a call checks the ceiling, so set it the same on every node or the nodes will disagree
+  about what they accept. Above it, the body and entry limits still apply.
+- One call to `/api/v1/kv` carries at most 256 operations and 1,024 keys
+  (`QUEEN_KV_MAX_KEYS_PER_CALL`, at most 4,096; a `getPrefix` counts as its `limit`), one write
+  per key, and reads at most 4 MiB of values (past it, `truncated: true`).
+- Per tenant and per node, `/api/v1/kv` takes 100 write calls a second (burst 200) and 200 read
+  calls a second (burst 400) by default (`QUEEN_KV_WRITE_RATE`, `QUEEN_KV_READ_RATE`). A call with
+  any write in it counts as a write, and timer schedules spend from the same bucket. Over it you
+  get 429 with `Retry-After`. KV inside a transaction is not rate-limited.
+- Each `getPrefix` page is its own snapshot: good for walking state, not for an exact count.
+
+## Next
+
+<CardGrid>
+  <LinkCard title="Timers" href="/concepts/timers/" description="Schedule what a step must do later, in the same commit." />
+  <LinkCard title="Dedup and once" href="/concepts/dedup/" description="A KV marker that makes a whole step run at most once." />
+</CardGrid>

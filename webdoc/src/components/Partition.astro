@@ -1,4 +1,6 @@
 ---
+import { textWidth } from "@/lib/figures";
+
 /**
  * A partition drawn as its offsets, with the markers that sit on top of them.
  *
@@ -75,7 +77,7 @@ const CURSOR_ROW = 26;
 const axisY = LEASE_BAND + 6;
 const axisBottom = axisY + CELL_H;
 const height = axisBottom + FLOOR_BAND + cursors.length * CURSOR_ROW + 12;
-const width = PAD_X * 2 + cells.length * CELL_W;
+
 
 /** Left edge of the cell holding `offset`, or null when it is not drawn. */
 function cellX(offset: number): number | null {
@@ -93,6 +95,23 @@ function boundaryX(offset: number): number {
   if (x !== null) return x + CELL_W;
   return offset < cells[0].offset ? PAD_X : PAD_X + cells.length * CELL_W;
 }
+
+const cellsWidth = PAD_X * 2 + cells.length * CELL_W;
+
+/**
+ * A cursor's label runs to the right of its marker, and the last cursor can
+ * sit near the end of the row: widen the figure to hold the longest one rather
+ * than let the viewBox clip it. Same estimate the drawn figures use.
+ */
+const width = Math.ceil(
+  Math.max(
+    cellsWidth,
+    ...cursors.map(
+      (c) =>
+        boundaryX(c.committed) + 8 + textWidth(c.label, 12.5) + (c.note ? textWidth(` ${c.note}`, 12) : 0) + PAD_X,
+    ),
+  ),
+);
 
 const FILL: Record<string, string> = {
   plain: "var(--nb-card)",
@@ -112,6 +131,7 @@ const STROKE: Record<string, string> = {
 ---
 
 <figure class="nb-partition">
+  <div class="nb-partition-frame">
   <svg
     viewBox={`0 0 ${width} ${height}`}
     width={width}
@@ -242,15 +262,21 @@ const STROKE: Record<string, string> = {
       })
     }
   </svg>
+  </div>
   {caption && <figcaption>{caption}</figcaption>}
 </figure>
 
 <style>
+  /* The same frame and caption as <Figure> (src/styles/figures.css), so a
+   * partition picture and a drawn figure on one page read as one set. */
   .nb-partition {
-    margin: 1.25rem 0;
+    margin: 1.75rem 0;
+  }
+  .nb-partition-frame {
     border: 1px solid var(--nb-border);
-    border-radius: 0.5rem;
-    padding: 0.75rem 0.5rem 0.5rem;
+    border-radius: 0.625rem;
+    background: var(--nb-card);
+    padding: 1rem 0.75rem;
     /* A narrow screen scrolls the axis rather than shrinking the offsets
      * into illegibility; the figure is a row of fixed-width cells. */
     overflow-x: auto;
@@ -262,10 +288,9 @@ const STROKE: Record<string, string> = {
     height: auto;
   }
   .nb-partition figcaption {
-    margin-top: 0.5rem;
-    text-align: center;
+    margin-top: 0.625rem;
     font-size: 0.8125rem;
-    line-height: 1.5;
+    line-height: 1.55;
     color: var(--nb-muted-foreground);
   }
   .nb-partition-cell {

@@ -1,314 +1,209 @@
 ---
-title: Status codes and error bodies
-description: "The shapes a failure can take: the error envelope, the responses that do not use it, the retry, overload and disk-full answers of a raft node, and the 429 contract behind the proxy."
+title: Errors
+description: "Every error body, status code and code across the API, what each one means, and whether a client should retry, stop, or check the outcome."
 type: reference
 tier: use
 sidebar:
-  order: 18
-  label: Errors
+  order: 6
 sourceOfTruth:
-  - server/src/handlers/mod.rs
-  - server/src/handlers/data.rs
-  - server/src/handlers/raft.rs
-  - server/src/handlers/static_files.rs
   - server/src/rsm/facade/mod.rs
+  - server/src/handlers/raft.rs
+  - server/src/handlers/data.rs
   - server/src/rsm/facade/real.rs
   - server/src/rsm/facade/real/phase2.rs
-  - server/src/rsm/planner/txn.rs
-  - server/src/rsm/admit.rs
-  - server/src/rsm/batcher.rs
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/consume/ack.rs
+  - server/src/handlers/kv.rs
+  - server/src/handlers/timers.rs
+  - server/src/handlers/ephemeral.rs
+  - server/src/quota.rs
+  - server/src/switches.rs
   - server/src/auth.rs
   - server/src/tenant.rs
   - proxy/src/errors.rs
-  - proxy/src/limits.rs
-verifiedBy:
-  - clients/client-js/test-v2/http-unit/retry429.test.js
-digest: >-
-  Broker errors are `application/json`. An error from the replicated state machine is
-  `{"error":"...","code":"..."}`; errors minted at the HTTP edge (authentication, the tenancy
-  header, some request validation) carry `error` only. Codes: 200 reads, management, acks,
-  transactions, including rolled-back ones; 201 `POST /api/v1/push`; 204 empty pop, no body; 503
-  with `Retry-After: 1` when no leader is known, the leader cannot be reached or the request
-  deadline elapsed; 429 with `Retry-After` of 1 to 5 s when a push or transaction waited the whole
-  admission hold (`QUEEN_RAFT_ADMIT_HOLD_MS`, default 15000 ms) without room; 507 `storage_full` when the data
-  directory's filesystem is `QUEEN_RAFT_DISK_HIGH_PCT` (default 85) percent used, until it is back
-  under `QUEEN_RAFT_DISK_LOW_PCT` (default 80); 413 over `QUEEN_MAX_BODY_BYTES` (64 MiB default).
-  2xx is not success: push item status is `queued`, `duplicate` or `error`; ack and transaction
-  report `success:false` at 200. A rolled-back transaction carries `reason`: branch on it, never on
-  `error`. `kv_precondition` is a lost idempotency gate at 200, not a failure to retry. The proxy
-  adds `code` and `Retry-After` in seconds on 429; SDKs retry 429 in place.
+  - proxy/src/gateway.rs
+  - proxy/src/cp.rs
+  - clients/client-js/client-v2/http/HttpClient.js
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+  - crates/queen-protocol/src/transaction.rs
 ---
 
-Broker failures come in two shapes. An error raised by the replicated state
-machine carries a machine-readable `code` next to the message:
+When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code
+is the part your client should branch on: messages get reworded, codes do not. Most of the
+decisions a client has to make come down to three questions, and the tables below answer them for
+every code: can I retry this as it is, do I have to fix the request, or do I need to find out
+whether it already happened.
 
-```json
-{"error":"no leader is known; retry after","code":"no_leader"}
-```
+A rolled-back transaction is not an error. It answers 200 with `success: false` and a `reason`, and
+those reasons are on [transaction](/reference/transaction/#rollback-reasons).
 
-An error minted at the HTTP edge, before a command reaches the state machine
-(authentication, the tenancy header, some request validation), is one JSON
-object with one key:
+## Error bodies
 
-```json
-{"error":"invalid x-queen-tenant header (must be a UUID)"}
-```
+| Where | Body | Branch on |
+|---|---|---|
+| Most routes: push, pop, ack, lease, queues, consumer groups, DLQ, status | `{"error": "<message>", "code": "<code>"}`, plus `"leader"` on a 503 `retry` when the leader is known | `code` |
+| Reads by offset refused for their shape (too many entries, a negative offset, a bad timestamp) | `{"error": "<message>"}` with 400; a per-entry `error` (`UNKNOWN_TOPIC_OR_PARTITION`, `OFFSET_OUT_OF_RANGE`, `BAD_CURSOR`) inside a 200 | the status, then each entry |
+| `POST /api/v1/transaction`, rolled back | `{"transactionId", "success": false, "reason", "error", "results": []}` | `reason` |
+| `/api/v1/kv*` and `/api/v1/timers*` | `{"error": "<code>", "reason": "<finer code>", "detail": "<message>"}` | `error`, then `reason` |
+| `/api/v1/ephemeral/*` | `{"error": "<message>", "code": "<code>"}` | `code` |
+| A pop refused for its parameters | `{"success": false, "error": "<message>", "messages": []}` with 400 | the status |
+| Authentication and the tenancy header | `{"error": "<message>"}` | the status |
+| The proxy, and `/api/cp` | `{"error": "<message>", "code": "<code>"}` | `code` |
+| Raft membership changes | `{"ok": false, "code": "<code>", "error": "<message>"}` | `code` |
 
-Content type is `application/json` in both cases. The message is JSON-escaped
-while the structural quotes are preserved, so the body always parses. There is
-no request id. Branch on the status code and, where it is present, on `code`;
-treat `error` as text for a human or a log. The proxy adds a `code` to every
-error it generates itself, described at the end of this page.
+The 429 and 503 answers of the engine, KV and timer routes carry `Retry-After`, in seconds. A 404
+for something that does not exist (a queue, a message) may carry only `error`.
 
-## 204 carries no body at all
+## Engine codes
 
-A `204 No Content` response (an empty pop) is built with **no body at all**,
-and the handler discards the body it would otherwise have sent. This is
-deliberate. Announcing a content length on a body that the HTTP layer then
-elides made strict HTTP/1.1 clients (Node's undici and llhttp) treat the
-connection as poisoned and drop it, which under empty-poll load snowballed into
-`ECONNRESET` storms.
+The `code` of the first shape.
 
-Consequence for a client: branch on the status before parsing. A pop that
-returns 204 has no `{"messages":[]}` to read.
+| `code` | Status | Meaning | Client |
+|---|---|---|---|
+| `retry` | 503 | This node could not get the call to a leader: a leader change, no quorum lease, or the leader unreachable from the node that forwarded it. | Retry after `Retry-After` (1 s). A write may have reached the leader, so it must be safe to repeat. |
+| `no_leader` | 503 | No leader is known after the hold: an election is running, or a majority is down. | Retry. |
+| `timeout` | 503 | The request's deadline passed before an answer. A write may have committed. | Retry a write that is safe to repeat; otherwise read to check. |
+| `outcome_unknown` | 503 | The leader changed while an ack, nack or DLQ move was being made durable, or a forwarded one was lost after it went out. It may or may not have applied. | Send the same ack again: a repeat of an ack that applied is answered as the first one was. |
+| `overloaded` | 429 | The node's admission budget for writes stayed full for the whole hold. | Retry after `Retry-After` (1 to 5 s). |
+| `storage_full` | 507 | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Pushes, KV writes and timer schedules are refused; acks and deletes still work. | Free disk or add space, then retry. |
+| `name_too_long` | 413 | The tenant, queue and partition or group names together exceed the store's key budget. | Shorten the name. |
+| `bad_body` | 400 | The body is not the route's JSON shape. | Fix the request. |
+| `bad_request` | 400 | A field is missing or invalid. | Fix the request. |
+| any other code | 400 | The engine refused this request for the reason the message gives. | Fix the request; do not retry it unchanged. |
+| `no_such_route` | 404 | No route has that method and path. | Check the path against [the routes](/reference/http/#routes). |
+| `internal` | 500 | A broker fault. | Report it; do not retry in a loop. |
+| `raft_phase1_unsupported` | 503 | The node does not serve this call. | Report it. |
 
-## Status codes
+**A 503 or a timeout on a write does not mean nothing happened.** Make writes safe to repeat
+before you retry them: a deterministic `transactionId` on every pushed message, the same lease on a
+repeated ack, a `required` marker in a transaction. See [dedup](/concepts/dedup/).
 
-| Code | When |
-| --- | --- |
-| `200` | Every successful read and management call; also acks, lease extension and completed transactions, including ones that rolled back (see below). |
-| `201` | `POST /api/v1/push` (even for an empty item list, which returns `[]`) and a recorded trace. |
-| `204` | A pop with no messages. |
-| `400` | A body that is not valid JSON; a missing required field; a discovery pop with neither `namespace` nor `task`; a malformed `x-queen-tenant` header when tenancy is on; a request the state machine refuses as a client error, with the refusal's own `code` (for example `bad_request` or `bad_body`). |
-| `401` | Authentication is enabled and the token is absent, unparseable, badly signed, expired, not yet valid, issued in the future, or carries a rejected issuer, audience, algorithm or key id. |
-| `403` | A valid token whose roles do not satisfy the route's required level; a streams registration by a non-default tenant with no enabled streams grant or at its `max_queries` cap; a raft membership call that names a tenant. |
-| `404` | Any unmatched path under `/api/` or `/streams/`, and any non-`GET`/`HEAD` request that reaches the dashboard fallback; a message, queue or trace that does not exist. |
-| `409` | `POST /streams/v1/queries` with a `config_hash` that does not match the registered query, and no `reset`; a raft membership change the cluster refuses (the body's `code` says why). |
-| `413` | A request body larger than `QUEEN_MAX_BODY_BYTES` (64 MiB by default); a queue, partition or consumer-group name too long for the store key (`name_too_long`). |
-| `429` | A push or transaction that waited the whole admission hold without room (`overloaded`). See below. |
-| `500` | An internal failure of the state machine (`internal`); a JWT configuration fault discovered per request, such as an `HS256` token with no configured secret or an unparseable public-key PEM. |
-| `503` | No leader is known (`no_leader`); this node is not the leader and could not hand the request over (`retry`); the request deadline elapsed (`timeout`); `GET /health` while the node has no leader. |
-| `504` | A raft membership change whose `timeoutMs` passed before it committed. It may still complete: read the membership before repeating it. |
-| `507` | A write that would grow storage while the node's data directory is over the disk gate (`storage_full`). See below. |
+## After a leader change
 
-### 503: retry it
+What a leader change does to a call in flight depends on where the call is remembered.
 
-A node answers `503` with `Retry-After: 1` when it cannot place a command in
-the replicated log right now: an election is in progress, the cluster has lost
-its quorum, the leader did not answer a forwarded request, or the request's
-deadline passed. The body carries the `code` (`no_leader`, `retry`,
-`timeout`), and a `retry` may carry a `leader` hint. Any node serves clients: a
-write that reaches a follower is handed to the leader, so a client does not have
-to find the leader itself. There is no local spooling: a request refused this way
-was not accepted, and the client retries it, so a successful push always means
-the message is in the log.
+Pushes, transactions, KV and timer calls are logged under a request id that the node serving the
+call minted. That node follows the leader change itself and resubmits under the same id until the
+deadline, and a command that had already committed is answered from its record and does not run
+again. You get the normal answer, or 503 `timeout` if the deadline passes first.
 
-### 429: the push admission budget
+Acks, nacks and DLQ moves are served from the leader's memory and made durable by its next
+checkpoint, a few milliseconds later. If the leader loses its lead while that checkpoint is on its
+way to the log, or a forwarded ack is lost after it went out, nobody can say whether it applied, and
+the answer is 503 `outcome_unknown`. Send the same ack, with the same lease, again.
 
-A push or a transaction takes room from a byte budget at the HTTP edge, sized by
-its `Content-Length`, before its body is read. When the budget is spent, a new
-request **waits** for room, so a producer that sends faster than the node
-commits slows down. Only a request that waited the whole hold is refused, with
-`429`, `code` `overloaded` and a `Retry-After` between 1 and 5 seconds. The hold
-is `QUEEN_RAFT_ADMIT_HOLD_MS` (default 15000 ms, jittered by 25 percent either
-way) and the budget is `QUEEN_RAFT_ADMIT_MAX_MB` (default 64; `0` turns the
-gate off). Pops and acks never take room from this budget. Per-tenant rate
-limiting is the proxy's job, described below.
+Pops are never in doubt: a claim nobody receives is handed back or ends with its lease, and its
+messages are delivered again. A node that cannot reach the leader answers 503 `retry` or
+`no_leader`, and the request may have reached the leader first.
 
-### 507: the disk gate
+All of this holds for a cluster. Lease exclusivity across a leader change assumes node clocks
+within `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. See
+[guarantees](/concepts/guarantees/).
 
-Writes that grow storage (pushes, transactions carrying pushes, KV puts and
-increments, timer schedules, traces) are refused with `507` and `code`
-`storage_full` once the filesystem holding the data directory is
-`QUEEN_RAFT_DISK_HIGH_PCT` percent used (default 85). They are accepted again
-once it is back under `QUEEN_RAFT_DISK_LOW_PCT` (default 80). Pops, acks and
-deletes are still accepted, so consumers can drain. Size the volume for the
-retention you configure.
+## KV and timer codes
 
-## Responses that are not the generic envelope
+The `error` of the third shape. The `reason` beside it is finer, and stable too.
 
-<Aside type="caution">
-A 2xx does not mean the operation succeeded. Push, ack and transaction all report
-their real outcome inside the body of a 200 or a 201.
-</Aside>
+| `error` | Status | `reason`, and when | Client |
+|---|---|---|---|
+| `kv_bad_request` | 400 | `kv_bad_body`, `kv_bad_namespace`, `kv_bad_key`, `kv_expiry_not_specified`, `kv_bad_ttl`, `kv_bad_expect`, `kv_unknown_op`, `kv_prefix_required`, `kv_too_many_ops`, `kv_too_many_keys`, `kv_duplicate_key_in_call`, `kv_tenant_not_an_input`, `kv_no_query_string`, `kv_field_in_path`. | Fix the request. |
+| `timers_bad_request` | 400 | `timers_bad_body`, `timers_bad_op`, `timers_queue_required`, `timers_delay_required`, `timers_payload_required`, `timers_payload_not_base64`, `timers_too_many_ops`, `timers_server_owned_field`, or a read-mode reason on the list routes. | Fix the request. |
+| `payload_too_large` | 413 | `kv_value_too_large`, `kv_key_too_large`, `timers_payload_too_large`, `timers_call_too_large`. | Shrink it, or raise the ceiling (see [limits](/reference/limits/)). |
+| `timer_horizon_exceeded` | 403 | `timers_horizon`: `delayMs` is beyond the horizon in force. | Use a shorter delay. |
+| `kv_quota_exceeded`, `timers_quota_exceeded` | 403 | The tenant is over its KV rows or bytes, or its timer count. Deletes and cancels are never refused for this. | Free space or raise the quota; do not retry unchanged. |
+| `feature_gated` | 403 | The tenant has no grant for this surface (`QUEEN_KV_REQUIRE_GRANT`). | An operator grants it. |
+| `rate_limited` | 429 | The tenant's KV read or write rate. | Retry after `Retry-After`. |
+| `kv_unavailable`, `timers_unavailable` | 503 | `kv_timeout`, `kv_retry`, `kv_no_leader`, `timers_timeout`, `timers_retry`, `no_leader`; or `kv_unavailable` when the node already tracks `QUEEN_KV_MAX_TENANTS` (10,000) tenants. | Retry after `Retry-After`. |
+| `kv_disabled`, `timers_disabled` | 503 | An operator paused the surface at runtime. | Retry later. |
+| `kv_error`, `timers_error` | 500 | A broker fault. | Report it. |
 
-**Push** returns `201` with one object per submitted item:
+A lost precondition on `POST /api/v1/kv` is not an error either. An ordinary one shows as
+`applied: false` in its result, and a `required` one answers 200 with
+`{"ok": false, "reason": "kv_precondition", "failedIndex", "kvReason", "version", "value"}`.
+Cancelling a timer that is not pending answers 200 with `ok: false`.
 
-```json
-[{"index":0,"message_id":"019...","transaction_id":"t-1","queueName":"orders","status":"queued","offset":42}]
-```
+## Ephemeral codes
 
-`status` is `queued` for an accepted message, with its `offset`; `duplicate`
-when deduplication matched, and `message_id` and `offset` are then the original
-message's; and `error` when the state machine refused that item's partition.
-The 2.0 broker never answers `buffered` or `failed`: those meant a disk spool,
-and there is none. A push that cannot be committed at all is not a `201`: it is
-one of the `503`, `429` or `507` answers above.
+| `code` | Status | Meaning | Client |
+|---|---|---|---|
+| `ephemeral_bad_request` | 400 | The request is malformed: a name, a batch, an id list. | Fix the request. |
+| `ephemeral_queue_not_found` | 404 | No ephemeral queue by that name exists. | Check the name. |
+| `queue_full` | 429 | The queue is at its `maxBytes` or `maxLength` and its overflow policy is reject. | Back off and push again once consumers drain it. |
+| `rate_limited` | 429 | The tenant is over its ephemeral messages-per-second allowance. | Retry after `Retry-After`. |
+| `ephemeral_quota_exceeded` | 403 | The tenant is at its ephemeral byte or queue allowance. | Drain, reset or delete a queue. |
+| `feature_gated` | 403 | The tenant is not granted the ephemeral class (`QUEEN_EPHEMERAL_REQUIRE_GRANT`). | An operator grants it. |
+| `ephemeral_unavailable` | 503 | This node is at `QUEEN_EPHEMERAL_MAX_BYTES`. | Retry later. |
+| `ephemeral_disabled` | 503 | An operator paused the surface at runtime. | Retry after `Retry-After`. |
+| `owner_moved`, `ephemeral_forward_failed` | 503 | The partition's owner changed while the call was relayed, or could not be reached. | Retry. |
+| `internal_only` | 403 | A broker-to-broker route was called without the forward mark. | Not a client route. |
 
-**Ack** and **ack batch** always return `200` with one object per
-acknowledgement:
+## Authentication and tenancy
 
-```json
-[{"index":0,"transactionId":"t-1","success":true,"error":null,"leaseReleased":true,"dlq":false,"noop":false}]
-```
+| Status | `error` | Client |
+|---|---|---|
+| 401 | `Authentication required`, `Token has expired`, `Token not yet valid`, `Token issued in the future`, `Invalid token signature`, `Invalid token issuer`, `Invalid token audience`, `Unknown key ID`, `Bad token header`, `Unsupported token algorithm` | Get a valid token. |
+| 403 | `Insufficient permissions` | Use a token whose role covers the route's access level ([HTTP API](/reference/http/#authentication)). |
+| 400 | `invalid x-queen-tenant header (must be a UUID)` | Fix whatever sets the header (normally the proxy). |
 
-An ack that resolved to nothing is *reported*, not silently accepted:
-`noop:true` for a duplicate commit, and `success:false` with an explanatory
-`error` for one that is unresolvable, already committed or stale, or whose lease
-is invalid or expired. See [Use Queen](/use) for what those mean for a consumer.
+## Proxy codes
 
-**Transaction** failures use their own envelope and arrive at HTTP `200`:
+Behind the embedded proxy, these answers come before the request reaches the broker. Plans and
+limits are on [tenants](/operate/tenants/).
 
-```json
-{"transactionId":"019...","success":false,"reason":"kv_precondition","error":"...","results":[]}
-```
+| `code` | Status | Meaning |
+|---|---|---|
+| `unauthorized` | 401 | No valid API key or session. |
+| `forbidden` | 403 | The credential has no role on this cluster, or is for another cluster. |
+| `rate_limited` | 429 | A request or message rate limit, with `Retry-After`. |
+| `quota_exceeded` | 403 | A queue, partition or monthly message quota is reached. |
+| `storage_quota_exceeded` | 403 | The retained-bytes quota is reached; pushes are blocked. |
+| `push_blocked` | 403 | Pushes are blocked on this cluster (billing hold). |
+| `cluster_suspended` | 403 | The cluster is suspended. |
+| `feature_gated` | 403 | The route is not in the plan. |
+| `route_blocked` | 404 | A broker route that is not served to tenants. |
+| `cluster_unknown` | 421 | The `Host` names no cluster. |
+| `payload_too_large` | 413 | The body is over the edge limit, an item's payload over the plan's `max_payload_bytes`, or a push over `max_batch_items`. |
+| `bad_gateway`, `upstream_timeout` | 502, 504 | The broker did not answer. |
 
-A transaction is one entry in the replicated log: it applies whole or not at
-all. `reason` is a machine-readable code, and it is the thing to branch on.
+### Control-plane codes
 
-| `reason` | What rolled the bundle back |
-| --- | --- |
-| `bad_request` | The body was malformed, an operation was neither a push nor an ack, or no operation or rider was given. |
-| `duplicate` | A pushed message was a duplicate. |
-| `rejected_ack` | An ack in the bundle could not be applied: its message is not leased by this worker, was already acked, or could not be resolved. |
-| `kv_precondition` | A `required` key/value gate lost. |
+The `/api/cp` routes answer the proxy envelope with these codes. With `QUEEN_PROXY_CP_TOKEN` unset
+every route answers 404 `not_found`; a wrong token answers 401 `unauthorized`, and a body over
+1 MiB 413 `payload_too_large`.
 
-A validation failure of a rider carries that rider's own code instead (for
-example `kv_bad_request`, `too_large` or `name_too_long`). `kv_precondition` is
-the one to design around. A lost gate is the expected outcome of every
-legitimate redelivery, which is the idempotency marker doing its job, so it
-arrives at `200` and belongs in neither a retry policy nor an error metric. The
-body carries `failedIndex`, `kvReason`, `version` and `value` alongside the
-code, so the caller can see who won without a second round trip. See
-[KV state](/use/kv/).
+| `code` | Status | Meaning |
+|---|---|---|
+| `invalid` | 400 | A field, a slug or a UUID is not valid. |
+| `conflict` | 409 | The record exists, or changed under the call. |
+| `tenant_unknown`, `cluster_unknown`, `key_unknown` | 404 | No such tenant, cluster or key. |
+| `not_deleting` | 409 | A purge or delete of a tenant whose status is not `deleting`. |
+| `not_purged` | 409 | A delete of a tenant whose clusters still list queues at the broker. |
+| `deleting` | 409 | A change to a tenant or cluster that is being torn down. |
+| `system_tenant` | 409 | The call would act on the broker's default tenant or the proxy's own, or the tenant header is off. |
+| `unavailable`, `no_store` | 503 | The proxy's state is not readable yet. Retry. |
 
-A transaction that cannot be committed at all (no leader, overload, disk gate)
-is not a `200`: it gets the status and envelope of that failure.
+## Raft membership codes
 
-**Lease extension** always returns `200`. A lease that does not exist, has
-expired, or belongs to another tenant is reported as `{"renewed":0,...}` with
-`success:false`. An unknown lease and a foreign lease are deliberately
-indistinguishable.
+`/api/v1/system/raft/membership/*` answers a refused change with one of these codes: 400 for
+`bad_request`, `not_a_learner` and `not_a_member`; 409 for `in_flight`, `no_quorum`, `last_voter`,
+`learner_behind`, `already_voter`, `address_mismatch`, `membership_changed` and `leader_changed`;
+503 for `leader_unreachable`; and 504 `timeout` when the deadline (`?timeoutMs=`, default 30 s)
+passed, in which case the change may still complete, so read the membership before repeating it. A
+request that carries a tenant answers 403 `forbidden`: the membership belongs to the whole cluster.
+See [cluster](/operate/cluster/).
 
-**Queue deletion** returns `200` even when nothing was deleted, with
-`deleted:false` and a `message` field saying the queue was not found. `DELETE`
-is idempotent here because the SDKs use delete-before-create as a cleanup idiom.
+## What the JS client does
 
-**Health** returns its own document at both `200` and `503`:
-`{"status":"healthy","engine":"raft","version":"…","raft":{...}}` while a leader
-is known, `"status":"settling"` with `503` otherwise. There is no `error` key to
-read.
+- It retries a 5xx or a network error: with one URL up to three attempts, waiting 1 s and then 2 s;
+  with several URLs and failover on, it tries each URL once. Every 5xx is treated alike, 507 and 503
+  `outcome_unknown` included.
+- It retries a 429 in place after `Retry-After`, up to 10 attempts, and without limit for a
+  long-poll pop.
+- Any other 4xx is thrown at once, with `error.status` and `error.code` from the body.
+- A transaction rolled back by a lost `required` precondition is returned from `commit()`; every
+  other rollback is thrown with `error.reason` set.
 
-**Unknown API routes** return `404` with `"code":"no_such_route"`. This exists
-because the dashboard fallback matches any method, so a call to an endpoint that
-does not exist used to come back as `200 text/html`, which every JSON client
-reads as success.
-
-**413** for an oversized body is produced by the body-limit layer before any
-handler runs, so it does not pass through the helper that builds every other
-error body. Do not expect the `{"error":...}` shape there.
-
-## Authentication and authorization errors
-
-With `JWT_ENABLED=false` (the default) the middleware is a pass-through and
-neither code occurs from it. The streams registration denial below is the one 403
-minted outside the middleware for a tenant, so it exists with authentication off
-too, though only for a non-default tenant, which in practice means behind a
-proxy.
-
-`401` bodies carry a fixed short message: `Authentication required`,
-`Bad token header`, `Invalid token signature`, `Token has expired`,
-`Token not yet valid`, `Token issued in the future`, `Invalid token issuer`,
-`Invalid token audience`, `Unsupported token algorithm`, `Unknown key ID`.
-
-A role-check `403` is always `{"error":"Insufficient permissions"}`. The route's
-required level is compared against the token's role *set*, not a numeric ladder, and
-`WriteOnly` is not below `ReadOnly`: a write-only role passes `POST /api/v1/push`
-and is rejected with 403 on every read and consume route, including pop and ack.
-The streams registration denial carries `denied: true` and an error naming the
-missing grant or the cap ([streams routes](/reference/http/streams)).
-
-Three endpoints can never return either code: `/health`, `/metrics` and
-`/metrics/prometheus` are `public` in the route table, and the level check
-short-circuits before any token is examined. The dashboard's own root and asset
-paths are public for the same reason.
-
-## Behind the proxy
-
-The proxy (embedded in the broker process with `QUEEN_PROXY_EMBEDDED=true`)
-wraps the same routes and adds a machine-readable `code` to every error it
-generates itself:
-
-```json
-{"error":"request rate limit exceeded","code":"rate_limited"}
-```
-
-The codes are a stable contract that clients switch on: `unauthorized`,
-`forbidden`, `rate_limited`, `quota_exceeded`, `storage_quota_exceeded`,
-`cluster_suspended`, `push_blocked`, `feature_gated`, `route_blocked`,
-`cluster_unknown`, `scope_unknown`, `payload_too_large`, `invalid_request`,
-`bad_gateway`, `upstream_timeout`.
-
-### The 429 contract
-
-A `429` from the proxy always carries a `Retry-After` header in **seconds**. On
-the data plane it has one of three causes:
-
-| Cause | `code` | `Retry-After` |
-| --- | --- | --- |
-| Request rate limit (per-cluster token bucket) | `rate_limited` | Time to refill the deficit, computed from the plan's sustained rate, clamped to 1–60 s |
-| Message rate limit (push and transaction items) | `rate_limited` | Same computation |
-| Too many parked consumers (a `wait=true` pop over the cell or cluster cap) | `rate_limited` | 5 s |
-
-A denied request never debits the bucket, so a client that backs off correctly is
-not punished for having been throttled.
-
-`403` with `quota_exceeded`, `storage_quota_exceeded` or `push_blocked` is the
-other family a producer must handle: those are not retryable on a timescale that
-backoff can fix. Note that those three reach the two dead-letter replay routes as
-well, because a replay writes a message. `404` with `route_blocked` means the
-route is not exposed to tenant credentials at all, and `400` with
-`invalid_request` is the proxy refusing a body it read and understood: today the
-one data-plane case is a replay whose destination names one half of a
-`(queue, partition)` pair, where the message names the half to add. See
-[the endpoints a tenant can reach](/reference/multi-tenant/endpoints/).
-
-### What the clients do with a 429
-
-Every SDK retries `429` in place, against the same backend and never via
-failover (a 429 is a quota signal, not a health signal), and treats no other
-status as retryable at that layer. That covers the proxy's `429` and the
-broker's own `overloaded` alike:
-
-- ordinary requests: up to **10 attempts**;
-- long-poll pops: **unbounded** by default, because the loop is meant to keep
-  waiting through transient throttling;
-- delay: `Retry-After` when present, otherwise exponential backoff from 500 ms
-  capped at 30 s;
-- either way jittered ±20 % so a fleet does not resynchronise into a herd.
-
-Each SDK exposes a `retry429` option carrying `maxAttempts`, `baseMs` and
-`capMs` (spelled per language convention) that overrides all of it, and setting
-`maxAttempts` explicitly applies it to pops too. Setting `maxAttempts` to `1`
-disables retrying and surfaces the 429 to your code, which is what a load
-generator wants and an application usually does not.
-
-## Related pages
-
-<CardGrid>
-  <LinkCard
-    href="/reference/defaults"
-    title="Defaults"
-    description="Every default that matters, including the ones where two values circulate."
-  />
-  <LinkCard
-    href="/reference/queue-options"
-    title="Queue options"
-    description="What /configure accepts, and what changing each option does to existing data."
-  />
-  <LinkCard
-    href="/use"
-    title="Use Queen"
-    description="Push, pop, ack and the delivery guarantees behind these responses."
-  />
-</CardGrid>
+Branch on the rollback reasons the broker sends, listed on
+[transaction](/reference/transaction/#rollback-reasons). The reason list in the Rust protocol
+crate (`crates/queen-protocol`) still names the 1.x codes `ack_rejected`, `misaligned` and
+`db_error`, which 2.0 never sends: a fenced ack that fails is `rejected_ack`.

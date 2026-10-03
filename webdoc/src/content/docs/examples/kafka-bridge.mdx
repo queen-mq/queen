@@ -1,0 +1,117 @@
+---
+title: Kafka bridge
+description: "A Kafka producer writes orders, a Queen worker bills them with one transaction per order, and a Kafka consumer reads the invoices, all on the same queues of one node, with no connector."
+type: example
+tier: use
+sidebar:
+  order: 7
+sourceOfTruth:
+  - examples/cross-protocol/bridge.mjs
+  - protocols/queen-kafka/src/records.rs
+  - protocols/queen-kafka/src/handlers/metadata.rs
+  - protocols/queen-kafka/src/queen.rs
+verifiedBy:
+  - examples/cross-protocol/bridge.mjs
+---
+
+You do not have to move a Kafka shop to Queen all at once. In this program an order service keeps
+its Kafka producer and changes only `bootstrap.servers`, an analytics service keeps its Kafka
+consumer, and the one piece in between, billing, is written against Queen so it can commit each
+order's ack, its invoice and the customer's running total as one transaction. Nothing copies data
+between the two worlds: a Kafka topic is a Queen queue, and Kafka partition 3 is the Queen
+partition named `"3"`, so both kinds of client read and write the same messages.
+
+## Run it
+
+The node needs its Kafka listener on:
+
+```bash
+docker run --platform linux/amd64 -d --name queen -p 6632:6632 -p 9092:9092 \
+  -e QUEEN_KAFKA_EMBEDDED=true \
+  -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 \
+  ghcr.io/queen-mq/queen:latest
+npm install queen-mq @confluentinc/kafka-javascript
+node bridge.mjs     # the program below, saved as bridge.mjs
+```
+
+What it printed against a 2.0.0-beta.6 node, with `@confluentinc/kafka-javascript` 1.10.1:
+
+```text
+producing orders with a Kafka client
+  12 orders for 3 customers
+
+billing with a Queen worker
+  stored payload: {"h":[{"k":"source","v":"c2hvcA=="}],"k":"YWxpY2U=","t":1790948491582,"v":"eyJjdXN0b21lciI6ImFsaWNlIiwibiI6MSwiY2VudHMiOjEwMDB9"}
+  ok: alice's orders arrived in order, all from Kafka partition 1
+  ok: bob's orders arrived in order, all from Kafka partition 2
+  ok: carol's orders arrived in order, all from Kafka partition 2
+  ok: billing saw all 12 orders with their Kafka key and header
+
+reading invoices with a Kafka consumer
+  first: partition 2, key null, value {"cents":1000,"customer":"bob","invoice":"INV-bob-1","n":1}
+  ok: analytics read all 12 invoices (got 12)
+  ok: each invoice is in the partition number its order came from
+
+  totals: alice=10000, bob=10000, carol=10000
+  ok: each customer's total is 10000, counted once per order
+
+PASS: 7 checks
+```
+
+The `stored payload` line is a Kafka record as Queen keeps it: key, value and header values in
+base64, because Kafka bytes are not always text, and the producer's timestamp in `t`. The last
+lines go the other way: a payload a Queen client pushed reaches a Kafka consumer as its JSON
+text, with no key.
+
+## The program
+
+<Render file="snippets/app-js-kafka-bridge" />
+
+## How it works
+
+The program creates both topics through the Kafka admin API, four partitions each, as a Kafka
+deployment would. The producer sends each order with the customer as its key, and the Kafka
+client hashes the key onto one of the four partitions, so each customer's orders sit in one
+partition, in order, and two customers can share one (bob and carol did).
+
+<Figure id="examples/kafka-bridge" />
+
+Billing is an ordinary Queen consumer group on the `orders` queue. It decodes the record from the
+payload and, for each order, commits one transaction: the ack of the order, the invoice pushed into
+the partition of the `invoices` topic with the same number as the order's, and a `kv.incr` of the
+customer's total. If the worker dies halfway, none of the three happened and the order comes back,
+which is why the totals in the run are exact. On Kafka the same guarantee takes a transactional
+producer, offsets sent to the transaction and consumers reading committed data only, and the
+running total would still live somewhere else.
+
+Analytics is an ordinary Kafka consumer group on `invoices`, reading from the beginning.
+[Kafka clients](/guides/kafka/) covers how topics, partitions, groups, offsets and transactions
+map onto Queen, and what the listener does and does not support.
+
+## Why it is short
+
+Putting a non-Kafka worker into a Kafka pipeline usually takes a connector in each direction,
+which means every record copied out and back again, and a lag between the copies to watch. Here
+there is one copy of each record, so the program is the three services and nothing in between.
+
+## Limits
+
+- Kafka decides the partitions. A Kafka producer hashes keys onto a fixed number of numbered
+  partitions, so the Queen worker inherits that layout, shared partitions included. Native
+  producers can give every customer a partition of its own, but a Kafka client cannot address a
+  partition whose name is not a number.
+- Create topics before Kafka consumers subscribe. The listener caches the list of queues for
+  three seconds, so a queue that a native push has just created is unknown to Kafka metadata until
+  the cache refreshes; we measured 3.0 s. A Kafka consumer that subscribed in that window was told
+  the topic does not exist and read nothing in the 30 seconds we waited.
+- A topic created through Kafka has no dedup window. Kafka records carry no Queen
+  `transactionId`, so such a topic gets `dedupWindowSeconds: 0`, and a native push into it with a
+  repeated `transactionId` is stored twice; we checked. Set `dedupWindowSeconds` on the queue if
+  native producers count on it.
+- The program needs a node with the listener on, which is why it lives in
+  `examples/cross-protocol/` and not with the other programs that `examples/apps/run.sh` runs.
+
+## Next
+
+[Kafka clients](/guides/kafka/) for the whole mapping and the clients that were tested, and the
+[card charger](/examples/exactly-once/) for the transaction that billing uses.

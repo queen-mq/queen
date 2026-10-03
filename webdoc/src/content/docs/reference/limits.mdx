@@ -1,338 +1,176 @@
 ---
-title: Limits and non-goals
-description: "Queen's design decisions stated plainly, how to work with each one, and the operational boundaries to check before you build."
-type: concept
+title: Limits
+description: "Sizes, name rules, windows and defaults of the broker, each with the setting that moves it and the file that applies it."
+type: reference
 tier: use
 sidebar:
-  order: 4
+  order: 7
 sourceOfTruth:
-  - server/src/main.rs
   - server/src/config.rs
   - server/src/handlers/raft.rs
   - server/src/handlers/data.rs
-  - server/src/rsm/mod.rs
-  - server/src/rsm/batcher.rs
-  - server/src/rsm/maintenance.rs
-  - server/src/rsm/planner/pop.rs
+  - server/src/handlers/kv.rs
+  - server/src/handlers/timers.rs
+  - server/src/handlers/ephemeral.rs
+  - server/src/quota.rs
+  - server/src/rsm/facade/mod.rs
   - server/src/rsm/facade/real.rs
   - server/src/rsm/facade/real/phase2.rs
-  - server/src/rsm/facade/real/phase2/admin.rs
-  - server/src/rsm/replicator/raft/cluster.rs
-  - server/src/embedded/mod.rs
-  - server/src/embedded/boot.rs
-  - server/src/proxy_embed.rs
-  - proxy/src/harden.rs
-  - proxy/src/state.rs
-  - proxy/src/gateway.rs
-digest: >-
-  The non-goals of today's build. Ordering granularity is the partition key, so in-group
-  parallelism equals the partition count. A bare broker enforces no per-caller quota; the proxy,
-  embedded in the broker process with QUEEN_PROXY_EMBEDDED=true, enforces a per-cluster plan. Every
-  write goes through the raft leader: a cluster of 3 or 5 voters serves writes only while a majority
-  is up, and a refused write answers 503 with nothing spooled. Retention is opt-in and advances past
-  whole stored records, so removing one message is not an operation. A transaction is one entry in
-  the replicated log, not end-to-end exactly-once. Timers and KV state are on every broker and have
-  their own limits: every KV write carries an expiry, deliverAt is a floor and not an appointment,
-  there is no recurrence, and a cancel after the fire answers absent, meaning no longer pending and
-  never not delivered.
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/offsets.rs
+  - server/src/rsm/entry.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/planner/kv.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/planner/timers.rs
+  - server/src/rsm/planner/positions.rs
+  - server/src/rsm/maintenance.rs
 ---
 
-This page states Queen's opinions in one place: the design decisions, how to
-work with each one, and the operational boundaries. Everything below is a
-property of the build you can run today, not a roadmap item. Most of these are
-how we believe a queue should behave; the point of collecting them here is that
-you can check them against your requirements in one read.
+Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
+on what one log entry may carry, a budget on how much a KV call may read. Few of them are about the
+data itself. The broker puts no cap on partitions per queue, on queues per tenant, or on how long a
+partition's history may grow: your disk and your memory bound those, and a proxy plan can cap them
+per tenant (see [tenants](/operate/tenants/)).
 
-## Per-tenant limits belong to the gateway
+Each limit below comes with the setting that moves it, when there is one, and the file that
+applies it. The values are the defaults of server 2.0.0-beta.6; the full list of settings is on
+[configuration](/reference/configuration/).
 
-A bare broker enforces no per-caller quota: it is one namespace and one resource
-pool. Run the proxy in the broker process (`QUEEN_PROXY_EMBEDDED=true`) and every
-cluster carries a plan: request and message rates with burst, queue and
-partition counts, payload and batch size, parked long-poll slots, retained bytes
-and a retention ceiling, plus an optional monthly message allowance. Enforcement
-is per cluster, and the wire contract is one the SDKs already handle: `429` with
-`Retry-After` for a rate limit, which every client retries on its own with
-backoff, and `403` with a code naming the quota for a hard cap. What each number
-does at request time, in the order the gateway evaluates them, is in
-[Quotas and rate limits](/reference/multi-tenant/quotas).
+## Requests
 
-## Ordering granularity is your partition key
+| Limit | Default | Setting | Applied in |
+|---|---|---|---|
+| Request body | 64 MiB | `QUEEN_MAX_BODY_BYTES` | `server/src/handlers/raft.rs` |
+| One planned command (a push to one partition, a KV call, a timers call, a positions list) | 96 MiB | `QUEEN_RAFT_ENTRY_MAX_BYTES` | `server/src/rsm/planner/push.rs` |
+| Message `payload` | any JSON value, inside the two limits above | | `server/src/rsm/facade/real.rs` |
+| Items per push | no count limit in the broker; 10,000 through the proxy unless the plan says otherwise | `QUEEN_PROXY_MAX_BATCH_ITEMS` | `server/src/rsm/facade/real.rs` |
+| `transactionId` | 65,535 bytes | | `server/src/rsm/facade/real.rs` |
+| Deadline of a push | 30 s, at most 60 s | `POP_DEFAULT_TIMEOUT_MS` | `server/src/handlers/raft.rs` |
+| Deadline of an ack, a lease extension or a transaction | 30 s, at most 60 s | `QUEEN_STMT_TIMEOUT_MS` | `server/src/handlers/raft.rs` |
 
-A message's position is a per-partition offset, assigned by the leader when it
-plans the push into the replicated log, so the order is exactly as coarse or as
-fine as the key you push with. One partition for a whole queue is total ordering
-across everything, at one in-flight leased batch per consumer group: a correct
-configuration, with one lane's worth of throughput. A partition per customer is
-a million independent orders. Nothing about this is fixed when the queue is
-created, because partitions are created by the push that names them.
+The pushes to one partition travel as one command, so items for one partition that together exceed
+the command limit are refused, and those items answer `status: "error"` in the 201 body.
 
-What you cannot have is both at once. There is no cross-partition sequence
-number exposed to clients, and no way to ask "what happened first" across two
-partitions. Two consumers draining two partitions of the same queue observe two
-independent orders.
+## Names
 
-The one extra guarantee you get *inside* a partition is that `created_at` is
-monotone: every entry is stamped from the replicated clock, which never goes
-back, not even across a change of leader. Time-based retention and timestamp
-subscriptions depend on that; it does not extend into a global clock.
+| Name | Rule | Applied in |
+|---|---|---|
+| Queue, partition, consumer group | No character rules. Tenant + queue + the longer of partition and group: at most 447 bytes. The tenant id is 36 bytes, which leaves 411 for the queue and the longer of the other two. Over it: 413 `name_too_long`. | `server/src/rsm/facade/mod.rs` |
+| Partition, when not named | `Default` | `server/src/rsm/facade/real.rs` |
+| Consumer group, when not named | `__QUEUE_MODE__` (queue mode) | `server/src/rsm/facade/real.rs` |
+| Queue namespace and task, for a queue a push creates | The first and second dot-separated parts of the queue name | `server/src/rsm/planner/timers.rs` |
+| KV namespace (`ns`) | `^[a-z0-9][a-z0-9._-]{0,63}$` | `server/src/rsm/planner/kv.rs` |
+| KV key | 1 to 512 bytes, no NUL, and tenant + namespace + key within the store's 511-byte key | `server/src/rsm/planner/kv.rs` |
+| Position metadata | 4096 bytes | `server/src/rsm/planner/positions.rs` |
 
-## Delivery order is arrival order
+## Queues, leases and retries
 
-There is no priority lane, no reordering at pop time, and no per-message
-deadline: a message's position is fixed at push. If some work is more urgent than
-other work, that is a different queue or a different partition, and you dedicate
-consumers to it.
+A queue created by its first push (or by a timer firing into it) and a queue created with
+`POST /api/v1/configure` start with different lease times:
 
-What you *can* shift is when a whole lane becomes visible. `delayedProcessing`
-defers every message of a queue by N seconds after it was stored, and
-`windowBuffer` holds a partition until it has been quiet for N seconds, so a
-burst is delivered as one batch. A partition that is written to more often than
-every `windowBuffer` seconds is not delivered until the writes pause. Both are
-per-queue options, both are applied by the pop itself, and neither reorders
-anything. Both are described in [Queue options](/reference/queue-options).
+| Option | Created by a push | Created by `configure` | Applied in |
+|---|---|---|---|
+| `leaseTime` | 60 s | 300 s | `server/src/rsm/planner/timers.rs`, `server/src/rsm/facade/real/phase2.rs` |
+| `retryLimit` | 3 | 3 | same |
+| `deadLetterQueue` | on | on | same |
+| `dedupWindowSeconds` | 3600 | 3600 | same |
+| `retentionEnabled` | off | off | same |
 
-## Parallelism inside a group is bounded by partition count
+A pop's `leaseSeconds` overrides `leaseTime` for that pop, and
+`POST /api/v1/lease/:leaseId/extend` extends by `seconds`, 60 by default. `configure` merges by
+default: an option you leave out keeps its value, and `null` restores its default. With
+`"mode": "replace"`, every option you leave out goes back to its default.
 
-A consumer group's cursor on a partition carries one batch end and one lease.
-So exactly one in-flight leased batch exists per (partition, group).
+## Dedup
 
-The rule that follows: **in-group parallelism equals partition count.** A
-single-partition queue is drained by one worker at a time within a consumer
-group, and further workers started against it get empty pops. Concurrency comes
-from partitions. If you want more parallelism, choose a partition key with more
-distinct values, or add a second consumer group, which is fan-out, not
-work-sharing, because every group receives every message.
+| Limit | Default | Setting | Applied in |
+|---|---|---|---|
+| Dedup window, per queue, checked per partition | 3600 s; `0` turns dedup off; no upper bound | `dedupWindowSeconds` on `configure` | `server/src/rsm/planner/push.rs` |
+| How long the hashes behind it are kept | the largest of the window, `completedRetentionSeconds` and 900 s | `QUEEN_RAFT_TXN_WINDOW_MIN_S` | `server/src/rsm/maintenance.rs` |
+| A committed command answers a retry of its request id | 60 s | `QUEEN_RAFT_REQUEST_ID_WINDOW_S` | `server/src/rsm/batcher.rs` |
 
-## Every write goes through the leader
+Two items with the same `(queue, partition, transactionId)` in one request store one message,
+whatever the window.
 
-A node keeps all of its state in its own data directory; there is no external
-database. On a single node (the default `local` replicator) that node is the
-whole failure domain: losing its disk loses the data. A cluster runs 3 or 5
-voters, and every node applies the same committed log to its own full copy of the
-state. Raft needs a majority, so 3 voters tolerate one failure and 5 tolerate
-two.
+## Pop and long-poll
 
-Every write is planned by one leader, so adding voters adds copies and failure
-tolerance, not write throughput. `QUEEN_RAFT_GROUPS` runs several raft groups per
-process, each with its own leader, and places each tenant in exactly one of them;
-one tenant's writes still go through one leader. Any node serves clients: a write
-that reaches a follower is handed to the leader.
+| Parameter | Default | Bound | Applied in |
+|---|---|---|---|
+| `batch` | 200 | none in the broker | `server/src/handlers/data.rs` |
+| `partitions` (wildcard pop) | 1 | 1 to 64 | `server/src/handlers/data.rs` |
+| `timeout` with `wait=true` | 30,000 ms (`POP_DEFAULT_TIMEOUT_MS`) | 60 s | `server/src/handlers/raft.rs` |
 
-When the cluster cannot take a write, Queen degrades in a specific way. Know it
-before you rely on it:
+A pop that finds nothing before its timeout answers `204`.
 
-- **Without a majority there is no leader.** Pushes, pops and acks answer `503`
-  with `Retry-After: 1`, and the client retries. There is no local spool: a
-  refused write was not accepted anywhere.
-- **A full disk refuses growing writes** with `507` once the data directory's
-  filesystem is `QUEEN_RAFT_DISK_HIGH_PCT` (85) percent used, until it is back
-  under `QUEEN_RAFT_DISK_LOW_PCT` (80). Pops and acks keep working, so consumers
-  can drain. Size the volume for the retention you configure.
+## Reads by offset
 
-<Aside type="danger">
-`/health` answers `503` (`"status":"settling"`) while the node knows no leader,
-which is exactly what an election or a lost quorum looks like. Wiring it to a
-Kubernetes **liveness** probe therefore restarts nodes during the event they
-need to ride out. Use `/health` as a readiness probe, and a TCP check on the HTTP
-port for liveness: the port opens only after the store and the replicator have
-opened. Readiness does not yet mean caught up either: a follower that is still
-catching up answers `200`.
-</Aside>
+| Limit | `POST /api/v1/fetch` | `POST /api/v1/fetch/offsets` | `POST /api/v1/partitions/changed` |
+|---|---|---|---|
+| Entries per call | 1024 | 1024 | 1024 |
+| Bytes per entry | `maxBytes`, 1 MiB by default, 1 byte to 8 MiB | | |
+| Long-poll | `maxWaitMs`, at most 30,000 | none | none |
+| Partitions per entry | | | `limit`, 1000 by default and at most |
 
-## Retention advances past records, not messages
+Applied in `server/src/rsm/facade/real/phase2/reads.rs` and `offsets.rs`.
 
-Retention is **opt-in**: it requires `retentionEnabled` plus a positive window.
-Without both, a partition's messages stay forever and the disk grows
-monotonically. When it is on, the leader plans a bounded maintenance pass every
-`RETENTION_INTERVAL` milliseconds (default 5000), and every node applies it.
+## KV
 
-Granularity is coarser than a message. A pass moves a partition's start forward
-past whole stored records, and the disk space comes back when a whole queue-log
-file on a node has nothing live left in it. So:
+| Limit | `POST /api/v1/kv` and the KV routes | Inside a transaction | Setting |
+|---|---|---|---|
+| Value | 64 KiB as compact JSON | the same | `QUEEN_KV_MAX_VALUE_BYTES` |
+| Operations per call | 256 | 64 | `QUEEN_KV_MAX_OPS_PER_CALL` (routes only) |
+| Keys named per call | 1024 | 256 | `QUEEN_KV_MAX_KEYS_PER_CALL` (routes only) |
+| `getPrefix` `limit` | 100 by default, at most 1000 | not allowed | |
+| Bytes read per call | 4 MiB | 4 MiB | |
+| Writes of one key per call | 1 | 1 | |
+| Expiry | `ttlSeconds` above 0 or `forever: true`, required on every `put`, `putIfAbsent` and `incr` | the same | |
+| Calls per tenant | reads 200/s (burst 400), writes 100/s (burst 200) | not counted | `QUEEN_KV_READ_RATE`, `QUEEN_KV_READ_BURST`, `QUEEN_KV_WRITE_RATE`, `QUEEN_KV_WRITE_BURST` |
 
-- "Delete exactly this one message" is not an operation Queen has. Retention
-  drops the oldest records of a partition, for every consumer group at once.
-- `DELETE /api/v1/messages/:partitionId/:transactionId` removes *dead-letter*
-  rows. It cannot remove a live message from the log.
-- A partition is deleted only once it is empty *and* has been idle for
-  `PARTITION_CLEANUP_DAYS` (30), with no dead letters, no live lease and no
-  streams state on it. Emptying it via retention is not enough, and the
-  recreated lane is a new partition starting at offset 0. Never assume offset
-  continuity across a month of silence.
+A call over a tenant's rate answers 429 `rate_limited`. A tenant's quota row can set its own rates
+and row and byte caps; see [tenants](/operate/tenants/).
 
-### `maxWaitTimeSeconds` deletes data, including messages currently leased
+## Timers
 
-Treat `maxWaitTimeSeconds` as an age-based shedding valve for data you are
-willing to lose, never as a timeout mechanism. If a queue sets it, maintenance
-deletes **records older than the cutoff, for every consumer group, in-flight
-leases included**, regardless of whether `retentionEnabled` is set. That is data
-loss by design. It does **not** dead-letter what it drops, and a consumer whose
-cursor was inside the deleted range resumes at the next surviving offset without
-an error. The eviction is not reported to the consumer that lost the messages.
+| Limit | `POST /api/v1/timers` | Inside a transaction | Setting |
+|---|---|---|---|
+| Horizon (`delayMs`) | 90 days, narrowed by a tenant's quota | not checked | `QUEEN_TIMERS_MAX_HORIZON_S` |
+| Payload, decoded | 1 MiB | not checked | `QUEEN_TIMERS_MAX_PAYLOAD_BYTES` |
+| Operations per call | 256 | not checked | `QUEEN_TIMERS_MAX_OPS_PER_CALL` |
+| Schedules per tenant | share the KV write rate | not counted | `QUEEN_KV_WRITE_RATE` |
+| One `(queue, timerKey)` per call | yes | yes | |
 
-## Dead letters are removed only when you remove them
+The leader fires due timers every 50 ms (`QUEEN_RAFT_TIMER_TICK_MS`), at most 256 timers and 4 MiB
+per tick. A fire that fails is retried with a backoff from 1 s to 60 s, and after 5 failed
+attempts (`QUEEN_SWEEPER_MAX_ATTEMPTS`; transient failures are not counted) the timer is
+dead-lettered into its queue's DLQ.
 
-Dead-letter rows grow until you clear them: no retention rule touches them, not
-the retention window, not the completed-retention window, not
-`maxWaitTimeSeconds`. Clearing is one address at a time, per queue with
-`DELETE /api/v1/dlq?queue=` (optionally one consumer group), or wholesale by
-deleting the queue, which deletes its dead-letter rows with it.
+## Ephemeral queues
 
-What you get for working through them is `GET /api/v1/dlq` to read, and two
-routes to act on one record: by address, and by dead-letter row id. A replay
-**moves** the record: one entry in the replicated log pushes the stored snapshot
-back and deletes the row it came from. The snapshot lands as a new message **at
-the tail of the partition**, with a fresh message id and the derived transaction
-id `dlq:<row id>`, so it is not reinserted at the position it originally held and
-its age clock restarts. Redrive is one record at a time, so reprocessing a large
-dead-letter backlog is a loop you write, and dead letters nobody works through
-keep occupying disk.
+Ephemeral queues live in memory, so their limits are memory budgets. Each is a ceiling a
+`configure` cannot raise.
 
-## `/configure` merges, and a manifest replaces
+| Limit | Default | Setting |
+|---|---|---|
+| Ephemeral bytes per node | 256 MiB; over it, 503 `ephemeral_unavailable` | `QUEEN_EPHEMERAL_MAX_BYTES` |
+| Bytes per queue | 16 MiB | `QUEEN_EPHEMERAL_QUEUE_MAX_BYTES` |
+| Messages per queue | 10,000 | `QUEEN_EPHEMERAL_QUEUE_MAX_LENGTH` |
+| Lease | 30 s (at most a day) | `QUEEN_EPHEMERAL_LEASE_S` |
+| Attempts before a message is dropped (there is no DLQ) | 5 | `QUEEN_EPHEMERAL_RETRY_LIMIT` |
+| Idle time before an implicit queue is collected | 300 s; `0` never | `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S` |
+| Pushed messages per tenant | 5,000/s, burst 10,000 | `QUEEN_EPHEMERAL_RATE`, `QUEEN_EPHEMERAL_BURST` |
+| Items per push or ack call, and pop `batch` | 10,000 | |
+| Pop `timeout` | 300,000 ms | |
+| Queue, partition and group names | 512 bytes | |
 
-`POST /api/v1/configure` merges: an option the body does not carry keeps the
-value the queue already has, and top-level `"mode": "replace"` rebuilds the whole
-configuration from defaults. Sending `{"queue":"orders","options":{"leaseTime":600}}`
-to a queue that already had retention configured changes the lease and nothing
-else; the same body with `"mode": "replace"` switches retention off and puts
-`dedupWindowSeconds` back to 3600.
+The last three are constants in `server/src/handlers/ephemeral.rs`.
 
-The limit to hold on to is that the two modes are not interchangeable and
-nothing infers which one you meant. A nudge merges; a desired-state document
-replaces, which is why `queenctl apply -f` sends `replace` and refuses a manifest
-key it cannot bind rather than silently resetting the option behind it. Related,
-because two defaults circulate: `leaseTime` is 60 seconds on a queue created
-implicitly by a push, and 300 seconds on one created by `/configure` without
-overriding it.
+## Retention
 
-## Transactions are one log entry, not exactly-once
-
-`POST /api/v1/transaction` bundles pushes, acks and the key/value and timer
-riders into one entry in the replicated log: it applies whole or not at all.
-That is a real atomicity guarantee and it is not end-to-end exactly-once
-delivery. If the response is lost and the client retries, the work is done twice
-unless the `transactionId` is deterministic and still inside the deduplication
-window.
-
-Two related edges: deduplication is bounded by `dedupWindowSeconds` (default 3600)
-and is exact only inside it, and `autoAck=true` commits the cursor as part of the
-pop itself, with no lease, which is at-most-once: a crash after the pop and
-before your handler finishes loses the message.
-
-## The broker expects a trusted network segment
-
-It is built to run behind a terminator, on a network only your own services can
-reach. The properties that follow from that:
-
-- **No TLS on the broker's own listener.** Without the embedded proxy the broker
-  binds plain HTTP on `PORT`. With `QUEEN_PROXY_EMBEDDED=true` the proxy's public
-  listener serves TLS when `QUEEN_TLS_CERT` and `QUEEN_TLS_KEY` are set; the
-  broker router on an internal `PORT` stays plain HTTP. Otherwise terminating TLS
-  is a reverse proxy's job.
-- **No CORS layer.** The broker router sets no access-control headers, so a
-  browser on another origin cannot call the broker directly.
-- **JWT authentication is off by default** (`JWT_ENABLED=false`), and with it off
-  the middleware passes every request through. Access levels are a role *set*,
-  not a ladder: `WriteOnly` passes `/api/v1/push` and is rejected on every read
-  and consume route.
-- **The raft port must be firewalled** in a cluster, and `QUEEN_RAFT_TOKEN` set to
-  the same secret on every node. Without the token, any host that reaches the raft
-  port can send votes and appends. This is a requirement, not a hardening tip.
-- **`/metrics/prometheus` is not tenant-safe.** Per-queue series sum across
-  tenants.
-- **A malformed or wrong-length `QUEEN_ENCRYPTION_KEY` disables encryption** and
-  stores plaintext on queues flagged for encryption, with only a warning in the
-  log.
-
-## The embedded engine is beta
-
-The broker can run inside a Rust application ([Embed the engine](/use/embed/)).
-Its boundaries are its own: it runs the state machine on a single node, in a data
-directory you must name (`BrokerConfig::raft(dir)` or `QUEEN_RAFT_DIR`), and one
-data directory must never be opened by two brokers at once; and the surface is
-the data plane, the DLQ and ephemeral queues, with no consumer-group
-administration, listings, traces or streams. The Rust API itself is beta:
-[Versions and compatibility](/reference/compatibility) states what that means.
-
-## Timers and KV state have their own boundaries
-
-Both surfaces are part of the engine and every broker serves them: there is no variable that turns
-them on, any more than there is one for push and pop, and the boundaries below always apply. What an
-operator can do is pause a live surface with a runtime kill switch, which answers `503`, and bound a
-tenant with grants and quotas, which answer `403`; both are on [KV and timers](/deploy/state). In a
-cluster a switch flip takes effect at once only on the node that served it, and the timer fire does
-not read the switch: only `QUEEN_RAFT_TIMER_TICK_MS=0` on every node stops it. The `kv` and `timers`
-riders of `POST /api/v1/transaction` are not checked against the switches, the grants or the
-quotas. The routes are on [kv](/reference/http/kv) and [timers](/reference/http/timers); the
-mechanics are in [Timer internals](/internals/timers) and [KV internals](/internals/kv).
-
-- **`deliverAt` is a floor, never an appointment.** A timer is delivered no earlier than the instant
-  you name, and later by up to the leader's timer cadence and whatever backlog is ahead of it. There
-  is no per-message deadline anywhere in Queen, and this is not one.
-- **There are no recurring timers.** One timer is one delivery. A repeating schedule is a consumer
-  that schedules the next one, which keeps the cancellation story to a single record.
-- **A cancel after the fire answers `absent`.** The fire removes the pending timer in the same entry
-  that pushes the message, so there is no tombstone afterwards. `absent` means **no longer
-  pending**. It never means "not delivered", and a compensation path has to check state rather than
-  read a cancel result as a verdict.
-- **Every KV write carries an expiry.** Exactly one of a TTL in seconds or an explicit `forever` is
-  required on every write; zero or two of them is an error. A store with no natural retention whose
-  TTL is optional grows in silence, and `forever` is deliberately something you have to type. This is
-  also the difference from streams state, which is scoped to a partition and has no expiry at all.
-- **The KV read boundary is a key or a prefix**, both capped, and prefix reads exist only on the
-  batch endpoint. There is no query language, no secondary index over values, no scan of a whole
-  namespace, and no cross-namespace read.
-- **A quota on either surface is soft.** Enforcement is an in-process count on the node that takes
-  the write, not a check against an exact count on every write. Overshoot is bounded, not zero.
-
-## Smaller edges
-
-- **Payloads must be JSON.** The push path parses each payload as a JSON value.
-  Opaque binary is not a payload type. Encode it yourself. The whole request
-  body is capped by `QUEEN_MAX_BODY_BYTES` (default 64 MiB).
-- **Every `204` has no body at all**, deliberately. An empty pop is a bare status
-  code.
-- **Consumers poll.** Long-polling parks a pop and wakes it, but there is no
-  server-initiated push and no persistent subscription stream.
-- **Retention cannot delete stream state, and a partition carrying open
-  accumulators is never reclaimed.** Partition cleanup checks for streams state
-  and refuses to delete: it is one of three vetoes, with dead-letter rows and a
-  live lease ([Retention](/internals/retention)). The limitation that follows is
-  that accumulators have no TTL: nothing time-based purges streams queries or
-  their state, and a query's state is removed when the query is registered again
-  with a new `config_hash` and `reset: true`.
-- **The bundled dashboard and JWT auth do not combine broker-direct.** With auth
-  off the broker serves a fully working dashboard as an anonymous operator; with
-  `JWT_ENABLED=true` it serves an explanation page instead, because the app
-  sends no bearer token and the broker holds no sessions. A dashboard with
-  logins and roles is the proxy's.
-- **The broker does not serve an OpenAPI document at runtime.** The
-  [OpenAPI 3.1 documents](/reference/openapi) published with this site are
-  generated from the router at documentation build time, not by the broker.
-- **There is no documented backup and restore procedure for the data directory,
-  and no in-place upgrade from a 1.x PostgreSQL deployment.** Messages stored in
-  1.x do not carry over; a 1.x consumer moves to 2.0 by pointing at the new
-  host.
-- **SDKs exist for JavaScript, Python, Go, Rust, PHP/Laravel and C++**, plus a Go
-  operator CLI. There is no Java or .NET client. Those languages use the
-  HTTP API directly.
-
-## Where another tool fits better
-
-| If you need | Where Queen stands |
-| --- | --- |
-| Total ordering across an entire topic or system | Ordering is per partition. One partition gives you total order and one lane's worth of throughput |
-| Message priority, deadlines, or reordering | Delivery is arrival order within a partition, with no override. `delayedProcessing` and `windowBuffer` shift when a whole lane becomes visible, and reorder nothing |
-| Many workers sharing one ordered stream | One in-flight leased batch per `(partition, group)` is what makes per-entity FIFO true. Parallelise by choosing a partition key with more distinct values: lanes are created by the push that names them |
-| A broker that keeps accepting writes without a majority | A cluster serves writes only while a majority of its voters is up. Nothing is spooled on the side: a refused write answers 503 and the client retries |
-| Write throughput that grows with every node you add | Every write of a raft group goes through its leader. More voters add copies and failure tolerance; `QUEEN_RAFT_GROUPS` spreads tenants over several leaders, one tenant per group |
-| Per-tenant quotas, plans and usage metering | Shipped in the proxy (`proxy/`), which runs in the broker process with `QUEEN_PROXY_EMBEDDED=true`, not in the bare broker |
-| Opaque binary or very large payloads | Payloads are JSON, inside a request-body cap |
-| A broker you can expose directly to untrusted clients | The bare broker has no TLS listener, no CORS, authentication off by default, and a raft port that must be firewalled. The embedded proxy is the surface built to face clients |
-| A Java or .NET SDK today | Only six language SDKs exist; everything else is plain HTTP |
-| Nothing but per-key ordering at very high cardinality, at a modest rate | Queen's per-lane cursor is what buys consumer groups, replay, per-group lag and a retry budget; a workload that needs none of those does not need the cursor, and pgmq serves it with no per-lane state at all |
-
-If none of those is disqualifying, the story behind the trade-offs is in
-[History](/start/history), the architectural comparison is in
-[Comparison](/start/compare), and the shortest path to a running broker is the
-[Quickstart](/start/quickstart).
+| Behaviour | Default | Setting |
+|---|---|---|
+| Retention of messages | off per queue | `retentionEnabled`, `retentionSeconds`, `completedRetentionSeconds` on `configure` |
+| Retention pass | every 5000 ms | `RETENTION_INTERVAL` |
+| A partition with no retained message, no dead letter and no live lease, unwritten for this long, is deleted | 30 days | `PARTITION_CLEANUP_DAYS`, `QUEEN_PARTITION_CLEANUP_ENABLED` |
+| Message traces | 7 days | `QUEEN_RAFT_TRACE_RETENTION_S` |
+| Disk high-water mark: writes that grow storage answer 507 | 85% | `QUEEN_RAFT_DISK_HIGH_PCT` (released at `QUEEN_RAFT_DISK_LOW_PCT`, 80%) |

@@ -2,470 +2,197 @@
 import { Code } from "astro:components";
 import BaseLayout from "../layouts/BaseLayout.astro";
 import Header from "../components/Header.astro";
+import Figure from "../components/Figure.astro";
 import { config } from "virtual:nimbus/config";
-import pushRaw from "../content/partials/snippets/js-push.mdx?raw";
-import consumeRaw from "../content/partials/snippets/js-consume.mdx?raw";
-import positionMapRaw from "../../../assets/queen-map.svg?raw";
+import {
+  HOME_TITLE,
+  hero,
+  step,
+  stepSection,
+  roles,
+  partitionSection,
+  primitives,
+  doorsSection,
+  doors,
+  dashboardSection,
+  proofSection,
+  proof,
+  runSection,
+  differentiators,
+  limits,
+  start,
+} from "../lib/home";
 
 /**
- * The landing page.
+ * The landing page. Every word on it comes from src/lib/home.ts, which the
+ * markdown twin (index.md.ts) reads too. Elements marked `data-md` are the
+ * ones scripts/check-markdown.mjs looks for in dist/index.md.
  *
- * The code samples are pulled out of the generated snippet partials rather than
- * retyped, so the front page cannot drift from the test suite either. Imported
- * `?raw` so Vite resolves them at build time and tracks them for hot reload.
- * Reading the file at runtime would look in the bundled output, not the source.
- * See webdoc/scripts/gen-snippets.mjs.
+ * The rhythm: a split hero, then sections that alternate between the page and
+ * a card-coloured band, each with a small label, a title, one lead paragraph,
+ * and one piece of evidence (code, a drawn figure, a chart, a screenshot) that
+ * shows what the paragraph claims.
  */
-function snippet(raw: string, id: string): string {
-  const fenced = raw.match(/```[a-z]*[^\n]*\n([\s\S]*?)```/);
-  if (!fenced) throw new Error(`snippet ${id} has no fenced block`);
-  return fenced[1].trimEnd();
-}
 
 // The same pair Nimbus configures for MDX code blocks, with defaultColor off:
-// each span then carries the light colour plus a `--shiki-dark` custom
-// property, and globals.css flips it under [data-mode="dark"]. Using Astro's
-// default here would give the landing page a second, mismatched code theme.
+// each span carries the light colour plus a `--shiki-dark` custom property,
+// and globals.css flips it under [data-mode="dark"].
 const SHIKI = { light: "github-light", dark: "github-dark" } as const;
 
-/**
- * The `<title>` for this page. Deliberately not `config.title`: NimbusHead
- * appends " | Queen MQ" only when the page title differs from the site title,
- * so passing the site title emitted a bare `<title>Queen MQ</title>` on the one
- * page that most needs to say what this is. This renders as
- * "Transactional messaging with one ordered stream per entity | Queen MQ".
- * Leave the brand out of the string or it gets appended twice.
- */
-const HOME_TITLE = "Transactional messaging with one ordered stream per entity";
-
-const produce = snippet(pushRaw, "js-push");
-const consume = snippet(consumeRaw, "js-consume");
-
-/**
- * The figure is inlined rather than served through an `img`, and the same file
- * ships in the README. An `img` renders in its own document, so it cannot see
- * `data-mode` and would keep following the operating system while the reader
- * flips the site theme. Inlined, the stylesheet inside the file becomes part of
- * this page and the toggle drives it. The XML prolog has to go: it is legal in
- * a standalone SVG and a stray processing instruction inside HTML.
- */
-const positionMap = positionMapRaw
-  .replace(/^<\?xml[^>]*\?>\s*/, "")
-  .replace(/<svg /, '<svg class="w-full h-auto" ');
-
-// `href` is optional: only the cards whose subject has one obvious destination
-// carry a link, so the linked ones stay meaningful rather than decorative.
-const differentiators: { title: string; body: string; href?: string }[] = [
-  {
-    title: "The entity is the partition",
-    body: "Most brokers give you ordering per shard, and your requirement is ordering per entity. Hash entities onto a fixed partition count and the ones that collide block each other. Give each entity its own queue and broker-side objects grow with your customer list. Queen removes the bridge: a partition is created by the first push that names it, and a slow customer delays only itself.",
-    href: "/use/model/",
-  },
-  {
-    title: "The partition key is your ordering boundary",
-    body: "customer_id, account_id, conversation_id, device_id, workflow_id. You choose it, and it is an application decision rather than an infrastructure sizing decision. Do not pick a key because it has high cardinality: pick the boundary your application genuinely requires.",
-    href: "/use/model/",
-  },
-  {
-    title: "Ack the input, write the state and push the output in one commit",
-    body: "One transaction bundles acknowledgements, pushes, key/value writes and timer operations, across any number of partitions, queues and consumer groups, into one entry of the replicated log. That is what replaces transactional outbox tables, a separate store for idempotency markers, and the reconciliation code that exists only because the broker's commit and the application store's commit were two different commits.",
-    href: "/reference/http/transaction/",
-  },
-  {
-    title: "Application scale is not infrastructure scale",
-    body: "In most brokers a per-entity ordering guarantee means a per-entity infrastructure object, either a topic partition with its own files and replicas or a live server-side queue. In Queen a partition is an entry in the node's ordered store and a range of offsets in its queue's log: not a file, a process or a replica set of its own.",
-    href: "/internals/storage-model/",
-  },
-  {
-    title: "Partitions, nodes and cells scale different things",
-    body: "Partitions scale application cardinality. Nodes buy availability: three voters survive one failure and five survive two, and any node serves any client. Cells scale the deployment: capacity grows by adding cells, not by growing one system, and there is no global cluster to join and no cross-cell coordination in the message path.",
-    href: "/deploy/ha/",
-  },
-  {
-    title: "One binary, no external database",
-    body: "Each node keeps its state in a replicated log on its own disk. One leader orders every write, a write is answered once a majority of the voters have it on disk, and every node applies the same entries to its own full copy. Messaging state and application state share that log, which is the whole reason for the design.",
-    href: "/deploy/",
-  },
-  {
-    title: "Any node serves any client",
-    body: "Messages, offsets, leases, deduplication state, queue configuration and dead letters are the state the log produces, so every node holds all of it. A follower forwards writes to the leader and holds reads until it has applied what was committed when they began, and a leader that stops gracefully hands leadership over first.",
-    href: "/deploy/ha/",
-  },
-  {
-    title: "Key/value state, timers and windows are part of the engine",
-    body: "A key/value write can share the transaction with a push and an ack, which a store standing beside the broker cannot do at any price. A timer is a scheduled message you can cancel and reprogram until it fires. Tumbling, sliding, session and cron windows commit their state, their output and their acks together. None of it is a flag you turn on.",
-    href: "/use/kv/",
-  },
-  {
-    title: "Many tenants on one cell, isolation enforced in the broker",
-    body: "The broker scopes queue identity natively as (tenant, name), so two tenants both owning a queue called orders own different queues. The proxy is the tenant-facing boundary that makes the identity driving that scoping trustworthy. Neither half is sufficient alone.",
-    href: "/deploy/multi-tenant/",
-  },
-  {
-    title: "Plain HTTP, six SDKs, one binary",
-    body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper, no database to run beside it. Anything that can make an HTTP request is a first-class client, and curl is one.",
-  },
-  {
-    title: "Kafka clients reach it by changing one line",
-    body: "The Kafka facade runs inside the broker process and stays off until you switch it on. It advertises 32 Kafka API keys, transactions included, so an unmodified producer or consumer moves across by changing bootstrap.servers and nothing else. It stores nothing durable of its own: offsets and records are Queen's, and what it deliberately does not do is written down.",
-    href: "/deploy/kafka/",
-  },
-];
-
-
-const proof = [
-  {
-    figure: "86.4B",
-    unit: "messages in 24 hours",
-    body: "About 1,000,000 a second in each direction, pushed, popped and acknowledged, with explicit acks and deduplication on. Zero restarts, and broker memory flat near 4.1 GB for the whole run.",
-    href: "/benchmarks/soak-24h",
-  },
-  {
-    figure: "1M",
-    unit: "ordered partitions",
-    body: "A million FIFO lanes in one queue, none preallocated, created during the run at a thousand a second while serving 200,000 messages a second. Zero push, pop or ack errors over 722 million messages.",
-    href: "/benchmarks/cardinality-1m",
-  },
-  {
-    figure: "0",
-    unit: "order violations",
-    body: "1,000 partitions through a four-stage pipeline at 25,000 events a second: 88,503,408 messages verified by a per-stage checker, with zero duplicates and zero gaps.",
-    href: "/benchmarks/ordered-pipeline",
-  },
-  {
-    figure: "0",
-    unit: "cross-tenant deliveries",
-    body: "Twelve tenants sharing one queue name and one consumer group name for an hour, with enforcement on. Not one message crossed a tenant boundary. Isolation is the clean result of that run, not throughput.",
-    href: "/benchmarks/multitenant-cell",
-  },
-];
-
-const featureLine = [
-  "Consumer groups",
-  "Replay and seek",
-  "Dead-letter queue",
-  "Exact deduplication",
-  "Transactional ack + state + push",
-  "Key/value state",
-  "Cancellable timers",
-  "Windowed aggregation",
-  "Ephemeral queues",
-  "Multi-tenancy",
-  "Kafka wire protocol",
-  "Raft replication",
-];
+const eyebrow = "text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground";
+const h2 = "mt-3 text-3xl font-semibold tracking-tight text-foreground lg:text-[2.5rem] lg:leading-[1.1]";
+const lead = "mt-5 max-w-3xl text-lg leading-relaxed text-muted-foreground";
+const card =
+  "block rounded-xl border border-border bg-background p-5 no-underline transition-colors hover:border-border-strong";
 ---
 
 <BaseLayout title={HOME_TITLE} description={config.description}>
-  <div class="flex flex-col min-h-screen">
-    <Header />
+  <div class="flex min-h-screen flex-col">
+    <Header transparentTop />
 
-    <main class="flex-1 w-full">
-      {/* Hero */}
-      <section class="mx-auto max-w-5xl w-full px-6 pt-20 pb-16">
-        <p class="text-sm font-medium text-muted-foreground">
-          Queen MQ · Apache 2.0
-        </p>
-        <h1
-          class="mt-3 max-w-3xl text-foreground leading-[1.08]"
-          style="font-size: clamp(2rem, 4.2vw, 3rem); font-weight: var(--nb-h1-weight); letter-spacing: -0.02em;"
-        >
-          High-performance transactional messaging, with an ordered stream per entity.
-        </h1>
-        <p class="mt-6 max-w-2xl text-lg font-medium text-foreground leading-relaxed">
-          You can offload most of your complex application logic to Queen.
-        </p>
-        <p class="mt-4 max-w-2xl text-lg text-muted-foreground leading-relaxed">
-          Queen is a message broker written in Rust: one binary per node, keeping its state in a
-          replicated log on its own disk. Its defining abstraction is <strong>one logical ordered partition per
-          application entity</strong>, a customer, an account, a conversation, a device, a
-          workflow, a session or a job, created by the first push that names it and never
-          provisioned in advance.
-        </p>
+    <main class="w-full flex-1">
+      {/* Hero: full height, two halves from lg up; the scene fills the right
+          42% under the clear header. Below lg the scene sits under the text. */}
+      <section class="lg:-mt-[calc(3.5rem+1px)] lg:grid lg:min-h-svh lg:grid-cols-[minmax(0,1fr)_42%]">
+        <div class="flex lg:items-center lg:justify-center lg:px-12">
+          <div class="mx-auto w-full max-w-6xl px-6 pb-12 pt-12 lg:max-w-[36rem] lg:px-0 lg:py-20">
+            <p class={eyebrow}>{hero.eyebrow}</p>
+            <h1
+              data-md
+              class="mt-5 text-foreground"
+              style="font-size: clamp(2.6rem, 5.4vw, 4.25rem); line-height: 1.02; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
+            >
+              {hero.headline}
+            </h1>
+            <p data-md class="mt-7 text-xl leading-relaxed text-foreground/85">{hero.lead}</p>
+            <p data-md class="mt-4 text-base leading-relaxed text-muted-foreground">{hero.second}</p>
 
-        <div class="mt-9 flex flex-wrap items-center gap-3">
-          <a
-            href="/start/quickstart"
-            class="rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background no-underline transition-opacity hover:opacity-90"
-          >
-            Push your first message
-          </a>
-          <a
-            href="https://queenmq.cloud/try"
-            class="rounded-lg border border-border px-5 py-2.5 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
-          >
-            Try it free, hosted
-          </a>
-          <a
-            href="/use/model/"
-            class="rounded-lg border border-border px-5 py-2.5 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
-          >
-            The model, in one page
-          </a>
-          <a
-            href="/start/compare/"
-            class="rounded-lg border border-border px-5 py-2.5 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
-          >
-            Compared to Kafka and RabbitMQ
-          </a>
-          <a
-            href="https://github.com/queen-mq/queen"
-            class="px-2 py-2.5 text-sm text-muted-foreground no-underline transition-colors hover:text-foreground"
-          >
-            Source on GitHub →
-          </a>
-        </div>
-
-        <p class="mt-8 text-sm text-muted-foreground">
-          {
-            featureLine.map((f, i) => (
-              <Fragment>
-                {i > 0 && " · "}
-                <strong>{f}</strong>
-              </Fragment>
-            ))
-          }
-        </p>
-      </section>
-
-      {/* The README's opening argument. Duplicated in index.md.ts
-          (homepageBody), like the rest of this page's copy: edit both together. */}
-      <section class="mx-auto max-w-5xl w-full px-6 pb-16">
-        <div class="grid gap-x-10 gap-y-8 lg:grid-cols-2">
-          <div>
-            <h2 class="text-xl font-semibold text-foreground">The problem</h2>
-            <p class="mt-2 text-muted-foreground leading-relaxed">
-              Most brokers give you ordering per <em>shard</em>. Your requirement is ordering per{" "}
-              <em>entity</em>: this customer's events processed in order, this conversation's
-              messages not overtaking each other, this account's transactions settling in
-              sequence.
-            </p>
-            <p class="mt-4 text-muted-foreground leading-relaxed">
-              Bridging the two is where the pain lives. Hash your entities onto a fixed partition
-              count and the ones that collide block each other: a slow customer stalls every
-              customer sharing its shard. Give each entity its own queue instead and broker-side
-              objects grow with your customer list.
-            </p>
-            <p class="mt-4 text-foreground leading-relaxed">
-              Queen removes the bridge: <strong>the entity is the partition.</strong>
-            </p>
-          </div>
-
-          <div>
-            <h2 class="text-xl font-semibold text-foreground">One entity, one ordered partition</h2>
-            <p class="mt-2 text-muted-foreground leading-relaxed">
-              Each partition is an independent ordered lane, created by the push that first names
-              it. Nothing is preallocated, nothing is assigned, nothing rebalances when a consumer
-              restarts.
-            </p>
-            <pre class="mt-4 overflow-x-auto rounded-lg border border-border bg-card p-4 text-xs leading-relaxed text-muted-foreground"><code>customer A  ──►  A1 ──► A2 ──► A3     strict FIFO within a lane
-customer B  ──►  B1 ──► B2            B is not held up by A
-customer C  ──►  C1 ──► C2 ──► C3     C is not held up by A or B</code></pre>
-            <p class="mt-4 text-sm text-muted-foreground leading-relaxed">
-              A single hot partition stays sequential, by design. Parallelism comes from many
-              active partitions, not from splitting one.
-              <a href="/use/model/"> The model, in one page →</a>
-            </p>
-          </div>
-        </div>
-      </section>
-
-      {/* Transactional processing */}
-      <section class="mx-auto max-w-5xl w-full px-6 pb-16">
-        <h2 class="text-xl font-semibold text-foreground">Transactional processing</h2>
-        <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
-          The second reason Queen exists. A single call bundles acknowledgements, pushes,
-          key/value writes and timer operations into one entry of the replicated log, which
-          applies whole or not at all.
-        </p>
-        <pre class="mt-6 overflow-x-auto rounded-lg border border-border bg-card p-4 text-xs leading-relaxed text-muted-foreground"><code>consume input
-     │
-     ├── update application state   (kv rider)
-     ├── produce output             (push, any queue, any partition)
-     ├── schedule / cancel a timer  (timers rider)
-     └── acknowledge input          (cursor advance)
-                │
-             COMMIT          all of it, or none of it</code></pre>
-        <p class="mt-4 max-w-3xl text-sm text-muted-foreground leading-relaxed">
-          Atomicity covers broker state, not the network. Queen does not make an external HTTP
-          call exactly-once, and no broker can. The one case that is exactly-once end to end is
-          when the effect is itself state in this broker, written through the key/value rider:
-          marker, effect, output and cursor advance become a single commit.
-          <a href="/reference/http/transaction/"> The bundle shape and every rollback cause →</a>
-        </p>
-      </section>
-
-      {/* Where it sits */}
-      <section class="mx-auto max-w-5xl w-full px-6 pb-16">
-        <div class="rounded-xl border border-border bg-card p-4 sm:p-6 overflow-x-auto">
-          {/* Below roughly 720px the figure would set its 12px labels at four
-              or five CSS pixels, so it scrolls instead of shrinking. */}
-          <div class="min-w-[720px]">
-            <Fragment set:html={positionMap} />
-          </div>
-        </div>
-        <p class="mt-3 text-sm text-muted-foreground">
-          Each frontier is where a system stops keeping one ordered lane per entity: measured
-          on matched hardware for Kafka, RabbitMQ and pgmq, taken from the published quotas
-          for SQS, and dashed wherever the edge is one we did not measure. Queen's region is a
-          square because the axes share a scale and it reaches a million on both, in two
-          separate runs of Queen 1.x, whose storage was PostgreSQL. The conditions behind every
-          figure are in{" "}
-          <a href="/start/compare/">the comparison</a> and in <a href="/benchmarks/comparison">the measured runs</a>.
-        </p>
-      </section>
-
-      {/* Code */}
-      <section class="mx-auto max-w-5xl w-full px-6 pb-20">
-        <h2 class="text-xl font-semibold text-foreground">It looks like this</h2>
-        <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
-          Queues and partitions are created on first use, so there is nothing to provision
-          before the first line runs.
-        </p>
-
-        <div class="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <div class="rounded-lg border border-border overflow-hidden">
-            <div class="border-b border-border px-4 py-2 text-xs font-medium text-muted-foreground">
-              Produce
+            <div class="mt-9 flex flex-wrap items-center gap-3">
+              <a
+                href={hero.primary.href}
+                class="rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background no-underline transition-opacity hover:opacity-90"
+              >
+                {hero.primary.label}
+              </a>
+              <a
+                href={hero.secondary.href}
+                class="rounded-lg border border-border px-5 py-2.5 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
+              >
+                {hero.secondary.label}
+              </a>
+              <a
+                href="https://github.com/queen-mq/queen"
+                class="px-2 py-2.5 text-sm text-muted-foreground no-underline transition-colors hover:text-foreground"
+              >
+                GitHub →
+              </a>
             </div>
-            <div class="p-4 text-sm overflow-x-auto">
-              <Code code={produce} lang="js" themes={SHIKI} defaultColor={false} />
+
+            <div class="mt-9 rounded-lg border border-border bg-card px-4 py-3">
+              <pre class="overflow-x-auto text-[0.8125rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{hero.run}</code></pre>
             </div>
-          </div>
-          <div class="rounded-lg border border-border overflow-hidden">
-            <div class="border-b border-border px-4 py-2 text-xs font-medium text-muted-foreground">
-              Consume
-            </div>
-            <div class="p-4 text-sm overflow-x-auto">
-              <Code code={consume} lang="js" themes={SHIKI} defaultColor={false} />
-            </div>
+            <p class="mt-3 text-sm text-muted-foreground">{hero.runNote}</p>
           </div>
         </div>
 
-        <p class="mt-3 text-sm text-muted-foreground">
-          There are <a href="/use/js-client">SDKs for JavaScript, Python, Go, Rust, PHP and C++</a>, <a href="/reference/queenctl/">an operator CLI</a>, and a <a href="/reference/http">plain HTTP API</a> for everything else.
-        </p>
-      </section>
-
-      {/* Differentiators */}
-      <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-16">
-          <h2 class="text-xl font-semibold text-foreground">What makes it different</h2>
-          <div class="mt-8 grid grid-cols-1 gap-x-10 gap-y-8 sm:grid-cols-2">
-            {
-              differentiators.map((d) => (
-                <div>
-                  <h3 class="font-medium text-foreground">
-                    {d.href ? <a href={d.href}>{d.title}</a> : d.title}
-                  </h3>
-                  <p class="mt-1.5 text-sm text-muted-foreground leading-relaxed">{d.body}</p>
-                </div>
-              ))
-            }
-          </div>
-        </div>
-      </section>
-
-      {/* Three kinds of scale */}
-      <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-16">
-          <h2 class="text-xl font-semibold text-foreground">Three kinds of scale</h2>
-          <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
-            Three axes, frequently confused, not interchangeable. Confusing them is the most
-            common way to mis-size a deployment.
-          </p>
-
-          <div class="mt-8 grid grid-cols-1 gap-8 sm:grid-cols-3">
-            <div>
-              <h3 class="font-medium text-foreground">Partitions scale application cardinality</h3>
-              <p class="mt-1.5 text-sm text-muted-foreground leading-relaxed">
-                Add entities freely. Nothing is provisioned, no process is created, no rebalance
-                runs. Millions of logical entity streams do not require millions of infrastructure
-                objects.
-              </p>
-            </div>
-            <div>
-              <h3 class="font-medium text-foreground">Nodes buy availability inside a cell</h3>
-              <p class="mt-1.5 text-sm text-muted-foreground leading-relaxed">
-                Three or five voters of one binary, each with a full copy on its own disk, covering
-                a process dying, a rolling restart, one node's network. Every write goes through one
-                leader, so more nodes buy availability, not write throughput.
-              </p>
-            </div>
-            <div>
-              <h3 class="font-medium text-foreground">Cells scale the deployment</h3>
-              <p class="mt-1.5 text-sm text-muted-foreground leading-relaxed">
-                A cell is one Queen node or a raft cluster of them, with the proxy optionally running
-                in the same process. Capacity grows by adding cells, not by growing one system: no
-                global cluster to join, no cross-cell coordination in the message path.
-              </p>
-            </div>
-          </div>
-
-          <pre class="mt-8 overflow-x-auto rounded-lg border border-border bg-card p-4 text-xs leading-relaxed text-muted-foreground"><code>                         Queen Cell
-     ┌──────────────────────────────────────────────┐
-     │  Queen node (leader)    ──► local disk       │
-     │  Queen node (follower)  ──► local disk       │  one replicated log,
-     │  Queen node (follower)  ──► local disk       │  a full copy on each
-     │  proxy, Kafka facade: in the same process    │  optional
-     └──────────────────────────────────────────────┘</code></pre>
-
-          <p class="mt-4 max-w-3xl text-sm text-muted-foreground leading-relaxed">
-            A cell is at once the scaling boundary, the failure boundary and the unit of upgrade
-            and operational ownership. The failure domain is the majority: a cluster keeps serving
-            while most of its voters are up, and stops taking writes when they are not.
-            <a href="/deploy/ha/"> Voters, quorum, failover and replacing a node →</a>
-          </p>
-        </div>
-      </section>
-
-      {/* Dashboard */}
-      <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-16">
-          <h2 class="text-xl font-semibold text-foreground">
-            <a href="/deploy/dashboard/" class="no-underline text-foreground">The dashboard is already in there</a>
-          </h2>
-          <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
-            Queue health, per-group lag, message inspection and dead-letter replay. Nothing was
-            installed to get this: it is the same binary, on the port you already opened, and it
-            grows logins and roles when it runs <a href="/deploy/multi-tenant/">behind the proxy</a>.
-          </p>
+        <div class="relative aspect-[4/5] w-full sm:mx-auto sm:mb-12 sm:max-w-xl sm:overflow-hidden sm:rounded-xl lg:mx-0 lg:mb-0 lg:aspect-auto lg:max-w-none lg:rounded-none">
           <img
-            src="/screenshots/dashboard-overview.png"
-            alt="The bundled dashboard's overview: stored messages, queues, partitions, consumer groups, pending and completed counts above a table of throughput, lag and error series with sparklines."
-            width="2880"
-            height="1800"
-            loading="lazy"
-            class="mt-6 w-full h-auto rounded-xl border border-border"
+            src="/queen-scene.svg"
+            alt=""
+            width="1200"
+            height="1536"
+            class="hero-scene-light absolute inset-0 h-full w-full object-cover"
+            style="object-position: 35% 50%;"
+          />
+          <img
+            src="/queen-scene-cream.svg"
+            alt=""
+            width="1200"
+            height="1536"
+            class="hero-scene-dark absolute inset-0 h-full w-full object-cover"
+            style="object-position: 35% 50%;"
           />
         </div>
       </section>
 
-      {/* Proof */}
+      {/* One step, one commit */}
       <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-16">
-          <h2 class="text-xl font-semibold text-foreground">Measured, with the conditions attached</h2>
-          <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
-            Every number on this site names the run that produced it. A figure without an
-            archived artifact recording its configuration does not get published here. The runs
-            below measured Queen 1.x, whose storage was PostgreSQL; 2.0 replaced that storage with
-            the replicated log, so they describe the 1.x engine. They are single-shape runs: they
-            say nothing about your throughput, latency, sizing or retention capacity, which follow
-            from your workload, payloads and hardware.
-          </p>
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <p class={eyebrow}>{stepSection.eyebrow}</p>
+          <h2 data-md class={h2}>{stepSection.title}</h2>
+          <p data-md class={lead}>{stepSection.lead}</p>
 
-          <div class="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+          <div class="home-code mt-12 overflow-hidden rounded-xl border border-border bg-card">
+            <div class="flex items-center justify-between border-b border-border px-5 py-2.5 text-xs text-muted-foreground">
+              <span class="font-medium">One step, as one call</span>
+              <span>JavaScript</span>
+            </div>
+            <div class="overflow-x-auto px-5 py-4 text-[0.8125rem]">
+              <Code code={step} lang="js" themes={SHIKI} defaultColor={false} />
+            </div>
+            <ol class="grid grid-cols-2 border-t border-border sm:grid-cols-3 lg:grid-cols-6">
+              {
+                roles.map((r) => (
+                  <li class="border-b border-r border-border px-5 py-4 lg:border-b-0">
+                    <a href={r.href} class="font-medium text-foreground no-underline hover:underline">
+                      {r.role}
+                    </a>
+                    <p data-md class="mt-1 text-sm leading-snug text-muted-foreground">{r.primitive}</p>
+                  </li>
+                ))
+              }
+              <li class="bg-background px-5 py-4">
+                <span class="font-medium text-foreground">One entry</span>
+                <p class="mt-1 text-sm leading-snug text-muted-foreground">committed whole, or not at all</p>
+              </li>
+            </ol>
+          </div>
+
+          <div class="mt-12 grid grid-cols-1 gap-10 lg:grid-cols-12 lg:items-center">
+            <div class="lg:col-span-8">
+              <Figure id="concepts/four-systems" />
+            </div>
+            <div class="lg:col-span-4">
+              <p data-md class="leading-relaxed text-muted-foreground">{stepSection.after}</p>
+              <a href={stepSection.link.href} class="mt-4 inline-block text-sm font-medium">
+                {stepSection.link.label} →
+              </a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Partitions */}
+      <section class="border-t border-border bg-card">
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <div class="grid grid-cols-1 gap-10 lg:grid-cols-12">
+            <div class="lg:col-span-5">
+              <p class={eyebrow}>{partitionSection.eyebrow}</p>
+              <h2 data-md class={h2}>{partitionSection.title}</h2>
+              <p data-md class="mt-5 text-lg leading-relaxed text-muted-foreground">{partitionSection.lead}</p>
+              <p data-md class="mt-4 leading-relaxed text-muted-foreground">{partitionSection.after}</p>
+              <a href={partitionSection.link.href} class="mt-4 inline-block text-sm font-medium">
+                {partitionSection.link.label} →
+              </a>
+            </div>
+            <div class="lg:col-span-7 lg:pt-2">
+              <Figure id="benchmarks/partitions-p99" />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Primitives */}
+      <section class="border-t border-border">
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <p class={eyebrow}>Everything in one log</p>
+          <h2 class={h2}>The pieces a step needs, sharing one commit</h2>
+          <div class="mt-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {
-              proof.map((p) => (
-                <a
-                  href={p.href}
-                  class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
-                >
-                  <div class="text-3xl font-semibold text-foreground">{p.figure}</div>
-                  <div class="mt-0.5 text-xs uppercase tracking-wide text-muted-foreground">
-                    {p.unit}
-                  </div>
-                  <p class="mt-3 text-sm text-muted-foreground leading-relaxed">{p.body}</p>
+              primitives.map((p) => (
+                <a href={p.href} class={card}>
+                  <div class="font-medium text-foreground">{p.title}</div>
+                  <p data-md class="mt-1.5 text-sm leading-relaxed text-muted-foreground">{p.body}</p>
                 </a>
               ))
             }
@@ -473,81 +200,189 @@ customer C  ──►  C1 ──► C2 ──► C3     C is not held up by A or
         </div>
       </section>
 
-      {/* Limits */}
+      {/* Doors */}
+      <section class="border-t border-border bg-card">
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <p class={eyebrow}>{doorsSection.eyebrow}</p>
+          <h2 data-md class={h2}>{doorsSection.title}</h2>
+          <p data-md class={lead}>{doorsSection.lead}</p>
+
+          <div class="mt-12 grid grid-cols-1 gap-8 lg:grid-cols-12">
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:col-span-6">
+              {
+                doors.map((d, i) => (
+                  <a href={d.href} class={i === doors.length - 1 && doors.length % 2 === 1 ? `${card} sm:col-span-2` : card}>
+                    <div class="font-medium text-foreground">{d.title}</div>
+                    <p data-md class="mt-1.5 text-sm leading-relaxed text-muted-foreground">{d.body}</p>
+                  </a>
+                ))
+              }
+            </div>
+            <div class="home-code overflow-hidden rounded-xl border border-border bg-background lg:col-span-6 lg:self-start">
+              <div class="border-b border-border px-4 py-2.5 text-xs font-medium text-muted-foreground">
+                {doorsSection.snippetTitle}
+              </div>
+              <div class="overflow-x-auto px-5 py-4 text-[0.8125rem]">
+                <Code code={doorsSection.snippet} lang="bash" themes={SHIKI} defaultColor={false} />
+              </div>
+              <p class="border-t border-border px-4 py-3 text-sm text-muted-foreground">
+                The source copies the rows already there, then streams every committed change. A
+                sink is the same call with <code>"kind": "sink"</code>.
+                <a href="/guides/postgres/"> PostgreSQL →</a>
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Dashboard */}
       <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-10">
-          <p class="max-w-3xl text-sm text-muted-foreground leading-relaxed">
-            Queen has real limits, and some workloads are better served elsewhere. One ordered
-            lane is sequential, so if your ordering boundary is everything, the core idea does
-            nothing for you. In-group parallelism is bounded by how many distinct entities you
-            push to. Every write goes through one leader and every voter holds a full copy, so one
-            node's disk bounds retention, there is no tiered object storage and no cross-region
-            replication, and the Kafka facade
-            speaks the wire protocol but not the ecosystem around it, so log compaction, Kafka
-            Streams, Connect's exactly-once source and the Schema Registry's compacted topic all
-            stay out.
-            <a href="/reference/limits"> Read the full list before you design around it →</a>
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <div class="grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-end">
+            <div class="lg:col-span-7">
+              <p class={eyebrow}>{dashboardSection.eyebrow}</p>
+              <h2 data-md class={h2}>{dashboardSection.title}</h2>
+            </div>
+            <div class="lg:col-span-5">
+              <p data-md class="leading-relaxed text-muted-foreground">{dashboardSection.lead}</p>
+              <a href={dashboardSection.link.href} class="mt-3 inline-block text-sm font-medium">
+                {dashboardSection.link.label} →
+              </a>
+            </div>
+          </div>
+          <div class="mt-12 overflow-hidden rounded-xl border border-border">
+            <img
+              src={`/screenshots/${dashboardSection.image}-light.png`}
+              alt={dashboardSection.alt}
+              width="2880"
+              height="1800"
+              loading="lazy"
+              decoding="async"
+              class="home-shot-light block h-auto w-full"
+            />
+            <img
+              src={`/screenshots/${dashboardSection.image}-dark.png`}
+              alt={dashboardSection.alt}
+              width="2880"
+              height="1800"
+              loading="lazy"
+              decoding="async"
+              class="home-shot-dark block h-auto w-full"
+            />
+          </div>
+        </div>
+      </section>
+
+      {/* Proof */}
+      <section class="border-t border-border bg-card">
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <p class={eyebrow}>{proofSection.eyebrow}</p>
+          <h2 data-md class={h2}>{proofSection.title}</h2>
+          <p data-md class={lead}>{proofSection.lead}</p>
+          <div class="mt-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {
+              proof.map((p) => (
+                <a href={p.href} class={card}>
+                  <div class="text-3xl font-semibold tracking-tight text-foreground">{p.figure}</div>
+                  <div class="mt-1 text-xs uppercase tracking-wide text-muted-foreground">{p.unit}</div>
+                  <p data-md class="mt-4 text-sm leading-relaxed text-muted-foreground">{p.body}</p>
+                </a>
+              ))
+            }
+          </div>
+          <a href={proofSection.link.href} class="mt-8 inline-block text-sm font-medium">
+            {proofSection.link.label} →
+          </a>
+        </div>
+      </section>
+
+      {/* Operations */}
+      <section class="border-t border-border">
+        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+          <p class={eyebrow}>{runSection.eyebrow}</p>
+          <h2 class={h2}>{runSection.title}</h2>
+          <div class="mt-12 grid grid-cols-1 gap-x-12 gap-y-10 sm:grid-cols-2">
+            {
+              differentiators.map((d) => (
+                <div class="border-t border-border pt-5">
+                  <h3 class="font-medium text-foreground">
+                    <a href={d.href} class="no-underline">
+                      {d.title}
+                    </a>
+                  </h3>
+                  <p data-md class="mt-2 leading-relaxed text-muted-foreground">{d.body}</p>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      </section>
+
+      {/* Limits */}
+      <section class="border-t border-border bg-card">
+        <div class="mx-auto w-full max-w-6xl px-6 py-12">
+          <p data-md class="max-w-4xl leading-relaxed text-muted-foreground">
+            {limits}
+            <a href="/reference/limits/"> Read the full list before you design around it →</a>
           </p>
         </div>
       </section>
 
       {/* Start */}
       <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-16">
-          <h2 class="text-xl font-semibold text-foreground">Start</h2>
-          <div class="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <a
-              href="/start/quickstart"
-              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
-            >
-              <div class="font-medium text-foreground">Use it</div>
-              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
-                The model in one page, the SDKs, and worked examples.
-              </p>
-            </a>
-            <a
-              href="/use/js-client"
-              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
-            >
-              <div class="font-medium text-foreground">Pick your SDK</div>
-              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
-                JavaScript, Python, Go, Rust, PHP and C++, plus queenctl and plain HTTP.
-              </p>
-            </a>
-            <a
-              href="/deploy"
-              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
-            >
-              <div class="font-medium text-foreground">Host it</div>
-              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
-                Deployment, high availability, security, operations.
-              </p>
-            </a>
-            <a
-              href="/internals"
-              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
-            >
-              <div class="font-medium text-foreground">Understand it</div>
-              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
-                The replicated log, offsets, the push and pop paths, the storage underneath.
-              </p>
-            </a>
+        <div class="mx-auto w-full max-w-6xl px-6 py-20">
+          <h2 class="text-2xl font-semibold tracking-tight text-foreground">Start here</h2>
+          <div class="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {
+              start.map((s) => (
+                <a href={s.href} class={card}>
+                  <div class="font-medium text-foreground">{s.title}</div>
+                  <p class="mt-1 text-sm leading-relaxed text-muted-foreground">{s.body}</p>
+                </a>
+              ))
+            }
           </div>
         </div>
       </section>
 
       <footer class="border-t border-border">
-        <div
-          class="mx-auto max-w-5xl w-full px-6 py-8 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-muted-foreground"
-        >
+        <div class="mx-auto flex w-full max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-6 py-8 text-sm text-muted-foreground">
           <span>Apache 2.0</span>
           <a href="https://github.com/queen-mq/queen">GitHub</a>
-          <a href="/reference">Reference</a>
-          <a href="/benchmarks">Benchmarks</a>
-          <a href="/reference/openapi">OpenAPI</a>
+          <a href="/reference/">Reference</a>
+          <a href="/benchmarks/">Benchmarks</a>
+          <a href="/reference/http/">HTTP API</a>
           <span class="ml-auto">Built at Smartness.</span>
         </div>
       </footer>
     </main>
   </div>
 </BaseLayout>
+
+<style>
+  /* Code on this page sits in a card that already has a frame and a header:
+     Shiki's own background, padding and border would be a box in a box. */
+  .home-code :global(pre.astro-code) {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent !important;
+    /* the wrapper scrolls; a second scroller here showed an empty track */
+    overflow: visible !important;
+  }
+  /* The hero scene and the dashboard screenshot exist once per theme.
+     BaseLayout stamps data-mode="dark" on <html> for the dark theme only. */
+  .hero-scene-dark,
+  .home-shot-dark {
+    display: none;
+  }
+  :global(:root[data-mode="dark"]) .hero-scene-light,
+  :global(:root[data-mode="dark"]) .home-shot-light {
+    display: none;
+  }
+  :global(:root[data-mode="dark"]) .hero-scene-dark,
+  :global(:root[data-mode="dark"]) .home-shot-dark {
+    display: block;
+  }
+</style>

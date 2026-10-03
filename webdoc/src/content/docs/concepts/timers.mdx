@@ -1,0 +1,127 @@
+---
+title: Timers
+description: "A timer is a message promised now and delivered later: an upsert by queue and timerKey that fires a real message into a real queue, through the log."
+type: concept
+tier: use
+sidebar:
+  order: 6
+sourceOfTruth:
+  - server/src/rsm/planner/timers.rs
+  - server/src/handlers/timers.rs
+  - server/src/rsm/batcher.rs
+  - server/src/switches.rs
+  - server/src/auth.rs
+  - server/src/quota.rs
+  - clients/client-js/client-v2/builders/TimerBuilder.js
+verifiedBy:
+  - clients/client-js/test-v2/timers.js
+---
+
+A timer schedules a message for later. When it fires, the broker pushes the message into a real
+queue, through the log like any other push, and your consumers read it like any other message. So a
+reminder, a payment timeout or the end of a seat reservation needs no cron job and no scheduler
+table, and because the timer can be scheduled in the same transaction as the step that wants it,
+it can never exist without that step, or the step without it.
+
+```js
+const t = queen.timer('reminders').key('order-9137')
+await t.delay('24h').payload({ orderId: 9137 }).schedule()   // { ok, status: 'scheduled', deliverAt, txn }
+await t.delay('48h').payload({ orderId: 9137 }).schedule()   // same key: status 'rescheduled'
+await t.peek()                                               // { found, deliverAt, ... }
+await t.cancel()                                             // { ok, status: 'cancelled' | 'absent', txn }
+await queen.timer('reminders').list({ limit: 50 })           // { rows, truncated, nextAfter }
+```
+
+```bash
+curl -s -X POST http://localhost:6632/api/v1/timers -H 'content-type: application/json' -d '{
+  "operations": [{ "op": "schedule", "queue": "reminders", "timerKey": "order-9137",
+    "delayMs": 86400000, "txn": "remind-9137", "payload": "eyJvcmRlcklkIjo5MTM3fQ==" }] }'
+curl -s -X DELETE 'http://localhost:6632/api/v1/timers/reminders/order-9137?txn=remind-9137'
+```
+
+A timer is identified by its queue and its `timerKey`, and scheduling a key that exists replaces
+it, so a reschedule is the same call. `delayMs` is relative, in milliseconds; there is no absolute
+time on the wire, because the broker's clock is the only one that decides when a timer is due, and
+a client's skew never enters. `txn` becomes the `transactionId` of the message the timer fires (the
+JS SDK mints one when you don't), `payload` is base64 (the JS SDK encodes JSON for you), and
+`partition` chooses the destination partition, `Default` when absent.
+
+## What a fire does
+
+Every 50 ms (`QUEEN_RAFT_TIMER_TICK_MS`) the leader of the tenant's raft group takes the timers that
+are due. A fire appends the message to its queue and partition and deletes the timer, in the same
+log entry, so it is never half done. The append goes through the push path: the queue and the
+partition are created if they don't exist yet, and the dedup check runs, so a `txn` already in the
+partition's dedup window appends nothing and the timer is done. A timer scheduled with a
+delay already due fires in the very entry that schedules it.
+
+<Figure id="concepts/timer-fire" />
+
+**`deliverAt` means not before, never exactly at.** The message is appended on a tick after it,
+then waits for a consumer like any other message.
+
+A fire that fails (its message refused by the push path) is retried with a backoff from one second
+up to a minute, and after five permanent failures the timer is filed in the destination queue's
+dead-letter queue, under the group `__timer__`.
+
+## `absent` may mean already delivered
+
+A fired timer leaves nothing behind. A cancel that arrives later answers HTTP 200 with `ok: false`,
+`status: "absent"` and the `txn` you sent with it (`?txn=` on the route), which is the
+`transactionId` to look for in the queue. A cancel and a fire never race into a half state: the
+cancel lands before the fire and nothing is delivered, or after it and answers `absent`. That is
+why the handler of a compensating timer (a payment timeout, say) checks the entity's KV state
+before it acts.
+
+## Cancel inside a transaction, or on its own
+
+`queen.transaction().timer(q).key(k).cancel()` rides the transaction and shares its fate: a
+transaction that rolls back keeps the timer. The standalone `DELETE /api/v1/timers/:queue/:timerKey`
+is never refused by a quota, a rate limit or the operator's kill switch, so cancel inside the
+transaction when the cancel must be atomic with an ack, and on its own when it must land no matter
+what. A cancel needs a token that can read and write; a produce-only token can schedule timers but
+not cancel them.
+
+## Delayed delivery is a queue option
+
+`delayedProcessing: N` holds every message of a queue for N seconds after its push
+([queue options](/concepts/partitions/)). Use it when every message waits the same time, and a
+timer when one message needs its own time, a reschedule or a cancel.
+
+## Time in a state machine
+
+A timer is a transition that time triggers. Schedule it in the transaction that enters a state,
+with the entity id as `timerKey` and the entity's partition as `partition`, so the fired message
+arrives in order with the entity's other events. Reschedule or cancel it in the transaction that
+leaves the state. See [one state machine per entity](/guides/state-machines/).
+
+```js
+await queen.transaction()
+  .ack(message, 'completed', { consumerGroup: 'bookings' })
+  .kv.put('bookings', bookingId, { state: 'held' }, { ttl: '7d' })
+  .timer('bookings').key(bookingId).partition(bookingId).delay('15m')
+    .payload({ type: 'hold-expired', bookingId }).schedule()
+  .commit()
+```
+
+## Limits
+
+- A fire comes on the leader's next tick after `deliverAt`: not before, and not exactly at.
+- No tombstone is kept, so `absent` cannot tell "cancelled earlier" from "already delivered".
+- A reschedule after the fire is a new message, unless it keeps the same `txn` and the destination
+  partition still remembers that id (its dedup window).
+- The standalone route (`POST /api/v1/timers`) refuses a delay beyond 90 days
+  (`QUEEN_TIMERS_MAX_HORIZON_S`, 403) and a payload above 1 MiB (`QUEEN_TIMERS_MAX_PAYLOAD_BYTES`),
+  takes at most 256 operations per call, and spends one token of the tenant's KV write rate per
+  call. In 2.0.0-beta.6 a timer scheduled inside a transaction is not checked against the horizon
+  or the payload ceiling; only the body and entry sizes bound it.
+- One call holds one operation per queue and `timerKey`.
+- Timer firing is Jepsen-tested (W10, in the P26 campaign on 2.0.0-beta.3): a timer fires at most
+  once and never after a cancel that removed it. See [guarantees](/concepts/guarantees/).
+
+## Next
+
+<CardGrid>
+  <LinkCard title="Transactions" href="/concepts/transactions/" description="Schedule and cancel timers in the same commit as the ack." />
+  <LinkCard title="One state machine per entity" href="/guides/state-machines/" description="Timers as the transitions that time triggers." />
+</CardGrid>

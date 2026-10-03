@@ -1,0 +1,183 @@
+---
+title: Booking saga
+description: "A booking that holds a room, asks for payment and arms its own release in one transaction, and a timer that gives the room back when the payment never comes."
+type: example
+tier: use
+sidebar:
+  order: 5
+sourceOfTruth:
+  - examples/apps/js/saga.mjs
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+  - clients/client-js/client-v2/builders/TimerBuilder.js
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/timers.rs
+verifiedBy:
+  - examples/apps/js/saga.mjs
+  - examples/apps/py/saga.py
+  - examples/apps/go/saga/main.go
+  - examples/apps/http/saga.sh
+---
+
+A booking holds a room while the guest pays, and gives the room back if the payment never comes.
+The giving back is the part that usually breaks: kept as a timeout inside a worker, it dies with
+the worker, and a deploy in the middle of a hold leaves the room held for good. In this program
+the release is a timer in the broker, scheduled in the same transaction that holds the room, so
+if a room is held its release exists, whatever happens to the process that held it. Four bookings
+go through it: one is submitted twice, one card is declined, and one confirmation skips its
+cancel on purpose, to show what the compensating side must do when a cancel comes too late.
+
+## Run it
+
+```bash
+docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+npm install queen-mq
+node saga.mjs     # the JavaScript tab below, saved as saga.mjs
+```
+
+What it printed against a 2.0.0-beta.6 node, in about 15 seconds, most of them spent waiting for
+the 10-second hold to run out:
+
+```text
+submitting bookings
+  5 submissions for 4 bookings
+
+reserving
+  B-1: room 101 held, release armed for 10000 ms
+  B-2: room 102 held, release armed for 10000 ms
+  B-2: already held, nothing written (exists)
+  B-3: room 103 held, release armed for 10000 ms
+  B-4: room 104 held, release armed for 10000 ms
+  ok: the reserver decided every submission (5, got 5)
+  ok: the duplicate submission of B-2 lost the gate, once
+  timers armed: B-1, B-2, B-3, B-4
+  ok: one release per booking, none for the duplicate (4, got 4)
+
+paying
+  B-1: paid and confirmed, release cancelled
+  B-2: paid and confirmed, release cancelled
+  B-3: card declined, hold left to expire
+  B-4: paid and confirmed, release deliberately NOT cancelled
+  ok: every booking was asked to pay once, B-2 included (B-1, B-2, B-3, B-4)
+  ok: the release cancelled with the confirmation is gone
+  ok: B-3 was never confirmed, so its release is still armed
+  ok: B-4 is confirmed and its release is still armed, on purpose
+
+compensating
+  B-3: hold expired, room 103 released
+  B-4: state is confirmed, release refused
+  ok: both armed releases were delivered (got B-3, B-4)
+
+checking
+  ok: no cancelled release was ever delivered
+  ok: exactly one room went back on sale, the declined one (got 103)
+  ok: the late release for B-4 was refused by the compensator
+  ok: every booking has exactly one saga entry (4)
+  ok: B-1, B-2 and B-4 ended confirmed
+  ok: B-3 was released by its timer, with no process waiting for it
+
+  final: B-1=confirmed, B-2=confirmed, B-3=expired, B-4=confirmed
+
+PASS: 14 checks
+```
+
+Room 103 went back on sale ten seconds after its card was declined, and nothing in the program
+was waiting for that moment: the broker fired the timer, and the compensator picked the message
+up like any other.
+
+## The program
+
+<Tabs>
+
+<TabItem label="JavaScript">
+
+<Render file="snippets/app-js-saga" />
+
+</TabItem>
+
+<TabItem label="Python">
+
+<Render file="snippets/app-py-saga" />
+
+</TabItem>
+
+<TabItem label="Go">
+
+<Render file="snippets/app-go-saga" />
+
+</TabItem>
+
+<TabItem label="curl">
+
+<Render file="snippets/app-http-saga" />
+
+</TabItem>
+
+</Tabs>
+
+## How it works
+
+<Figure id="examples/saga" />
+
+### Reserving
+
+The reserver commits one transaction with four parts: a `putIfAbsent` of the saga's state
+(`held`), with `required: true` so it acts as a gate; the release timer, keyed by the booking
+id; the payment request, pushed into the booking's own partition of the payments queue; and the
+ack of the submission. Written as four calls, every order between them is wrong somewhere: schedule the
+timer first and a crash leaves a release for a payment nobody asked for, push first and a crash
+leaves a hold with no release. As one transaction they commit together or not at all. The second
+submission of B-2 loses the gate, the whole transaction rolls back, and the program acknowledges
+the duplicate on its own, so there is one payment request, one timer and one saga entry for B-2.
+
+The payment push carries no `transactionId`. Inside a transaction, pushes are checked before the
+KV operations, so a deterministic id would make the duplicate fail on the push, thrown as a
+`duplicate` error, before the gate could return its `kv_precondition` answer. The gate already
+makes the push happen once, because the push can only commit with the entry it guards.
+
+### Paying
+
+The payer reads the saga's state, then commits the `confirmed` state, the cancel of the release
+and the ack together. The read-then-write is safe without a lock because the state key derives
+from the partition key: every message about a booking is in one partition, and a partition is
+held by one worker of the group at a time. The `expect: state.version` on the write turns that
+assumption into something the broker checks.
+
+### Compensating
+
+The cancel is not what keeps a confirmed booking. A timer leaves nothing behind when it fires,
+so a cancel that arrives a moment too late answers `absent` and the release is delivered anyway.
+B-4 makes that case reproducible by skipping its cancel. The compensator therefore reads the
+saga's state before it does anything, and refuses the release for a booking that is no longer
+just `held`. Its write carries `expect` too, and there the fence does real work: the release
+arrives on another queue, in a partition unrelated to the payments partition, so nothing else
+stops a release computed from a stale read from overwriting a confirmation that landed in
+between.
+
+[One state machine per entity](/guides/state-machines/) is the general form of this program,
+with the timeout fired into the entity's own partition so the late case needs no extra check, and
+[timers](/concepts/timers/) covers scheduling, cancelling and what a fire does.
+
+## Why it is short
+
+Without timers in the broker, a saga like this needs a scheduler of its own (a table of pending
+releases, a process that polls it, a lock so two pollers do not release the same room) and an
+outbox, so that the hold, the payment request and the scheduled release are not written to three
+systems by three calls. Here the release is one more line in the transaction that creates the
+hold, it survives any number of deploys, and cancelling it is one more line in the transaction
+that confirms the payment.
+
+## Limits
+
+- A timer fires on the leader's next tick after it is due, every 50 ms by default, so a
+  release is never early and slightly late. It is a message like any other once it fires.
+- `absent` cannot tell "cancelled" from "already delivered". That is why the compensator
+  checks the state, and why any consumer of a compensating timer should.
+- The state reads are KV calls of their own, limited per tenant on each node (200 reads a
+  second by default, `QUEEN_KV_READ_RATE`). The writes inside the transactions are not counted.
+- Timer firing was not part of the Jepsen pass; transactions and queues were. See
+  [guarantees](/concepts/guarantees/).
+
+## Next
+
+The [rate limiters](/examples/rate-limiter/) use the same two primitives, a KV counter and a
+timer, to move work into the next window instead of refusing it.

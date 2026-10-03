@@ -1,0 +1,17 @@
+{
+  "name": "queen-mcp",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Queen MQ's MCP server for coding agents: the Queen model, tested code, known traps, error meanings and Kafka client compatibility.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build-bundle.mjs",
+    "dev": "node scripts/build-bundle.mjs && node dev.mjs",
+    "test": "node scripts/build-bundle.mjs && node --test test/*.test.mjs",
+    "deploy": "node scripts/build-bundle.mjs && npx wrangler@4 deploy"
+  }
+}

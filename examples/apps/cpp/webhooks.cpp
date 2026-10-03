@@ -1,26 +1,25 @@
 // docs:start(app-cpp-webhooks)
 //
-// A webhook delivery system.
+// A webhook sender: ordered per endpoint, retried by the broker, and
+// dead-lettered with its error when it never succeeds.
 //
-// Every SaaS product ends up writing this one, and it is harder than it looks:
-// deliveries to one customer's endpoint must arrive in order, a customer whose
-// endpoint is down must not slow down anybody else's, failures must be retried
-// a bounded number of times, and what never succeeds has to end up somewhere a
-// human can look at.
+// Deliveries to one endpoint have to arrive in the order the events happened,
+// an endpoint that is down must not slow anybody else down, a failure is
+// retried a bounded number of times, and what never succeeds has to end up
+// somewhere a person can read it. Each endpoint gets a partition of its own,
+// created by its first delivery, so a dead endpoint backs up its own partition
+// and nothing else. Retries are the broker's retry budget, and an exhausted
+// delivery lands in the dead-letter queue with the error attached.
 //
-// The shape here is one ordered lane per destination, created by the first
-// delivery to it. A dead endpoint backs up its own lane and no other; retries
-// are the broker's retry budget rather than a loop in your code; and what
-// exhausts the budget lands in the dead-letter queue with the error attached.
+//   webhook-deliveries (one partition per endpoint)
+//     `-- group "sender"  POSTs each delivery; a nack spends one retry
+//           `-- retryLimit spent -> dead-letter queue, with the error
 //
-//   webhook-deliveries (one partition per destination)
-//     `-- group "sender"  posts each delivery, fails on a dead endpoint
-//           `-- retryLimit exhausted -> dead-letter queue
-//
-// Build it (see examples/tutorials/cpp/01-hello-world.cpp for the headers
-// queen_client.hpp expects but this repository does not vendor -- json.hpp
-// under clients/server/vendor, threadpool.hpp under clients/server/include --
-// and for why -lssl -lcrypto is required even over plain http):
+// Build it. queen_client.hpp needs json.hpp and threadpool.hpp, which this
+// repository carries under clients/server, and cpp-httplib, which it does not
+// (Homebrew puts httplib.h under /opt/homebrew/include). The client switches on
+// cpp-httplib's OpenSSL support, so -lssl -lcrypto are needed even over plain
+// http.
 //   mkdir -p build
 //   c++ -std=c++17 -O1 -pthread \
 //       -I../../../clients/client-cpp -I../../../clients/server/vendor \
@@ -65,12 +64,14 @@ struct Endpoint {
     bool healthy;
 };
 
-// Three subscribers. One of them has let its certificate expire, which is the
-// most common way a webhook endpoint dies: it answers, but it answers 500.
+// Three subscribers. One of them answers 500 to everything. It is listed first,
+// so its deliveries are the oldest in the queue and its partition is usually
+// handed out first: a sender that let a failing endpoint hold up the others
+// would fail the checks below.
 static const std::vector<Endpoint> ENDPOINTS = {
+    {"initech.example", false},
     {"acme.example", true},
     {"globex.example", true},
-    {"initech.example", false},
 };
 static const int EVENTS_PER_ENDPOINT = 3;
 static const int RETRY_LIMIT = 2;
@@ -81,7 +82,7 @@ static const std::string GROUP = "sender";
 static const int HEALTHY_DELIVERIES = EVENTS_PER_ENDPOINT * 2;
 static const int DEAD_DELIVERIES = EVENTS_PER_ENDPOINT;
 static const int EXPECTED_ATTEMPTS =
-    HEALTHY_DELIVERIES + EVENTS_PER_ENDPOINT * (RETRY_LIMIT + 1);
+    HEALTHY_DELIVERIES + DEAD_DELIVERIES * (RETRY_LIMIT + 1);
 
 static int checks = 0;
 
@@ -100,9 +101,9 @@ static bool is_healthy(const std::string& host) {
     throw std::runtime_error("unknown endpoint " + host);
 }
 
-// Stands in for the HTTP POST to the subscriber. A real sender would use an
-// HTTP client and treat any non-2xx as a failure, which is exactly what
-// throwing does here.
+// Stands in for the HTTP POST to the subscriber. A real sender POSTs with an
+// HTTP client and throws on any status that is not 2xx, which is what this
+// does.
 static void post_to_endpoint(const std::string& host) {
     if (!is_healthy(host)) {
         throw std::runtime_error(host + " answered 500");
@@ -112,7 +113,7 @@ static void post_to_endpoint(const std::string& host) {
 static std::string join(const std::vector<int>& values) {
     std::ostringstream out;
     for (size_t i = 0; i < values.size(); ++i) {
-        if (i) out << ", ";
+        if (i) out << ",";
         out << values[i];
     }
     return out.str();
@@ -131,24 +132,18 @@ int main() {
     try {
         std::cout << "broker " << QUEEN_URL << std::endl;
 
-        // retryLimit is the delivery budget, and dlqAfterMaxRetries is what
-        // happens when it runs out: the broker moves the exhausted message to
-        // the dead-letter table with the last error on the row. The broker
-        // defaults that flag to true, so it is set here to say what this
-        // program depends on rather than to switch anything on; turning it off
-        // is what would leave an exhausted delivery merely marked failed and
-        // sitting in its lane.
-        //
-        // leaseTime is the other half of the contract: it is how long the
-        // broker waits for a sender that took a delivery and never came back
-        // before handing that delivery to someone else.
+        // retryLimit is the delivery budget: a delivery that fails
+        // RETRY_LIMIT + 1 times is filed in the dead-letter queue with its last
+        // error, because dlqAfterMaxRetries is on. The broker turns that flag
+        // on by default, and it is written out here because the dead-letter
+        // checks at the end depend on it. leaseTime is how long the broker
+        // waits for a sender that took a delivery and never came back before
+        // it hands the delivery to another sender.
         //
         // The C++ QueueConfig struct has no dlqAfterMaxRetries field, so the
-        // options object is assembled by hand and posted through the client's
-        // own HTTP transport, which keeps the base URL, the retry and the 429
-        // backoff policy that every other call in this file uses. Writing the
-        // flag out is worth the detour because this program's last three checks
-        // are about the dead-letter rows.
+        // options are assembled by hand and posted through the client's own
+        // HTTP transport, which keeps the base URL, the retries and the 429
+        // backoff that every other call in this file uses.
         json configured = client.get_http_client()->post(
             "/api/v1/configure",
             json{{"queue", DELIVERIES},
@@ -161,14 +156,15 @@ int main() {
 
         // -------------------------------------------------------------- queuing
         //
-        // The application emits events. Each one goes into the partition of the
-        // endpoint it is destined for, which is what makes "in order per
-        // subscriber" a property of the storage rather than of the sender.
+        // The application emits events. Each delivery goes into the partition
+        // of the endpoint it is for, which is what makes "in order per
+        // subscriber" a property of the storage instead of something the
+        // sender has to arrange.
         std::cout << "\nqueuing deliveries" << std::endl;
         for (int seq = 1; seq <= EVENTS_PER_ENDPOINT; ++seq) {
             for (const Endpoint& endpoint : ENDPOINTS) {
-                // The event id makes the enqueue idempotent: an application
-                // that retries its own emit does not create a second delivery.
+                // The event id. An application that retries its own emit does
+                // not create a second delivery.
                 client.queue(DELIVERIES).partition(endpoint.host).push({
                     json{{"transactionId",
                           endpoint.host + "-evt-" + std::to_string(seq)},
@@ -184,36 +180,31 @@ int main() {
 
         // -------------------------------------------------------------- sending
         //
-        // The sender pool. Here this client parts company with the JavaScript:
-        // its automatic acknowledgement turns a thrown handler into a nack with
-        // a null error, so the dead-letter rows would arrive with no reason on
-        // them and a support engineer would have nothing to read. auto_ack
-        // (false) hands the acknowledgement back to the handler, which sends
-        // the failure with the message that caused it.
+        // The sender pool: three workers, each a thread with a poll loop of its
+        // own. A failed delivery goes back to the broker with its error: the
+        // broker redelivers it and counts one retry, and deliveryAttempt says
+        // which attempt this is. The retries live in the broker, so they
+        // survive the sender dying halfway, which a retry loop inside the
+        // handler would not.
         //
-        // That is the only difference. The retries are still the broker's: a
-        // failed acknowledgement puts the delivery back in its lane until the
-        // retry budget is gone, and that survives the sender process dying
-        // mid-flight, which a loop inside the handler would not.
+        // auto_ack(false): the handler acknowledges each delivery itself,
+        // because this client's automatic nack sends no error and the dead
+        // letter would keep none. partitions(1) and batch(1): every pop takes
+        // ONE delivery, from one endpoint. A nack releases the endpoint's
+        // lease, and the broker then refuses acks for anything else popped
+        // under it, so a worker holding more than the failed delivery could not
+        // acknowledge the rest.
         //
-        // concurrency(3) runs three poll loops and each pop claims one
-        // partition, so the three destinations are drained in parallel and the
-        // dead one backs up alone.
-        //
-        //   wait(false)     keeps the idle clock meaningful: it is only
-        //                   consulted between polls, so a long-polling pop
-        //                   would stretch the 6 second budget to the length of
-        //                   one server-side park.
+        //   wait(false)     every pop answers at once. This client has no
+        //                   setter for the long-poll timeout, which is 30
+        //                   seconds, and the stop flag and the idle deadline
+        //                   are only consulted between pops.
         //   idle_millis     the deadline. A delivery that never comes back
         //                   fails this run instead of hanging it.
-        //   limit()         counts per worker, here and in the JavaScript
-        //                   alike: each worker keeps its own tally, so with
-        //                   three workers it is a backstop rather than the
-        //                   thing that ends the run. The stop flag below is
-        //                   what actually ends the loop, and it is raised on
-        //                   the outcome -- every healthy delivery sent and
-        //                   every dead one dead-lettered -- rather than on an
-        //                   attempt count.
+        //   limit()         counts per worker, so it is only a backstop. The
+        //                   stop flag ends the loop, and it is raised on the
+        //                   outcome: every healthy delivery sent and every dead
+        //                   one dead-lettered.
         std::cout << "\nsending" << std::endl;
         std::mutex lock;
         std::map<std::string, std::vector<int>> delivered_to;
@@ -227,6 +218,8 @@ int main() {
             .group(GROUP)
             .subscription_mode("all")
             .concurrency(3)
+            .partitions(1)
+            .batch(1)
             .each()
             .auto_ack(false)
             .limit(EXPECTED_ATTEMPTS)
@@ -237,15 +230,6 @@ int main() {
                     const std::string host = msg["data"]["endpoint"].get<std::string>();
                     const int seq = msg["data"]["seq"].get<int>();
 
-                    // The popped message carries no attempt counter, so a
-                    // sender that wants to back off or give up early on an
-                    // error it knows is permanent counts the attempts itself.
-                    // That is all this map is.
-                    {
-                        std::lock_guard<std::mutex> guard(lock);
-                        attempts[host] += 1;
-                    }
-
                     std::string error;
                     try {
                         post_to_endpoint(host);
@@ -253,34 +237,49 @@ int main() {
                         error = e.what();
                     }
 
-                    // The acknowledgement names the consumer group explicitly:
-                    // the broker does not read it off the message, and an ack
-                    // sent without it commits the wrong cursor.
+                    {
+                        // Recorded before the ack: the ack releases the
+                        // endpoint's lease, and another worker could take and
+                        // record the next delivery before this one otherwise.
+                        std::lock_guard<std::mutex> guard(lock);
+                        attempts[host] += 1;
+                        if (error.empty()) {
+                            delivered_to[host].push_back(seq);
+                            ++delivered_total;
+                            std::cout << "  " << host << " <- event " << seq << std::endl;
+                        } else {
+                            std::cout << "  " << host << " <- event " << seq
+                                      << " failed on attempt "
+                                      << msg.value("deliveryAttempt", 0) << ": "
+                                      << error << std::endl;
+                        }
+                    }
+
+                    // The ack names the consumer group: without it the broker
+                    // looks for the lease on the queue's own cursor and refuses
+                    // the ack. A failure carries its error, which is what the
+                    // dead letter keeps once the budget is spent.
                     json context = {{"group", GROUP}};
                     if (!error.empty()) context["error"] = error;
                     json ack = client.ack(msg, error.empty(), context);
 
-                    // A rejected acknowledgement still arrives as HTTP 200 with
-                    // success: false on the item, so the per-item flag is the
-                    // only proof the broker took it. The outer "success" only
-                    // says the call did not throw.
+                    // A refused acknowledgement still arrives as HTTP 200 with
+                    // success: false on the item, so the item is the broker's
+                    // verdict. The outer "success" only says the call did not
+                    // throw.
                     if (!ack.value("success", false) || !ack["result"].is_array() ||
                         ack["result"].empty() ||
                         !ack["result"][0].value("success", false)) {
-                        throw std::runtime_error("the broker rejected an acknowledgement");
+                        throw std::runtime_error("the broker refused the acknowledgement for " +
+                                                 host + "/" + std::to_string(seq));
                     }
 
                     std::lock_guard<std::mutex> guard(lock);
-                    if (error.empty()) {
-                        delivered_to[host].push_back(seq);
-                        ++delivered_total;
-                        std::cout << "  " << host << " <- event " << seq << std::endl;
-                    } else if (ack["result"][0].value("dlq", false)) {
-                        // The broker says this failure spent the last of the
-                        // retry budget and the delivery is now a dead letter.
+                    if (ack["result"][0].value("dlq", false)) {
+                        // This failure spent the last of the retry budget, and
+                        // the delivery is now a dead letter.
                         ++dead_lettered;
                     }
-
                     if (delivered_total >= HEALTHY_DELIVERIES &&
                         dead_lettered >= DEAD_DELIVERIES) {
                         stop = true;
@@ -309,67 +308,64 @@ int main() {
                   endpoint.host + " received all " +
                       std::to_string(EVENTS_PER_ENDPOINT) + " events");
             check(seqs == in_order,
-                  endpoint.host + " received them in the order they happened");
+                  endpoint.host + " received them in the order they happened (got " +
+                      (seqs.empty() ? std::string("none") : join(seqs)) + ")");
         }
 
         check(delivered_to["initech.example"].empty(),
-              "the dead endpoint received nothing, as it should");
-        check(attempts["initech.example"] > EVENTS_PER_ENDPOINT,
-              "the dead endpoint was retried rather than dropped on the first "
-              "failure");
+              "the dead endpoint received nothing");
+        check(attempts["initech.example"] == DEAD_DELIVERIES * (RETRY_LIMIT + 1),
+              "each dead delivery was tried " + std::to_string(RETRY_LIMIT + 1) +
+                  " times before it was given up (" +
+                  std::to_string(attempts["initech.example"]) + " attempts)");
 
-        // The dead-letter queue is a table you can read, not a log line. Each
-        // row carries the payload, the endpoint it was for, and the last error,
-        // which is what a support engineer needs to answer "why did this
-        // customer not get it".
+        // The dead letters are records you can query. Each one keeps the
+        // payload, so it names the endpoint and the invoice, and the last error,
+        // which is what answers "why did this customer not get the webhook".
         //
-        // dlq().get() swallows a transport failure and answers with an empty
-        // page rather than throwing, so an unreachable broker shows up as the
-        // next three checks failing rather than as an exception.
+        // dlq().get() answers a transport failure with an empty page and does
+        // not throw, so an unreachable broker shows up here as the next check
+        // failing.
         json dlq = client.queue(DELIVERIES).dlq().limit(50).get();
-        const json& rows = dlq["messages"];
+        const json& letters = dlq["messages"];
 
         std::vector<json> dead;
-        for (const json& row : rows) {
-            if (row["data"]["endpoint"] == "initech.example") dead.push_back(row);
+        for (const json& letter : letters) {
+            if (letter["data"]["endpoint"] == "initech.example") dead.push_back(letter);
         }
 
         check(dead.size() == static_cast<size_t>(EVENTS_PER_ENDPOINT),
               "all " + std::to_string(EVENTS_PER_ENDPOINT) +
                   " dead deliveries are in the dead-letter queue");
 
-        bool every_row_explains_itself = true;
-        for (const json& row : dead) {
-            const std::string message = row.value("errorMessage", std::string());
-            if (message.find("answered 500") == std::string::npos) {
-                every_row_explains_itself = false;
+        bool every_letter_explains_itself = true;
+        for (const json& letter : dead) {
+            const std::string error = letter.value("errorMessage", std::string());
+            if (error.find("answered 500") == std::string::npos) {
+                every_letter_explains_itself = false;
             }
         }
-        check(every_row_explains_itself,
-              "each dead-letter row carries the error that killed it");
+        check(every_letter_explains_itself,
+              "each dead letter carries the error that killed it");
 
         bool only_the_dead_endpoint = true;
-        for (const json& row : rows) {
-            if (row["data"]["endpoint"] != "initech.example") only_the_dead_endpoint = false;
+        for (const json& letter : letters) {
+            if (letter["data"]["endpoint"] != "initech.example") only_the_dead_endpoint = false;
         }
         check(only_the_dead_endpoint,
-              "no healthy endpoint put anything in the dead-letter queue");
+              "no healthy delivery ended up in the dead-letter queue");
 
-        std::ostringstream letters;
+        std::ostringstream summary;
         for (size_t i = 0; i < dead.size(); ++i) {
-            if (i) letters << ", ";
-            letters << dead[i]["data"]["endpoint"].get<std::string>() << "/"
-                    << dead[i]["data"]["invoiceId"].get<std::string>();
+            if (i) summary << "; ";
+            summary << dead[i]["data"]["endpoint"].get<std::string>() << "/"
+                    << dead[i]["data"]["invoiceId"].get<std::string>() << ": "
+                    << dead[i].value("errorMessage", std::string());
         }
-        std::cout << "\n  dead letters: " << letters.str() << std::endl;
-        std::cout << "  attempts on the dead endpoint: "
-                  << attempts["initech.example"] << ", on "
-                  << ENDPOINTS[0].host << ": " << attempts[ENDPOINTS[0].host]
-                  << " (" << join(delivered_to[ENDPOINTS[0].host]) << ")"
-                  << std::endl;
+        std::cout << "\n  dead letters: " << summary.str() << std::endl;
 
-        // Clean up on success only: a failed run leaves the queue and its
-        // dead-letter rows on the broker to be looked at.
+        // Clean up on success only: a failed run leaves the queue and its dead
+        // letters on the broker to be looked at.
         client.queue(DELIVERIES).del();
 
         verdict = "\nPASS: " + std::to_string(checks) + " checks";

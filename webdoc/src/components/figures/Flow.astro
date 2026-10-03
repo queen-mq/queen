@@ -1,0 +1,373 @@
+---
+/**
+ * Boxes and arrows on a grid: an architecture, a path through the system, who
+ * talks to whom. The spec places boxes by column and row; the edges are routed
+ * here, orthogonally, from the sides that face each other, so moving a box
+ * moves its arrows with it. See src/lib/figures.ts for the spec.
+ */
+import { domId, roundedPath, textWidth, type FlowSpec, type FlowNode, type Side } from "@/lib/figures";
+
+interface Props {
+  id: string;
+  spec: FlowSpec;
+}
+const { id, spec } = Astro.props;
+const pid = domId(id);
+
+const COL = spec.colWidth ?? 170;
+const ROW = spec.rowHeight ?? 100;
+const PAD = 16;
+const GAP_X = spec.gap ?? 48;
+const W = PAD * 2 + spec.cols * COL;
+const H = PAD * 2 + spec.rows * ROW;
+
+const LABEL = 13;
+const SUB = 11.5;
+const LABEL_LH = 16;
+const SUB_LH = 14;
+
+interface Box {
+  node: FlowNode;
+  cx: number;
+  cy: number;
+  w: number;
+  h: number;
+  label: string[];
+  sub: string[];
+}
+
+const boxes = new Map<string, Box>();
+for (const node of spec.nodes) {
+  if (boxes.has(node.id)) throw new Error(`figure ${id}: two nodes are called "${node.id}"`);
+  const span = node.span ?? 1;
+  const label = node.label.split("\n");
+  const sub = node.sub ? node.sub.split("\n") : [];
+  const w = span * COL - GAP_X;
+  const disk = node.shape === "disk" ? 10 : 0;
+  const h = Math.max(38, 14 + label.length * LABEL_LH + sub.length * SUB_LH + 6) + disk;
+  const widest = Math.max(
+    ...label.map((l) => textWidth(l, LABEL, node.mono)),
+    ...sub.map((l) => textWidth(l, SUB)),
+  );
+  if (widest + 22 > w) {
+    throw new Error(
+      `figure ${id}: node "${node.id}" needs about ${Math.ceil(widest + 22)} px and its box is ${w} px. ` +
+        `Shorten the text, break it with "\\n", or give the node span: 2 / the figure a wider colWidth.`,
+    );
+  }
+  if (h > ROW - 14) throw new Error(`figure ${id}: node "${node.id}" is ${h} px tall and a row is ${ROW} px. Raise rowHeight.`);
+  const [c, r] = node.at;
+  if (c < 0 || c + span > spec.cols + 0.001 || r < 0 || r > spec.rows - 1 + 0.001) {
+    throw new Error(`figure ${id}: node "${node.id}" at [${c}, ${r}] is outside the ${spec.cols}x${spec.rows} grid`);
+  }
+  boxes.set(node.id, {
+    node,
+    cx: PAD + (c + span / 2) * COL,
+    cy: PAD + (r + 0.5) * ROW,
+    w,
+    h,
+    label,
+    sub,
+  });
+}
+
+const box = (nid: string, what: string): Box => {
+  const b = boxes.get(nid);
+  if (!b) throw new Error(`figure ${id}: ${what} names "${nid}", which is not a node (${[...boxes.keys()].join(", ")})`);
+  return b;
+};
+
+function anchor(b: Box, side: Side): [number, number] {
+  // A stack draws two boxes behind the front one, 8 px right and up: arrows
+  // on those sides stop at the back box, or the front box hides their heads.
+  const st = b.node.shape === "stack" ? 8 : 0;
+  switch (side) {
+    case "l":
+      return [b.cx - b.w / 2, b.cy];
+    case "r":
+      return [b.cx + b.w / 2 + st, b.cy];
+    case "t":
+      return [b.cx, b.cy - b.h / 2 - st];
+    case "b":
+      return [b.cx, b.cy + b.h / 2];
+  }
+}
+
+const horizontal = (s: Side) => s === "l" || s === "r";
+
+const edges = (spec.edges ?? []).map((e, i) => {
+  const a = box(e.from, `edge ${i + 1}`);
+  const b = box(e.to, `edge ${i + 1}`);
+  const dx = b.cx - a.cx;
+  const dy = b.cy - a.cy;
+  let fromSide: Side;
+  let toSide: Side;
+  if (Math.abs(dy) < 1) {
+    fromSide = dx > 0 ? "r" : "l";
+    toSide = dx > 0 ? "l" : "r";
+  } else if (Math.abs(dx) < 1) {
+    fromSide = dy > 0 ? "b" : "t";
+    toSide = dy > 0 ? "t" : "b";
+  } else if (Math.abs(dx) >= Math.abs(dy)) {
+    fromSide = dx > 0 ? "r" : "l";
+    toSide = dy > 0 ? "t" : "b";
+  } else {
+    fromSide = dy > 0 ? "b" : "t";
+    toSide = dx > 0 ? "l" : "r";
+  }
+  fromSide = e.fromSide ?? fromSide;
+  toSide = e.toSide ?? toSide;
+
+  let s = anchor(a, fromSide);
+  let t = anchor(b, toSide);
+  let pts: Array<[number, number]>;
+  if (horizontal(fromSide) && horizontal(toSide)) {
+    if (Math.abs(s[1] - t[1]) < 0.5 || (e.offset && Math.abs(s[1] - t[1]) < 0.5)) pts = [s, t];
+    else if (fromSide === toSide) {
+      const x = fromSide === "r" ? Math.max(s[0], t[0]) + 22 : Math.min(s[0], t[0]) - 22;
+      pts = [s, [x, s[1]], [x, t[1]], t];
+    } else {
+      const mx = (s[0] + t[0]) / 2;
+      pts = [s, [mx, s[1]], [mx, t[1]], t];
+    }
+  } else if (!horizontal(fromSide) && !horizontal(toSide)) {
+    if (Math.abs(s[0] - t[0]) < 0.5) pts = [s, t];
+    else if (fromSide === toSide) {
+      const y = fromSide === "b" ? Math.max(s[1], t[1]) + 18 : Math.min(s[1], t[1]) - 18;
+      pts = [s, [s[0], y], [t[0], y], t];
+    } else {
+      const my = (s[1] + t[1]) / 2;
+      pts = [s, [s[0], my], [t[0], my], t];
+    }
+  } else if (horizontal(fromSide)) {
+    pts = [s, [t[0], s[1]], t];
+  } else {
+    pts = [s, [s[0], t[1]], t];
+  }
+
+  // A request and its answer between the same two boxes: two parallel lines.
+  if (e.offset && pts.length === 2) {
+    const vertical = Math.abs(pts[0][0] - pts[1][0]) < 0.5;
+    pts = pts.map(([x, y]) => (vertical ? [x + e.offset!, y] : [x, y + e.offset!])) as Array<[number, number]>;
+  }
+
+  // Stop short of the border so the arrowhead's tip sits on it, not over it.
+  const end = pts[pts.length - 1];
+  const prev = pts[pts.length - 2];
+  const len = Math.hypot(end[0] - prev[0], end[1] - prev[1]) || 1;
+  const trimEnd = e.plain ? 0 : 1.5;
+  pts[pts.length - 1] = [end[0] - ((end[0] - prev[0]) / len) * trimEnd, end[1] - ((end[1] - prev[1]) / len) * trimEnd];
+  if (e.both) {
+    const s0 = pts[0];
+    const s1 = pts[1];
+    const l0 = Math.hypot(s1[0] - s0[0], s1[1] - s0[1]) || 1;
+    pts[0] = [s0[0] + ((s1[0] - s0[0]) / l0) * 1.5, s0[1] + ((s1[1] - s0[1]) / l0) * 1.5];
+  }
+
+  // The label: at a fraction of the path's length, beside the segment there.
+  let label: { x: number; y: number; anchor: string } | null = null;
+  if (e.label) {
+    const segs = pts.slice(1).map((p, k) => ({ a: pts[k], b: p, l: Math.hypot(p[0] - pts[k][0], p[1] - pts[k][1]) }));
+    const total = segs.reduce((n, sg) => n + sg.l, 0);
+    let want = total * (e.labelAt ?? 0.5);
+    let seg = segs[0];
+    for (const sg of segs) {
+      seg = sg;
+      if (want <= sg.l) break;
+      want -= sg.l;
+    }
+    const f = seg.l ? Math.min(1, want / seg.l) : 0;
+    const x = seg.a[0] + (seg.b[0] - seg.a[0]) * f;
+    const y = seg.a[1] + (seg.b[1] - seg.a[1]) * f;
+    const vertical = Math.abs(seg.a[0] - seg.b[0]) < 0.5;
+    const side = e.labelSide ?? (vertical ? "right" : "above");
+    label =
+      side === "above"
+        ? { x, y: y - 7, anchor: "middle" }
+        : side === "below"
+          ? { x, y: y + 15, anchor: "middle" }
+          : side === "right"
+            ? { x: x + 8, y: y + 4, anchor: "start" }
+            : { x: x - 8, y: y + 4, anchor: "end" };
+  }
+
+  // A label on a short straight run between two boxes must fit the run, or it
+  // lands on the borders. Vertical runs put the label beside the line instead.
+  if (e.label && pts.length === 2 && Math.abs(pts[0][1] - pts[1][1]) < 0.5) {
+    const run = Math.abs(pts[1][0] - pts[0][0]);
+    const need = textWidth(e.label, 11.5) + 10;
+    if (need > run) {
+      throw new Error(
+        `figure ${id}: the label "${e.label}" on ${e.from} -> ${e.to} needs ${Math.ceil(need)} px and the boxes are ${Math.round(run)} px apart. ` +
+          `Shorten it, raise the spec's gap (now ${GAP_X}) or colWidth, or route the edge vertically.`,
+      );
+    }
+  }
+
+  const tone = e.tone ?? "default";
+  return {
+    d: roundedPath(pts),
+    tone,
+    dashed: e.dashed,
+    markerEnd: e.plain ? undefined : `url(#${pid}-ah-${tone})`,
+    markerStart: e.both ? `url(#${pid}-ah-${tone})` : undefined,
+    text: e.label,
+    label,
+  };
+});
+
+const groups = (spec.groups ?? []).map((g) => {
+  const members = g.nodes.map((n) => box(n, `group "${g.label}"`));
+  const x0 = Math.min(...members.map((m) => m.cx - m.w / 2)) - 14;
+  const x1 = Math.max(...members.map((m) => m.cx + m.w / 2 + (m.node.shape === "stack" ? 8 : 0))) + 14;
+  const y0 = Math.min(...members.map((m) => m.cy - m.h / 2 - (m.node.shape === "stack" ? 8 : 0))) - 30;
+  const y1 = Math.max(...members.map((m) => m.cy + m.h / 2)) + 14;
+  return { ...g, x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+});
+
+const minX = Math.min(0, ...groups.map((g) => g.x - 2));
+const minY = Math.min(0, ...groups.map((g) => g.y - 2));
+const maxX = Math.max(W, ...groups.map((g) => g.x + g.w + 2));
+const maxY = Math.max(H, ...groups.map((g) => g.y + g.h + 2));
+
+const notes = (spec.notes ?? []).map((n) => ({
+  x: PAD + (n.at[0] + 0.5) * COL,
+  y: PAD + (n.at[1] + 0.5) * ROW,
+  lines: n.text.split("\n"),
+  anchor: n.anchor ?? "middle",
+  tone: n.tone ?? "default",
+}));
+
+const TONES = ["default", "strong", "faint", "warn", "danger"];
+
+function textTop(b: Box): number {
+  const block = b.label.length * LABEL_LH + b.sub.length * SUB_LH;
+  const disk = b.node.shape === "disk" ? 5 : 0;
+  return b.cy - block / 2 + 12 + disk;
+}
+---
+
+<svg
+  class="qf-svg"
+  viewBox={`${minX} ${minY} ${maxX - minX} ${maxY - minY}`}
+  width={maxX - minX}
+  height={maxY - minY}
+  style={`max-width: ${maxX - minX}px; min-width: ${Math.min(maxX - minX, 560)}px`}
+  role="img"
+  aria-label={spec.alt}
+  xmlns="http://www.w3.org/2000/svg"
+>
+  <title>{spec.alt}</title>
+  <defs>
+    {
+      TONES.map((t) => (
+        <marker
+          id={`${pid}-ah-${t}`}
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="8"
+          markerHeight="8"
+          markerUnits="userSpaceOnUse"
+          orient="auto-start-reverse"
+        >
+          <path d="M 0.5 1 L 9 5 L 0.5 9 z" class={`qf-ah qf-ah-${t}`} />
+        </marker>
+      ))
+    }
+  </defs>
+
+  {
+    groups.map((g) => (
+      <g class={`qf-g qf-g-${g.tone ?? "default"}`}>
+        <rect x={g.x} y={g.y} width={g.w} height={g.h} rx="12" />
+      </g>
+    ))
+  }
+
+  {
+    edges.map((e) => (
+      <path
+        d={e.d}
+        class={`qf-e qf-e-${e.tone}`}
+        stroke-dasharray={e.dashed ? "5 4" : undefined}
+        marker-end={e.markerEnd}
+        marker-start={e.markerStart}
+      />
+    ))
+  }
+
+  {
+    [...boxes.values()].map((b) => {
+      const tone = b.node.tone ?? "default";
+      const x = b.cx - b.w / 2;
+      const y = b.cy - b.h / 2;
+      const shape = b.node.shape ?? "box";
+      const top = textTop(b);
+      return (
+        <g class={`qf-n qf-n-${tone}`}>
+          {shape === "stack" && (
+            <>
+              <rect x={x + 8} y={y - 8} width={b.w} height={b.h} rx="8" />
+              <rect x={x + 4} y={y - 4} width={b.w} height={b.h} rx="8" />
+            </>
+          )}
+          {shape === "disk" ? (
+            <>
+              <path
+                d={`M ${x} ${y + 6} V ${y + b.h - 6} A ${b.w / 2} 6 0 0 0 ${x + b.w} ${y + b.h - 6} V ${y + 6}`}
+              />
+              <ellipse cx={b.cx} cy={y + 6} rx={b.w / 2} ry="6" />
+            </>
+          ) : (
+            <rect x={x} y={y} width={b.w} height={b.h} rx={shape === "pill" ? b.h / 2 : 8} />
+          )}
+          {b.label.map((l, i) => (
+            <text x={b.cx} y={top + i * LABEL_LH} text-anchor="middle" class={b.node.mono ? "qf-t qf-mono" : "qf-t"}>
+              {l}
+            </text>
+          ))}
+          {b.sub.map((l, i) => (
+            <text
+              x={b.cx}
+              y={top + b.label.length * LABEL_LH + i * SUB_LH - 1}
+              text-anchor="middle"
+              class="qf-ts"
+            >
+              {l}
+            </text>
+          ))}
+        </g>
+      );
+    })
+  }
+
+  {
+    groups.map((g) => (
+      <text x={g.x + 12} y={g.y + 18} class="qf-gl">
+        {g.label}
+      </text>
+    ))
+  }
+
+  {
+    edges.map(
+      (e) =>
+        e.label && (
+          <text x={e.label.x} y={e.label.y} text-anchor={e.label.anchor} class={`qf-te qf-te-${e.tone}`}>
+            {e.text}
+          </text>
+        ),
+    )
+  }
+
+  {
+    notes.map((n) =>
+      n.lines.map((l, i) => (
+        <text x={n.x} y={n.y + i * 14} text-anchor={n.anchor} class={`qf-note qf-note-${n.tone}`}>
+          {l}
+        </text>
+      )),
+    )
+  }
+</svg>

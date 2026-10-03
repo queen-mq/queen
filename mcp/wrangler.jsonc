@@ -1,0 +1,16 @@
+{
+  // queenmq.com/mcp: Queen MQ's MCP server for coding agents.
+  //
+  // A Worker of its own beside the docs Worker `queen` (static assets only,
+  // see webdoc/wrangler.jsonc). The docs Worker holds queenmq.com as a Custom
+  // Domain; this one claims only the /mcp paths with a Route, and a Route takes
+  // precedence over a Custom Domain on the same hostname, so neither has to
+  // know about the other.
+  //
+  // The bundle is built from webdoc/dist, so deploy after the docs build:
+  //   pnpm --dir webdoc build && npm --prefix mcp run deploy
+  "name": "queen-mcp",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-06-19",
+  "routes": [{ "pattern": "queenmq.com/mcp*", "zone_name": "queenmq.com" }]
+}

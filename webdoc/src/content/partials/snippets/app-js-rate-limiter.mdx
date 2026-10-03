@@ -10,17 +10,17 @@ description: "Verified snippet extracted from examples/apps/js/rate-limiter.mjs.
 
 ```js title="examples/apps/js/rate-limiter.mjs"
 //
-// A rate limiter, built out of a streaming query.
+// A rate limiter built from a streaming query.
 //
-// Counting requests per API key in a fixed window is the textbook rate limiter,
-// and the usual implementation is a counter in Redis: a second data system to
-// run, to size, and to lose when it restarts.
+// The textbook rate limiter counts requests per API key in a fixed window,
+// usually with a counter in Redis, which is one more system to run and one
+// more place where the count can drift from the requests.
 //
-// Here the counter is a windowed aggregation over the request stream itself.
-// The window state, the decisions it emits and the acknowledgement of the
-// requests it counted all commit as one entry in the broker's replicated log,
-// so the counter cannot drift from the stream it was computed from, and it
-// survives a restart because it lives in the broker, not in a process's memory.
+// Here the counter is a windowed aggregation over the request queue itself.
+// Each cycle of the stream commits the window state, the closed windows it
+// emits and the ack of the requests it counted as one entry in the broker's
+// log, so the count cannot drift from the requests, and it survives a restart
+// of this process because the state is in the broker.
 //
 //   api-requests (one partition per API key)
 //     └── streaming query: tumbling window, count per key
@@ -74,11 +74,13 @@ try {
 
   // ------------------------------------------------------------- the counter
   //
-  // A stream is a running process: it has to be listening before the requests
-  // arrive. Starting one over an existing backlog counts nothing.
+  // The stream runs in this process, as a consumer group of its own. A new
+  // group starts at the tail of the queue unless it asks otherwise, and a
+  // request pushed while the stream was still starting would be missed, so it
+  // asks for subscriptionMode 'all': every request in the queue is counted.
   //
   // The partition is the aggregation key, so the window state is per API key
-  // without anything being said about keys here: whoever pushes decides.
+  // without a word about keys here: the producer decides, by partition.
   console.log('\nstarting the counter')
   stream = await Stream
     .from(queen.queue(REQUESTS))
@@ -92,6 +94,7 @@ try {
     .run({
       queryId: QUERY_ID,
       url: QUEEN_URL,
+      subscriptionMode: 'all',
       batchSize: 200,
       maxPartitions: 8,
       maxWaitMillis: 200,
@@ -113,9 +116,9 @@ try {
   // ---------------------------------------------------------------- the gate
   //
   // The enforcement point. It reads each closed window and turns the ones over
-  // quota into throttle decisions. Splitting it from the counter is deliberate:
-  // the counting is exact and belongs to the broker, the policy is yours and
-  // changes on a different schedule.
+  // quota into throttle decisions. It is separate from the counter on purpose:
+  // the counting is exact and stays the same, while the policy is yours and
+  // changes on its own schedule.
   console.log('\nenforcing')
   const counted = {}
   const decisions = []
@@ -140,19 +143,22 @@ try {
       const overBy = w.data.requests - QUOTA_PER_WINDOW
 
       if (overBy > 0) {
-        // The decision is a message, not a log line: whatever enforces it (an
-        // edge worker, a gateway, the API itself) subscribes to this queue and
-        // gets the decisions in order, per key.
-        await queen.queue(THROTTLED).partition(key).push({
-          data: { key, window: w.data.requests, quota: QUOTA_PER_WINDOW, overBy },
-        })
+        // The decision is a message: whatever enforces it (an edge worker, a
+        // gateway, the API itself) reads this queue and gets the decisions in
+        // order, per key. It commits with the ack of the window it came from,
+        // so a crash in between cannot lose a decision or make two.
+        await queen
+          .transaction()
+          .queue(THROTTLED).partition(key)
+          .push({ data: { key, window: w.data.requests, quota: QUOTA_PER_WINDOW, overBy } })
+          .ack(w, 'completed', { consumerGroup: 'rate-limiter-gate' })
+          .commit()
         decisions.push({ key, overBy })
         console.log(`  ${key}: ${w.data.requests} in a window, over by ${overBy}`)
       } else {
+        await queen.ack(w, true, { group: 'rate-limiter-gate' })
         console.log(`  ${key}: ${w.data.requests} in a window, within quota`)
       }
-
-      await queen.ack(w, true, { group: 'rate-limiter-gate' })
     }
   }
 

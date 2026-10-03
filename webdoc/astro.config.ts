@@ -51,7 +51,7 @@ const nimbusConfig = defineNimbusConfig({
   site: "https://queenmq.com",
   title: "Queen MQ",
   description:
-    "A transactional message broker in one binary: one ordered FIFO lane per entity, consumer groups, replay, a dead-letter queue, key/value state, timers and a dashboard, replicated with Raft.",
+    "A transactional event broker in one binary: one ordered partition per entity, and the ack, the state change, the next events and the timer of each step commit as one entry, replicated with Raft.",
   locale: "en",
   homeLabel: "Queen MQ",
   github: "https://github.com/queen-mq/queen",
@@ -81,25 +81,18 @@ const nimbusConfig = defineNimbusConfig({
     defaultCollapsed: true,
     overviewLabel: "Overview",
     indexDisplay: "overview-leaf",
-    // Five sections, in the order a reader meets them: what it is, how to build
-    // on it, how to run it, the exhaustive material, the evidence. The first
-    // four are written user-first and short; Documentation is the one place
-    // where completeness beats brevity, which is why Reference and Internal sit
-    // inside it as one group rather than as two top-level sections competing
-    // with the guides.
+    // Eight sections, in the order a reader meets them: what it is, the model,
+    // what to build with it, whole programs built with it, how to run it, the
+    // exhaustive tables, how it works inside, and the evidence.
     items: [
-      { label: "Start Here", icon: "ph:rocket-launch", autogenerate: { directory: "start" } },
-      { label: "Use Queen", icon: "ph:code", autogenerate: { directory: "use" } },
-      { label: "Deploy Queen", icon: "ph:hard-drives", autogenerate: { directory: "deploy" } },
-      {
-        label: "Documentation",
-        icon: "ph:book-open-text",
-        items: [
-          { label: "Reference", autogenerate: { directory: "reference" } },
-          { label: "Internal", autogenerate: { directory: "internals" } },
-        ],
-      },
-      { label: "Benchmark", icon: "ph:chart-line-up", autogenerate: { directory: "benchmarks" } },
+      { label: "Start", icon: "ph:rocket-launch", autogenerate: { directory: "start" } },
+      { label: "Concepts", icon: "ph:graph", autogenerate: { directory: "concepts" } },
+      { label: "Guides", icon: "ph:code", autogenerate: { directory: "guides" } },
+      { label: "Examples", icon: "ph:app-window", autogenerate: { directory: "examples" } },
+      { label: "Operate", icon: "ph:hard-drives", autogenerate: { directory: "operate" } },
+      { label: "Reference", icon: "ph:book-open-text", autogenerate: { directory: "reference" } },
+      { label: "Internals", icon: "ph:cpu", autogenerate: { directory: "internals" } },
+      { label: "Benchmarks", icon: "ph:chart-line-up", autogenerate: { directory: "benchmarks" } },
     ],
   },
 });

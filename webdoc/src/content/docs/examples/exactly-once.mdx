@@ -1,0 +1,148 @@
+---
+title: Charge each order once
+description: "A card charger that survives redelivery: the charge marker and the ack commit in one transaction, so five orders, a failure and a full replay still make five charges."
+type: example
+tier: use
+sidebar:
+  order: 4
+sourceOfTruth:
+  - examples/apps/js/exactly-once.mjs
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+  - clients/client-js/client-v2/kv/Kv.js
+  - server/src/rsm/planner/txn.rs
+verifiedBy:
+  - examples/apps/js/exactly-once.mjs
+  - examples/apps/py/exactly_once.py
+  - examples/apps/http/exactly-once.sh
+---
+
+A consumer that charges cards will see some orders twice: a lease runs out while the card network
+is slow, a node restarts, someone replays the queue. This program makes the second delivery
+harmless. The "already charged" marker lives in the broker, next to the queue, and it is written
+in the same transaction as the ack, so an order is either marked and acknowledged or neither. It
+charges five orders, fails one of them before it reaches the card, then replays all five through
+a second consumer group, and checks that the ledger holds exactly five charges.
+
+## Run it
+
+```bash
+docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+npm install queen-mq
+node exactly-once.mjs     # the JavaScript tab below, saved as exactly-once.mjs
+```
+
+What it printed against a 2.0.0-beta.6 node:
+
+```text
+queuing orders
+  5 orders queued
+
+charging
+  ORD-1: charged
+  ORD-2: charged
+  ORD-3: card network timed out (will be redelivered)
+  ok: ORD-3 failed before its commit and left no marker behind
+  ORD-3: charged
+  ORD-4: charged
+  ORD-5: charged
+  ok: the charger decided every order (5, got 5)
+
+replaying
+  ORD-1: ran === false
+  ORD-2: ran === false
+  ORD-3: ran === false
+  ORD-4: ran === false
+  ORD-5: ran === false
+
+checking
+  ok: 5 orders, 5 charges, one per order
+  ok: ORD-3 came back after its failure and was charged then
+  ok: the replay received all 5 orders and charged none of them
+  ok: every order has its marker (5)
+  ok: each marker names the charge that was made
+
+  ledger: ORD-1=ch_ORD-1_0, ORD-2=ch_ORD-2_1, ORD-3=ch_ORD-3_2, ORD-4=ch_ORD-4_3, ORD-5=ch_ORD-5_4
+
+PASS: 7 checks
+```
+
+The replay is the interesting half. It is the same messages through the same handler, as if an
+operator had rewound the queue, and the only thing between those five orders and a second charge
+is the marker each one left.
+
+## The program
+
+<Tabs>
+
+<TabItem label="JavaScript">
+
+<Render file="snippets/app-js-exactly-once" />
+
+</TabItem>
+
+<TabItem label="Python">
+
+<Render file="snippets/app-py-exactly-once" />
+
+</TabItem>
+
+<TabItem label="curl">
+
+<Render file="snippets/app-http-exactly-once" />
+
+</TabItem>
+
+</Tabs>
+
+## How it works
+
+The handler is four steps, and their order is the design. It reads the marker first, and if the
+order was charged already it only acknowledges the message. Then it does everything that can fail
+without touching the card; ORD-3's scripted failure sits there, which is why it leaves no marker
+and comes back to be charged normally. Then it charges. Then it writes the marker and the ack in
+one `POST /api/v1/transaction`, with the marker as a `putIfAbsent` that carries
+`required: true`.
+
+<Figure id="guides/exactly-once-commit" />
+
+That last call is where the guarantee comes from. `required` turns the `putIfAbsent` into a gate:
+if two deliveries of one order race to the commit, the loser's whole transaction rolls back, its
+ack included, and comes back as a value (`success: false`, `reason: 'kv_precondition'`) because a
+duplicate is a normal outcome and not an error to retry. The ack carries the delivery's lease, so
+a worker whose lease ran out during the charge has its ack refused and its marker with it.
+[Charge a card once](/guides/exactly-once/) walks through why each of these holds, and
+[transactions](/concepts/transactions/) covers the call itself.
+
+The consumer pops one order at a time with `.batch(1)`. A nack (an ack with status `failed`)
+releases the partition's lease, so in a batch of several orders, every order after a failed one
+would still be handled, charged, refused at its commit because the lease is gone, and charged again
+when it came back. We checked: with broker-sized batches, ORD-4 and ORD-5 were charged and then
+refused, and the run failed.
+
+## Why it is short
+
+The usual guard against a double charge is an idempotency table in the application's database,
+written after the charge and before the ack. The table and the broker then commit separately, and
+the program has to reason about every crash between the two. Here the marker is a KV entry in the
+same replicated log as the queue, so "charged" and "acknowledged" are one commit, and the
+program needs no second store and no job to reconcile the two.
+
+## Limits
+
+- The card can still be charged twice in one window. If the worker dies, or loses its lease,
+  between the provider's answer and the commit, the charge happened and no marker exists, so the
+  redelivery charges again. Pass the order id to the payment provider as its idempotency key and
+  the provider refuses the second charge. Effects that are themselves writes to Queen (a push, an
+  ack, a KV write) go inside the transaction and have no such window.
+- The marker lives as long as its TTL. The programs use an hour. Choose one longer than any
+  redelivery or replay you will run; an expired marker reads as absent.
+- The read before the charge is a KV call of its own. KV calls outside a transaction count
+  against the tenant's rate on each node, 200 reads a second by default (burst 400,
+  `QUEEN_KV_READ_RATE`), answered with 429 past it. KV inside the transaction is not counted.
+- Delivery stays at least once. Exactly once holds for what the transaction writes. See
+  [guarantees](/concepts/guarantees/) for what the Jepsen tests covered.
+
+## Next
+
+The [booking saga](/examples/saga/) puts a state machine and a timer in the same kind of
+transaction, and [dedup](/concepts/dedup/) shows `once`, the short form of this gate.

@@ -1,0 +1,3 @@
+src/bundle.generated.mjs
+node_modules/
+.wrangler/

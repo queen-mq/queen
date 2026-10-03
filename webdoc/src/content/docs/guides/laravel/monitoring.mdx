@@ -1,0 +1,195 @@
+---
+title: Monitoring and alerts
+description: "Throughput, failures and runtime per job class from every worker of every host, monitored tags, long-wait alerts measured by the broker, and a Prometheus endpoint an autoscaler can read."
+type: how-to
+tier: operate
+status: preview
+sidebar:
+  order: 7
+sourceOfTruth:
+  - server/src/handlers/kv.rs
+  - server/src/rsm/planner/kv.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2.rs
+# Describes clients/client-php as it is on origin/master (PHP client 1.7.0 and later). Add
+# config/queen.php, Monitoring/{JobMetricsRecorder,JobTags,TagMonitor,QueueWaits}.php,
+# Dashboard/{JobMetricsReader,PrometheusMetrics}.php, Commands/CheckWaitsCommand.php and
+# Events/LongWaitDetected.php once the 2.0 line carries that tree.
+---
+
+The [dashboard](/guides/laravel/dashboard/) shows what the supervisors are doing. This page is about
+what the jobs are doing: how many of each class ran, how many failed and how long they took, which
+recent jobs carry a tag you care about, which queue has a job that has waited too long, and a
+Prometheus endpoint an autoscaler can read. All of it needs PHP client 1.7.0 or later.
+
+The workers record everything themselves, into the broker's [key/value store](/concepts/kv/). We
+put it there on purpose: the numbers then cover every worker of every host or pod, whichever engine
+supervises it, a dashboard on any host reads the same numbers, and there is no Redis to keep and no
+snapshot command to schedule.
+
+| | Horizon | Queen |
+| --- | --- | --- |
+| Per-job metrics | snapshots taken by the scheduled `horizon:snapshot` | live, from every worker, over the last hour, six hours or day |
+| Tags | automatic and `tags()`, monitored from the dashboard | automatic and `tags()`, monitored from the dashboard |
+| Long-wait alerts | estimated from the backlog and recent runtimes | the broker's age of the oldest waiting job, per consumer group |
+| Alert routes | mail, Slack, SMS | the `LongWaitDetected` event, and mail |
+| Autoscaler metrics | not built in | a Prometheus endpoint for KEDA or an HPA |
+
+## Jobs per class
+
+The dashboard's **Jobs** page lists every job class that ran in the window you pick: jobs
+processed, failed attempts, jobs per minute and the average runtime of an attempt.
+
+Each worker of a Queen connection counts these per class in memory and writes them at most once
+every ten seconds (also while it waits for its next job, and when it stops) to one key of its own,
+in a five-minute bucket:
+
+```text
+jobs/v1/<bucket>/<worker>   {"classes": {"App\\Jobs\\SendInvoice": {"processed": 12, "failed": 1, "runtime_ms": 2600, "max_ms": 900}}}
+```
+
+That is one write per worker every ten seconds, never one per job, and no two workers ever write
+the same key. Keys expire after 25 hours, which bounds the longest window. `max_ms`, the longest single attempt (PHP client 1.9.0), is not on the Jobs
+page: the Configuration page's [tuning advice](/guides/laravel/dashboard/#tuning-advice-and-settings)
+compares it with `shutdown_grace`. Recording is best effort. Since 1.9.0 it makes one attempt of at
+most two seconds, with no failover and no retry, and a failed write is dropped without ever
+reaching the job. A preforked worker starts its own counts after its fork.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_JOB_METRICS` | `true` | record per-class metrics |
+| `QUEEN_JOB_METRICS_CONNECTION` | `queen` | the Queen connection whose broker stores them |
+| `QUEEN_JOB_METRICS_NAMESPACE` | `queen-metrics` | the key/value namespace |
+
+The dashboard reads them with a paged `getPrefix` from the window's first bucket, cached for fifteen
+seconds. One read takes at most 50,000 keys, a day of buckets for about 170 workers. Past that, the
+page marks the table as partial, covering the oldest part of the window, and a shorter window shows
+the rest.
+
+That read uses the supervisor's `read_bearer_token` when one is set. On a 2.0 broker a prefix read
+goes through `POST /api/v1/kv`, the key/value route that also writes, so a strictly read-only
+credential (a `read-only` JWT, or a proxy key with only the `read` scope) is refused there and the
+Jobs page shows its metrics as unavailable. Give the read token key/value access, or leave it unset
+so the page reads with the connection's token.
+
+## Monitored tags
+
+A job is tagged when it is pushed, as in Horizon: by its `tags()` method when it has one, otherwise
+with one `Model:key` tag per Eloquent model it carries. Queued listeners, mailables, notifications
+and broadcasts are unwrapped to the object that carries the models. The tags travel in the payload,
+so a worker reads them without unserializing the command. A model is always tagged by its key, even
+when it has a `tags()` relation, and a `tags()` that throws or returns no list is ignored: tagging
+never fails a dispatch.
+
+```php
+class ChargeCustomer implements ShouldQueue
+{
+    public function __construct(public Customer $customer, public Invoice $invoice) {}
+
+    // Optional: without it, the job is tagged App\Models\Customer:42 and App\Models\Invoice:7.
+    public function tags(): array
+    {
+        return ['billing', 'customer:'.$this->customer->id];
+    }
+}
+```
+
+On the dashboard's **Tags** page, add a tag to monitor. Within thirty seconds every worker records
+each completed or failed job that carries it, and the page lists the newest ones with their class,
+queue, attempts and runtime. The list of monitored tags is one key updated with compare-and-swap
+(the key/value store's `expect`), so two operators adding tags at the same moment never overwrite
+each other. At most 50 tags can be monitored, and a job keeps at most 20 tags of up to 128 bytes.
+Horizon's silenced jobs have no equivalent.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_TAGS` | `true` | tag jobs and record the monitored ones |
+| `QUEEN_TAGS_CONNECTION` | `queen` | the Queen connection whose broker stores them |
+| `QUEEN_TAGS_NAMESPACE` | `queen-metrics` | the key/value namespace |
+| `QUEEN_TAGS_RETENTION_MINUTES` | `1440` | how long a recorded job stays listed |
+
+## Long-wait alerts
+
+`queen:check-waits` reports a queue whose oldest job has waited longer than its threshold. Schedule
+it every minute and give each `connection:queue` its threshold in seconds:
+
+```php
+// routes/console.php
+Schedule::command('queen:check-waits')->everyMinute();
+```
+
+```php
+// config/queen.php
+'waits' => [
+    'queen:default' => 60,
+    'queen:emails' => 300,
+],
+'notifications' => [
+    'mail' => env('QUEEN_NOTIFY_MAIL'),      // comma-separated addresses
+    'throttle_minutes' => 5,
+],
+```
+
+For each `connection:queue` it checks every consumer group a supervisor pool consumes that queue
+with, and the wait it compares is measured, never estimated. When the group has no pending job,
+nothing waits. Otherwise the broker's lag for the group is the wait: how long the oldest message the
+group has not consumed has been in the queue, from `GET /api/v1/consumer-groups/lagging`. For a
+queue the group never consumed, it is the age of the oldest pending message, which also covers a
+queue no worker serves at all.
+
+Above the threshold it dispatches `Queen\Laravel\Events\LongWaitDetected` (connection, queue,
+consumer group, seconds, threshold) and, when `queen.notifications.mail` is set, mails it. Each
+queue and group notifies at most once per throttle window, and an alert that fails to send is tried
+again at the next run. Listen to the event to send the alert anywhere else, such as Slack.
+
+## Prometheus and Kubernetes autoscaling
+
+With a token set, `GET /queen/metrics` answers in the Prometheus text format. The scraper sends the
+token as a bearer token; the route has no session and no Gate, and answers `404` while it is off.
+
+```dotenv
+QUEEN_METRICS_ENABLED=true
+QUEEN_METRICS_TOKEN=a-secret-of-at-least-32-characters
+```
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `queen_queue_depth` | connection, consumer_group, queue | jobs not yet acknowledged, waiting or running, as a supervisor last sampled them |
+| `queen_supervisor_instances` | availability | supervisor instances, live and stale |
+| `queen_supervisor_up` | instance_id, hostname | 1 while the instance's heartbeat is current |
+| `queen_supervisor_heartbeat_age_seconds` | instance_id, hostname | age of the instance's last status |
+| `queen_workers`, `queen_workers_desired`, `queen_workers_draining` | instance_id, hostname, supervisor, queue | worker processes per pool |
+| `queen_pool_replicas` | instance_id, hostname, supervisor, queue | coordinated replicas sharing the pool's target |
+| `queen_shared_queue_supervisors` | connection, consumer_group, queue | masters that autoscale one queue without coordinating |
+
+The endpoint reads what the supervisors publish, so on web pods it needs
+[remote status](/guides/laravel/dashboard/#a-supervisor-on-another-host). With
+[coordinated replicas](/guides/laravel/supervisors/#several-replicas), scale the supervisor
+Deployment on the backlog. With KEDA's Prometheus scaler, for pods of up to 10 workers, each sized
+for 10 jobs:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: queen-workers
+spec:
+  scaleTargetRef:
+    name: queen-workers        # the supervisor Deployment
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        query: max(queen_queue_depth{queue="default",consumer_group="laravel"})
+        threshold: "100"       # max_processes x target_jobs_per_process
+```
+
+Each new pod joins the coordination and takes its share at its next poll, and a pod removed by a
+scale-down leaves at once. [Scale on Kubernetes](/guides/laravel/kubernetes/) has the whole
+deployment.
+
+The broker has Prometheus metrics of its own, about queues, partitions and the cluster (see
+[monitoring the broker](/operate/monitoring/)). This endpoint covers the Laravel side: workers,
+pools and the depth the supervisors see.

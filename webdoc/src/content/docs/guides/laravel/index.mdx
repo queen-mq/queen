@@ -1,0 +1,249 @@
+---
+title: Laravel
+description: "Run your Laravel jobs on Queen: install the queue connection, keep your job classes and workers, order jobs per entity, pick a delivery profile, and choose who runs the workers."
+type: how-to
+tier: use
+sidebar:
+  order: 8
+sourceOfTruth:
+  - clients/client-php/src/Laravel/Contracts/QueenPartitionable.php
+  - clients/client-php/src/Laravel/Queue/SyncedFailedJobProvider.php
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/consume/pop.rs
+  - server/src/rsm/planner/push.rs
+  - proxy/src/routes.rs
+# Describes clients/client-php and supervisor/ as they are on origin/master (PHP client 1.9.0,
+# supervisor 0.6.0, both tagged). Add composer.json, config/queen.php,
+# QueenServiceProvider.php and Queue/{QueenConnector,QueenQueue,QueenJob,ProcessLeaseRenewer}.php
+# once the 2.0 line carries that tree.
+---
+
+Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and
+running the workers, which Horizon's master does. Your job classes stay ordinary Laravel jobs and
+`queue:work` stays the worker. In exchange you get a backlog that is on disk (and in a cluster on a
+majority of nodes) before `dispatch()` returns, an ordered lane per entity when you want one, and
+workers that do more with less. In our runs of 2026-10-01 on one 16-vCPU Linux server, with every
+write fsynced on both sides, 32 workers completed 2,753 jobs/s of 10 ms jobs against 1,124 for
+Horizon, and an application with 64 forked workers fit in 183 MiB against 1,892
+([benchmark](/benchmarks/laravel/)).
+
+## Install
+
+<Steps>
+
+1. **Start a broker** if you have none yet. One container is enough to try it
+   ([quickstart](/start/quickstart/)):
+
+   ```bash
+   docker run -d --name queen --platform linux/amd64 -p 6632:6632 \
+     -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
+   ```
+
+2. **Install the package and publish its configuration.** Package discovery registers the service
+   provider, the `Queen` facade and a `queen` queue connection, so `config/queue.php` needs no
+   entry unless you want to override it.
+
+   ```bash
+   composer require queen-mq/php-client
+   php artisan vendor:publish --tag=queen-config
+   ```
+
+3. **Point Laravel at Queen.**
+
+   ```dotenv
+   QUEUE_CONNECTION=queen
+   QUEEN_URL=http://127.0.0.1:6632
+   QUEEN_QUEUE=default
+   QUEEN_CONSUMER_GROUP=laravel
+   QUEEN_RETRY_AFTER=90
+   ```
+
+4. **Dispatch a job you already have.** Nothing changes at the call site.
+
+   ```php
+   GenerateInvoice::dispatch($invoiceId);
+   ```
+
+5. **Run a worker.**
+
+   ```bash
+   php artisan queue:work queen --queue=default --timeout=60 --tries=3
+   ```
+
+</Steps>
+
+That is a working integration, with no supervisor. Keep your current systemd, Kubernetes or
+Supervisor definition if a fixed number of workers is all you need, and stop a worker with the
+signal you already use.
+
+`QUEEN_RETRY_AFTER` is the Queen lease: how long a worker holds a job before the broker gives it to
+someone else. It must be longer than the worker's `--timeout` and than the slowest job, unless you
+turn on [lease renewal](/guides/laravel/concepts/#lease-renewal-and-fencing). The consumer group is
+the name under which your workers share the work: two applications in one group split the jobs
+between them, and two groups on one queue each get every job, because the driver subscribes each
+new group to everything the queue holds. Give each application and environment its own queue names
+(or its own broker) and its own group.
+
+When the broker requires a credential, set `QUEEN_BEARER_TOKEN`: a broker JWT with the
+`read-write` role, or, through the broker's [embedded proxy](/operate/security/), an API key with
+the `produce`, `consume` and `read` scopes. The proxy classifies the deletion of a dead-letter
+entry as queue administration, so with failed-job sync on (the default) that key needs the `admin`
+scope too, or `queue:retry` and `queue:forget` fail before they touch Laravel's row. Behind the
+proxy the cluster's plan also caps the partitions per queue (8 on `free`, 64 on `dedicated-s`, see
+[tenants](/operate/tenants/)), so keep `QUEEN_PARTITIONS` within it, and remember that every entity
+a `QueenPartitionable` job names is a partition too.
+
+You need PHP 8.3 or later. The queue connection needs no extension; the supervisors need `pcntl` and
+`posix` on Unix.
+
+## Order jobs per entity
+
+By default the driver spreads jobs over 64 partitions of the queue, `laravel-0000` to
+`laravel-0063`, by a hash of each job's UUID. A job that implements `QueenPartitionable` names its
+own partition instead:
+
+```php
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Queen\Laravel\Contracts\QueenPartitionable;
+
+final class RebuildCustomer implements ShouldQueue, QueenPartitionable
+{
+    public function __construct(public string $customerId) {}
+
+    public function queenPartition(): string
+    {
+        return 'customer:'.$this->customerId;
+    }
+}
+```
+
+Every `RebuildCustomer` of one customer now runs in dispatch order, one at a time, and customers
+never wait for each other. You need no lock or version column for it, because the broker leases a
+partition to one worker at a time, and the partition is created by the first job that names it
+([how it works](/guides/laravel/concepts/#queues-and-stripes)).
+
+## Choose a delivery profile
+
+### The safe default
+
+`prefetch=1` and `ack_batch=1` keep one synchronous acknowledgement per job: the worker asks for a
+job, runs it, and waits until the broker has stored its ACK. Start here while you validate a
+migration, and stay here whenever every job, with a margin, fits inside `retry_after`.
+
+```dotenv
+QUEEN_PREFETCH=1
+QUEEN_ACK_BATCH=1
+```
+
+Turn on lease renewal even with `prefetch=1` when you cannot bound a job's runtime. The lease is
+then renewed while the job runs, and a worker that can no longer renew in time is stopped before
+its lease ends, so a job never runs in two workers at once. Under the Rust supervisor on Linux the
+master renews the leases of all its workers; anywhere else each worker starts one small PHP helper
+beside it. That path needs `pcntl` and `posix`, and your code must not replace the driver's signal
+handler.
+
+### A faster profile
+
+Every write a worker waits for is an fsync on the broker, so the round trips decide how many short
+jobs a worker can run. Three settings take them off the worker's path. `prefetch` leases several
+jobs with one pop. `ack_async` sends the ACK of a finished job and starts the next one without
+waiting for the answer. `pop_ahead` sends the pop for the next batch while the last job of a full
+batch runs.
+
+```dotenv
+QUEEN_PREFETCH=4
+QUEEN_ACK_BATCH=1
+QUEEN_LEASE_RENEWAL=true
+QUEEN_ACK_ASYNC=true
+QUEEN_POP_AHEAD=true
+```
+
+On the Linux server, 32 workers at prefetch 4 went from 1,879 to 2,794 jobs/s with the other two
+([benchmark](/benchmarks/laravel/#the-worker-side-features-one-at-a-time)). The price is a wider
+at-least-once window. The connector refuses `prefetch` above 1, and `pop_ahead`, without
+`QUEEN_LEASE_RENEWAL=true`, because Laravel can pause a worker (maintenance mode, `queue:pause`)
+while it still holds leased jobs. `ack_async` needs `ack_batch=1`, since a batch already defers its
+ACKs. When the broker refuses an asynchronous ACK, the worker learns it one job later, reports it
+through Laravel's exception handler, abandons the lease and drops the rest of its batch, and the
+refused job runs again after its lease expires.
+
+A worker pops ahead only after a full batch: a short batch means the queue was nearly empty, and a
+pop sent ahead would come back empty too. It never pops ahead after a job that took more than a
+third of `retry_after`, nor when it serves a comma-separated queue list, whose next job may come from
+another queue. When a worker crashes, whatever renews its lease hands back the prefetched jobs it had
+not started, without an extra attempt; keep `tries` at 2 or more on these connections anyway, for
+the crashes that cannot be handed back
+([prefetch](/guides/laravel/concepts/#prefetch-ack_async-and-pop_ahead)). `ack_async`, `pop_ahead`
+and the crash hand-back need PHP client 1.9.0.
+
+## What Laravel keeps
+
+| Laravel | With Queen |
+| --- | --- |
+| `dispatch()`, middleware, `timeout`, `tries`, `backoff` | unchanged |
+| Delayed dispatch | a Queen [timer](/concepts/timers/) holds the job until it is due |
+| `release()` | ACK and re-push, or ACK and timer, in one [transaction](/concepts/transactions/) |
+| `failed_jobs` and its commands | unchanged; the broker keeps a dead-letter copy in step (`QUEEN_SYNC_FAILED_JOBS`) |
+| `Queue::size()`, `pendingSize()`, `reservedSize()` | the consumer group's depth in the broker, plus pending timers |
+| Ordering | queue names, plus `QueenPartitionable` for an ordered lane per entity |
+| Delivery | at-least-once, as on Redis: a lease expiry or a crash can run a job again |
+| `queue:clear` | not supported: the command fails and the jobs stay |
+
+All 32 Laravel queue features we checked (chains, batches, unique jobs, rate limits, middleware,
+encrypted jobs, queued listeners and notifications, the failed-job commands) behave as the Laravel
+documentation says, on both supervisors ([the list](/benchmarks/laravel/#laravel-queue-features)).
+
+## Who runs the workers
+
+| Choice | Use it when | Master process |
+| --- | --- | --- |
+| Your process manager | a fixed number of `queue:work` processes is enough | whatever you run today |
+| Queen PHP supervisor | you want Horizon-like pools and no native binary | Laravel stays loaded in one PHP master |
+| Queen Rust supervisor | you want the smallest master | Rust, after one temporary Artisan run |
+
+Both supervisors read the same `supervisor` section of `config/queen.php`, publish the same status
+and obey the same commands, and both offer the same optional features beyond Horizon's pools:
+[coordinated replicas](/guides/laravel/supervisors/#several-replicas),
+[prefork workers](/guides/laravel/supervisors/#prefork-workers),
+[event-driven scaling](/guides/laravel/supervisors/#event-driven-scaling), per-queue minimums and
+fast scale-up. Start with [worker supervisors](/guides/laravel/supervisors/), and turn on the
+[dashboard](/guides/laravel/dashboard/) once authentication is in place.
+
+## Versions
+
+The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a separate binary
+whose version each client release pins. These pages describe PHP client 1.9.0. Everything not
+listed here works from 1.6.0 on.
+
+| PHP client | Supervisor | Brings |
+| --- | --- | --- |
+| 1.7.0 | 0.4.0 | coordinated replicas, prefork, per-queue minimum, fast scale-up, job metrics, monitored tags, long-wait alerts, the Prometheus endpoint |
+| 1.8.0 | 0.5.0 | event-driven scaling |
+| 1.9.0 | 0.6.0 | lease renewal in the Rust master, `ack_async`, `pop_ahead`, the cURL transport, unstarted and crashed batches handed back without an attempt, job timeouts no longer counted as crashes, the dashboard's Retry now, In the queue now and tuning advice |
+
+## Limits
+
+Delivery is at-least-once, as it is on Redis: a lease expiry, a fenced worker or a crash can run a
+job twice, so a job with an external effect needs an idempotency key
+([charge a card once](/guides/exactly-once/)).
+
+A job waits for the job ahead of it in its partition. A long job therefore delays the short jobs
+that hashed to its stripe, even while other workers are idle, so give long jobs a queue of their
+own. A released job goes to the back of its partition, behind jobs dispatched after it for the same
+entity.
+
+Run one supervisor master per application and consumer group, unless every replica runs with
+coordination: the state directory's lock only excludes a second master on the same host. The
+supervisors and the dashboard are previews and run on Unix only. The Rust engine's Linux builds are
+static and their release qualification is still pending, and there is no Windows build.
+
+In 2.0.0-beta.6 the broker's depth read does not decode a percent-encoded queue name, so a queue
+named with a space, a colon or a slash looks empty to the supervisor, which then never scales it
+up. Keep queue names to letters, digits, `-`, `_` and `.`.
+
+Horizon still does some things Queen does not: silenced jobs, job lists, batches in its dashboard,
+Slack and SMS alert routes, per-supervisor controls, and clearing a queue.
+
+Read next: [how Queen runs Laravel jobs](/guides/laravel/concepts/), then
+[Queen or Horizon](/guides/laravel/queen-vs-horizon/) and
+[migrate from Horizon](/guides/laravel/migrate-from-horizon/).

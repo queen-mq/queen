@@ -1,81 +1,84 @@
 ---
 title: Benchmarks
-description: "Every published figure with its conditions, and the hardware behind it: archived runs of Queen 1.x, whose storage was PostgreSQL."
+description: "Queen MQ 2.0 on three 16-vCPU nodes, with Kafka, Redpanda and Pulsar run on the same machines: throughput, partition count, transactions, Kafka clients, hours under faults and Jepsen, every number with the run it came from."
 type: overview
+tier: operate
 sidebar:
   order: 1
-sourceOfTruth:
-  - benchmark-queen/2026-07-23-3test-report/results.md
-  - benchmark-queen/2026-07-29-vm-campaign/results.md
-  - benchmark-queen/2026-07-30-1h-soak/soak1h.json
-  - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
-  - benchmark-queen/laravel-supervisors/QUALIFICATION_SUMMARY_20260829.md
-  - benchmark-queen/laravel-supervisors/QUALIFICATION_REPORT_20260829.md
-  - benchmark-queen/2026-10-01-linux-vm-horizon-raft/README.md
 digest: >-
-  Every run on these pages measured Queen 1.x, whose storage was PostgreSQL; 2.0 replaced that
-  storage with a replicated log, so the figures describe the 1.x engine and not 2.0, and no 2.0
-  figure is published here. The two headline 1.x figures, each with the conditions that make it
-  true. Sustained throughput: 86,369,975,300 messages in 24 hours, about 1,000,000 msg/s per
-  side, 0 restarts and broker
-  resident memory flat near 4.1 GB, on Queen 1.0.0 with explicit acks on leased pops,
-  deduplication on with a 60 second window, 200 partitions, 600 consumers, push batch 100 and
-  256-byte payloads, broker and PostgreSQL 18 co-located on one 32 vCPU / 62 GiB machine, loaders
-  on separate hosts, fdatasync about 70 microseconds. Cardinality: 1,000,000 ordered partitions in
-  one queue, created during the run at 1,000 a second, serving 200,000 msg/s with zero push, pop
-  or ack errors, on the same machine with retention on at RETENTION_PARALLELISM=16, deduplication
-  off, 300 consumers, over one hour. Both are single-shape runs, and neither is a claim about a
-  shape that was not measured.
+  Queen MQ 2.0 benchmarks ran on three DigitalOcean nodes with 16 vCPU and 31 GB each, one raft
+  group, every write fsynced on two of three nodes before its answer, 256-byte JSON messages pushed
+  100 at a time to one partition. On 2.0.0-beta.2 (2026-10-01, 60 s per point, latency over the
+  last 30 s, deduplication off) one queue carried 1,000,000 msg/s pushed and consumed at every
+  partition count tried from 200 to 10,000,000, e2e p99 103 to 163 ms, and topped out near
+  1,500,000 msg/s pushed at 200 partitions. On the same machines Kafka 4.3.1 was faster at 200
+  partitions (e2e p99 18 ms against 146 ms) and fell behind at 100,000 partitions. Exactly-once
+  consume-transform-produce transactions of 10 messages committed in 3 ms at the median and peaked
+  between 7,000 and 9,000 transactions a second. A soak at 500,000 msg/s held e2e p99 near 86 ms
+  for 3 h 23 min through kill -9 and graceful restarts of the leader. Jepsen: 65 of 65 tests valid
+  on 2.0.0-beta.3.
 ---
 
-<Aside type="caution">
-Every run on these pages measured **Queen 1.x**, whose storage was PostgreSQL. 2.0 replaced that
-storage with a replicated log, so these figures describe the 1.x engine and not 2.0. They are kept
-as records of what 1.x did under stated conditions.
-</Aside>
+Queen 2.0 replicates every write through raft, so we measured it as a cluster: three nodes, every
+write fsynced on two of them before the client hears back, and a load generator that keeps its
+schedule when the broker slows down, so a stall shows up as latency instead of quietly lowering
+the load. Then we ran Kafka, Redpanda and Pulsar on the same six machines with the same load and
+the same report. These pages hold what came out, each number with the conditions that make it
+true, including the places where another system did better.
 
-A number appears here only when an archived artifact under `benchmark-queen/` records what
-produced it: the loader's stdout, the configuration line it printed, the host shape, the broker
-build.
+## The results
 
-## The runs
+| Result | Conditions | Page |
+|---|---|---|
+| 1,000,000 msg/s pushed and consumed into one queue at every partition count we tried, from 200 to 10,000,000, e2e p99 103 to 163 ms | 2.0.0-beta.2, 2026-10-01; 60 s per point, latency over the last 30 s; deduplication off | [Partition count](/benchmarks/partitions/) |
+| About 1,500,000 msg/s pushed into one queue of 200 partitions before the raft leader saturates | same rig and build | [Throughput and latency](/benchmarks/throughput/) |
+| 3 ms median commit for an exactly-once step of 10 messages, e2e p99 19 ms at 9,000 msg/s; a ceiling between 7,000 and 9,000 such transactions a second | 2.0.0-beta.2, 200 partitions in and out; a verifier found every input exactly once in the output | [Transactions](/benchmarks/transactions/) |
+| Kafka clients at 1,000,000 msg/s through the facade inside the broker, e2e p99 91 ms | franz-go, `acks=all`, idempotent; the code of 2.0.0-beta.5, 2026-10-02 | [Kafka clients](/benchmarks/kafka-clients/) |
+| 2,753 Laravel jobs/s with 32 workers on Queen's driver and supervisor, against 1,124 for Horizon on Redis | one raft node, 2.0.0-beta.2, 2026-10-01; 10 ms jobs, Redis fsyncing every write; medians of 3 runs | [Laravel workers](/benchmarks/laravel/) |
+| 500,000 msg/s for 3 h 23 min over 1,000,000 partitions, e2e p50 20 ms and p99 86 ms in the median window, through a kill -9 of the leader, a graceful leader restart and a kill -9 of a follower | deduplication and retention on; the builds that became 2.0.0-beta.1, 2026-10-01 | [Soak and failover](/benchmarks/soak/) |
+| 65 of 65 Jepsen tests valid: no acknowledged message lost, no lease held twice, KV linearizable, transactions atomic | 2.0.0-beta.3, 2026-10-01; five nodes, kill -9, pauses, partitions, clock jumps, power loss | [Jepsen](/benchmarks/jepsen/) |
 
-| Run | Headline | The conditions that make it true |
-| --- | --- | --- |
-| [Throughput 24h 1M](/benchmarks/soak-24h) | 86,369,975,300 messages in 24 hours, about 1,000,000 msg/s per side, 0 restarts, broker resident memory flat at ~4.1 GB | **Explicit acks** (leased pops), **deduplication on** (60 s window), 200 partitions, 600 consumers, push batch 100, 256-byte payloads, 32 vCPU / 62 GiB, Queen 1.0.0 |
-| [A million ordered partitions](/benchmarks/cardinality-1m) | 1,000,000 ordered partitions in one queue, created during the run at 1,000/s, serving 200,000 msg/s with 0 push, pop or ack errors | **Explicit acks** (leased pops), retention on with `RETENTION_PARALLELISM=16`, **deduplication off**, 1,000 partitions active per second rotating through the space, 300 consumers, 32 vCPU / 62 GiB, Queen 1.0.0. One hour, of which 43 minutes on the completed space |
-| [Ordered pipeline](/benchmarks/ordered-pipeline) | 88,503,408 messages verified across 4 stages and 1000 partitions with 0 duplicates, 0 gaps and 0 order violations | 25,000 events/s for 600 s, deduplication window 300 s, explicit bulk acks, per-stage verifier over per-property logs |
-| [Multi-tenant cell](/benchmarks/multitenant-cell) | A 2-core cell behind the proxy holding above 2400 msg/s with zero loss; 12 tenants for 1 hour with zero cross-tenant deliveries | **Deduplication off**, **429 retry disabled**, enforcement on, all tenants sharing one queue and one consumer group |
-| [Laravel supervisors](/benchmarks/laravel-supervisors) | 2,753 against 1,124 completed jobs/s with 32 workers and fsync on every write, 4,395 against 1,090 with 64; 64 workers in 183 MiB against Horizon's 1,892 MiB; p95 23 against 227 ms at 500 jobs/s | **Diagnostic only:** one 16-vCPU Linux VM, Queen on one Raft node against Horizon on Redis `appendfsync always`, 10 ms jobs, queue full before the workers start, three runs per engine, prefetch 4 with lease renewal. An earlier Docker Desktop run with 8 workers is on the same page |
+## Where Queen leads, and where it does not
 
-Also: [cross-broker comparison](/benchmarks/comparison) and
-[method, rig and archive](/benchmarks/method/).
+Queen hardly notices the partition count. A partition costs the leader about 2 KB of memory, and
+its messages go into its queue's log next to every other partition's, so ten million partitions
+are written and fsynced the way two hundred are. We are proudest of this result, because it is the
+reason Queen exists: one partition per entity, as many entities as you have. Kafka, Redpanda and
+Pulsar give each partition a log and a replication state of its own, and on these machines Kafka's
+p99 went from 18 ms at 200 partitions to 1.5 s at 50,000 before it fell behind at 100,000, while
+Pulsar and Redpanda fell behind from 50,000. Queen ran the same 1M msg/s over ten million
+partitions with a p99 of 122 ms.
 
-## The other evidence
+With few partitions, the others are faster. At 1M msg/s on 200 partitions Kafka delivered with an
+e2e p99 of 18 ms and Pulsar with 21 ms, against Queen's 146 ms, and Kafka used a little over half
+of Queen's CPU. Kafka went on to 4M msg/s at a p99 of 75 ms; Queen's single raft leader tops out
+near 1.5M. Durability explains part of the gap to Kafka, which answered from the page cache, but
+none of the gap to Pulsar, which waited for two fsyncs as Queen did. Most of what remains comes from
+two choices we made: a Queen pop is a write too, because the lease it hands out commits through the
+log before the consumer sees a message, and one leader orders every write of a raft group.
 
-How fast one shape goes is one kind of evidence. Whether the clients and the broker agree about
-what the API means, on more than one topology, is the other.
-[Conformance](/benchmarks/conformance) is the 1.x record of that matrix: six client suites on
-three PostgreSQL topologies each, the broker's own unit tests, an HA mesh assertion and a
-two-tenant isolation suite recorded at 45 assertions and 0 failures, every cell in its own
-throwaway stack. The harness itself, and
-how to run a subset of it, is [Testing](/internals/contributing/testing/).
+Transactions are where that design pays. A step's acks and pushes are one log entry, so a
+transaction costs about one write: 3 ms at the median, and 9,000 single-message transactions a
+second went through where Kafka, Redpanda and Pulsar all fell behind. The ceiling is the one thread
+that plans them. At 200 partitions Queen and Pulsar top out near the same 7,000 transactions a
+second; with 900 partitions and 900 workers Pulsar doubled to 14,400 and Queen dropped to 5,100.
 
-## How to read a figure
+## The rig, in short
 
-Producers are open-loop: each push leaves at its scheduled instant and is shed over the in-flight
-cap rather than queued behind it, so a pacer that falls behind shows up as latency. Every
-archived run reports `shed=0`. Consumers are closed-loop drainers: their throughput is a result,
-not an offered load.
+Six DigitalOcean droplets with 16 vCPU and 31 GB each, in one VPC: three brokers and three load
+machines, plus a fourth load machine for Queen's native runs, because its HTTP load generator needs
+more CPU per message than the Kafka and Pulsar clients. Two brokers have a Xeon Gold 6548N and the
+third an older Xeon Platinum 8358, which we kept from leading Queen's raft group; Kafka, Redpanda
+and Pulsar spread their partition leaders over all three. Each system ran alone on the brokers,
+with the same OS settings.
 
-Broker-side p99 is the time the broker spent on a request it accepted. End-to-end p99 also spans
-the network, the commit and the wait in the partition, so it belongs to the workload. The
-multi-tenant hour recorded both: a broker-side median p99 of about 2.9 ms against an end-to-end
-p99 of 133,693 ms, the rate-limited tenants' backlog in the same histogram.
+An e2e latency is measured per message, from the instant its producer was scheduled to send it to
+the instant a consumer received it, before the ack. Unless a page says otherwise, a latency is the
+worst of the load processes over the last 30 seconds of a 60-second run, and a system "fell behind"
+when it consumed less than 97% of the offered rate or its e2e p99 passed 5 seconds. Every number
+names its build and date, and the engine moves fast: read a figure as what that build did on this
+rig. The full method, each system's settings and the commands to run it again are in
+[how we measure](/benchmarks/methodology/).
 
-## Hardware
-
-| Rig | Used by | Shape |
-| --- | --- | --- |
-| Single-node bench | Throughput 24h 1M, the ordered pipeline | Broker and PostgreSQL 18 co-located on 32 vCPU / 62 GiB, loaders on separate machines, three of 16 vCPU for the soak. `fdatasync` about 70 µs on the soak host, 68 µs on the pipeline host |
-| Cell rig | the multi-tenant runs | 8 vCPU / 15 GiB with NVMe, `fdatasync` average 95.5 µs and p99 about 396 µs. PostgreSQL, the proxy's state database, the broker and the proxy share **one CPU-capped systemd slice**: a free-tier shape is 2 cores for all four, loader outside it |
+Results measured on Queen 1.x, whose storage was PostgreSQL, stay in the git history of this site.
+They are not 2.0 numbers.

@@ -1,0 +1,165 @@
+---
+title: AI agents
+description: "Connect Claude Code, Cursor, VS Code, Codex or Claude to Queen's MCP server, so your coding agent builds on Queen from the model, tested code and the list of known traps."
+type: how-to
+tier: use
+sidebar:
+  order: 5
+sourceOfTruth:
+  - mcp/src/mcp.mjs
+  - mcp/src/tools.mjs
+---
+
+Queen runs an MCP server for coding agents at `https://queenmq.com/mcp`. Connect your agent and it
+starts every session knowing the Queen model and its traps, because the server hands it a primer as
+the session opens. While it works, the agent asks the server for tested code in your language,
+checks what it wrote against the known traps, looks up the errors it meets, and learns which Kafka
+clients work against Queen and with what configuration. There is no account to create and nothing
+runs on your machine: the server is one HTTPS endpoint that answers questions about Queen.
+
+## Install
+
+<Tabs>
+<TabItem label="Claude Code">
+
+```bash
+claude mcp add --transport http queen https://queenmq.com/mcp
+```
+
+That connects the server for you, in the current project, and `--scope user` makes it yours in
+every project. To give it to everyone who works on the repository, use `--scope project`: Claude
+Code then writes the entry to `.mcp.json` at the project root, for you to commit.
+
+```bash
+claude mcp add --transport http --scope project queen https://queenmq.com/mcp
+```
+
+`/mcp` inside Claude Code shows the server and whether it is connected.
+
+</TabItem>
+<TabItem label="Cursor">
+
+[Add to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=queen&config=eyJ1cmwiOiJodHRwczovL3F1ZWVubXEuY29tL21jcCJ9)
+installs the server from a link. To add it by hand, put this in `.cursor/mcp.json` in your project,
+or in `~/.cursor/mcp.json` for every project:
+
+```json
+{
+  "mcpServers": {
+    "queen": {
+      "url": "https://queenmq.com/mcp"
+    }
+  }
+}
+```
+
+</TabItem>
+<TabItem label="VS Code">
+
+[Install in VS Code](vscode:mcp/install?%7B%22name%22%3A%22queen%22%2C%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fqueenmq.com%2Fmcp%22%7D)
+opens VS Code ready to install the server. For one workspace, add it to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "queen": {
+      "type": "http",
+      "url": "https://queenmq.com/mcp"
+    }
+  }
+}
+```
+
+VS Code discovers the server's tools and makes them available in chat.
+
+</TabItem>
+<TabItem label="Codex">
+
+Add the server to `~/.codex/config.toml`, or to `.codex/config.toml` in a trusted project:
+
+```toml
+[mcp_servers.queen]
+url = "https://queenmq.com/mcp"
+```
+
+`codex mcp add queen --url https://queenmq.com/mcp` writes the same entry. The Codex CLI, its IDE
+extension and the ChatGPT desktop app all read this file.
+
+</TabItem>
+<TabItem label="Claude Desktop and claude.ai">
+
+Open **Customize > Connectors**, choose **+ Add**, then **Add custom connector**. Name it Queen,
+paste `https://queenmq.com/mcp` as the server URL and add it; the server needs no sign-in. On a Team
+or Enterprise plan, an owner adds the connector first, under **Organization settings > Connectors**.
+
+</TabItem>
+</Tabs>
+
+Any other agent that speaks MCP over Streamable HTTP connects to the same URL, with no headers and
+no sign-in.
+
+## What your agent gets
+
+The server gives your agent six tools, which it calls on its own as it works:
+
+- `guide(topic|page)` answers from the documentation: the sections that best match a question asked
+  in plain words, or a whole page by its slug.
+- `example(task, language)` returns code for one operation (a push, a consumer, a transaction, a
+  replay) or a whole example app, in JavaScript, Python, Go, PHP, Rust, C++ or plain HTTP. It
+  answers from snippets cut from programs our test suite runs, so the method names are exact, and
+  labels any code that comes from a docs page instead.
+- `check(language)` is the checklist of known traps for code in that language, from the mistakes
+  that lose, stall or duplicate messages down to the ones that only cost speed. With `kafka`, it
+  covers Kafka clients.
+- `explain_error(error)` says what an error means and what to do about it, for an HTTP status, a
+  `code` or a transaction `reason` from a response body, or a Kafka error name or number.
+- `kafka_client(client, version?)` says whether a Kafka client library works against Queen, which
+  versions we tested, the configuration it needs and where it falls short.
+- `setup(feature, language?)` walks through setting up one feature: KV state, timers, stream
+  processing, ephemeral queues, Kafka clients, the Postgres source and sink, or the S3 sink. It
+  answers with the docs for that feature, the calls in your SDK when you name a language, and the
+  traps that apply.
+
+It also offers three prompts, which you run yourself:
+
+- `design` turns a description of a flow into a Queen model (queues, partition keys, readers, one
+  transaction per step, timers and KV state) before any code exists.
+- `review` goes through the Queen code in your current changes with the trap checklist and the
+  tested API.
+- `from-kafka` brings a Kafka application over, keeping its Kafka client against Queen's Kafka
+  facade or moving the code to a Queen SDK.
+
+Claude Code lists the prompts as slash commands, `/queen:design`, `/queen:review` and
+`/queen:from-kafka`, and typing `/mcp__queen__design` runs the same prompt. In VS Code's chat they
+are `/queen.design` and so on.
+
+## Set it up for your team
+
+Commit the configuration and the server comes with the repository. The files are `.mcp.json` for
+Claude Code (the one `--scope project` writes), `.cursor/mcp.json` for Cursor and
+`.vscode/mcp.json` for VS Code, each holding the entry shown above; recent versions of VS Code read
+`.mcp.json` too. Everyone who opens the repository in one of those agents is offered the server,
+and Claude Code asks each person to approve it once. The
+[`examples/`](https://github.com/queen-mq/queen/tree/master/examples) folder of the Queen
+repository carries all three files, so an agent working on the examples gets the server the same
+way.
+
+## When remote MCP servers are blocked
+
+Some companies don't allow remote MCP servers. The primer the server hands your agent is also a
+plain file, so you can append it to your project's `AGENTS.md`:
+
+```bash
+curl -s https://queenmq.com/mcp/AGENTS.md >> AGENTS.md
+```
+
+Agents that read `AGENTS.md` then start every session knowing the Queen model. They don't get the
+tools this way, so the file ends with links to what the docs offer instead: every page as markdown,
+the error reference and the Kafka client guide.
+
+## Privacy
+
+A tool call carries a question and nothing else: a topic, a language, an error code, a client name.
+No tool takes source code as an argument, so your code stays out of the calls, and `review` runs
+inside your agent, against the checklist the server sends back. There is no sign-in and no account,
+and the server keeps no session from one call to the next.

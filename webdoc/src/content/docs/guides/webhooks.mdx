@@ -1,0 +1,175 @@
+---
+title: Deliver webhooks
+description: "Deliver webhooks in order per endpoint, with the broker's retry budget and a dead-letter queue, so an endpoint that is down slows down nobody else."
+type: how-to
+tier: use
+sourceOfTruth:
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+  - clients/client-js/client-v2/admin/Admin.js
+  - server/src/rsm/consume/ack.rs
+  - server/src/rsm/consume/pop.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/admin.rs
+verifiedBy:
+  - examples/apps/js/webhooks.mjs
+  - examples/apps/py/webhooks.py
+  - examples/apps/go/webhooks/main.go
+  - examples/apps/rust/src/bin/webhooks.rs
+  - examples/apps/php/webhooks.php
+  - examples/apps/cpp/webhooks.cpp
+  - examples/apps/http/webhooks.sh
+sidebar:
+  order: 4
+---
+
+Put every delivery in the partition of the endpoint it is for, let the broker's retry budget do the
+retrying, and let what never succeeds land in the dead-letter queue with its error. Deliveries to
+one endpoint then arrive in the order the events happened, and an endpoint that is down backs up
+its own partition while every other endpoint keeps receiving.
+
+## The shape
+
+```js
+await queen.queue('webhooks')
+  .config({ leaseTime: 30, retryLimit: 5, dlqAfterMaxRetries: true })
+  .create()
+
+// Producer: one partition per endpoint, the event id as transactionId.
+await queen.queue('webhooks').partition(endpoint).push([
+  { transactionId: event.id, data: { url, event } },
+])
+
+// Sender: return to ack, throw to spend one retry.
+await queen.queue('webhooks')
+  .group('sender')
+  .subscriptionMode('all')        // a new group starts at the tail unless told otherwise
+  .concurrency(20)
+  .partitions(1)                  // one endpoint per pop
+  .each()
+  .consume(async (msg) => {
+    const res = await fetch(msg.data.url, { method: 'POST', body: JSON.stringify(msg.data.event) })
+    if (!res.ok) throw new Error(`${msg.data.url} answered ${res.status}`)
+  })
+```
+
+The first push that names an endpoint creates its partition, so there is nothing to set up per
+customer, and order holds inside it. The 20 senders spread over endpoints and never share one,
+because a group leases a partition to one consumer at a time. `.partitions(1)` keeps each pop to a
+single endpoint. A pop can otherwise lease several partitions at once, and after a failed delivery
+the client skips the rest of what it popped. Deliveries to other endpoints that came in the same
+pop would then come back only when their lease runs out, so a healthy endpoint would wait on a dead
+one.
+
+<Figure id="guides/webhooks-endpoints" />
+
+The retry budget belongs to the broker. With `autoAck` on, the default, a handler that returns
+acknowledges the delivery and a handler that throws gives it back with the error, which spends one
+unit of `retryLimit`. After `retryLimit` failures the next one files the delivery in the
+dead-letter queue with its last error (so it was tried `retryLimit` + 1 times), and the endpoint's
+next delivery goes out. Because the count lives in the broker, the retries survive the sender
+dying halfway, which a retry loop inside the handler would not. The `transactionId` makes the
+enqueue idempotent too: within the queue's dedup window (an hour by default), an application that
+retries its own emit does not create a second delivery.
+
+## The dead letters
+
+Read them, and re-queue them once the endpoint is fixed:
+
+```js
+const dlq = await queen.queue('webhooks').dlq().limit(50).get()
+for (const row of dlq.messages.reverse()) {      // newest first from the broker: re-queue oldest first
+  console.log(row.partition, row.errorMessage, row.retryCount)
+  await queen.admin.retryMessage(row.partitionId, row.transactionId)
+}
+```
+
+A re-queued delivery is a new message at the tail of its partition, with transactionId
+`dlq:<row id>`, and the dead-letter row is removed in the same transaction.
+
+Some failures are permanent, a `410 Gone` or a deleted subscription, and retrying them only spends
+time. To skip the rest of the budget, consume with `.autoAck(false)` and `.batch(1)`, and ack each
+delivery yourself: `completed` on success, `failed` with the error on a transient failure, and
+`queen.ack(msg, 'dlq', { group: msg.consumerGroup, error: reason })` on a permanent one, which files
+the row at once whatever the queue's flags say. One delivery per pop keeps a dead-lettered delivery
+from having anything behind it in the same batch. See [consuming](/concepts/consuming/) for the
+statuses.
+
+## The verified programs
+
+Each program queues three events for three endpoints, one of which answers 500 to everything. It
+checks that the two healthy endpoints received their events in order, that the dead one was tried
+the full budget and never skipped, and that its three deliveries sit in the dead-letter queue with
+the error attached.
+
+<Tabs>
+
+<TabItem label="JavaScript">
+
+<Render file="snippets/app-js-webhooks" />
+
+</TabItem>
+
+<TabItem label="Python">
+
+<Render file="snippets/app-py-webhooks" />
+
+</TabItem>
+
+<TabItem label="Go">
+
+<Render file="snippets/app-go-webhooks" />
+
+</TabItem>
+
+<TabItem label="Rust">
+
+<Render file="snippets/app-rust-webhooks" />
+
+</TabItem>
+
+<TabItem label="PHP">
+
+<Render file="snippets/app-php-webhooks" />
+
+</TabItem>
+
+<TabItem label="C++">
+
+<Render file="snippets/app-cpp-webhooks" />
+
+</TabItem>
+
+<TabItem label="curl">
+
+<Render file="snippets/app-http-webhooks" />
+
+</TabItem>
+
+</Tabs>
+
+## Limits
+
+A failing delivery holds up its own endpoint: later deliveries to it wait until it succeeds or is
+dead-lettered. That is the price of order, and other endpoints do not pay it.
+
+Retries are immediate, because a nacked delivery comes back on the next pop. `retryDelay` is
+accepted by `/configure` and stored, but the 2.0 consumption engine does not apply it. For a pause
+between attempts, ack the delivery and schedule it again as a timer into the same partition, in one
+[transaction](/concepts/transactions/); it then goes out behind the newer deliveries to that
+endpoint.
+
+Only a nack spends the budget. A sender that dies mid-delivery costs nothing, because the lease
+expires and the delivery comes back, which also means a delivery that crashes its sender every
+time is retried forever. Messages carry `deliveryAttempt` so a handler can dead-letter such a
+delivery past a threshold of its own (the Go and Rust clients do not expose the field yet).
+
+Dead-lettering is on by default (`deadLetterQueue` and `dlqAfterMaxRetries` are both `true` on a
+new queue). Turn both off and a delivery that spends its budget is skipped, and it is gone.
+
+The endpoint can receive a delivery twice, for instance when a lease expires after the POST and
+before the ack. Send the event id in a header so the receiver can drop repeats.
+
+The dead-letter path has its own workload in the Jepsen suite (W7). It caught a real bug, a dead
+letter filed without its payload under kill -9, which was fixed in `7a2a1711`; [Jepsen](/benchmarks/jepsen/)
+lists every run.

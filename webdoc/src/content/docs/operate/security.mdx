@@ -1,0 +1,172 @@
+---
+title: Security
+description: "Which port serves what, broker JWT and proxy API keys, access levels, the raft token, TLS and payload encryption at rest, with the defaults and the gaps stated plainly."
+type: how-to
+tier: operate
+sidebar:
+  order: 5
+sourceOfTruth:
+  - server/src/main.rs
+  - server/src/config.rs
+  - server/src/auth.rs
+  - server/src/encryption.rs
+  - server/src/tenant.rs
+  - server/src/peerclient.rs
+  - server/src/proxy_embed.rs
+  - server/src/rsm/facade/real/phase2/streams.rs
+  - server/src/rsm/replicator/raft/cluster.rs
+  - server/src/rsm/replicator/raft/network.rs
+  - proxy/src/harden.rs
+  - proxy/src/cp.rs
+  - protocols/queen-kafka/src/boot.rs
+  - SECURITY.md
+---
+
+Out of the box a node authenticates nobody: its HTTP port is plain HTTP, and every route answers
+any caller that can reach it. That keeps the first run to one command, and it is the first thing to
+change before anything else can reach the node. Put one of two front doors on it, the broker's own
+JWT for services that hold tokens or the built-in proxy for API keys and people, keep the raft port
+on a private network, and encrypt the queues whose payloads must not sit on disk in clear.
+
+## What listens where
+
+| Port | Set by | Serves | Protected by |
+|---|---|---|---|
+| `6632` | `PORT`, `QUEEN_BIND_ADDR` (`0.0.0.0`) | The HTTP API, the dashboard, `/health`, the metrics | Broker JWT, off by default. Plain HTTP. When the proxy shares this port, the proxy's keys and TLS |
+| `7400` by convention | the raft address in `QUEEN_RAFT_PEERS`; `QUEEN_RAFT_LISTEN` (default `0.0.0.0` on that port) | Votes, log entries, snapshots, membership changes, the commands followers send the leader | `QUEEN_RAFT_TOKEN`. Plain HTTP |
+| raft port + N | `QUEEN_RAFT_GROUPS` | Raft group N | The same token |
+| `QUEEN_PROXY_PORT`, e.g. `6711` | when set and different from `PORT` | The proxy: the data plane for keys and sessions, the console, `/api/cp/*` | API keys and sessions; `/api/cp/*` by `QUEEN_PROXY_CP_TOKEN`. TLS with `QUEEN_TLS_CERT` / `QUEEN_TLS_KEY` |
+| `9092` | `QUEEN_KAFKA_ADDR`, with `QUEEN_KAFKA_EMBEDDED=true` | The Kafka facade | `QUEEN_KAFKA_SASL=plain`, off by default. TLS with `QUEEN_KAFKA_TLS_CERT` / `QUEEN_KAFKA_TLS_KEY` |
+
+<Figure id="operate/ports" />
+
+`QUEEN_BIND_ADDR=127.0.0.1` keeps the HTTP port on the host. That is wrong in Kubernetes, where
+probes and Services arrive on the pod's IP. Whatever you choose, port 6632 never faces the internet
+without one of the front doors below.
+
+## Broker JWT
+
+```bash
+JWT_ENABLED=true
+JWT_ALGORITHM=RS256                 # HS256 (default), HS384, HS512, RS256, RS384, RS512, EdDSA, auto
+JWT_JWKS_URL=https://idp.example.com/.well-known/jwks.json   # or JWT_PUBLIC_KEY (the PEM itself), or JWT_SECRET for HS*
+JWT_ISSUER=https://idp.example.com/
+JWT_AUDIENCE=queen
+```
+
+```bash
+curl -s http://queen:6632/api/v1/resources/queues -H "authorization: Bearer $TOKEN"
+```
+
+A token's roles come from the `role` claim (a string) or the `roles` claim (an array), renamed
+with `JWT_ROLES_CLAIM` and `JWT_ROLES_ARRAY_CLAIM`. JWKS keys are fetched at boot, cached by `kid`,
+refreshed every hour (`JWT_JWKS_REFRESH_INTERVAL`, in seconds) and again when a token names a `kid`
+the node has not seen, at most once every 5 seconds. `exp`, `nbf` and `iat` are checked with 30
+seconds of skew (`JWT_CLOCK_SKEW`). `JWT_ENABLED=true` with no key material at all stops the boot,
+and the `config: auth` boot line states the mode with the secrets masked.
+
+Each route has an access level, and the token's roles decide which levels it passes. Write-only is
+a produce-only role for services that must push without reading anything, so it sits beside
+read-write rather than below it.
+
+| Level | Routes | Passes with role |
+|---|---|---|
+| public | `/health`, `/metrics`, `/metrics/prometheus`, the dashboard's files, `/auth/*`, and whatever `JWT_SKIP_PATHS` adds | none needed |
+| read-only | `GET` listings, status, messages, consumer groups, the DLQ, traces, KV and timer reads; the batched reads by offset | `read-only`, `read-write`, `admin` |
+| write-only | `POST /api/v1/push`, `POST /api/v1/timers`, the ephemeral push | `write-only`, `read-write`, `admin` |
+| read-write | everything else: pop, ack, transaction, KV writes, configure | `read-write`, `admin` |
+| admin | `/api/v1/system/*` (raft membership, kill switches), `/internal/*`, queue, consumer-group and DLQ deletes | `admin` |
+
+The role names are settings as well (`JWT_ROLE_ADMIN`, `JWT_ROLE_READ_WRITE`,
+`JWT_ROLE_READ_ONLY`, `JWT_ROLE_WRITE_ONLY`), and every route's level is in the
+[HTTP reference](/reference/http/).
+
+## API keys and people
+
+The proxy built into the binary (`QUEEN_PROXY_EMBEDDED=true`) is the second front door: API keys
+bound to one tenant's cluster, sessions for people with a role per cluster, plan quotas, and TLS on
+its own listener. In a cluster it gets a port of its own, and that is the port to expose. See
+[tenants, API keys and quotas](/operate/tenants/).
+
+The broker also has a raw tenant mode, `QUEEN_TENANCY_HEADER=true`, which scopes every request by
+an `x-queen-tenant` header that must hold a UUID and is checked against nothing. It refuses to boot
+unless `QUEEN_KV_TRUSTED_PROXY=1` states that something in front sets that header and strips the
+client's own. The built-in proxy needs neither setting, because it hands requests to the broker
+inside the process.
+
+## TLS
+
+The broker port does not terminate TLS itself. Two listeners do. The proxy's listener takes
+`QUEEN_TLS_CERT` and `QUEEN_TLS_KEY`, two PEM file paths, over HTTP/1.1, and one without the other
+stops the boot. The Kafka facade takes `QUEEN_KAFKA_TLS_CERT` and `QUEEN_KAFKA_TLS_KEY`. Without
+SASL the Kafka listener authenticates nobody, and with SASL on a plaintext listener every client's
+token crosses the network in clear, which the node warns about at boot. Anything else terminates
+TLS at your ingress or load balancer, with the hop to the node on a private network.
+
+## The raft token
+
+```bash
+QUEEN_RAFT_TOKEN="$(openssl rand -hex 32)"    # the same value on every node
+```
+
+Every raft RPC carries `QUEEN_RAFT_TOKEN` in `x-queen-raft-token`. The receiving node checks it
+from the headers, in constant time, before it reads the body, so a wrong token is a cheap `401`. The
+nodes also present it to each other on the HTTP port when they move ephemeral partitions, and the
+proxy strips it from client requests. A refusal shows up on the sending node, as
+`refused this node's QUEEN_RAFT_TOKEN` inside a replication warning; the refusing node logs
+nothing.
+
+Unset, anything that reaches the raft port can vote, append entries, install snapshots and submit
+commands, and a node whose raft listener is reachable beyond loopback says so at boot. Set, the
+token still travels in clear, so keep the raft port on a private network and allow it only from
+the other nodes. Rotating it is a rolling restart: nodes with the new token form the quorum once a
+majority of them has restarted.
+
+## Payload encryption at rest
+
+```bash
+QUEEN_ENCRYPTION_KEY="$(openssl rand -hex 32)"    # 64 hex characters, the same on every node
+```
+
+```bash
+curl -s -X POST http://localhost:6632/api/v1/configure -H 'content-type: application/json' \
+  -d '{"queue":"payments","options":{"encryptionEnabled":true}}'
+```
+
+The payloads of a queue with `encryptionEnabled` are stored AES-256-GCM encrypted, including the
+messages that transactions and timers push into it, and are decrypted when read. Queue, partition
+and KV key names, and KV values, are stored in clear. Check the boot line
+`encryption service initialized (AES-256-GCM)`, because a missing key is silent: with no key the
+node stores flagged queues in plaintext and says so only in its `config: security` line
+(`encryption_key=<unset>`). A key of the wrong length, or one that is not hex, logs a warning and
+disables encryption the same way.
+
+## The data directory
+
+`QUEEN_RAFT_DIR` holds everything a node knows: payloads (in clear unless encrypted), KV, timers,
+consumer positions and, with the proxy, its users and API-key hashes. Treat the volume, and every
+snapshot of it, like a credential.
+
+## Limits
+
+Everything is open by default. With `JWT_ENABLED=false` and no proxy in front, anyone who reaches
+port 6632 can read, write, delete queues and change the raft membership. With the proxy on its own
+port, port 6632 is exactly that broker, which is why it stays inside the network.
+
+`/metrics/prometheus` is public on port 6632 and names every tenant's queues. On the proxy's port it
+needs the control-plane token, in `x-queen-cp-token` or as a bearer token, and answers `404` to
+anyone else.
+
+A JWT without `exp` is accepted, so issue tokens that expire. Changing `QUEEN_ENCRYPTION_KEY` makes
+the encrypted payloads unreadable, and consumers then receive the ciphertext envelope as data with
+no error; restoring the key restores the plaintext. In 2.0.0-beta.6 the messages a stream's sink
+pushes are stored in clear even in a queue with `encryptionEnabled`.
+
+There is no TLS between nodes: the raft port and the HTTP calls between nodes are plaintext. And
+with the broker's JWT on, the nodes' ephemeral hand-over calls are refused, so ephemeral partitions
+that move lose their contents ([ephemeral queues](/guides/ephemeral/)).
+
+## Reporting a vulnerability
+
+Report it privately, through GitHub's private vulnerability reporting on the `queen-mq/queen`
+repository, as `SECURITY.md` describes.

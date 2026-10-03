@@ -10,17 +10,17 @@ description: "Verified snippet extracted from examples/apps/go/rate-limiter/main
 
 ```go title="examples/apps/go/rate-limiter/main.go"
 //
-// A rate limiter, built out of a streaming query.
+// A rate limiter built from a streaming query.
 //
-// Counting requests per API key in a fixed window is the textbook rate limiter,
-// and the usual implementation is a counter in Redis: a second data system to
-// run, to size, and to lose when it restarts.
+// The textbook rate limiter counts requests per API key in a fixed window,
+// usually with a counter in Redis, which is one more system to run and one
+// more place where the count can drift from the requests.
 //
-// Here the counter is a windowed aggregation over the request stream itself.
-// The window state, the decisions it emits and the acknowledgement of the
-// requests it counted all commit as one entry in the broker's replicated log,
-// so the counter cannot drift from the stream it was computed from, and it
-// survives a restart because it lives in the broker, not in a process's memory.
+// Here the counter is a windowed aggregation over the request queue itself.
+// Each cycle of the stream commits the window state, the closed windows it
+// emits and the ack of the requests it counted as one entry in the broker's
+// log, so the count cannot drift from the requests, and it survives a restart
+// of this process because the state is in the broker.
 //
 //	api-requests (one partition per API key)
 //	  |-- streaming query: tumbling window, count per key
@@ -53,7 +53,7 @@ var (
 
 	// The query id is this streaming query's identity in the broker: its
 	// window state is keyed by it, so a restart with the same id resumes the
-	// same windows instead of opening new ones.
+	// same windows.
 	queryID = "app-go-rate-limiter-" + runID
 )
 
@@ -89,10 +89,10 @@ func assert(condition bool, description string) error {
 var stopping atomic.Bool
 
 // streamLogger is what the streaming runner reports through. Stopping the
-// runner cancels whatever poll it had in flight and the pop loop reports that
-// cancellation on its way out: that one is the shutdown itself, not a fault, so
-// it is dropped. Everything else is printed, because a query failing to commit
-// its windows would otherwise fail this run with no explanation.
+// runner cancels whatever poll it had in flight, and the pop loop reports that
+// cancellation on its way out. That report is the shutdown itself, so it is
+// dropped. Everything else is printed, because a query failing to commit its
+// windows would otherwise fail this run with no explanation.
 type streamLogger struct{}
 
 func (streamLogger) Info(msg string, ctx map[string]interface{}) {}
@@ -123,7 +123,7 @@ func run() error {
 	}
 
 	// One context bounds the whole program, including the streaming runner it
-	// starts: a broker that stops answering ends the run instead of wedging it.
+	// starts, so a broker that stops answering fails the run when it expires.
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
@@ -145,11 +145,13 @@ func run() error {
 
 	// ------------------------------------------------------------- the counter
 	//
-	// A stream is a running process: it has to be listening before the requests
-	// arrive. Starting one over an existing backlog counts nothing.
+	// The stream runs in this process, as a consumer group of its own. A new
+	// group starts at the tail of the queue unless it asks otherwise, and a
+	// request pushed while the stream was still starting would be missed, so it
+	// asks for SubscriptionMode "all": every request in the queue is counted.
 	//
 	// The partition is the aggregation key, so the window state is per API key
-	// without anything being said about keys here: whoever pushes decides.
+	// without a word about keys here: the producer decides, by partition.
 	fmt.Println("\nstarting the counter")
 	runner, err := streams.
 		// AsStreamSource adapts a queue builder to what the streaming engine
@@ -171,12 +173,13 @@ func run() error {
 		}, "requests", "cost").
 		To(client.Queue(usageQueue)).
 		Run(ctx, streams.RunOptions{
-			QueryID:       queryID,
-			URL:           brokerURL,
-			BatchSize:     200,
-			MaxPartitions: 8,
-			MaxWaitMillis: 200,
-			Logger:        streamLogger{},
+			QueryID:          queryID,
+			URL:              brokerURL,
+			BatchSize:        200,
+			MaxPartitions:    8,
+			MaxWaitMillis:    200,
+			SubscriptionMode: queen.SubscriptionModeAll,
+			Logger:           streamLogger{},
 		})
 	if err != nil {
 		return fmt.Errorf("start the counter: %w", err)
@@ -188,13 +191,6 @@ func run() error {
 		runner.Stop()
 	}
 	defer stop()
-
-	// Run returns as soon as the query is registered, with the pop loop running
-	// in its own goroutine. That loop's first poll is what creates the query's
-	// consumer group, and a new group starts at the tail: give it that poll
-	// before producing, or the requests race past a cursor that does not exist
-	// yet and nothing is ever counted.
-	time.Sleep(500 * time.Millisecond)
 
 	// ------------------------------------------------------------- the traffic
 	fmt.Println("\ntaking traffic")
@@ -225,9 +221,9 @@ func run() error {
 	// ---------------------------------------------------------------- the gate
 	//
 	// The enforcement point. It reads each closed window and turns the ones over
-	// quota into throttle decisions. Splitting it from the counter is deliberate:
-	// the counting is exact and belongs to the broker, the policy is yours and
-	// changes on a different schedule.
+	// quota into throttle decisions. It is separate from the counter on purpose:
+	// the counting is exact and stays the same, while the policy is yours and
+	// changes on its own schedule.
 	fmt.Println("\nenforcing")
 	type decision struct {
 		key    string
@@ -237,9 +233,9 @@ func run() error {
 	var decisions []decision
 
 	// The loop waits for the totals it expects, with a deadline. Stopping on a
-	// quiet period instead would be a race: a window closes when its timer says
-	// so, not when the reader is tired of waiting, and a burst that straddles a
-	// boundary arrives as two windows rather than one.
+	// quiet period would be a race: a window closes when its timer fires,
+	// whatever the reader is doing, and a burst that straddles a boundary
+	// arrives as two windows.
 	complete := func() bool {
 		return counted[quietKey] == quietRequests && counted[noisyKey] == noisyRequests
 	}
@@ -250,8 +246,9 @@ func run() error {
 			Group(gateGroup).
 			SubscriptionMode(queen.SubscriptionModeAll).
 			Batch(50).
-			// Each key's windows land in that key's partition, and a pop claims
-			// a single partition unless it is asked for more.
+			// Each key's windows land in that key's partition. Partitions(10)
+			// lets one pop take the windows of both keys, with Batch as the
+			// budget they share.
 			Partitions(10).
 			Wait(true).
 			TimeoutMillis(2000).
@@ -271,10 +268,13 @@ func run() error {
 			overBy := int(requests) - quotaPerWindow
 
 			if overBy > 0 {
-				// The decision is a message, not a log line: whatever enforces
-				// it (an edge worker, a gateway, the API itself) subscribes to
-				// this queue and gets the decisions in order, per key.
-				if _, err := client.Queue(throttledQueue).
+				// The decision is a message: whatever enforces it (an edge
+				// worker, a gateway, the API itself) reads this queue and gets
+				// the decisions in order, per key. It commits with the ack of
+				// the window it came from, so a crash in between cannot lose a
+				// decision or make two.
+				if _, err := client.Transaction().
+					Queue(throttledQueue).
 					Partition(key).
 					Push(map[string]interface{}{
 						"key":    key,
@@ -282,21 +282,20 @@ func run() error {
 						"quota":  quotaPerWindow,
 						"overBy": overBy,
 					}).
-					Execute(ctx); err != nil {
-					return fmt.Errorf("push throttle decision: %w", err)
+					Ack(w, "completed", queen.AckOptions{ConsumerGroup: gateGroup}).
+					Commit(ctx); err != nil {
+					return fmt.Errorf("commit throttle decision: %w", err)
 				}
 				decisions = append(decisions, decision{key: key, overBy: overBy})
 				fmt.Printf("  %s: %d in a window, over by %d\n", key, int(requests), overBy)
 			} else {
+				// A Pop leaves the ack to the caller, and the ack has to name
+				// the consumer group: without it the same windows come back on
+				// the next turn and every count is added twice.
+				if _, err := client.Ack(ctx, w, true, queen.AckOptions{ConsumerGroup: gateGroup}); err != nil {
+					return fmt.Errorf("ack window: %w", err)
+				}
 				fmt.Printf("  %s: %d in a window, within quota\n", key, int(requests))
-			}
-
-			// This is a Pop, not a Consume loop, so nothing acknowledges on
-			// your behalf, and the ack has to name the consumer group: without
-			// it the same windows come back on the next turn and every count is
-			// added twice.
-			if _, err := client.Ack(ctx, w, true, queen.AckOptions{ConsumerGroup: gateGroup}); err != nil {
-				return fmt.Errorf("ack window: %w", err)
 			}
 		}
 	}
@@ -331,8 +330,8 @@ func run() error {
 
 	// The decisions are readable by whatever enforces them, in order, per key.
 	// No consumer group is named, so this read goes through the queue's own
-	// cursor, and the call is bounded rather than parked on the default 30 s
-	// long poll.
+	// cursor, and TimeoutMillis bounds the call at two seconds (the default
+	// long poll is 30 s).
 	throttled, err := client.Queue(throttledQueue).
 		Batch(50).
 		Partitions(10).
@@ -378,8 +377,8 @@ func run() error {
 }
 
 // cost reads the request's cost out of a payload. Extractors are handed the
-// decoded payload as an interface{}, so the shape is checked here rather than
-// by the compiler, and a request that carries no cost counts as one.
+// decoded payload as an interface{}, so the shape is checked here at run time,
+// and a request that carries no cost counts as one.
 func cost(m interface{}) float64 {
 	payload, ok := m.(map[string]interface{})
 	if !ok {

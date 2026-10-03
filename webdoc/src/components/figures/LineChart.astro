@@ -1,0 +1,200 @@
+---
+/**
+ * A line chart: one measure against one other, a line per system or setting,
+ * each labelled at its end instead of in a legend. Never two y-axes: two
+ * measures of different scale are two charts. See src/lib/figures.ts.
+ */
+import { AUTO_DASH, DASHES, SERIES_ORDER, fmt, scale, textWidth, type LineSpec, type Point } from "@/lib/figures";
+
+interface Props {
+  id: string;
+  spec: LineSpec;
+}
+const { id, spec } = Astro.props;
+
+const W = spec.width ?? 720;
+const H = spec.height ?? 320;
+
+const series = spec.series.map((s, i) => {
+  const points: Point[] = s.points.map((p) => (Array.isArray(p) ? { x: p[0], y: p[1] } : p));
+  const tone = s.tone ?? SERIES_ORDER[i % SERIES_ORDER.length];
+  const dash = s.dash ?? AUTO_DASH[i % AUTO_DASH.length];
+  return { ...s, points, tone, dash, marks: s.marks ?? points.length <= 24, primary: tone === "s1" };
+});
+const xs = series.flatMap((s) => s.points.map((p) => p.x));
+const ys = series.flatMap((s) => s.points.filter((p) => p.y !== null).map((p) => p.y as number));
+for (const h of spec.hlines ?? []) ys.push(h.y);
+if (!xs.length || !ys.length) throw new Error(`figure ${id}: a line chart needs points`);
+if (spec.x.log && xs.some((v) => v <= 0)) throw new Error(`figure ${id}: a log x axis cannot hold ${Math.min(...xs)}`);
+if (spec.y.log && ys.some((v) => v <= 0)) throw new Error(`figure ${id}: a log y axis cannot hold ${Math.min(...ys)}`);
+
+const yFmt = spec.y.format ?? "si";
+const xFmt = spec.x.format ?? "si";
+
+// Margins from what has to fit in them. A series that runs to the right edge
+// is labelled in the right margin; one that stops early is labelled where it
+// stops, so the reader never matches a line to a legend.
+const probeY = scale(spec.y, Math.min(...ys), Math.max(...ys), 0, 1);
+const left = Math.max(36, ...probeY.ticks.map((t) => textWidth(fmt(t, yFmt), 11) + 14));
+const maxX = Math.max(...xs);
+const lastOf = (s: (typeof series)[number]) => [...s.points].reverse().find((p) => p.y !== null);
+const atEdge = (s: (typeof series)[number]) => (lastOf(s)?.x ?? maxX) >= maxX;
+const edgeLabelW = Math.max(0, ...series.filter(atEdge).map((s) => textWidth(s.label, 12) + (s.primary ? 6 : 0)));
+const right = edgeLabelW ? edgeLabelW + 22 : 16;
+const top = (spec.markers ?? []).length ? 50 : 34;
+const bottom = spec.x.label ? 46 : 30;
+
+const x0 = left;
+const x1 = W - right;
+const y0 = top;
+const y1 = H - bottom;
+
+const sx = scale(spec.x, Math.min(...xs), Math.max(...xs), x0, x1);
+const sy = scale(spec.y, Math.min(...ys), Math.max(...ys), y1, y0);
+const yTicks = sy.ticks.filter((t) => sy.at(t) >= y0 - 0.5 && sy.at(t) <= y1 + 0.5);
+const xTicks = sx.ticks.filter((t) => sx.at(t) >= x0 - 0.5 && sx.at(t) <= x1 + 0.5);
+
+function pathOf(points: Point[]): string {
+  let d = "";
+  let pen = false;
+  for (const p of points) {
+    if (p.y === null) {
+      pen = false;
+      continue;
+    }
+    d += `${pen ? "L" : "M"} ${sx.at(p.x).toFixed(1)} ${sy.at(p.y).toFixed(1)} `;
+    pen = true;
+  }
+  return d.trim();
+}
+
+// End labels, pushed apart where they would collide.
+const ends = series
+  .map((s, i) => {
+    const last = lastOf(s);
+    const edge = atEdge(s);
+    const x = edge ? x1 + 10 : (last ? sx.at(last.x) : x1) + 9;
+    return { i, x, y: last ? sy.at(last.y as number) : y0, w: textWidth(s.label, 12) + 6, edge };
+  })
+  .sort((a, b) => a.y - b.y);
+for (let k = 1; k < ends.length; k++) {
+  for (let j = 0; j < k; j++) {
+    const a = ends[j];
+    const b = ends[k];
+    const overlapX = a.x < b.x + b.w && b.x < a.x + a.w;
+    if (overlapX && b.y - a.y < 14) b.y = a.y + 14;
+  }
+}
+const endY = new Map(ends.map((e) => [e.i, e]));
+---
+
+<svg
+  class="qf-svg qf-chart"
+  viewBox={`0 0 ${W} ${H}`}
+  width={W}
+  height={H}
+  style={`max-width: ${W}px; min-width: ${Math.min(W, 560)}px`}
+  role="img"
+  aria-label={spec.alt}
+  xmlns="http://www.w3.org/2000/svg"
+>
+  <title>{spec.alt}</title>
+
+  {spec.y.label && <text x={x0} y={16} class="qf-axt">{spec.y.label}</text>}
+
+  {
+    (spec.bands ?? []).map((b) => (
+      <g class={`qf-band qf-band-${b.tone ?? "default"}`}>
+        <rect x={sx.at(b.from)} y={y0} width={Math.max(1, sx.at(b.to) - sx.at(b.from))} height={y1 - y0} />
+        {b.label && (
+          <text x={sx.at(b.from) + 6} y={y0 + 14} class="qf-ann">
+            {b.label}
+          </text>
+        )}
+      </g>
+    ))
+  }
+
+  {
+    yTicks.map((t) => (
+      <g>
+        <line x1={x0} x2={x1} y1={sy.at(t)} y2={sy.at(t)} class="qf-grid" />
+        <text x={x0 - 8} y={sy.at(t) + 4} text-anchor="end" class="qf-tick">
+          {fmt(t, yFmt)}
+        </text>
+      </g>
+    ))
+  }
+  <line x1={x0} x2={x1} y1={y1} y2={y1} class="qf-axis" />
+  {
+    xTicks.map((t) => (
+      <g>
+        <line x1={sx.at(t)} x2={sx.at(t)} y1={y1} y2={y1 + 4} class="qf-axis" />
+        <text x={sx.at(t)} y={y1 + 17} text-anchor="middle" class="qf-tick">
+          {fmt(t, xFmt)}
+        </text>
+      </g>
+    ))
+  }
+  {spec.x.label && <text x={(x0 + x1) / 2} y={H - 8} text-anchor="middle" class="qf-axt">{spec.x.label}</text>}
+
+  {
+    (spec.hlines ?? []).map((h) => (
+      <g class={`qf-ref qf-ref-${h.tone ?? "default"}`}>
+        <line x1={x0} x2={x1} y1={sy.at(h.y)} y2={sy.at(h.y)} />
+        <text x={x1 - 4} y={sy.at(h.y) - 6} text-anchor="end" class="qf-ann">
+          {h.label}
+        </text>
+      </g>
+    ))
+  }
+  {
+    (spec.markers ?? []).map((m) => (
+      <g class={`qf-ref qf-ref-${m.tone ?? "default"}`}>
+        <line x1={sx.at(m.x)} x2={sx.at(m.x)} y1={y0 - 14} y2={y1} />
+        <text x={sx.at(m.x) + 5} y={y0 - 6} class="qf-ann">
+          {m.label}
+        </text>
+      </g>
+    ))
+  }
+
+  {
+    series.map((s) => (
+      <g style={`--c: var(--qf-${s.tone})`} class={s.primary ? "qf-series qf-primary" : "qf-series"}>
+        <path d={pathOf(s.points)} class={s.points.length > 120 ? "qf-line qf-dense" : "qf-line"} stroke-dasharray={DASHES[s.dash]} />
+        {s.marks &&
+          s.points
+            .filter((p) => p.y !== null)
+            .map((p) => (
+              <circle
+                cx={sx.at(p.x)}
+                cy={sy.at(p.y as number)}
+                r={s.primary ? 3.4 : 3}
+                class={p.hollow ? "qf-mark qf-hollow" : "qf-mark"}
+              />
+            ))}
+        {s.points
+          .filter((p) => p.note && p.y !== null)
+          .map((p) => (
+            <text x={sx.at(p.x) + 7} y={sy.at(p.y as number) - 7} class="qf-ann qf-halo">
+              {p.note}
+            </text>
+          ))}
+      </g>
+    ))
+  }
+
+  {
+    series.map((s, i) => {
+      const e = endY.get(i)!;
+      return (
+        <g style={`--c: var(--qf-${s.tone})`} class={s.primary ? "qf-series qf-primary" : "qf-series"}>
+          <text x={e.x} y={e.y + 4} class={e.edge ? "qf-end" : "qf-end qf-halo"}>
+            {s.label}
+          </text>
+        </g>
+      );
+    })
+  }
+</svg>

@@ -1,0 +1,241 @@
+---
+title: Configuration
+description: "The environment variables the broker, its engine and the embedded proxy read, with the default the code applies."
+type: reference
+tier: operate
+sidebar:
+  order: 4
+sourceOfTruth:
+  - server/src/config.rs
+  - server/src/proxy_embed.rs
+  - server/src/rsm/batcher.rs
+  - server/src/rsm/entry.rs
+  - server/src/rsm/admit.rs
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/apply.rs
+  - server/src/rsm/facade/real.rs
+  - server/src/rsm/replicator/raft/mod.rs
+  - server/src/rsm/replicator/raft/forward.rs
+  - server/src/rsm/qlog/codec.rs
+  - server/src/rsm/qlog/set.rs
+  - server/src/rsm/segments/mod.rs
+  - server/src/rsm/scrub.rs
+  - server/src/rsm/retention_scan.rs
+  - server/src/rsm/dedup.rs
+  - server/src/handlers/timers.rs
+  - server/src/handlers/ephemeral.rs
+  - proxy/src/config.rs
+  - proxy/src/cp.rs
+  - proxy/src/app.rs
+  - proxy/src/harden.rs
+---
+
+A node reads its whole configuration from environment variables when it starts. There is no
+configuration file and nothing to keep in sync between a file and the process: change a variable and
+restart the node. A single node needs none of them to run, and a cluster needs a handful
+(`QUEEN_RAFT_REPLICATOR=openraft`, `QUEEN_RAFT_NODE_ID`, `QUEEN_RAFT_PEERS`), which
+[cluster](/operate/cluster/) walks through. Everything else is here for when you want to change a
+default, with the value the code applies when you don't.
+
+```bash
+docker run --platform linux/amd64 -p 6632:6632 -v queen-data:/var/lib/queen/raft \
+  -e QUEEN_KV_MAX_VALUE_BYTES=262144 -e LOG_LEVEL=info \
+  ghcr.io/queen-mq/queen:latest
+```
+
+In a cluster, give every node the same values except the per-node ones: `QUEEN_RAFT_NODE_ID`,
+`QUEEN_RAFT_LISTEN`, `QUEEN_SERVER_ID` and, with the Kafka facade, `QUEEN_KAFKA_ADVERTISED_ADDR`
+and `QUEEN_KAFKA_NODE_ID`.
+
+## Broker
+
+The table below is generated from `server/src/config.rs` and the files named in its header. The
+booleans it lists accept `true`/`false`, `1`/`0`, `yes`/`no` and `on`/`off`; unset or empty takes
+the default, and any other value stops the node at boot with the variable's name.
+
+<Render file="generated/broker-config" />
+
+`QUEEN_RAFT_PLANNER_QUEUE_DEPTH` is printed at boot and changes nothing else; the planner's command
+channel is `QUEEN_RAFT_COMMAND_QUEUE_DEPTH`, below.
+
+## Engine tuning
+
+The replicated log, the planner and the consumption engine read their settings where they are
+used, so the generator above does not see them. These are the ones worth knowing. The defaults are
+the result of measuring on real load, so change one when a measurement tells you to, and change
+one at a time. A numeric setting that is not a positive integer keeps its default; a switch that is
+on by default turns off only with `0`, `false`, `off` or `no`.
+
+### Planner and log
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUEEN_LANES` | `8` (1 to 64) | Planning lanes: threads that plan, in parallel, the commands that touch only their own partitions (`pid % lanes`). The consumption engine splits its checkpoints the same way. |
+| `QUEEN_RAFT_PIPELINE` | `8` | Log entries in flight at once on the leader. |
+| `QUEEN_RAFT_BATCH_MAX_CMDS` | `4096` | Commands one planning cycle drains. |
+| `QUEEN_RAFT_BATCH_MAX_BYTES` | `4194304` (4 MiB) | Estimated bytes one planning cycle drains. |
+| `QUEEN_RAFT_ENTRY_MAX_BYTES` | `100663296` (96 MiB) | The largest planned command: a push to one partition, one KV or timers call, one positions list. A larger one is refused. |
+| `QUEEN_RAFT_COMMAND_QUEUE_DEPTH` | `16384` | The planner's command channel. |
+| `QUEEN_RAFT_REQUEST_ID_WINDOW_S` | `60` | How long a committed command's outcome answers a retry under the same request id. |
+| `QUEEN_RAFT_ANSWER_AT_COMMIT` | on | Answer pushes and acks when their entry commits, without waiting for it to apply on the leader. |
+| `QUEEN_RAFT_DEDUP_INDEX` | `txns` | How each append's `transactionId` hashes are indexed: `txns` (one row per append), `segment` (read back from the queue log) or `rows`. |
+
+### Admission
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUEEN_RAFT_ADMIT_MAX_MB` | the larger of 128 MiB and (`QUEEN_RAFT_PIPELINE` + 2) × `QUEEN_RAFT_BATCH_MAX_BYTES` | The byte budget for writes waiting to be planned. `0` turns admission off. |
+| `QUEEN_RAFT_ADMIT_HOLD_MS` | `15000` | How long a write waits for room before it is refused with 429 `overloaded`. Jittered by 25% either way; the `Retry-After` is 1 to 5 s. |
+| `QUEEN_RAFT_ADMIT_FWD_HOLD_MS` | `2000` | The same wait for a command a follower forwarded, never more than half of what its caller has left. |
+
+### Consumption engine
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUEEN_CONSUME_CHECKPOINT_MS` | `5` | How often the leader logs the cursor rows that changed. A pop or an ack is answered once the checkpoint holding its change has committed. |
+| `QUEEN_CONSUME_FAST` | off | `1`, `true`, `on` or `yes` answers pops and acks before their checkpoint commits. A leader change can then lose a lease or an ack you were told about. |
+| `QUEEN_CONSUME_LEADER_LEASE_MS` | `400` | The engine serves only while its node leads and has heard from a quorum within this. |
+| `QUEEN_CONSUME_TXN_TTL_MS` | `30000` | The longest a transaction holds the cursors it acks or positions. |
+| `QUEEN_CONSUME_ROWS_PER_COMMAND` | `4096` | Cursor rows one checkpoint command carries. |
+| `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` | `500` | The clock difference between nodes that lease exclusivity allows for. A new leader serves no pops or acks for one checkpoint interval plus this. |
+| `QUEEN_RAFT_POP_REPLY_MARGIN_MS` | `50` | A pop this close to its deadline is answered empty and never claimed for. |
+
+### Cluster
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUEEN_RAFT_CLIENT_OFFLOAD` | on | Every node serves its own clients and sends the leader only prepared commands. Off, a follower forwards whole HTTP requests. Required for `QUEEN_RAFT_GROUPS` above 1. |
+| `QUEEN_RAFT_FOLLOWER_ANSWER_AT_DONE` | on | A follower answers a push or an ack once it knows the entry committed, before applying it. Pops and pushes with a duplicate still wait for the local apply. |
+| `QUEEN_RAFT_FWD_STREAMS` | `4` (1 to 64) | Long-lived streams a follower forwards prepared commands over. |
+| `QUEEN_EPHEMERAL_MEMBER_TTL_MS` | `4000` (at least 200) | A member the leader has not heard from for this long owns no ephemeral partition. |
+
+### Apply and storage
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUEEN_RAFT_APPLY_SHARDS` | `4` (at most 64) | Threads that apply partition-keyed effects in parallel. Node-local: the replicated state is the same at every value. |
+| `QUEEN_RAFT_DURABLE_EVERY_MS` | `1000` | How often the store checkpoint is written to disk. It bounds what a restart replays; no answer waits for it. |
+| `QUEEN_RAFT_DURABLE_EVERY_BYTES` | `268435456` (256 MiB) | ...or after this many bytes, whichever comes first. |
+| `QUEEN_RAFT_SEGMENT_BYTES` | `67108864` (64 MiB) | The size at which a queue-log file rolls. |
+| `QUEEN_RAFT_QLOG_ZSTD_LEVEL` | `1` | zstd level for queue-log payloads; `0` stores them raw. |
+| `QUEEN_QLOG_LANES` | `1` (1 to 64) | Queue-log lanes per queue. Read only when the data directory is created. |
+| `QUEEN_QLOG_COMPACT_MIN_DEAD_PCT` | unset | Rewrite a sealed file once this percentage of it is dead. Unset: a per-queue log file on its first dead message, a shared one at 50%. |
+| `QUEEN_QLOG_SEAL_AGE_S` | `600` | An active file holding data this old is sealed so retention can reclaim it; `0` never seals by age. |
+| `QUEEN_STORE_SCRUB_EVERY_S` | `21600` | How often the whole store is re-verified in the background; `0` turns the scrub off. |
+| `QUEEN_STORE_SCRUB_ROWS_PER_S` | `2000` | The scrub's pace. |
+| `QUEEN_RAFT_RETENTION_SCAN_PER_S` | `50000` | Partitions the leader's retention scanner walks per second. |
+
+### Other
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUEEN_TIMERS_MAX_PAYLOAD_BYTES` | `1048576` (1 MiB) | The decoded payload ceiling of `POST /api/v1/timers`. |
+| `QUEEN_CELL_ID` | unset | The cluster's name on the dashboard. Unset, a hash of the membership. |
+| `QUEEN_RAFT_METRICS` | on | The pipeline timing and admission families on `/metrics/prometheus`. |
+
+The Kafka facade's own settings (`QUEEN_KAFKA_ADDR`, `QUEEN_KAFKA_ADVERTISED_ADDR`,
+`QUEEN_KAFKA_NODE_ID`, TLS, SASL, transaction caps) are in the [Kafka reference](/reference/kafka/#settings).
+
+## Embedded proxy
+
+`QUEEN_PROXY_EMBEDDED=true` runs the multi-tenant proxy inside the broker process. It takes over the
+public port (`PORT`) and calls the broker router in process, with the broker's own JWT off and the
+tenancy header on, so the proxy is the only way in. With `QUEEN_PROXY_PORT` set to another port,
+the proxy serves that port and `PORT` serves the bare broker, for clients, scrapers and probes
+inside your network; that port must not face the internet. Plans and limits are on
+[tenants](/operate/tenants/), and how to expose a node safely is on [security](/operate/security/).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUEEN_PROXY_PORT` | unset | Give the proxy its own port (see above). |
+| `QUEEN_TLS_CERT`, `QUEEN_TLS_KEY` | unset | PEM file paths. Set both to serve TLS on the proxy's listener. |
+| `QUEEN_PROXY_ENFORCE` | `false` | `false` is shadow mode: rate limits and the queue and partition counts are computed, logged and metered but not refused. The size caps and the storage and monthly message quotas are enforced either way. |
+| `QUEEN_PROXY_TENANT_HEADER` | `true` | Send each cluster's broker tenant to the broker in `x-queen-tenant`. Off, every cluster shares the broker's default tenant. |
+| `QUEEN_PROXY_CP_TOKEN` | unset | Turns on the [control-plane API](/reference/http/#control-plane-apicp). Unset, `/api/cp/*` and `/metrics*` answer 404 on the proxy's port. |
+| `QUEEN_PROXY_PUBLIC_URL` | unset | The public base URL: OAuth callbacks are built on it, and the session audience and allowed origin default to it. |
+| `QUEEN_PROXY_SHARED_HOSTS` | empty | Hostnames that front many clusters, where the cluster comes from the credential, not the `Host`. |
+| `QUEEN_PROXY_DEFAULT_CLUSTER` | unset | Development only: the cluster a `Host` that names none falls back to. |
+| `QUEEN_PROXY_DEV_INSECURE` | `false` | Development only: skip authentication. |
+| `QUEEN_PROXY_MAX_BODY_BYTES` | `16777216` (16 MiB) | Request body cap on the data plane. |
+| `QUEEN_PROXY_MAX_BATCH_ITEMS` | `10000` | Items per push when the plan sets no `max_batch_items`. |
+| `QUEEN_PROXY_UPSTREAM_TIMEOUT_MS` | `35000` | How long a call to the broker may take. |
+| `QUEEN_PROXY_UPSTREAM_CONNECT_TIMEOUT_MS` | `5000` | Connect timeout to the broker. |
+| `QUEEN_PROXY_LONGPOLL_MAX_MS` | `90000` | The longest a long-poll pop may wait through the proxy, whatever it asks for. |
+| `QUEEN_PROXY_LONGPOLL_MARGIN_MS` | `10000` | Time the proxy gives a long-poll pop beyond its own timeout before it gives up on the broker. |
+| `QUEEN_PROXY_JWT_SECRET` | unset | HS256 secret for session tokens. |
+| `QUEEN_PROXY_JWT_ED25519_PEM`, `QUEEN_PROXY_JWT_ED25519_PUB_PEM` | unset | Ed25519 signing key, and a public key for a node that only verifies. |
+| `QUEEN_PROXY_JWT_ISS` | `queen-proxy` | Session token issuer. |
+| `QUEEN_PROXY_JWT_AUD` | the host of `QUEEN_PROXY_PUBLIC_URL` | Session token audience; none is enforced when both are unset. |
+| `QUEEN_PROXY_JWT_TTL_S` | `86400` | Session lifetime. |
+| `QUEEN_PROXY_COOKIE_NAME` | `queen_session` | Session cookie name. |
+| `QUEEN_PROXY_COOKIE_DOMAIN` | unset | Session cookie domain. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | unset | Sign-in with Google. |
+| `GOOGLE_ALLOWED_DOMAINS` | empty (any verified account) | Google Workspace domains allowed to sign in. |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | unset | Sign-in with GitHub. |
+| `QUEEN_PROXY_AUTOPROVISION` | `false` | `true` creates an account on first OAuth sign-in, in the tenant `QUEEN_PROXY_AUTOPROVISION_TENANT`. |
+| `QUEEN_PROXY_DEFAULT_ROLE` | `viewer` | The role an auto-provisioned user gets; an unknown value falls back to `viewer`. |
+| `QUEEN_PROXY_OPERATOR_ENABLED` | `false` | Allow the operator capability on this node at all. |
+| `QUEEN_PROXY_OPERATORS` | unset | Emails that hold the operator flag, synced at boot. Set but empty revokes every operator. |
+| `QUEEN_PROXY_BOOTSTRAP_TENANT` | unset | At first boot, create this tenant and its cluster (plan `QUEEN_PROXY_BOOTSTRAP_PLAN`, default `dev`) with an admin `QUEEN_PROXY_BOOTSTRAP_EMAIL` (default `admin@localhost`), password `QUEEN_PROXY_BOOTSTRAP_PASSWORD`. |
+| `QUEEN_PROXY_BOOTSTRAP_API_KEY` | unset | With the bootstrap tenant, also register this API key with every scope. |
+| `QUEEN_PROXY_STORAGE_REFRESH_MS` | `10000` (at least 500) | How often the storage quota is re-evaluated. |
+| `QUEEN_PROXY_RECONCILE_MS` | `60000` | How often the queue registry reconciles with the broker's inventory. |
+| `QUEEN_PROXY_METER_FLUSH_MS` | `15000` | How often usage is written. |
+| `QUEEN_PROXY_SPOOL_DIR` | `./queen-proxy-spool` | Where usage is spooled while the KV does not answer. |
+| `QUEEN_PROXY_USAGE_KEEP_DAYS` | `90` | Days of per-minute usage kept. |
+| `QUEEN_PROXY_STALE_GRACE_MS` | `600000` | How long a cached cluster may be served past its TTL while the store does not answer. |
+| `QUEEN_PROXY_REVOCATION_STRICT` | `false` | `true` refuses a session when the revocation lookup itself fails. |
+| `QUEEN_PROXY_REVOCATION_SWEEP_MS` | `3600000` | How often expired revoked-token rows are dropped; `0` turns the sweep off. |
+| `QUEEN_PROXY_AUTH_HOST` | `false` | Sign-in host mode: OAuth callbacks are built only on `QUEEN_PROXY_PUBLIC_URL`, never on the request's `Host`. |
+| `QUEEN_PROXY_AUTH_PORTAL_URL`, `QUEEN_PROXY_AUTH_PORTAL_LABEL` | unset | On a node that only verifies sessions, where to send people to sign in, and the link text. |
+| `QUEEN_PROXY_OAUTH_STATE_SECRET` | the JWT HS secret, else a random key per process | Signs the OAuth `state`. Set it when several nodes serve sign-in. |
+| `QUEEN_PROXY_CELL_MAX_PARKED` | `5000` | Long-poll pops this node holds open for all tenants together; beyond it a waiting pop gets 429. |
+| `QUEEN_PROXY_ROLLUP_MS` | `3600000` (at least 1000) | Usage rollup and monthly quota check: the longest a cluster over its monthly allowance keeps pushing. |
+| `QUEEN_PROXY_QUOTA_WARN_PERCENT` | `80` | The share of the monthly message quota at which the control plane is told. |
+| `QUEEN_PROXY_KEY_TOUCH_MS` | `10000` (at least 1000) | How often the last-use time of API keys is written. |
+| `QUEEN_PROXY_INVAL_POLL_MS` | `1000` (at least 100) | How often the cache invalidation feed is read. |
+| `QUEEN_PROXY_REGISTRY_PERSIST_MS` | `1000` | How often newly admitted queues are written to the registry. |
+| `QUEEN_PROXY_SHUTDOWN_DRAIN_MS` | `5000` | The longest the usage drain may hold a stopping node. |
+
+### Edge
+
+The edge applies to everything the proxy serves. The data plane has no per-IP rate limit by
+default, because a fleet of producers behind one NAT would otherwise be throttled as one client.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUEEN_EDGE_MAX_CONNS` | `20000` | Accepted connections beyond this are closed at once. |
+| `QUEEN_EDGE_MAX_BODY_BYTES` | `67108864` (64 MiB) | Body cap on the data plane. |
+| `QUEEN_EDGE_WEB_MAX_BODY_BYTES` | `1048576` (1 MiB) | Body cap on sign-in, the console and the operator API. |
+| `QUEEN_EDGE_RPS_PER_IP`, `QUEEN_EDGE_BURST_PER_IP` | `0` (off); burst twice the rate | Per-IP rate limit on the data plane. |
+| `QUEEN_EDGE_WEB_RPS_PER_IP`, `QUEEN_EDGE_WEB_BURST_PER_IP` | `20`, `60` | Per-IP rate limit on the web routes. |
+| `QUEEN_EDGE_REQUEST_TIMEOUT_MS` | `60000` | Request timeout; `0` turns it off. |
+| `QUEEN_EDGE_TIMEOUT_EXEMPT` | empty | Path prefixes with no request timeout. |
+| `QUEEN_EDGE_LONG_POLL_MAX_MS` | `310000` | The ceiling of a long-poll at the edge. |
+| `QUEEN_EDGE_LONG_POLL_GRACE_MS` | `10000` | Time a long-poll gets beyond its own timeout. |
+| `QUEEN_EDGE_HEADER_READ_TIMEOUT_MS` | `30000` | The whole request head must arrive within this. |
+| `QUEEN_EDGE_TLS_HANDSHAKE_TIMEOUT_MS` | `10000` | TLS handshake timeout. |
+| `QUEEN_EDGE_MAX_HEADERS` | `100` | Headers per request. |
+| `QUEEN_EDGE_MAX_HEADER_BYTES`, `QUEEN_EDGE_MAX_HEADER_VALUE_BYTES` | `65536`, `16384` | Header size limits. |
+| `QUEEN_EDGE_MAX_URI_BYTES` | `8192` | URI length limit. |
+| `QUEEN_EDGE_SHUTDOWN_GRACE_MS` | `25000` | How long open connections get to finish at shutdown. |
+| `QUEEN_EDGE_TRUSTED_PROXIES` | empty | Addresses whose forwarded client IP is believed. |
+| `QUEEN_EDGE_REAL_IP_HEADER` | unset | The header that carries the client IP from a trusted proxy. |
+| `QUEEN_EDGE_MAX_TRACKED_IPS` | `100000` | Clients the rate limiter tracks. |
+| `QUEEN_EDGE_IPV6_PREFIX` | `64` | IPv6 clients are counted per prefix of this length. |
+| `QUEEN_PUBLIC_ORIGINS` | the origin of `QUEEN_PROXY_PUBLIC_URL` | Origins allowed to send cookie-carrying requests. |
+| `QUEEN_EDGE_SESSION_COOKIES` | empty | More cookie names treated as session cookies, beside `QUEEN_PROXY_COOKIE_NAME` and its cell variants. |
+| `QUEEN_EDGE_CORS_ORIGINS`, `QUEEN_EDGE_CORS_HEADERS` | none; `authorization, content-type, x-request-id` | CORS. |
+| `QUEEN_EDGE_HSTS`, `QUEEN_EDGE_HSTS_MAX_AGE_S` | `auto`, `31536000` | HSTS: `auto`, `on` or `off`. |
+
+Password sign-in is throttled per IP and per account: after the free failures, each further
+failure doubles a backoff that starts at `QUEEN_LOGIN_BACKOFF_BASE_MS`.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUEEN_LOGIN_FREE_FAILURES_IP` | `10` | Failures from one IP, within the window, before backoff starts. |
+| `QUEEN_LOGIN_FREE_FAILURES_ACCOUNT` | `5` | Failures on one account, within the window, before backoff starts. |
+| `QUEEN_LOGIN_BACKOFF_BASE_MS` | `1000` | The first backoff step. |
+| `QUEEN_LOGIN_LOCKOUT_S` | `900` | The longest the backoff grows. |
+| `QUEEN_LOGIN_WINDOW_S` | `900` | A key whose last failure is older than this starts over. |
+| `QUEEN_LOGIN_MAX_TRACKED` | `100000` | IPs and accounts tracked, each. |

@@ -1,0 +1,140 @@
+---
+title: Throughput and latency
+description: "One queue of 200 partitions offered 300,000 to 4,000,000 msg/s on three nodes, with Kafka, Redpanda and Pulsar on the same machines: latency at each rate, each system's ceiling, CPU, and where Queen's latency comes from."
+type: reference
+tier: operate
+sidebar:
+  order: 2
+sourceOfTruth:
+  - server/src/rsm/consume/mod.rs
+  - server/src/rsm/facade/groups.rs
+---
+
+Two hundred partitions in one queue is the shape that suits a broker with a log per partition
+best: few logs, full batches, little state to keep. So that is where we raised the rate, from
+300,000 to 4,000,000 messages a second, to find each system's ceiling and to see what latency it
+paid on the way up. Queen holds a million messages a second here, and it is not the fastest system
+on this page.
+
+## The shape
+
+One queue, or one topic, of 200 partitions. Producers pushed 256-byte JSON messages, 100 at a time
+to one partition, and consumers took up to 1,000 messages per pop or fetch and acknowledged them
+asynchronously. Each point ran for 60 seconds and the figures cover its last 30. Queen
+2.0.0-beta.2 ran on 2026-10-01 with deduplication off and pops of up to 10 partitions; Kafka 4.3.1
+ran on 2026-09-30, Redpanda 26.2.3 and Pulsar 4.2.4 on 2026-10-01, on the same brokers and load
+machines. Runs and scripts: `benchmark-queen/2026-09-30-stage03-3node/` (Queen, tags `mb2c-q1-t200-*`)
+and `benchmark-queen/2026-09-30-kafka-pulsar/runs/` (the others).
+
+## Latency by rate
+
+End-to-end latency, p50 / p99 in milliseconds, the worst of the load processes. "Behind" marks a
+point where the system consumed under 97% of the offered rate or its p99 passed 5 seconds.
+
+| Offered msg/s | Queen | Kafka | Redpanda | Pulsar |
+|---|---|---|---|---|
+| 300,000 | 11 / 22 | 8 / 10 | 9 / 66 | 7 / 15 |
+| 600,000 | 19 / 98 | 8 / 13 | 16 / 181 | 7 / 18 |
+| 1,000,000 | 61 / 146 | 8 / 18 | 16 / 187 | 7 / 21 |
+| 1,500,000 | behind: 1.34M out, p50 4.6 s | 8 / 35 | 32 / 322 | 8 / 20 |
+| 2,000,000 | behind: 1.50M in, 1.23M out | 9 / 59 | 48 / 253 | 12 / 21 |
+| 3,000,000 | not run | 9 / 74 | behind: 2.92M out, p99 23 s | not run |
+| 4,000,000 | not run | 17 / 75 | behind: p99 19 s | not run |
+
+<Figure id="benchmarks/throughput-p99" />
+
+What each system had done when it answered a producer:
+
+| System | Copies | Acknowledged after |
+|---|---|---|
+| Queen | 3 | the entry is fsynced on 2 of the 3 nodes |
+| Kafka | 3 (`acks=all`, `min.insync.replicas=2`) | every in-sync replica has the batch, in page cache; no fsync |
+| Redpanda | 3 | 2 of 3 have fsynced (`write_caching` off, its default) |
+| Pulsar | 3 (ensemble 3, write quorum 3, ack quorum 2) | 2 bookies have fsynced their journal |
+
+Kafka's line is the one to beat: 8 ms at the median from 300,000 to 3,000,000 msg/s. Pulsar waits
+for the same two fsyncs as Queen and stays as flat up to 2M. Queen holds a p99 of 22 ms at 300,000
+and climbs from there, to 98 ms at 600,000 and 146 ms at a million. Redpanda's median stays low and
+its p99 sits near 200 ms. Its README in the archive traces that tail to one broker, the one with CPU
+steal and the slowest disk, and notes that Redpanda is tested on XFS while this rig has one ext4
+disk per broker.
+
+## The ceiling
+
+At 1,500,000 msg/s offered, Queen accepted everything but its consumers took 1.34M a second, and
+the backlog pushed the median e2e to 4.6 seconds. At 2M it accepted 1.5M and shed the rest at the
+producers' in-flight cap. The leader used 12 to 13 of its 16 cores at both points. That is
+Queen's ceiling for one queue: about 1.5M msg/s pushed, set by one leader. Kafka carried 4M msg/s
+in and out at a p99 of 75 ms, and we did not push it further. Pulsar carried 2M at 21 ms and was not
+run higher. Redpanda fell behind at 3M.
+
+<Figure id="benchmarks/throughput-ceiling" />
+
+## Where Queen's latency comes from
+
+A push is answered once its entry is fsynced on two of the three nodes, as in Pulsar. Two more
+things are Queen's own, and both are choices we would make again.
+
+A pop is a write. The consumption engine on the leader hands out a lease, and the answer waits
+until the checkpoint carrying that lease has committed through the log, which happens every 5 ms
+(`QUEEN_CONSUME_CHECKPOINT_MS`). A new leader therefore knows every lease the old one gave, and no
+consumer is ever handed a message that another consumer still holds. A message pays for two
+replicated commits between its push and its delivery. `QUEEN_CONSUME_FAST=1` answers before the
+checkpoint and gives that guarantee up; no run here used it.
+
+One leader orders every write of a raft group. That leader is what makes a transaction one entry in
+one log, and it is also where the work queues up as the rate climbs: at 1M msg/s it used 9 of its 16
+cores while the two followers used 3.7 and 4.7. Kafka, Redpanda and Pulsar spread their partition
+leaders over all three brokers. A cluster can run several raft groups (`QUEEN_RAFT_GROUPS`), each
+with its own leader, and a tenant lives in exactly one. Every run on this page used one tenant, so
+one group and one leader.
+
+## CPU
+
+Cores used by each system's own processes, summed over the three brokers (48 vCPU in all).
+
+| Offered msg/s | Queen | Kafka | Redpanda | Pulsar |
+|---|---|---|---|---|
+| 300,000 | 9.0 | 3.6 | 4.1 | 2.7 |
+| 600,000 | 13.0 | 6.3 | 8.4 | 4.5 |
+| 1,000,000 | 17.2 | 9.7 | 14.2 | 7.1 |
+| 1,500,000 | 24.9 (fell behind) | 12.6 | 19.7 | 10.0 |
+| 2,000,000 | 27.2 (fell behind) | 14.5 | 23.6 | 12.7 |
+| 3,000,000 | not run | 18.4 | 31.9 (fell behind) | not run |
+| 4,000,000 | not run | 19.4 | 37.7 (fell behind) | not run |
+
+<Figure id="benchmarks/throughput-cpu" />
+
+Redpanda's column is its own count of busy shard time. Its reactors poll, so the operating system
+counts more: 39 cores at 1M msg/s. In this shape Queen spends two to three times the CPU of Kafka
+and Pulsar for each message. At 100,000 partitions the picture turns around; see
+[partition count](/benchmarks/partitions/).
+
+## Deduplication
+
+These runs had deduplication off, because Kafka, Redpanda and Pulsar have no equivalent to price
+in. An earlier build measured what it costs: on 2026-09-29, raft at `e3456a48`, one queue of
+500,000 partitions at 1M msg/s ran at an e2e p99 of 249 to 272 ms with a 60-second dedup window and
+232 to 257 ms without one, in 90-second runs (`benchmark-queen/2026-09-29-1m-3node/`). That build
+predates the consumption engine, so take the difference from it and the latency from the table
+above. The [soak](/benchmarks/soak/) runs with deduplication on.
+
+## When every message has its own partition
+
+Every run on this page pushes 100 messages to one partition per request, and the broker's work
+grows with the partitions a command touches more than with the messages it carries. When each
+push carries one message per partition, the same broker does far more work per message. The last
+measurement of that shape had each push carry 10 messages for 10 different partitions, over 10
+queues of 100,000 partitions, and peaked near 114,000 msg/s pushed (2026-09-30, the Stage 0-3
+build committed as `08050fed`, run `s08-mk10-q10-t1m-r200k`). That build predates the consumption
+engine and the shape has not been measured since. Plan for it if your producers send one message
+per entity at a time.
+
+## What this page does not show
+
+A million a second for long. Each point ran 60 seconds, and the longest run at 1M msg/s on the
+current code is ten minutes of Kafka clients through the facade, which had stalls (see
+[Kafka clients](/benchmarks/kafka-clients/)); our runs of hours are at 500,000 msg/s. Nor does it
+show more than one raft group, payloads other than 256 bytes, or consumers that do any work. The
+figures are 2.0.0-beta.2: the push path changed in beta.5, and Queen's own clients have not been
+measured with four load machines since.

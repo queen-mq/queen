@@ -11,26 +11,24 @@ description: "Verified snippet extracted from examples/apps/http/chat.sh."
 ```bash title="examples/apps/http/chat.sh"
 #!/usr/bin/env bash
 #
-# A chat messaging system, with nothing but curl.
+# A chat backend, with nothing but curl: one ordered partition per
+# conversation.
 #
-# This is the application Queen was written for. A hotel messaging product ran
-# on Kafka and kept stalling: some conversations need a translation or an agent
-# reply before the next message can be handled, and on a shared partition one
-# slow conversation holds up every conversation behind it.
-#
-# The fix is structural rather than operational: one ordered lane per
-# conversation, created by the first message sent to it. A conversation that
-# takes ten seconds delays itself and nothing else.
-#
-# What this program builds:
+# Queen started as the broker of a hotel messaging product. Some conversations
+# need a translation or an agent before their next message can be handled, and
+# on a hashed Kafka topic one slow conversation held up every conversation that
+# shared its partition. Here every conversation is a partition of its own,
+# created by the first message sent to it, so a slow conversation waits on
+# itself and on nothing else.
 #
 #   chat-messages (one partition per conversation)
-#     ├── group "delivery"    fast, marks each message as delivered
-#     └── group "enrichment"  slow on conversations that need translation
+#     ├── group "delivery"    marks each message delivered, fast
+#     ├── group "enrichment"  translates the Japanese conversation, slow
+#     └── group "sentiment"   added later, reads the whole history
 #
-# And what it proves: every message reaches both groups exactly once, in the
-# order it was sent inside its own conversation, and the conversations that
-# need no translation finish while the slow one is still working.
+# The program checks what the design promises: every message reaches each
+# group once and in the order of its conversation, and the English
+# conversations finish while the Japanese one is still being translated.
 #
 # There is no client library here and none is needed: an SDK's consume() is a
 # loop around the pop route, and its concurrency is several of those loops at
@@ -59,29 +57,32 @@ ENRICHMENT=app-http-enrichment
 SENTIMENT=app-http-sentiment
 
 # Three conversations: id, locale, and whether it needs a translation pass. The
-# one in Japanese does, which is the slow work: 400 ms a message against 10 ms
-# for the rest.
-CONVERSATIONS='conv-en-1 en no
-conv-en-2 en no
-conv-jp-1 jp yes'
+# Japanese one does: 400 ms a message against 10 ms for the others. It is listed
+# first, so its messages are the oldest in the queue and its partition is usually
+# handed out first: a consumer that let one conversation hold up another would
+# fail the timing check below.
+CONVERSATIONS='conv-jp-1 jp yes
+conv-en-1 en no
+conv-en-2 en no'
 CONVERSATION_COUNT=3
 MESSAGES_PER_CONVERSATION=6
 TOTAL=$((CONVERSATION_COUNT * MESSAGES_PER_CONVERSATION))
-# 1,2,3,4,5,6: what every lane must read back, in that order.
+# 1,2,3,4,5,6: what every conversation must read back, in that order.
 EXPECTED_SEQS="$(seq 1 "$MESSAGES_PER_CONVERSATION" | paste -sd, -)"
 
 FAST_SECONDS=0.01
 SLOW_SECONDS=0.4
 
-# Three poll loops in one pool, which is what an SDK's concurrency(3) is. A pop
-# claims ONE partition per call unless you raise `partitions`, so the three
-# workers land on three different lanes: a worker skips a partition another
-# worker holds a lease on and is handed the next one instead.
+# Three poll loops in one pool, which is what an SDK's concurrency(3) is. Each
+# pop claims ONE partition: `partitions` defaults to 1, and only a pop that asks
+# for autopilot=true lets the broker lease several ready partitions at once. So
+# the three workers land on three different conversations: a worker skips a
+# partition another worker holds a lease on and is handed the next one instead.
 WORKERS=3
 
 # Every pop long-polls for this many milliseconds and no longer. It is short on
 # purpose: a worker re-reads the pool's shared progress after at most this long,
-# rather than parking until the phase is over.
+# so a phase ends within a second of its last message.
 POLL_MS=1000
 
 # The bound that keeps a stall from becoming a hang. A phase that has not seen
@@ -172,15 +173,16 @@ needs_translation() {
 echo "broker $QUEEN_URL"
 
 # ---------------------------------------------------------------------------
-# Leases are what make a crashed worker safe: a message whose handler dies is
-# redelivered once the lease expires. retryLimit bounds how many times that can
-# happen before the message is dead-lettered instead.
+# A crashed worker's messages come back when its lease expires, and retryLimit
+# bounds how often a failing message (one a worker acks as `failed`) is retried
+# before it goes to the dead-letter queue. A lease that runs out spends none of
+# that budget.
 #
-# /configure merges rather than replacing, so an option not named here keeps
-# whatever the queue already has. This queue name is unique per run, so what is
-# not named lands on its default: the option this program depends on and does
-# not send is dedupWindowSeconds, whose default of 3600 seconds is what makes
-# the resend below a duplicate.
+# /configure merges: an option not named here keeps whatever the queue already
+# has. This queue name is unique per run, so what is not named lands on its
+# default: the option this program depends on and does not send is
+# dedupWindowSeconds, whose default of 3600 seconds is what makes the resend
+# below a duplicate.
 # ---------------------------------------------------------------------------
 configure_body="$(jq -n --arg queue "$MESSAGES" \
   '{queue: $queue, options: {leaseTime: 60, retryLimit: 3}}')"
@@ -188,11 +190,11 @@ request POST /api/v1/configure "$configure_body"
 [ "$STATUS" = 200 ] || fail "configure returned HTTP $STATUS"
 check "$(jq -r .configured "$OUT")" true 'the queue was created with a 60 second lease'
 
-# ---------------------------------------------------------------------- producing
+# ------------------------------------------------------------------------ sending
 #
-# A chat client sends a message: one push, into the partition named after the
-# conversation. Nothing was declared for this conversation in advance, and
-# nothing has to be cleaned up when it goes quiet.
+# Sending a message is one push into the conversation's partition. Nothing was
+# declared for the conversation beforehand, and nothing has to be cleaned up
+# when it goes quiet.
 #
 # The wire field is "payload". The JavaScript and Python clients let you write
 # "data" on an item and rename it before sending; raw HTTP does not.
@@ -201,10 +203,10 @@ echo "sending"
 seq_no=1
 while [ "$seq_no" -le "$MESSAGES_PER_CONVERSATION" ]; do
   while read -r conversation locale translate; do
-    # transactionId is the sender's own idempotency key: a retry of this send,
-    # from a phone on a flaky network, writes nothing the second time and answers
-    # with the first message's id. jq builds the body so that a payload with a
-    # quote or a newline in it cannot break the JSON.
+    # transactionId is the phone's own id for the message: a phone that retries
+    # a send it never saw answered writes nothing the second time, and gets the
+    # first message's id back. jq builds the body so that a payload with a quote
+    # or a newline in it cannot break the JSON.
     body="$(jq -n --arg queue "$MESSAGES" --arg conversation "$conversation" \
       --arg locale "$locale" --argjson seq "$seq_no" --argjson sent_at "$(now_ms)" \
       '{items: [{
@@ -228,9 +230,9 @@ EOF
 done
 echo "  $TOTAL messages across $CONVERSATION_COUNT conversations"
 
-# A resend of the same message: the client retried because it never saw the first
-# answer. The broker recognises the transaction id and stores nothing, so this
-# push has no effect on any of the counts below.
+# The phone resends message 1 because the answer got lost on a bad network. The
+# broker recognises the transaction id and stores nothing, so this push has no
+# effect on any of the counts below.
 resend_body="$(jq -n --arg queue "$MESSAGES" \
   '{items: [{queue: $queue, partition: "conv-en-1", transactionId: "conv-en-1-1",
              payload: {conversationId: "conv-en-1", seq: 1,
@@ -238,7 +240,7 @@ resend_body="$(jq -n --arg queue "$MESSAGES" \
 request POST /api/v1/push "$resend_body"
 [ "$STATUS" = 201 ] || fail "the resend returned HTTP $STATUS"
 check "$(jq -r '.[0].status' "$OUT")" duplicate \
-  'a resent message was deduplicated, not stored twice'
+  'a resent message was recognised and not stored twice'
 
 # ---------------------------------------------------------------------------
 # The worker pool.
@@ -255,11 +257,11 @@ die() { printf '%s\n' "$*" > "$TMP/worker-error"; exit 1; }
 # not a per-message delete, so that one call completes every earlier unacked
 # message of the same partition for the same group.
 #
-# consumerGroup is mandatory here. Omit it and it defaults to __QUEUE_MODE__, so
-# the commit would land on a cursor this worker never read from and the whole
-# conversation would be redelivered forever. Each message carries its own
-# partitionId; use that, never the top-level one, which describes only the first
-# claimed partition.
+# consumerGroup is mandatory here. Omit it and the ack goes to __QUEUE_MODE__, a
+# cursor this worker never read from: it is refused, and the conversation comes
+# back every time its lease runs out. Each message carries its own partitionId;
+# use that, never the top-level one, which describes only the first claimed
+# partition.
 ack_batch() {
   local group="$1" popfile="$2" ack_body
   ack_body="$(jq -c --arg group "$group" '{
@@ -286,9 +288,9 @@ ack_batch() {
 # before it existed: a new cursor is seeded at the TAIL unless you say otherwise.
 # It seeds a cursor that does not exist yet and is ignored on every later pop.
 #
-# batch is the whole conversation, so one call usually takes a lane's six
+# batch is the whole conversation, so one call usually takes a conversation's six
 # messages together. partitions is left at its default of 1: this worker wants
-# one lane at a time, which is what leaves the other two for the other workers.
+# one conversation at a time, which leaves the other two for the other workers.
 worker() {
   local group="$1" idx="$2" mode="$3"
   local deadline conversation msg_seq popfile
@@ -300,8 +302,8 @@ worker() {
     [ "$(now_ms)" -lt "$deadline" ] || break
 
     request GET "/api/v1/pop/queue/$MESSAGES?consumerGroup=$group&subscriptionMode=all&batch=$MESSAGES_PER_CONVERSATION&wait=true&timeout=$POLL_MS"
-    # 204 is an empty pop, with no body at all: every lane is either drained or
-    # leased by another worker right now. Go round again.
+    # 204 is an empty pop, with no body at all: every partition is either
+    # drained or leased by another worker right now. Go round again.
     [ "$STATUS" != 204 ] || continue
     [ "$STATUS" = 200 ] || die "pop returned HTTP $STATUS"
     cp "$OUT" "$popfile"
@@ -323,7 +325,7 @@ worker() {
             sleep "$FAST_SECONDS"
           fi
           ;;
-        # Sentiment scoring: counted, not slowed down.
+        # Sentiment scoring: only counted here.
         score) : ;;
       esac
       printf '%s %s %s\n' "$conversation" "$msg_seq" "$(( $(now_ms) - PHASE_START ))" \
@@ -369,45 +371,41 @@ seen_by() {
 }
 
 # finished_at <conversation>: the ms stamp on that conversation's last handled
-# message, which is when the lane was done.
+# message, which is when the conversation was done.
 finished_at() {
   awk -v c="$1" '$1 == c { t = $3 } END { print t + 0 }' "$PROGRESS"
 }
 
 # --------------------------------------------------------------------- delivering
 #
-# The delivery worker is what marks a message as delivered to the recipients. It
-# is fast and must never fall behind, which is why it is its own consumer group:
-# it shares no cursor with the slow work below.
+# Marking messages delivered is fast work and must never wait behind slow work,
+# so it is a consumer group of its own, with its own cursor.
 echo
 echo "delivering"
 run_phase "$DELIVERY" deliver
 
 check "$(wc -l < "$PROGRESS" | tr -d ' ')" "$TOTAL" \
-  'delivery saw every message exactly once'
+  "delivery saw all $TOTAL messages once"
 while read -r conversation locale translate; do
-  check "$(seen_by "$conversation")" "$EXPECTED_SEQS" "$conversation was delivered in order"
+  check "$(seen_by "$conversation")" "$EXPECTED_SEQS" \
+    "$conversation was delivered in order: $EXPECTED_SEQS"
 done <<EOF
 $CONVERSATIONS
 EOF
 
 # --------------------------------------------------------------------- enriching
 #
-# The slow group. It reads the same stored messages through its own cursor, and
-# the Japanese conversation costs 400 ms a message because it has to be
-# translated before it can be answered.
-#
-# This is where a shared partition would hurt: on a hashed topic these messages
-# would sit in the same lane as the English ones and hold them up. Here each
-# conversation has its own lane and each pop claims one lane, so the English
-# conversations finish while the Japanese one is still being translated. The
-# timings below are the proof.
+# The slow group reads the same stored messages through its own cursor. On a
+# topic with a few hashed partitions, the Japanese conversation would sit in a
+# partition shared with English ones and hold them up. Here each worker holds
+# one conversation at a time, so the English conversations finish while the
+# Japanese one is still being translated. The timings below are the proof.
 echo
 echo "enriching"
 run_phase "$ENRICHMENT" enrich
 
 check "$(wc -l < "$PROGRESS" | tr -d ' ')" "$TOTAL" \
-  'enrichment saw every message exactly once, through its own cursor'
+  "enrichment saw all $TOTAL messages once, through its own cursor"
 
 SLOW="$(finished_at conv-jp-1)"
 EN1="$(finished_at conv-en-1)"
@@ -418,28 +416,28 @@ echo "  english done after $FAST ms, japanese after $SLOW ms"
 
 [ "$FAST" -lt "$SLOW" ] \
   || fail "the English conversations did not finish first ($FAST ms against $SLOW ms)"
-ok 'the conversations needing no translation finished first, in the same worker pool'
+ok 'the English conversations finished while the Japanese one was still being translated'
 
-[ "$SLOW" -gt $((MESSAGES_PER_CONVERSATION * 300)) ] \
-  || fail "the slow conversation took only $SLOW ms, so the comparison proves nothing"
-ok 'the slow conversation really was slow, so the comparison means something'
+[ "$SLOW" -ge $((MESSAGES_PER_CONVERSATION * 400)) ] \
+  || fail "the Japanese conversation took only $SLOW ms, so the comparison proves nothing"
+ok 'the Japanese conversation really took its six translations'
 
-# ------------------------------------------------------------------------ replay
+# ----------------------------------------------------------------------- backfill
 #
-# A new feature needs the history: sentiment scoring over everything ever said.
-# It is a new consumer group reading from the beginning, and it costs no producer
-# change and no second copy of the data. Nothing was re-pushed: all three groups
-# read the same stored messages through their own cursors.
+# A feature added later, sentiment scoring, wants every message ever sent. It is
+# one more consumer group starting from the oldest message: no producer change,
+# and no second copy of the data. Nothing was pushed again: all three groups read
+# the same stored messages through their own cursors.
 echo
-echo "backfilling a new consumer"
+echo "backfilling a new group"
 run_phase "$SENTIMENT" score
 
 check "$(wc -l < "$PROGRESS" | tr -d ' ')" "$TOTAL" \
-  'a group added today read the whole history'
+  "a group created now read the whole history ($TOTAL messages)"
 
 # Clean up on success only: a failed run leaves the queue on the broker to be
-# looked at. Deleting a queue that does not exist is also a 200, so check
-# "deleted" rather than the status code.
+# looked at. Deleting a queue that does not exist also answers 200, with
+# deleted:false, so the field is what to check.
 request DELETE "/api/v1/resources/queues/$MESSAGES"
 [ "$(jq -r .deleted "$OUT")" = true ] || fail 'the queue was not deleted'
 

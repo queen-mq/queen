@@ -1,0 +1,124 @@
+---
+/**
+ * Horizontal bars: a value per category, grouped when several systems or
+ * settings are compared on each one. Each bar carries its number, so the axis
+ * is for proportion and the label for precision. See src/lib/figures.ts.
+ */
+import { SERIES_ORDER, fmt, scale, textWidth, type BarSpec } from "@/lib/figures";
+
+interface Props {
+  id: string;
+  spec: BarSpec;
+}
+const { id, spec } = Astro.props;
+
+const W = spec.width ?? 720;
+const n = spec.series.length;
+for (const s of spec.series) {
+  if (s.values.length !== spec.categories.length) {
+    throw new Error(`figure ${id}: series "${s.label}" has ${s.values.length} values for ${spec.categories.length} categories`);
+  }
+}
+const series = spec.series.map((s, i) => ({ ...s, tone: s.tone ?? SERIES_ORDER[i % SERIES_ORDER.length] }));
+const values = series.flatMap((s) => s.values.filter((v): v is number => v !== null));
+if (!values.length) throw new Error(`figure ${id}: a bar chart needs values`);
+const xFmt = spec.x.format ?? "si";
+
+const BAR = n === 1 ? 16 : 12;
+const INNER = 4;
+const GROUP_GAP = n === 1 ? 10 : 16;
+const groupH = n * BAR + (n - 1) * INNER;
+
+const legendH = n > 1 ? 30 : 0;
+const left = Math.min(260, Math.max(80, ...spec.categories.map((c) => textWidth(c, 12) + 18)));
+const labelOf = (s: (typeof series)[number], k: number): string => {
+  const v = s.values[k];
+  const note = s.notes?.[k];
+  if (v === null) return spec.missing ?? "not run";
+  return note ? `${fmt(v, xFmt)} · ${note}` : fmt(v, xFmt);
+};
+const right = Math.max(56, ...series.flatMap((s) => s.values.map((_, k) => textWidth(labelOf(s, k), 11) + 14)));
+const top = legendH + 6;
+const plotH = spec.categories.length * groupH + (spec.categories.length - 1) * GROUP_GAP;
+const x0 = left;
+const x1 = W - right;
+const axisY = top + plotH + 10;
+const H = axisY + (spec.x.label ? 40 : 24);
+
+const lo = spec.x.log ? Math.min(...values) : 0;
+const sx = scale({ ...spec.x, min: spec.x.min ?? (spec.x.log ? undefined : 0) }, lo, Math.max(...values), x0, x1);
+const ticks = sx.ticks.filter((t) => sx.at(t) >= x0 - 0.5 && sx.at(t) <= x1 + 0.5);
+const base = spec.x.log ? sx.at(sx.ticks[0]) : sx.at(0);
+
+const groupTop = (k: number) => top + k * (groupH + GROUP_GAP);
+
+let lx = x0;
+const legend = series.map((s) => {
+  const item = { x: lx, label: s.label, tone: s.tone };
+  lx += textWidth(s.label, 12) + 34;
+  return item;
+});
+---
+
+<svg
+  class="qf-svg qf-chart"
+  viewBox={`0 0 ${W} ${H}`}
+  width={W}
+  height={H}
+  style={`max-width: ${W}px; min-width: ${Math.min(W, 560)}px`}
+  role="img"
+  aria-label={spec.alt}
+  xmlns="http://www.w3.org/2000/svg"
+>
+  <title>{spec.alt}</title>
+
+  {
+    legend.map((l) => (
+      <g style={`--c: var(--qf-${l.tone})`} class={l.tone === "s1" ? "qf-series qf-primary" : "qf-series"}>
+        <rect x={l.x} y={9} width="11" height="11" rx="2" class="qf-bar" />
+        <text x={l.x + 17} y={19} class="qf-end">
+          {l.label}
+        </text>
+      </g>
+    ))
+  }
+
+  {
+    ticks.map((t) => (
+      <g>
+        <line x1={sx.at(t)} x2={sx.at(t)} y1={top - 4} y2={axisY} class="qf-grid" />
+        <text x={sx.at(t)} y={axisY + 15} text-anchor="middle" class="qf-tick">
+          {fmt(t, xFmt)}
+        </text>
+      </g>
+    ))
+  }
+  <line x1={base} x2={base} y1={top - 4} y2={axisY} class="qf-axis" />
+  {spec.x.label && <text x={(x0 + x1) / 2} y={H - 8} text-anchor="middle" class="qf-axt">{spec.x.label}</text>}
+
+  {
+    spec.categories.map((c, k) => (
+      <text x={x0 - 12} y={groupTop(k) + groupH / 2 + 4} text-anchor="end" class="qf-cat">
+        {c}
+      </text>
+    ))
+  }
+
+  {
+    spec.categories.map((_, k) =>
+      series.map((s, j) => {
+        const v = s.values[k];
+        const y = groupTop(k) + j * (BAR + INNER);
+        const end = v === null ? base : sx.at(v);
+        return (
+          <g style={`--c: var(--qf-${s.tone})`} class={s.tone === "s1" ? "qf-series qf-primary" : "qf-series"}>
+            {v !== null && <rect x={base} y={y} width={Math.max(1.5, end - base)} height={BAR} rx="2" class="qf-bar" />}
+            <text x={(v === null ? base : end) + 6} y={y + BAR / 2 + 4} class={v === null ? "qf-val qf-missing" : "qf-val"}>
+              {labelOf(s, k)}
+            </text>
+          </g>
+        );
+      }),
+    )
+  }
+</svg>
