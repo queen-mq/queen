@@ -187,7 +187,7 @@ jobs:
         run: npx --yes wrangler@4.145.0 deploy
       - name: The site answers
         run: |
-          for path in / /use/laravel/supervisors/; do
+          for path in / /guides/laravel/supervisors/; do
             for _ in 1 2 3 4 5; do
               code=$(curl -s -o /dev/null -w '%{http_code}' "https://queenmq.com${path}")
               [ "$code" = 200 ] && break

@@ -22,7 +22,7 @@
  * there is a figure.
  */
 
-import type { Axis, FigureSpec, Format } from "./figure-spec";
+import type { Axis, FigureSpec, Format, SeriesTone } from "./figure-spec";
 export * from "./figure-spec";
 
 // ---------------------------------------------------------------------------
