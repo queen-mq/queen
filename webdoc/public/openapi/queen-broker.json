@@ -51,6 +51,9 @@
       "name": "Reads by offset"
     },
     {
+      "name": "Connectors"
+    },
+    {
       "name": "Dashboard identity"
     },
     {
@@ -2163,7 +2166,7 @@
     },
     "/api/v1/ephemeral/queue/{queue}": {
       "delete": {
-        "operationId": "delete_api_v1_ephemeral_queue_queue",
+        "operationId": "ephemeral_delete_queue",
         "tags": [
           "Ephemeral queues"
         ],
@@ -2199,33 +2202,12 @@
               }
             },
             "x-queen-schema": "opaque"
-          },
-          "400": {
-            "description": "Malformed request.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "No leader is known (an election, or a cluster without its majority), or the command timed out: retry after the Retry-After seconds.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
           }
         },
         "x-queen-access-level": "read-write",
         "x-queen-tenant-scoped": true,
-        "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_ephemeral_delete",
-        "x-queen-query-params": "adapter",
-        "x-queen-note": "Served by the broker's generic adapter, which reads its own query string and body: parameters and body are documented on the reference page for this route, not derived here.",
+        "x-queen-handler": "server/src/handlers/ephemeral.rs::handle_ephemeral_delete_queue",
+        "x-queen-query-params": "none",
         "security": [
           {
             "bearerAuth": []
@@ -2409,6 +2391,9 @@
                 "properties": {
                   "node": {
                     "type": "string"
+                  },
+                  "epoch": {
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -2420,6 +2405,262 @@
           "x-queen-schema": "derived",
           "x-queen-schema-source": "LeavingBody"
         }
+      }
+    },
+    "/api/v1/ephemeral/_ready": {
+      "get": {
+        "operationId": "ephemeral_ready",
+        "tags": [
+          "Ephemeral queues"
+        ],
+        "summary": "GET /api/v1/ephemeral/_ready",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/ephemeral.rs::handle_ephemeral_ready",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/connectors": {
+      "get": {
+        "operationId": "connectors_list",
+        "tags": [
+          "Connectors"
+        ],
+        "summary": "GET /api/v1/connectors",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/connectors.rs::handle_connectors_list",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/connectors/{name}": {
+      "get": {
+        "operationId": "connector_get",
+        "tags": [
+          "Connectors"
+        ],
+        "summary": "GET /api/v1/connectors/:name",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/connectors.rs::handle_connector_get",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "connector_put",
+        "tags": [
+          "Connectors"
+        ],
+        "summary": "PUT /api/v1/connectors/:name",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/connectors.rs::handle_connector_put",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      },
+      "delete": {
+        "operationId": "connector_delete",
+        "tags": [
+          "Connectors"
+        ],
+        "summary": "DELETE /api/v1/connectors/:name",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dropSlot",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/connectors.rs::handle_connector_delete",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/connectors/{name}/resync": {
+      "post": {
+        "operationId": "connector_resync",
+        "tags": [
+          "Connectors"
+        ],
+        "summary": "POST /api/v1/connectors/:name/resync",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/connectors.rs::handle_connector_resync",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/api/v1/configure": {
@@ -2869,7 +3110,7 @@
             }
           }
         },
-        "x-queen-access-level": "read-write",
+        "x-queen-access-level": "admin",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_delete_tenant",
         "x-queen-query-params": "adapter",
@@ -2933,7 +3174,7 @@
             }
           }
         },
-        "x-queen-access-level": "read-write",
+        "x-queen-access-level": "admin",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_quota_set",
         "x-queen-query-params": "adapter",
@@ -3163,7 +3404,7 @@
       "post": {
         "operationId": "post_api_v1_fetch_offsets",
         "tags": [
-          "Other"
+          "Reads by offset"
         ],
         "summary": "POST /api/v1/fetch/offsets",
         "parameters": [
@@ -3211,7 +3452,7 @@
             }
           }
         },
-        "x-queen-access-level": "read-write",
+        "x-queen-access-level": "read-only",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_fetch_offsets",
         "x-queen-query-params": "adapter",
@@ -5329,6 +5570,148 @@
         }
       }
     },
+    "/api/v1/resources/queues/{queue}": {
+      "get": {
+        "operationId": "get_api_v1_resources_queues_queue",
+        "tags": [
+          "Queues"
+        ],
+        "summary": "GET /api/v1/resources/queues/:queue",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No leader is known (an election, or a cluster without its majority), or the command timed out: retry after the Retry-After seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_get_queue",
+        "x-queen-query-params": "adapter",
+        "x-queen-note": "Served by the broker's generic adapter, which reads its own query string and body: parameters and body are documented on the reference page for this route, not derived here.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "delete_api_v1_resources_queues_queue",
+        "tags": [
+          "Queues"
+        ],
+        "summary": "DELETE /api/v1/resources/queues/:queue",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No leader is known (an election, or a cluster without its majority), or the command timed out: retry after the Retry-After seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_delete_queue",
+        "x-queen-query-params": "adapter",
+        "x-queen-note": "Served by the broker's generic adapter, which reads its own query string and body: parameters and body are documented on the reference page for this route, not derived here.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/resources/queues/{queue}/depth": {
       "get": {
         "operationId": "get_api_v1_resources_queues_queue_depth",
@@ -5473,13 +5856,13 @@
         ]
       }
     },
-    "/api/v1/resources/queues/{queue}": {
+    "/api/v1/status/queues/{queue}": {
       "get": {
-        "operationId": "get_api_v1_resources_queues_queue",
+        "operationId": "get_api_v1_status_queues_queue",
         "tags": [
-          "Queues"
+          "Status and metrics"
         ],
-        "summary": "GET /api/v1/resources/queues/:queue",
+        "summary": "GET /api/v1/status/queues/:queue",
         "parameters": [
           {
             "name": "queue",
@@ -5535,77 +5918,7 @@
         },
         "x-queen-access-level": "read-only",
         "x-queen-tenant-scoped": true,
-        "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_get_queue",
-        "x-queen-query-params": "adapter",
-        "x-queen-note": "Served by the broker's generic adapter, which reads its own query string and body: parameters and body are documented on the reference page for this route, not derived here.",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      },
-      "delete": {
-        "operationId": "delete_api_v1_resources_queues_queue",
-        "tags": [
-          "Queues"
-        ],
-        "summary": "DELETE /api/v1/resources/queues/:queue",
-        "parameters": [
-          {
-            "name": "queue",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "x-queen-tenant",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
-                }
-              }
-            },
-            "x-queen-schema": "opaque"
-          },
-          "400": {
-            "description": "Malformed request.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "No leader is known (an election, or a cluster without its majority), or the command timed out: retry after the Retry-After seconds.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "x-queen-access-level": "admin",
-        "x-queen-tenant-scoped": true,
-        "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_delete_queue",
+        "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_status_queue",
         "x-queen-query-params": "adapter",
         "x-queen-note": "Served by the broker's generic adapter, which reads its own query string and body: parameters and body are documented on the reference page for this route, not derived here.",
         "security": [
@@ -6594,16 +6907,16 @@
         ]
       }
     },
-    "/api/v1/status/queues/{queue}": {
-      "get": {
-        "operationId": "get_api_v1_status_queues_queue",
+    "/api/v1/ephemeral/queue/{_}": {
+      "delete": {
+        "operationId": "delete_api_v1_ephemeral_queue__",
         "tags": [
-          "Status and metrics"
+          "Ephemeral queues"
         ],
-        "summary": "GET /api/v1/status/queues/:queue",
+        "summary": "DELETE /api/v1/ephemeral/queue/:_",
         "parameters": [
           {
-            "name": "queue",
+            "name": "_",
             "in": "path",
             "required": true,
             "schema": {
@@ -6654,9 +6967,9 @@
             }
           }
         },
-        "x-queen-access-level": "read-only",
+        "x-queen-access-level": "read-write",
         "x-queen-tenant-scoped": true,
-        "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_status_queue",
+        "x-queen-handler": "server/src/rsm/facade/real/phase2.rs::api_ephemeral_delete",
         "x-queen-query-params": "adapter",
         "x-queen-note": "Served by the broker's generic adapter, which reads its own query string and body: parameters and body are documented on the reference page for this route, not derived here.",
         "security": [

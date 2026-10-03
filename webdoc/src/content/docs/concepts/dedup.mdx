@@ -16,6 +16,7 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-js/test-v2/docs.js
   - clients/client-js/test-v2/kv.js
+# sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0). Nothing this page states changes.
 ---
 
 Every message carries a `transactionId`. Push the same id to the same partition again, inside the

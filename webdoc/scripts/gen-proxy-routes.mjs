@@ -111,7 +111,8 @@ const PROXY_ROUTES = "proxy/src/routes.rs";
 // and `is_operator_route` is untouched. The control-plane routes beta.4 added
 // under `/api/cp/*` are the proxy's OWN routes, served before `classify` is
 // ever consulted, so they are not broker routes and are not in this table.
-const CLASSIFY_FINGERPRINT = "fa21620708d3a484";
+// 2026-10-03: re-read for 2.0.0 — the connectors rule (892e7d81d).
+const CLASSIFY_FINGERPRINT = "f108fbdfae4f8ef5";
 const OPERATOR_FINGERPRINT = "0eca43d77dc8c6f2";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -141,6 +142,21 @@ function segmentsBetween(p, prefix, suffix) {
   const mid = p.slice(prefix.length, p.length - suffix.length);
   const parts = mid.split("/");
   return parts.every((s) => s.length > 0) ? parts.length : -1;
+}
+
+/**
+ * The shapes the broker serves under `/api/v1/connectors`, as
+ * `is_connectors_route` in the Rust: the collection (GET), one connector
+ * (GET, PUT, DELETE) and its resync (POST). HEAD rides with GET.
+ */
+function isConnectorsRoute(m, p) {
+  const read = m === "GET" || m === "HEAD";
+  if (p === "/api/v1/connectors") return read;
+  if (!p.startsWith("/api/v1/connectors/")) return false;
+  const seg = p.slice("/api/v1/connectors/".length).split("/");
+  if (seg.length === 1 && seg[0] !== "") return read || m === "PUT" || m === "DELETE";
+  if (seg.length === 2 && seg[0] !== "" && seg[1] === "resync") return m === "POST";
+  return false;
 }
 
 function classify(m, p) {
@@ -205,6 +221,13 @@ function classify(m, p) {
   if (p.startsWith("/api/v1/messages/") && m === "DELETE") return "queue admin";
   if (p === "/api/v1/dlq" && m === "DELETE") return "queue admin";
   if (p.startsWith("/api/v1/consumer-groups") && (m === "DELETE" || m === "POST")) return "queue admin";
+  // The Postgres connectors (PLAN_PG_CONNECTORS.md §6), below the consumer
+  // groups exactly as in the Rust: queue admin on every verb the broker
+  // registers, reads included (a connector names a database and its login),
+  // and every other shape under the prefix fails closed.
+  if (p === "/api/v1/connectors" || p.startsWith("/api/v1/connectors/")) {
+    return isConnectorsRoute(m, p) ? "queue admin" : "blocked";
+  }
 
   if (p.startsWith("/streams/")) return "gated (streams)";
   if (p === "/api/v1/traces" && m === "POST") return "gated (traces)";

@@ -30,6 +30,7 @@ digest: >-
   (`QUEEN_PROXY_EMBEDDED=true`, its own `QUEEN_PROXY_PORT`) adds tenants, API keys, quotas, TLS
   and a control plane over `/api/cp/*`. `GET /health` answers 200 `healthy` or 503 `settling`,
   `GET /metrics/prometheus` serves the metrics, and the dashboard is served by the same binary.
+# sourceOfTruth re-read 2026-10-03 (cb0329f74): the Dockerfile's queenctl -X paths moved to the /v2 module path; the image and what it runs are unchanged. Nothing this page states changes.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its

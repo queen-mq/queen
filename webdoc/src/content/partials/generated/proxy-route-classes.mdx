@@ -52,6 +52,11 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | Method | Path |
 | --- | --- |
 | `POST` | `/api/v1/configure` |
+| `GET` | `/api/v1/connectors` |
+| `DELETE` | `/api/v1/connectors/:name` |
+| `GET` | `/api/v1/connectors/:name` |
+| `PUT` | `/api/v1/connectors/:name` |
+| `POST` | `/api/v1/connectors/:name/resync` |
 | `DELETE` | `/api/v1/consumer-groups/:group` |
 | `DELETE` | `/api/v1/consumer-groups/:group/queues/:queue` |
 | `POST` | `/api/v1/consumer-groups/:group/queues/:queue/partitions/:partition/seek` |
@@ -142,6 +147,7 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `POST` | `/api/v1/ephemeral/configure` |
 | `GET` | `/api/v1/ephemeral/pop` |
 | `POST` | `/api/v1/ephemeral/push` |
+| `DELETE` | `/api/v1/ephemeral/queue/:_` |
 | `DELETE` | `/api/v1/ephemeral/queue/:queue` |
 | `GET` | `/api/v1/ephemeral/queues` |
 | `GET` | `/api/v1/ephemeral/queues/:queue/depth` |
@@ -164,6 +170,7 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | --- | --- |
 | `POST` | `/api/v1/ephemeral/_adopt` |
 | `POST` | `/api/v1/ephemeral/_leaving` |
+| `GET` | `/api/v1/ephemeral/_ready` |
 | `GET` | `/api/v1/pop` |
 | `GET` | `/api/v1/raft/liveness` |
 | `POST` | `/api/v1/resources/quota` |
@@ -184,4 +191,4 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/metrics` |
 | `GET` | `/status` |
 
-75 of the broker's 102 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.
+81 of the broker's 109 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.

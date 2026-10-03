@@ -149,6 +149,9 @@ const GROUPS = [
   ["Embedded proxy and Kafka facade", (n) => n === "QUEEN_PROXY_EMBEDDED" || n === "QUEEN_PROXY_PORT" || n.startsWith("QUEEN_KAFKA_")],
   // The broker's own S3 sink knobs; the sink's QUEEN_S3_* table is deploy/s3.
   ["S3 sink", (n) => n.startsWith("QUEEN_S3_")],
+  // The Postgres connectors' switch; the connectors themselves are configured
+  // over /api/v1/connectors (guides/postgres).
+  ["PostgreSQL connectors", (n) => n.startsWith("QUEEN_PG_")],
   ["Logging", (n) => n === "LOG_LEVEL" || n === "RUST_LOG" || n.startsWith("QUEEN_LOG")],
 ];
 

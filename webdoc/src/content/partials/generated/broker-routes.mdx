@@ -13,7 +13,7 @@ description: "Every HTTP route the broker registers, with its access level and w
       - server/src/handlers/*.rs (Tenant extension)
 */}
 
-Queen's broker serves **102 method + path pairs**. Every row below is read out of the router, the generic adapter behind it and the authorization table at build time.
+Queen's broker serves **109 method + path pairs**. Every row below is read out of the router, the generic adapter behind it and the authorization table at build time.
 
 ### Message plane
 
@@ -41,9 +41,9 @@ Queen's broker serves **102 method + path pairs**. Every row below is read out o
 | `GET` | `/api/v1/resources/queues/:queue` | read-only | yes |
 | `GET` | `/api/v1/resources/queues/:queue/depth` | read-only | yes |
 | `GET` | `/api/v1/resources/queues/:queue/sizes` | read-only | yes |
-| `POST` | `/api/v1/resources/quota` | read-write | yes |
+| `POST` | `/api/v1/resources/quota` | admin | yes |
 | `GET` | `/api/v1/resources/tasks` | read-only | yes |
-| `DELETE` | `/api/v1/resources/tenant` | read-write | yes |
+| `DELETE` | `/api/v1/resources/tenant` | admin | yes |
 
 ### Consumer groups
 
@@ -127,10 +127,12 @@ Queen's broker serves **102 method + path pairs**. Every row below is read out o
 | --- | --- | --- | --- |
 | `POST` | `/api/v1/ephemeral/_adopt` | read-write | yes |
 | `POST` | `/api/v1/ephemeral/_leaving` | read-write | no |
+| `GET` | `/api/v1/ephemeral/_ready` | read-write | no |
 | `POST` | `/api/v1/ephemeral/ack` | read-write | yes |
 | `POST` | `/api/v1/ephemeral/configure` | read-write | yes |
 | `GET` | `/api/v1/ephemeral/pop` | read-write | yes |
 | `POST` | `/api/v1/ephemeral/push` | write-only | yes |
+| `DELETE` | `/api/v1/ephemeral/queue/:_` | read-write | yes |
 | `DELETE` | `/api/v1/ephemeral/queue/:queue` | read-write | yes |
 | `GET` | `/api/v1/ephemeral/queues` | read-only | yes |
 | `GET` | `/api/v1/ephemeral/queues/:queue/depth` | read-only | yes |
@@ -169,6 +171,16 @@ Queen's broker serves **102 method + path pairs**. Every row below is read out o
 | `POST` | `/api/v1/fetch/offsets` | read-only | yes |
 | `POST` | `/api/v1/partitions/changed` | read-only | yes |
 
+### Connectors
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/connectors` | read-only | yes |
+| `DELETE` | `/api/v1/connectors/:name` | admin | yes |
+| `GET` | `/api/v1/connectors/:name` | read-only | yes |
+| `PUT` | `/api/v1/connectors/:name` | admin | yes |
+| `POST` | `/api/v1/connectors/:name/resync` | admin | yes |
+
 ### Dashboard identity (broker-direct)
 
 | Method | Path | Access level | Tenant-scoped |
@@ -177,4 +189,4 @@ Queen's broker serves **102 method + path pairs**. Every row below is read out o
 | `POST` | `/auth/logout` | public | no |
 | `GET` | `/auth/me` | public | no |
 
-76 of these handlers resolve a tenant from the request; 19 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.
+82 of these handlers resolve a tenant from the request; 20 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.

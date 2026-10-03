@@ -19,6 +19,7 @@ verifiedBy:
   - examples/apps/http/saga.sh
 sidebar:
   order: 2
+# sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0). Nothing this page states changes.
 ---
 
 Give every entity its own partition, keep its state in one KV entry, and commit each transition as

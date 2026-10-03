@@ -79,21 +79,6 @@ export const RAFT_ADAPTER = "server/src/rsm/facade/real/phase2.rs";
 export const RAFT_ADAPTER_DYNAMIC = "server/src/rsm/facade/real/phase2/reads.rs";
 
 /**
- * The `/api/v1/resources/queues/:queue...` arms at the bottom of `api_impl`,
- * which dispatch on `strip_prefix`/`strip_suffix` rather than on a literal
- * (method, path) pair, so no parse below sees them. Mirrored here behind a
- * fingerprint of that block: when the Rust changes, re-read it, update the four
- * rows, and paste the new fingerprint.
- */
-const QUEUE_PREFIX_ARMS = [
-  { method: "GET", path: "/api/v1/resources/queues/:queue/depth", handler: "api_queue_depth", passesCtx: true },
-  { method: "GET", path: "/api/v1/resources/queues/:queue/sizes", handler: "api_queue_sizes", passesCtx: true },
-  { method: "GET", path: "/api/v1/resources/queues/:queue", handler: "api_get_queue", passesCtx: true },
-  { method: "DELETE", path: "/api/v1/resources/queues/:queue", handler: "api_delete_queue", passesCtx: true },
-];
-const QUEUE_PREFIX_FINGERPRINT = "a91b716fffe1966e";
-
-/**
  * The Rust binding names of `api_dynamic`'s path segments, spelled the way the
  * published API has always spelled those parameters. Presentation only: the
  * segment position is what the broker matches on.
@@ -169,15 +154,8 @@ export function brokerRoutes() {
     routes.push({ method: m[1], path: m[2], handler: call.handler, via: "adapter", passesCtx: call.passesCtx });
   }
 
-  // 3. The queue-prefix arms, mirrored.
-  assertFingerprint(
-    `${RAFT_ADAPTER} :: api_impl queue-prefix arms`,
-    sliceBlock(impl, 'strip_prefix("/api/v1/resources/queues/")', "no_such_route"),
-    QUEUE_PREFIX_FINGERPRINT,
-  );
-  for (const r of QUEUE_PREFIX_ARMS) routes.push({ ...r, via: "adapter" });
-
-  // 4. The path-pattern arms: `["api", "v1", "messages", pid, txn] if req.method == "GET" =>`.
+  // 3. The path-pattern arms (the queue routes among them since 2.0.0, which
+  //    decodes every segment): `["api", "v1", "messages", pid, txn] if req.method == "GET" =>`.
   const dynamicText = repoRead(RAFT_ADAPTER_DYNAMIC);
   const dyn = fnBody(dynamicText, "async fn api_dynamic");
   const pat = /\[((?:\s*(?:"[^"]*"|[a-z_]\w*)\s*,?)+)\]\s*if\s+req\.method\s*==\s*"(\w+)"\s*=>/g;

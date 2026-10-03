@@ -16,6 +16,7 @@ verifiedBy:
   - examples/apps/http/exactly-once.sh
 sidebar:
   order: 3
+# sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0). Nothing this page states changes.
 ---
 
 A consumer that charges cards will see some orders twice: a lease runs out while the card network

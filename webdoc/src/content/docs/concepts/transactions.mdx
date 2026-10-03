@@ -18,6 +18,7 @@ verifiedBy:
   - clients/client-js/test-v2/transaction.js
   - clients/client-js/test-v2/kv.js
   - clients/client-js/test-v2/timers.js
+# sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0); the lease paragraph now says so.
 ---
 
 A transaction is one call that writes one step. It acks what the worker took, pushes the next
@@ -93,8 +94,8 @@ for a worker that lost its message minutes ago.
 
 The lease has to travel with the ack. Over HTTP, put `leaseId` on each ack operation, or name
 exactly one lease in `requiredLeases` and the acks without their own `leaseId` take it; an ack that
-ends up with no lease is not checked and still moves the cursor. The JS SDK sends each message's
-lease in `requiredLeases`.
+ends up with no lease is not checked and still moves the cursor. The SDKs put each message's lease
+on its ack.
 
 ## `once`, the gate
 

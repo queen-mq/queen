@@ -24,6 +24,7 @@ digest: >-
   connection.
 sidebar:
   order: 1
+# sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0). Nothing this page states changes.
 ---
 
 Queen commits a few things together that usually live in different systems: the ack of a message,

@@ -16,6 +16,7 @@ sourceOfTruth:
   - server/src/rsm/facade/intake.rs
   - server/src/handlers/raft.rs
   - clients/client-js/client-v2/builders/TransactionBuilder.js
+# sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0); the requiredLeases paragraph now says so.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step
@@ -110,9 +111,9 @@ after the group's cursor, or was already acked with a `failed`, `retry` or `dlq`
 commits.
 
 `requiredLeases` fences nothing on its own: it only supplies the lease of the acks in the same
-body. The JS builder sends each acked message's `leaseId` in `requiredLeases`, so a transaction
-that acks messages from two different pops names two leases and its acks are not fenced. Over
-HTTP, put `leaseId` on every ack.
+body. Every SDK puts each acked message's `leaseId` on its ack as well as in `requiredLeases`, so a
+transaction that acks messages from two different pops is fenced by both leases. Over HTTP, put
+`leaseId` on every ack.
 
 ### KV operations
 
