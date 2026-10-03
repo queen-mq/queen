@@ -458,6 +458,7 @@ import { formatChartLabel, formatTimestamp, formatTimestampUtc } from '@/composa
 import {
   laggingGroupsVerdict, pendingDepthAdvisory, PENDING_DEPTH_FLOOR,
 } from '@/composables/useConflation'
+import { oneOf, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
@@ -522,6 +523,13 @@ const timeRanges = [
   { label: '6h',  value: '6h',  minutes: 360 },
   { label: '24h', value: '24h', minutes: 1440 },
 ]
+// Kept in the URL and the tab's memory, and shared by every queue: one
+// component serves every queue name, and the window picked on one is the
+// window the next is read in. Not per cluster: a range means the same on
+// every one.
+usePersistedFilters('queueDetail', {
+  range: { ref: selectedRange, codec: oneOf(timeRanges.map(r => r.value)), keep: true },
+})
 // The resolved window, restated once in the scope strip. There is no custom
 // range on this page, so it is always a quick range.
 const rangeLabel = computed(() => {

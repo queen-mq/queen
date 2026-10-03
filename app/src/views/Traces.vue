@@ -27,7 +27,7 @@
         <input v-model="searchTraceName" type="text" placeholder="A trace name" class="input" @keyup.enter="searchTraces" />
       </div>
       <button class="btn btn-primary" :disabled="!searchTraceName || loading" @click="searchTraces">Search</button>
-      <button v-if="currentTraceName" class="btn btn-ghost" @click="clearSearch">Clear</button>
+      <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear</button>
       <!-- Quick examples: real trace names for this tenant, or nothing. -->
       <template v-if="!currentTraceName && exampleTraceNames.length > 0">
         <span class="tool-label">Recent</span>
@@ -129,6 +129,9 @@
                   </svg>
                   <h3>No traces found</h3>
                   <p>No events carry the trace name <span class="font-mono">{{ currentTraceName }}</span>.</p>
+                  <!-- A restored search can be the reason nothing is listed; the
+                       way out is offered where that sentence is read. -->
+                  <button class="btn btn-ghost" @click="clearFilters">Clear search</button>
                 </div>
               </td>
             </tr>
@@ -350,16 +353,20 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { traces as tracesApi, describeApiError } from '@/api'
 import { useApi } from '@/composables/useApi'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
+import { text, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
+import { useIdentity } from '@/stores/identity'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 
+
+const { actingCluster } = useIdentity()
 
 // Search state
 const searchTraceName = ref('')
@@ -370,6 +377,14 @@ const limit = ref(50)
 const totalTraces = ref(0)
 // Our own verdict on an unusable page, kept apart from the transport error.
 const pageError = ref(null)
+
+// The APPLIED name is kept in the URL and the tab's memory, never the box — the
+// box is a draft until Search. The box starts from it, so a restored search
+// reads back where it was typed.
+const { hasActiveFilter, clearFilters } = usePersistedFilters('traces', {
+  name: { ref: currentTraceName, codec: text },
+}, { scope: () => actingCluster.value?.id })
+searchTraceName.value = currentTraceName.value
 
 // useApi owns loading/error, aborts on unmount, and discards a response that
 // belongs to a cluster we have since left. The panel object is kept whole so
@@ -449,18 +464,38 @@ async function fetchTraces() {
   totalTraces.value = Number(payload?.total) || rows.length
 }
 
-// Search traces by name
-async function searchTraces() {
-  if (!searchTraceName.value.trim()) return
+// Search traces by name. A new name reaches the table through the watcher on
+// the applied name below; the same name again re-asks from the first row.
+function searchTraces() {
+  const name = searchTraceName.value.trim()
+  if (!name) return
+  if (name === currentTraceName.value) startSearch()
+  else currentTraceName.value = name
+}
 
+function startSearch() {
   offset.value = 0
-  currentTraceName.value = searchTraceName.value.trim()
   totalTraces.value = 0
   // A new name is a first load, not a refresh: drop the previous result so the
   // table skeletons rather than showing the old name's rows under the new one.
   traceData.value = null
-  await fetchTraces()
+  return fetchTraces()
 }
+
+// Every way the applied name moves — Search, Clear, a link, the remembered
+// search of the cluster just switched to — lands the box and the table on it.
+watch(currentTraceName, (name) => {
+  searchTraceName.value = name
+  if (name) {
+    startSearch()
+    return
+  }
+  traceData.value = null
+  totalTraces.value = 0
+  offset.value = 0
+  pageError.value = null
+  apiError.value = null
+})
 
 // Load page of traces
 async function loadPage() {
@@ -493,16 +528,6 @@ function nextPage() {
   if (shownTo.value >= totalTraces.value) return
   offset.value += traces.value.length || limit.value
   loadPage()
-}
-
-function clearSearch() {
-  searchTraceName.value = ''
-  currentTraceName.value = ''
-  traceData.value = null
-  totalTraces.value = 0
-  offset.value = 0
-  pageError.value = null
-  apiError.value = null
 }
 
 function viewTrace(trace) {
@@ -544,6 +569,10 @@ const refreshCurrentView = async () => {
 // Not useAutoRefresh: this page does not poll, so it shows no live tick. Its
 // freshness fact is the per-card stamp().
 useRefresh(refreshCurrentView)
+
+// In setup, not onMounted: a restored search paints its skeleton first, not a
+// "No traces found" for a name that has not been asked about yet.
+loadPage()
 
 onMounted(loadExampleTraceNames)
 </script>

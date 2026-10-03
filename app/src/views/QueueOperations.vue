@@ -213,6 +213,10 @@
                   <span v-if="selectedQueues.length > 0" class="filter-hint">
                     {{ selectedQueues.length }} of {{ availableQueues.length }}
                   </span>
+                  <!-- The picked queues are remembered across a trip away and
+                       back, so the way out of them sits beside the picker. The
+                       op and the view are how these charts are read, and stay. -->
+                  <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
                   <!-- Per-queue view-mode toggle: only meaningful for the Parked
                        tab today (cluster-aggregate vs per-replica). Hidden on
                        other ops to keep the surface tidy. -->
@@ -561,6 +565,7 @@ import {
   formatTimestampTime, formatTimestampUtc,
   isMultiDay, validateRange,
 } from '@/composables/useFormat'
+import { appliedRange, interval, list, oneOf, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
@@ -572,7 +577,7 @@ import { ackFailureSeverity, dlqGrowthSeverity } from '@/composables/useSeverity
 import BaseChart from '@/components/BaseChart.vue'
 import MultiSelect from '@/components/MultiSelect.vue'
 
-const { can, actingTenantSlug, actingCellSlug } = useIdentity()
+const { can, actingCluster, actingTenantSlug, actingCellSlug } = useIdentity()
 
 // ---------------------------------------------------------------------------
 // State
@@ -1553,6 +1558,23 @@ const opsError = computed(() => queueOpsError.value)
 const allFailed = computed(() =>
   queueOpsError.value !== null && retentionError.value !== null
 )
+
+// ---------------------------------------------------------------------------
+// Kept in the URL and the tab's memory, so a trip away and back lands on the
+// same window and the same chart. Bound here, below queueOpTabs whose keys it
+// accepts, and above the first fetch and the watcher that read it. The range,
+// the op and the view are how the page is read, not a narrowing: Clear leaves
+// them.
+// ---------------------------------------------------------------------------
+const customRange = appliedRange({ customMode, appliedCustom, customFrom, customTo })
+
+const { hasActiveFilter, clearFilters } = usePersistedFilters('operations', {
+  range: { ref: timeRange, codec: oneOf(timeRanges.map(r => r.value)), keep: true },
+  custom: { ref: customRange, codec: interval, keep: true },
+  queue: { ref: selectedQueues, codec: list },
+  op: { ref: selectedQueueOp, codec: oneOf(queueOpTabs.map(t => t.key)), keep: true },
+  view: { ref: viewMode, codec: oneOf(['aggregate', 'individual']), keep: true },
+}, { scope: () => actingCluster.value?.id })
 
 // One shared ticker for the whole app, paused while the tab is hidden: under
 // the proxy every poll is rate-limited and metered.

@@ -54,6 +54,7 @@
           <option v-for="task in tasks" :key="task" :value="task">{{ task || '(default)' }}</option>
         </select>
       </label>
+      <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
       <template #view>
         <div class="tool-seg">
           <span class="tool-label">Sort</span>
@@ -105,6 +106,11 @@
                not answer that. -->
           <button v-if="!hasActiveFilter && can('queueAdmin')" class="btn" @click="showCreate = true">
             Create queue
+          </button>
+          <!-- A restored slice can be the reason the list is empty; the way
+               out is offered where that sentence is read. -->
+          <button v-else-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">
+            Clear filters
           </button>
         </div>
       </template>
@@ -161,6 +167,7 @@ import { queues as queuesApi, system as systemApi, describeApiError } from '@/ap
 import { formatNumber, toNum } from '@/composables/useApi'
 import { queueAttention } from '@/composables/useAttention'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
+import { oneOf, optionalText, text, usePersistedFilters, withSelected } from '@/composables/usePersistedFilters'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
@@ -173,7 +180,7 @@ import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 
 const router = useRouter()
-const { can } = useIdentity()
+const { can, actingCluster } = useIdentity()
 const { notifySuccess } = useToast()
 
 // "All" sentinel. It must not be '' — '' is a real, selectable namespace/task
@@ -207,6 +214,24 @@ const filterNamespace = ref(ALL)
 const filterTask = ref(ALL)
 const sortBy = ref('health')
 
+const sortOptions = [
+  { value: 'health', label: 'Worst first' },
+  { value: 'avgLagMs', label: 'Lag' },
+  { value: 'density', label: 'Density' },
+  { value: 'partitions', label: 'Partitions' },
+  { value: 'name', label: 'Name' },
+]
+
+// Kept in the URL and the tab's memory, so a trip to a queue and back lands on
+// the same slice. The sort is how the list is read, not a narrowing: Clear
+// leaves it.
+const { hasActiveFilter, clearFilters } = usePersistedFilters('queues', {
+  q: { ref: searchQuery, codec: text },
+  ns: { ref: filterNamespace, codec: optionalText },
+  task: { ref: filterTask, codec: optionalText },
+  sort: { ref: sortBy, codec: oneOf(sortOptions.map(o => o.value)), keep: true },
+}, { scope: () => actingCluster.value?.id })
+
 // Modal state
 // The create form. It is not prefilled from anything on this page: a create
 // starts from the broker's defaults, which the modal states field by field.
@@ -216,18 +241,10 @@ const queueToDelete = ref(null)
 const deleteError = ref(null)
 const deleting = ref(false)
 
-const sortOptions = [
-  { value: 'health', label: 'Worst first' },
-  { value: 'avgLagMs', label: 'Lag' },
-  { value: 'density', label: 'Density' },
-  { value: 'partitions', label: 'Partitions' },
-  { value: 'name', label: 'Name' },
-]
-
-// Re-export the store-derived lists with the names this template already
-// uses, so the template doesn't need to change.
-const namespaces = storeNamespaces
-const tasks = storeTasks
+// The store-derived lists, plus a restored selection the store has not listed
+// (yet, or at all) — a <select> whose value has no option renders blank.
+const namespaces = computed(() => withSelected(storeNamespaces.value, filterNamespace.value))
+const tasks = computed(() => withSelected(storeTasks.value, filterTask.value))
 
 /**
  * Merge each queue with its latest queue-ops aggregate and derive the
@@ -270,10 +287,6 @@ const enrichedQueues = computed(() => {
     }
   })
 })
-
-const hasActiveFilter = computed(() =>
-  !!searchQuery.value || filterNamespace.value !== ALL || filterTask.value !== ALL
-)
 
 // Filter (sort happens inside QueueHealthGrid)
 const filteredQueues = computed(() => {

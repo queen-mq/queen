@@ -199,8 +199,10 @@ import {
   formatChartLabel, formatDateTimeLocal, formatTimestampRange, formatTimestampRangeUtc,
   formatTimestampUtc, isMultiDay, validateRange,
 } from '@/composables/useFormat'
+import { appliedRange, interval, oneOf, text, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
+import { useIdentity } from '@/stores/identity'
 import Autocomplete from '@/components/Autocomplete.vue'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
@@ -213,6 +215,8 @@ import PageTools from '@/components/PageTools.vue'
 // proxy blocks and the broker never scopes; nothing on this page may come from
 // it, so its lifetime "messages/leases/DLQ/workers" panels are gone rather
 // than shown as this tenant's.
+
+const { actingCluster } = useIdentity()
 
 const QUEUE_PAGE_LIMIT = 500
 
@@ -234,6 +238,18 @@ const appliedCustom = ref(null)
 const queueFilter = ref('')
 const namespaceFilter = ref('')
 const taskFilter = ref('')
+
+const customRange = appliedRange({ customMode, appliedCustom, customFrom, customTo })
+
+// Kept in the URL and the tab's memory. The range is how the page is read,
+// not a narrowing: Clear leaves it.
+const { hasActiveFilter, clearFilters } = usePersistedFilters('analytics', {
+  range: { ref: selectedRange, codec: oneOf(timeRanges.map(r => r.value)), keep: true },
+  custom: { ref: customRange, codec: interval, keep: true },
+  queue: { ref: queueFilter, codec: text },
+  ns: { ref: namespaceFilter, codec: text },
+  task: { ref: taskFilter, codec: text },
+}, { scope: () => actingCluster.value?.id })
 
 // ---------------------------------------------------------------------------
 // Range
@@ -328,12 +344,6 @@ watch([queueFilter, namespaceFilter, taskFilter], () => {
   queueList.refresh()
 })
 
-const clearFilters = () => {
-  queueFilter.value = ''
-  namespaceFilter.value = ''
-  taskFilter.value = ''
-}
-
 // ---------------------------------------------------------------------------
 // Scope
 // ---------------------------------------------------------------------------
@@ -343,9 +353,6 @@ const namespaceOptions = computed(() => namespacesApi.data.value?.namespaces || 
 const taskOptions = computed(() => tasksApi.data.value?.tasks || [])
 
 const queuePageFull = computed(() => queues.value.length >= QUEUE_PAGE_LIMIT)
-const hasActiveFilter = computed(
-  () => !!(queueFilter.value || namespaceFilter.value || taskFilter.value)
-)
 const groupFilterActive = computed(() => !!(namespaceFilter.value || taskFilter.value))
 // A namespace/task filter is resolved through the queue list. If that list is
 // unavailable the filter cannot be honoured — never quietly widen the scope.

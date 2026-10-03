@@ -122,6 +122,11 @@
                 @click="sortBy = opt.value"
               >{{ opt.label }}</button>
             </div>
+
+            <!-- The slice is remembered across a trip to another page and
+                 back, so the way out of it sits beside the controls it resets.
+                 The sort is a view mode, not a narrowing, and stays. -->
+            <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
           </div>
         </template>
       </PageTools>
@@ -258,6 +263,9 @@
                   <div class="empty-state">
                     <h3>No queue matches these filters</h3>
                     <p>{{ formatNumber(rows.length) }} ephemeral queue{{ rows.length === 1 ? '' : 's' }} are live on this cell.</p>
+                    <!-- A restored slice can be the reason nothing matches; the
+                         way out is offered where that sentence is read. -->
+                    <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
                   </div>
                 </td>
               </tr>
@@ -353,6 +361,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ephemeral as ephemeralApi, describeApiError } from '@/api'
 import { formatBytes, formatNumber, toNum } from '@/composables/useApi'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
+import { flag, oneOf, text, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
@@ -362,7 +371,7 @@ import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 import { lossSeverity } from '@/composables/useSeverity'
 
-const { can } = useIdentity()
+const { can, actingCluster } = useIdentity()
 const { notifySuccess } = useToast()
 
 const store = useEphemeralStore()
@@ -386,6 +395,15 @@ const sortOptions = [
   { value: 'bytes', label: 'Bytes' },
   { value: 'name', label: 'Name' },
 ]
+
+// Kept in the URL and the tab's memory, so a trip to another page and back
+// lands on the same slice. The sort is how the list is read, not a narrowing:
+// Clear leaves it. Open rows are not kept — they are a glance, not a slice.
+const { hasActiveFilter, clearFilters } = usePersistedFilters('ephemeral', {
+  q: { ref: searchQuery, codec: text },
+  declared: { ref: declaredOnly, codec: flag },
+  sort: { ref: sortBy, codec: oneOf(sortOptions.map(o => o.value)), keep: true },
+}, { scope: () => actingCluster.value?.id })
 
 // Per-row expand state — the Set-based pattern Dashboard and QueueDetail use.
 const expanded = ref(new Set())

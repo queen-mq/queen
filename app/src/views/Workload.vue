@@ -41,6 +41,7 @@
           <button class="crumb" disabled>{{ selectedQueue }}</button>
         </template>
       </div>
+      <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
       <template #view>
         <div class="tool-seg">
           <span class="tool-label">Group by</span>
@@ -646,6 +647,7 @@ import {
   formatDateTimeLocal, formatTimestampRange, formatTimestampRangeUtc, formatTimestampUtc,
   validateRange,
 } from '@/composables/useFormat'
+import { appliedRange, interval, oneOf, optionalText, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import PageHead from '@/components/PageHead.vue'
@@ -655,9 +657,11 @@ import {
   comparisonRange, deeperFindings, efficiency, enrichRows, findings, flowSeries, formatters as fmt,
   heatCells, rollupFromQueueOps, sameHourBaseline, totalSeries, trimOpenBucket, weeklyProfile, windowDeltas,
 } from '@/composables/useWorkload'
-import { onClusterChange } from '@/stores/identity'
+import { onClusterChange, useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { isMissingRoute, routeSupport } from '@/stores/routeSupport'
+
+const { actingCluster } = useIdentity()
 
 // TENANT PAGE. Three sources, each with its own panel state:
 //   /api/v1/analytics/workload — the whole page's numbers, tenant-scoped
@@ -1046,6 +1050,24 @@ function fetchAll() {
   queuesStore.fetchQueues().catch(() => {})
 }
 
+const customRange = appliedRange({ customMode, appliedCustom, customFrom, customTo })
+
+// Kept in the URL and the tab's memory, and bound right before the first fetch
+// so it already asks for the restored slice. The focus is the one narrowing;
+// the range, grouping, metric and comparison are how the page is read and
+// stay on Clear. The open queue is a click, not a filter, and is not kept.
+const { hasActiveFilter, clearFilters: clearSlice } = usePersistedFilters('workload', {
+  range: { ref: selectedRange, codec: oneOf(timeRanges.map((r) => r.value)), keep: true },
+  custom: { ref: customRange, codec: interval, keep: true },
+  by: { ref: groupBy, codec: oneOf(['namespace', 'task']), keep: true },
+  focus: { ref: focus, codec: optionalText },
+  metric: { ref: metric, codec: oneOf(metrics.map((m) => m.value)), keep: true },
+  compare: { ref: compare, codec: oneOf(compareModes.map((c) => c.value)), keep: true },
+}, { scope: () => actingCluster.value?.id })
+
+// Clearing the focus is a refetch like every other way out of it.
+const clearFilters = () => { clearSlice(); goRoot() }
+
 fetchAll()
 useAutoRefresh(fetchAll)
 // The live tick counts from the last load that succeeded.
@@ -1172,6 +1194,9 @@ const focusOptions = computed(() => {
   const seen = new Set()
   for (const m of queueMetaMap.value.values()) seen.add((kind === 'task' ? m.task : m.namespace) ?? '')
   for (const r of rows.value) if (r.level !== 'queue') seen.add(r.key ?? '')
+  // A restored focus may be named before the lists that hold it load, or
+  // after its group is gone; a select with no option for it renders blank.
+  if (focus.value !== null) seen.add(focus.value)
   const keys = [...seen].sort((a, b) => (a === '' ? 1 : b === '' ? -1 : a.localeCompare(b)))
   return keys.map((k) => ({ value: k, label: k || (kind === 'task' ? '(no task)' : '(no namespace)') }))
 })

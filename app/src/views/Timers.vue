@@ -452,7 +452,6 @@
 //   · the page              exactly the rows on screen; the keyset walk has no
 //                           total, by construction
 import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
 
 import Autocomplete from '@/components/Autocomplete.vue'
 import PageHead from '@/components/PageHead.vue'
@@ -465,6 +464,7 @@ import { formatBytes, formatNumber, toNum, useApi } from '@/composables/useApi'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { describeVerdict, gatedVerdict } from '@/composables/useGatedVerdict'
 import { useKeysetPager } from '@/composables/useKeysetPager'
+import { oneOf, text, usePersistedFilters } from '@/composables/usePersistedFilters'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import {
@@ -477,10 +477,11 @@ import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { routeSupport } from '@/stores/routeSupport'
 
-const route = useRoute()
-const router = useRouter()
-const { can, epoch } = useIdentity()
+const { can, epoch, actingCluster } = useIdentity()
 const { notifySuccess } = useToast()
+
+/** The page sizes the picker offers, and the only ones a URL may name. */
+const PAGE_SIZES = [50, 100, 250]
 
 const TENANT_TOTAL_TITLE =
   'Every pending timer this tenant holds on the cell, from the sweeper\'s cached measurement on the queue listing — minutes old, never a live count'
@@ -497,8 +498,17 @@ const {
   timerRows, timerBytes, fetchQueues,
 } = queuesStore
 
-const queue = ref(typeof route.query.queue === 'string' ? route.query.queue : '')
+const queue = ref('')
 const limit = ref(100)
+
+// Kept so a trip elsewhere and back lands on the same queue. Both are `keep`:
+// the queue is the address and the page size how it is read, so neither is a
+// narrowing and this page has no Clear. The count prefix is not kept: it is
+// the input of a one-off count whose answer is not kept either.
+usePersistedFilters('timers', {
+  queue: { ref: queue, codec: text, keep: true },
+  limit: { ref: limit, codec: oneOf(PAGE_SIZES), keep: true },
+}, { scope: () => actingCluster.value?.id })
 
 const queueOptions = computed(() => allQueues.value.map((q) => q.name).filter(Boolean).sort())
 const queuesUnavailable = computed(() => Boolean(queuesError.value) && queueOptions.value.length === 0)
@@ -654,17 +664,11 @@ const probeAgain = async () => {
 
 // The queue and the page size each start a NEW sequence: the cursors on the
 // stack address the old one and would silently page through it.
-watch(queue, (q) => {
+watch(queue, () => {
   pager.reset()
   closeDrawer()
   countResult.value = null
   countError.value = null
-  // The URL carries the queue so the page can be linked to; replace, never
-  // push, so Back leaves the page instead of walking the picker's history.
-  const current = typeof route.query.queue === 'string' ? route.query.queue : ''
-  if (current !== q) {
-    router.replace({ query: { ...route.query, queue: q || undefined } })
-  }
   reload()
 })
 watch(limit, () => { pager.reset(); reload() })
