@@ -11,9 +11,9 @@ becomes a Rust one.
 composer require queen-mq/php-client
 ```
 
-[Documentation](https://queenmq.com/use/laravel/) ·
-[Migrate from Horizon](https://queenmq.com/use/laravel/migrate-from-horizon) ·
-[SDK reference](https://queenmq.com/reference/sdk/php/) ·
+[Documentation](https://queenmq.com/guides/laravel/) ·
+[Migrate from Horizon](https://queenmq.com/guides/laravel/migrate-from-horizon/) ·
+[SDK reference](https://queenmq.com/start/clients/) ·
 PHP 8.3 / 8.4 · Apache-2.0
 
 ```text
@@ -27,14 +27,14 @@ PHP 8.3 / 8.4 · Apache-2.0
 ```
 
 Median proportional set size of the orchestrator alone, from the
-[supervisor benchmark](https://queenmq.com/benchmarks/laravel-supervisors). It is a control-plane
+[supervisor benchmark](https://queenmq.com/benchmarks/laravel/). It is a control-plane
 number, not a whole-stack claim: Queen still runs a broker. The PHP reference master measures
 35.1 MiB.
 
 With 8 workers and 10 ms jobs, on a broker and a Redis that both fsync every write, Queen completed
 643 jobs/s against Horizon's 417, and its master and workers used 70 MiB against 310 MiB. One Docker
 Desktop host, diagnostic; every lane and its limits are on the
-[benchmark page](https://queenmq.com/benchmarks/laravel-supervisors#horizon-against-queen-on-raft-2026-10-01).
+[benchmark page](https://queenmq.com/benchmarks/laravel/#worker-capacity-on-a-linux-server).
 
 ---
 
@@ -67,11 +67,11 @@ long-wait alerts are recorded by every worker into the broker, across every host
 
 **Stay on Horizon** if you need silenced jobs, job lists, batches, Slack or SMS notification routes,
 or per-supervisor controls. The honest, itemized comparison is
-[Queen or Horizon](https://queenmq.com/use/laravel/queen-vs-horizon).
+[Queen or Horizon](https://queenmq.com/guides/laravel/queen-vs-horizon/).
 
 > **Preview.** The queue driver is usable on its own. The supervisor and dashboard are preview
 > features and Unix-only. Read
-> [Production checks](https://queenmq.com/use/laravel/supervisors#production-checks) before
+> [Production checks](https://queenmq.com/guides/laravel/supervisors/#before-production) before
 > replacing Horizon.
 
 ---
@@ -178,7 +178,7 @@ Horizon empty every Redis queue, confirm no reserved job remains, terminate Hori
 workers side by side, watch Redis to zero, then `php artisan horizon:terminate` and remove the
 routing flag.
 
-Full runbook, including rollback: [Migrate from Horizon](https://queenmq.com/use/laravel/migrate-from-horizon).
+Full runbook, including rollback: [Migrate from Horizon](https://queenmq.com/guides/laravel/migrate-from-horizon/).
 
 ---
 
@@ -247,7 +247,7 @@ Rust supervisor on Linux the master renews the leases of all its workers; elsewh
 starts one small PHP helper, on Unix CLI PHP. Delivery stays at least once either way — handlers
 still need idempotency keys. `process_limit` still counts a slot for the helper, which a worker
 starts when the master refuses it.
-[The safe delivery profile](https://queenmq.com/use/laravel/#start-with-the-safe-delivery-profile).
+[The safe delivery profile](https://queenmq.com/guides/laravel/#the-safe-default).
 
 Requests go over the client's own kept-alive cURL handles, not Guzzle: a pop and an ACK cost the
 client about 60% less CPU, and with 10 ms jobs a whole worker used 13 to 25% less.
@@ -257,7 +257,7 @@ client about 60% less CPU, and with 10 ms jobs a whole worker used 13 to 25% les
 asynchronous ACK is reported one job later and the job is delivered again; `QUEEN_POP_AHEAD` needs
 `QUEEN_LEASE_RENEWAL`, and `QUEEN_ACK_ASYNC` needs `QUEEN_ACK_BATCH=1`. With both, 8 workers on the
 Raft broker went from 453 to 643 jobs/s of 10 ms jobs.
-[Asynchronous acknowledgements](https://queenmq.com/use/laravel/#asynchronous-acknowledgements).
+[A faster profile](https://queenmq.com/guides/laravel/#a-faster-profile).
 
 Keep `prefetch=1` for long jobs, strict per-job acknowledgement, or comma-separated priority queues.
 
@@ -355,13 +355,13 @@ by every worker; without prefork, each worker keeps its own copy and opcache cos
 **Monitoring.** The dashboard's Jobs and Tags pages, `queen:check-waits` with the
 `LongWaitDetected` event and mail, and a Prometheus endpoint at `/queen/metrics`
 (`QUEEN_METRICS_ENABLED`, `QUEEN_METRICS_TOKEN`) are described in
-[Monitoring and alerts](https://queenmq.com/use/laravel/monitoring).
-> [Several replicas](https://queenmq.com/use/laravel/supervisors#several-replicas).
+[Monitoring and alerts](https://queenmq.com/guides/laravel/monitoring/).
+> [Several replicas](https://queenmq.com/guides/laravel/supervisors/#several-replicas).
 
 Requires Unix with `pcntl` and `posix`. Windows is rejected explicitly rather than left to fail;
 WSL runs the Linux artifact. Installer verification, air-gapped installs, Sigstore pinning and the
 endpoint-failover read token are covered in
-[Worker supervisors](https://queenmq.com/use/laravel/supervisors).
+[Worker supervisors](https://queenmq.com/guides/laravel/supervisors/).
 
 ### Dashboard
 
@@ -400,7 +400,7 @@ Gate::define('viewQueenDashboard', fn ($user) => $user?->canOperateQueues() === 
 Controls are POST-only, CSRF-protected and carry the exact supervisor `instance_id`, so a stale page
 cannot command a replaced master. Without remote status, the panel reads one local state directory.
 Global backlog analytics and DLQ operations live in the Queen broker dashboard.
-[Dashboard reference](https://queenmq.com/use/laravel/dashboard).
+[Dashboard reference](https://queenmq.com/guides/laravel/dashboard/).
 
 **Supervisor on another host.** When the dashboard is served by other processes than the supervisor
 — Kubernetes web pods and a separate worker pod, for instance — either engine can also publish its
@@ -500,14 +500,14 @@ verdict instead of throwing. It belongs in an `if`, not in a `catch`, and not in
 The rest of the surface — buffered push, multi-partition pop, pop autopilot, conflation, the
 `KafkaConsumer`-style consumer, key/value state, timers, the DLQ, the admin API, tracing, wildcard
 consumption and the `queen:consume` Artisan command — is documented with every option in the
-[PHP SDK reference](https://queenmq.com/reference/sdk/php/).
+[PHP SDK reference](https://queenmq.com/start/clients/).
 
 ---
 
 ## Configuration
 
-Every key is in the published `config/queen.php` and documented in
-[Config keys and env vars](https://queenmq.com/reference/sdk/php/#config-keys-and-env-vars). The
+Every key is in the published `config/queen.php`, and
+[Map the configuration](https://queenmq.com/guides/laravel/migrate-from-horizon/#map-the-configuration) maps Horizon's settings onto them. The
 ones worth knowing on day one:
 
 | Variable | What it controls |
