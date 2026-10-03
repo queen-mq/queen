@@ -6,74 +6,60 @@
 
 **High-performance transactional message broker**
 
-Queen is a distributed message broker written in **Rust**: its
-defining abstraction is one logical ordered partition per application entity (a customer, an
-account, a conversation, a device, a workflow, a session, a job), created by the first push that
-names it, never provisioned in advance, with a set of transactional features to make your job easier.
+Queen MQ is a transactional event broker. When a worker handles an event, the ack, the state it
+changes, the events it emits and the timer it sets commit as one entry of a replicated log, or not
+at all. On three nodes it carries 1M msg/s in and out of one queue of 10M partitions.
 
-[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · [Try it](https://queenmq.cloud) · Apache-2.0 · v2.0.0
+[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.0.0
 
-
-Queen speaks HTTP, but is also protocol-compatible with **Kafka**.
-
-[Free on Queen Cloud](https://queenmq.cloud). The same broker, hosted.
 </div>
 
 ---
 
-## The problem Queen solves
+## Why Queen
 
-Queen gives you the capability to have tons of ordered FIFO partitions, per entity, in order to solve HOL.
-It can manage 10M partitions easily, and those partitions are dynamic, created at first push with your key/entity.
+**One partition per entity.** Most brokers make you pick a partition count up front and hash your
+keys onto it, so one slow customer blocks everyone who hashed next to it. In Queen every customer,
+order or conversation gets its own ordered partition, created by the first push that names it. No
+count to plan, no head-of-line blocking, and ten million partitions in one queue is a benchmark we
+publish.
 
-Also, Queen is engineered in order to provide transactional features that allow you to offload to it a lot of complex application logic: with one unique Queen transaction is possible to: ACK (or NACK) a message, push to other queues, update counters in its own KV storage, set timers. It also have Postgres source and sink connetors to provide exaclty once operations between Queen and Postgres.
+**One commit per step.** Handling an event usually spans four systems: a broker, a database with an
+outbox, a scheduler and an idempotency table, and a crash between any two leaves the step half done.
+In Queen it is one transaction: ack the event, push the next ones, write KV state and set timers,
+all in one log entry.
 
-Queen is multi tenant, and can spread its tenants over several Raft groups, each with its own leader. It's architeture is engineered to be almost insensible to partition count and make transactions easy and fast [Benchmark](https://queenmq.com/benchmarks/partitions/).
+**One binary.** No database, ZooKeeper or sidecar beside it. Tenants live in their own Raft groups,
+each with its own leader, so a transaction needs no coordinator and no two-phase commit.
 
-Queen is running in production at [Smartness](https://smartness.com), and it is tested with Jepsen.
-
----
+In production at [Smartness](https://www.smartness.com/en). Tested with Jepsen.
 
 ## Features
 
-Main features:
+- **Partitions on demand.** Created by the first push that names them, ordered inside, cheap enough
+  for millions. [Partitions](https://queenmq.com/concepts/partitions/)
+- **Transactions.** Ack, push, KV and timers commit together or not at all, fenced by the worker's
+  lease. [Transactions](https://queenmq.com/concepts/transactions/)
+- **Exactly-once effects.** Push dedup by `transactionId`, and `once` to run a step at most once.
+  [Dedup](https://queenmq.com/concepts/dedup/)
+- **Consumer groups.** A cursor per group: fan-out, replay, seek by time, retries and a dead-letter
+  queue. [Consuming](https://queenmq.com/concepts/consuming/)
+- **State and time.** A transactional [KV](https://queenmq.com/concepts/kv/) with versions and an
+  expiry on every write, [timers](https://queenmq.com/concepts/timers/) that fire real messages into
+  real queues, delayed delivery, debounce windows, conflation.
+- **Streams.** Tumbling, sliding, session and cron windows whose state commits with the ack.
+  [Streams](https://queenmq.com/guides/streams/)
+- **Ephemeral queues.** In memory, for request/reply, presence and live updates.
+  [Ephemeral](https://queenmq.com/guides/ephemeral/)
+- **Kafka, PostgreSQL, S3.** Kafka clients connect unchanged, PostgreSQL tables stream in and out,
+  queues land in S3 as JSONL or Parquet, exactly once, with no connector process.
+  [Kafka](https://queenmq.com/guides/kafka/) · [PostgreSQL](https://queenmq.com/guides/postgres/) · [S3](https://queenmq.com/guides/s3/)
+- **Batteries included.** A dashboard on the same port, Prometheus metrics, JWT/JWKS auth, payload
+  encryption, a multi-tenant proxy with API keys, Raft over three or five nodes.
+- **Any client.** curl, six SDKs (JavaScript, Python, Go, Rust, C++, PHP with a Laravel driver) and
+  `queenctl`. [Clients](https://queenmq.com/start/clients/)
 
-- **Ordered partitions, created on demand.** A partition exists as soon as a push names it, and
-ordering holds inside it.
-
-- **Dedup at push.** 
-
-- **Consumer group.** Fan out jobs to multiple consumer group, seek by timestamp.
-
-- **Exactly once inside it's transactional features** Deduplication at push plus `ack + kv + push + timers` commit together or not at all.
-
-- **State and time in the broker.** [`queen.kv`](https://queenmq.com/use/kv), a transactional
-key/value store with optimistic locking and an expiry on every write ·
-[timers](https://queenmq.com/use/timers) that schedule a real message into a real queue and stay
-cancellable until they fire · delayed delivery · window-buffer debounce · conflation, last-value
-delivery per partition.
-
-- **Stream processing in your process.** An [operator chain](https://queenmq.com/use/streams) with
-state in the same brokers: no job manager, no changelog topic, no state store to deploy. Four
-window types (tumbling, sliding, session, cron), map/filter/aggregate, event time with watermarks,
-per-message gating.
-
-- **Ephemeral queues, no disk in the path.** An
-[in-memory class](https://queenmq.com/use/ephemeral) for request/reply, signalling, presence
-fan-out and cache invalidation: the shapes that should not pay for replay and retention.
-
-- **Kafka clients connect directly.** Since 1.4.0 Queen speaks Kafka wire protocols, so an
-existing client moves over by changing its connection URL.
-
-- **Postgres source and sink** Exaclty once processing between Queen and Postgres database.
-
-- **One binary, no sidecars, no database.** curl is a first-class client · six SDKs (JavaScript,
-Python, Go, Rust, C++, PHP/Laravel) plus `queenctl` · a dashboard served by the same binary on the
-same port · Prometheus metrics · JWT/JWKS auth · payload encryption · multi-tenant · Raft
-replication over three or five nodes.
-
-
-## Published benchmarks
+## Benchmarks
 
 Three 16-vCPU nodes, every write fsynced on two of them before the answer, with Kafka 4.3.1,
 Redpanda 26.2.3 and Pulsar 4.2.4 on the same machines. Each row links to the run and its conditions.
@@ -93,8 +79,6 @@ message. [Method and rig](https://queenmq.com/benchmarks/methodology/).
 
 ## Quick start
 
-Docker and about two minutes:
-
 ```bash
 docker run -d -p 6632:6632 ghcr.io/queen-mq/queen:latest
 ```
@@ -108,30 +92,29 @@ curl -X POST http://localhost:6632/api/v1/push -H 'content-type: application/jso
 ```
 
 `transactionId` is your idempotency key: a retry of the same push writes nothing the second time.
-Full walkthrough in the [Quickstart](https://queenmq.com/start/quickstart).
+Open http://localhost:6632 for the dashboard, and take the
+[Quickstart](https://queenmq.com/start/quickstart/) from there.
 
 ## Documentation
 
-- **[The model](https://queenmq.com/use/model)**: queues, partitions, groups, offsets, leases, retention.
-- **[Transactions](https://queenmq.com/reference/http/transaction)**: bundle shape, rollback causes, the exactly-once boundary.
-- **[KV](https://queenmq.com/use/kv)** · **[Timers](https://queenmq.com/use/timers)** · **[Streams](https://queenmq.com/use/streams)** · **[Ephemeral](https://queenmq.com/use/ephemeral)**: beyond push and pop.
-- **[Deploy](https://queenmq.com/deploy)** · [HA](https://queenmq.com/deploy/ha) · [Kubernetes](https://queenmq.com/deploy/kubernetes) · [Operations](https://queenmq.com/deploy/operations) · [Kafka](https://queenmq.com/deploy/kafka).
-- **[Multi-tenant](https://queenmq.com/deploy/multi-tenant)** · [Proxy](https://queenmq.com/deploy/proxy) · [Isolation](https://queenmq.com/reference/multi-tenant/isolation).
-- **[Internals](https://queenmq.com/internals)**: the replicated log, storage model, life of a push and a pop, dedup, retention.
-- **[Benchmarks](https://queenmq.com/benchmarks)** · [method and rig](https://queenmq.com/benchmarks/method) · [comparison](https://queenmq.com/start/compare).
-- **[HTTP reference](https://queenmq.com/reference/http)** · **[SDKs](https://queenmq.com/reference/sdk/javascript)**: routes and clients.
+- [The model](https://queenmq.com/concepts/): partitions, consumer groups, transactions, KV, timers, dedup, guarantees.
+- [Guides](https://queenmq.com/guides/) · [Examples](https://queenmq.com/examples/): exactly-once, state machines, streams, webhooks, Kafka, PostgreSQL, S3, Laravel.
+- [Operate](https://queenmq.com/operate/): a [cluster](https://queenmq.com/operate/cluster/), [Kubernetes](https://queenmq.com/operate/kubernetes/), [monitoring](https://queenmq.com/operate/monitoring/), [recovery](https://queenmq.com/operate/recovery/), [tenants](https://queenmq.com/operate/tenants/).
+- [Reference](https://queenmq.com/reference/): the HTTP API, configuration, errors, limits.
+- [Internals](https://queenmq.com/internals/): the replicated log, storage, the life of a step.
+- [Compared to Kafka, SQS and Temporal](https://queenmq.com/start/compare/).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and the [contributing
-guide](https://queenmq.com/internals/contributing). Benchmark claims need an archived artifact under
-`benchmark-queen/`; doc pages declare the source files they are true of.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[contributing guide](https://queenmq.com/internals/contributing/). Benchmark claims need an archived
+artifact under `benchmark-queen/`, and doc pages name the source files they describe.
 
 ## License
 
-Apache-2.0, see [LICENSE.md](LICENSE.md). Broker and proxy both, so the multi-tenant service is
-yours to run.
+Apache-2.0, see [LICENSE.md](LICENSE.md). The broker and the proxy both, so the multi-tenant service
+is yours to run.
 
 ---
 
-QueenMQ is built at [Smartness](https://www.smartness.com/en).
+Queen MQ is built at [Smartness](https://www.smartness.com/en).
