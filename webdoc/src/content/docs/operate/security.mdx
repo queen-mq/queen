@@ -20,6 +20,7 @@ sourceOfTruth:
   - proxy/src/cp.rs
   - protocols/queen-kafka/src/boot.rs
   - SECURITY.md
+# sourceOfTruth re-read 2026-10-03 (4e2bd24a): SECURITY.md supports 2.x only (the page says so); auth.rs lets the ephemeral hand-over calls in on the cluster token since 892e7d81 (the JWT sentence says so).
 ---
 
 Out of the box a node authenticates nobody: its HTTP port is plain HTTP, and every route answers
@@ -162,11 +163,14 @@ the encrypted payloads unreadable, and consumers then receive the ciphertext env
 no error; restoring the key restores the plaintext. In 2.0.0-beta.6 the messages a stream's sink
 pushes are stored in clear even in a queue with `encryptionEnabled`.
 
-There is no TLS between nodes: the raft port and the HTTP calls between nodes are plaintext. And
-with the broker's JWT on, the nodes' ephemeral hand-over calls are refused, so ephemeral partitions
-that move lose their contents ([ephemeral queues](/guides/ephemeral/)).
+There is no TLS between nodes: the raft port and the HTTP calls between nodes are plaintext. With the
+broker's JWT on, the nodes' ephemeral hand-over calls (`_adopt`, `_leaving`, `_ready`) prove
+themselves with the cluster token, never a JWT, so set `QUEEN_RAFT_TOKEN`: without it they are
+refused, and ephemeral partitions that move lose their contents
+([ephemeral queues](/guides/ephemeral/)).
 
 ## Reporting a vulnerability
 
 Report it privately, through GitHub's private vulnerability reporting on the `queen-mq/queen`
 repository, as `SECURITY.md` describes.
+Security fixes go to 2.x; 1.x is no longer supported.
