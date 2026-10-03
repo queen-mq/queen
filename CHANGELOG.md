@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased (2.0.0)
+## 2.0.0 - 2026-10-03
 
 **The PostgreSQL storage class is removed.** Queen 2.0 has one storage class, its own replicated
 log, and there is no database to run beside it. Each node keeps its whole state in one data
