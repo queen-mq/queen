@@ -58,6 +58,7 @@ mod keep_overlay;
 mod kv;
 mod kv_crash;
 mod multipush;
+mod partitions_changed;
 pub(super) mod planner_harness;
 mod planner_indexes;
 mod planner_overlay;

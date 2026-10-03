@@ -12,23 +12,36 @@ use axum::http::StatusCode;
 use axum::response::Response;
 
 /// `GET /status` — liveness plus, when the in-process Kafka facade is enabled,
-/// its state under `kafka`. With the facade off the body is the fixed string.
+/// its state under `kafka`, and when the in-process S3 sink is, its state under
+/// `s3` (`s3_inproc::status_value`: the bucket, the health verdict, a row per
+/// queue). With neither on the body is the fixed string.
 pub async fn handle_status() -> Response {
     #[cfg(feature = "kafka")]
     let kafka = crate::kafka_inproc::status_value();
     #[cfg(not(feature = "kafka"))]
     let kafka: Option<serde_json::Value> = None;
-    let Some(kafka) = kafka else {
+    #[cfg(feature = "s3")]
+    let s3 = crate::s3_inproc::status_value();
+    #[cfg(not(feature = "s3"))]
+    let s3: Option<serde_json::Value> = None;
+    if kafka.is_none() && s3.is_none() {
         return json(
             StatusCode::OK,
             "{\"status\":\"ok\",\"engine\":\"segments-rust\"}".to_string(),
         );
-    };
-    let body = serde_json::json!({
+    }
+    let mut body = serde_json::json!({
         "status": "ok",
         "engine": "segments-rust",
-        "kafka": kafka,
     });
+    if let Some(out) = body.as_object_mut() {
+        if let Some(kafka) = kafka {
+            out.insert("kafka".into(), kafka);
+        }
+        if let Some(s3) = s3 {
+            out.insert("s3".into(), s3);
+        }
+    }
     json(StatusCode::OK, body.to_string())
 }
 

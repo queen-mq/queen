@@ -175,6 +175,9 @@ pub struct Config {
     // EMBEDDED MODE for the Kafka wire facade (server/src/kafka_facade.rs).
     // Off by default: nothing is spawned, nothing is logged, no behaviour changes.
     pub kafka_facade: KafkaFacadeConfig,
+    // EMBEDDED MODE for the S3 / data-lake sink (server/src/s3_inproc.rs).
+    // Off by default: nothing starts, nothing is read but the switch.
+    pub s3_sink: S3SinkConfig,
     // Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): native tenant scoping on queue
     // identity. Default OFF ⇒ every request uses config::DEFAULT_TENANT and the
     // broker behaves byte-identically to today. ON ⇒ the tenant is read from the
@@ -301,6 +304,28 @@ impl KafkaFacadeConfig {
             enabled: env_bool("QUEEN_KAFKA_EMBEDDED", false),
             // Floored at 100ms because a grace of zero is an abort with extra steps.
             shutdown_grace_ms: env_int("QUEEN_KAFKA_SHUTDOWN_GRACE_MS", 5000).max(100) as u64,
+        }
+    }
+}
+
+/// The S3 / data-lake sink, run IN-PROCESS on its own runtime (s3_inproc.rs)
+/// when `QUEEN_S3_EMBEDDED=true`. Every other `QUEEN_S3_*` variable is read by
+/// the sink itself (connectors/queen-s3, `Config::from_env_with`).
+#[derive(Clone)]
+pub struct S3SinkConfig {
+    pub enabled: bool,
+    /// How long the stopping sink has to finish the window it is committing
+    /// and give its leases back. 30 s, not the facades' 5: a stopping sink has
+    /// an open window and possibly an upload in flight.
+    pub shutdown_grace_ms: u64,
+}
+
+impl S3SinkConfig {
+    pub(crate) fn from_env() -> S3SinkConfig {
+        S3SinkConfig {
+            enabled: env_bool("QUEEN_S3_EMBEDDED", false),
+            // Floored at 100ms because a grace of zero is an abort with extra steps.
+            shutdown_grace_ms: env_int("QUEEN_S3_SHUTDOWN_GRACE_MS", 30000).max(100) as u64,
         }
     }
 }
@@ -517,6 +542,13 @@ pub fn log_effective(cfg: &Config) {
             "config: kafka_facade"
         );
     }
+    if cfg.s3_sink.enabled {
+        tracing::info!(
+            target: "boot",
+            shutdown_grace_ms = cfg.s3_sink.shutdown_grace_ms,
+            "config: s3_sink"
+        );
+    }
     tracing::info!(
         target: "boot",
         encryption_key = %mask(&env_str("QUEEN_ENCRYPTION_KEY", "")),
@@ -637,6 +669,7 @@ pub fn load() -> Config {
         auth: AuthConfig::from_env(),
         server_id: resolve_server_id(),
         kafka_facade: KafkaFacadeConfig::from_env(),
+        s3_sink: S3SinkConfig::from_env(),
         tenancy_header,
         raft_dir: env_str("QUEEN_RAFT_DIR", "/var/lib/queen/raft"),
         raft_ready_lag_ms: env_int("QUEEN_RAFT_READY_LAG_MS", 2000).max(0) as u64,

@@ -572,6 +572,9 @@ fn record_results(st: &AppState, results: &[Value], ms: f64, bytes_in: u64) {
 /// exemption: a consumer group committing at its own pace is the facade doing
 /// its job, and the tenant's KV write rate (`QUEEN_KV_WRITE_RATE`, 100/s by
 /// default) turned it into 429s a Kafka client read as COORDINATOR_NOT_AVAILABLE.
+/// The in-process S3 sink (src/s3_inproc.rs) commits through it too: its lease
+/// claims and refreshes, window intents and commit pointers (namespace
+/// `queen-s3`) are the sink doing its job, on every node at once.
 /// The answer is byte-for-byte the route's: the same body on success, the same
 /// rendering of every failure.
 pub fn facade_kv(

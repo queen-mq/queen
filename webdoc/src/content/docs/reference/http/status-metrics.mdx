@@ -21,6 +21,9 @@ sourceOfTruth:
   - server/src/rsm/dashboard/node_views.rs
   - server/src/rsm/dashboard/store.rs
   - server/src/rsm/timing.rs
+  - server/src/s3_inproc.rs
+# sourceOfTruth re-read 2026-10-02 (through 8a0faff0 + working tree): GET /status gains the in-process S3 sink's s3 object beside kafka.
+# sourceOfTruth re-read 2026-10-02, second pass (working tree): the s3 object is one entry per tenant sink (s3_inproc::status_value), and the queen_s3_* families carry a tenant label for a tenant other than the default.
 ---
 
 Several different things are called "status" on this broker, and they answer different
@@ -86,7 +89,19 @@ cannot enumerate broker facts.
 It touches neither the state machine nor the disk, so it answers as long as the HTTP server
 is scheduling requests. When the in-process Kafka facade is on (`QUEEN_KAFKA_EMBEDDED=true`),
 the body adds a `kafka` object with the facade's state (`mode`, `phase`, `listen`,
-`advertised`, `clustered`, `restarts` and more).
+`advertised`, `clustered`, `restarts` and more). When the S3 sink is on
+(`QUEEN_S3_EMBEDDED=true`), it adds an `s3` object with this node's sinks, one per broker
+tenant: `mode` (`in-process`), the node's `phase` (`starting`, `running`, `stopped`),
+`threads`, `controlPlane.error` (the last failed read of the control plane's sink rows, `null`
+once a read succeeds) and `sinks`. Each entry of `sinks` names its `tenant`, its `source` (`env`
+for the default tenant's sink, `cp` for one the control plane configured), its `cluster` (the
+cluster id, `null` for `env`), its own `phase` (`starting`, `running`, `error`, `backoff`,
+`stopped`), `error`, `restarts`, `lastExit`, `uptimeMs` and `backoffMs`, and carries the sink's
+own report beside them: the bucket, the health verdict, the buffer budget, the sink's
+`placement` (`nodes` alive running it, its `queues`, the fair `share`, the queues `held` here and
+the one `givingBack` while a rebalance moves it) and one row per configured queue, owned here or
+held by another node ([the status block](/deploy/s3#the-status-block)). With the sink on and no
+tenant configured, `sinks` is empty.
 
 ## GET /api/v1/status
 
@@ -278,6 +293,10 @@ The body is assembled in three parts:
    `durable`), `queen_raft_inflight`, `queen_raft_proposals_total`, `queen_raft_log_storage`
    (`kind` `files`, `bytes`) and `queen_raft_storage_full`, which is `1` while the disk gate
    refuses writes.
+
+When the S3 sink runs on the node, its `queen_s3_*` families follow the state-machine block,
+each family once for every tenant's sink on the node, a tenant other than the default one told
+apart by a `tenant` label ([the S3 sink families](/reference/prometheus#the-s3-sink-families)).
 
 The complete family list, generated from the source, is in the [reference section](/reference).
 In a cluster, scrape every node: each reports only itself.

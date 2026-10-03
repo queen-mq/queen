@@ -65,6 +65,10 @@ fan-out and cache invalidation: the shapes that should not pay for replay and re
 - **Kafka clients connect directly.** Since 1.4.0 Queen speaks Kafka wire protocols, so an
 existing client moves over by changing its connection URL.
 
+- **A data lake, written by the broker.** The [S3 sink](https://queenmq.com/deploy/s3) mirrors each
+queue's log into any S3-compatible bucket as JSONL or Parquet under a Hive layout, exactly once,
+and each tenant can have a bucket of its own.
+
 - **One binary, no sidecars, no database.** curl is a first-class client · six SDKs (JavaScript,
 Python, Go, Rust, C++, PHP/Laravel) plus `queenctl` · a dashboard served by the same binary on the
 same port · Prometheus metrics · JWT/JWKS auth · payload encryption · multi-tenant · Raft
@@ -103,7 +107,7 @@ Full walkthrough in the [Quickstart](https://queenmq.com/start/quickstart).
 - **[The model](https://queenmq.com/use/model)**: queues, partitions, groups, offsets, leases, retention.
 - **[Transactions](https://queenmq.com/reference/http/transaction)**: bundle shape, rollback causes, the exactly-once boundary.
 - **[KV](https://queenmq.com/use/kv)** · **[Timers](https://queenmq.com/use/timers)** · **[Streams](https://queenmq.com/use/streams)** · **[Ephemeral](https://queenmq.com/use/ephemeral)**: beyond push and pop.
-- **[Deploy](https://queenmq.com/deploy)** · [HA](https://queenmq.com/deploy/ha) · [Kubernetes](https://queenmq.com/deploy/kubernetes) · [Operations](https://queenmq.com/deploy/operations) · [Kafka](https://queenmq.com/deploy/kafka).
+- **[Deploy](https://queenmq.com/deploy)** · [HA](https://queenmq.com/deploy/ha) · [Kubernetes](https://queenmq.com/deploy/kubernetes) · [Operations](https://queenmq.com/deploy/operations) · [Kafka](https://queenmq.com/deploy/kafka) · [S3 sink](https://queenmq.com/deploy/s3).
 - **[Multi-tenant](https://queenmq.com/deploy/multi-tenant)** · [Proxy](https://queenmq.com/deploy/proxy) · [Isolation](https://queenmq.com/reference/multi-tenant/isolation).
 - **[Internals](https://queenmq.com/internals)**: the replicated log, storage model, life of a push and a pop, dedup, retention.
 - **[Benchmarks](https://queenmq.com/benchmarks)** · [method and rig](https://queenmq.com/benchmarks/method) · [comparison](https://queenmq.com/start/compare).

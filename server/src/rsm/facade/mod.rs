@@ -437,8 +437,9 @@ pub struct RecordRead {
     pub offset: u64,
     pub created_at_us: i64,
     pub payload: bytes::Bytes,
-    /// The record's transaction id: read for the JSON route only, `None` in a
-    /// [`Rsm::fetch_records`] answer.
+    /// The record's transaction id, the string the JSON route renders as
+    /// `transactionId`: `Some` in a [`Rsm::fetch_log`] answer, `None` in a
+    /// [`Rsm::fetch_records`] one (its caller does not keep it).
     pub txn: Option<String>,
 }
 
@@ -452,6 +453,60 @@ pub struct RecordsFetched {
     /// `UNKNOWN_TOPIC_OR_PARTITION` or `OFFSET_OUT_OF_RANGE`, as the route
     /// spells them.
     pub error: Option<&'static str>,
+}
+
+/// One queue to ask [`Rsm::partitions_changed`] about: the typed twin of one
+/// `POST /api/v1/partitions/changed` entry, its `since` already parsed.
+#[derive(Clone, Debug)]
+pub struct ChangedAsk {
+    pub queue: String,
+    /// Only the partitions whose last write is at or after this stamp (epoch
+    /// µs, the clock of a record's `ts`); `None` lists every partition.
+    pub since_us: Option<i64>,
+    /// The `next` of the previous page, echoed back unmodified; `None` or `""`
+    /// starts the pass. Opaque: anything this broker did not issue is
+    /// `BAD_CURSOR`.
+    pub after: Option<String>,
+    /// Partitions per page, clamped to `1..=1000`.
+    pub limit: usize,
+}
+
+/// One partition of a [`ChangedAnswer`], with the bounds a reader starts from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangedPartition {
+    pub name: String,
+    /// The partition's uuid, as a string: the `id` the route renders. Stable
+    /// for the partition's life; a partition deleted and created again under
+    /// the same name has a new one.
+    pub id: String,
+    /// The offset of the last stored record, `-1` for an empty partition.
+    pub last_offset: i64,
+    /// The oldest offset still retained.
+    pub log_start: u64,
+    /// The stamp of the newest record (epoch µs).
+    pub last_write_at_us: i64,
+}
+
+/// One entry of a [`PartitionsChanged`] answer, index-aligned with the asks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChangedAnswer {
+    pub partitions: Vec<ChangedPartition>,
+    /// The cursor of the next page, `Some` exactly when this page is full.
+    pub next: Option<String>,
+    /// `UNKNOWN_TOPIC_OR_PARTITION` or `BAD_CURSOR`, as the route spells them;
+    /// an entry with an error lists nothing.
+    pub error: Option<&'static str>,
+}
+
+/// The answer of [`Rsm::partitions_changed`]: the twin of the route's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartitionsChanged {
+    /// The greatest stamp this node has applied (epoch µs): every record
+    /// stamped at or below it is already visible to reads on this node, so a
+    /// window that ends at or below it is complete here. The route renders it
+    /// as `safeTime`.
+    pub safe_time_us: i64,
+    pub entries: Vec<ChangedAnswer>,
 }
 
 /// A pop outcome: the rendered response body, and whether the claim came back
@@ -794,6 +849,31 @@ pub trait Rsm: Send + Sync {
         _max_wait_ms: u64,
         _min_bytes: usize,
     ) -> Result<Vec<RecordsFetched>, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+
+    /// [`Rsm::fetch_records`] for a caller that keeps each record's
+    /// transaction id (the in-process S3 sink): the same read, bounds, long
+    /// poll and decryption, with [`RecordRead::txn`] set to what the JSON
+    /// route renders as `transactionId`. `Unsupported` where it is not served.
+    async fn fetch_log(
+        &self,
+        _ctx: ReqCtx,
+        _entries: Vec<RecordFetch>,
+        _max_wait_ms: u64,
+        _min_bytes: usize,
+    ) -> Result<Vec<RecordsFetched>, RsmError> {
+        Err(RsmError::Unsupported)
+    }
+
+    /// `POST /api/v1/partitions/changed` for an in-process caller (the S3
+    /// sink): the same pages, cursors and `safeTime`, answered as typed rows
+    /// rather than rendered JSON. `Unsupported` where it is not served.
+    async fn partitions_changed(
+        &self,
+        _ctx: ReqCtx,
+        _asks: Vec<ChangedAsk>,
+    ) -> Result<PartitionsChanged, RsmError> {
         Err(RsmError::Unsupported)
     }
     /// `GET /api/v1/pop/queue/:queue` (wildcard over the queue's partitions).

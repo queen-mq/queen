@@ -34,6 +34,11 @@ mod quota;
 // in lib.rs (the twin-list rule of lib.rs's header).
 #[allow(dead_code)]
 mod rsm;
+// The S3 / data-lake sink run IN-PROCESS: with `QUEEN_S3_EMBEDDED=true` the
+// queen-s3 library runs inside this process on its own runtime, on every node,
+// reading this node's own state — no child, no second binary.
+#[cfg(feature = "s3")]
+mod s3_inproc;
 #[allow(dead_code)]
 mod switches;
 mod syscollect;
@@ -209,6 +214,26 @@ async fn run_raft(cfg: config::Config) {
              feature: no Kafka listener is started"
         );
     }
+    // The S3 sink, IN-PROCESS (s3_inproc.rs). Resolved here for the same
+    // reason: the variables with no default (bucket, endpoint, region, queues,
+    // keypair) are unfixable by retrying, so boot dies naming the one missing.
+    #[cfg(feature = "s3")]
+    let s3_cfg = if cfg.s3_sink.enabled {
+        match s3_inproc::preflight() {
+            Ok(c) => Some(c),
+            Err(e) => obs::fatal(format!("QUEEN_S3_EMBEDDED=true: {e}")),
+        }
+    } else {
+        None
+    };
+    #[cfg(not(feature = "s3"))]
+    if cfg.s3_sink.enabled {
+        tracing::warn!(
+            target: "queen-s3",
+            "QUEEN_S3_EMBEDDED=true, but this binary was built without the `s3` \
+             feature: no sink is started"
+        );
+    }
 
     let state = match handlers::raft::build_raft_state(&cfg) {
         Ok(s) => s,
@@ -229,11 +254,27 @@ async fn run_raft(cfg: config::Config) {
     // rolling restart) costs the cluster one transfer, not an election timeout
     // without a leader (1-2 s). It drains as a follower.
     let handoff_rsm = state.rsm.clone();
+    // The S3 sink (s3_inproc.rs) starts later, once the listener is bound; it
+    // is put here so the signal can start its drain at once.
+    #[cfg(feature = "s3")]
+    let s3_at_signal: std::sync::Arc<
+        std::sync::OnceLock<std::sync::Arc<s3_inproc::InProcess>>,
+    > = std::sync::Arc::new(std::sync::OnceLock::new());
     let shutdown = {
         let rsm = handoff_rsm.clone();
         let st = state.clone();
+        #[cfg(feature = "s3")]
+        let s3_at_signal = std::sync::Arc::clone(&s3_at_signal);
         async move {
             obs::shutdown_signal().await;
+            // The sink drains beside everything below — no new reads, the
+            // window in flight committed, its leases given back — rather than
+            // after the ephemeral drain and the hand-off, which can take tens
+            // of seconds between them.
+            #[cfg(feature = "s3")]
+            if let Some(s3) = s3_at_signal.get() {
+                s3.begin_shutdown();
+            }
             // The ephemeral rings go to their next owners first, while the
             // peers still answer and this node still serves.
             handlers::ephemeral_drain(&st).await;
@@ -249,6 +290,16 @@ async fn run_raft(cfg: config::Config) {
     // router itself, never the proxy's edge: it authenticates its own clients.
     #[cfg(feature = "kafka")]
     let kafka_router = proxy_embed::enabled().then(|| {
+        handlers::raft::build_raft_router(state.clone(), authenticator.clone(), cfg.tenancy_header)
+    });
+    // The S3 sink reads and writes through the state machine itself
+    // (s3_inproc.rs); the broker router is its route for a KV batch on a
+    // follower that does not take writes. Never the proxy's edge, like the
+    // facade's.
+    #[cfg(feature = "s3")]
+    let s3_rsm = state.rsm.clone();
+    #[cfg(feature = "s3")]
+    let s3_router = proxy_embed::enabled().then(|| {
         handlers::raft::build_raft_router(state.clone(), authenticator.clone(), cfg.tenancy_header)
     });
 
@@ -338,6 +389,22 @@ async fn run_raft(cfg: config::Config) {
         )
     });
 
+    // The S3 sink starts once the router exists and the listener is bound, on
+    // every node; its queues' leases decide which node writes which queue. The
+    // signal starts its drain through `s3_at_signal` (above).
+    #[cfg(feature = "s3")]
+    let s3 = s3_cfg.map(|c| {
+        let s3 = s3_inproc::start(
+            &cfg.s3_sink,
+            c,
+            s3_router.unwrap_or_else(|| app.clone()),
+            s3_rsm,
+            None,
+        );
+        let _ = s3_at_signal.set(std::sync::Arc::clone(&s3));
+        s3
+    });
+
     if let Some((proxy_listener, public)) = proxy_front {
         // Two listeners, one shutdown: the hand-off runs once, then both drain.
         let shutdown = futures_util::FutureExt::shared(shutdown);
@@ -375,6 +442,14 @@ async fn run_raft(cfg: config::Config) {
     #[cfg(feature = "kafka")]
     if let Some(k) = kafka {
         k.shutdown().await;
+    }
+    // The sink has been draining since the signal; this waits for what is
+    // left of QUEEN_S3_SHUTDOWN_GRACE_MS, counted from the signal. Its KV
+    // commits reach the state machine directly, so the closed listener does
+    // not stop them.
+    #[cfg(feature = "s3")]
+    if let Some(s3) = s3 {
+        s3.shutdown().await;
     }
     // The embedded proxy's open usage minute and pending queue rows.
     if let Some(proxy) = embedded_proxy {

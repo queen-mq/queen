@@ -1,0 +1,677 @@
+---
+title: The S3 lake
+description: "What the S3 sink puts in a bucket: the key layout, the JSONL and Parquet record envelopes, the manifest and checkpoint sidecars, the key/value documents, the window commit on the broker's log clock that makes it exactly once, and how DuckDB, Spark, Trino, ClickHouse and Snowflake read it."
+type: reference
+tier: use
+sidebar:
+  order: 31
+  label: S3 lake
+sourceOfTruth:
+  - connectors/queen-s3/src/layout.rs
+  - connectors/queen-s3/src/types.rs
+  - connectors/queen-s3/src/window.rs
+  - connectors/queen-s3/src/writer/mod.rs
+  - connectors/queen-s3/src/writer/jsonl.rs
+  - connectors/queen-s3/src/writer/parquet.rs
+  - connectors/queen-s3/src/checkpoint.rs
+  - connectors/queen-s3/src/seek.rs
+  - connectors/queen-s3/src/lease.rs
+  - connectors/queen-s3/src/driver.rs
+  - connectors/queen-s3/src/config.rs
+  - connectors/queen-s3/src/obs.rs
+  - connectors/queen-s3/compat/MATRIX.md
+  - connectors/queen-s3/compat/readers/duckdb_reader.py
+  - server/src/s3_inproc.rs
+  - server/src/rsm/maintenance.rs
+  - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/planner/push.rs
+verifiedBy:
+  - connectors/queen-s3/tests/driver_basic.rs
+  - connectors/queen-s3/tests/driver_crash.rs
+  - connectors/queen-s3/tests/engine_window.rs
+  - connectors/queen-s3/tests/engine_jsonl.rs
+  - connectors/queen-s3/tests/parquet_envelope.rs
+  - connectors/queen-s3/compat/run.sh
+# sourceOfTruth re-read 2026-10-02 (through 8a0faff0 + working tree): rewritten from the 1.5.0 page. Keys, envelopes and the manifest are the 1.5.0 formats; ts is the stamp of the append on the broker's log clock, a window closes against the reading node's applied safeTime, partitions carry an id across incarnations, and checkpoint positions carry it too.
+# sourceOfTruth re-read 2026-10-02, second pass (working tree): every key starts with tenant=, the sidecars sit under _queen/tenant=…/queue=…, the manifest names its tenant, the Parquet footer carries queen.tenant, and the KV documents live in the sink's tenant; the reader recipes gain the tenant= level, which the compat matrix has not measured yet.
+---
+
+The S3 sink writes a queue's log into an object store in a format no Queen code has to read back.
+Objects are JSONL or Parquet under a Hive-partitioned layout, so DuckDB, Spark, Trino, Athena,
+ClickHouse and Snowflake query them with nothing in front of them. Running the sink is
+[the operator page](/deploy/s3); this page is the contract a reader gets. Every broker tenant can have a
+sink of its own, writing to a bucket of its own, and every key starts with the tenant. Both record envelopes are
+the ones the 1.5.0 sink wrote; the keys gained the `tenant=` level, the manifest and the Parquet footer
+name the tenant, and the position checkpoint gained a partition id.
+
+Settings are named here by their `QUEEN_S3_*` variables, which configure the default tenant's sink. A
+sink the control plane configures sets the same per-tenant settings (`LAYOUT`, `ALIGN`, `START`,
+`TARGET_MB`, `MAX_WINDOW_MS` and the rest) as fields of its document, listed in
+[the settings table](/deploy/s3#per-tenant-settings). `SAFE_GUARD_MS`, `LEASE_TTL_MS`,
+`CHECKPOINT_EVERY` and `CRASH_AT` are the node's, for every tenant's sink alike.
+
+Two sentences first, because everything else assumes them.
+
+**The lake mirrors the log, not the outcome of processing.** The sink reads through the in-process
+twin of `POST /api/v1/fetch`, which takes no lease, moves no cursor and ignores consumer state
+entirely. A record that a consumer group later nacked, dead-lettered or never touched is in the lake
+exactly like one that was acked on the first delivery. That is the correct behaviour for a lake, and it
+has to be said out loud because the word "sink" makes people assume "what was consumed".
+
+**The lake is plaintext.** The node that reads a queue decrypts each payload when it has the
+encryption key, so a queue encrypted at rest inside Queen is readable text in the bucket. Bucket-side
+encryption is what restores the property, and it is not optional; the
+[deploy page](/deploy/s3#the-s3-side) has the header and the key policy.
+
+## The bucket layout
+
+```text
+<prefix>/tenant=<tenant>/queue=<queue>/dt=<date>/hour=<hour>/w-<k>-<tStart>-<tEnd>.<ext>
+<prefix>/_queen/tenant=<tenant>/queue=<queue>/windows/<k>.json
+<prefix>/_queen/tenant=<tenant>/queue=<queue>/checkpoint/<k>.json.zst
+```
+
+Real keys, for the broker's default tenant, at the default prefix `queen` and the default hourly
+alignment:
+
+```text
+queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/dt=2026-09-04/hour=10/w-0000001842-1788516000000000-1788516300000000.jsonl.zst
+queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/dt=2026-09-04/hour=10/w-0000001842-1788516000000000-1788516300000000.parquet
+queen/_queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/windows/0000001842.json
+queen/_queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/checkpoint/0000001840.json.zst
+```
+
+And under `QUEEN_S3_LAYOUT=per-partition`, one object per partition per window, with the offset range
+in the name, which is the Connect-shaped key a reader that wants one entity's file can find by name:
+
+```text
+queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/dt=2026-09-04/hour=10/w-0000001842-1788516000000000-1788516300000000-p-cust-0420-000000001400-000000001811.parquet
+```
+
+The parts, and what each one is for:
+
+| Part | What it is |
+| --- | --- |
+| `<prefix>` | The sink's prefix, `queen` by default. The sink's name is not in any key, so two sinks that mirror the same queue into one bucket are told apart by their prefixes alone. |
+| `tenant=<tenant>` | The broker tenant the sink runs for, percent-escaped: `00000000-0000-0000-0000-000000000001` for the default tenant, the cluster's broker tenant for a sink the control plane configured. It comes first, so two tenants that share a bucket and a prefix never share a key, data or sidecar, and a listing of one tenant's prefix holds nothing of another's. A Hive partition key. |
+| `queue=<queue>` | The queue name, percent-escaped. A Hive partition key, so a reader prunes on it. |
+| `dt=`, `hour=` | Derived from the window's start, never from a record. Windows never straddle an alignment boundary, so the bucket is exact for every record in the object. `QUEEN_S3_ALIGN=day` omits `hour=`. `none` still writes both, from the window's start, and since a window may then straddle an hour they say where the window starts. |
+| `w-<k>` | The window number, zero-padded to ten digits. Monotone per queue. |
+| `<tStart>-<tEnd>` | The window's half-open bounds in microseconds since the epoch, zero-padded to sixteen digits. The first window of `QUEEN_S3_START=earliest` starts at the aligned bucket of its first record. |
+| `-p-<partition>-<first>-<last>` | Per-partition layout only: the partition and its offset range, offsets padded to twelve digits. |
+| `<ext>` | `jsonl.zst`, `jsonl.gz`, `jsonl` or `parquet`. |
+
+Three properties are pinned by tests, and something depends on each:
+
+**Deterministic.** The key is a function of the window intent (`k`, `tStart`, `tEnd`) and nothing
+else: no wall clock, no attempt counter, no random suffix, no node name. That is what makes a retried
+upload, on the same node or on the next owner of the queue, an *overwrite of the same key with the same
+bytes* rather than a second object, and it is why exactly-once here needs no conditional PUT and no
+LIST.
+
+**Escaped.** Everything outside `[A-Za-z0-9._-]` is percent-encoded with uppercase hex, in the data keys
+and in the sidecar paths alike, so a partition named `a/b`, a queue with a space, and a name containing
+`..` cannot escape their prefix. An ordinary name (`orders`, `cust-0420`, `svc.billing`) is never
+rewritten.
+
+**Ordered.** Keys sort lexicographically in window order, because `k` is zero-padded and leads. A
+reader that lists a bucket gets the windows in commit order for free.
+
+`_queen/` is deliberately **not** a Hive partition: a reader globbing
+`tenant=*/queue=*/dt=*/hour=*/*` walks straight past the sidecars without excluding anything by name.
+
+## The record envelope
+
+Five fields, the same five in both formats. There are deliberately **no headers**: a stored frame
+has no header map and the broker refuses to fake one.
+
+| Field | What it is |
+| --- | --- |
+| `partition` | The partition name, which at Queen's cardinality is usually an entity id. |
+| `offset` | Absolute offset within the partition, unique within one incarnation of it (below). |
+| `transactionId` | The message's addressable identity, the client's transaction id. `GET /api/v1/messages/:partitionId/:transactionId` is keyed by it. **It may repeat in the log**, see below. |
+| `ts` | The stamp the broker gave the append that wrote the record, on its log clock, at microsecond precision, UTC. Every record of one append shares it, and within a partition it strictly increases from one append to the next. It is a write time, not an event time. |
+| `payload` | The message body, spliced from the bytes the broker stored, a raw line break written as a space (see below). `null` exactly when the stored payload was empty. A payload the node could not decrypt arrives as a JSON string of its stored bytes. |
+
+`ts` being the append's stamp is the one thing to internalise before building a table on it. Event
+time is a field inside the payload, and extracting it is the reader's job. The lake is partitioned by
+when Queen wrote a record, which is what makes a window a deterministic set.
+
+**What identifies a record.** Within one incarnation of a partition, `(partition, offset)` is unique.
+But a partition can be deleted, by retention once it has been idle and empty for
+`PARTITION_CLEANUP_DAYS`, or with its queue, and created again under the same name, and the new
+incarnation starts again at offset 0. So across the lake the unique key of a record is
+**`(partition, offset, ts)`**: every record of a later incarnation is stamped after every record of the
+one before it. Within a partition name, ordering by `(ts, offset)` is log order, across incarnations
+too.
+
+**The tenant and the queue are not among the five.** They are the `tenant=<tenant>` and
+`queue=<queue>` keys of the path and nothing else, which is exactly where Spark and Hive put a key
+they wrote with `partitionBy`, and every reader with partition discovery hands them back as columns
+for free. Repeating the queue in the rows as well was an earlier shape and it was wrong in two
+concrete ways: a Hive or Athena table may not have a column and a partition key of the same name,
+and PyArrow's dataset reader types the discovered key as `dictionary<string>` while the file's own
+column is `string`, so `pq.read_table('<prefix>')` and `pd.read_parquet('<prefix>')`, the first
+thing a notebook types, failed to merge the schemas. The tenant follows the same rule for the same
+reasons. A reader that opens **one object** with no path around it gets both from the Parquet
+footer (`queen.queue` and `queen.tenant`, below); for a lone JSONL object, the key in the path it
+came from is the only record of them.
+
+### JSONL
+
+One record per line, five fields, always in this order and with these spellings:
+
+```json
+{"partition":"cust-0420","offset":1811,"transactionId":"ord-9f21","ts":"2026-09-04T10:03:41.918204Z","payload":{"type":"paid","amount":1290}}
+```
+
+`payload` is the broker's own bytes, with one exception: a raw line break (`\n` or `\r`) is written
+as a space, so a record stays one line. In valid JSON a raw line break can only be whitespace between
+tokens (inside a string it must be escaped), so the value is unchanged. Nothing parses a payload into
+a tree, which means this writer never decides how a float or a large integer is spelled: whatever the
+producer sent is what the lake holds.
+
+The bytes are a pure function of the records, and each of these is a pin with a test behind it:
+field order and spelling are fixed here rather than derived from a struct a refactor could reorder;
+`ts` is rendered the way the broker renders a timestamp, six fractional digits and a `Z`; string
+escaping is `serde_json`'s, compared against it on a corpus rather than asserted in a comment; the
+zstd and gzip levels are constants, because a level is part of the bytes; and gzip headers carry
+**mtime 0** with no filename and no comment, because `GzBuilder`'s default mtime is the wall clock and
+would put a timestamp inside the object.
+
+### Parquet
+
+The low-level writer, with no `arrow` anywhere in the dependency tree. Five fixed columns:
+
+```text
+message queen_record {
+  required binary partition (STRING);
+  required int64 offset;
+  required binary transaction_id (STRING);
+  required int64 ts (TIMESTAMP(MICROS,true));
+  optional binary payload (STRING);
+}
+```
+
+`transaction_id` is snake_case here and `transactionId` in JSONL, because each follows the
+convention its own format is read with. `payload` is the JSON **text**, so a reader extracts from
+it with `json_extract` or its local equivalent. It is the one nullable column.
+
+| Column | Encoding | Why |
+| --- | --- | --- |
+| `partition` | dictionary, with chunk min/max | A handful of hot entities per window make the dictionary the whole column, and min/max is what prunes row groups **by entity**. |
+| `offset` | `DELTA_BINARY_PACKED` | Dense and ascending within a partition, so delta beats a dictionary of a million distinct integers. |
+| `transaction_id` | plain | High-cardinality text; the block codec does the work. |
+| `ts` | `DELTA_BINARY_PACKED`, with chunk min/max | One value per append and non-decreasing within a partition, so the deltas are mostly zero. The min/max is what prunes **by time**. |
+| `payload` | plain | As above, and never a dictionary. |
+
+Statistics are `Chunk`: min and max per row group, which is the pruning a reader can act on. Page
+statistics and the column index are deliberately off, because they would only add footer weight.
+
+Everything that can move a byte is pinned rather than inherited from the crate's defaults:
+`created_by` is the constant `queen-s3` (the crate default embeds its own version, and the writer's
+identity belongs in the manifest instead); key/value metadata is exactly three pairs,
+`queen.envelope=1`, `queen.queue=<queue>` and `queen.tenant=<tenant>`, all constant for the object,
+so the footer is still a pure function of the window; the writer version is `PARQUET_1_0`, so data pages are V1, which is
+what every reader below takes; compression is ZSTD level 3 or Snappy, at a fixed level; row groups
+close on a fixed record count (100,000) rather than on bytes or time; and the data page size,
+dictionary page size, data page row count, write batch size and statistics truncation are all named
+constants, so a change to a crate default is a test failure rather than silently different bytes.
+
+What is deliberately **not** pinned is the parquet crate version. A library upgrade may move the
+bytes, which is why the manifest records which writer produced each object and why the lockfile is
+bumped deliberately.
+
+## The sidecars
+
+Neither is required to read the lake. The data objects hold every committed record on their own, and
+both sidecars live under `_queen/` where a Hive glob does not see them.
+
+### The manifest
+
+`_queen/tenant=<tenant>/queue=<queue>/windows/<k>.json`, one per committed window, and **the only
+place a wall-clock value is written**. The data object carries none, which is what makes a retry
+byte-identical.
+
+```json
+{
+  "sink": "default",
+  "tenant": "00000000-0000-0000-0000-000000000001",
+  "queue": "orders",
+  "k": 1842,
+  "tStart": 1788516000000000,
+  "tEnd": 1788516300000000,
+  "format": "jsonl",
+  "compression": "zstd",
+  "layout": "merged",
+  "objects": [
+    { "key": "queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/dt=2026-09-04/hour=10/w-0000001842-1788516000000000-1788516300000000.jsonl.zst",
+      "bytes": 44139012,
+      "records": 918442,
+      "sha256": "9f2c…" }
+  ],
+  "records": 918442,
+  "bytes": 44139012,
+  "partitions": 5183,
+  "minTs": 1788516000121004,
+  "maxTs": 1788516299904881,
+  "lost": [],
+  "writer": "queen-s3/2.0.0 jsonl+zstd",
+  "committedAt": "2026-09-04T10:05:07.412000Z"
+}
+```
+
+`tenant` is the broker tenant the sink runs for, the `tenant=` key of every object the manifest
+names; a manifest the 1.5.0 sink wrote has no such field. `tStart`, `tEnd`, `minTs` and `maxTs` are
+integers: microseconds since the epoch, the same clock the key encodes. `committedAt` is the one value
+on a wall clock: the uploading node's own, taken when it
+writes the manifest, just before the commit, in milliseconds and rendered at microsecond precision, so
+its last three digits are always zeros.
+`partitions` counts the distinct partitions that contributed at least one record; each object's
+`sha256` is the SHA-256 of that object's bytes, in hex. `objects` has one entry under `merged` and one
+per partition under `per-partition`, where each entry also carries `partition`, `firstOffset` and
+`lastOffset`. `compression` is the JSONL codec, or for Parquet `zstd`, and `none` for a Snappy file,
+whose codec `writer` names. `lost` is normally empty and is [the one thing to alert on](#retention-overrun).
+`writer` is what the object was written by, which is the field to consult if two objects of the same
+shape ever differ in bytes.
+
+A manifest is what a verification pass reads, and it is also, deliberately, most of what an Iceberg
+manifest entry needs: row count, byte size and the time bounds. Nothing today writes a catalog.
+
+### The checkpoint
+
+`_queen/tenant=<tenant>/queue=<queue>/checkpoint/<k>.json.zst`, written every
+`QUEEN_S3_CHECKPOINT_EVERY` windows: for
+each tracked partition, the next offset the window after `k` would read from, and the id of the
+partition incarnation that offset belongs to.
+
+```json
+{ "k": 1840, "tEnd": 1788515700000000,
+  "positions": [["cust-0420", 1812, "0199a6f2-5c1e-7b3a-9d4e-2f6a8c0b1d3e"],
+                ["cust-0421", 44, "0199a6f2-5c1f-7c11-8e02-4a7b9d3c2e10"]] }
+```
+
+It is a **cache and never the commit truth**. A stale entry costs re-read bytes that the window
+filter throws away; a missing one, or one whose id is no longer the partition's, costs a backwards
+probe-seek or a read from the start of the log. Nothing here can lose or duplicate a record, only make
+a restart slower. Positions are sorted by partition name before serialisation and the zstd level is a
+constant, so the same position map always encodes to the same object. The two-element form the 1.5.0
+sink wrote, `["cust-0420", 1812]`, still decodes, as a position of an unknown incarnation.
+
+One rule the restart path follows and it is worth knowing: the checkpoint loaded is the newest one
+**at or below the committed window**. A checkpoint written for a window that was never committed
+names positions past the commit truth, and reading from it would skip records. That is the only way
+a position could cost more than a re-read, and it is closed by an inequality.
+
+## The key/value documents
+
+Beside the bucket, the sink keeps three documents per sink and queue in Queen's key/value store,
+namespace `queen-s3`, in the tenant the sink runs for: the default tenant's sink in the default
+tenant, a control-plane sink in its cluster's broker tenant. Two tenants' queues called `orders` are
+therefore two sets of documents that never meet. The queue is percent-escaped in the key as it is in
+an object key.
+
+| Key | Written | Expiry | What it holds |
+| --- | --- | --- | --- |
+| `s3:<sink>:<queue>:intent` | before a window's upload | never | `k`, `tStart` and `tEnd` (integer microseconds), `format`, `compression`, `layout`, `writer` |
+| `s3:<sink>:<queue>:committed` | after the window's objects and its manifest | never | `k`, `tEnd`, `manifest` (the manifest's key), `records`, `bytes`, `committedAtMs` |
+| `s3:<sink>:<queue>:lease` | when a node claims the queue, every third of its TTL, and with every intent and commit | `QUEEN_S3_LEASE_TTL_MS` | `instance`, `incarnation`, `sinceMs` |
+
+The commit pointer's `tEnd` is written as the broker writes a timestamp, because something else reads
+it: a queue's [retention hold](/deploy/s3#the-retention-hold), which reads the pointer in the queue's
+own tenant.
+
+```json
+{"k":1842,"tEnd":"2026-09-04T10:05:00.000000Z","manifest":"queen/_queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/windows/0000001842.json","records":918442,"bytes":44139012,"committedAtMs":1788516307598}
+```
+
+The 1.5.0 sink wrote `tEnd` there as integer microseconds, which the hold could not read; the sink
+still reads that form.
+
+## The window commit
+
+The whole design is one idea, and everything a reader can rely on follows from it.
+
+**A window is the set of records whose `ts` lies in `[T_{k-1}, T_k)`.** Boundaries come from the
+broker's log clock and from nowhere else. The sink never reads its own wall clock to make one: a sink
+that compared a `ts` with its own clock would be wrong by construction, and the window engine is
+written so that no clock is reachable from it at all.
+
+**`safeTime` is the ceiling.** Every discovery call answers the `safeTime` of the node that serves it:
+the greatest record stamp that node has applied. A record is stamped at or above the clock of the log
+entry that carries it, and an entry's clock is above every stamp before it in the log, so every record
+the node has not applied yet will carry a stamp strictly above its `safeTime`, and every record stamped
+at or below it is already readable there. A window may close only at or below that value, minus
+`QUEEN_S3_SAFE_GUARD_MS`. The value is a property of one node, a follower's trailing the leader's, and
+the sink pairs it only with reads served by the same node: the one it runs on.
+
+Given that, window `k` is a **deterministic set**:
+
+1. Every record inside the window is already applied on the reading node, so nothing can be added to
+   it later.
+2. Nothing can be removed from it except by retention, which is [the alarm case](#retention-overrun).
+3. Within a partition, offsets and `ts` are co-monotone, so the window's records for one partition are
+   one contiguous offset range, findable by reading forward from any position at or below its start.
+4. The writer sorts by `(partition, offset)`, or by `(partition, ts, offset)` in the one case where a
+   window holds two incarnations of a partition, and puts no wall-clock value in the object.
+
+So rebuilding window `k` from scratch, on the same node or on another once it has applied the window,
+produces the same records in the same order, and with the writer pins above, the same bytes. **That is
+the trick**: a retried upload is byte-identical without the object name having to enumerate a million
+offsets.
+
+The commit sequence around it is three durable steps in Queen's key/value store and the bucket:
+
+| Step | What happens | If the node dies here |
+| --- | --- | --- |
+| 1. Intent | `T_k` is fixed in the queue's intent document **before** anything is uploaded | The next owner redoes window `k` with the intent's `tEnd` and writes identical bytes |
+| 2. Upload | The objects go up, then the manifest | The next owner finds the manifest and commits from it, or rebuilds the window and overwrites identical bytes |
+| 3. Commit | The commit pointer moves | Before the pointer moves, the next owner commits from the manifest; after, there is nothing to redo. The pointer is what makes the window real |
+
+The intent and the commit are each written in one batch with a conditional write of the queue's lease
+row, which must hold, so a node that lost the queue to another node cannot write either: its batch
+rolls back whole.
+
+### What exactly-once means here, precisely
+
+**It holds for every reader**, including one that only lists the bucket. Each window exists at most
+once, with one content; windows never overlap; and every record stamped between the first window's
+start and the committed `tEnd` is in exactly one window, unless retention removed it first, which the
+window's manifest then records. No manifest is needed to read correctly; the manifest is for
+verification.
+
+**It is about the lake, not about delivery.** Two things follow that people expect not to:
+
+- A record a consumer group nacked, dead-lettered or evicted is in the lake, because the read path
+  ignores consumer state.
+- **Duplicates by `transactionId` can exist in the log itself.** An idempotency key reused outside
+  the broker's dedup window produces two messages, and the lake reproduces the log faithfully. A
+  reader that wants one row per `transactionId` writes it: `QUALIFY ROW_NUMBER() OVER (PARTITION BY
+  transactionId ORDER BY ts, offset) = 1`, or the local equivalent.
+
+What the lake does **not** contain is a second copy of a window under a different name. That is the
+property the deterministic key and the deterministic bytes exist to give.
+
+### When a window closes
+
+`T_k` is the largest value that is, all at once, at or below the node's `safeTime` minus the guard, at
+or below the point every partition has been read to, at or below the next alignment boundary, and, once
+about `QUEEN_S3_TARGET_MB` is buffered below it, at a record's `ts`. The window closes when one of four
+things has happened: that size is reached, the window has been open `QUEEN_S3_MAX_WINDOW_MS` on the
+broker's clock, the alignment boundary is reached, or the node's memory budget asks this queue to close
+early. `T_k` is always a record's `ts`, an alignment boundary, or `safeTime` minus the guard, never a
+number the engine made up.
+
+**An empty window is not committed.** An aligned interval that holds no record is stepped over, with no
+object and no commit, so a quiet queue numbers its windows by the ones that carry records, and the
+bounds of two consecutive windows can have an empty interval between them. The step is recomputed the
+same way after a restart.
+
+Two findings shape the close, and both are the kind of thing that would have been a silent hole rather
+than a visible bug.
+
+**The close is anchored on the last complete discovery pass, not on the newest `safeTime` seen.**
+Most discovery passes ask only for the partitions written since just before the window's start, so a
+partition the sink has not read yet may not be named by any page it has seen. A complete
+pass walks the queue's partitions in creation order, so a partition created during the pass is still
+met by it, and one it did not list held no record at or above `since` when the pass went by it; what
+it received afterwards is stamped above that page's `safeTime`. So a window that closes at or below the
+pass's `safeTime`, the minimum over its pages, cannot run past a record of a partition it has not read.
+Closing against a newer `safeTime` could, and that record would then be dropped as "already committed"
+by the next window's filter, silently. The same value floors the frontier of partitions that are read
+to their end, which is what lets a queue of a million partitions close windows without polling every
+one.
+
+**A partition whose fetch failed keeps blocking the close.** A fetch that errs is tried again on the
+next round, and until it answers, its partition holds the window open. Skipping it would be worse than
+slow: the records nobody read would arrive in a later window, where the "already committed" filter
+would drop them for being below its start. Lag is the correct symptom of a partition that cannot be
+read.
+
+### Partitions that come back
+
+A partition name is not an identity. Discovery names each partition with its `id`, a uuid that lasts
+as long as the partition does, and the sink keeps the id each position was read under. A different id
+for a name it tracks is a new incarnation, deleted and created again in between, and it is read from its
+own start: an offset is never carried from one incarnation to another, in memory or through a
+checkpoint. Records already committed are dropped again by the window filter, so that costs a re-read
+and never a duplicate. An incarnation that went away with records the sink had not read is recorded as
+[lost](#retention-overrun).
+
+### A queue that changes node
+
+The queue's window may have been in flight on the node that owned it. The next owner reads the intent
+and the commit pointer, and if the manifest of the window in flight is in the bucket and names that
+exact intent, the upload had finished: the window is committed from its manifest and not rebuilt.
+Otherwise it is rebuilt from the new owner's own log, and nothing is uploaded until that node's
+`safeTime`, minus the guard, has reached the window's end, so it is the whole window. Either way the
+object a reader sees for window `k` is the same one.
+
+### The crash matrix
+
+The node killed at any point, and what a reader sees afterwards. These are the five fault points the
+sink can be told to inject (`QUEEN_S3_CRASH_AT`, which in the broker aborts the whole process), so this
+table is exercised rather than argued.
+
+| Killed | What the bucket holds | After the restart, or on the node that takes the queue |
+| --- | --- | --- |
+| Before the intent | Nothing new | The window is recomputed from the same committed start. It may close at a **different** `T_k`, which is allowed precisely because no object exists |
+| After the intent, before the upload | Nothing new | Window `k` is redone at the intent's `tEnd`, so the object that appears is the one that would have appeared |
+| Mid upload | A partial multipart upload, never a partial object; or, for a window that fits one PUT, its first object and no manifest | The same window is rewritten under the same keys. An orphaned multipart upload stays until the bucket's `AbortIncompleteMultipartUpload` rule collects it |
+| After the upload, before the commit | The objects and the manifest, with no pointer at them | The window is committed from its manifest; nothing is uploaded again |
+| After the commit | Everything | Nothing to redo. A stale checkpoint costs a bounded re-read and nothing else |
+
+A single PUT is atomic per key, so no reader ever sees a partial object, and no reader ever sees two
+different versions of window `k`.
+
+## Retention overrun
+
+This is the one failure that is data loss, and it is never silent.
+
+If records go away before the sink read them, the sink learns it in one of these ways: a fetch below
+the start of the log is answered `OFFSET_OUT_OF_RANGE`; discovery reports a log start above the sink's
+position; a checkpoint position is below the log start; a fetch answer skips over offsets the broker
+could no longer find; or a partition incarnation went away with records the sink had not read. Whichever
+it is, it records the gap and **keeps committing**, because a stalled sink loses more than a lagging
+one:
+
+- the offset range goes into that window's manifest, as
+  `"lost": [{ "partition": "cust-0420", "from": 1400, "to": 1811 }]`, where `from` and `to` are both
+  inclusive;
+- `queen_s3_records_lost_total{queue}` counts the missing offsets, with a `tenant` label in front for
+  a tenant other than the default one;
+- a warning per range is logged when that window commits;
+- the sink resumes from the new start of the log.
+
+The one gap that is not counted is a skip whose next record is stamped below the last committed
+window's end: the whole gap was stamped before that record, so it lies in a window already shipped.
+
+So a lake with a hole says so, in the window where the hole is, in a file a query engine can read.
+A verification job over the manifests is one `WHERE json_array_length(lost) > 0`.
+
+`queen_s3_lag_seconds` is the metric that was climbing for hours before any of that happened, and
+[the retention hold](/deploy/s3#the-retention-hold) is how it is prevented rather than detected.
+
+## Reader recipes
+
+These are measured, not sketched. The connector's compat lane builds a small lake with the sink's
+own writers, opens it with each reader below, and judges every cell on exactness rather than on
+"it opened": the record count per queue and per partition, the number of NULL payloads, and a
+digest of the `partition|offset` list **in the order that reader returned it**. The generated table,
+with the version of every library and the exact call, is
+[`connectors/queen-s3/compat/MATRIX.md`](https://github.com/queen-mq/queen/blob/master/connectors/queen-s3/compat/MATRIX.md).
+This is what it said on 2026-09-04, over 5 000 records in each of the five (format, compression)
+prefixes. That run predates the `tenant=` key and the `queen.tenant` footer pair: the five-field
+envelope it read is the one the sink writes today, but its keys had no tenant level. The recipes
+below add that level, `tenant=*/` in a glob and the tenant's id in a fixed path, and **in that form
+they have not been measured**. The lane's readers already glob `tenant=*/`, and its next run
+regenerates the table.
+
+| Reader | Version | jsonl zstd | jsonl gzip | jsonl plain | parquet zstd | parquet snappy |
+| --- | --- | --- | --- | --- | --- | --- |
+| DuckDB | 1.5.5 | ok | ok | ok | ok | ok |
+| ClickHouse | 26.8.2.7 | ok | ok | ok | ok | ok |
+| Apache Spark (PySpark) | 4.0.1 | **no codec** | ok | ok | ok | ok |
+| Polars | 1.44.1 | ok | ok | ok | ok | ok |
+| PyArrow | 25.0.1 | ok | ok | ok | ok | ok |
+| pandas | 3.0.5 | **no codec** | ok | ok | ok | ok |
+| Trino (the Athena shape) | 483 | not run | not run | not run | not run | not run |
+
+Which reader takes which **compression** is the part that varies, and it is the whole reason `gzip`
+is an option: two of the six readers cannot decompress a zstd JSONL object out of the box. Spark's
+JSONL path goes through Hadoop's `ZStandardCodec`, a JNI wrapper that needs a `libhadoop` built
+with zstd, and the official image does not carry one; the failure is at decompression rather than
+at codec lookup, and Parquet with zstd in the same JVM is unaffected because parquet-java has its
+own binding. pandas needs the `zstandard` package installed. Both read `gzip` with nothing extra,
+and **Parquet sidesteps the question entirely** by naming its codec inside the file, per column
+chunk, which is why the two Parquet columns are green everywhere.
+
+Trino was stood up but never measured, so its row is an admission rather than a result. Two things
+that container did teach are in the DDL below.
+
+**DuckDB**, straight off the bucket, with Hive partitions pruned:
+
+```sql
+SELECT partition, offset, ts, payload->>'type' AS type
+FROM read_parquet('s3://my-lake/queen/tenant=*/queue=orders/dt=*/hour=*/*.parquet',
+                  hive_partitioning = true)
+WHERE dt = '2026-09-04' AND partition = 'cust-0420'
+ORDER BY ts, offset;
+```
+
+One entity's exact history, in order, off an object store, with no Queen in the path: `ts` first, so a
+partition that was deleted and created again reads in log order too. Scoping the glob to one `queue=` is
+the simple form; `hive_partitioning = true` over `queue=*` is what gives `queue` back as a column when
+several queues are read into one table, and `tenant` the same way. `tenant=*` matches the one tenant a
+bucket of its own holds. Where tenants share a bucket and a prefix, name the tenant in the path or
+filter on the `tenant` column: the same queue name in two tenants is two queues.
+
+The JSONL objects read the same way with `read_json_auto`, which is the form to reach for when the
+payload shape varies:
+
+```sql
+SELECT partition, offset, ts, payload
+FROM read_json_auto('s3://my-lake/queen/tenant=*/queue=orders/dt=2026-09-04/hour=*/*.jsonl.zst',
+                    format = 'newline_delimited', compression = 'zstd',
+                    hive_partitioning = true);
+```
+
+Two DuckDB specifics the lane measured. Uncompressed JSONL is `compression = 'uncompressed'`, not
+`'none'`: DuckDB's enum has no `none` and passing it raises a `NotImplementedException` rather than
+doing nothing. And `read_json_auto` infers `ts` as a `TIMESTAMP` with the trailing `Z` dropped, so
+it is not timezone-aware, and `payload` as a `STRUCT`, which the JSON operator `->>` does not apply
+to. Naming the columns keeps a query portable between the two formats:
+
+```sql
+FROM read_json('…/*.jsonl.zst', format = 'newline_delimited', compression = 'zstd',
+               hive_partitioning = true,
+               columns = {partition: 'VARCHAR', "offset": 'BIGINT', transactionId: 'VARCHAR',
+                          ts: 'VARCHAR', payload: 'JSON'})
+```
+
+**Spark**, where the Hive layout is the native one. Point it at the layout **root** rather than at a
+glob of the files: that is what makes partition discovery hand back `tenant`, `queue`, `dt` and
+`hour` as columns, for JSON exactly as for Parquet.
+
+```python
+spark = SparkSession.builder.config("spark.sql.session.timeZone", "UTC").getOrCreate()
+df = spark.read.parquet("s3a://my-lake/queen/")
+df.where("queue = 'orders' AND dt = '2026-09-04'").orderBy("partition", "offset")
+```
+
+The session timezone is not a detail. `ts` is Queen's clock in UTC, and Spark's `to_timestamp` on
+the JSONL text reads it in the **session** zone, so on a machine in Europe/Rome the same object
+comes back two hours out. Two more things the lane measured: Spark infers `ts` from JSON as a
+string (it does not infer timestamps from JSON unless asked) and `payload` as a nested struct, so a
+query written against the Parquet `payload` string does not run unchanged over the JSONL objects.
+
+**Polars, PyArrow and pandas**, the three a notebook has installed. For Parquet the plain call over
+the prefix works and gives the path keys as columns, `dictionary<string>` in PyArrow and `category`
+in pandas:
+
+```python
+pq.read_table("queen/")                         # pyarrow, keys discovered
+pd.read_parquet("queen/")                       # pandas, same reader underneath
+pl.read_parquet("queen/")                       # polars, over the ROOT: a glob discovers nothing
+```
+
+For JSONL none of the three discovers a partition key over a glob, so read **one queue's prefix at
+a time**, `tenant=<tenant>/queue=<queue>/`, and the tenant and the queue are the directories asked
+for. PyArrow is the exception: its dataset reader
+does JSON too, `pads.dataset(prefix, format="json", partitioning="hive")`, which gives the keys
+back, though its compression detection stops at gzip and a `.jsonl.zst` still wants a
+`CompressedInputStream` per file.
+
+**Trino and Athena**, with partition projection, so no crawler and no `MSCK REPAIR` ever runs. One
+table per queue, pointed at that queue's prefix, which is the natural modelling and also the only
+one a Hive table allows: a table may not have a column and a partition key of the same name.
+
+```sql
+CREATE EXTERNAL TABLE queen_orders (
+  `partition`    string,
+  `offset`       bigint,
+  transaction_id string,
+  ts             timestamp,
+  payload        string
+)
+PARTITIONED BY (dt string, hour string)
+STORED AS PARQUET
+LOCATION 's3://my-lake/queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/'
+TBLPROPERTIES (
+  'projection.enabled'      = 'true',
+  'projection.dt.type'      = 'date',
+  'projection.dt.format'    = 'yyyy-MM-dd',
+  'projection.dt.range'     = '2026-01-01,NOW',
+  'projection.dt.interval'  = '1',
+  'projection.dt.interval.unit' = 'DAYS',
+  'projection.hour.type'    = 'integer',
+  'projection.hour.range'   = '0,23',
+  'projection.hour.digits'  = '2'
+);
+```
+
+Projection is what makes an hourly layout cheap at a year's scale: the engine computes the
+partitions it needs from the predicate instead of listing the bucket to discover them. The location
+names one tenant, the default one here: a table of a tenant's queue points at that tenant's
+`tenant=` prefix. Two things
+the lane learned from a Trino 483 container before giving up on measuring it: `partition` and
+`offset` are reserved words and have to be quoted everywhere, and the Hive connector's
+`hive.timestamp-precision` defaults to `MILLISECONDS` and then **refuses** a `timestamp(6)` column,
+so the catalog needs `hive.timestamp-precision=MICROSECONDS` or the table has to declare
+`timestamp(3)` and drop three digits of Queen's clock.
+
+**ClickHouse**, over the JSONL objects. Pass the structure: left to itself, schema inference types
+`payload` as a `Tuple` of the keys it sampled, which is not a JSON document any more, and
+`payload IS NULL` is then false for every row, so a null payload silently becomes an empty tuple
+instead of a NULL.
+
+```sql
+SELECT partition, `offset`, ts, JSONExtractString(payload, 'type') AS type
+FROM s3('https://s3.eu-central-1.amazonaws.com/my-lake/queen/tenant=*/queue=orders/dt=2026-09-04/hour=*/*.jsonl.zst',
+        'JSONEachRow',
+        'partition String, `offset` Int64, transactionId String, ts String, payload Nullable(String)');
+```
+
+Recent ClickHouse turns hive partitioning on by itself, so `tenant`, `queue`, `dt` and `hour` arrive
+as columns with no argument at all, even alongside an explicit structure, and `WHERE hour = 10` prunes
+on them. Over the Parquet objects `ts` arrives as `DateTime64(6, 'UTC')`: the
+`TIMESTAMP(MICROS,UTC)` annotation survives.
+
+**Snowflake**, through an external stage, where the format is the whole configuration:
+
+```sql
+COPY INTO queen_orders
+FROM @my_lake/queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/
+FILE_FORMAT = (TYPE = PARQUET);
+
+-- or, for the JSONL objects
+COPY INTO queen_orders_raw
+FROM @my_lake/queen/tenant=00000000-0000-0000-0000-000000000001/queue=orders/
+FILE_FORMAT = (TYPE = JSON COMPRESSION = ZSTD);
+```
+
+Two habits pay for themselves whichever engine reads the lake. Order one partition by
+`(ts, offset)` and never by `ts` alone: every record of one append shares a timestamp, and the offset
+alone starts again when a partition is deleted and created again. And prune on `dt` and `hour` before
+anything else: they are exact, they cost nothing, and they are the difference between reading one hour
+and reading a year.

@@ -287,6 +287,35 @@ jobs:
           cargo clippy --manifest-path protocols/queen-kafka/Cargo.toml --locked \
             --all-targets -- -D warnings
 
+  # The S3 / data-lake sink (connectors/queen-s3), linked into the broker by the
+  # default `s3` feature and run in-process (server/src/s3_inproc.rs). Its own
+  # workspace root, excluded from every other manifest by construction — so,
+  # exactly like the Kafka facade above, named nowhere it would be tested
+  # nowhere. The broker's `cargo test` reaches only the in-process wiring.
+  #
+  # Unit tests only. The end-to-end scenarios need a live broker and an
+  # S3-compatible endpoint; they stay OUT of this workflow until they are boring —
+  # the proxyimpr lesson: a flaky new lane in the release-day matrix is
+  # discovered on release day.
+  s3-sink:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+          # See rust-unit: name the manifest, or rust-cache probes the root.
+          cache-workspaces: connectors/queen-s3
+      - name: cargo test
+        run: cargo test --manifest-path connectors/queen-s3/Cargo.toml --locked
+      - name: rustfmt
+        run: cargo fmt --manifest-path connectors/queen-s3/Cargo.toml --check
+      - name: clippy
+        run: |
+          cargo clippy --manifest-path connectors/queen-s3/Cargo.toml --locked \
+            --all-targets -- -D warnings
+
   # `rust-version` in the client's Cargo.toml is a promise to anyone on an older
   # toolchain. Every other job runs current stable, so without this the promise
   # is never checked — which is how it came to say 1.75 while the crate had not

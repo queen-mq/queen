@@ -14,6 +14,7 @@ sourceOfTruth:
   - proxy/src/store/usage.rs
   - proxy/src/app.rs
   - proxy/src/cp.rs
+  - proxy/src/s3.rs
   - proxy/src/cache.rs
   - proxy/src/auth.rs
   - proxy/src/registry.rs
@@ -23,6 +24,8 @@ sourceOfTruth:
   - server/src/proxy_embed.rs
   - server/src/rsm/facade/real/phase2.rs
   - server/src/rsm/facade/groups.rs
+  - server/src/s3_inproc.rs
+# sourceOfTruth re-read 2026-10-02 (working tree): the s3_sinks documents (px.s3sinks) and PUT/GET/DELETE /api/cp/clusters/:slug/s3 (cp.rs put_s3/get_s3/delete_s3, data.rs put_s3_sink/delete_s3_sink), the purge removing a tenant's sinks first, the delete removing their rows.
 ---
 
 Everything the proxy needs to route, authorize, limit and bill a request lives in the
@@ -50,6 +53,7 @@ atomic batch as the row, so two nodes can never both win the same value.
 | `cluster_roles` | `(user, cluster) → role` for `admin`, `producer`, `consumer`, `viewer` | One per pair |
 | `api_keys` | Cluster-scoped credentials, stored as a sha256 hash, with a scope list | `revoked_at` |
 | `queues` | A **cache** of `(cluster, queue name, partitions_count)` for cap admission | Soft-deleted by the reconciler |
+| `s3_sinks` | One per cluster: its [S3 sink](#a-clusters-s3-sink). The cluster's `broker_tenant` (copied when written), `enabled`, the sink's settings as `config` JSON (never a secret), the S3 secret sealed with the cell's `QUEEN_ENCRYPTION_KEY`, and `updated_at`, which every write moves | Set and removed through `/api/cp/clusters/:slug/s3`; removed by the tenant's purge and with the tenant |
 | `usage_minutes`, `usage_days` | Metered usage per `(cluster, period, op class)`; minutes are written per node | Minutes expire ([metering](/reference/multi-tenant/metering/)); days are kept |
 | `operations` | Append-only audit. Every change the store makes writes a row for it | Kept |
 | `revoked_tokens` | Session `jti` deny-list with the token's own expiry | Expires with the token |
@@ -179,13 +183,16 @@ its next poll.
 | `POST /api/cp/provision` | A tenancy whose ids and key a control plane chose: tenant, cluster, user, role, key and overrides, in one write |
 | `POST /api/cp/tenants` | A tenant, from `{slug, name?}` |
 | `PUT /api/cp/tenants/:slug/status` | `{status}`: `active`, `grace`, `suspended` or `deleting`, for every cluster of the tenant |
-| `POST /api/cp/tenants/:slug/purge` | The broker's own purge, for every cluster of a `deleting` tenant |
+| `POST /api/cp/tenants/:slug/purge` | The tenant's S3 sinks removed, then the broker's own purge, for every cluster of a `deleting` tenant |
 | `DELETE /api/cp/tenants/:slug` | Deletes a `deleting` tenant and everything under it (`?force=true` skips the status check) |
 | `GET /api/cp/clusters` | Every cluster; `?plan=<code>` keeps one plan's |
 | `POST /api/cp/clusters` | Ensures a cluster exists, from `{tenant_slug, tenant_name?, slug, plan?, cell_id?}`, creating the tenant when needed |
 | `GET /api/cp/clusters/:slug` | One cluster: its ids, plan, statuses and overrides |
 | `GET /api/cp/clusters/:slug/queues` | The broker's queue listing for the cluster |
 | `POST /api/cp/clusters/:slug/configure` | The broker's `configure` for one of the cluster's queues |
+| `PUT /api/cp/clusters/:slug/s3` | The cluster's S3 sink: its settings, checked by the broker, `secretKey`, stored sealed, and `enabled` |
+| `GET /api/cp/clusters/:slug/s3` | The cluster's S3 sink, without its secret |
+| `DELETE /api/cp/clusters/:slug/s3` | Removes the cluster's S3 sink |
 | `PUT /api/cp/clusters/:id/overrides` | The cluster's limit overrides (`null` clears them) |
 | `PUT /api/cp/clusters/:id/status` | `{status}`: `active`, `push_blocked`, `suspended` or `deleting` |
 | `GET /api/cp/clusters/:id/usage` | The last hour of metered minutes, summed over the nodes |
@@ -291,7 +298,11 @@ Three calls, in this order, each safe to repeat:
    refresh. The answer is `{ok: true, tenant_id, clusters}`, each cluster as
    `{id, slug, broker_tenant_uuid}`, and an unknown slug is
    `404 {"code":"tenant_unknown"}`. Setting the status a tenant already has writes nothing.
-2. `POST /api/cp/tenants/:slug/purge`. For every cluster, the proxy runs the broker's own
+2. `POST /api/cp/tenants/:slug/purge`. It first removes the S3 sinks of the tenant's
+   clusters, on every pass. Every broker node has stopped them, or does within 5 seconds,
+   the interval at which it reads the statuses again: a `deleting` tenant's sink does not
+   run. What the sinks wrote stays in their buckets, because neither the purge nor a sink
+   deletes an object. Then, for every cluster, the proxy runs the broker's own
    tenant purge (`DELETE /api/v1/resources/tenant`, which no tenant credential can reach)
    in-process, for that cluster's `broker_tenant_uuid`: its queues and messages, KV rows,
    timers, traces and stream queries. It refuses a tenant that is not `deleting`
@@ -304,17 +315,18 @@ Three calls, in this order, each safe to repeat:
    `missing_clusters`: its broker tenant is unknown. An unknown slug answers
    `{existed: false, done: true, clusters: []}`.
 3. `DELETE /api/cp/tenants/:slug`. Deletes the tenant and everything the proxy keeps for
-   it: its clusters, users and their identities, roles, API keys, queue rows, usage and
-   audit rows. It refuses a tenant that is not `deleting` (`409 {"code":"not_deleting"}`),
+   it: its clusters, users and their identities, roles, API keys, queue rows, S3 sink rows,
+   usage and audit rows. It refuses a tenant that is not `deleting` (`409 {"code":"not_deleting"}`),
    and one whose clusters' broker tenants still list a queue
    (`409 {"code":"not_purged"}`, or `503` when the broker's listing cannot be read);
    `?force=true` skips both. It answers `{existed: true, clusters}`, each cluster as
    `{cluster_id, slug, broker_tenant_uuid}`, and `{existed: false, clusters: []}` once the
    tenant is gone.
 
-The delete does not touch the broker, and the purge does not touch the proxy's documents:
-a tenant deleted without its purge leaves its broker data behind, under a
-`broker_tenant_uuid` the delete's answer is the last place to find.
+The delete does not touch the broker, and the purge touches none of the proxy's documents
+but the tenant's S3 sink rows, which it removes without an audit row of their own: a tenant
+deleted without its purge leaves its broker data behind, under a `broker_tenant_uuid` the
+delete's answer is the last place to find.
 
 ### Activity
 
@@ -354,6 +366,50 @@ proxy's own, and refuses every cluster while `QUEEN_PROXY_TENANT_HEADER` is off,
 the clusters' data is then the default tenant's. A tenant a request names is never used:
 the tenant is always the cluster's own.
 
+### A cluster's S3 sink
+
+`PUT /api/cp/clusters/:slug/s3` gives the cluster's broker tenant an S3 sink of its own,
+writing to its own bucket; `GET` reads it back and `DELETE` removes it. The three routes
+exist only where the node runs the S3 sink (`QUEEN_S3_EMBEDDED=true`), and answer
+`404 {"code":"s3_unavailable"}` elsewhere.
+
+```bash
+curl -s -X PUT http://127.0.0.1:6711/api/cp/clusters/acme-prod/s3 \
+  -H "x-queen-cp-token: $CP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"endpoint":"https://s3.eu-west-1.amazonaws.com","region":"eu-west-1","bucket":"acme-lake","accessKey":"AKIA...","secretKey":"...","queues":"*"}'
+```
+
+- The body is the sink's settings, plus `secretKey` and `enabled`. The settings are a JSON
+  object of at most 32 KiB with no key named like a secret, and the broker checks them by
+  the sink's own rules: `endpoint`, `region`, `bucket`, `accessKey` and `queues` are
+  required, the optional ones are listed on
+  [the S3 sink page](/deploy/s3#per-tenant-settings), and an unknown field, a node-wide
+  one or a value the sink refuses is `400 {"code":"invalid"}` with the sink's sentence.
+- `secretKey` is required while the cluster has no sink, at most 4096 bytes, and omitted
+  or `null` keeps the stored one. It is stored only sealed with the cell's
+  `QUEEN_ENCRYPTION_KEY`, so a cell without the key answers
+  `409 {"code":"encryption_required"}`, and no answer or error carries it, sealed or not.
+- `enabled` defaults to `true`. `false` keeps the row and its secret, and the sink does not
+  run.
+
+A PUT and a GET answer the row without its secret:
+`{cluster, tenant, enabled, config, secretKeySet, updatedAt}`, `tenant` being the cluster's
+broker tenant and `updatedAt` the time of the last write, to the second. A GET of a cluster
+with no sink is `404 {"code":"s3_unset"}`. A DELETE answers `{cluster, removed}`, with
+`removed: false` when there was nothing to remove. A PUT that carries `secretKey` always
+writes and moves `updatedAt`, because a new secret cannot be told from a repeated one, and
+that is what makes every node rebuild the sink with it; a PUT without one that changes
+nothing writes nothing. Each write appends its audit row: `s3_sink_set`, with
+`{enabled, secret}` and `secret` `set` or `kept`, or `s3_sink_removed`.
+
+A PUT is refused for a cluster or tenant being deleted (`409 {"code":"deleting"}`), and, like
+the routes above, for a cluster bound to a system tenant or any cluster while
+`QUEEN_PROXY_TENANT_HEADER` is off (`409 {"code":"system_tenant"}`). An unknown slug is
+`404 {"code":"cluster_unknown"}` on all three. Every broker node reads the rows again every 5
+seconds and starts, rebuilds or stops the tenant's sink to match. A sink runs while its row is
+enabled and the cluster's combined status is `active` or `push_blocked`; how it runs, and what
+it writes, is [the S3 sink page](/deploy/s3#a-tenants-sink-from-the-control-plane).
+
 ### Keys, retried
 
 `POST /api/cp/keys` answers `201 {id, existed: false}` for a new key. A hash the cluster
@@ -374,6 +430,8 @@ revoked before, and an unknown id is `404 {"code":"key_unknown"}`.
 | Record a login | Every successful local or OAuth sign-in | Stores the time and appends its audit row atomically |
 | Set a cluster's status | `PUT /api/cp/clusters/:id/status` | |
 | Set a cluster's overrides | `PUT /api/cp/clusters/:id/overrides`, `POST /api/cp/provision` | |
+| Set a cluster's S3 sink | `PUT /api/cp/clusters/:slug/s3` | Not while the cluster or its tenant is `deleting` |
+| Remove a cluster's S3 sink | `DELETE /api/cp/clusters/:slug/s3`, the tenant's purge, the tenant's delete | |
 | Issue an API key | `POST /api/cp/keys`, `POST /api/cp/provision`, the console's `POST /api/console/keys`, the bootstrap | `key_hash` must be 64 lowercase hex characters |
 | Revoke an API key | `DELETE /api/cp/keys/:id`, the console's `DELETE /api/console/keys/:id` | The console refuses an unknown or already-revoked key; the control plane answers an already-revoked one as done |
 | Grant a cluster role | The console's `POST /api/console/members`, the operator Users page, `POST /api/cp/provision`, the bootstrap, OAuth auto-provisioning | Refuses a cross-tenant pairing. This is a security boundary, not a convenience check |
@@ -435,7 +493,8 @@ forced to move a cluster in a hurry.
 ## The audit trail
 
 `operations` is append-only, stored newest first per tenant, with a second index per
-cluster. Every change above writes a row for itself, with an `actor` of `user`,
+cluster. Every change above writes a row for itself, except the purge's removal of a
+tenant's S3 sinks, with an `actor` of `user`,
 `api_key`, `control_plane` or `system`. The control-plane store functions write
 `control_plane`. The console and the sign-in path write rows with actor `user` and the
 signed-in user's id,

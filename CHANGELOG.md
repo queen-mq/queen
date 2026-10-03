@@ -17,9 +17,85 @@ There is no in-place upgrade from 1.x: a 2.0 broker does not read a 1.x database
 not carry over, so a move is a cutover. Start 2.0 beside the old deployment, re-apply the queue
 configuration, move the producers, drain the old deployment and move the consumers.
 
-**The SQS facade and the S3 sink are removed.** Neither is in the image or the binary any more,
-and `QUEEN_SQS_*` and `QUEEN_S3_*` are not read. The S3 sink is to be reimplemented in a later
-release.
+**The SQS facade is removed.** It is not in the image or the binary any more, and `QUEEN_SQS_*`
+is not read.
+
+**The S3 sink runs inside the broker, on every node.** `QUEEN_S3_EMBEDDED=true` starts the
+data-lake sink in the broker process, on a runtime of its own (`QUEEN_S3_THREADS`, default a
+quarter of the cores, 1 or 2); there is no `queen-s3` binary, no child process, no `QUEEN_S3_BIN`
+and no `/healthz` or `/metrics` listener of its own, and `QUEEN_S3_LISTEN` and
+`QUEEN_S3_LOG_FORMAT` are named in a warning and ignored. Every node runs it with the same
+configuration, one sink per broker tenant (below). Per queue, a lease in the key/value store
+(`s3:<sink>:<queue>:lease`, TTL `QUEEN_S3_LEASE_TTL_MS`, default 30 s, refreshed every third of
+it) picks the node that writes the queue, and every window intent and commit carries that lease as
+a required conditional write, so a node that lost the queue cannot commit. A node claims a free
+queue after waiting one second for every queue it already runs or is claiming, plus a jitter under
+200 ms, at most half the lease TTL, so the least-loaded node claims first and the queues spread
+over the nodes; a claim that fails for a passing reason (no leader yet) is retried within about a
+second rather than a TTL. Queues are then rebalanced: each sink counts the nodes running it through
+TTL'd presence rows, and a node holding more than `ceil(queues / nodes)` gives one queue back at a
+time (drained and released as at a SIGTERM) to a node below its share, so pods started one after
+another still end up sharing the queues, and nothing moves in a steady state. A node stopped
+with SIGTERM gives its queues back at once; one that dies loses them when its leases expire, and
+one that comes back under the same `QUEEN_S3_INSTANCE` (by default `node-<id>@<host>`) takes its
+own back at once. Each node reads its own applied copy of the
+log, followers included, and closes a window against its own `safeTime`; the lease refresh is a
+log entry, so `safeTime` keeps moving on a broker nothing writes to and the last window before a
+quiet spell still closes by age. The sink needs no `QUEEN_URL`
+and no token, and the proxy's key/value carve-out for it is gone. Both record envelopes are the
+1.5.0 formats; every key gains a `tenant=` level, the manifest a `tenant` field, the Parquet
+footer a `queen.tenant` pair, and the position checkpoint each partition's id, so a 2.0 sink is
+pointed at a new prefix or bucket. A record's `ts` is the stamp of the append that wrote it, and across the lake
+`(partition, offset, ts)` is unique, since a partition deleted and created again starts again at
+offset 0. A missing or bad value of one of the sink's variables fails the broker's boot, naming
+the variable; a bucket that does not answer delays the sink and nothing else. The window buffers are the broker's memory
+now, so `QUEEN_S3_MEMORY_MB` defaults to 512 instead of 1024, and an out-of-memory takes the
+broker: size the container for both. On SIGTERM the sink stops reading at once, finishes the
+window it is committing and gives its leases back while the broker hands off and drains, and the
+broker waits for it up to `QUEEN_S3_SHUTDOWN_GRACE_MS` (30 s) counted from the signal. Its state is the `s3` block of `GET /status`, and its
+`queen_s3_*` families are on `/metrics/prometheus`. `queen_s3_lag_seconds` is the node's
+`safeTime` minus the stamp the queue's lake is complete through (`completeThrough` in the status),
+so a queue read to its end and idle lags by about the guard and one discovery interval instead of
+growing; a node exports a queue's gauges only while it runs the queue. The commit pointer's `tEnd` is now an
+ISO-8601 timestamp: 1.5.0 wrote integer microseconds, which the retention hold could not read,
+so `retentionSinkHold` always sat at its cap; it now follows the sink. Running it is
+[deploy/s3](https://queenmq.com/deploy/s3); what it writes is
+[reference/s3](https://queenmq.com/reference/s3).
+
+**Every broker tenant can have an S3 sink and a bucket of its own.** The default tenant's sink is
+configured by `QUEEN_S3_*` and turned on by `QUEEN_S3_QUEUES`: without it the default tenant has no
+sink, and another per-tenant `QUEEN_S3_*` variable set without it fails the boot. Every other
+tenant's is set by the control plane: `PUT /api/cp/clusters/:slug/s3` with the tenant's endpoint,
+region, bucket, access key and queues, any other per-tenant setting, and `secretKey`, which is
+stored only sealed with the cell's `QUEEN_ENCRYPTION_KEY` (the same on every node; a cell without
+one refuses the secret). `GET` answers it without the secret, `DELETE` removes it, and the
+tenant's purge and delete remove it too. The routes are offered only where the node runs the sink.
+Every node reads those rows every 5 seconds and runs a tenant's sink while its row is enabled and
+its cluster's status, combined with its tenant's, is `active` or `push_blocked`; a write that moves
+`updatedAt`, which every PUT with a secret does, rebuilds the sink once the old one has drained. The memory budget, threads, fetch
+concurrency, discovery interval, guard, lease TTL, multipart threshold, checkpoint cadence and
+instance name stay node-wide, in the environment, shared by every tenant's sink, and a tenant's
+settings cannot name them. Keys start with the tenant, `<prefix>/tenant=<id>/queue=<name>/…`, and
+the sidecars sit under `<prefix>/_queen/tenant=<id>/queue=<name>/`, so two tenants never share a
+key even in one bucket and prefix. A tenant's leases and commit pointers are in its own key/value
+store, where its queues' retention hold reads them. The `s3` block of `GET /status` is
+`{mode, phase, threads, controlPlane, sinks}`, one entry per tenant with its `source` (`env` or
+`cp`), and a control-plane tenant's `queen_s3_*` series carry a `tenant` label; the node renders
+each family once, and a removed tenant's series go with it.
+
+**`POST /api/v1/partitions/changed` answers a sound `safeTime`.** It is the greatest record stamp
+the answering node has applied: every record stamped at or below it is already readable on that
+node, so a time window that ends there is complete. 1.x derived it from PostgreSQL's open
+transactions, with a fixed fallback floor (`safeTimeDegraded`, now always `false`), and the 2.0
+betas answered the node's wall clock, which a record planned before the answer and applied after
+it could fall below. It is per node, and it moves only when an entry applies, so an idle node
+answers the same value until the next write. Pages run in partition creation order with and
+without `since`, under an opaque cursor that means the same in both, and a complete pass reads
+each of the queue's partitions once, where every page used to sort the whole queue; a cursor of
+the old shapes (`n|…`, `t|…`) is `BAD_CURSOR`. Every partition carries `id`, its uuid, which is
+new when a partition is deleted and created again under the same name. `since` is read to the
+microsecond, and one that is not a timestamp is a `400`, as in 1.x, where the 2.0 betas read it
+as absent and listed everything.
 
 **The standalone proxy is removed.** The proxy runs inside the broker process with
 `QUEEN_PROXY_EMBEDDED=true`, fronting `PORT`, or its own `QUEEN_PROXY_PORT` while `PORT` stays the
@@ -38,7 +114,7 @@ Committed offsets are Queen consumer-group positions by default (`QUEEN_KAFKA_OF
 `PG_USE_SSL`, `PG_SSL_REJECT_UNAUTHORIZED`, `PG_SSL_ROOT_CERT`), the disk spool (`FILE_BUFFER_*`),
 the broker mesh (`QUEEN_MESH_*`, `QUEEN_UDP_*`, `QUEEN_SYNC_*`), the hot-list, fusion, ack-fusion,
 pop-fusion and admission knobs, `QUEEN_APPLY_SCHEMA`, `RETENTION_PARALLELISM`, the statistics
-refresh intervals, `QUEEN_STORAGE`, `QUEEN_SQS_*`, `QUEEN_S3_*` and `PXDB_*`. Some 1.x names stay
+refresh intervals, `QUEEN_STORAGE`, `QUEEN_SQS_*`, `QUEEN_S3_BIN` and `PXDB_*`. Some 1.x names stay
 because the 2.0 engine reads them: `RETENTION_INTERVAL`, `RETENTION_BATCH_SIZE`,
 `PARTITION_CLEANUP_DAYS`, `QUEEN_PARTITION_CLEANUP_ENABLED`, `METRICS_FLUSH_MS`,
 `QUEEN_SWEEPER_BACKOFF_MIN_MS`, `QUEEN_SWEEPER_BACKOFF_MAX_MS`,
@@ -68,11 +144,11 @@ timers and ephemeral kill switches and tenant quotas stay.
 `stats_refresh`, `system_metrics` and `log_reports` are removed. `StartError` has only `Config`, and
 `Broker::shutdown()` returns nothing.
 
-**One image, one binary.** `ghcr.io/queen-mq/queen` carries the broker, with the proxy and the Kafka
-facade linked in, the dashboard and `queenctl`; the `queen-kafka`, `queen-sqs` and `queen-s3`
-binaries and the PostgreSQL client tools are gone. The dashboard is raft-only: the Postgres stats
-panel, the database pool and the disk-spool cards are removed, and the replicated log's status
-takes their place.
+**One image, one binary.** `ghcr.io/queen-mq/queen` carries the broker, with the proxy, the Kafka
+facade and the S3 sink linked in, the dashboard and `queenctl`; the `queen-kafka`, `queen-sqs` and
+`queen-s3` binaries and the PostgreSQL client tools are gone. The dashboard is raft-only: the
+Postgres stats panel, the database pool and the disk-spool cards are removed, and the replicated
+log's status takes their place.
 
 **The partitions sunflower names its seeds.** Each queue owns a wedge of the flower, and hovering a
 seed lights its queue and shows the queue, the partition, its pending and its lag. The per-partition

@@ -9,12 +9,15 @@
 //! | `POST /api/cp/tenants` | `create_tenant` |
 //! | `DELETE /api/cp/tenants/:slug` | `delete_tenant` (`?force=true` skips the `deleting` gate) |
 //! | `PUT /api/cp/tenants/:slug/status` | `set_tenant_status_by_slug` |
-//! | `POST /api/cp/tenants/:slug/purge` | the broker's tenant purge, in-process, for every cluster of a `deleting` tenant |
+//! | `POST /api/cp/tenants/:slug/purge` | the tenant's S3 sinks removed, then the broker's tenant purge, in-process, for every cluster of a `deleting` tenant |
 //! | `GET /api/cp/clusters` | every cluster (`?plan=<code>` filters) |
 //! | `POST /api/cp/clusters` | ensure a cluster (and its tenant) exists |
 //! | `GET /api/cp/clusters/:slug` | the cluster with its tenant, plan, statuses and overrides |
 //! | `GET /api/cp/clusters/:slug/queues` | the broker's queue listing, for the cluster's broker tenant |
 //! | `POST /api/cp/clusters/:slug/configure` | the broker's `configure`, for the cluster's broker tenant |
+//! | `PUT /api/cp/clusters/:slug/s3` | the cluster's S3 sink: config checked by the broker, `secretKey` sealed with the cell's `QUEEN_ENCRYPTION_KEY`, one row (`px.s3sinks`) |
+//! | `GET /api/cp/clusters/:slug/s3` | the cluster's S3 sink, redacted: never the secret, sealed or not |
+//! | `DELETE /api/cp/clusters/:slug/s3` | the cluster's S3 sink removed |
 //! | `PUT /api/cp/clusters/:id/overrides` | `set_limit_override` (body JSON or `null`) |
 //! | `PUT /api/cp/clusters/:id/status` | `set_cluster_status` |
 //! | `GET /api/cp/clusters/:id/usage` | the last hour of metered minutes |
@@ -31,12 +34,24 @@
 //! call acts on is always the cluster's own, never one a request names, and
 //! the broker's default tenant and the proxy's own (where this whole state
 //! lives) are refused.
+//!
+//! The S3 routes (`/clusters/:slug/s3`) exist only on a broker that hands the
+//! proxy its sink ([`crate::s3::S3Sinks`]; otherwise 404 `s3_unavailable`).
+//! A PUT body is the sink config plus `secretKey` (required while the cluster
+//! has no sink, omitted or `null` afterwards to keep the stored one) and
+//! `enabled` (default `true`); the config is everything else, checked by the
+//! broker as the sink will read it. The secret is stored only sealed, so a
+//! cell without `QUEEN_ENCRYPTION_KEY` refuses one (409
+//! `encryption_required`); no answer and no error ever carries it, sealed or
+//! not. A cluster or tenant being deleted gets no sink (409 `deleting`), and
+//! its sinks go with the purge and the delete.
 
 // A handler's helpers answer early with the `Response` itself (`tri!`):
 // boxing it would buy nothing on a control-plane call.
 #![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
@@ -51,8 +66,10 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::errors::{json_error, CODE_CLUSTER_UNKNOWN};
+use crate::s3::S3Sinks;
 use crate::state::St;
 use crate::store::data::{self, BrokerTarget, ClusterKey, DataError, Lookup};
+use crate::store::schema::S3SinkDoc;
 
 pub fn router() -> Router<St> {
     Router::new()
@@ -66,6 +83,10 @@ pub fn router() -> Router<St> {
         .route("/clusters/:slug", get(get_cluster))
         .route("/clusters/:slug/queues", get(cluster_queues))
         .route("/clusters/:slug/configure", post(configure_queue))
+        .route(
+            "/clusters/:slug/s3",
+            put(put_s3).get(get_s3).delete(delete_s3),
+        )
         .route("/clusters/:id/overrides", put(set_overrides))
         .route("/clusters/:id/status", put(set_status))
         .route("/clusters/:id/usage", get(usage))
@@ -88,11 +109,23 @@ pub const CODE_SYSTEM_TENANT: &str = "system_tenant";
 pub const CODE_DELETING: &str = "deleting";
 /// A tenant whose broker data is still there refuses its delete.
 pub const CODE_NOT_PURGED: &str = "not_purged";
+/// 404: this broker runs no S3 sink (`QUEEN_S3_EMBEDDED` is not true, or it
+/// was built without one): the S3 routes do not exist here.
+pub const CODE_S3_UNAVAILABLE: &str = "s3_unavailable";
+/// 404: the cluster has no S3 sink.
+pub const CODE_S3_UNSET: &str = "s3_unset";
+/// 409: the cell has no `QUEEN_ENCRYPTION_KEY`, so it cannot store an S3
+/// secret (it never stores one in clear). Nothing was written.
+pub const CODE_ENCRYPTION_REQUIRED: &str = "encryption_required";
 
 /// The most cluster slugs one `POST /api/cp/activity` may name.
 pub const MAX_ACTIVITY_CLUSTERS: usize = 256;
 /// The largest request body this surface reads (`413` above it).
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// The longest S3 `secretKey` taken, in bytes (an AWS secret key is 40): with
+/// the config's own cap ([`data::S3_CONFIG_MAX_BYTES`]) a sink row stays
+/// under the broker's KV value ceiling once sealed.
+pub const MAX_S3_SECRET_BYTES: usize = 4096;
 
 /// How long one cluster's purge may take at the broker: it deletes every
 /// partition of the tenant before it answers.
@@ -443,6 +476,22 @@ async fn purge_tenant(State(st): State<St>, h: HeaderMap, Path(slug): Path<Strin
     {
         return system_tenant(x);
     }
+    // The tenant's S3 sinks stop before its data goes: a sink left running
+    // would keep reading, and leasing in, a tenant being wiped (a `deleting`
+    // tenant gets no new one). Every pass removes whatever is there.
+    let ids: Vec<Uuid> = found
+        .targets
+        .iter()
+        .map(|x| x.cluster_id)
+        .chain(found.missing.iter().copied())
+        .collect();
+    let removed = match data::delete_s3_sinks(&st.store, &ids).await {
+        Ok(n) => n,
+        Err(e) => return fail(e),
+    };
+    if removed > 0 {
+        tracing::info!(target: "cp", tenant = %t.slug, removed, "tenant purge: s3 sinks removed");
+    }
     // A cluster the tenant's index lists but whose document is gone has a
     // broker tenant nobody knows any more: nothing can vouch for it.
     let mut all_done = found.missing.is_empty();
@@ -739,19 +788,23 @@ async fn get_cluster(State(st): State<St>, h: HeaderMap, Path(slug): Path<String
     }
 }
 
+/// The cluster named `slug`, gated by nothing but its existence: what a route
+/// that only reads or removes the proxy's own rows of a cluster resolves.
+async fn cluster_of(st: &St, slug: &str) -> Result<BrokerTarget, Response> {
+    let slug = slug_param(slug, "cluster slug")?;
+    match data::broker_target(&st.store, &slug).await {
+        Ok(Some(x)) => Ok(x),
+        Ok(None) => Err(crate::errors::err_404(
+            CODE_CLUSTER_UNKNOWN,
+            "no such cluster",
+        )),
+        Err(e) => Err(fail(e)),
+    }
+}
+
 /// The cluster named `slug`, as a broker tenant this surface may act on.
 async fn target_of(st: &St, slug: &str) -> Result<BrokerTarget, Response> {
-    let slug = slug_param(slug, "cluster slug")?;
-    let x = match data::broker_target(&st.store, &slug).await {
-        Ok(Some(x)) => x,
-        Ok(None) => {
-            return Err(crate::errors::err_404(
-                CODE_CLUSTER_UNKNOWN,
-                "no such cluster",
-            ))
-        }
-        Err(e) => return Err(fail(e)),
-    };
+    let x = cluster_of(st, slug).await?;
     tenant_header_on(st)?;
     if is_system_tenant(&x.broker_tenant) {
         return Err(system_tenant(&x));
@@ -816,6 +869,188 @@ async fn configure_queue(
         )
         .await,
     )
+}
+
+// ---------------------------------------------------------------------------
+// a cluster's S3 sink
+// ---------------------------------------------------------------------------
+
+/// The broker's S3 sink hook, or the 404 that says this broker has none.
+fn s3_hook(st: &St) -> Result<Arc<dyn S3Sinks>, Response> {
+    st.s3.clone().ok_or_else(|| {
+        crate::errors::err_404(
+            CODE_S3_UNAVAILABLE,
+            "this broker runs no S3 sink (QUEEN_S3_EMBEDDED is not true, or it was built without \
+             one): no cluster can mirror its \
+             queues to S3 here",
+        )
+    })
+}
+
+/// A `PUT /clusters/:slug/s3` body, split: the sink config (everything but
+/// `secretKey` and `enabled`), the secret, the switch.
+struct S3In {
+    config: Value,
+    secret: Option<String>,
+    enabled: bool,
+}
+
+/// [`S3In`] from a request body. No refusal here quotes a value of the body:
+/// one of them is the secret.
+fn s3_in(raw: &[u8]) -> Result<S3In, Response> {
+    let Value::Object(mut o) = parse::<Value>(raw)? else {
+        return Err(invalid(
+            "s3: the body must be a JSON object: the sink config, secretKey and enabled",
+        ));
+    };
+    let secret = match o.remove("secretKey") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s.len() > MAX_S3_SECRET_BYTES => {
+            return Err(invalid(&format!(
+                "s3: secretKey is longer than {MAX_S3_SECRET_BYTES} bytes"
+            )))
+        }
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s),
+        Some(_) => {
+            return Err(invalid(
+                "s3: secretKey must be a non-empty string (omit it to keep the stored one)",
+            ))
+        }
+    };
+    let enabled = match o.remove("enabled") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => b,
+        Some(_) => return Err(invalid("s3: enabled must be true or false")),
+    };
+    let config = Value::Object(o);
+    data::check_s3_config(&config).map_err(fail)?;
+    Ok(S3In {
+        config,
+        secret,
+        enabled,
+    })
+}
+
+/// What the S3 routes answer for a sink: never its secret, sealed or not.
+fn s3_view(slug: &str, d: &S3SinkDoc) -> Value {
+    json!({
+        "cluster": slug,
+        "tenant": d.broker_tenant,
+        "enabled": d.enabled,
+        "config": d.config,
+        "secretKeySet": !d.secret_key_sealed.is_empty(),
+        "updatedAt": crate::store::web::utc_iso(d.updated_at_us),
+    })
+}
+
+/// 409 `encryption_required`: the seal refused, the cell has no
+/// `QUEEN_ENCRYPTION_KEY`. The hook's sentence is the answer when it names
+/// the key, else it rides along in ours; either way with the secret scrubbed
+/// out of it should it be there.
+fn encryption_required(reason: &str, secret: &str) -> Response {
+    let reason = if secret.is_empty() {
+        reason.to_string()
+    } else {
+        reason.replace(secret, "***")
+    };
+    let msg = if reason.contains("QUEEN_ENCRYPTION_KEY") {
+        reason
+    } else {
+        format!(
+            "this cell has no QUEEN_ENCRYPTION_KEY, and an S3 secret is only ever stored sealed \
+             with it: set QUEEN_ENCRYPTION_KEY (the same on every node) and retry ({reason})"
+        )
+    };
+    json_error(StatusCode::CONFLICT, CODE_ENCRYPTION_REQUIRED, &msg)
+}
+
+/// `PUT /clusters/:slug/s3`: set the cluster's S3 sink (module header) ->
+/// 200 with the redacted sink. A repeat leaves the same sink; one with a
+/// secret re-seals it and moves `updatedAt` (a new secret cannot be told from
+/// a repeated one, and the broker rebuilds a sink whose row moved), one
+/// without writes nothing and answers the very same.
+async fn put_s3(State(st): State<St>, Path(slug): Path<String>, req: Request<Body>) -> Response {
+    let raw = tri!(guarded_body(req).await);
+    let hook = tri!(s3_hook(&st));
+    let b = tri!(s3_in(&raw));
+    let x = tri!(target_of(&st, &slug).await);
+    // A wipe in progress gets no sink: it would read a tenant being purged.
+    if x.deleting() {
+        return json_error(
+            StatusCode::CONFLICT,
+            CODE_DELETING,
+            &format!(
+                "cluster {} or its tenant is deleting: no S3 sink is set during a wipe",
+                x.slug
+            ),
+        );
+    }
+    if let Err(m) = hook.validate(&x.broker_tenant.to_string(), &b.config) {
+        return invalid(&m);
+    }
+    let sealed = match &b.secret {
+        Some(s) => match hook.seal(s) {
+            Ok(v) => Some(v),
+            Err(e) => return encryption_required(&e, s),
+        },
+        None => None,
+    };
+    let secret = if sealed.is_some() { "set" } else { "kept" };
+    let put = data::S3SinkPut {
+        enabled: b.enabled,
+        config: b.config,
+        secret_key_sealed: sealed,
+    };
+    match data::put_s3_sink(&st.store, x.cluster_id, &put).await {
+        Ok(Some(d)) => {
+            tracing::info!(
+                target: "cp", cluster = %x.slug, broker_tenant = %d.broker_tenant,
+                enabled = d.enabled, secret, "s3 sink set"
+            );
+            answer(StatusCode::OK, s3_view(&x.slug, &d))
+        }
+        // Deleted by another call since the lookup above.
+        Ok(None) => crate::errors::err_404(CODE_CLUSTER_UNKNOWN, "no such cluster"),
+        Err(e) => fail(e),
+    }
+}
+
+/// `GET /clusters/:slug/s3`: the cluster's S3 sink, redacted; 404 `s3_unset`
+/// when it has none.
+async fn get_s3(State(st): State<St>, h: HeaderMap, Path(slug): Path<String>) -> Response {
+    tri!(guard(&h));
+    tri!(s3_hook(&st));
+    let x = tri!(cluster_of(&st, &slug).await);
+    match data::s3_sink(&st.store, x.cluster_id).await {
+        Ok(Some(d)) => answer(StatusCode::OK, s3_view(&x.slug, &d)),
+        Ok(None) => {
+            crate::errors::err_404(CODE_S3_UNSET, &format!("cluster {} has no S3 sink", x.slug))
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `DELETE /clusters/:slug/s3` -> 200 `{cluster, removed}`, `removed: false`
+/// when there was no sink (a retry). A wipe in progress may remove one too.
+async fn delete_s3(State(st): State<St>, h: HeaderMap, Path(slug): Path<String>) -> Response {
+    tri!(guard(&h));
+    tri!(s3_hook(&st));
+    let x = tri!(cluster_of(&st, &slug).await);
+    match data::delete_s3_sink(&st.store, x.cluster_id).await {
+        Ok(removed) => {
+            if removed {
+                tracing::info!(
+                    target: "cp", cluster = %x.slug, broker_tenant = %x.broker_tenant,
+                    "s3 sink removed"
+                );
+            }
+            answer(
+                StatusCode::OK,
+                json!({"cluster": x.slug, "removed": removed}),
+            )
+        }
+        Err(e) => fail(e),
+    }
 }
 
 async fn set_overrides(
@@ -1180,6 +1415,15 @@ mod tests {
     }
 
     fn st_cfg(store: Store, upstream: Upstream, cfg: crate::config::Config) -> St {
+        st_full(store, upstream, cfg, None)
+    }
+
+    fn st_full(
+        store: Store,
+        upstream: Upstream,
+        cfg: crate::config::Config,
+        s3: Option<Arc<dyn S3Sinks>>,
+    ) -> St {
         let cache = crate::cache::ClusterCache::new(&cfg, store.clone());
         let limits = crate::limits::Limits::new(&cfg);
         let meter = Arc::new(crate::meter::Meter::new(&cfg));
@@ -1194,6 +1438,7 @@ mod tests {
             meter,
             registry,
             keys,
+            s3,
         })
     }
 
@@ -2805,5 +3050,587 @@ mod tests {
             (s, c["slug"].clone(), c["tenant_slug"].clone()),
             (StatusCode::CREATED, json!("acme-2"), json!("acme"))
         );
+    }
+
+    // ---- a cluster's S3 sink --------------------------------------------------
+
+    const SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+
+    /// The broker's sink hook, faked: a config is valid when its `bucket` is a
+    /// name without a space; the n-th seal is `sealed:<n>:<the secret's bytes
+    /// xor 0x5a, hex>` (no two alike, never the secret), or, on a cell without
+    /// a key, `no_key` with `{secret}` replaced: a refusal careless enough to
+    /// quote the secret.
+    #[derive(Default)]
+    struct FakeS3 {
+        no_key: Option<&'static str>,
+        /// Every `(broker tenant, config)` the check was handed.
+        validated: Mutex<Vec<(String, Value)>>,
+        seals: Mutex<u32>,
+    }
+
+    impl S3Sinks for FakeS3 {
+        fn validate(&self, broker_tenant: &str, config: &Value) -> Result<(), String> {
+            self.validated
+                .lock()
+                .unwrap()
+                .push((broker_tenant.to_string(), config.clone()));
+            match config.get("bucket").and_then(Value::as_str) {
+                Some(b) if !b.is_empty() && !b.contains(' ') => Ok(()),
+                _ => Err("bucket is not a bucket name: one name, no slash, no space".into()),
+            }
+        }
+
+        fn seal(&self, secret: &str) -> Result<String, String> {
+            if let Some(refusal) = self.no_key {
+                return Err(refusal.replace("{secret}", secret));
+            }
+            let mut n = self.seals.lock().unwrap();
+            *n += 1;
+            let hex: String = secret
+                .bytes()
+                .map(|b| format!("{:02x}", b ^ 0x5a))
+                .collect();
+            Ok(format!("sealed:{n}:{hex}"))
+        }
+    }
+
+    impl FakeS3 {
+        fn sealed(&self) -> u32 {
+            *self.seals.lock().unwrap()
+        }
+    }
+
+    /// A seeded single binary whose broker hands the proxy `hook`, and one
+    /// provisioned tenancy `acme` (its answer).
+    async fn s3_world(hook: Arc<FakeS3>) -> (St, Arc<MemKv>, Value) {
+        let (store, kv) = seeded("inprocess://self", None).await;
+        let broker = stub_broker(Calls::default(), WORKS);
+        let cfg = crate::config::test_config(&[]);
+        let st = st_full(store, Upstream::InProcess(broker), cfg, Some(hook));
+        let a = provisioned(
+            &st,
+            prov("acme", "acme", Uuid::new_v4(), "a@acme.io", &hash(1)),
+        )
+        .await;
+        (st, kv, a)
+    }
+
+    /// A sink config (no secret, no switch).
+    fn sink(bucket: &str) -> Value {
+        json!({
+            "endpoint": "https://s3.eu-west-1.amazonaws.com",
+            "region": "eu-west-1",
+            "bucket": bucket,
+            "accessKey": "AKIAIOSFODNN7EXAMPLE",
+            "queues": "orders,payments",
+            "format": "parquet",
+        })
+    }
+
+    fn with_secret(mut config: Value, secret: &str) -> Value {
+        config["secretKey"] = json!(secret);
+        config
+    }
+
+    async fn put_sink(st: &St, slug: &str, body: Value) -> (StatusCode, Value) {
+        call(
+            st,
+            "PUT",
+            &format!("/api/cp/clusters/{slug}/s3"),
+            Some(body),
+        )
+        .await
+    }
+
+    /// The stored row and its version.
+    async fn sink_row(kv: &MemKv, cluster: Uuid) -> Option<kv::Doc<S3SinkDoc>> {
+        kv::get::<S3SinkDoc>(kv, ns::S3SINKS, &schema::key(cluster))
+            .await
+            .unwrap()
+    }
+
+    /// The audit rows of `action`, as JSON text.
+    async fn audit(kv: &MemKv, action: &str) -> Vec<String> {
+        kv::scan::<schema::OperationDoc>(kv, ns::OPS, "#")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|(_, d)| d.value.action == action)
+            .map(|(_, d)| serde_json::to_string(&d.value).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_s3_sink_round_trips_redacted() {
+        let hook = Arc::new(FakeS3::default());
+        let (st, kv, a) = s3_world(hook.clone()).await;
+        let cluster = id(&a["cluster_id"]);
+        let tenant = a["broker_tenant_uuid"].clone();
+
+        let (s, v) = put_sink(&st, "acme", with_secret(sink("lake"), SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let at = v["updatedAt"].as_str().unwrap().to_string();
+        assert!(at.ends_with('Z') && at.len() == 20, "{at}");
+        assert_eq!(
+            v,
+            json!({
+                "cluster": "acme", "tenant": tenant, "enabled": true, "config": sink("lake"),
+                "secretKeySet": true, "updatedAt": at,
+            })
+        );
+        // The broker checked the config alone, for the cluster's own tenant.
+        assert_eq!(
+            *hook.validated.lock().unwrap(),
+            vec![(tenant.as_str().unwrap().to_string(), sink("lake"))]
+        );
+        // The row holds the secret sealed, and nothing else holds it at all.
+        let row = sink_row(&kv, cluster).await.unwrap().value;
+        assert_eq!(
+            (row.cluster_id, row.broker_tenant, row.enabled),
+            (cluster, id(&tenant), true)
+        );
+        assert_eq!(row.config, sink("lake"));
+        assert!(row.secret_key_sealed.starts_with("sealed:1:"));
+        let stored = kv::get::<Value>(kv.as_ref(), ns::S3SINKS, &schema::key(cluster))
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+            .to_string();
+        assert!(!stored.contains(SECRET), "{stored}");
+        assert!(!format!("{row:?}").contains(&row.secret_key_sealed));
+        let set = audit(&kv, "s3_sink_set").await;
+        assert_eq!(set.len(), 1);
+        assert!(
+            !set[0].contains(SECRET) && !set[0].contains("sealed:"),
+            "{set:?}"
+        );
+
+        let (s, got) = call(&st, "GET", "/api/cp/clusters/acme/s3", None).await;
+        assert_eq!((s, &got), (StatusCode::OK, &v));
+        for body in [&v, &got] {
+            let text = body.to_string();
+            assert!(
+                !text.contains(SECRET) && !text.contains("sealed:"),
+                "{text}"
+            );
+        }
+
+        let (s, d) = call(&st, "DELETE", "/api/cp/clusters/acme/s3", None).await;
+        assert_eq!(
+            (s, d),
+            (StatusCode::OK, json!({"cluster": "acme", "removed": true}))
+        );
+        assert!(kv.keys(ns::S3SINKS).is_empty());
+        assert_eq!(audit(&kv, "s3_sink_removed").await.len(), 1);
+        let (s, d) = call(&st, "DELETE", "/api/cp/clusters/acme/s3", None).await;
+        assert_eq!(
+            (s, d),
+            (StatusCode::OK, json!({"cluster": "acme", "removed": false})),
+            "a retry"
+        );
+        assert_eq!(
+            audit(&kv, "s3_sink_removed").await.len(),
+            1,
+            "a retry writes nothing"
+        );
+        let (s, v) = call(&st, "GET", "/api/cp/clusters/acme/s3", None).await;
+        assert_eq!(
+            (s, v["code"].clone()),
+            (StatusCode::NOT_FOUND, json!("s3_unset"))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_secret_is_required_first_and_kept_when_omitted() {
+        let hook = Arc::new(FakeS3::default());
+        let (st, kv, a) = s3_world(hook.clone()).await;
+        let cluster = id(&a["cluster_id"]);
+        // No sink yet: no secret to keep.
+        let mut null = sink("lake");
+        null["secretKey"] = Value::Null;
+        for body in [sink("lake"), null] {
+            let (s, v) = put_sink(&st, "acme", body).await;
+            assert_eq!(
+                (s, v["code"].clone()),
+                (StatusCode::BAD_REQUEST, json!("invalid")),
+                "{v}"
+            );
+            assert!(
+                v["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("secretKey is required"),
+                "{v}"
+            );
+        }
+        assert!(kv.keys(ns::S3SINKS).is_empty());
+        assert_eq!(hook.sealed(), 0, "nothing was sealed");
+
+        let (s, _) = put_sink(&st, "acme", with_secret(sink("lake"), SECRET)).await;
+        assert_eq!(s, StatusCode::OK);
+        let first = sink_row(&kv, cluster).await.unwrap().value;
+
+        // Omitted: the stored secret stays, everything else is the request's.
+        let mut off = sink("lake");
+        off["prefix"] = json!("mirror/acme");
+        off["enabled"] = json!(false);
+        let (s, v) = put_sink(&st, "acme", off).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["enabled"], json!(false));
+        assert_eq!(v["config"]["prefix"], json!("mirror/acme"));
+        assert!(v["config"].get("enabled").is_none(), "{v}");
+        let kept = sink_row(&kv, cluster).await.unwrap().value;
+        assert_eq!(kept.secret_key_sealed, first.secret_key_sealed);
+        assert!(!kept.enabled);
+        assert_eq!(hook.sealed(), 1);
+        let set = audit(&kv, "s3_sink_set").await;
+        assert!(
+            set.iter().any(|o| o.contains(r#""secret":"kept""#)),
+            "{set:?}"
+        );
+
+        // A new secret replaces it; `enabled` defaults to true again.
+        let (s, v) = put_sink(&st, "acme", with_secret(sink("lake"), "rotated-secret")).await;
+        assert_eq!((s, v["enabled"].clone()), (StatusCode::OK, json!(true)));
+        let rotated = sink_row(&kv, cluster).await.unwrap().value;
+        assert!(rotated.secret_key_sealed.starts_with("sealed:2:"));
+        assert!(
+            rotated.config.get("prefix").is_none(),
+            "replaced, not merged"
+        );
+    }
+
+    /// The bus may send a call twice: the same request leaves the same sink.
+    /// One with a secret re-seals it and moves the revision (a rotation looks
+    /// exactly like a repeat, and the broker must see a rotation); one
+    /// without writes nothing and answers the very same.
+    #[tokio::test]
+    async fn an_s3_put_repeats_quietly() {
+        let hook = Arc::new(FakeS3::default());
+        let (st, kv, a) = s3_world(hook.clone()).await;
+        let cluster = id(&a["cluster_id"]);
+        let body = with_secret(sink("lake"), SECRET);
+        let (s1, mut v1) = put_sink(&st, "acme", body.clone()).await;
+        let r1 = sink_row(&kv, cluster).await.unwrap().value;
+        let (s2, mut v2) = put_sink(&st, "acme", body).await;
+        let r2 = sink_row(&kv, cluster).await.unwrap().value;
+        assert_eq!((s1, s2), (StatusCode::OK, StatusCode::OK));
+        assert_ne!(r1.secret_key_sealed, r2.secret_key_sealed, "sealed afresh");
+        assert!(
+            r2.updated_at_us > r1.updated_at_us,
+            "a written secret moves the revision"
+        );
+        assert_eq!((&r1.config, r1.enabled), (&r2.config, r2.enabled));
+        let last = v2.clone();
+        for v in [&mut v1, &mut v2] {
+            v.as_object_mut().unwrap().remove("updatedAt");
+        }
+        assert_eq!(v1, v2, "the same sink but for its revision");
+
+        let version = sink_row(&kv, cluster).await.unwrap().version;
+        let ops = kv.keys(ns::OPS).len();
+        for _ in 0..2 {
+            let (s, v) = put_sink(&st, "acme", sink("lake")).await;
+            assert_eq!((s, &v), (StatusCode::OK, &last));
+        }
+        assert_eq!(sink_row(&kv, cluster).await.unwrap().version, version);
+        assert_eq!(
+            kv.keys(ns::OPS).len(),
+            ops,
+            "nothing changed: nothing written"
+        );
+        assert_eq!(hook.sealed(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_brokers_refusal_is_a_400_with_its_sentence_and_writes_nothing() {
+        let hook = Arc::new(FakeS3::default());
+        let (st, kv, _) = s3_world(hook.clone()).await;
+        let ops = kv.keys(ns::OPS).len();
+        let (s, v) = put_sink(&st, "acme", with_secret(sink("my lake"), SECRET)).await;
+        assert_eq!(
+            (s, v),
+            (
+                StatusCode::BAD_REQUEST,
+                json!({"error": "bucket is not a bucket name: one name, no slash, no space", "code": "invalid"})
+            )
+        );
+        assert_eq!(hook.sealed(), 0, "checked before anything is sealed");
+        assert!(kv.keys(ns::S3SINKS).is_empty());
+        assert_eq!(kv.keys(ns::OPS).len(), ops);
+    }
+
+    /// The hook's sentence is the answer when it names the key, else ours
+    /// carries it; the secret is scrubbed out of either.
+    #[tokio::test]
+    async fn a_cell_without_an_encryption_key_refuses_a_secret_and_writes_nothing() {
+        let cases = [
+            (
+                "QUEEN_ENCRYPTION_KEY is not set: cannot seal {secret}",
+                "QUEEN_ENCRYPTION_KEY is not set: cannot seal ***".to_string(),
+            ),
+            (
+                "sealing {secret} failed",
+                "this cell has no QUEEN_ENCRYPTION_KEY, and an S3 secret is only ever stored \
+                 sealed with it: set QUEEN_ENCRYPTION_KEY (the same on every node) and retry \
+                 (sealing *** failed)"
+                    .to_string(),
+            ),
+        ];
+        for (refusal, want) in cases {
+            let hook = Arc::new(FakeS3 {
+                no_key: Some(refusal),
+                ..Default::default()
+            });
+            let (st, kv, _) = s3_world(hook).await;
+            let ops = kv.keys(ns::OPS).len();
+            let (s, v) = put_sink(&st, "acme", with_secret(sink("lake"), SECRET)).await;
+            assert_eq!(
+                (s, v),
+                (
+                    StatusCode::CONFLICT,
+                    json!({"error": want, "code": "encryption_required"})
+                )
+            );
+            assert!(kv.keys(ns::S3SINKS).is_empty());
+            assert_eq!(kv.keys(ns::OPS).len(), ops);
+        }
+    }
+
+    /// A body the surface refuses is a 400 that never quotes the body, and
+    /// nothing named like a secret is ever stored in clear.
+    #[tokio::test]
+    async fn malformed_s3_bodies_are_400_and_never_quote_the_secret() {
+        let hook = Arc::new(FakeS3::default());
+        let (st, kv, _) = s3_world(hook.clone()).await;
+        let mut big = with_secret(sink("lake"), SECRET);
+        big["queues"] = json!("q,".repeat(data::S3_CONFIG_MAX_BYTES / 2));
+        let long = format!("{SECRET}{}", "x".repeat(MAX_S3_SECRET_BYTES));
+        let cases = [
+            with_secret(sink("lake"), &long),
+            json!([SECRET]),
+            json!(SECRET),
+            json!({"bucket": "lake", "secretKey": 42}),
+            json!({"bucket": "lake", "secretKey": "  "}),
+            json!({"bucket": "lake", "secretKey": [SECRET]}),
+            json!({"bucket": "lake", "secretKey": SECRET, "enabled": "yes"}),
+            json!({"bucket": "lake", "secret_key": SECRET}),
+            json!({"bucket": "lake", "secretKey": SECRET, "SecretAccessKey": SECRET}),
+            big,
+        ];
+        for body in cases {
+            let (s, v) = put_sink(&st, "acme", body.clone()).await;
+            assert_eq!(
+                (s, v["code"].clone()),
+                (StatusCode::BAD_REQUEST, json!("invalid")),
+                "{v}"
+            );
+            assert!(!v.to_string().contains(SECRET), "{v}");
+        }
+        // Not JSON at all.
+        let app = Router::new()
+            .nest("/api/cp", router())
+            .with_state(st.clone());
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/cp/clusters/acme/s3")
+            .header("x-queen-cp-token", TOKEN)
+            .body(Body::from(format!(r#"{{"secretKey": "{SECRET}"#)))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let text = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&text).contains(SECRET));
+        assert!(kv.keys(ns::S3SINKS).is_empty());
+        assert!(hook.validated.lock().unwrap().is_empty() && hook.sealed() == 0);
+    }
+
+    /// The existing rule: no sink acts on the broker's default tenant or the
+    /// proxy's own, nor on any while the tenant header is off. Reading and
+    /// removing touch only the proxy's own row.
+    #[tokio::test]
+    async fn no_s3_sink_is_set_on_a_reserved_tenant_or_with_the_tenant_header_off() {
+        for reserved in [DEFAULT_TENANT, schema::PROXY_TENANT] {
+            let hook = Arc::new(FakeS3::default());
+            let (st, kv, a) = s3_world(hook.clone()).await;
+            rebind(&kv, id(&a["cluster_id"]), reserved).await;
+            let (s, v) = put_sink(&st, "acme", with_secret(sink("lake"), SECRET)).await;
+            assert_eq!(
+                (s, v["code"].clone()),
+                (StatusCode::CONFLICT, json!("system_tenant")),
+                "{reserved}: {v}"
+            );
+            assert!(kv.keys(ns::S3SINKS).is_empty());
+            assert!(hook.validated.lock().unwrap().is_empty() && hook.sealed() == 0);
+            let (s, v) = call(&st, "GET", "/api/cp/clusters/acme/s3", None).await;
+            assert_eq!(
+                (s, v["code"].clone()),
+                (StatusCode::NOT_FOUND, json!("s3_unset"))
+            );
+            let (s, v) = call(&st, "DELETE", "/api/cp/clusters/acme/s3", None).await;
+            assert_eq!((s, v["removed"].clone()), (StatusCode::OK, json!(false)));
+        }
+
+        let (store, kv) = seeded("inprocess://self", None).await;
+        let mut cfg = crate::config::test_config(&[]);
+        cfg.send_tenant_header = false;
+        let hook: Arc<dyn S3Sinks> = Arc::new(FakeS3::default());
+        let st = st_full(store, Upstream::InProcess(Router::new()), cfg, Some(hook));
+        provisioned(
+            &st,
+            prov("acme", "acme", Uuid::new_v4(), "a@acme.io", &hash(1)),
+        )
+        .await;
+        let (s, v) = put_sink(&st, "acme", with_secret(sink("lake"), SECRET)).await;
+        assert_eq!(
+            (s, v["code"].clone()),
+            (StatusCode::CONFLICT, json!("system_tenant"))
+        );
+        assert!(kv.keys(ns::S3SINKS).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_cluster_is_404_on_every_s3_route() {
+        let (st, kv, _) = s3_world(Arc::new(FakeS3::default())).await;
+        let body = with_secret(sink("lake"), SECRET);
+        for (method, body) in [("PUT", Some(body)), ("GET", None), ("DELETE", None)] {
+            let (s, v) = call(&st, method, "/api/cp/clusters/nope/s3", body.clone()).await;
+            assert_eq!(
+                (s, v["code"].clone()),
+                (StatusCode::NOT_FOUND, json!("cluster_unknown")),
+                "{method}"
+            );
+            let (s, v) = call(&st, method, "/api/cp/clusters/Bad_Slug/s3", body).await;
+            assert_eq!(
+                (s, v["code"].clone()),
+                (StatusCode::BAD_REQUEST, json!("invalid")),
+                "{method}"
+            );
+        }
+        assert!(kv.keys(ns::S3SINKS).is_empty());
+    }
+
+    /// A broker built without the sink has no S3 routes: 404 `s3_unavailable`
+    /// behind the same token.
+    #[tokio::test]
+    async fn without_the_brokers_sink_the_s3_routes_are_404() {
+        let (st, kv, _) = world().await;
+        provisioned(
+            &st,
+            prov("acme", "acme", Uuid::new_v4(), "a@acme.io", &hash(1)),
+        )
+        .await;
+        let body = with_secret(sink("lake"), SECRET);
+        for (method, body) in [("PUT", Some(body)), ("GET", None), ("DELETE", None)] {
+            let uri = "/api/cp/clusters/acme/s3";
+            let (s, v) = call(&st, method, uri, body.clone()).await;
+            assert_eq!(
+                (s, v["code"].clone()),
+                (StatusCode::NOT_FOUND, json!("s3_unavailable")),
+                "{method}: {v}"
+            );
+            let wrong = [("x-queen-cp-token", "wrong")];
+            let (s, _) = call_with(&st, method, uri, body, &wrong).await;
+            assert_eq!(s, StatusCode::UNAUTHORIZED, "{method}: the token first");
+        }
+        assert!(kv.keys(ns::S3SINKS).is_empty());
+    }
+
+    /// A wipe gets no sink, and the sinks of a tenant go with its purge and
+    /// with its delete; a neighbour keeps its own.
+    #[tokio::test]
+    async fn a_wipe_refuses_an_s3_sink_and_the_purge_and_the_delete_remove_them() {
+        let hook = Arc::new(FakeS3::default());
+        let (st, kv, a) = s3_world(hook).await;
+        let (s, c2) = call(
+            &st,
+            "POST",
+            "/api/cp/clusters",
+            Some(json!({"tenant_slug": "acme", "slug": "acme-2"})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{c2}");
+        let b = provisioned(
+            &st,
+            prov("beta", "beta", Uuid::new_v4(), "b@beta.io", &hash(2)),
+        )
+        .await;
+        for slug in ["acme", "acme-2", "beta"] {
+            let (s, v) = put_sink(&st, slug, with_secret(sink("lake"), SECRET)).await;
+            assert_eq!(s, StatusCode::OK, "{slug}: {v}");
+        }
+        let beta_row = vec![schema::key(id(&b["cluster_id"]))];
+        assert_eq!(kv.keys(ns::S3SINKS).len(), 3);
+
+        // A cluster being deleted gets no sink...
+        let c2_status = format!("/api/cp/clusters/{}/status", c2["id"].as_str().unwrap());
+        call(&st, "PUT", &c2_status, Some(json!({"status": "deleting"}))).await;
+        let (s, v) = put_sink(&st, "acme-2", with_secret(sink("lake"), SECRET)).await;
+        assert_eq!(
+            (s, v["code"].clone()),
+            (StatusCode::CONFLICT, json!("deleting")),
+            "{v}"
+        );
+        call(&st, "PUT", &c2_status, Some(json!({"status": "active"}))).await;
+
+        // ...nor does one whose tenant is; reading and removing still answer.
+        call(
+            &st,
+            "PUT",
+            "/api/cp/tenants/acme/status",
+            Some(json!({"status": "deleting"})),
+        )
+        .await;
+        let before = sink_row(&kv, id(&a["cluster_id"])).await.unwrap();
+        let (s, v) = put_sink(&st, "acme", sink("other")).await;
+        assert_eq!(
+            (s, v["code"].clone()),
+            (StatusCode::CONFLICT, json!("deleting")),
+            "{v}"
+        );
+        let after = sink_row(&kv, id(&a["cluster_id"])).await.unwrap();
+        assert_eq!(after.version, before.version, "nothing written");
+        let (s, _) = call(&st, "GET", "/api/cp/clusters/acme/s3", None).await;
+        assert_eq!(s, StatusCode::OK);
+
+        // The purge removes the tenant's sinks, and only the tenant's.
+        let (s, v) = call(&st, "POST", "/api/cp/tenants/acme/purge", None).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(kv.keys(ns::S3SINKS), beta_row);
+
+        // A row a cut-short wipe left behind goes with the tenant's delete.
+        kv::write(
+            kv.as_ref(),
+            vec![kv::put_op(
+                ns::S3SINKS,
+                &schema::key(id(&a["cluster_id"])),
+                &before.value,
+                Expect::Any,
+                Ttl::Forever,
+                false,
+            )],
+        )
+        .await
+        .unwrap();
+        let (s, v) = call(&st, "DELETE", "/api/cp/tenants/acme", None).await;
+        assert_eq!(
+            (s, v["existed"].clone()),
+            (StatusCode::OK, json!(true)),
+            "{v}"
+        );
+        assert_eq!(kv.keys(ns::S3SINKS), beta_row);
+
+        // A forced delete, no purge first: the cascade alone removes it.
+        let (s, v) = call(&st, "DELETE", "/api/cp/tenants/beta?force=true", None).await;
+        assert_eq!(
+            (s, v["existed"].clone()),
+            (StatusCode::OK, json!(true)),
+            "{v}"
+        );
+        assert!(kv.keys(ns::S3SINKS).is_empty());
     }
 }

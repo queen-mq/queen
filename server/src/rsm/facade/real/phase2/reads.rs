@@ -10,6 +10,7 @@ use super::positions::pct_decode;
 use super::{query_map, read_error, ApiOut, ApiReq, Effect, RaftFacade, ReqCtx, RsmError};
 use crate::frames::{unpack_frames_ref, uuid_bytes_to_string, uuid_string_to_bytes};
 use crate::rsm::effect::{Pid, TraceEvent};
+use crate::rsm::facade::{ChangedAnswer, ChangedAsk, ChangedPartition, PartitionsChanged};
 use crate::rsm::planner::bucket_of;
 use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::store::keys;
@@ -304,13 +305,40 @@ impl RaftFacade {
         max_wait_ms: u64,
         min_bytes: usize,
     ) -> Result<Vec<crate::rsm::facade::RecordsFetched>, RsmError> {
+        self.fetch_typed(ctx, entries, max_wait_ms, min_bytes, false)
+            .await
+    }
+
+    /// [`crate::rsm::facade::Rsm::fetch_log`]: [`Self::fetch_records_impl`]
+    /// with each record's transaction id, read as the route reads it.
+    pub(in crate::rsm::facade::real) async fn fetch_log_impl(
+        &self,
+        ctx: ReqCtx,
+        entries: Vec<crate::rsm::facade::RecordFetch>,
+        max_wait_ms: u64,
+        min_bytes: usize,
+    ) -> Result<Vec<crate::rsm::facade::RecordsFetched>, RsmError> {
+        self.fetch_typed(ctx, entries, max_wait_ms, min_bytes, true)
+            .await
+    }
+
+    /// The typed fetches: the route's count ceiling and wait cap, then the
+    /// route's own [`Self::fetch_wait`].
+    async fn fetch_typed(
+        &self,
+        ctx: ReqCtx,
+        entries: Vec<crate::rsm::facade::RecordFetch>,
+        max_wait_ms: u64,
+        min_bytes: usize,
+        want_txn: bool,
+    ) -> Result<Vec<crate::rsm::facade::RecordsFetched>, RsmError> {
         if entries.len() > 1024 {
             return Err(RsmError::Rejected {
                 code: "bad_body".into(),
                 message: "too many entries".into(),
             });
         }
-        self.fetch_wait(&ctx, &entries, max_wait_ms.min(30_000), min_bytes, false)
+        self.fetch_wait(&ctx, &entries, max_wait_ms.min(30_000), min_bytes, want_txn)
             .await
     }
 
@@ -488,11 +516,20 @@ impl RaftFacade {
         .map_err(|e| RsmError::Internal(format!("fetch read task: {e}")))?
     }
 
+    /// `POST /api/v1/partitions/changed`: the body read into [`ChangedAsk`]s,
+    /// the read [`crate::rsm::facade::Rsm::partitions_changed`] makes
+    /// ([`Self::changed_read`]), the answer rendered. The whole request is
+    /// refused (400) above [`CHANGED_MAX_ENTRIES`] entries and for a `since`
+    /// that is not a timestamp — the 1.5.0 handler refused a malformed one
+    /// too, and reading it as "no since" would turn a caller's incremental
+    /// pass into a full listing without a word. Everything else is answered
+    /// per entry.
     pub(super) async fn api_partitions_changed(
         &self,
         ctx: ReqCtx,
         body: &[u8],
     ) -> Result<ApiOut, RsmError> {
+        use crate::rsm::planner::timers::iso_us;
         let root: Value =
             serde_json::from_slice(body).map_err(|e| super::rejected("bad_body", e))?;
         let entries = root
@@ -500,52 +537,177 @@ impl RaftFacade {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if entries.len() > 1024 {
+        if entries.len() > CHANGED_MAX_ENTRIES {
             return Ok(ApiOut::json(
                 400,
                 json!({"error":"too many entries"}).to_string(),
             ));
         }
+        let mut asks = Vec::with_capacity(entries.len());
+        for (i, e) in entries.iter().enumerate() {
+            let since_us = match e.get("since") {
+                None | Some(Value::Null) => None,
+                Some(v) => match v
+                    .as_str()
+                    .and_then(crate::rsm::dashboard::model::parse_ts_us)
+                {
+                    Some(us) => Some(us),
+                    None => {
+                        return Ok(ApiOut::json(
+                            400,
+                            json!({
+                                "error": format!(
+                                    "bad body: entry {i}: since is not a timestamp: {v}"
+                                )
+                            })
+                            .to_string(),
+                        ))
+                    }
+                },
+            };
+            asks.push(ChangedAsk {
+                queue: e
+                    .get("queue")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                since_us,
+                after: match e.get("after") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(s)) => Some(s.clone()),
+                    // Never a cursor this broker issued: BAD_CURSOR.
+                    Some(other) => Some(other.to_string()),
+                },
+                limit: e
+                    .get("limit")
+                    .and_then(Value::as_i64)
+                    .map_or(CHANGED_MAX_LIMIT, |l| {
+                        l.clamp(1, CHANGED_MAX_LIMIT as i64) as usize
+                    }),
+            });
+        }
+        let queues: Vec<String> = asks.iter().map(|a| a.queue.clone()).collect();
+        let answer = self.changed_read(&ctx, asks).await?;
+        let entries: Vec<Value> = queues
+            .into_iter()
+            .zip(answer.entries)
+            .map(|(queue, a)| match a.error {
+                Some(error) => json!({"queue": queue, "error": error}),
+                None => json!({
+                    "queue": queue,
+                    "partitions": a.partitions.into_iter().map(|p| json!({
+                        "name": p.name,
+                        "id": p.id,
+                        "lastOffset": p.last_offset,
+                        "logStart": p.log_start,
+                        "lastWriteAt": iso_us(p.last_write_at_us),
+                    })).collect::<Vec<_>>(),
+                    "next": a.next,
+                }),
+            })
+            .collect();
+        Ok(ApiOut::json(
+            200,
+            json!({
+                "safeTime": iso_us(answer.safe_time_us),
+                "safeTimeDegraded": false,
+                "entries": entries,
+            })
+            .to_string(),
+        ))
+    }
+
+    /// [`crate::rsm::facade::Rsm::partitions_changed`]: the route's count
+    /// ceiling, then the route's own read.
+    pub(in crate::rsm::facade::real) async fn partitions_changed_impl(
+        &self,
+        ctx: ReqCtx,
+        asks: Vec<ChangedAsk>,
+    ) -> Result<PartitionsChanged, RsmError> {
+        if asks.len() > CHANGED_MAX_ENTRIES {
+            return Err(RsmError::Rejected {
+                code: "bad_body".into(),
+                message: "too many entries".into(),
+            });
+        }
+        self.changed_read(&ctx, asks).await
+    }
+
+    /// The read of a discovery call, the route's and the typed one alike: ONE
+    /// store read in one blocking task, `safeTime` first, then one page per
+    /// ask ([`changed_page`]).
+    async fn changed_read(
+        &self,
+        ctx: &ReqCtx,
+        asks: Vec<ChangedAsk>,
+    ) -> Result<PartitionsChanged, RsmError> {
         let store = self.store.clone();
         let tenant = ctx.tenant.clone();
-        let out = tokio::task::spawn_blocking(move || store.read(|r| {
-            let mut answer = Vec::with_capacity(entries.len());
-            for e in entries {
-                let queue = e.get("queue").and_then(Value::as_str).unwrap_or("");
-                if r.queue(&tenant, queue)?.is_none() {
-                    answer.push(json!({"queue":queue,"error":"UNKNOWN_TOPIC_OR_PARTITION"}));
-                    continue;
-                }
-                let since = e.get("since").and_then(Value::as_str).and_then(crate::util::parse_iso_ms).map(|v|v*1000);
-                let after = e.get("after").and_then(Value::as_str);
-                let limit = e.get("limit").and_then(Value::as_u64).unwrap_or(1000).clamp(1,1000) as usize;
-                let mode = if since.is_some() { 't' } else { 'n' };
-                let cursor = parse_changed_cursor(after, mode);
-                if after.is_some() && cursor.is_none() {
-                    answer.push(json!({"queue":queue,"error":"BAD_CURSOR"})); continue;
-                }
-                let mut rows = Vec::new();
-                r.scan_queue_partitions(&tenant, queue, None, usize::MAX, &mut |pid| {
-                    if let Ok(Some(p)) = r.partition(pid) {
-                        let keep = match since { Some(s) => p.last_write_at_us >= s, None => true };
-                        if keep { rows.push(p); }
-                    }
-                    true
-                })?;
-                if mode == 't' { rows.sort_by(|a,b|(a.last_write_at_us,&a.partition).cmp(&(b.last_write_at_us,&b.partition))); }
-                else { rows.sort_by(|a,b|a.partition.cmp(&b.partition)); }
-                let rows: Vec<_> = rows.into_iter().filter(|p| match &cursor {
-                    Some((_, ts, name)) if mode == 't' => (p.last_write_at_us, &p.partition) > (*ts, name),
-                    Some((_, _, name)) => p.partition > *name,
-                    None => true,
-                }).take(limit).collect();
-                let next = if rows.len() == limit { rows.last().map(|p| if mode=='t' { format!("t|{}|{}",p.last_write_at_us,p.partition) } else { format!("n|{}",p.partition) }) } else { None };
-                let parts:Vec<Value>=rows.into_iter().map(|p|json!({"name":p.partition,"lastOffset":p.last_offset,"logStart":p.log_start,"lastWriteAt":crate::rsm::planner::timers::iso_us(p.last_write_at_us)})).collect();
-                answer.push(json!({"queue":queue,"partitions":parts,"next":next}));
-            }
-            Ok(answer)
-        })).await.map_err(|e| RsmError::Internal(format!("partitions changed: {e}")))?.map_err(read_error)?;
-        Ok(ApiOut::json(200, json!({"safeTime":crate::rsm::planner::timers::iso_us(super::super::wall_micros()),"safeTimeDegraded":false,"entries":out}).to_string()))
+        tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                // safeTime: the greatest stamp this node has APPLIED, read
+                // FIRST — before any queue or partition row. Every record
+                // this node has not applied yet is stamped strictly above it,
+                // so every record stamped at or below it is in the rows read
+                // below and readable by a fetch here: a reader may close a
+                // time window at it and lose nothing. (The wall clock at the
+                // answer, which this replaced, is not that: a record is
+                // stamped when it is PLANNED and visible once it is APPLIED,
+                // so a planned, older-stamped record could still be on its
+                // way.) Each step, and where it is enforced:
+                //
+                // 1. The applied clock only moves forward along the log:
+                //    apply refuses an entry whose `now_us` is below the last
+                //    applied one (`Applier::gates`, TimeWentBackwards, I5,
+                //    rsm/apply.rs), and `meta.max_created_at_us` only rises
+                //    (the Append arm of rsm/apply_shard.rs).
+                // 2. A record is stamped at or above its entry's clock: a
+                //    push stamps `created_at = max(now_us, the partition's
+                //    last created_at + 1)` (`Planner::plan_push_known`,
+                //    rsm/planner/push.rs), the one place an Append is built.
+                // 3. An entry's clock is above every stamp before it in the
+                //    log: a cycle is stamped with `Committed::plan_now` =
+                //    max(wall, last applied now_us + 1, max_created_at + 1)
+                //    (rsm/state/mod.rs), lifted above every entry still in
+                //    flight — `Overlay::plan_now` (rsm/planner/mod.rs), and
+                //    with lanes "L2: one clock for the cycle" over every
+                //    in-flight `now_us` and `created_hi`
+                //    (rsm/batcher_lanes.rs) — and a new leader plans only
+                //    after it applied the first entry of its own term, hence
+                //    every entry of the terms before (I13, `RunState::on_role`,
+                //    rsm/batcher.rs).
+                //    So by 2 and 3 every record of an entry not applied here
+                //    is stamped strictly above both values read now.
+                // 4. What is read below is at least as new as these two
+                //    values: every keyspace is RAM, read LIVE by every handle
+                //    under the tables' locks (`Keyspace::is_ram`, the "Phase
+                //    C" section of rsm/store/mod.rs), and apply writes these
+                //    meta rows at the end of each entry — after its effects,
+                //    after its payload bytes became readable (the segment
+                //    and qlog flushes), just before the applied index
+                //    (`Applier::execute`, rsm/apply.rs). A partition row read
+                //    after them holds every record of every entry they
+                //    reflect.
+                //
+                // A follower is the same argument at its own applied index.
+                // The value is the serving node's: pair it with reads served
+                // by the same node (pages from several nodes: their minimum).
+                // It moves only when an entry applies, so an idle node answers
+                // the same safeTime until the next write. Never degraded.
+                let safe_time_us = r.last_now_us()?.max(r.max_created_at_us()?);
+                let entries = asks
+                    .iter()
+                    .map(|ask| changed_page(r, &tenant, ask))
+                    .collect::<crate::rsm::store::Result<Vec<_>>>()?;
+                Ok(PartitionsChanged {
+                    safe_time_us,
+                    entries,
+                })
+            })
+        })
+        .await
+        .map_err(|e| RsmError::Internal(format!("partitions changed: {e}")))?
+        .map_err(read_error)
     }
 
     /// `GET /api/v1/messages`: the messages created in `[from, to)` (default
@@ -1901,14 +2063,116 @@ fn trace_json(e: TraceEvent, location: Option<(String, String)>) -> Value {
     })
 }
 
-fn parse_changed_cursor(raw: Option<&str>, mode: char) -> Option<(char, i64, String)> {
+/// Queues per discovery call. Above it the whole call is refused rather than
+/// cut short: a dropped entry would leave its caller waiting on a queue
+/// nobody looked at.
+const CHANGED_MAX_ENTRIES: usize = 1024;
+
+/// Partitions per discovery page: the default, and the ceiling `limit` is
+/// clamped to (never refused).
+const CHANGED_MAX_LIMIT: usize = 1000;
+
+/// One discovery page of `ask.queue`: its partitions in pid order (creation
+/// order), the first `limit` after the cursor's pid that pass `since`
+/// (`last_write_at_us >= since`), and the cursor of the next page.
+///
+/// Walks the queue's pid index ([`TypedReads::scan_queue_partitions`]) from
+/// just past the cursor and stops at the page's last match, so a COMPLETE pass
+/// — every page of one ask until `next` is `None` — reads each partition row
+/// of the queue once, with or without `since`: one scan per pass, whatever the
+/// page size, where sorting every partition on every page cost
+/// O(partitions × pages). The answer is O(what matched). A pid only grows, so
+/// a partition created during a pass is past the cursor and the pass still
+/// meets it; none is ever behind it. Partitions being deleted (in the garbage
+/// set) are skipped, as every reader skips them.
+///
+/// The cursor is `p|<pid of the page's last partition>`, issued exactly when
+/// the page is full. It is opaque to the caller: anything else — the 1.x
+/// `n|name` and `t|micros|name` ones included — is `BAD_CURSOR`, after the
+/// unknown queue check.
+fn changed_page<R: Reads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    ask: &ChangedAsk,
+) -> crate::rsm::store::Result<ChangedAnswer> {
+    if r.queue(tenant, &ask.queue)?.is_none() {
+        return Ok(ChangedAnswer {
+            error: Some("UNKNOWN_TOPIC_OR_PARTITION"),
+            ..ChangedAnswer::default()
+        });
+    }
+    let after = match parse_changed_cursor(ask.after.as_deref()) {
+        Ok(after) => after,
+        Err(error) => {
+            return Ok(ChangedAnswer {
+                error: Some(error),
+                ..ChangedAnswer::default()
+            })
+        }
+    };
+    let from = match after {
+        None => None,
+        Some(pid) => match pid.checked_add(1) {
+            Some(next) => Some(next),
+            // Nothing can come after the last pid there is.
+            None => return Ok(ChangedAnswer::default()),
+        },
+    };
+    let limit = ask.limit.clamp(1, CHANGED_MAX_LIMIT);
+    let mut partitions = Vec::new();
+    let mut last: Pid = 0;
+    let mut failed = None;
+    r.scan_queue_partitions(tenant, &ask.queue, from, usize::MAX, &mut |pid| {
+        let row = match r.is_garbage(pid) {
+            Ok(true) => Ok(None),
+            Ok(false) => r.partition(pid),
+            Err(e) => Err(e),
+        };
+        match row {
+            Ok(Some(p)) => {
+                if ask.since_us.is_none_or(|s| p.last_write_at_us >= s) {
+                    partitions.push(ChangedPartition {
+                        id: uuid_bytes_to_string(&p.uuid),
+                        name: p.partition,
+                        last_offset: p.last_offset,
+                        log_start: p.log_start,
+                        last_write_at_us: p.last_write_at_us,
+                    });
+                    last = pid;
+                }
+                partitions.len() < limit
+            }
+            Ok(None) => true,
+            Err(e) => {
+                failed = Some(e);
+                false
+            }
+        }
+    })?;
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    let next = (partitions.len() >= limit).then(|| format!("p|{last}"));
+    Ok(ChangedAnswer {
+        partitions,
+        next,
+        error: None,
+    })
+}
+
+/// The pid a discovery page resumes after: `None` with no cursor (absent or
+/// `""`), the pid of a `p|<decimal pid>` cursor, `BAD_CURSOR` for anything
+/// else.
+fn parse_changed_cursor(raw: Option<&str>) -> Result<Option<Pid>, &'static str> {
+    const BAD: &str = "BAD_CURSOR";
     match raw {
-        None => Some((mode, 0, String::new())),
-        Some(s) if mode == 'n' => s.strip_prefix("n|").map(|n| ('n', 0, n.to_string())),
+        None | Some("") => Ok(None),
         Some(s) => {
-            let rest = s.strip_prefix("t|")?;
-            let (ts, name) = rest.split_once('|')?;
-            Some(('t', ts.parse().ok()?, name.to_string()))
+            let digits = s.strip_prefix("p|").ok_or(BAD)?;
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(BAD);
+            }
+            digits.parse::<Pid>().map(Some).map_err(|_| BAD)
         }
     }
 }

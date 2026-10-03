@@ -132,6 +132,9 @@ pub struct AppState {
     pub meter: std::sync::Arc<crate::meter::Meter>,
     pub registry: crate::registry::Registry,
     pub keys: crate::auth::Keys,
+    /// The broker's S3 sink hook (`/api/cp/clusters/:slug/s3`); `None` on a
+    /// broker built without the sink.
+    pub s3: Option<Arc<dyn crate::s3::S3Sinks>>,
 }
 
 pub type St = Arc<AppState>;

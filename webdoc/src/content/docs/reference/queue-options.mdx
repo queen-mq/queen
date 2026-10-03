@@ -14,6 +14,8 @@ sourceOfTruth:
   - server/src/rsm/planner/push.rs
   - server/src/rsm/planner/ack.rs
   - server/src/rsm/maintenance.rs
+# sourceOfTruth re-read 2026-10-02 (through 8a0faff0 + working tree): retentionSinkHold and retentionSinkHoldMaxSeconds are documented, now that the in-process S3 sink writes the commit pointer the hold reads.
+# sourceOfTruth re-read 2026-10-02, second pass (working tree): one S3 sink per broker tenant; the hold reads the commit pointer in the queue's own tenant (maintenance.rs sink_floor), and a control-plane sink names itself with its sink setting.
 digest: >-
   `POST /api/v1/configure` MERGES: omitted keys are kept, `"mode":"replace"` resets the rest to
   defaults, and a `null` for a numeric or boolean option is refused with 400. Integer seconds:
@@ -39,7 +41,7 @@ Four rules cover every option on this page:
 | --- | --- |
 | the key is absent | the value the queue already had |
 | the key is present with a value | that value |
-| the key is present with `null` | refused with `400` (`"<key> must be an integer"`, or `boolean`) for a numeric or boolean option, and nothing is written; `""` for `namespace` and `task` |
+| the key is present with `null` | refused with `400` (`"<key> must be an integer"`, or `boolean`) for a numeric or boolean option, and nothing is written; `""` for `namespace`, `task` and `retentionSinkHold` |
 | top-level `"mode": "replace"` | every option rebuilt from defaults, so anything the body omits goes back to its default |
 
 <Aside type="caution">
@@ -136,6 +138,8 @@ knowing before you reach for `maxSize` expecting back pressure, or for
 | `retentionSeconds` | integer (s) | `0` | Maintenance, rule 1 |
 | `completedRetentionSeconds` | integer (s) | `0` | Maintenance, rule 2 |
 | `maxWaitTimeSeconds` | integer (s) | `0` | Maintenance, independently of `retentionEnabled` |
+| `retentionSinkHold` | string | `""` | Maintenance, flooring rules 1 and 2 at what the named S3 sink committed |
+| `retentionSinkHoldMaxSeconds` | integer (s) | `604800` | Maintenance, the cap on that hold |
 | `encryptionEnabled` | boolean | `false` | Push, if a valid key is configured |
 | `dedupWindowSeconds` | integer (s) | `3600` | Push, before an offset is allocated |
 
@@ -317,6 +321,28 @@ left behind the new start resume at the next existing offset.
 Use it when stale data is worse than lost data: a live telemetry lane where a
 message older than the window has no value. Do not use it as a retention policy
 for anything you would want to audit.
+
+## retentionSinkHold and retentionSinkHoldMaxSeconds: wait for the lake
+
+**Type** string, and integer seconds. **Default** `""` (off), and `604800` (seven
+days) from `/configure`; a queue created by a push stores `0`, which a later
+`/configure` reads as the default.
+
+The name of an [S3 sink](/deploy/s3) (`QUEEN_S3_SINK`, or the `sink` setting of
+a tenant's sink from the control plane) that mirrors this queue into a bucket.
+With it set, `retentionSeconds` and `completedRetentionSeconds` delete nothing
+stamped after the later of two instants: the end of the last window that sink
+committed for the queue, read from the queue's own tenant, less a minute, and now less
+`retentionSinkHoldMaxSeconds`. So retention cannot delete what the lake does not
+have yet, and a stopped sink cannot hold it back for longer than the cap. Until
+the sink has committed anything the cap alone applies, so the hold protects from
+the moment it is set.
+
+`retentionSinkHold` must match `[A-Za-z0-9._-]{0,64}` and
+`retentionSinkHoldMaxSeconds` must lie between 60 and 31,536,000; anything else
+is refused with `400` and nothing is written. `maxWaitTimeSeconds` and the
+deduplication index are not held. Changing either option applies from the next
+maintenance pass.
 
 ## encryptionEnabled: encryption at rest
 

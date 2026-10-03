@@ -1,0 +1,84 @@
+[package]
+name = "queen-s3"
+# The crate's own version line, as protocols/queen-kafka keeps its own: the
+# broker links it as a path dependency and does not version it. 2.0.0 is the
+# sink in-process on the raft broker; 1.5.0 named the standalone sink of the
+# PostgreSQL broker, a different implementation. The version is also the
+# `queen-s3/<version>` every intent and manifest names as its writer and the
+# boot line and status report, so a bump changes no object byte, only that
+# string.
+version = "2.0.0"
+edition = "2021"
+# Same floor as server/Cargo.toml: this library is compiled into the broker.
+rust-version = "1.88"
+description = "S3 / data-lake sink for QueenMQ, linked into the broker: reads each queue's replicated log in place and writes open-format objects (JSONL, Parquet) under a Hive layout, exactly once, at any partition cardinality."
+license = "Apache-2.0"
+homepage = "https://queenmq.com"
+repository = "https://github.com/queen-mq/queen"
+publish = false
+
+# A library only. The broker links it (feature `s3`, server/src/s3_inproc.rs)
+# and runs `queen_s3::Sink` in-process on every node of the cluster; there is
+# no standalone binary any more.
+[lib]
+name = "queen_s3"
+path = "src/lib.rs"
+
+# Every dependency names the module that uses it. The set is fixed by the five
+# verbs of the bucket and the two writers; the broker side is a trait the broker
+# implements (src/queen.rs `QueenApi`), so nothing here speaks to the broker.
+[dependencies]
+# Same pin and feature set as server/ and the facades, so the broker build
+# resolves one tokio.
+tokio = { version = "1", features = ["full"] }
+# The S3 API client (src/s3/client.rs). Same crate, features and rationale as
+# protocols/queen-kafka/Cargo.toml: rustls with the `ring` provider, no OpenSSL
+# on the host, no cmake in the build. The broker already compiles this exact
+# set through the Kafka facade, so the sink adds no second TLS stack.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "http2",
+    "charset",
+] }
+serde = { version = "1", features = ["derive"] }
+# `raw_value`: a payload is spliced through untouched (src/types.rs `Record`,
+# src/writer/jsonl.rs). Parsing it into a tree would be the loader-CPU trap the
+# 1M msg/s campaign hit.
+serde_json = { version = "1", features = ["raw_value"] }
+bytes = "1"
+# Object compression (src/writer/jsonl.rs, src/checkpoint.rs) — the crate the
+# whole repository pins for segment blobs.
+zstd = "0.13"
+# gzip for readers that do not take zstd JSON (src/writer/jsonl.rs).
+flate2 = "1"
+# SigV4 (src/s3/sigv4.rs): HMAC-SHA256 key derivation and hashes.
+hmac = "0.12"
+sha2 = "0.10"
+# Content-MD5 on single PUTs and ETag verification (src/s3/client.rs).
+md-5 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+# Parquet writer (src/writer/parquet.rs). NO default features: `arrow` is not
+# needed for a fixed five-column envelope written through the low-level
+# SerializedFileWriter API, and its tree is the whole cost. `zstd` resolves to
+# the same zstd crate as above; `snap` is pure Rust. rust-version 1.85 (verified
+# against the registry, 2026-09-04).
+parquet = { version = "59", default-features = false, features = ["zstd", "snap"] }
+# Backoff jitter and incarnation ids (src/s3/client.rs, src/lease.rs).
+rand = "0.8"
+# Log lines only. The library never installs a subscriber: the broker owns
+# tracing, and every line here lands in its output under target `queen-s3`.
+tracing = "0.1"
+
+[dev-dependencies]
+# `tokio::time::pause`/`advance` for the driver and sink tests; a library
+# dependency never gets test-util (Cargo unifies features per build, the
+# queen-kafka precedent).
+tokio = { version = "1", features = ["test-util"] }
+# tests/infra_s3_client.rs plays the bucket with a local axum server that
+# records every request. Tests only: the library serves nothing.
+axum = "0.7"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -154,6 +154,24 @@ impl Rsm for GroupRouter {
             .fetch_records(ctx, entries, max_wait_ms, min_bytes)
             .await
     }
+    async fn fetch_log(
+        &self,
+        ctx: ReqCtx,
+        entries: Vec<RecordFetch>,
+        max_wait_ms: u64,
+        min_bytes: usize,
+    ) -> Result<Vec<RecordsFetched>, RsmError> {
+        self.pick(&ctx.tenant)
+            .fetch_log(ctx, entries, max_wait_ms, min_bytes)
+            .await
+    }
+    async fn partitions_changed(
+        &self,
+        ctx: ReqCtx,
+        asks: Vec<ChangedAsk>,
+    ) -> Result<PartitionsChanged, RsmError> {
+        self.pick(&ctx.tenant).partitions_changed(ctx, asks).await
+    }
     async fn pop_wildcard(&self, ctx: ReqCtx, req: PopReq) -> Result<PopOut, RsmError> {
         self.pick(&ctx.tenant).pop_wildcard(ctx, req).await
     }

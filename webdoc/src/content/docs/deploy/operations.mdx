@@ -72,7 +72,9 @@ slowest consumer group's cursor, so one abandoned group pins the history for eve
 two ways to turn it back off are both explicit: send `retentionEnabled: false`, or send the whole
 configuration with `"mode": "replace"`, which is what `queenctl apply -f` does. A `null` value is
 refused with `400` rather than read as "restore the default". See
-[queue options](/reference/queue-options).
+[queue options](/reference/queue-options). A queue that the [S3 sink](/deploy/s3) mirrors can make
+both rules wait until the lake has a record, with `retentionSinkHold`
+([the retention hold](/deploy/s3#the-retention-hold)).
 
 The leader plans retention every `RETENTION_INTERVAL` ms, default 5000, as ordinary entries of the
 replicated log, so every node deletes the same messages. One pass is bounded by

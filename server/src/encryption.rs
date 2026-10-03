@@ -31,6 +31,13 @@ impl Encryption {
         Arc::new(Encryption { key: Some(key) })
     }
 
+    /// A cell with no `QUEEN_ENCRYPTION_KEY`, whatever this test process's
+    /// environment holds.
+    #[cfg(test)]
+    pub(crate) fn disabled_for_test() -> Encryption {
+        Encryption { key: None }
+    }
+
     pub fn from_env() -> Arc<Encryption> {
         let hex = std::env::var("QUEEN_ENCRYPTION_KEY").unwrap_or_default();
         if hex.is_empty() {

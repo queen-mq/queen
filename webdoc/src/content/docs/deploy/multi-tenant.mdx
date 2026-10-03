@@ -14,6 +14,9 @@ sourceOfTruth:
   - proxy/src/acting.rs
   - proxy/src/config.rs
   - proxy/src/store/data.rs
+  - proxy/src/s3.rs
+  - server/src/s3_inproc.rs
+# sourceOfTruth re-read 2026-10-02 (working tree): a tenant's data lake through PUT /api/cp/clusters/:slug/s3, run by every node's sink manager.
 ---
 
 The proxy inside the broker binary is what turns one Queen into something you can hand to other
@@ -152,6 +155,22 @@ The scopes are `produce`, `consume`, `read` and `admin`, and a key needs at leas
 carries the key's id, which is what `DELETE /api/cp/keys/:id` revokes. Sending the same hash again
 for the same cluster answers that id with `"existed": true` rather than making a second key, so a
 retried call is harmless.
+
+## A data lake per tenant
+
+With the S3 sink on every node (`QUEEN_S3_EMBEDDED=true`) and the same `QUEEN_ENCRYPTION_KEY` on
+every node, a cluster's queues can be mirrored into a bucket of the tenant's own:
+
+```bash
+curl -s -X PUT http://127.0.0.1:6711/api/cp/clusters/acme-prod/s3 \
+  -H "x-queen-cp-token: $CP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"endpoint":"https://s3.eu-central-1.amazonaws.com","region":"eu-central-1","bucket":"acme-lake","accessKey":"AKIAEXAMPLE","secretKey":"their-secret","queues":"*"}'
+```
+
+The secret is stored sealed with the cell's key and no answer carries it back. Every node reads the
+sinks again every 5 seconds, and a cluster's sink runs while the cluster's status combined with its
+tenant's is `active` or `push_blocked`, which a tenant in `grace` counts as. Every setting, what lands in the bucket, and how the work spreads over the nodes is
+[the S3 sink](/deploy/s3#a-tenants-sink-from-the-control-plane).
 
 ## Human logins
 
