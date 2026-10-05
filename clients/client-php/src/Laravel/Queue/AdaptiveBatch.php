@@ -14,12 +14,13 @@ namespace Queen\Laravel\Queue;
  * and the worker's sleep fall between a pop() and the next job, so they never
  * count as a job.
  *
- * The batch only grows after a pop that came back full, and at most twofold.
- * A pop that comes back short means the queue had no backlog: a larger batch
- * would only hold jobs that idle workers could run, behind the job running
- * here, so the next pop asks for what the queue had, one job after an empty
- * pop. Under a backlog every pop comes back full and the batch reaches its
- * target within a few pops.
+ * The batch doubles only after two pops in a row came back full: one full pop
+ * can be a short burst on a quiet queue, and a worker that grew its batch on
+ * it would hold jobs that idle workers could run, behind the job running
+ * here. A pop that comes back short means the queue had no backlog, so the
+ * next pop asks for what the queue had, one job after an empty pop. Under a
+ * backlog every pop comes back full and the batch reaches 16 within eight
+ * pops.
  */
 final class AdaptiveBatch
 {
@@ -28,6 +29,9 @@ final class AdaptiveBatch
 
     /** About this much work per batch, in milliseconds. */
     public const TARGET_MILLIS = 250;
+
+    /** Full pops in a row before the batch doubles. */
+    private const FULL_POPS_TO_GROW = 2;
 
     /** The share of the newest job in the moving average. */
     private const WEIGHT = 0.3;
@@ -38,8 +42,8 @@ final class AdaptiveBatch
     /** @var array<string, int> the size last asked for, per queue */
     private array $size = [];
 
-    /** @var array<string, bool> whether the queue's last pop came back full */
-    private array $full = [];
+    /** @var array<string, int> full pops in a row since the batch last grew or a pop came back short */
+    private array $fullPops = [];
 
     /** @var array{0: string, 1: float}|null the job handed out and when */
     private ?array $running = null;
@@ -83,10 +87,13 @@ final class AdaptiveBatch
     /** A pop of $queue asked for $requested jobs and got $received. */
     public function popped(string $queue, int $requested, int $received): void
     {
-        $this->full[$queue] = $received >= $requested;
-        if ($received < $requested) {
-            $this->size[$queue] = max(1, $received);
+        if ($received >= $requested) {
+            $this->fullPops[$queue] = ($this->fullPops[$queue] ?? 0) + 1;
+
+            return;
         }
+        $this->fullPops[$queue] = 0;
+        $this->size[$queue] = max(1, $received);
     }
 
     /** The number of jobs the next pop of $queue asks for. */
@@ -98,7 +105,11 @@ final class AdaptiveBatch
             return $current;
         }
         $wanted = (int) max(1, min($this->ceiling, floor($this->targetMillis / max($average, 0.5))));
-        $grown = ($this->full[$queue] ?? true) ? $current * 2 : $current;
+        $grown = $current;
+        if (($this->fullPops[$queue] ?? 0) >= self::FULL_POPS_TO_GROW && $current < $wanted) {
+            $grown = $current * 2;
+            $this->fullPops[$queue] = 0;
+        }
 
         return $this->size[$queue] = min($wanted, $grown);
     }

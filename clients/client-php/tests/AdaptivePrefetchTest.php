@@ -63,24 +63,27 @@ final class AdaptivePrefetchTest extends TestCase
         (new QueenConnector())->connect([...$this->config(), 'prefetch' => 'fast', 'lease_renewal' => true]);
     }
 
-    public function testShortJobsGrowEachPopAndTheBufferIsServedFirst(): void
+    public function testShortJobsGrowAfterTwoFullPopsAndTheBufferIsServedFirst(): void
     {
         $handler = new PlanHandler([
             $this->pop('lease-1', ['job-1']),
             self::ACKED,
-            $this->pop('lease-2', ['job-2', 'job-3']),
+            $this->pop('lease-2', ['job-2']),
+            self::ACKED,
+            $this->pop('lease-3', ['job-3', 'job-4']),
             self::ACKED,
             self::ACKED,
-            $this->pop('lease-3', ['job-4', 'job-5', 'job-6', 'job-7']),
+            $this->pop('lease-4', ['job-5', 'job-6']),
         ]);
         $queue = $this->queue($handler);
 
         $this->runJob($queue, 'job-1');
         $this->runJob($queue, 'job-2');
         $this->runJob($queue, 'job-3');
-        $this->assertSame('job-4', $queue->pop('emails')->getJobId());
+        $this->runJob($queue, 'job-4');
+        $this->assertSame('job-5', $queue->pop('emails')->getJobId());
 
-        $this->assertSame(['1', '2', '4'], $this->batches($handler), 'one pop per batch, each up to twice the last');
+        $this->assertSame(['1', '1', '2', '2'], $this->batches($handler), 'twice the batch after two full ones');
     }
 
     public function testLongJobsKeepAskingForOneJob(): void

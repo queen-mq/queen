@@ -13,36 +13,52 @@ final class AdaptiveBatchTest extends TestCase
 {
     private float $now = 1_000.0;
 
-    public function testAQueueStartsAtOneJobAndGrowsAtMostTwofoldPerFullBatch(): void
+    public function testAQueueStartsAtOneJobAndDoublesAfterTwoFullBatchesInARow(): void
     {
         $batch = $this->batch();
         $this->assertSame(1, $this->full($batch, 'emails'), 'nothing measured yet');
 
         $this->runJobs($batch, 'emails', 3, 10.0);
 
+        $this->assertSame(
+            [1, 2, 2, 4, 4, 8, 8, 16, 16, 16],
+            array_map(fn (): int => $this->full($batch, 'emails'), range(1, 10)),
+            'the ceiling is 16',
+        );
+    }
+
+    public function testOneFullBatchAfterAShortOneIsNotABacklogYet(): void
+    {
+        $batch = $this->batch();
+        $this->runJobs($batch, 'emails', 3, 10.0);
+        $this->full($batch, 'emails');
+        $this->full($batch, 'emails');
         $this->assertSame(2, $this->full($batch, 'emails'));
-        $this->assertSame(4, $this->full($batch, 'emails'));
-        $this->assertSame(8, $this->full($batch, 'emails'));
-        $this->assertSame(16, $this->full($batch, 'emails'), 'the ceiling');
-        $this->assertSame(16, $this->full($batch, 'emails'));
+
+        $batch->popped('emails', 2, 1);
+        $this->assertSame(1, $this->full($batch, 'emails'));
+        $this->assertSame(1, $this->full($batch, 'emails'), 'one full pop since the short one');
+        $this->assertSame(2, $this->full($batch, 'emails'));
     }
 
     public function testAShortBatchMeansNoBacklogSoTheNextAsksForWhatTheQueueHad(): void
     {
         $batch = $this->batch();
         $this->runJobs($batch, 'emails', 3, 10.0);
-        foreach ([2, 4, 8] as $expected) {
-            $this->assertSame($expected, $this->full($batch, 'emails'));
+        for ($step = 0; $step < 7; ++$step) {
+            $this->full($batch, 'emails');
         }
+        $this->assertSame(8, $batch->size('emails'));
 
-        $batch->popped('emails', 16, 3);
+        $batch->popped('emails', 8, 3);
 
         // Bigger batches would only hold jobs that idle workers could run.
         $this->assertSame(3, $batch->size('emails'));
         $batch->popped('emails', 3, 1);
         $this->assertSame(1, $batch->size('emails'));
         $batch->popped('emails', 1, 1);
-        $this->assertSame(2, $batch->size('emails'), 'a full batch may grow again');
+        $batch->popped('emails', 1, 1);
+        $this->assertSame(2, $batch->size('emails'), 'two full batches may grow again');
     }
 
     public function testAnEmptyPopFallsBackToOneJob(): void
@@ -62,7 +78,10 @@ final class AdaptiveBatchTest extends TestCase
         $batch = $this->batch();
         $this->runJobs($batch, 'reports', 4, 100.0);
 
+        $this->full($batch, 'reports');
+        $this->full($batch, 'reports');
         $this->assertSame(2, $this->full($batch, 'reports'), '250 ms of 100 ms jobs');
+        $this->full($batch, 'reports');
         $this->assertSame(2, $this->full($batch, 'reports'));
     }
 
@@ -78,7 +97,7 @@ final class AdaptiveBatchTest extends TestCase
     {
         $batch = $this->batch();
         $this->runJobs($batch, 'emails', 6, 5.0);
-        for ($step = 0; $step < 5; ++$step) {
+        for ($step = 0; $step < 9; ++$step) {
             $this->full($batch, 'emails');
         }
         $this->assertSame(16, $this->full($batch, 'emails'));
@@ -100,6 +119,8 @@ final class AdaptiveBatchTest extends TestCase
         $batch->handedOut('emails');
         $this->now += 10.0;
         $batch->popping();
+        $this->full($batch, 'emails');
+        $this->full($batch, 'emails');
 
         $this->assertSame(2, $batch->size('emails'), 'the 3 s wait was not a job');
     }
@@ -113,6 +134,10 @@ final class AdaptiveBatchTest extends TestCase
         $batch->handedOut('slow');
         $this->now += 2_000.0;
         $batch->popping();
+        foreach (['fast', 'slow'] as $queue) {
+            $this->full($batch, $queue);
+            $this->full($batch, $queue);
+        }
 
         $this->assertSame(2, $batch->size('fast'));
         $this->assertSame(1, $batch->size('slow'));
@@ -122,8 +147,9 @@ final class AdaptiveBatchTest extends TestCase
     {
         $batch = new AdaptiveBatch(ceiling: 3, clock: fn (): float => $this->now);
         $this->runJobs($batch, 'emails', 3, 1.0);
-        $this->full($batch, 'emails');
-        $this->full($batch, 'emails');
+        for ($step = 0; $step < 5; ++$step) {
+            $this->full($batch, 'emails');
+        }
 
         $this->assertSame(3, $this->full($batch, 'emails'));
     }
