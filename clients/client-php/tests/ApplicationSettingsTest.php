@@ -20,7 +20,7 @@ final class ApplicationSettingsTest extends TestCase
         $this->assertSame(8, $this->settings(['bulk_batch' => '+8'])->connectionInteger('bulk_batch', 100));
         $this->assertSame(8, $this->settings(['bulk_batch' => ' 8 '])->connectionInteger('bulk_batch', 100));
         $this->assertSame(
-            ['name' => 'prefetch', 'env' => 'QUEEN_PREFETCH', 'value' => '4', 'default' => '1', 'changed' => true, 'invalid' => false],
+            ['name' => 'prefetch', 'env' => null, 'value' => '4', 'default' => '1', 'changed' => true, 'invalid' => false],
             array_diff_key($this->row($settings, 'connection', 'prefetch'), ['meaning' => true]),
         );
         $this->assertNotSame('', $this->row($settings, 'connection', 'prefetch')['meaning']);
@@ -130,15 +130,38 @@ final class ApplicationSettingsTest extends TestCase
         $this->assertFalse($this->row($settings, 'supervisor', 'heartbeat_timeout')['changed']);
     }
 
-    public function testTheLeaseServiceIsOnUnlessTheMastersEnvironmentTurnsItOff(): void
+    public function testTheLeaseServiceIsOnUnlessTheConfigurationTurnsItOff(): void
     {
-        // As the Rust supervisor reads it: 0, false, no or off, in any case.
-        foreach ([[null, false], ['', false], ['false', true], [' Off ', true], ['0', true], ['no', true], ['true', false], ['banana', false]] as [$value, $disabled]) {
-            $settings = new ApplicationSettings(['queen' => [], 'env' => ['QUEEN_SUPERVISOR_LEASE_SERVICE' => $value]]);
+        // As SupervisorConfiguration reads it: a real boolean, on when unset.
+        foreach ([[null, false, 'on'], [true, false, 'on'], [false, true, 'off'], ['false', false, 'invalid'], [0, false, 'invalid']] as [$value, $disabled, $shown]) {
+            $settings = $this->settings(['supervisor' => ['lease_service' => $value]]);
             $this->assertSame($disabled, $settings->leaseServiceDisabled(), var_export($value, true));
+            $this->assertSame([$shown, 'on'], $this->valueAndDefault($settings, 'supervisor', 'lease_service'), var_export($value, true));
         }
-        $off = new ApplicationSettings(['queen' => [], 'env' => ['QUEEN_SUPERVISOR_LEASE_SERVICE' => 'false']]);
-        $this->assertSame(['off', 'on'], $this->valueAndDefault($off, 'supervisor', 'QUEEN_SUPERVISOR_LEASE_SERVICE'));
+        $off = $this->row($this->settings(['supervisor' => ['lease_service' => false]]), 'supervisor', 'lease_service');
+        $this->assertSame([null, true], [$off['env'], $off['changed']]);
+    }
+
+    public function testOnlyTheEnvironmentVariablesTheConfigReadsAreShown(): void
+    {
+        $settings = $this->settings(['autopilot' => false]);
+        $variables = array_column([...$settings->rows()['connection'], ...$settings->rows()['supervisor']], 'env', 'name');
+
+        $this->assertSame([
+            'url' => 'QUEEN_URL',
+            'bearer_token' => 'QUEEN_BEARER_TOKEN',
+            'partitions' => 'QUEEN_PARTITIONS',
+            'read_bearer_token' => 'QUEEN_SUPERVISOR_READ_BEARER_TOKEN',
+            'prefork' => 'QUEEN_SUPERVISOR_PREFORK',
+            'coordination.enabled' => 'QUEEN_SUPERVISOR_COORDINATION',
+            'remote_status.enabled' => 'QUEEN_SUPERVISOR_REMOTE_STATUS',
+        ], array_filter($variables));
+        $this->assertSame([], array_values(array_diff(array_filter($variables), LaravelConfigFileTest::ENVIRONMENT)));
+        // Every other row is a plain config value, shown by its key alone.
+        foreach (['prefetch', 'retry_after', 'sync_failed_jobs', 'autopilot', 'shutdown_grace', 'event_driven', 'fast_scale_up', 'lease_service', 'remote_status.key', 'remote_status.ttl'] as $name) {
+            $this->assertArrayHasKey($name, $variables);
+            $this->assertNull($variables[$name], $name);
+        }
     }
 
     public function testFastScaleUpNamesThePoolsThatUseIt(): void
@@ -198,7 +221,7 @@ final class ApplicationSettingsTest extends TestCase
 
     public function testConfigurationOfTheWrongShapeYieldsDefaultsNotErrors(): void
     {
-        $settings = new ApplicationSettings(['queen' => 'nonsense', 'queue' => ['connections' => 7], 'env' => 3]);
+        $settings = new ApplicationSettings(['queen' => 'nonsense', 'queue' => ['connections' => 7]]);
 
         $this->assertSame(1, $settings->connectionInteger('prefetch', 1));
         $this->assertFalse($settings->leaseServiceDisabled());
@@ -215,7 +238,6 @@ final class ApplicationSettingsTest extends TestCase
         return new ApplicationSettings([
             'queen' => $queen,
             'queue' => ['connections' => ['queen' => ['driver' => 'queen', ...$connection]]],
-            'env' => [],
         ]);
     }
 

@@ -3,6 +3,41 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+PHP client 2.1.0 pins supervisor 0.7.0: the Rust master reads `lease_service` from its
+configuration and handles the `queue:restart` exit below, so 0.6.0 cannot run with it.
+
+**Breaking, Laravel: `config/queen.php` reads 20 environment variables instead of 95.** Only the
+values that differ between environments or deployments still read the environment: the broker
+URLs and token, the queue, consumer group and partitions, the supervisor's read token, state
+directory and its remote status, prefork and coordination switches, the dashboard's switch, path,
+domain and console URL, the alert mail, the metrics switch and token, and the supervisor binary's
+install path and mirror. Every other setting is a plain value in the published file, with the
+default it had: set it there, or add your own `env()` call where a value must differ per
+environment. `QUEEN_SUPERVISOR_LEASE_SERVICE`, which the Rust master read from its environment,
+is the config key `supervisor.lease_service` (default on), so the dashboard now shows the master's
+value instead of the web host's. `supervisor.remote_status.key` is no longer required: it defaults
+to a slug of `APP_NAME` and `APP_ENV`. An application that publishes its own `config/queen.php`
+keeps every variable that file reads; the configuration reference maps each removed variable to its
+key.
+
+**Laravel prefork: `php artisan queue:restart` runs the deployed code.** A forked worker stops at
+`queue:restart` like a spawned one, but its replacement was forked from the fork server, which
+still held the code it booted, so the workers kept the old code until the master restarted. A
+worker that stops for the restart signal now says so (Laravel 12 gives the reason), and both
+engines then start a new fork server: the workers forked from then on boot nothing and run the
+code on disk. The old server stays open until the last worker it forked exits. Changes to
+`config/queen.php` still need `queen:supervisor terminate`, as before.
+
+**Laravel prefork: a fork server that is not safe to fork is not used.** `fork()` copies only the
+calling thread, so a booted application that runs another thread (a gRPC or Kafka extension, an
+APM agent) would give every worker a broken copy. On Linux the fork server now refuses to serve
+when another thread outlives a 5-second grace (libcurl's resolver thread ends within it), names
+the threads, and the master spawns its workers instead. It warns about sockets the boot left open,
+which every forked worker would share, and it releases the database and Redis connections, log
+channels and mailers the boot opened before the first fork, not in each child only.
+
 ## 2.0.0 - 2026-10-03
 
 **The PostgreSQL storage class is removed.** Queen 2.0 has one storage class, its own replicated

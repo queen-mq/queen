@@ -22,6 +22,12 @@ use Illuminate\Queue\Events\WorkerStopping;
  * footprint is above the limit stops the same way on every start. So the
  * marker says `memory` only when this process handled a job.
  *
+ * A worker that stops for `php artisan queue:restart` says `restart`
+ * (Laravel 12 gives the reason). Its exit is clean either way, but a
+ * preforked worker was forked from a fork server that still holds the code it
+ * booted: the master starts a new server, so the workers it forks from then
+ * on run the code on disk, as spawned ones do.
+ *
  * The master passes the directory in QUEEN_SUPERVISOR_EXITS_DIR. A spawned
  * worker registers the listeners at boot, a preforked one right after its fork.
  */
@@ -32,6 +38,8 @@ final class WorkerExitMarker
     public const TIMEOUT = 'timeout';
 
     public const MEMORY = 'memory';
+
+    public const RESTART = 'restart';
 
     /** Laravel's Worker::EXIT_MEMORY_LIMIT. */
     public const MEMORY_EXIT_CODE = 12;
@@ -58,6 +66,8 @@ final class WorkerExitMarker
         $events->listen(WorkerStopping::class, static function (WorkerStopping $event) use ($marker, &$handledJob): void {
             if ($handledJob && self::stopsForMemory($event)) {
                 $marker->write(self::MEMORY);
+            } elseif (self::reason($event) === 'restart_signal') {
+                $marker->write(self::RESTART);
             }
         });
     }
@@ -65,12 +75,20 @@ final class WorkerExitMarker
     private static function stopsForMemory(WorkerStopping $event): bool
     {
         // Laravel 12 says why; before it, the exit status alone tells.
-        $reason = $event->reason ?? null;
-        if ($reason instanceof \BackedEnum) {
-            return $reason->value === 'memory';
+        $reason = self::reason($event);
+        if ($reason !== null) {
+            return $reason === 'memory';
         }
 
         return $event->status === self::MEMORY_EXIT_CODE;
+    }
+
+    /** Laravel 12's WorkerStopReason value; null before Laravel 12. */
+    private static function reason(WorkerStopping $event): ?string
+    {
+        $reason = $event->reason ?? null;
+
+        return $reason instanceof \BackedEnum ? (string) $reason->value : null;
     }
 
     /**

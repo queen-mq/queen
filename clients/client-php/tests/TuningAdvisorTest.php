@@ -25,7 +25,7 @@ final class TuningAdvisorTest extends TestCase
         $this->assertSame('Deploys interrupt App\Jobs\Export', $advice[0]['title']);
         $this->assertStringContainsString('2 min 10 s', $advice[0]['evidence']);
         $this->assertStringContainsString('75 s', $advice[0]['evidence']);
-        $this->assertStringContainsString('QUEEN_SUPERVISOR_SHUTDOWN_GRACE', $advice[0]['action']);
+        $this->assertStringContainsString('Raise queen.supervisor.shutdown_grace above the longest run', $advice[0]['action']);
         $this->assertStringContainsString('terminationGracePeriodSeconds', $advice[0]['action']);
         $this->assertSame('https://queenmq.com/use/laravel/supervisors', $advice[0]['doc']);
 
@@ -58,7 +58,7 @@ final class TuningAdvisorTest extends TestCase
         $this->assertSame(['warning'], array_column($advice, 'severity'));
         $this->assertSame('Pool default has one worker for 2 queues', $advice[0]['title']);
         $this->assertStringContainsString('low has 42 jobs waiting', $advice[0]['evidence']);
-        $this->assertStringContainsString('QUEEN_SUPERVISOR_MAX_PROCESSES', $advice[0]['action']);
+        $this->assertStringContainsString('min_processes and max_processes in queen.supervisor.supervisors.default', $advice[0]['action']);
         $this->assertStringContainsString('its own pool', $advice[0]['action']);
     }
 
@@ -86,8 +86,8 @@ final class TuningAdvisorTest extends TestCase
         $this->assertStringContainsString('App\Jobs\Ping', $advice[0]['evidence']);
         $this->assertStringContainsString('12 ms', $advice[0]['evidence']);
         $this->assertStringNotContainsString('App\Jobs\Report', $advice[0]['evidence']);
-        foreach (['QUEEN_PREFETCH=4', 'QUEEN_ACK_ASYNC=true', 'QUEEN_POP_AHEAD=true', 'QUEEN_LEASE_RENEWAL=true'] as $variable) {
-            $this->assertStringContainsString($variable, $advice[0]['action']);
+        foreach (['prefetch 4 with ack_async and pop_ahead true', 'config/queen.php', 'queen connection in config/queue.php', 'need lease_renewal true'] as $setting) {
+            $this->assertStringContainsString($setting, $advice[0]['action']);
         }
         $this->assertStringEndsWith(
             'Keep tries at 2 or more: after a crash that is not handed back, such as a lost node, each job a worker had prefetched comes back with one attempt more.',
@@ -183,15 +183,18 @@ final class TuningAdvisorTest extends TestCase
 
     public function testALeaseHelperPerWorkerIsFlaggedOnlyWhenTheMastersServiceIsTurnedOff(): void
     {
-        $renewing = $this->config([], ['lease_renewal' => true], ['QUEEN_SUPERVISOR_LEASE_SERVICE' => 'false']);
+        $renewing = $this->config(['supervisor' => ['lease_service' => false]], ['lease_renewal' => true]);
         $advice = $this->advise(config: $renewing);
 
         $this->assertSame(['info'], array_column($advice, 'severity'));
-        $this->assertStringContainsString('QUEEN_SUPERVISOR_LEASE_SERVICE', $advice[0]['action']);
+        $this->assertStringContainsString('queen.supervisor.lease_service turns', $advice[0]['evidence']);
+        $this->assertStringContainsString('Set queen.supervisor.lease_service to true', $advice[0]['action']);
         $this->assertSame('https://queenmq.com/use/laravel/supervisors#lease-renewal-in-the-master', $advice[0]['doc']);
 
         $this->assertSame([], $this->advise(config: $this->config([], ['lease_renewal' => true])), 'the service is on by default');
-        $this->assertSame([], $this->advise(config: $this->config([], [], ['QUEEN_SUPERVISOR_LEASE_SERVICE' => 'false'])), 'no renewal, no helpers');
+        $this->assertSame([], $this->advise(config: $this->config(['supervisor' => ['lease_service' => true]], ['lease_renewal' => true])));
+        $this->assertSame([], $this->advise(config: $this->config(['supervisor' => ['lease_service' => 'false']], ['lease_renewal' => true])), 'the supervisor refuses a string');
+        $this->assertSame([], $this->advise(config: $this->config(['supervisor' => ['lease_service' => false]])), 'no renewal, no helpers');
     }
 
     public function testAutoscalingThatWaitsForThePollIsToldAboutEventDrivenScaling(): void
@@ -201,7 +204,7 @@ final class TuningAdvisorTest extends TestCase
         $this->assertSame(['info'], array_column($advice, 'severity'));
         $this->assertSame('Bursts wait for the next poll', $advice[0]['title']);
         $this->assertStringContainsString('every 3 s', $advice[0]['evidence']);
-        $this->assertStringContainsString('QUEEN_SUPERVISOR_EVENT_DRIVEN=true', $advice[0]['action']);
+        $this->assertStringContainsString('Set queen.supervisor.event_driven to true', $advice[0]['action']);
         $this->assertSame('https://queenmq.com/use/laravel/supervisors#event-driven-scaling', $advice[0]['doc']);
     }
 
@@ -224,7 +227,7 @@ final class TuningAdvisorTest extends TestCase
         $this->assertSame('Pool default can run a job twice at once', $advice[0]['title']);
         $this->assertStringContainsString('120 s', $advice[0]['evidence']);
         $this->assertStringContainsString('90 s', $advice[0]['evidence']);
-        $this->assertStringContainsString('QUEEN_RETRY_AFTER', $advice[0]['action']);
+        $this->assertStringContainsString('Raise queen.supervisor.supervisors.default.retry_after above the timeout', $advice[0]['action']);
 
         $equal = $this->advise(config: $this->config(['supervisor' => ['supervisors' => ['default' => ['timeout' => 90]]]]));
         $this->assertSame(['critical'], array_column($equal, 'severity'), 'a lease as long as the timeout is too short');
@@ -237,6 +240,7 @@ final class TuningAdvisorTest extends TestCase
         $this->assertSame(['critical'], array_column($advice, 'severity'));
         $this->assertSame('The supervisor does not start with pool default', $advice[0]['title']);
         $this->assertStringContainsString('even with lease renewal', $advice[0]['evidence']);
+        $this->assertStringContainsString('Raise queen.supervisor.supervisors.default.retry_after above the timeout', $advice[0]['action']);
     }
 
     public function testALeaseLongerThanTheTimeoutIsFine(): void
@@ -298,10 +302,9 @@ final class TuningAdvisorTest extends TestCase
      *
      * @param array<string, mixed> $queen merged into config('queen')
      * @param array<string, mixed> $connection the `queen` queue connection's own options
-     * @param array<string, string> $env
      * @return array<string, mixed>
      */
-    private function config(array $queen = [], array $connection = [], array $env = []): array
+    private function config(array $queen = [], array $connection = []): array
     {
         return [
             'queen' => array_replace_recursive([
@@ -317,7 +320,6 @@ final class TuningAdvisorTest extends TestCase
                 ],
             ], $queen),
             'queue' => ['connections' => ['queen' => ['driver' => 'queen', ...$connection]]],
-            'env' => $env,
         ];
     }
 

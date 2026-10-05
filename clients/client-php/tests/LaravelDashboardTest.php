@@ -2285,7 +2285,7 @@ final class LaravelDashboardTest extends TestCase
             $items,
         ));
         $this->assertStringContainsString('2 min 10 s', $items[0]->textContent);
-        $this->assertStringContainsString('QUEEN_SUPERVISOR_SHUTDOWN_GRACE', $items[0]->textContent);
+        $this->assertStringContainsString('Raise queen.supervisor.shutdown_grace above the longest run', $items[0]->textContent);
         $docs = iterator_to_array($xpath->query('//section[@id="advice"]//a[starts-with(@href, "https://queenmq.com/")]'));
         $this->assertCount(4, $docs);
         foreach ($docs as $link) {
@@ -2329,10 +2329,15 @@ final class LaravelDashboardTest extends TestCase
         $this->assertSame(1, $xpath->query('//div[@aria-label="Connection settings"]//tr[td[1]/code="ack_async"]/td[2]/span[@class="badge warning"]')->length);
         $this->assertSame(['on', 'off'], [$connection['lease_renewal'][1], $connection['lease_renewal'][2]]);
         $this->assertSame('30,000 ms', $connection['timeout'][1]);
-        $this->assertStringContainsString('QUEEN_PREFETCH', $connection['prefetch'][0]);
+        // A plain config value shows its key alone; one the config reads from
+        // the environment also names the variable.
+        $this->assertSame('prefetch', $connection['prefetch'][0]);
+        $this->assertSame(0, $xpath->query('//div[@aria-label="Connection settings"]//tr[td[1]/code="prefetch"]/td[1]/span')->length);
+        $this->assertSame('partitions QUEEN_PARTITIONS', preg_replace('/\s+/', ' ', $connection['partitions'][0]));
         $supervisor = $this->settingsRows($xpath, 'Supervisor settings');
         $this->assertSame(['75 s', '75 s'], [$supervisor['shutdown_grace'][1], $supervisor['shutdown_grace'][2]]);
-        $this->assertSame('on', $supervisor['QUEEN_SUPERVISOR_LEASE_SERVICE'][1]);
+        $this->assertSame(['lease_service', 'on', 'on'], array_slice($supervisor['lease_service'], 0, 3));
+        $this->assertArrayNotHasKey('QUEEN_SUPERVISOR_LEASE_SERVICE', $supervisor);
         foreach ([...$connection, ...$supervisor] as $name => $cells) {
             $this->assertNotSame('', $cells[3], "{$name} has a meaning");
         }

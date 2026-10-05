@@ -44,6 +44,12 @@ final class ForkedProcess extends Process
         return false;
     }
 
+    /** The fork server this worker was forked from. */
+    public function server(): ForkServerClient
+    {
+        return $this->server;
+    }
+
     public function getPid(): ?int
     {
         return $this->isRunning() ? $this->forkedPid : null;

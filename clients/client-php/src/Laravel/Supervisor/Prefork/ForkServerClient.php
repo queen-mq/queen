@@ -124,7 +124,8 @@ final class ForkServerClient
 
     public function isAlive(): bool
     {
-        return proc_get_status($this->process)['running'];
+        // A closed server is gone: proc_close() freed its process handle.
+        return is_resource($this->process) && proc_get_status($this->process)['running'];
     }
 
     /**
@@ -133,6 +134,9 @@ final class ForkServerClient
      */
     public function close(float $timeoutSeconds): void
     {
+        if (!is_resource($this->process)) {
+            return;
+        }
         if (is_resource($this->commands)) {
             fclose($this->commands);
         }

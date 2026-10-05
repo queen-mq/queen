@@ -61,6 +61,10 @@ final class PhpSupervisor
     private ReplicaCoordinator|false|null $coordinator = null;
     private ForkServerClient|false|null $forkServer = null;
     private bool $preforkFailed = false;
+    /** A worker of the current fork server stopped for queue:restart. */
+    private bool $forkServerStale = false;
+    /** @var list<ForkServerClient> replaced servers, open until their workers are gone */
+    private array $retiredForkServers = [];
     /** @var array<string, QueueWatcher>|null event-driven watchers by connection; null when disabled */
     private ?array $watchers = null;
     /** @var array<string, true> pools a watched queue woke, kept until they are evaluated */
@@ -106,6 +110,7 @@ final class PhpSupervisor
                     $this->reap($name, $this->config['supervisors'][$name]);
                 }
                 $this->reapDraining();
+                $this->refreshForkServer();
                 $this->observeStableWorkers();
 
                 $pollDue = microtime(true) - $lastPoll >= $this->config['poll_interval'];
@@ -660,13 +665,65 @@ final class PhpSupervisor
 
     private function closeForkServer(): void
     {
-        if ($this->forkServer instanceof ForkServerClient) {
+        foreach ([...$this->retiredForkServers, $this->forkServer] as $server) {
+            if (!$server instanceof ForkServerClient) {
+                continue;
+            }
             try {
-                $this->forkServer->close(5);
+                $server->close(5);
             } catch (\Throwable $error) {
                 $this->emit("prefork: fork server did not close cleanly: {$error->getMessage()}\n", 'err');
             }
         }
+        $this->retiredForkServers = [];
+    }
+
+    /**
+     * After `queue:restart`, boot a new fork server, so the workers forked
+     * from then on run the code on disk. The old server stays open while a
+     * worker it forked still runs: closing it would SIGKILL that worker.
+     */
+    private function refreshForkServer(): void
+    {
+        if ($this->forkServerStale && $this->forkServer instanceof ForkServerClient) {
+            $this->retiredForkServers[] = $this->forkServer;
+            $this->forkServer = null;
+            $this->preforkFailed = false;
+            $this->emit("prefork: queue:restart received, starting a new fork server\n", 'out');
+            $this->startForkServer();
+        }
+        $this->forkServerStale = false;
+
+        $retired = [];
+        foreach ($this->retiredForkServers as $server) {
+            if ($this->hasForkedWorkers($server)) {
+                $retired[] = $server;
+                continue;
+            }
+            try {
+                $server->close(5);
+            } catch (\Throwable $error) {
+                $this->emit("prefork: fork server did not close cleanly: {$error->getMessage()}\n", 'err');
+            }
+        }
+        $this->retiredForkServers = $retired;
+    }
+
+    private function hasForkedWorkers(ForkServerClient $server): bool
+    {
+        $processes = array_column($this->draining, 'process');
+        foreach ($this->processes as $pools) {
+            foreach ($pools as $pool) {
+                array_push($processes, ...$pool);
+            }
+        }
+        foreach ($processes as $process) {
+            if ($process instanceof ForkedProcess && $process->server() === $server && $process->isRunning()) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function reap(string $name, array $options): void
@@ -696,6 +753,11 @@ final class PhpSupervisor
                 $exitCode = $process->getExitCode();
                 $this->emit("exited {$name}:{$queue} pid=" . ($pid ?? 'unknown') . " code=" . ($exitCode ?? 'unknown') . "\n", $exitCode === 0 ? 'out' : 'err');
                 $announced = $this->announcedExit($pid, $exitCode);
+                if ($announced === WorkerExitMarker::RESTART
+                    && $process instanceof ForkedProcess
+                    && $process->server() === $this->forkServer) {
+                    $this->forkServerStale = true;
+                }
                 if ($poolHadProbe && !$wasProbe) {
                     continue;
                 }
@@ -762,11 +824,11 @@ final class PhpSupervisor
 
     /**
      * What the worker announced before this exit (see WorkerExitMarker):
-     * Laravel's job timeout, when SIGKILL ended it, or its memory limit after
-     * a job, when it exited 12. A marker explains no other exit. Either way
-     * the marker is consumed.
+     * Laravel's job timeout, when SIGKILL ended it, its memory limit after a
+     * job, when it exited 12, or queue:restart, when it exited 0. A marker
+     * explains no other exit. Either way the marker is consumed.
      *
-     * @return WorkerExitMarker::TIMEOUT|WorkerExitMarker::MEMORY|null
+     * @return WorkerExitMarker::TIMEOUT|WorkerExitMarker::MEMORY|WorkerExitMarker::RESTART|null
      */
     private function announcedExit(?int $pid, ?int $exitCode): ?string
     {
@@ -784,6 +846,7 @@ final class PhpSupervisor
         return match (true) {
             $marker === WorkerExitMarker::TIMEOUT && $exitCode === 128 + SIGKILL => WorkerExitMarker::TIMEOUT,
             $marker === WorkerExitMarker::MEMORY && $exitCode === WorkerExitMarker::MEMORY_EXIT_CODE => WorkerExitMarker::MEMORY,
+            $marker === WorkerExitMarker::RESTART && $exitCode === 0 => WorkerExitMarker::RESTART,
             default => null,
         };
     }

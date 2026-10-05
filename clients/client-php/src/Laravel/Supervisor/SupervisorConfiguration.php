@@ -410,6 +410,12 @@ final class SupervisorConfiguration
             // Emitted only when enabled: engines reject unknown contract keys.
             $result['prefork'] = true;
         }
+        if (!self::boolean($raw['lease_service'] ?? true, 'lease_service')) {
+            // Emitted only when off: engines reject unknown contract keys, and
+            // the Rust engine reads an absent key as on. The PHP engine has no
+            // lease service: each lease_renewal worker starts its own helper.
+            $result['lease_service'] = false;
+        }
         if ($eventDriven) {
             // Emitted only when enabled: the partition stripes the Laravel
             // driver pushes to on each connection, which the engines watch.

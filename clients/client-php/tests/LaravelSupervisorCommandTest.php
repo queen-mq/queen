@@ -88,6 +88,29 @@ class LaravelSupervisorCommandTest extends TestCase
         $this->assertSame('header-secret', $engine['connections']['queen']['headers']['X-Queen-Key']);
     }
 
+    public function testTheEngineConfigurationCarriesTheLeaseServiceOnlyWhenItIsOff(): void
+    {
+        $kernel = $this->app->make(\Illuminate\Contracts\Console\Kernel::class);
+        $this->assertTrue($this->app['config']->get('queen.supervisor.lease_service'), 'on by default');
+
+        $output = new BufferedOutput();
+        $this->assertSame(0, $kernel->call('queen:supervisor-config', ['--for-engine' => true], $output));
+        $document = json_decode(trim($output->fetch()), true, 512, JSON_THROW_ON_ERROR);
+        // The Rust engine reads an absent key as on, and rejects unknown keys.
+        $this->assertArrayNotHasKey('lease_service', $document);
+
+        $this->app['config']->set('queen.supervisor.lease_service', false);
+        $output = new BufferedOutput();
+        $this->assertSame(0, $kernel->call('queen:supervisor-config', ['--for-engine' => true], $output));
+        $this->assertFalse(json_decode(trim($output->fetch()), true, 512, JSON_THROW_ON_ERROR)['lease_service']);
+
+        // Read like every other switch: a real boolean only, never a string.
+        $this->app['config']->set('queen.supervisor.lease_service', 'false');
+        $output = new BufferedOutput();
+        $this->assertSame(1, $kernel->call('queen:supervisor-config', ['--for-engine' => true], $output));
+        $this->assertStringContainsString('Queen supervisor lease_service must be a boolean.', $output->fetch());
+    }
+
     public function testEngineConfigurationWarnsOnStandardErrorAboutAPrefetchingPoolWithOneTry(): void
     {
         $this->app['config']->set('queen.supervisor.supervisors', ['default' => ['queues' => ['default'], 'tries' => 1]]);

@@ -43,7 +43,6 @@ class SuperviseCommand extends Command
         return [
             'queen' => $this->laravel['config']->get('queen', []),
             'queue' => ['connections' => $this->laravel['config']->get('queue.connections', [])],
-            'env' => [],
         ];
     }
 }
