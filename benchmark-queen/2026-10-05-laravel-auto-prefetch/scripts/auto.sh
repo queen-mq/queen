@@ -15,7 +15,8 @@ export BENCH_APP_IMAGE=queen-laravel-supervisor-bench:auto
 
 # Queen only: the Rust supervisor with prefork, the CLI opcache and lease
 # renewal in the master, every write fsynced.
-COMMON=(--queen-storage raft --sample-interval 1.0 --timeout 3600 --engines queen-rust --runs 3
+# AUTO_RUNS: more runs for a lane whose tail varies from run to run.
+COMMON=(--queen-storage raft --sample-interval 1.0 --timeout 3600 --engines queen-rust --runs "${AUTO_RUNS:-3}"
     --queen-prefork 1 --queen-opcache-cli 1 --queen-lease-service 1)
 # The profiles of the guide.
 SAFE=(--queen-prefetch 1 --queen-ack-async 0 --queen-pop-ahead 0)
@@ -30,7 +31,7 @@ lane() {
     local -a extra=()
     [ "$BUILT" = 1 ] && extra+=(--no-build)
     if docker ps --quiet | grep -q .; then extra+=(--allow-foreign-containers); fi
-    echo "== $name: $* ${extra[*]} ($(date +%H:%M:%S))" | tee -a "$OUT/campaign.log"
+    echo "== $name: $* ${extra[*]} sleep=${BENCH_WORKER_SLEEP:-1} ($(date +%H:%M:%S))" | tee -a "$OUT/campaign.log"
     "$BENCH/scripts/run.sh" "${COMMON[@]}" "$@" ${extra[@]+"${extra[@]}"} \
         --output "$OUT/$name" >"$OUT/$name.log" 2>&1
     local status=$?

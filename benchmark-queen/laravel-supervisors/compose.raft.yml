@@ -35,6 +35,9 @@ x-app-environment: &app-environment
   # KiB every benchmark job allocates and holds while it runs, as a real job
   # builds models and collections; 0 keeps the tiny job.
   BENCH_JOB_ALLOC_KB: ${BENCH_JOB_ALLOC_KB:-0}
+  # Seconds a worker sleeps after an empty pop (Laravel's --sleep). With a
+  # long poll (block_for, 1 s by default) the worker already waited on the broker.
+  BENCH_WORKER_SLEEP: ${BENCH_WORKER_SLEEP:-1}
   QUEEN_SUPERVISOR_PREFORK: "${BENCH_QUEEN_PREFORK:-false}"
   QUEEN_SUPERVISOR_EVENT_DRIVEN: "${BENCH_QUEEN_EVENT_DRIVEN:-false}"
   QUEEN_SUPERVISOR_FAST_SCALE_UP: "${BENCH_QUEEN_FAST_SCALE_UP:-false}"
