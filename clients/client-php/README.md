@@ -13,7 +13,7 @@ composer require queen-mq/php-client
 
 [Documentation](https://queenmq.com/guides/laravel/) ·
 [Migrate from Horizon](https://queenmq.com/guides/laravel/migrate-from-horizon/) ·
-[SDK reference](https://queenmq.com/start/clients/) ·
+[PHP client reference](https://github.com/queen-mq/php-client/blob/master/REFERENCE.md) ·
 PHP 8.3 / 8.4 · Apache-2.0
 
 ```text
@@ -21,20 +21,25 @@ PHP 8.3 / 8.4 · Apache-2.0
    ───────                              ─────
    dispatch() ──► Redis                 dispatch() ──► Queen
                     │                                     │
-   horizon master ──┤  65.0 MiB PHP     queen-supervisor ─┤  2.9 MiB Rust
+   horizon master ──┤  49.1 MiB PHP     queen-supervisor ─┤  7.0 MiB Rust
                     │                                     │
    horizon:work ────┘                   queue:work queen ─┘
 ```
 
-Median proportional set size of the orchestrator alone, from the
-[supervisor benchmark](https://queenmq.com/benchmarks/laravel/). It is a control-plane
-number, not a whole-stack claim: Queen still runs a broker. The PHP reference master measures
-35.1 MiB.
+Resident memory of the master process through a 45-minute soak on a Linux server, from the
+[Laravel benchmark](https://queenmq.com/benchmarks/laravel/#the-soak). It is a control-plane
+number, not a whole-stack claim: Queen still runs a broker, with prefork a fork server holds the
+booted Laravel beside the Rust master, and Horizon runs `horizon:supervisor` beside its own. The PHP
+engine's master held 58.5 MiB.
 
-With 8 workers and 10 ms jobs, on a broker and a Redis that both fsync every write, Queen completed
-643 jobs/s against Horizon's 417, and its master and workers used 70 MiB against 310 MiB. One Docker
-Desktop host, diagnostic; every lane and its limits are on the
-[benchmark page](https://queenmq.com/benchmarks/laravel/#worker-capacity-on-a-linux-server).
+On one 16-vCPU Linux server, with a broker and a Redis that both fsync every write:
+
+- 32 workers completed 2,753 jobs/s of 10 ms jobs against Horizon's 1,124.
+- 64 forked workers and their supervisor used 225 MiB against Horizon's 1,967 MiB, about 27 MiB
+  less per worker.
+
+Diagnostic results; every lane and its limits are on the
+[benchmark page](https://queenmq.com/benchmarks/laravel/).
 
 ---
 
@@ -50,10 +55,12 @@ and one data directory per node, and no external database to run next to it.
 
 **A control plane that is not a Laravel application.** The Rust supervisor loads Artisan once to
 resolve configuration, then leaves only Rust and your ordinary `queue:work` processes resident:
-2.9 MiB against Horizon's 65 MiB in the qualification campaign.
+7.0 MiB against 49.1 MiB for Horizon's master through a 45-minute soak.
 
 **Smaller workers.** With prefork, Laravel boots once and every worker is forked from it, sharing the
-framework and the opcache: 38 to 75% less worker memory in our measurements. The Rust master also
+framework and the opcache: a forked worker kept 1.7 MiB of private memory against 28.9 MiB for a
+Horizon worker. The memory a job allocates stays the worker's own, so the saving is about 27 MiB
+per worker, not a ratio. The Rust master also
 renews the workers' leases itself, so prefetching workers need no helper process.
 
 **More jobs per worker.** The acknowledgement of a job and the pop for the next batch can travel
@@ -250,14 +257,15 @@ still need idempotency keys. `process_limit` still counts a slot for the helper,
 starts when the master refuses it.
 [The safe delivery profile](https://queenmq.com/guides/laravel/#the-safe-default).
 
-Requests go over the client's own kept-alive cURL handles, not Guzzle: a pop and an ACK cost the
-client about 60% less CPU, and with 10 ms jobs a whole worker used 13 to 25% less.
+Requests go over the client's own kept-alive cURL handles, not Guzzle: with 32 workers and empty
+jobs on the Linux server, 6,030 jobs/s against 5,441 and 1.03 against 1.41 ms of application CPU
+per job.
 `QUEEN_SDK_HTTP_TRANSPORT=guzzle` switches back; an HTTP proxy variable does so too.
 
 `ack_async` and `pop_ahead` take the broker's round trip off the worker's path. A failed
 asynchronous ACK is reported one job later and the job is delivered again; `pop_ahead` needs
-`lease_renewal`, and `ack_async` needs `ack_batch` 1. With both, 8 workers on the
-Raft broker went from 453 to 643 jobs/s of 10 ms jobs.
+`lease_renewal`, and `ack_async` needs `ack_batch` 1. With both, 32 workers on the Linux server
+went from 1,879 to 2,794 jobs/s of 10 ms jobs.
 [A faster profile](https://queenmq.com/guides/laravel/#a-faster-profile).
 
 Keep `prefetch=1` for long jobs, strict per-job acknowledgement, or comma-separated priority queues.
@@ -357,6 +365,14 @@ opens no connection before forking, purges database and Redis connections in eac
 SIGKILLs its workers if the master dies. A failed fork falls back to spawning. Needs `ext-pcntl`
 and `ext-posix`. Enable `opcache.enable_cli` with prefork, where the fork server's opcache is shared
 by every worker; without prefork, each worker keeps its own copy and opcache costs memory.
+
+- `php artisan queue:restart` makes the master start a new fork server (Laravel 12), so the workers
+  forked after a deploy run the new code; `config/queen.php` changes still need
+  `queen:supervisor terminate`.
+- On Linux the fork server refuses to serve when the booted application runs another thread (a gRPC
+  or Kafka extension, an APM agent), and the master spawns workers. It warns about sockets the boot
+  left open, which every forked worker would share.
+- [When not to use prefork](https://queenmq.com/guides/laravel/supervisors/#when-not-to-use-prefork).
 
 **Monitoring.** The dashboard's Jobs and Tags pages, `queen:check-waits` with the
 `LongWaitDetected` event and mail, and a Prometheus endpoint at `/queen/metrics`
@@ -506,9 +522,9 @@ A lost precondition is the expected outcome of a legitimate redelivery, so `comm
 verdict instead of throwing. It belongs in an `if`, not in a `catch`, and not in your error metrics.
 
 The rest of the surface — buffered push, multi-partition pop, pop autopilot, conflation, the
-`KafkaConsumer`-style consumer, key/value state, timers, the DLQ, the admin API, tracing, wildcard
-consumption and the `queen:consume` Artisan command — is documented with every option in the
-[PHP SDK reference](https://queenmq.com/start/clients/).
+`KafkaConsumer`-style consumer, key/value state, timers, the DLQ, the admin API, tracing and
+wildcard consumption — is documented with every option in the
+[PHP client reference](REFERENCE.md).
 
 ---
 

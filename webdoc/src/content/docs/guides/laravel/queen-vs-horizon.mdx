@@ -36,6 +36,9 @@ sourceOfTruth:
 # Describes clients/client-php and supervisor/ as they are on master (PHP client 2.0.0, which pins
 # supervisor 0.6.0); the measurements are the Linux-server archives above, on master too.
 # sourceOfTruth re-read 2026-10-05 (docs restore): master carries clients/client-php, supervisor/ and the Laravel archives, so the files this page describes join the list; only Linux-server results remain (no Docker Desktop run); restored the Evidence column, the Queue backend and size-limit rows, the Horizon-docs sentence, the control-plane caveat, the global backlog analytics and the link to the crashes still charged an attempt; corrected the failure count (15 plus 2 replica scenarios), the four-profile soak, the pop_ahead rule (full batch, one queue) and the PHP master's memory (58.5 MiB, above Horizon's 49.1).
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
 ---
 
 Horizon and Queen both run ordinary Laravel jobs and both supervise their workers, on different
@@ -46,30 +49,38 @@ terms, and the [Laravel benchmark](/benchmarks/laravel/) has every run behind th
 
 ## At a glance
 
-| | Horizon | Queen | Evidence |
-| --- | --- | --- | --- |
-| Queue backend | Redis | the Queen broker: one binary, a replicated log | [durability](/guides/laravel/concepts/#durability) |
-| Durability in the benchmark | Redis AOF, `appendfsync` `always`, `everysec` or `no` | one Raft node, fsync on every acknowledged write | [the runs](/benchmarks/laravel/#the-runs) |
-| Jobs/s, 32 workers, 10 ms jobs, fsync on every write | 1,124 | 2,753 | [capacity](/benchmarks/laravel/#worker-capacity-on-a-linux-server) |
-| Jobs/s, 64 workers | 1,090 | 4,395 | [capacity](/benchmarks/laravel/#worker-capacity-on-a-linux-server) |
-| p95 from dispatch to completion, 500 jobs/s asked, 16 workers | 227 ms | 23 ms | [latency](/benchmarks/laravel/#latency-at-a-steady-rate) |
-| Application memory, 64 idle workers after 10 ms jobs | 1,967 MiB | 225 MiB, with forked workers | [memory](/benchmarks/laravel/#where-the-difference-comes-from) |
-| The same, after jobs that each held 8 MiB | 2,494 MiB | 755 MiB | [memory](/benchmarks/laravel/#where-the-difference-comes-from) |
-| Supervisor processes beside 64 workers, proportional set size | 60 MiB: master and `horizon:supervisor` | 31 MiB: Rust master and fork server | [memory](/benchmarks/laravel/#where-the-difference-comes-from) |
-| Master resident memory through a 45-minute soak | 49.1 MiB | 7.0 MiB Rust, 58.5 MiB PHP | [the soak](/benchmarks/laravel/#the-soak) |
-| Backend CPU per job, at 500 jobs/s and under load with 32 workers | 0.49 and 0.37 ms | 0.87 and 0.23 ms | [CPU](/benchmarks/laravel/#cpu) |
-| A job that runs longer than `retry_after` | can run in two workers at once | lease renewal and fencing keep one attempt at a time | [lease renewal](/guides/laravel/concepts/#lease-renewal-and-fencing) |
-| The jobs behind a long job | free workers take them | the jobs in its stripe wait for it | [stripes](/guides/laravel/concepts/#queues-and-stripes) |
-| Order per entity | none | `QueenPartitionable` | [stripes](/guides/laravel/concepts/#queues-and-stripes) |
-| Reaction to a burst | reads queue sizes every `balanceCooldown` | with `event_driven` and `fast_scale_up`, 64 workers 8.2 s after a burst of 30,000 jobs began | [capacity](/benchmarks/laravel/#worker-capacity-on-a-linux-server) |
-| Several masters on one queue | each sizes its pools from the whole backlog | opt-in coordination shares one target | [several replicas](/guides/laravel/supervisors/#several-replicas) |
-| Dashboard and alerts | mature: job lists, batches, silenced jobs, Slack and SMS | preview: process health, job metrics, tags, what each queue holds, failed jobs with a retry, tuning advice, mail, Prometheus | [monitoring](/guides/laravel/monitoring/) |
-| Clear a queue | `horizon:clear` and `queue:clear` | not supported: `queue:clear` fails and the jobs still run | [clearing a queue](/guides/laravel/migrate-from-horizon/#clearing-a-queue) |
-| 15 failures and 2 replica scenarios on one Linux server | all but one passed: 2 of 300 jobs ran twice after a Redis restart | all passed, on both engines | [failures](/benchmarks/laravel/#failures-replicas-a-soak-and-laravel-features) |
-| 32 Laravel queue features | all passed | all passed, on both engines | [features](/benchmarks/laravel/#laravel-queue-features) |
-| Maturity | established | preview, supervisors on Unix only | [requirements](/guides/laravel/supervisors/#requirements) |
+**Measured on one Linux server**
 
-The measured rows come from the [Laravel benchmark](/benchmarks/laravel/): one 16-vCPU Linux
+| | Horizon | Queen |
+| --- | --- | --- |
+| [Jobs/s, 32 workers, 10 ms jobs, fsync on every write](/benchmarks/laravel/#worker-capacity-on-a-linux-server) | 1,124 | 2,753 |
+| [Jobs/s, 64 workers](/benchmarks/laravel/#worker-capacity-on-a-linux-server) | 1,090 | 4,395 |
+| [p95 from dispatch to completion, 500 jobs/s asked, 16 workers](/benchmarks/laravel/#latency-at-a-steady-rate) | 227 ms | 23 ms |
+| [Application memory, 64 idle workers after 10 ms jobs](/benchmarks/laravel/#where-the-difference-comes-from) | 1,967 MiB | 225 MiB, with forked workers |
+| [The same, after jobs that each held 8 MiB](/benchmarks/laravel/#where-the-difference-comes-from) | 2,494 MiB | 755 MiB |
+| [Supervisor processes beside 64 workers, proportional set size](/benchmarks/laravel/#where-the-difference-comes-from) | 60 MiB: master and `horizon:supervisor` | 31 MiB: Rust master and fork server |
+| [Master resident memory through a 45-minute soak](/benchmarks/laravel/#the-soak) | 49.1 MiB | 7.0 MiB Rust, 58.5 MiB PHP |
+| [Backend CPU per job, at 500 jobs/s and under load with 32 workers](/benchmarks/laravel/#cpu) | 0.49 and 0.37 ms | 0.87 and 0.23 ms |
+| [15 failures and 2 replica scenarios on one Linux server](/benchmarks/laravel/#failures-replicas-a-soak-and-laravel-features) | all but one passed: 2 of 300 jobs ran twice after a Redis restart | all passed, on both engines |
+| [32 Laravel queue features](/benchmarks/laravel/#laravel-queue-features) | all passed | all passed, on both engines |
+
+**How they behave**
+
+| | Horizon | Queen |
+| --- | --- | --- |
+| [Queue backend](/guides/laravel/concepts/#durability) | Redis | the Queen broker: one binary, a replicated log |
+| [Durability in the benchmark](/benchmarks/laravel/#the-runs) | Redis AOF, `appendfsync` `always`, `everysec` or `no` | one Raft node, fsync on every acknowledged write |
+| [A job that runs longer than `retry_after`](/guides/laravel/concepts/#lease-renewal-and-fencing) | can run in two workers at once | lease renewal and fencing keep one attempt at a time |
+| [The jobs behind a long job](/guides/laravel/concepts/#queues-and-stripes) | free workers take them | the jobs in its stripe wait for it |
+| [Order per entity](/guides/laravel/concepts/#queues-and-stripes) | none | `QueenPartitionable` |
+| [Reaction to a burst](/benchmarks/laravel/#worker-capacity-on-a-linux-server) | reads queue sizes every `balanceCooldown` | with `event_driven` and `fast_scale_up`, 64 workers 8.2 s after a burst of 30,000 jobs began |
+| [Several masters on one queue](/guides/laravel/supervisors/#several-replicas) | each sizes its pools from the whole backlog | opt-in coordination shares one target |
+| [Dashboard and alerts](/guides/laravel/monitoring/) | mature: job lists, batches, silenced jobs, Slack and SMS | preview: process health, job metrics, tags, what each queue holds, failed jobs with a retry, tuning advice, mail, Prometheus |
+| [Clear a queue](/guides/laravel/migrate-from-horizon/#clearing-a-queue) | `horizon:clear` and `queue:clear` | not supported: `queue:clear` fails and the jobs still run |
+| [Maturity](/guides/laravel/supervisors/#requirements) | established | preview, supervisors on Unix only |
+
+Each row label links to its evidence. The measured rows come from the
+[Laravel benchmark](/benchmarks/laravel/): one 16-vCPU Linux
 server and one Raft node of 2.0.0-beta.2 and beta.3 (2026-10-01 and 2026-10-02). They are
 diagnostic, with a protocol written by the Queen team; [the limits](#the-limits-of-this-evidence)
 say what they do not show. The master memory row is a control-plane result, not a whole-stack one:

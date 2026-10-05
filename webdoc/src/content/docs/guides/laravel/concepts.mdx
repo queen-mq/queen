@@ -44,6 +44,9 @@ sourceOfTruth:
 # QUEEN_SUPERVISOR_PROCESS_LIMIT, QUEEN_SUPERVISOR_FAST_SCALE_UP, the refused ack_async job that
 # runs again, the pop() that fails before the prefetched job ends, and the stable retry ID of a
 # failed payload; replaces the Docker Desktop figures with the Linux server's.
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,
@@ -253,12 +256,21 @@ store whose locks every worker host can see (`null` means Laravel's default stor
 Each of these takes broker round trips off a worker's path, and each leaves more work leased or
 unconfirmed when a worker fails. All are off by default.
 
-| Setting | What it does | What it saves | What it costs |
-| --- | --- | --- | --- |
-| `prefetch` | one pop leases several jobs, run one after another | one pop per job | a crash that is not handed back delivers the batch's unfinished jobs again, each with an attempt; a slow job delays the rest of its batch; above 1 it needs lease renewal |
-| `ack_batch` | sends the ACKs of several successful jobs together | ACK requests | a crash delivers again the jobs that finished but were not acknowledged yet |
-| `ack_async` (1.9.0) | sends the ACK and starts the next job without waiting for the answer | the broker's write latency, once per job | a refused ACK is reported one job later, when the next job has already run on the same lease, and the refused job runs again; needs `ack_batch` 1 |
-| `pop_ahead` (1.9.0) | sends the pop for the next batch while the last job of a full batch runs | the pop round trip at each batch boundary | the next batch is leased one job earlier; needs lease renewal; never on a comma-separated queue list |
+- **`prefetch`**: one pop leases several jobs, run one after another.
+  - Saves one pop per job.
+  - Costs: a crash that is not handed back delivers the batch's unfinished jobs again, each with an
+    attempt; a slow job delays the rest of its batch; above 1 it needs lease renewal.
+- **`ack_batch`**: sends the ACKs of several successful jobs together.
+  - Saves ACK requests.
+  - Costs: a crash delivers again the jobs that finished but were not acknowledged yet.
+- **`ack_async`** (1.9.0): sends the ACK and starts the next job without waiting for the answer.
+  - Saves the broker's write latency, once per job.
+  - Costs: a refused ACK is reported one job later, when the next job has already run on the same
+    lease, and the refused job runs again. Needs `ack_batch` 1.
+- **`pop_ahead`** (1.9.0): sends the pop for the next batch while the last job of a full batch runs.
+  - Saves the pop round trip at each batch boundary.
+  - Costs: the next batch is leased one job earlier. Needs lease renewal; never on a
+    comma-separated queue list.
 
 Prefetch needs renewal because Laravel can pause a worker that still holds prefetched jobs, in
 maintenance mode or with `queue:pause`. With `prefetch` above 1, a `pop()` of the same queue while

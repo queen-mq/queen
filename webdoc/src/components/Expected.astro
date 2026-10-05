@@ -1,0 +1,14 @@
+---
+/**
+ * What a results-table row expects, under its scenario in small, muted type,
+ * so the scenario column reads first and the expectation stays at hand. The
+ * markdown twin renders it as "(expected: …)" (src/lib/markdown-partials.ts).
+ */
+interface Props {
+  text: string;
+}
+
+const { text } = Astro.props;
+---
+
+<small class="mt-0.5 block text-xs leading-snug text-muted-foreground">Expected: {text}</small>

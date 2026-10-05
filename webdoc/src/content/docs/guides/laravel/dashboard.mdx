@@ -52,6 +52,9 @@ sourceOfTruth:
 # which pins queen-supervisor 0.6.0.
 # sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in PHP client 2.1.0, so the opening dotenv block keeps QUEEN_DASHBOARD_ENABLED and QUEEN_DASHBOARD_PATH and the page names dashboard.allow_local, refresh_seconds and failed_jobs_limit as keys; the tuning item and the Settings list read supervisor.lease_service from the configuration (ApplicationSettings, no longer the web host's environment) and show a variable only for the settings that read one; remote status needs only QUEEN_SUPERVISOR_REMOTE_STATUS, since remote_status.key defaults to a slug of APP_NAME and APP_ENV, and its table gives keys.
 # sourceOfTruth re-read 2026-10-05 (2.0.0 on master): adds the client and Rust supervisor files the page states, and restores what docs 2.0 dropped: the Gate deciding before allow_local, the trusted-layer exception, the short-jobs advice turning into a warning with tries 1, the startup warning, no deploy advice without max_ms, the Settings limits, the shared-queue scope, staleness and expiry, the legacy <key>/head slot, the Rust publish path, the per-queue totals, the drawer pause, the SQL cut, uncached errors and new-tab links; the 1.9.0 markers stay, since they name the release that brought each feature (the Versions table on the Laravel page says the same); the old Overview screenshot stays out (its UI predates the Jobs and Tags pages and the current mark).
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the

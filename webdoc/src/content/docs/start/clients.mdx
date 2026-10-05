@@ -26,6 +26,9 @@ verifiedBy:
   - server/tests/embedded_raft_smoke.rs
 # sourceOfTruth re-read 2026-10-05 (Laravel env cut): config/queen.php still reads QUEEN_URL, the
 # only variable the PHP snippet sets besides Laravel's QUEUE_CONNECTION; nothing else changes.
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same

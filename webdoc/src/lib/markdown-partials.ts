@@ -129,6 +129,22 @@ export async function renderEntryMarkdown(entry: MarkdownEntry): Promise<string>
  */
 const componentMap = {
   /**
+   * A results-table cell becomes its mark, and its note in parentheses: the
+   * colour does not travel, the verdict does.
+   */
+  /** What a results-table row expects, after its scenario. */
+  Expected: ({ attrs }: { attrs: Record<string, string | boolean> }): string => {
+    const text = typeof attrs.text === "string" ? attrs.text.trim() : "";
+    return text ? `(expected: ${text})` : "";
+  },
+
+  Result: ({ attrs }: { attrs: Record<string, string | boolean> }): string => {
+    const note = typeof attrs.note === "string" ? attrs.note.trim() : "";
+    const mark = attrs.fail ? "✗" : "✓";
+    return note ? `${mark} (${note})` : mark;
+  },
+
+  /**
    * A figure becomes its description. The image itself cannot travel into
    * markdown usefully (two theme-specific SVGs, no meaning without a
    * renderer), so what the markdown carries is the text that stands in for it:

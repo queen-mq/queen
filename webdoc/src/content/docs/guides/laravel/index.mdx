@@ -25,6 +25,9 @@ sourceOfTruth:
 # supervisor 0.6.0, both tagged).
 # sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in PHP client 2.1.0, so install step 3 drops QUEEN_RETRY_AFTER, the lease paragraph and both delivery profiles name the keys of config/queen.php (prefetch, ack_batch, lease_renewal, ack_async, pop_ahead, sync_failed_jobs) instead of variables, the Versions section adds a 2.1.0 row (20 variables, supervisor.lease_service, the queue:restart and fork-safety changes of prefork) and the configuration reference link names the 20 variables.
 # sourceOfTruth re-read 2026-10-05 (docs restore): master carries clients/client-php and supervisor/, so the client files this page describes join the list; the page now describes PHP client 2.0.0 (a Versions row: each transaction ACK names its lease, the Jobs page reads with a read-only token; SupervisorBinary pins 0.6.0); restored, as QueenQueue does them, the prefetch=1 limit of ack_async, the pop_ahead safety rules (lease tracked when the job ends, batch handed back once half the new lease has passed, no long-poll), the queue:work --timeout gap (assertJobTimeoutIsSafe checks only a job's own $timeout; SupervisorConfiguration refuses timeout >= retry_after), the diagnostic caveat and the links to Kubernetes, monitoring and the production checks.
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and

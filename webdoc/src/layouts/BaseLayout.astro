@@ -72,14 +72,21 @@ const briefUrl = Astro.site
 
         const resolveMode = () => readPref() ?? (media.matches ? "dark" : "light");
 
+        // No stored preference is the "system" choice: follow the OS.
+        const labels = { light: "Theme: light", dark: "Theme: dark", system: "Theme: system" };
+
         const applyTheme = () => {
           const root = document.documentElement;
           const mode = resolveMode();
+          const pref = readPref() ?? "system";
           if (mode === "dark") root.setAttribute("data-mode", "dark");
           else root.removeAttribute("data-mode");
           root.style.colorScheme = mode;
           document.querySelectorAll("[data-nb-theme-toggle]").forEach((b) => {
             b.setAttribute("data-nb-state", mode);
+            b.setAttribute("data-nb-pref", pref);
+            b.setAttribute("aria-label", labels[pref]);
+            b.setAttribute("title", labels[pref]);
           });
         };
 

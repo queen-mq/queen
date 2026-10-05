@@ -33,6 +33,9 @@ sourceOfTruth:
 # which pins queen-supervisor 0.6.0.
 # sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in PHP client 2.1.0, so the job metrics, tags, long-wait and Prometheus tables give the keys of config/queen.php (job_metrics.*, tags.*, waits, notifications.throttle_minutes, metrics.path) and name a variable only for notifications.mail, metrics.enabled and metrics.token.
 # sourceOfTruth re-read 2026-10-05 (2.0.0 on master): adds the client files the page states; the read-only token paragraph is corrected (JobMetricsReader lists through POST /api/v1/resources/kv/list, a read route for the broker and the proxy, and falls back to getPrefix only on 403 or 404); restores max_ms missing from earlier workers, QUEEN_WAIT_THRESHOLD, QUEEN_NOTIFY_THROTTLE_MINUTES and QUEEN_METRICS_PATH with their defaults, and what size(), pendingSize(), reservedSize() and delayedSize() count; the read-only token needs 2.0.0, and the 1.9.0 markers stay on what 1.9.0 brought.
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
 ---
 
 The [dashboard](/guides/laravel/dashboard/) shows what the supervisors are doing. This page is about
