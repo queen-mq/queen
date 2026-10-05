@@ -956,6 +956,9 @@ impl Engine {
             let fr = self.frames(r, &seg);
             let mut walk = Walk::default();
             if let Some(pid) = w.pinned {
+                // Its partition may be one the unloader dropped and an append
+                // just queued back ([`super::unload`]).
+                self.attach_late(r, &fr, g, now)?;
                 let cfg = g.cfg();
                 let worker: Arc<str> = Arc::from(w.cmd.worker.as_str());
                 let req = ClaimReq {

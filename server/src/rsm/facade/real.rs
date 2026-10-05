@@ -5055,6 +5055,17 @@ impl Rsm for RaftFacade {
             "queen_raft_storage_full {}\n",
             u8::from(self.storage_full.load(std::sync::atomic::Ordering::Relaxed))
         ));
+        let es = self.engine.engine_stats();
+        out.push_str("# HELP queen_consume_engine What the consumption engine holds in memory (only the leader holds any): groups, (group, partition) parts, partitions\n# TYPE queen_consume_engine gauge\n");
+        out.push_str(&format!(
+            "queen_consume_engine{{kind=\"groups\"}} {}\nqueen_consume_engine{{kind=\"parts\"}} {}\nqueen_consume_engine{{kind=\"partitions\"}} {}\n",
+            es.groups, es.parts, es.partitions
+        ));
+        out.push_str("# HELP queen_consume_parts_total Parts the engine loaded (first contacts and loads back) and unloaded (idle)\n# TYPE queen_consume_parts_total counter\n");
+        out.push_str(&format!(
+            "queen_consume_parts_total{{kind=\"loaded\"}} {}\nqueen_consume_parts_total{{kind=\"unloaded\"}} {}\n",
+            es.loaded_total, es.unloaded_total
+        ));
         out
     }
 

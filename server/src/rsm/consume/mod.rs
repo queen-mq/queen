@@ -35,6 +35,11 @@
 //!   margin) comes; the engine's serve thread answers it.
 //! * Apply hooks ([`hooks`]): every node's apply reports appends and catalog
 //!   effects; only the leader's engine holds anything to update.
+//! * Memory ([`unload`]): a whole-queue group's part that holds nothing (no
+//!   lease, nothing to deliver, everything durable) and stayed so for
+//!   `QUEEN_CONSUME_IDLE_UNLOAD_S` is dropped; its partition keeps the group as
+//!   a watcher, and the next append there loads the part back from its cursor
+//!   row, the way a new leader loads it.
 
 mod ack;
 mod checkpoint;
@@ -44,6 +49,7 @@ mod load;
 mod pop;
 mod state;
 mod txn;
+mod unload;
 mod wait;
 
 #[cfg(test)]
@@ -52,6 +58,8 @@ mod tests;
 mod tests_ack;
 #[cfg(test)]
 mod tests_pop;
+#[cfg(test)]
+mod tests_unload;
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -174,6 +182,10 @@ pub(crate) struct Knobs {
     /// `QUEEN_CONSUME_TXN_TTL_MS` (default 30000), in µs: a transaction
     /// reservation nobody resolves is released after this.
     pub txn_ttl_us: i64,
+    /// `QUEEN_CONSUME_IDLE_UNLOAD_S` (default 600; `0` keeps every part), in
+    /// µs: how long a whole-queue group's part must have held nothing before
+    /// it is dropped from memory ([`unload`]).
+    pub idle_unload_us: i64,
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -212,6 +224,7 @@ impl Knobs {
                 * 1000,
             rows_per_cmd: env_u64("QUEEN_CONSUME_ROWS_PER_COMMAND", 4096).max(1) as usize,
             txn_ttl_us: env_u64("QUEEN_CONSUME_TXN_TTL_MS", 30_000) as i64 * 1000,
+            idle_unload_us: env_u64("QUEEN_CONSUME_IDLE_UNLOAD_S", 600) as i64 * SEC_US,
         }
     }
 }
@@ -305,6 +318,8 @@ pub struct Engine {
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Group loads running (each re-runs the commands it held when it ends).
     pub(crate) loading: std::sync::atomic::AtomicUsize,
+    /// The idle-part unloader's pacing and counters ([`unload`]).
+    pub(crate) unload: unload::Unload,
 }
 
 impl Drop for Engine {
@@ -357,6 +372,7 @@ impl Engine {
             waking: Arc::new(wait::Waking::default()),
             thread: Mutex::new(None),
             loading: std::sync::atomic::AtomicUsize::new(0),
+            unload: unload::Unload::default(),
         })
     }
 

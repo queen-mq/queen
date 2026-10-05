@@ -50,6 +50,10 @@ services:
       # every kv test answers 403 on the `tenanted` lane and the lane can never be
       # IDENTICAL to `single`. Set it to `true` for a one-off check of the denial.
       QUEEN_KV_REQUIRE_GRANT: "${QUEEN_TEST_KV_REQUIRE_GRANT:-false}"
+      # How long an idle consumer part stays in the leader's memory. 600 is the
+      # default; a lane run with QUEEN_TEST_IDLE_UNLOAD_S=1 drops parts while
+      # the suites run, so every suite also goes through the load-back path.
+      QUEEN_CONSUME_IDLE_UNLOAD_S: "${QUEEN_TEST_IDLE_UNLOAD_S:-600}"
     volumes:
       - raftdata:/var/lib/queen/raft
 

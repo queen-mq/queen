@@ -40,7 +40,20 @@ pub(super) fn knobs() -> Knobs {
         margin_us: 50_000,
         rows_per_cmd: 2,
         txn_ttl_us: 30_000_000,
+        // Off unless a run asks for it: `QUEEN_TEST_IDLE_UNLOAD_US=1` runs the
+        // whole engine suite with every idle part dropped at once, which must
+        // change no answer ([`super::unload`]).
+        idle_unload_us: std::env::var("QUEEN_TEST_IDLE_UNLOAD_US")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(0),
     }
+}
+
+/// `QUEEN_TEST_IDLE_UNLOAD_US` set: the suite runs with every part that
+/// could go dropped before each command ([`H::serve`]).
+pub(super) fn aggressive_unload() -> bool {
+    std::env::var("QUEEN_TEST_IDLE_UNLOAD_US").is_ok()
 }
 
 pub(super) fn qcfg() -> QueueConfig {
@@ -188,6 +201,34 @@ impl H {
     /// an `Append` (the queue and the partition created on first use), then
     /// the hook apply calls.
     pub fn push_at(&mut self, q: &str, part: &str, txns: &[&str], created: i64) -> Pid {
+        let (pid, new, end) = self.write_append(q, part, txns, created);
+        if new {
+            self.e.on_effect(
+                &Effect::PartitionCreate {
+                    pid,
+                    uuid: [pid as u8; 16],
+                    tenant: T.to_string(),
+                    queue: q.to_string(),
+                    partition: part.to_string(),
+                    created_at_us: created,
+                },
+                0,
+            );
+        }
+        self.e.on_append(pid, end);
+        pid
+    }
+
+    /// What [`H::push_at`] writes, without the hooks apply calls after it:
+    /// `(pid, whether the partition is new, its last offset)`. A test runs
+    /// the hooks itself, to put something between the write and them.
+    pub fn write_append(
+        &mut self,
+        q: &str,
+        part: &str,
+        txns: &[&str],
+        created: i64,
+    ) -> (Pid, bool, i64) {
         let mut w = self.store.write().expect("write");
         if w.queue(T, q).expect("read").is_none() {
             w.put_queue(T, q, &qcfg()).expect("queue");
@@ -216,21 +257,38 @@ impl H {
         row.last_write_at_us = created;
         w.put_partition(pid, &row).expect("tail");
         w.commit().expect("commit");
-        drop(w);
-        if new {
-            self.e.on_effect(
-                &Effect::PartitionCreate {
-                    pid,
-                    uuid: [pid as u8; 16],
-                    tenant: T.to_string(),
-                    queue: q.to_string(),
-                    partition: part.to_string(),
-                    created_at_us: created,
-                },
-                0,
-            );
+        (pid, new, end as i64)
+    }
+
+    /// An empty partition: what apply writes for its `PartitionCreate`, then
+    /// the hook.
+    pub fn create_partition(&mut self, q: &str, part: &str) -> Pid {
+        let created = self.now;
+        let mut w = self.store.write().expect("write");
+        if w.queue(T, q).expect("read").is_none() {
+            w.put_queue(T, q, &qcfg()).expect("queue");
         }
-        self.e.on_append(pid, end as i64);
+        assert!(
+            w.pid_of(T, q, part).expect("read").is_none(),
+            "{part} exists"
+        );
+        let pid = self.next_pid;
+        self.next_pid += 1;
+        let row = PartitionRow::new([pid as u8; 16], T, q, part, created);
+        w.create_partition(pid, &row).expect("create");
+        w.commit().expect("commit");
+        drop(w);
+        self.e.on_effect(
+            &Effect::PartitionCreate {
+                pid,
+                uuid: [pid as u8; 16],
+                tenant: T.to_string(),
+                queue: q.to_string(),
+                partition: part.to_string(),
+                created_at_us: created,
+            },
+            0,
+        );
         pid
     }
 
@@ -378,6 +436,11 @@ impl H {
     pub fn serve(&mut self, cmd: Command) -> Reply {
         // The clock work at the commands' clock (lease expiries, holds).
         self.e.tick(self.now);
+        // `QUEEN_TEST_IDLE_UNLOAD_US`: every part that could go goes first,
+        // so the command finds it gone ([`super::unload`]).
+        if aggressive_unload() {
+            self.e.unload_now(self.now);
+        }
         match self.e.serve(&cmd, self.now) {
             Served::Now(r) => r,
             Served::NotMine => panic!("not the engine's: {cmd:?}"),
@@ -401,6 +464,9 @@ impl H {
     /// Serve expecting a held answer (the group loaded first if it had to).
     pub fn later(&mut self, cmd: Command) -> tokio::sync::oneshot::Receiver<Reply> {
         self.e.tick(self.now);
+        if aggressive_unload() {
+            self.e.unload_now(self.now);
+        }
         match self.e.serve(&cmd, self.now) {
             Served::Later(rx) => {
                 self.e.wait_loads();

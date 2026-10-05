@@ -273,8 +273,8 @@ impl Engine {
                 }
             }
         }
-        let mut sh = lock(&self.shards[si]);
-        let sh = &mut *sh;
+        let mut guard = lock(&self.shards[si]);
+        let sh = &mut *guard;
         if g.dead.load(Ordering::Acquire) {
             return Ok(false);
         }
@@ -289,6 +289,30 @@ impl Engine {
         // an append applied since the read above is in it, a later one finds
         // this part watching.
         let now_head = r.partition_head(pid)?.unwrap_or(head);
+        let grace = self.grace();
+        // That append's own hook may not have run yet (apply writes the row
+        // first): the parts already watching wait for it, and it would find
+        // the tail raised here and arm none of them. Arm them now, as it would
+        // have (2026-10-05: a new partition's first message stuck for the
+        // groups that loaded it a moment before another group did).
+        let (mut woken, mut reload) = (Vec::new(), Vec::new());
+        if sh
+            .pids
+            .get(&pid)
+            .is_some_and(|pi| now_head.last_offset > pi.tail)
+        {
+            self.append_locked(
+                sh,
+                pid,
+                now_head.last_offset,
+                now_us,
+                grace,
+                &mut woken,
+                &mut reload,
+            );
+            // This group's part is the one being loaded.
+            reload.retain(|(rg, _)| rg.id != g.id);
+        }
         let pi = sh.pids.entry(pid).or_insert_with(|| PidInfo {
             tail: now_head.last_offset,
             log_start: now_head.log_start,
@@ -318,8 +342,15 @@ impl Engine {
             .or_insert_with(|| GroupShard::new(g.clone()))
             .parts
             .insert(pid, part);
-        let grace = self.grace();
+        self.unload.loaded.fetch_add(1, Ordering::Relaxed);
         super::pop::arm(sh, g.id, pid, now_us, grace);
+        drop(guard);
+        if !reload.is_empty() {
+            self.reload_parts(reload);
+        }
+        for gid in woken {
+            self.wake_group(gid);
+        }
         Ok(true)
     }
 

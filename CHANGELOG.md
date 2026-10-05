@@ -3,6 +3,25 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 2.0.1-beta - 2026-10-05
+
+**A new partition's first message reaches every consumer group.** On a queue read by two or more
+consumer groups, a group that took a new partition into the leader's memory before the partition's
+first message was written could miss that message until the partition's next message or a change
+of leader. A second group loading the partition a moment later raised the shared tail and armed
+only its own cursor, so the append's own wake-up found nothing left to do. A group's load now arms
+every group already watching the partition whenever it finds the tail moved.
+
+**The leader keeps only the consumer state that is in use.** The consumption engine kept every
+(consumer group, partition) pair it had served in the leader's memory, about 1 KB each, until the
+partition or the group was deleted, and a partition is deleted only after `PARTITION_CLEANUP_DAYS`
+(30 by default). A workload that keeps opening partitions, one per conversation or entity, grew the
+leader without bound. A whole-queue group's pair that holds nothing (no lease, nothing to deliver,
+no hold, every change durable) and stays so for `QUEEN_CONSUME_IDLE_UNLOAD_S` (default 600; `0`
+keeps every pair) now leaves memory. The next message on its partition loads it back from its
+cursor row, as a new leader does. New gauges: `queen_consume_engine{kind="groups"|"parts"|"partitions"}`
+and `queen_consume_parts_total{kind="loaded"|"unloaded"}`.
+
 ## 2.0.0 - 2026-10-03
 
 **The PostgreSQL storage class is removed.** Queen 2.0 has one storage class, its own replicated
