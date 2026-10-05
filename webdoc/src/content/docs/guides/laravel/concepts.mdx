@@ -262,8 +262,8 @@ unconfirmed when a worker fails. All are off by default.
   - Costs: a crash that is not handed back delivers the batch's unfinished jobs again, each with an
     attempt; a slow job delays the rest of its batch; above 1 it needs lease renewal.
   - `'auto'` sizes each pop from how long the worker's jobs take, about 250 ms of work per batch:
-    up to 16 short jobs, one long one. It starts at one job, grows at most twofold per pop and
-    shrinks at once, per queue.
+    up to 16 short jobs, one long one. It starts at one job, doubles after two full pops in a row
+    and shrinks at once, per queue.
 - **`ack_batch`**: sends the ACKs of several successful jobs together.
   - Saves ACK requests.
   - Costs: a crash delivers again the jobs that finished but were not acknowledged yet.

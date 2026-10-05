@@ -30,7 +30,7 @@ data and a README.
 | 2026-10-02 | `2.0.0-beta.3` | 15 failures, 2 replica scenarios, a 45-minute soak, 32 Laravel features, the crash hand-back | [2026-10-02-laravel-failure-matrix](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-02-laravel-failure-matrix) |
 | 2026-10-02 | `2.0.0-beta.3` | 64, 128 and 256 partition stripes, 36 runs | [2026-10-02-laravel-partition-stripes](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-02-laravel-partition-stripes) |
 | 2026-10-05 | `2.0.0-beta.3` | worker memory: prefork and the opcache apart, jobs that allocate, 20 minutes of work, 38 runs | [2026-10-05-laravel-worker-memory](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-05-laravel-worker-memory) |
-| 2026-10-05 | `2.0.0-beta.3` | the safe, balanced and fast profiles, `prefetch` `'auto'`, 63 runs | [2026-10-05-laravel-auto-prefetch](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-05-laravel-auto-prefetch) |
+| 2026-10-05 | `2.0.0-beta.3` | the safe, balanced and fast profiles, `prefetch` `'auto'`, 100 runs | [2026-10-05-laravel-auto-prefetch](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-05-laravel-auto-prefetch) |
 
 Every run used the Laravel 12 application in `benchmark-queen/laravel-supervisors` and its job
 `App\Jobs\BenchmarkJob`, which sleeps 10 ms unless a lane says otherwise, on PHP 8.3. Horizon ran on Redis 7.4 with its append-only file. Whenever both stacks ran, Redis
@@ -186,7 +186,8 @@ after that was not measured.
 ## Delivery profiles and prefetch auto
 
 2026-10-05, Queen only: the Rust supervisor with prefork, the command-line opcache and lease
-renewal in the master, three runs per lane, each on a fresh broker. The profiles are the
+renewal in the master, three runs per lane (five at 500 jobs/s), each on a fresh broker. Every
+worker long-polls for 1 s. The profiles are the
 [Laravel guide's](/guides/laravel/#choose-a-delivery-profile): safe is `prefetch` 1 with
 synchronous ACKs; balanced is `prefetch` `'auto'`; fast adds `ack_async` and `pop_ahead`.
 
@@ -194,23 +195,40 @@ synchronous ACKs; balanced is `prefetch` `'auto'`; fast adds `ack_async` and `po
 
 | 32 workers, one burst | Safe | Balanced | Fast | Fast, `prefetch` 4 |
 | --- | ---: | ---: | ---: | ---: |
-| Empty jobs, jobs/s | 3,131 | 5,675 | 6,015 | 6,046 |
-| 10 ms jobs, jobs/s | 1,548 | 2,007 | 2,836 | 2,835 |
+| Empty jobs, jobs/s | 3,131 | 5,681 | 5,994 | 6,046 |
+| 10 ms jobs, jobs/s | 1,548 | 2,003 | 2,867 | 2,835 |
 | 200 ms jobs, jobs/s | 139 | 139 | 147 | 148 |
 | Pops per job, 10 ms jobs | 1.00 | 0.07 | 0.09 | 0.26 |
 | Broker CPU per job, 10 ms jobs | 0.29 ms | 0.19 ms | 0.19 ms | 0.22 ms |
 
-With short jobs `'auto'` reached batches of about 15 jobs, so a worker popped once every 15 jobs
-and the broker spent a third less CPU per job; with 200 ms jobs it kept one job per pop. At a steady
-500 jobs/s with 16 workers the p50 was 14.4 to 14.6 ms in every profile and the p95 23 ms; the p99 was 29 ms
-for safe and fast and 30 ms for balanced, 59 ms in one of its three runs. Fast popped ahead after
-every job on that quiet queue, about two pops per job, and the broker spent 0.81 ms of CPU per job
-against 0.73.
+- With short jobs `'auto'` reached batches of about 15 jobs: a worker popped once every 15 jobs, and
+  the broker spent a third less CPU per job.
+- With 200 ms jobs it kept one job per pop.
+- At a steady 500 jobs/s with 16 workers the p50 was 14 to 15 ms in every profile and the p95 23 ms.
+- Fast popped ahead after every job on that quiet queue, about two pops per job: the broker spent
+  0.81 ms of CPU per job against 0.70 for safe and 0.72 for balanced.
+
+### The p99 at 500 jobs/s
+
+| Profile | p99 of each of five runs |
+| --- | --- |
+| Safe, `sleep` 1 | 29, 29, 28, 36, 28 ms |
+| Safe, `sleep` 0 | 29, 29, 29, 78, 29 ms |
+| Balanced, `sleep` 1 | 30, 37, 29, 29, 338 ms |
+| Balanced, `sleep` 0 | 29, 29, 30, 30, 30 ms |
+| Fast, `sleep` 1 | 29, 29, 29, 29, 29 ms |
+
+The 338 ms run is a burst after a quiet spell. 12 of the 16 workers had come back empty from their
+long poll and were sleeping for Laravel's `sleep` of 1 s, so the 4 awake ones took the burst and
+grew their batches, and every job over 100 ms came in those first 1.5 s. With `sleep` 0 an idle
+worker polls again at once; the broker's CPU per job stayed within 2%. The 78 ms run of safe is a
+stall of about one second that hit all 16 workers alike, with one job per pop, so batches play no
+part in it.
 
 A first version of `'auto'` let the batch grow under any pop, and at 500 jobs/s its p99 reached 63
 and 145 ms in two runs of three, while a worker held several jobs and others sat idle. The batch now
-grows only after a pop that came back full and shrinks to what a short pop brought; the balanced and
-fast lanes above are that version, rerun.
+doubles only after two pops in a row came back full, and shrinks to what a short pop brought; the
+balanced and fast lanes above are that version.
 
 ## CPU
 
