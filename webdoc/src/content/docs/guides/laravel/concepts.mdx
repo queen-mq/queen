@@ -44,6 +44,9 @@ sourceOfTruth:
 # QUEEN_SUPERVISOR_PROCESS_LIMIT, QUEEN_SUPERVISOR_FAST_SCALE_UP, the refused ack_async job that
 # runs again, the pop() that fails before the prefetched job ends, and the stable retry ID of a
 # failed payload; replaces the Docker Desktop figures with the Linux server's.
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,
