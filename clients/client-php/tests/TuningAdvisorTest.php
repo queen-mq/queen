@@ -27,7 +27,7 @@ final class TuningAdvisorTest extends TestCase
         $this->assertStringContainsString('75 s', $advice[0]['evidence']);
         $this->assertStringContainsString('Raise queen.supervisor.shutdown_grace above the longest run', $advice[0]['action']);
         $this->assertStringContainsString('terminationGracePeriodSeconds', $advice[0]['action']);
-        $this->assertSame('https://queenmq.com/use/laravel/supervisors', $advice[0]['doc']);
+        $this->assertSame('https://queenmq.com/guides/laravel/supervisors', $advice[0]['doc']);
 
         $unpublished = $this->advise(
             snapshot: $this->snapshot(['configuration' => ['supervisors' => []]]),
@@ -93,7 +93,7 @@ final class TuningAdvisorTest extends TestCase
             'Keep tries at 2 or more: after a crash that is not handed back, such as a lost node, each job a worker had prefetched comes back with one attempt more.',
             $advice[0]['action'],
         );
-        $this->assertSame('https://queenmq.com/use/laravel#asynchronous-acknowledgements', $advice[0]['doc']);
+        $this->assertSame('https://queenmq.com/guides/laravel#a-faster-profile', $advice[0]['doc']);
     }
 
     public function testPrefetchAdviceIsAWarningForAPoolWithOneTry(): void
@@ -174,10 +174,10 @@ final class TuningAdvisorTest extends TestCase
         $advice = $this->advise(config: $this->config(['supervisor' => ['prefork' => false]]));
 
         $this->assertSame(['info'], array_column($advice, 'severity'));
-        $this->assertStringContainsString('336 MiB', $advice[0]['evidence']);
-        $this->assertStringContainsString('85 MiB', $advice[0]['evidence']);
+        $this->assertStringContainsString('2,062 MiB', $advice[0]['evidence']);
+        $this->assertStringContainsString('225 MiB', $advice[0]['evidence']);
         $this->assertStringContainsString('QUEEN_SUPERVISOR_PREFORK=true', $advice[0]['action']);
-        $this->assertSame('https://queenmq.com/use/laravel/supervisors#prefork-workers', $advice[0]['doc']);
+        $this->assertSame('https://queenmq.com/guides/laravel/supervisors#prefork-workers', $advice[0]['doc']);
         $this->assertSame([], $this->advise(config: $this->config(['supervisor' => ['prefork' => true]])));
     }
 
@@ -189,7 +189,7 @@ final class TuningAdvisorTest extends TestCase
         $this->assertSame(['info'], array_column($advice, 'severity'));
         $this->assertStringContainsString('queen.supervisor.lease_service turns', $advice[0]['evidence']);
         $this->assertStringContainsString('Set queen.supervisor.lease_service to true', $advice[0]['action']);
-        $this->assertSame('https://queenmq.com/use/laravel/supervisors#lease-renewal-in-the-master', $advice[0]['doc']);
+        $this->assertSame('https://queenmq.com/guides/laravel/supervisors#lease-renewal-in-the-master', $advice[0]['doc']);
 
         $this->assertSame([], $this->advise(config: $this->config([], ['lease_renewal' => true])), 'the service is on by default');
         $this->assertSame([], $this->advise(config: $this->config(['supervisor' => ['lease_service' => true]], ['lease_renewal' => true])));
@@ -205,7 +205,7 @@ final class TuningAdvisorTest extends TestCase
         $this->assertSame('Bursts wait for the next poll', $advice[0]['title']);
         $this->assertStringContainsString('every 3 s', $advice[0]['evidence']);
         $this->assertStringContainsString('Set queen.supervisor.event_driven to true', $advice[0]['action']);
-        $this->assertSame('https://queenmq.com/use/laravel/supervisors#event-driven-scaling', $advice[0]['doc']);
+        $this->assertSame('https://queenmq.com/guides/laravel/supervisors#event-driven-scaling', $advice[0]['doc']);
     }
 
     public function testFixedPoolsDoNotWaitForThePoll(): void
@@ -257,7 +257,7 @@ final class TuningAdvisorTest extends TestCase
         $this->assertSame(['warning'], array_column($advice, 'severity'));
         $this->assertSame('3 supervisors autoscale queue default without coordinating', $advice[0]['title']);
         $this->assertStringContainsString('QUEEN_SUPERVISOR_COORDINATION=true', $advice[0]['action']);
-        $this->assertSame('https://queenmq.com/use/laravel/supervisors#several-replicas', $advice[0]['doc']);
+        $this->assertSame('https://queenmq.com/guides/laravel/supervisors#several-replicas', $advice[0]['doc']);
     }
 
     public function testFailedJobsLinkToTheFailedJobsPage(): void

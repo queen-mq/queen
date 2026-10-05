@@ -148,8 +148,9 @@ return [
             'ttl' => null,
         ],
         // Boot Laravel once in a fork server and fork every worker from it,
-        // instead of booting each worker: workers share the framework and the
-        // opcache copy-on-write. Needs ext-pcntl and ext-posix.
+        // instead of booting each worker: workers share the opcache's
+        // compiled code outright and the booted heap copy-on-write. Needs
+        // ext-pcntl and ext-posix; turn opcache.enable_cli on with it.
         'prefork' => filter_var(env('QUEEN_SUPERVISOR_PREFORK', false), FILTER_VALIDATE_BOOL),
         // Wake on new jobs instead of waiting for the next poll: a read-only
         // long poll on the broker (no lease, no cursor) watches the partition

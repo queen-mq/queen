@@ -1,6 +1,6 @@
 //! Prefork workers: Laravel boots once, in a fork server, and every worker is
-//! forked from it instead of booting on its own. Workers share the framework
-//! and the opcache copy-on-write.
+//! forked from it instead of booting on its own. Workers share the opcache's
+//! compiled code outright and the booted heap copy-on-write.
 //!
 //! The server is `php artisan queen:fork-server`, the Laravel package's
 //! `ForkServer`. This module is the master's side of its protocol, one JSON
