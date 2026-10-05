@@ -50,6 +50,10 @@ return [
         'coordination' => ['enabled' => (bool) env('QUEEN_SUPERVISOR_COORDINATION', false)],
         'prefork' => (bool) env('QUEEN_SUPERVISOR_PREFORK', false),
         'event_driven' => (bool) env('QUEEN_SUPERVISOR_EVENT_DRIVEN', false),
+        // Rust lanes on Linux: lease renewal in the master, or one PHP helper
+        // per worker when a campaign turns it off. The package reads no
+        // environment variable for it, so the harness keeps this one.
+        'lease_service' => filter_var(env('QUEEN_SUPERVISOR_LEASE_SERVICE', true), FILTER_VALIDATE_BOOL),
         'supervisors' => [
             'bench' => [
                 'connection' => $benchmark['connection'],

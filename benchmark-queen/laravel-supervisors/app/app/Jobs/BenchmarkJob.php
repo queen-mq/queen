@@ -38,11 +38,15 @@ final class BenchmarkJob implements ShouldQueue
                 $this->sleepUntilMonotonicDeadline($this->sleepMs);
             }
 
-            $digest = hash('sha256', $this->runId.':'.$this->jobId, true);
+            // Memory a real job builds while it runs (models, collections,
+            // payloads), held until the job ends.
+            $held = self::allocate((int) config('benchmark.job_alloc_kb', 0));
+            $digest = hash('sha256', $this->runId.':'.$this->jobId.':'.count($held), true);
             for ($iteration = 0; $iteration < $this->cpuIterations; ++$iteration) {
                 $digest = hash('sha256', $digest.pack('J', $iteration), true);
             }
 
+            unset($held);
             $completedAt = hrtime(true);
             $checksum = bin2hex($digest);
             $ledgerEffect = $ledgerAttemptId === null
@@ -105,5 +109,18 @@ final class BenchmarkJob implements ShouldQueue
             $remainingMicroseconds = (int) max(1, intdiv($remainingNanoseconds + 999, 1000));
             usleep(min(1_000_000, $remainingMicroseconds));
         }
+    }
+
+    /** @return list<string> $kib distinct strings of 1 KiB each */
+    private static function allocate(int $kib): array
+    {
+        $rows = [];
+        for ($index = 0; $index < $kib; ++$index) {
+            // 999 characters and the 25-byte zend_string header fill one
+            // 1,024-byte slot of PHP's allocator exactly.
+            $rows[] = str_repeat(chr(97 + $index % 26), 991).sprintf('%08d', $index);
+        }
+
+        return $rows;
     }
 }

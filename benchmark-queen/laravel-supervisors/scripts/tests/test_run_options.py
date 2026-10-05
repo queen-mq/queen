@@ -171,7 +171,7 @@ class RunOptionsTest(unittest.TestCase):
         dispatch = source.index('--rate="$DISPATCH_RATE" >"${CURRENT_HOST_RUN}/dispatch-command.json"')
         evidence = source.index('>"${CURRENT_HOST_RUN}/backlog-count.json"')
         release = source.index('        release_workers\n')
-        results = source.index('producer php artisan bench:results --no-ansi "$run_id"')
+        results = source.index('artisan bench:results --no-ansi "$run_id"')
 
         self.assertLess(hold, baseline, "the workers are held before the counters' baseline")
         self.assertLess(baseline, dispatch)

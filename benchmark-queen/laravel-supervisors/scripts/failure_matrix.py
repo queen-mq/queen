@@ -765,6 +765,50 @@ def laravel_compat(lane: Lane) -> list[Check]:
     return checks
 
 
+def queue_restart(lane: Lane) -> list[Check]:
+    """A deploy that runs only `php artisan queue:restart`, as Forge and Envoyer do. Every worker
+    stops after its job and is replaced. With prefork the replacements must come from a fork server
+    booted after the signal; from the one booted before it, they would keep its code."""
+    first, later = ids(0, 4), ids(4, 4)
+    old_workers = set(lane.workers())
+    old_servers = {pid for pid, _, args in lane.processes() if "queen:fork-server" in args}
+    lane.dispatch("ok", 4, sleep_ms=3_000, tries=1)
+    lane.wait_until(lambda r: any(r.count(j, "started") for j in first), 60, "a job started")
+    lane.artisan("queue:restart")
+    lane.note("queue:restart")
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        current = set(lane.workers())
+        if len(current) >= int(lane.env["BENCH_WORKERS"]) and not current & old_workers:
+            break
+        time.sleep(1)
+    lane.note("workers replaced" if not set(lane.workers()) & old_workers else "workers NOT replaced")
+    lane.dispatch("ok", 4, first=4, sleep_ms=100, tries=1)
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in first + later), 120, "all completed")
+    jobs = lane.settle(5)
+    after = lane.processes()
+    needle = "horizon:work" if lane.profile.engine == "horizon" else "artisan queue:work"
+    workers = {pid: ppid for pid, ppid, args in after if needle in args}
+    servers = {pid for pid, _, args in after if "queen:fork-server" in args}
+    lane.extra["queue_restart"] = {"old_workers": sorted(old_workers), "old_fork_servers": sorted(old_servers),
+                                   "workers": workers, "fork_servers": sorted(servers)}
+    checks = [
+        Check("every worker was replaced", bool(workers) and not set(workers) & old_workers,
+              f"before {sorted(old_workers)}, after {sorted(workers)}"),
+        *completed_once(jobs, first + later),
+    ]
+    if old_servers:
+        parents = set(workers.values())
+        checks += [
+            Check("the new workers come from a fork server booted after the signal",
+                  bool(parents) and parents <= servers and not parents & old_servers,
+                  f"fork servers before {sorted(old_servers)}, after {sorted(servers)}, worker parents {sorted(parents)}"),
+            Check("the old fork server exited with its last worker", not old_servers & servers,
+                  f"still running: {sorted(old_servers & servers)}"),
+        ]
+    return checks
+
+
 @dataclass(frozen=True)
 class Scenario:
     name: str
@@ -796,6 +840,10 @@ SCENARIOS = [
     Scenario("replicas-kill", replicas_kill, {"BENCH_QUEEN_COORDINATION": "true"}, replicas=2),
     Scenario("replicas-rolling", replicas_rolling, {"BENCH_QUEEN_COORDINATION": "true"}, replicas=2),
     Scenario("soak", soak, {"BENCH_WORKERS": "8", "BENCH_MIN_WORKERS": "8", "BENCH_MAX_WORKERS": "8"}),
+    # queue:work reads the restart signal from the cache, which every process must share.
+    Scenario("queue-restart", queue_restart, {
+        "BENCH_CACHE_STORE": "database", "BENCH_DB_DATABASE": COMPAT_DATABASE,
+    }, prepare=compat_database),
     Scenario("laravel-compat", laravel_compat, {
         "BENCH_CACHE_STORE": "database", "BENCH_DB_DATABASE": COMPAT_DATABASE,
         "BENCH_WORKERS": "3", "BENCH_MIN_WORKERS": "3", "BENCH_MAX_WORKERS": "3",

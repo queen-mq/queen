@@ -7,7 +7,8 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_DIR="$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd)"
 REPOSITORY_ROOT="$(CDPATH='' cd -- "${BENCH_DIR}/../.." && pwd)"
 COMPOSE_FILE="${BENCH_DIR}/compose.yml"
-APP_IMAGE="queen-laravel-supervisor-bench:local"
+# Compose runs the same tag (compose.yml, compose.raft.yml).
+APP_IMAGE="${BENCH_APP_IMAGE:-queen-laravel-supervisor-bench:local}"
 BROKER_IMAGE="queen-laravel-supervisor-broker:local"
 
 PROFILES_CSV="fixed,auto"
@@ -304,6 +305,8 @@ require_positive_int "--queen-partitions" "$QUEEN_PARTITIONS"
 require_uint "--queen-pop-fusion" "$QUEEN_POP_FUSION"
 require_uint "--queen-prefork" "$QUEEN_PREFORK"
 require_uint "--queen-opcache-cli" "$QUEEN_OPCACHE_CLI"
+require_uint "BENCH_HORIZON_OPCACHE_CLI" "${BENCH_HORIZON_OPCACHE_CLI:-0}"
+require_uint "BENCH_JOB_ALLOC_KB" "${BENCH_JOB_ALLOC_KB:-0}"
 require_uint "--queen-event-driven" "$QUEEN_EVENT_DRIVEN"
 require_uint "--queen-fast-scale-up" "$QUEEN_FAST_SCALE_UP"
 require_uint "--queen-ack-async" "$QUEEN_ACK_ASYNC"
@@ -345,6 +348,8 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$QUEEN_POP_FUSION" -le 1 ] || die "--queen-pop-fusion must be 0 or 1"
 [ "$QUEEN_PREFORK" -le 1 ] || die "--queen-prefork must be 0 or 1"
 [ "$QUEEN_OPCACHE_CLI" -le 1 ] || die "--queen-opcache-cli must be 0 or 1"
+[ "${BENCH_HORIZON_OPCACHE_CLI:-0}" -le 1 ] || die "BENCH_HORIZON_OPCACHE_CLI must be 0 or 1"
+[ "${BENCH_JOB_ALLOC_KB:-0}" -le 65536 ] || die "BENCH_JOB_ALLOC_KB must not exceed 65536"
 [ "$QUEEN_EVENT_DRIVEN" -le 1 ] || die "--queen-event-driven must be 0 or 1"
 [ "$QUEEN_FAST_SCALE_UP" -le 1 ] || die "--queen-fast-scale-up must be 0 or 1"
 [ "$QUEEN_ACK_ASYNC" -le 1 ] || die "--queen-ack-async must be 0 or 1"
@@ -986,6 +991,8 @@ export BENCHMARK_QUEEN_PARTITIONS="$QUEEN_PARTITIONS"
 export BENCHMARK_QUEEN_POP_FUSION="$QUEEN_POP_FUSION"
 export BENCHMARK_QUEEN_PREFORK="$QUEEN_PREFORK"
 export BENCHMARK_QUEEN_OPCACHE_CLI="$QUEEN_OPCACHE_CLI"
+export BENCHMARK_HORIZON_OPCACHE_CLI="${BENCH_HORIZON_OPCACHE_CLI:-0}"
+export BENCHMARK_JOB_ALLOC_KB="${BENCH_JOB_ALLOC_KB:-0}"
 export BENCHMARK_QUEEN_EVENT_DRIVEN="$QUEEN_EVENT_DRIVEN"
 export BENCHMARK_QUEEN_FAST_SCALE_UP="$QUEEN_FAST_SCALE_UP"
 export BENCHMARK_QUEEN_ACK_ASYNC="$QUEEN_ACK_ASYNC"
@@ -1138,6 +1145,8 @@ settings = {
     "queen_pop_fusion": os.environ["BENCHMARK_QUEEN_POP_FUSION"] == "1",
     "queen_prefork": os.environ["BENCHMARK_QUEEN_PREFORK"] == "1",
     "queen_opcache_cli": os.environ["BENCHMARK_QUEEN_OPCACHE_CLI"] == "1",
+    "horizon_opcache_cli": os.environ["BENCHMARK_HORIZON_OPCACHE_CLI"] == "1",
+    "job_alloc_kib": int(os.environ["BENCHMARK_JOB_ALLOC_KB"]),
     "queen_event_driven": os.environ["BENCHMARK_QUEEN_EVENT_DRIVEN"] == "1",
     "queen_fast_scale_up": os.environ["BENCHMARK_QUEEN_FAST_SCALE_UP"] == "1",
     "queen_ack_async": os.environ["BENCHMARK_QUEEN_ACK_ASYNC"] == "1",
@@ -1342,7 +1351,9 @@ run_lane() {
     export BENCH_QUEEN_HTTP_TRANSPORT="$QUEEN_HTTP_TRANSPORT"
     export BENCH_POLL_INTERVAL="$QUEEN_POLL_INTERVAL"
     if [ "$engine" = "horizon" ]; then
-        export BENCH_OPCACHE_CLI=0
+        # Off unless a memory lane asks for it: separately started workers
+        # each get their own opcache segment, so it is not Horizon's default.
+        export BENCH_OPCACHE_CLI="${BENCH_HORIZON_OPCACHE_CLI:-0}"
     else
         export BENCH_OPCACHE_CLI="$QUEEN_OPCACHE_CLI"
     fi
@@ -1472,7 +1483,9 @@ run_lane() {
     fi
 
     set +e
-    producer php artisan bench:results --no-ansi "$run_id" \
+    # The check reads every result line: 600,000 of them pass PHP's default
+    # 128 MiB, as the failure matrix's own reports do.
+    producer php -d memory_limit=1G artisan bench:results --no-ansi "$run_id" \
         --expected="$JOBS" --wait="$WAIT_TIMEOUT" --poll-ms=500 \
         >"${CURRENT_HOST_RUN}/result-check.json" \
         2>"${CURRENT_HOST_RUN}/result-check.stderr.log"

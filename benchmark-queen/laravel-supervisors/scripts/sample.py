@@ -183,8 +183,20 @@ def sample_cgroup(directory: Path | None) -> tuple[dict[str, Any] | None, list[s
     except (FileNotFoundError, PermissionError, OSError):
         pass
 
+    stat: dict[str, int] | None = None
+    try:
+        parsed = parse_key_values(read_text(directory / "memory.stat", 65_536))
+        stat = {
+            key: parsed[key]
+            for key in ("anon", "file", "shmem", "kernel", "pagetables", "inactive_file")
+            if key in parsed
+        }
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
+
     memory: dict[str, Any] = {
         "current_bytes": read_optional_int(directory / "memory.current"),
+        "stat_bytes": stat,
         "peak_bytes": read_optional_int(directory / "memory.peak"),
         "swap_current_bytes": read_optional_int(directory / "memory.swap.current"),
         "events": events,
@@ -298,11 +310,25 @@ def sample_schedstat(proc_root: Path, pid: int) -> dict[str, int] | None:
         return None
 
 
-def sample_pss(proc_root: Path, pid: int) -> tuple[int | None, int | None]:
+# smaps_rollup's PSS split (Linux 5.9+): a forked worker's PSS is mostly its
+# share of the booted heap (anon) and of the opcache segment (shmem).
+PSS_SPLIT = {
+    "Pss_Anon": "pss_anon_bytes",
+    "Pss_File": "pss_file_bytes",
+    "Pss_Shmem": "pss_shmem_bytes",
+}
+
+
+def sample_pss(
+    proc_root: Path, pid: int
+) -> tuple[int | None, int | None, dict[str, int]]:
+    """Return PSS, private (USS) and PSS split into anonymous, file and shmem."""
+
     try:
         pss = None
         private = 0
         private_seen = False
+        split: dict[str, int] = {}
         for line in read_text(proc_root / str(pid) / "smaps_rollup", 65_536).splitlines():
             key, separator, raw = line.partition(":")
             if not separator:
@@ -310,12 +336,14 @@ def sample_pss(proc_root: Path, pid: int) -> tuple[int | None, int | None]:
             value = kib_value(raw.strip())
             if key == "Pss":
                 pss = value
+            elif key in PSS_SPLIT and value is not None:
+                split[PSS_SPLIT[key]] = value
             elif key in {"Private_Clean", "Private_Dirty", "Private_Hugetlb"} and value is not None:
                 private += value
                 private_seen = True
-        return pss, private if private_seen else None
+        return pss, private if private_seen else None, split
     except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-        return None, None
+        return None, None, {}
 
 
 def cgroup_process_ids(directory: Path | None, cgroup_root: Path) -> tuple[set[int], bool]:
@@ -404,9 +432,10 @@ def enrich_process(
     process["start_ticks"] = process_start_ticks(proc_root, pid)
     process["schedstat"] = sample_schedstat(proc_root, pid)
     if include_pss:
-        pss, private = sample_pss(proc_root, pid)
+        pss, private, split = sample_pss(proc_root, pid)
         process["pss_bytes"] = pss
         process["private_bytes"] = private
+        process.update(split)
     process["_enriched"] = True
 
 
