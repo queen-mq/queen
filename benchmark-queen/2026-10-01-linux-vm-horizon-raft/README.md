@@ -137,8 +137,9 @@ instead of 0.93 (−12%) and the application 1.34 instead of 1.46 (−8%), with 
 same latency. Under load nothing changed: 0.257 pops per job, 2,738 against
 2,730 jobs/s.
 
-The soak (`raw/soak-memory.csv`): over 15 minutes the workers' proportional
-set size stayed flat for both engines (529 MiB for Horizon, 81 MiB for Queen).
+The soak (`raw/soak-memory.csv`): over 15 minutes the proportional set size
+of the application's processes, supervisor and 16 workers together, stayed flat
+for both engines (529 MiB for Horizon, 81 MiB for Queen).
 Both application containers grew by about 170 MiB of page cache, the
 benchmark's own result files. Redis grew from 67 to 611 MiB of process memory
 with Horizon's job records; the broker grew from 59 to 117 MiB, plus page cache
