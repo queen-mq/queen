@@ -12,10 +12,19 @@ sourceOfTruth:
   - server/src/rsm/consume/pop.rs
   - server/src/rsm/planner/push.rs
   - proxy/src/routes.rs
-# Describes clients/client-php and supervisor/ as they are on origin/master (PHP client 1.9.0,
-# supervisor 0.6.0, both tagged). Add composer.json, config/queen.php,
-# QueenServiceProvider.php and Queue/{QueenConnector,QueenQueue,QueenJob,ProcessLeaseRenewer}.php
-# once the 2.0 line carries that tree.
+  - clients/client-php/composer.json
+  - clients/client-php/config/queen.php
+  - clients/client-php/src/Laravel/QueenServiceProvider.php
+  - clients/client-php/src/Laravel/Queue/QueenConnector.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Queue/QueenJob.php
+  - clients/client-php/src/Laravel/Queue/ProcessLeaseRenewer.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-php/src/Laravel/Supervisor/Binary/SupervisorBinary.php
+# Describes clients/client-php and supervisor/ as they are on master (PHP client 2.0.0, which pins
+# supervisor 0.6.0, both tagged).
+# sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in PHP client 2.1.0, so install step 3 drops QUEEN_RETRY_AFTER, the lease paragraph and both delivery profiles name the keys of config/queen.php (prefetch, ack_batch, lease_renewal, ack_async, pop_ahead, sync_failed_jobs) instead of variables, the Versions section adds a 2.1.0 row (20 variables, supervisor.lease_service, the queue:restart and fork-safety changes of prefork) and the configuration reference link names the 20 variables.
+# sourceOfTruth re-read 2026-10-05 (docs restore): master carries clients/client-php and supervisor/, so the client files this page describes join the list; the page now describes PHP client 2.0.0 (a Versions row: each transaction ACK names its lease, the Jobs page reads with a read-only token; SupervisorBinary pins 0.6.0); restored, as QueenQueue does them, the prefetch=1 limit of ack_async, the pop_ahead safety rules (lease tracked when the job ends, batch handed back once half the new lease has passed, no long-poll), the queue:work --timeout gap (assertJobTimeoutIsSafe checks only a job's own $timeout; SupervisorConfiguration refuses timeout >= retry_after), the diagnostic caveat and the links to Kubernetes, monitoring and the production checks.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and
@@ -24,8 +33,10 @@ running the workers, which Horizon's master does. Your job classes stay ordinary
 majority of nodes) before `dispatch()` returns, an ordered lane per entity when you want one, and
 workers that do more with less. In our runs of 2026-10-01 on one 16-vCPU Linux server, with every
 write fsynced on both sides, 32 workers completed 2,753 jobs/s of 10 ms jobs against 1,124 for
-Horizon, and an application with 64 forked workers fit in 183 MiB against 1,892
-([benchmark](/benchmarks/laravel/)).
+Horizon, and an application with 64 forked workers fit in 183 MiB against 1,892. Prefork saves
+the booted framework, about 27 MiB per worker, while the memory a job allocates stays the same on
+both ([benchmark](/benchmarks/laravel/)). These results are diagnostic: each comes from one host, with
+a protocol written by the Queen team.
 
 ## Install
 
@@ -55,7 +66,6 @@ Horizon, and an application with 64 forked workers fit in 183 MiB against 1,892
    QUEEN_URL=http://127.0.0.1:6632
    QUEEN_QUEUE=default
    QUEEN_CONSUMER_GROUP=laravel
-   QUEEN_RETRY_AFTER=90
    ```
 
 4. **Dispatch a job you already have.** Nothing changes at the call site.
@@ -76,13 +86,19 @@ That is a working integration, with no supervisor. Keep your current systemd, Ku
 Supervisor definition if a fixed number of workers is all you need, and stop a worker with the
 signal you already use.
 
-`QUEEN_RETRY_AFTER` is the Queen lease: how long a worker holds a job before the broker gives it to
-someone else. It must be longer than the worker's `--timeout` and than the slowest job, unless you
-turn on [lease renewal](/guides/laravel/concepts/#lease-renewal-and-fencing). The consumer group is
-the name under which your workers share the work: two applications in one group split the jobs
-between them, and two groups on one queue each get every job, because the driver subscribes each
-new group to everything the queue holds. Give each application and environment its own queue names
-(or its own broker) and its own group.
+`retry_after` in `config/queen.php`, 90 seconds by default, is the Queen lease: how long a worker
+holds a job before the broker gives it to someone else. It must be longer than the worker's
+`--timeout` and than the slowest job, unless you turn on
+[lease renewal](/guides/laravel/concepts/#lease-renewal-and-fencing). Laravel does not pass
+`queue:work --timeout` to the connection, so without lease renewal the driver checks only a job's
+own `$timeout` against the lease. A Queen supervisor refuses a pool whose `timeout` is not shorter
+than `retry_after`; under any other process manager, keep `--timeout` below `retry_after`
+yourself.
+
+The consumer group is the name under which your workers share the work: two applications in one
+group split the jobs between them, and two groups on one queue each get every job, because the
+driver subscribes each new group to everything the queue holds. Give each application and
+environment its own queue names (or its own broker) and its own group.
 
 When the broker requires a credential, set `QUEEN_BEARER_TOKEN`: a broker JWT with the
 `read-write` role, or, through the broker's [embedded proxy](/operate/security/), an API key with
@@ -94,7 +110,8 @@ proxy the cluster's plan also caps the partitions per queue (8 on `free`, 64 on 
 a `QueenPartitionable` job names is a partition too.
 
 You need PHP 8.3 or later. The queue connection needs no extension; the supervisors need `pcntl` and
-`posix` on Unix.
+`posix` on Unix. Every key of `config/queen.php`, its default and the 20 environment variables the
+file reads are in the [configuration reference](/guides/laravel/configuration/).
 
 ## Order jobs per entity
 
@@ -128,11 +145,14 @@ partition to one worker at a time, and the partition is created by the first job
 
 `prefetch=1` and `ack_batch=1` keep one synchronous acknowledgement per job: the worker asks for a
 job, runs it, and waits until the broker has stored its ACK. Start here while you validate a
-migration, and stay here whenever every job, with a margin, fits inside `retry_after`.
+migration, and stay here whenever every job, with a margin, fits inside `retry_after`. The settings
+of this section are keys of `config/queen.php`; the same keys on the `queen` connection in
+`config/queue.php` win over them.
 
-```dotenv
-QUEEN_PREFETCH=1
-QUEEN_ACK_BATCH=1
+```php
+// config/queen.php
+'prefetch' => 1,
+'ack_batch' => 1,
 ```
 
 Turn on lease renewal even with `prefetch=1` when you cannot bound a job's runtime. The lease is
@@ -150,31 +170,41 @@ jobs with one pop. `ack_async` sends the ACK of a finished job and starts the ne
 waiting for the answer. `pop_ahead` sends the pop for the next batch while the last job of a full
 batch runs.
 
-```dotenv
-QUEEN_PREFETCH=4
-QUEEN_ACK_BATCH=1
-QUEEN_LEASE_RENEWAL=true
-QUEEN_ACK_ASYNC=true
-QUEEN_POP_AHEAD=true
+```php
+// config/queen.php
+'prefetch' => 4,
+'ack_batch' => 1,
+'lease_renewal' => true,
+'ack_async' => true,
+'pop_ahead' => true,
 ```
 
 On the Linux server, 32 workers at prefetch 4 went from 1,879 to 2,794 jobs/s with the other two
-([benchmark](/benchmarks/laravel/#the-worker-side-features-one-at-a-time)). The price is a wider
-at-least-once window. The connector refuses `prefetch` above 1, and `pop_ahead`, without
-`QUEEN_LEASE_RENEWAL=true`, because Laravel can pause a worker (maintenance mode, `queue:pause`)
-while it still holds leased jobs. `ack_async` needs `ack_batch=1`, since a batch already defers its
-ACKs. When the broker refuses an asynchronous ACK, the worker learns it one job later, reports it
-through Laravel's exception handler, abandons the lease and drops the rest of its batch, and the
-refused job runs again after its lease expires.
+([benchmark](/benchmarks/laravel/#the-worker-side-features-one-at-a-time)). With `prefetch=1` and
+without `pop_ahead`, the worker must read the answer to its ACK before its next pop, so `ack_async`
+gains little there.
+
+The price is a wider at-least-once window. The connector refuses `prefetch` above 1, and
+`pop_ahead`, without `lease_renewal`, because Laravel can pause a worker (maintenance
+mode, `queue:pause`) while it still holds leased jobs. `ack_async` needs `ack_batch=1`, since a
+batch already defers its ACKs. When the broker refuses an asynchronous ACK, the worker learns it
+one job later, reports it through Laravel's exception handler, abandons the lease and drops the
+rest of its batch, and the refused job runs again after its lease expires.
 
 A worker pops ahead only after a full batch: a short batch means the queue was nearly empty, and a
 pop sent ahead would come back empty too. It never pops ahead after a job that took more than a
 third of `retry_after`, nor when it serves a comma-separated queue list, whose next job may come from
-another queue. When a worker crashes, whatever renews its lease hands back the prefetched jobs it had
-not started, without an extra attempt; keep `tries` at 2 or more on these connections anyway, for
-the crashes that cannot be handed back
-([prefetch](/guides/laravel/concepts/#prefetch-ack_async-and-pop_ahead)). `ack_async`, `pop_ahead`
-and the crash hand-back need PHP client 1.9.0.
+another queue. A pop sent ahead never waits for new jobs, so an idle queue behaves as before.
+
+The batch popped ahead is leased while the last job of the current batch runs. The worker tracks
+that new lease as soon as the job ends, before it can pause. When the job ran so long that half of
+the new lease has passed, too little is left to renew it safely, and the worker returns the batch
+to the queue at once.
+
+When a worker crashes, whatever renews its lease hands back the prefetched jobs it had not started,
+without an extra attempt; keep `tries` at 2 or more on these connections anyway, for the crashes
+that cannot be handed back ([prefetch](/guides/laravel/concepts/#prefetch-ack_async-and-pop_ahead)).
+`ack_async`, `pop_ahead` and the crash hand-back need PHP client 1.9.0.
 
 ## What Laravel keeps
 
@@ -183,7 +213,7 @@ and the crash hand-back need PHP client 1.9.0.
 | `dispatch()`, middleware, `timeout`, `tries`, `backoff` | unchanged |
 | Delayed dispatch | a Queen [timer](/concepts/timers/) holds the job until it is due |
 | `release()` | ACK and re-push, or ACK and timer, in one [transaction](/concepts/transactions/) |
-| `failed_jobs` and its commands | unchanged; the broker keeps a dead-letter copy in step (`QUEEN_SYNC_FAILED_JOBS`) |
+| `failed_jobs` and its commands | unchanged; the broker keeps a dead-letter copy in step (`sync_failed_jobs`) |
 | `Queue::size()`, `pendingSize()`, `reservedSize()` | the consumer group's depth in the broker, plus pending timers |
 | Ordering | queue names, plus `QueenPartitionable` for an ordered lane per entity |
 | Delivery | at-least-once, as on Redis: a lease expiry or a crash can run a job again |
@@ -208,18 +238,26 @@ and obey the same commands, and both offer the same optional features beyond Hor
 [event-driven scaling](/guides/laravel/supervisors/#event-driven-scaling), per-queue minimums and
 fast scale-up. Start with [worker supervisors](/guides/laravel/supervisors/), and turn on the
 [dashboard](/guides/laravel/dashboard/) once authentication is in place.
+[Scale on Kubernetes](/guides/laravel/kubernetes/) puts these features together for pods that
+follow the backlog, and [monitoring and alerts](/guides/laravel/monitoring/) covers job metrics per
+class, monitored tags, long-wait alerts and the Prometheus endpoint. Read the
+[production checks](/guides/laravel/supervisors/#before-production) before you replace Horizon.
 
 ## Versions
 
 The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a separate binary
-whose version each client release pins. These pages describe PHP client 1.9.0. Everything not
-listed here works from 1.6.0 on.
+whose version each client release pins. These pages describe PHP client 2.1.0, which pins
+supervisor 0.7.0; neither is released yet. PHP client 2.0.0, on Packagist, pins supervisor 0.6.0,
+published for Linux (amd64 and arm64, static musl builds) and macOS with a signed manifest.
+Everything not listed here works from 1.6.0 on.
 
 | PHP client | Supervisor | Brings |
 | --- | --- | --- |
 | 1.7.0 | 0.4.0 | coordinated replicas, prefork, per-queue minimum, fast scale-up, job metrics, monitored tags, long-wait alerts, the Prometheus endpoint |
 | 1.8.0 | 0.5.0 | event-driven scaling |
 | 1.9.0 | 0.6.0 | lease renewal in the Rust master, `ack_async`, `pop_ahead`, the cURL transport, unstarted and crashed batches handed back without an attempt, job timeouts no longer counted as crashes, the dashboard's Retry now, In the queue now and tuning advice |
+| 2.0.0 | 0.6.0 | every transaction ACK names its own lease; the dashboard's Jobs page works with a read-only token |
+| 2.1.0 | 0.7.0 | `config/queen.php` reads 20 environment variables instead of 95 ([upgrading](/guides/laravel/configuration/#upgrading-from-200)); `supervisor.lease_service` replaces `QUEEN_SUPERVISOR_LEASE_SERVICE`; with prefork, `queue:restart` runs the deployed code, and a fork server that is not safe to fork is not used |
 
 ## Limits
 

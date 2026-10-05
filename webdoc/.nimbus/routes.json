@@ -35,6 +35,7 @@
     "/guides/kafka-frameworks",
     "/guides/laravel",
     "/guides/laravel/concepts",
+    "/guides/laravel/configuration",
     "/guides/laravel/dashboard",
     "/guides/laravel/kubernetes",
     "/guides/laravel/migrate-from-horizon",
