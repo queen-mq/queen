@@ -48,7 +48,7 @@ workload needs. The switches in capitals are environment variables; `ack_async`,
 | --- | --- | --- |
 | Several pods work the same queues and consumer group | [Coordinated replicas](/guides/laravel/supervisors/#several-replicas) share one worker target | `QUEEN_SUPERVISOR_COORDINATION=true` |
 | Worker memory decides how many workers fit in a pod | [Prefork](/guides/laravel/supervisors/#prefork-workers): Laravel boots once per pod and every worker is forked from it | `QUEEN_SUPERVISOR_PREFORK=true` and `opcache.enable_cli=1` |
-| Short jobs, where the broker round trip dominates | [Asynchronous ACKs and popping ahead](/guides/laravel/#a-faster-profile) | `ack_async` and `pop_ahead` |
+| Short jobs, where the broker round trip dominates | [Asynchronous ACKs and popping ahead](/guides/laravel/#fast) | `ack_async` and `pop_ahead` |
 | Bursts must be served in seconds | [Event-driven scaling](/guides/laravel/supervisors/#event-driven-scaling) with fast scale-up | `supervisor.event_driven` and `fast_scale_up` |
 | A quiet queue must not wait for a cold start | A per-queue minimum | `min_processes_per_queue` |
 | Some queues need workers of their own | A `simple` pool beside an `auto` pool | two entries in `supervisors` |

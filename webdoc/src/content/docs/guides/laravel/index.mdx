@@ -145,13 +145,27 @@ partition to one worker at a time, and the partition is created by the first job
 
 ## Choose a delivery profile
 
-### The safe default
+Three profiles cover most applications. They differ in how many round trips to the broker a worker
+waits for, and every write a worker waits for is an fsync on the broker. The settings are keys of
+`config/queen.php`; the same keys on the `queen` connection in `config/queue.php` win over them.
 
-`prefetch=1` and `ack_batch=1` keep one synchronous acknowledgement per job: the worker asks for a
-job, runs it, and waits until the broker has stored its ACK. Start here while you validate a
-migration, and stay here whenever every job, with a margin, fits inside `retry_after`. The settings
-of this section are keys of `config/queen.php`; the same keys on the `queen` connection in
-`config/queue.php` win over them.
+| | Safe | Balanced | Fast |
+| --- | --- | --- | --- |
+| Settings | `prefetch` 1 | `prefetch` `'auto'`, `lease_renewal` | as balanced, plus `ack_async` and `pop_ahead` |
+| Empty jobs, 32 workers | 3,131 jobs/s | 5,675 jobs/s | 6,015 jobs/s |
+| 10 ms jobs, 32 workers | 1,548 jobs/s | 2,007 jobs/s | 2,836 jobs/s |
+| 200 ms jobs, 32 workers | 139 jobs/s | 139 jobs/s | 147 jobs/s |
+| p99 at a steady 500 jobs/s | 29 ms | 30 ms (59 ms in one run of three) | 29 ms |
+| Use it for | a migration, strict one-job-at-a-time | most queues | short jobs, high volume |
+
+Medians of three runs on the Linux server with the Rust supervisor and prefork
+([benchmark](/benchmarks/laravel/#delivery-profiles-and-prefetch-auto)).
+
+### Safe
+
+One synchronous acknowledgement per job: the worker asks for a job, runs it, and waits until the
+broker has stored its ACK. Start here while you validate a migration, and stay here whenever every
+job, with a margin, fits inside `retry_after`.
 
 ```php
 // config/queen.php
@@ -166,44 +180,61 @@ master renews the leases of all its workers; anywhere else each worker starts on
 beside it. That path needs `pcntl` and `posix`, and your code must not replace the driver's signal
 handler.
 
-### A faster profile
+### Balanced
 
-Every write a worker waits for is an fsync on the broker, so the round trips decide how many short
-jobs a worker can run. Three settings take them off the worker's path. `prefetch` leases several
-jobs with one pop. `ack_async` sends the ACK of a finished job and starts the next one without
-waiting for the answer. `pop_ahead` sends the pop for the next batch while the last job of a full
-batch runs.
+`prefetch` `'auto'` lets each worker size its next pop from how long its jobs take: about 250 ms of
+work per batch, up to 16 short jobs, one long job (PHP client 2.2.0).
 
 ```php
 // config/queen.php
-'prefetch' => 4,
-'ack_batch' => 1,
+'prefetch' => 'auto',
+'lease_renewal' => true,
+```
+
+- **What it gains.** With short jobs a worker pops about once every 15 jobs instead of once per
+  job, so it waits for the broker far less and the broker spends less CPU per job. With jobs of
+  200 ms or more it keeps one job per pop, so it never holds work another worker could run.
+- **How it decides.** A job is timed from the moment the worker hands it to Laravel to its next
+  pop, its ACK included. The batch starts at one job and only grows after a pop that came back
+  full, at most twofold. A pop that comes back short means the queue had no backlog, so the next
+  pop asks for what the queue had; an empty pop falls back to one job. Each queue of a worker is
+  sized on its own.
+- **What it costs.** A crash that the lease renewer cannot hand back delivers the rest of the batch
+  again, each job with an attempt, so keep `tries` at 2 or more. A short burst on a quiet queue can
+  still make a worker hold a few jobs while another sits idle, which shows in the p99.
+
+### Fast
+
+The balanced profile, with the two settings that take the remaining round trips off the worker's
+path. `ack_async` sends the ACK of a finished job and starts the next one without waiting for the
+answer. `pop_ahead` sends the pop for the next batch while the last job of a full batch runs.
+
+```php
+// config/queen.php
+'prefetch' => 'auto',
 'lease_renewal' => true,
 'ack_async' => true,
 'pop_ahead' => true,
 ```
 
-On the Linux server, 32 workers at prefetch 4 went from 1,879 to 2,794 jobs/s with the other two
-([benchmark](/benchmarks/laravel/#the-worker-side-features-one-at-a-time)). With `prefetch=1` and
-without `pop_ahead`, the worker must read the answer to its ACK before its next pop, so `ack_async`
-gains little there.
+On the Linux server it matched a fixed `prefetch` of 4 (2,835 jobs/s with 10 ms jobs) with a
+third as many pops. On a quiet queue it pops ahead after every job, about two pops per job, and the
+broker spent 0.81 ms of CPU per job at 500 jobs/s against 0.73 for the other two profiles.
 
-The price is a wider at-least-once window. The connector refuses `prefetch` above 1, and
-`pop_ahead`, without `lease_renewal`, because Laravel can pause a worker (maintenance
-mode, `queue:pause`) while it still holds leased jobs. `ack_async` needs `ack_batch=1`, since a
-batch already defers its ACKs. When the broker refuses an asynchronous ACK, the worker learns it
-one job later, reports it through Laravel's exception handler, abandons the lease and drops the
-rest of its batch, and the refused job runs again after its lease expires.
+The price is a wider at-least-once window. The connector refuses `prefetch` above 1 or `'auto'`,
+and `pop_ahead`, without `lease_renewal`, because Laravel can pause a worker (maintenance mode,
+`queue:pause`) while it still holds leased jobs. `ack_async` needs `ack_batch=1`, since a batch
+already defers its ACKs. When the broker refuses an asynchronous ACK, the worker learns it one job
+later, reports it through Laravel's exception handler, abandons the lease and drops the rest of
+its batch, and the refused job runs again after its lease expires.
 
 A worker pops ahead only after a full batch: a short batch means the queue was nearly empty, and a
 pop sent ahead would come back empty too. It never pops ahead after a job that took more than a
-third of `retry_after`, nor when it serves a comma-separated queue list, whose next job may come from
-another queue. A pop sent ahead never waits for new jobs, so an idle queue behaves as before.
-
-The batch popped ahead is leased while the last job of the current batch runs. The worker tracks
-that new lease as soon as the job ends, before it can pause. When the job ran so long that half of
-the new lease has passed, too little is left to renew it safely, and the worker returns the batch
-to the queue at once.
+third of `retry_after`, nor when it serves a comma-separated queue list, whose next job may come
+from another queue. A pop sent ahead never waits for new jobs, so an idle queue behaves as before.
+The batch popped ahead is leased while the last job of the current batch runs; the worker tracks
+that new lease as soon as the job ends, and returns the batch at once when half of its lease has
+passed.
 
 When a worker crashes, whatever renews its lease hands back the prefetched jobs it had not started,
 without an extra attempt; keep `tries` at 2 or more on these connections anyway, for the crashes
@@ -250,8 +281,8 @@ class, monitored tags, long-wait alerts and the Prometheus endpoint. Read the
 ## Versions
 
 The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a separate binary
-whose version each client release pins. These pages describe PHP client 2.1.0, which pins
-supervisor 0.7.0; neither is released yet. PHP client 2.0.0, on Packagist, pins supervisor 0.6.0,
+whose version each client release pins. These pages describe PHP client 2.2.0, not released yet,
+which pins supervisor 0.7.0 as 2.1.0 does. PHP client 2.1.0 is on Packagist, and supervisor 0.7.0 is
 published for Linux (amd64 and arm64, static musl builds) and macOS with a signed manifest.
 Everything not listed here works from 1.6.0 on.
 
@@ -262,6 +293,7 @@ Everything not listed here works from 1.6.0 on.
 | 1.9.0 | 0.6.0 | lease renewal in the Rust master, `ack_async`, `pop_ahead`, the cURL transport, unstarted and crashed batches handed back without an attempt, job timeouts no longer counted as crashes, the dashboard's Retry now, In the queue now and tuning advice |
 | 2.0.0 | 0.6.0 | every transaction ACK names its own lease; the dashboard's Jobs page works with a read-only token |
 | 2.1.0 | 0.7.0 | `config/queen.php` reads 20 environment variables instead of 95 ([upgrading](/guides/laravel/configuration/#upgrading-from-200)); `supervisor.lease_service` replaces `QUEEN_SUPERVISOR_LEASE_SERVICE`; with prefork, `queue:restart` runs the deployed code, and a fork server that is not safe to fork is not used |
+| 2.2.0 | 0.7.0 | `prefetch` `'auto'` sizes each pop from the jobs' runtime; the safe, balanced and fast profiles |
 
 ## Limits
 

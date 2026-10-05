@@ -261,6 +261,9 @@ unconfirmed when a worker fails. All are off by default.
   - Saves one pop per job.
   - Costs: a crash that is not handed back delivers the batch's unfinished jobs again, each with an
     attempt; a slow job delays the rest of its batch; above 1 it needs lease renewal.
+  - `'auto'` sizes each pop from how long the worker's jobs take, about 250 ms of work per batch:
+    up to 16 short jobs, one long one. It starts at one job, grows at most twofold per pop and
+    shrinks at once, per queue.
 - **`ack_batch`**: sends the ACKs of several successful jobs together.
   - Saves ACK requests.
   - Costs: a crash delivers again the jobs that finished but were not acknowledged yet.
@@ -404,7 +407,9 @@ itself held 24 MiB of PSS beside the Rust master's 6.6 MiB; Horizon's master and
   booted framework, about 27 MiB per worker here, whatever the job does; the ratio falls as jobs
   grow, and an application with more code and providers saves more per worker.
 - **The pages a worker writes over its life.** PHP keeps the memory it has allocated for reuse
-  until the process exits, so a worker that once ran a large job stays large. A worker that wrote
+  until the process exits, so a worker that once ran a large job stays large. The copying itself
+  was slow on the Linux server: over 20 minutes and about 9,400 jobs each, forked workers copied
+  0.1 MiB more of their shared pages. Days were not measured. A worker that wrote
   to every page it shares would copy the booted heap, 12.8 MiB in the benchmark, but never the
   compiled code in the opcache. `max_jobs` and `max_time` replace a forked worker without a boot.
 - **A restart at deploy.** The fork server keeps the code it booted. `queue:restart` makes the

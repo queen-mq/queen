@@ -173,7 +173,7 @@ container), not only in `.env`.
 | `partition_prefix` | `laravel` | Start of the stripe names, `<prefix>-0000` to `<prefix>-<partitions - 1>`. |
 | `retry_after` | `90` | The lease, in seconds: a job not acknowledged by then is delivered again. |
 | `block_for` | `0` | How long a pop on an empty queue waits for a job, in seconds. |
-| `prefetch` | `1` | Jobs a worker leases with one pop, 1 to 1,000. |
+| `prefetch` | `1` | Jobs a worker leases with one pop, 1 to 1,000, or `'auto'`: each pop sized from the jobs' runtime, about 250 ms of work, 1 to 16 jobs. |
 | `ack_batch` | `1` | Finished jobs acknowledged in one request, 1 to `prefetch`. |
 | `ack_async` | `false` | Start the next job without waiting for the answer to the last ACK. |
 | `pop_ahead` | `false` | Pop the next batch while the last job of a full batch runs. |
@@ -371,9 +371,9 @@ checks when either engine starts, and `php artisan queen:supervisor-config` show
 | Rule | Checked by | Error |
 | --- | --- | --- |
 | `partitions` is 1 to 1,024 | connector | `Queen Laravel partitions must be an integer in the range 1..1024.` |
-| `prefetch` is 1 to 1,000 | connector, supervisor | `Queen Laravel prefetch must be an integer in the range 1..1000.` |
+| `prefetch` is 1 to 1,000 or `'auto'` | connector, supervisor | `Queen Laravel prefetch must be an integer in the range 1..1000.` |
 | `ack_batch` is 1 to `prefetch` | connector | `Queen Laravel ack_batch must be an integer in the range 1..4.` (with `prefetch` 4) |
-| `prefetch` above 1 needs `lease_renewal` | connector | `Queen Laravel prefetch [4] requires lease_renewal so every prefetched lease remains fenced while Laravel executes synchronous job code.` |
+| `prefetch` above 1, or `'auto'`, needs `lease_renewal` | connector | `Queen Laravel prefetch [4] requires lease_renewal so every prefetched lease remains fenced while Laravel executes synchronous job code.` |
 | A pool's connection with `prefetch` above 1 has `lease_renewal` | supervisor | `Queen supervisor [default] connection prefetch [4] requires lease_renewal.` |
 | `pop_ahead` needs `lease_renewal` | connector | `Queen Laravel pop_ahead requires lease_renewal so the batch it pops ahead remains fenced.` |
 | `ack_async` needs `ack_batch` 1 | connector | `Queen Laravel ack_async requires ack_batch 1: a batch already defers its ACKs.` |

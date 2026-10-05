@@ -56,6 +56,7 @@ sourceOfTruth:
 # links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
 # moved; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the trace routes read the on-disk trace store and refuse a key over 511 bytes (400 name_too_long). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-05 (prefetch auto): the advice rows name prefetch 'auto' (TuningAdvisor, ApplicationSettings).
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the
@@ -327,8 +328,8 @@ evidence, what to do, and a link to these pages. When nothing calls for a change
 | Warning | the longest run of a job class exceeds `shutdown_grace`: a deploy kills that job, and it runs again |
 | Warning | a pool with `max_processes` 1 serves two or more queues, and one of them has a backlog |
 | Warning | several running supervisors autoscale one queue without coordination |
-| Warning | a pool has `tries` 1 on a connection with `prefetch` above 1 or `pop_ahead`: a crash that is not [handed back](/guides/laravel/concepts/#prefetch-ack_async-and-pop_ahead) fails each job the worker held but had not started; `queen:supervise` prints the same warning when it starts, and so does `queen:supervisor-config`, which the Rust supervisor runs at start unless it reads a `--config` file |
-| Info | `prefetch` is 1, `pop_ahead` is off, and classes that ran at least 60 times average under 100 ms; a warning when a pool has `tries` 1, since a crash that is not handed back charges an attempt to each job a worker had prefetched |
+| Warning | a pool has `tries` 1 on a connection with `prefetch` above 1 or `'auto'`, or `pop_ahead`: a crash that is not [handed back](/guides/laravel/concepts/#prefetch-ack_async-and-pop_ahead) fails each job the worker held but had not started; `queen:supervise` prints the same warning when it starts, and so does `queen:supervisor-config`, which the Rust supervisor runs at start unless it reads a `--config` file |
+| Info | `prefetch` is 1, `pop_ahead` is off, and classes that ran at least 60 times average under 100 ms; the advice suggests `prefetch` `'auto'` with `ack_async` and `pop_ahead`, the [fast profile](/guides/laravel/#fast); a warning when a pool has `tries` 1, since a crash that is not handed back charges an attempt to each job a worker had prefetched |
 | Info | [prefork](/guides/laravel/supervisors/#prefork-workers) is off |
 | Info | lease renewal is on, but `supervisor.lease_service` is `false` and turns off [renewal in the master](/guides/laravel/supervisors/#lease-renewal-in-the-master) |
 | Info | a pool follows the backlog without [event-driven scaling](/guides/laravel/supervisors/#event-driven-scaling) |

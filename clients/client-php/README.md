@@ -220,7 +220,7 @@ connection in `config/queue.php` win over them.
 
 | Key | Default | |
 | --- | --- | --- |
-| `prefetch` | `1` | jobs claimed per broker request |
+| `prefetch` | `1` | jobs claimed per broker request, or `'auto'` to size each pop from the jobs' runtime |
 | `ack_batch` | `1` | successful jobs committed together |
 | `autopilot` | `false` | lets the broker size the pop sweep width instead of `partitions` |
 | `block_for` | `0` | long-poll seconds; `0` polls without blocking |
@@ -255,7 +255,7 @@ Rust supervisor on Linux the master renews the leases of all its workers; elsewh
 starts one small PHP helper, on Unix CLI PHP. Delivery stays at least once either way — handlers
 still need idempotency keys. `process_limit` still counts a slot for the helper, which a worker
 starts when the master refuses it.
-[The safe delivery profile](https://queenmq.com/guides/laravel/#the-safe-default).
+[The safe delivery profile](https://queenmq.com/guides/laravel/#safe).
 
 Requests go over the client's own kept-alive cURL handles, not Guzzle: with 32 workers and empty
 jobs on the Linux server, 6,030 jobs/s against 5,441 and 1.03 against 1.41 ms of application CPU
@@ -266,7 +266,7 @@ per job.
 asynchronous ACK is reported one job later and the job is delivered again; `pop_ahead` needs
 `lease_renewal`, and `ack_async` needs `ack_batch` 1. With both, 32 workers on the Linux server
 went from 1,879 to 2,794 jobs/s of 10 ms jobs.
-[A faster profile](https://queenmq.com/guides/laravel/#a-faster-profile).
+[The fast profile](https://queenmq.com/guides/laravel/#fast).
 
 Keep `prefetch=1` for long jobs, strict per-job acknowledgement, or comma-separated priority queues.
 

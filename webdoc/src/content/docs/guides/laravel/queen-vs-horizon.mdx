@@ -131,7 +131,7 @@ Redis did not close the gap: 1,247 with `everysec` and 1,313 with `appendfsync n
 node kept fsyncing. With 64 workers Horizon stayed near 1,100 and Queen reached 4,395. Each Horizon
 job cost about 33 Redis commands and each Queen job 1.3 broker requests. Every Queen pop and ACK
 waits for an fsync, so the driver keeps those waits off the worker's path: the ACK of a job travels
-while the next job runs ([`ack_async`](/guides/laravel/#a-faster-profile)), and after a full batch
+while the next job runs ([`ack_async`](/guides/laravel/#fast)), and after a full batch
 from one queue, the pop for the next batch travels while the last job of that batch runs
 (`pop_ahead`).
 
