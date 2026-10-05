@@ -59,6 +59,8 @@
 	--nb-success: #6c675f;
 	--nb-success-foreground: #6c675f;
 	--nb-success-muted: #ebe7e1;
+	/* The one green on the site: a passed check in a results table (Result). */
+	--nb-pass: #2f7d4e;
 
 	--nb-warning: #9a5b07;
 	--nb-warning-foreground: #9a5b07;
@@ -136,6 +138,7 @@
 	--nb-success: #8f8a83;
 	--nb-success-foreground: #8f8a83;
 	--nb-success-muted: rgba(143, 138, 131, 0.10);
+	--nb-pass: #5cc48a;
 
 	--nb-warning: #e8a849;
 	--nb-warning-foreground: #e8a849;

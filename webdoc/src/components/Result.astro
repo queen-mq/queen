@@ -1,0 +1,20 @@
+---
+/**
+ * One cell of a results table: a green tick for a pass or a red cross for a
+ * fail, and an optional note under it in small, muted type, so a column of
+ * results reads at a glance and only the exceptions carry words. The markdown
+ * twin renders "✓" or "✗" and the note (src/lib/markdown-partials.ts).
+ */
+interface Props {
+  /** The check failed. */
+  fail?: boolean;
+  /** A short remark under the mark. */
+  note?: string;
+}
+
+const { fail = false, note } = Astro.props;
+---
+
+<span class:list={["font-semibold", fail ? "text-danger" : "text-[var(--nb-pass)]"]}>
+  <span aria-hidden="true">{fail ? "✗" : "✓"}</span><span class="sr-only">{fail ? "fail" : "pass"}</span>
+</span>{note && <small class="mt-0.5 block text-xs leading-snug text-muted-foreground">{note}</small>}

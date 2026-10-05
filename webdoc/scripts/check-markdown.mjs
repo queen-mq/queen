@@ -103,6 +103,8 @@ const HANDLED = new Map([
   ["SupervisorTopology", "src/lib/markdown-partials.ts (componentMap: computed description, caption)"],
   ["PreforkMemory", "src/lib/markdown-partials.ts (componentMap: computed description, caption, source)"],
   ["Figure", "src/lib/markdown-partials.ts (componentMap: alt, caption, and the spec's data as a table or list)"],
+  ["Result", "src/lib/markdown-partials.ts (componentMap: ✓ or ✗ and the note)"],
+  ["Expected", "src/lib/markdown-partials.ts (componentMap: the expectation in parentheses)"],
   ["PackageManagers", "nimbus-docs downleveler (rendered as a sh block)"],
   ["LinkCard", "nimbus-docs downleveler (rendered as a link list item)"],
 ]);

@@ -188,19 +188,35 @@
   -webkit-overflow-scrolling: touch;
 }
 
+/* Tables are read across, so they sit a step below the body text: a tighter
+   size and leading keep a row of several columns to a few lines. */
 .docs-content :where(th:not([class])),
 .docs-content :where(td:not([class])) {
-  padding: 0.625rem 0.75rem;
+  padding: 0.5rem 0.75rem;
   text-align: left;
   vertical-align: top;
   border-bottom: 1px solid var(--nb-border);
 }
 
+.docs-content :where(td:not([class])) {
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+
+/* A long identifier (a config path, a variable) breaks only when its column
+   cannot hold it, instead of pushing the table into a horizontal scroll. */
+.docs-content :where(td:not([class])) :where(code:not([class])) {
+  overflow-wrap: anywhere;
+}
+
+/* A header wraps only when its column cannot hold it; nowrap made long
+   headers push the table past its column. */
 .docs-content :where(th:not([class])) {
   background: var(--nb-muted);
   font-weight: 600;
   font-size: 0.8125rem;
-  white-space: nowrap;
+  line-height: 1.4;
+  text-wrap: balance;
 }
 
 .docs-content :where(tbody:not([class]) tr:not([class]):last-child td:not([class])) {

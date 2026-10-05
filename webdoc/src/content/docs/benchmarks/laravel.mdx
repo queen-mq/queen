@@ -19,21 +19,23 @@ node, and the conditions next to each number. The guides that use these numbers 
 
 ## The runs
 
-| Run | Host | Queen broker | What it measured | Archive |
-| --- | --- | --- | --- | --- |
-| 2026-10-01, Linux server | DigitalOcean droplet, 16 vCPUs (Intel Xeon Gold 6548N), 31 GiB, Ubuntu 24.04, Docker 29 | one Raft node, `2.0.0-beta.2` (`d82e785f`) | throughput, latency, memory and CPU, 16 to 64 workers, 119 runs | `benchmark-queen/2026-10-01-linux-vm-horizon-raft/` |
-| 2026-10-02, Linux server | the same droplet | one Raft node, `2.0.0-beta.3` | 15 failures, 2 replica scenarios, a 45-minute soak, 32 Laravel features, the crash hand-back | `benchmark-queen/2026-10-02-laravel-failure-matrix/` |
-| 2026-10-02, Linux server | the same droplet | one Raft node, `2.0.0-beta.3` | 64, 128 and 256 partition stripes, 36 runs | `benchmark-queen/2026-10-02-laravel-partition-stripes/` |
-| 2026-10-05, Linux server | the same droplet | one Raft node, `2.0.0-beta.3` | worker memory: prefork and the opcache apart, jobs that allocate, 36 runs | `benchmark-queen/2026-10-05-laravel-worker-memory/` |
+Every run used one DigitalOcean droplet that ran nothing else (16 vCPUs, Intel Xeon Gold 6548N,
+31 GiB, Ubuntu 24.04, Docker 29), whose virtual disk set the fsync cost, and one node of the Raft
+broker, the only storage 2.0 has. Each archive under `benchmark-queen/` holds the scripts, the raw
+data and a README.
+
+| Date | Broker | What it measured | Archive |
+| --- | --- | --- | --- |
+| 2026-10-01 | `2.0.0-beta.2` | throughput, latency, memory and CPU, 16 to 64 workers, 119 runs | [2026-10-01-linux-vm-horizon-raft](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-01-linux-vm-horizon-raft) |
+| 2026-10-02 | `2.0.0-beta.3` | 15 failures, 2 replica scenarios, a 45-minute soak, 32 Laravel features, the crash hand-back | [2026-10-02-laravel-failure-matrix](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-02-laravel-failure-matrix) |
+| 2026-10-02 | `2.0.0-beta.3` | 64, 128 and 256 partition stripes, 36 runs | [2026-10-02-laravel-partition-stripes](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-02-laravel-partition-stripes) |
+| 2026-10-05 | `2.0.0-beta.3` | worker memory: prefork and the opcache apart, jobs that allocate, 36 runs | [2026-10-05-laravel-worker-memory](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-05-laravel-worker-memory) |
 
 Every run used the Laravel 12 application in `benchmark-queen/laravel-supervisors` and its job
 `App\Jobs\BenchmarkJob`, which sleeps 10 ms unless a lane says otherwise, on PHP 8.3. Horizon ran on Redis 7.4 with its append-only file. Whenever both stacks ran, Redis
 used `appendfsync always` unless a lane says otherwise, so that Redis and the Raft log both fsync
 every write they acknowledge. A Raft node fsyncs every acknowledged write in a group commit, in
 every lane.
-
-Every run used the Raft broker, the only storage 2.0 has, on one droplet that ran nothing else,
-with its virtual disk setting the fsync cost.
 
 ## Worker capacity on a Linux server
 
@@ -124,14 +126,15 @@ case agree within 0.1 MiB per worker and 2 MiB per container.
 
 | Workers | Opcache | Private per worker, MiB | PSS per worker, MiB | Application, MiB |
 | --- | --- | ---: | ---: | ---: |
-| Horizon, each boots Laravel | off | 28.9 | 29.2 | 1,967 |
-| Horizon, each boots Laravel | on | 35.9 | 36.2 | 2,436 |
-| Queen, each started on its own | off | 31.1 | 31.5 | 2,062 |
-| Queen, each started on its own | on | 38.1 | 38.4 | 2,512 |
+| Horizon, spawned | off | 28.9 | 29.2 | 1,967 |
+| Horizon, spawned | on | 35.9 | 36.2 | 2,436 |
+| Queen, spawned | off | 31.1 | 31.5 | 2,062 |
+| Queen, spawned | on | 38.1 | 38.4 | 2,512 |
 | Queen, forked | off | 6.2 | 6.7 | 496 |
 | Queen, forked | on | 1.7 | 2.2 | 225 |
 
-Private memory is the pages no other process maps. A worker started on its own holds about 29 MiB
+A spawned worker starts PHP and boots Laravel on its own; a forked one is forked from the fork
+server. Private memory is the pages no other process maps. A spawned worker holds about 29 MiB
 of it: Laravel's compiled code and the booted application, in its heap. The opcache moves the
 compiled code into opcache memory that each such process creates for itself, 22.6 MiB in a Horizon
 worker, and costs 7 MiB more per worker. A Queen worker started on its own held 2.2 MiB more than a
@@ -153,14 +156,16 @@ The same lanes with a job that built 8,192 strings of 1 KiB and released them at
 builds models and collections. PHP keeps freed memory for the next job, so each worker grew by 7.9
 to 8.3 MiB in every case and stayed there:
 
-| 64 workers | Opcache | Private per worker, MiB: 10 ms job | holding 8 MiB | Application, MiB: 10 ms job | holding 8 MiB |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Horizon, each boots Laravel | off | 28.9 | 37.1 | 1,967 | 2,494 |
-| Horizon, each boots Laravel | on | 35.9 | 43.9 | 2,436 | 2,949 |
-| Queen, each started on its own | off | 31.1 | 39.4 | 2,062 | 2,590 |
-| Queen, each started on its own | on | 38.1 | 46.0 | 2,512 | 3,019 |
-| Queen, forked | off | 6.2 | 14.5 | 496 | 1,026 |
-| Queen, forked | on | 1.7 | 10.0 | 225 | 755 |
+<Figure id="benchmarks/laravel-memory-per-worker" />
+
+| Workers, opcache | Application, 10 ms job | Holding 8 MiB |
+| --- | ---: | ---: |
+| Horizon, spawned, off | 1,967 MiB | 2,494 MiB |
+| Horizon, spawned, on | 2,436 MiB | 2,949 MiB |
+| Queen, spawned, off | 2,062 MiB | 2,590 MiB |
+| Queen, spawned, on | 2,512 MiB | 3,019 MiB |
+| Queen, forked, off | 496 MiB | 1,026 MiB |
+| Queen, forked, on | 225 MiB | 755 MiB |
 
 Against Horizon with the opcache off, forked workers with the opcache saved 27 MiB per worker with
 either job, the booted framework, and the ratio fell from 8.7 to 3.3. A real application's jobs
@@ -224,25 +229,25 @@ the PHP supervisor (`php artisan queen:supervise`), Queen Rust the native `queen
 A lane passes when every job ended as its kind says (completed once, or failed once into
 `failed_jobs`, and into the dead-letter queue on Queen) and no two attempts of one job overlapped.
 
-| What happens | Expected | Horizon | Queen PHP | Queen Rust | Queen Rust, prefetch 4 |
-| --- | --- | --- | --- | --- | --- |
-| A job throws on every attempt (`tries` 3, `backoff` 2) | 3 attempts at least 2 s apart, then one failed-job row | Pass | Pass | Pass | Pass |
-| A job throws on its first attempt only | It completes on its second attempt, once | Pass | Pass | Pass | Pass |
-| `release()` once, or `fail()` | A released job completes on its second attempt; `fail()` is final | Pass | Pass | Pass | Pass |
-| A 15 s job with `timeout` 3 (`tries` 2) | The worker is killed and replaced at each attempt; one failed-job row | Pass | Pass | Pass | Pass |
-| A job takes the worker over `--memory` (110 of 96 MiB) | The job completes once, then the worker is replaced | Pass | Pass | Pass | Pass |
-| A job exceeds PHP's `memory_limit` (256 of 128 MiB, `tries` 2) | The worker dies at each attempt; one failed-job row | Pass | Pass | Pass | 1 of 2 jobs failed without running; passed with the crash hand-back |
-| SIGKILL on a worker during a 4 s job | The killed job runs again; all 8 complete once | Pass | Pass | Pass | Pass |
-| SIGKILL on the master during 4 s jobs, then a restart | All 8 jobs complete once | Pass | Pass | Pass | Pass |
-| A deploy (SIGTERM) during 10 s jobs | The jobs finish during the grace and do not run again | Pass | Pass | Pass | Pass |
-| A deploy during 60 s jobs, longer than the grace | The killed jobs run again; each completes once | Pass | Pass | Pass | Pass |
-| One worker runs two 60 s jobs of one prefetched batch; a deploy kills it in the second | The first job, done before the deploy, does not run again | Pass | Pass | Pass | Pass |
-| The backend restarts while 300 jobs of 100 ms run | All 300 complete once | 2 of 300 jobs ran twice | Pass | Pass | Pass |
-| The backend freezes for 5 s during 10 s jobs | Nothing runs twice | Pass | Pass | Pass | Pass |
-| The backend freezes for 45 s, longer than the 30 s lease | All complete; a job may run twice | Pass | Pass | Pass | Pass |
-| `dispatch()` while the backend is stopped | It throws, and works again once the backend is back | Pass | Pass | Pass | Pass |
-| Two masters on one queue; SIGKILL on one, as a node loss would | All 40 jobs complete once | Pass | Pass | Pass | Pass |
-| A rolling restart of two masters while 60 jobs run | All 60 complete once | Pass | Pass | Pass | Pass |
+| What happens | Horizon | Queen PHP | Queen Rust | Rust, prefetch 4 |
+| --- | :---: | :---: | :---: | :---: |
+| A job throws on every attempt (`tries` 3, `backoff` 2) <Expected text="3 attempts at least 2 s apart, then one failed-job row" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| A job throws on its first attempt only <Expected text="It completes on its second attempt, once" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| `release()` once, or `fail()` <Expected text="A released job completes on its second attempt; fail() is final" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| A 15 s job with `timeout` 3 (`tries` 2) <Expected text="The worker is killed and replaced at each attempt; one failed-job row" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| A job takes the worker over `--memory` (110 of 96 MiB) <Expected text="The job completes once, then the worker is replaced" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| A job exceeds PHP's `memory_limit` (256 of 128 MiB, `tries` 2) <Expected text="The worker dies at each attempt; one failed-job row" /> | <Result /> | <Result /> | <Result /> | <Result note="1 of 2 jobs failed without running, until the crash hand-back" /> |
+| SIGKILL on a worker during a 4 s job <Expected text="The killed job runs again; all 8 complete once" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| SIGKILL on the master during 4 s jobs, then a restart <Expected text="All 8 jobs complete once" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| A deploy (SIGTERM) during 10 s jobs <Expected text="The jobs finish during the grace and do not run again" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| A deploy during 60 s jobs, longer than the grace <Expected text="The killed jobs run again; each completes once" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| One worker runs two 60 s jobs of one prefetched batch; a deploy kills it in the second <Expected text="The first job, done before the deploy, does not run again" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| The backend restarts while 300 jobs of 100 ms run <Expected text="All 300 complete once" /> | <Result fail note="2 of 300 jobs ran twice" /> | <Result /> | <Result /> | <Result /> |
+| The backend freezes for 5 s during 10 s jobs <Expected text="Nothing runs twice" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| The backend freezes for 45 s, longer than the 30 s lease <Expected text="All complete; a job may run twice" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| `dispatch()` while the backend is stopped <Expected text="It throws, and works again once the backend is back" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| Two masters on one queue; SIGKILL on one, as a node loss would <Expected text="All 40 jobs complete once" /> | <Result /> | <Result /> | <Result /> | <Result /> |
+| A rolling restart of two masters while 60 jobs run <Expected text="All 60 complete once" /> | <Result /> | <Result /> | <Result /> | <Result /> |
 
 Horizon's two duplicates are worth understanding, because both stacks promise the same thing
 there. The two jobs finished while Redis restarted, so the worker could not remove them from

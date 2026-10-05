@@ -167,7 +167,7 @@ the environment variable when the file reads one. The same key on the `queen` co
 | Horizon | Queen | Note |
 | --- | --- | --- |
 | `use` | `QUEEN_URL` or `QUEEN_URLS`, and `QUEEN_BEARER_TOKEN` | Horizon's Redis connection becomes the broker's address |
-| `prefix` | `job_metrics.namespace`, `tags.namespace`, `supervisor.coordination.namespace`, `supervisor.remote_status.namespace` | only when several applications share a broker; their jobs are kept apart by queue names |
+| `prefix` | the `namespace` keys of `job_metrics`, `tags`, `supervisor.coordination` and `supervisor.remote_status` | only when several applications share a broker; their jobs are kept apart by queue names |
 | `path`, `domain`, `middleware` | `QUEEN_DASHBOARD_PATH` (default `queen`), `QUEEN_DASHBOARD_DOMAIN`, `dashboard.middleware` | the panel is off until `QUEEN_DASHBOARD_ENABLED=true` |
 | Gate `viewHorizon` | Gate `viewQueenDashboard` | production access is denied until you define it |
 | `waits` | `waits` | the same `connection:queue => seconds` shape; schedule `queen:check-waits` every minute |
