@@ -18,6 +18,7 @@ sourceOfTruth:
   - clients/client-js/client-v2/consumer/ConsumerManager.js
 verifiedBy:
   - clients/client-js/test-v2/docs.js
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the consumption engine drops a whole-queue group's idle parts and loads them back on the next append, and a new partition's first message reaches every group; the consumption engine drops a whole-queue group's idle parts and loads them back on the next append; facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*; /api/v1/raft/members reports anonBytes. Nothing this page states changes.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers

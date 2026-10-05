@@ -31,6 +31,7 @@ digest: >-
   default. Each tenant lives in exactly one raft group with one leader, so a multi-queue transaction
   is one log entry with no coordinator and no two-phase commit; one tenant's writes go through one
   leader and one log, and more raft groups and clusters add capacity across tenants.
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the engine drops idle parts (QUEEN_CONSUME_IDLE_UNLOAD_S) and loads them back on the next append; traces live in their own LMDB file.
 ---
 
 Queen is one process per node, built around one idea: decide every write once, on the leader, and
@@ -125,7 +126,9 @@ time a group is touched, and serves claims from ready lists, oldest partition fi
 `QUEEN_CONSUME_CHECKPOINT_MS` (5 ms) it logs the cursor rows that changed, as one checkpoint command
 per tenant and lane, and it releases an answer only once the checkpoint holding its change has
 committed. A long-poll pop that finds nothing is held right there, and apply wakes it the moment
-the partition's tail moves.
+the partition's tail moves. A whole-queue group's partition that holds nothing (no lease, nothing
+to deliver, every change committed) for `QUEEN_CONSUME_IDLE_UNLOAD_S` (600 s) leaves the engine's
+memory; the next message on it loads it back from its cursor row, as a new leader does.
 
 One reason consumption left the planner shows in the same 2026-09-23 runs. With pushes, pops and
 acks in one serial queue, acks waited behind pushes: at 300,000 offered, the ack round trip went
@@ -188,7 +191,8 @@ data, because there is no migration between groups yet, so pin a large tenant wi
 the same `QUEEN_RAFT_GROUPS` on every node.
 
 The store is loaded into RAM in full at boot, so each node's memory grows with the partitions,
-cursors and KV keys of the groups it holds. And a new leader serves no pops or acks for one
+cursors and KV keys of the groups it holds; traces are the exception, kept in their own LMDB file
+and read from disk. And a new leader serves no pops or acks for one
 checkpoint interval plus `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` after it takes over.
 
 ## Next

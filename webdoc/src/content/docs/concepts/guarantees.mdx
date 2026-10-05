@@ -22,6 +22,7 @@ sourceOfTruth:
   - test/jepsen/src/jepsen/queen/workload/pipeline.clj
   - test/jepsen/src/jepsen/queen/workload/dedup.clj
   - test/jepsen/src/jepsen/queen/workload/timers.clj
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): QUEEN_CONSUME_IDLE_UNLOAD_S (600 s) drops idle parts from the leader's memory. Nothing this page states changes.
 ---
 
 We test Queen with Jepsen, on five nodes, under kill -9, network partitions, process pauses, clock

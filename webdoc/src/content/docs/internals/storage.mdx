@@ -21,13 +21,15 @@ sourceOfTruth:
   - server/src/rsm/replicator/raft/mod.rs
   - server/src/rsm/replicator/raft/log_store.rs
   - server/src/rsm/replicator/raft/snapshot.rs
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): traces moved to their own LMDB file (traces/), expiry in bounded steps, snapshots carry traces/; the store, the checkpoint and the replay rules are otherwise unchanged.
 ---
 
-A node keeps two things on its own disk. The queue log files hold every message, and they are
+A node keeps three things on its own disk. The queue log files hold every message, and they are
 also the write-ahead log: a message is written once, in its queue's log, and that write is the one
 that makes it durable. The store holds everything else (queues, partitions, cursors, dedup rows,
-KV, timers) in RAM, and checkpoints it to an LMDB file once a second. There is no other database,
-and no write waits for the checkpoint.
+KV, timers) in RAM, and checkpoints it to an LMDB file once a second; no write waits for the
+checkpoint. Since 2.0.1 (cluster version 4), message traces live in a second LMDB file of their
+own, `traces/` in the data directory, read from disk and never loaded into RAM.
 
 This page covers when a write is durable, what a restart replays, the damage that makes a node
 refuse to boot, and how disk space comes back.
@@ -37,6 +39,7 @@ refuse to boot, and how disk space comes back.
 ```text
 $QUEEN_RAFT_DIR                    default /var/lib/queen/raft
   store/data.mdb                   the store checkpoint (LMDB)
+  traces/data.mdb                  message traces (LMDB, read from disk; 2.0.1 and later)
   qlog/
     LANES  SHARDS                  the log layout, fixed when the directory is created
     q0/                            the system log: entries that touch no queue
@@ -131,7 +134,7 @@ applied.
 
 In a cluster a restarted node then catches up from the leader. A node that was away longer than
 `QUEEN_RAFT_PURGE_HOLD_S` (600), or a new one, receives a snapshot instead: a copy of the leader's
-store checkpoint plus its queue log files. The node stages it under `snapshots/`, exits, and swaps
+store checkpoint, its trace file and its queue log files. The node stages it under `snapshots/`, exits, and swaps
 it in at the next boot, never while it serves.
 
 ## Refused at boot
@@ -182,6 +185,8 @@ or, in a cluster, above the raft purge point. One pass examines at most 256 file
 Disk is freed by whole files: a partition's bytes go when its file dies or is rewritten, and a
 watermark that moves frees nothing by itself. RAM holds the whole store, since partitions,
 cursors, KV keys and request ids are loaded at boot on every node, so memory grows with them.
+Traces are the exception: the trace file is page cache, a trace costs its row on disk and no RAM,
+and expiry (`QUEEN_RAFT_TRACE_RETENTION_S`, 7 days) deletes at most 512 of them per step.
 Replication protects against losing a minority of disks; losing a majority for good can lose
 acknowledged writes. A data directory does not move between replicators, and `QUEEN_QLOG_SHARDS`
 and `QUEEN_QLOG_LANES` take effect only on a new directory.

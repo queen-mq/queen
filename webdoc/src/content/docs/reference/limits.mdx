@@ -25,6 +25,7 @@ sourceOfTruth:
   - server/src/rsm/planner/timers.rs
   - server/src/rsm/planner/positions.rs
   - server/src/rsm/maintenance.rs
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): defaults checked against 2.0.1; traces are on disk and expire in bounded steps; a trace key over 511 bytes is answered 400.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -34,7 +35,7 @@ partition's history may grow: your disk and your memory bound those, and a proxy
 per tenant (see [tenants](/operate/tenants/)).
 
 Each limit below comes with the setting that moves it, when there is one, and the file that
-applies it. The values are the defaults of server 2.0.0-beta.6; the full list of settings is on
+applies it. The values are the defaults of server 2.0.1; the full list of settings is on
 [configuration](/reference/configuration/).
 
 ## Requests
@@ -172,5 +173,6 @@ The last three are constants in `server/src/handlers/ephemeral.rs`.
 | Retention of messages | off per queue | `retentionEnabled`, `retentionSeconds`, `completedRetentionSeconds` on `configure` |
 | Retention pass | every 5000 ms | `RETENTION_INTERVAL` |
 | A partition with no retained message, no dead letter and no live lease, unwritten for this long, is deleted | 30 days | `PARTITION_CLEANUP_DAYS`, `QUEEN_PARTITION_CLEANUP_ENABLED` |
-| Message traces | 7 days | `QUEEN_RAFT_TRACE_RETENTION_S` |
+| Message traces (on disk, expired at most 512 per step) | 7 days | `QUEEN_RAFT_TRACE_RETENTION_S` |
+| A trace whose `transactionId` or one of its names makes a store key over 511 bytes is answered `400` | 511 bytes | none |
 | Disk high-water mark: writes that grow storage answer 507 | 85% | `QUEEN_RAFT_DISK_HIGH_PCT` (released at `QUEEN_RAFT_DISK_LOW_PCT`, 80%) |

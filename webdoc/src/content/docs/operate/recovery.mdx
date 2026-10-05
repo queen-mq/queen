@@ -52,6 +52,7 @@ digest: >-
   `QUEEN_RAFT_FORCE_RECOVER=<survivor id>` on exactly one node, which can lose writes only the lost
   nodes held. A deterministic apply failure stops every node and is stepped over with the
   `QUEEN_RAFT_APPLY_SKIP=<index>:<digest>` value the log prints, set on every node.
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs and apply.rs gained the on-disk trace store; 2.0.1 raises the cluster version to 4, which the rollback paragraph now names.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and
@@ -472,7 +473,9 @@ others keep serving. A configuration error is fixed in place. To roll back, star
 release on the same directory, which works until the leader raises the cluster version. It does
 that only once every member runs a release that reads the new version, and from then on an older
 build refuses to boot with `this build reads effect catalogue version N, and the cluster this store
-belongs to writes version M ... never an older one`. On Kubernetes, a rolling update stalls on a pod
+belongs to writes version M ... never an older one`. 2.0.1 is the first release that raises it,
+from 3 to 4; to keep a rollback possible while it bakes, run it with `QUEEN_RAFT_CLUSTER_VERSION_MS=0`
+and remove that setting once you stay. On Kubernetes, a rolling update stalls on a pod
 that cannot become Ready: fix that pod, or change only it with `OnDelete`.
 
 Give each stop its time. A stopping node first hands its ephemeral partitions to their next owners

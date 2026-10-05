@@ -28,6 +28,7 @@ sourceOfTruth:
   - proxy/src/cp.rs
   - proxy/src/app.rs
   - proxy/src/harden.rs
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): QUEEN_CONSUME_IDLE_UNLOAD_S added; batcher.rs, apply.rs and facade/real.rs gained the trace store, no setting this page lists changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no
@@ -97,6 +98,7 @@ on by default turns off only with `0`, `false`, `off` or `no`.
 | `QUEEN_CONSUME_LEADER_LEASE_MS` | `400` | The engine serves only while its node leads and has heard from a quorum within this. |
 | `QUEEN_CONSUME_TXN_TTL_MS` | `30000` | The longest a transaction holds the cursors it acks or positions. |
 | `QUEEN_CONSUME_ROWS_PER_COMMAND` | `4096` | Cursor rows one checkpoint command carries. |
+| `QUEEN_CONSUME_IDLE_UNLOAD_S` | `600` | A whole-queue group's partition that holds nothing (no lease, nothing to deliver, every change committed) for this long leaves the leader's memory; the next message on it loads it back from its cursor row. `0` keeps every one. |
 | `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` | `500` | The clock difference between nodes that lease exclusivity allows for. A new leader serves no pops or acks for one checkpoint interval plus this. |
 | `QUEEN_RAFT_POP_REPLY_MARGIN_MS` | `50` | A pop this close to its deadline is answered empty and never claimed for. |
 
@@ -107,6 +109,7 @@ on by default turns off only with `0`, `false`, `off` or `no`.
 | `QUEEN_RAFT_CLIENT_OFFLOAD` | on | Every node serves its own clients and sends the leader only prepared commands. Off, a follower forwards whole HTTP requests. Required for `QUEEN_RAFT_GROUPS` above 1. |
 | `QUEEN_RAFT_FOLLOWER_ANSWER_AT_DONE` | on | A follower answers a push or an ack once it knows the entry committed, before applying it. Pops and pushes with a duplicate still wait for the local apply. |
 | `QUEEN_RAFT_FWD_STREAMS` | `4` (1 to 64) | Long-lived streams a follower forwards prepared commands over. |
+| `QUEEN_RAFT_CLUSTER_VERSION_MS` | `1000` | How often the leader compares the cluster's data format version with what every member reads, and raises it once all read the new one. A raise is one-way: older builds refuse the data from then on. `0` never raises it, which keeps a rollback open while a new release bakes. |
 | `QUEEN_EPHEMERAL_MEMBER_TTL_MS` | `4000` (at least 200) | A member the leader has not heard from for this long owns no ephemeral partition. |
 
 ### Apply and storage

@@ -16,6 +16,7 @@ sourceOfTruth:
   - clients/client-js/client-v2/builders/QueueBuilder.js
 verifiedBy:
   - clients/client-js/test-v2/docs.js
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): consume/pop.rs and the engine drop idle (group, partition) parts after QUEEN_CONSUME_IDLE_UNLOAD_S; maintenance.rs expires traces in bounded steps.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a
@@ -50,7 +51,9 @@ moves keys from one shard to another. So you guess the count early, and you live
 
 We made the partition the entity because in Queen it costs almost nothing. A partition is a few
 rows in the broker's state, about 2 KB of the leader's memory, plus one cursor for each consumer
-group that reads it; it is not a file, a process or a replica set. That is why there is no count to
+group that reads it; it is not a file, a process or a replica set. A group's cursor stays in the
+leader's memory only while the partition is in use: after `QUEEN_CONSUME_IDLE_UNLOAD_S` (10 minutes)
+with nothing to deliver it is dropped, and the next message loads it back. That is why there is no count to
 plan and nothing to provision, and why a queue can hold millions of them: on three 16-vCPU nodes,
 one queue of ten million partitions carried 1,000,000 messages a second, pushed and consumed, at an
 end-to-end p99 of 122 ms (2.0.0-beta.2, 2026-10-01; see [partition count](/benchmarks/partitions/)).

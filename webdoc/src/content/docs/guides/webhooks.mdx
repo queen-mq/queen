@@ -21,6 +21,7 @@ verifiedBy:
   - examples/apps/http/webhooks.sh
 sidebar:
   order: 4
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the consumption engine drops a whole-queue group's idle parts and loads them back on the next append, and a new partition's first message reaches every group; the trace routes read the on-disk trace store and refuse a key over 511 bytes (400 name_too_long); /api/v1/raft/members reports anonBytes. Nothing this page states changes.
 ---
 
 Put every delivery in the partition of the endpoint it is for, let the broker's retry budget do the

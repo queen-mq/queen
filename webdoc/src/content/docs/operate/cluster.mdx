@@ -26,6 +26,7 @@ sourceOfTruth:
   - test/recovery/FINDINGS.md
 verifiedBy:
   - deploy/compose/three-node/compose.yaml
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): catalogue version 4 (traces on disk) is the first raise past 3, one-way; a learner joins a version-4 cluster only once its node answers.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They
@@ -107,7 +108,7 @@ curl -s localhost:36632/health | jq -c .raft
 ```
 
 ```json
-{"role":"follower","leader":true,"term":3,"applied":13,"commit":13,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"apply":{"failure":null,"skipped":[]}}
+{"role":"follower","leader":true,"term":3,"applied":13,"commit":13,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}
 ```
 
 `applied` equal to `commit`, the same 13 the leader reports, means node 3 has applied everything
@@ -317,6 +318,12 @@ build reads less than the cluster's version refuses to start on that data, and t
 to add it as a learner, so a downgrade past a format change stops at the first node. The gate
 exists from 2.0.0-beta.2 on; the move to beta.1 was a stop-all upgrade.
 
+2.0.1 is such a release: once every node runs it, the cluster moves from version 3 to 4 and
+traces start going to their own file on disk. From then on 2.0.0 and 2.0.1-beta refuse to start
+on that data, so going back means an empty data directory. To keep the way back open while a new
+release bakes, set `QUEEN_RAFT_CLUSTER_VERSION_MS=0` on every node: the leader then never raises
+the version, and removing the setting later raises it within a second.
+
 ## Ephemeral queues in a cluster
 
 [Ephemeral queues](/guides/ephemeral/) keep their messages in memory and never in the log, and
@@ -402,8 +409,9 @@ on `PORT`:
 The leader checks every change before it writes it. One change runs at a time, a live majority has
 to exist before and after (`409 no_quorum` otherwise), the last voter cannot be removed, and a
 learner is promoted only within 1,000 entries of the leader (`QUEEN_RAFT_PROMOTE_MAX_LAG`;
-`409 learner_behind`, or `"force": true`). Every change is idempotent, so a lost answer is safe to
-repeat. To replace node 3 after its disk is gone:
+`409 learner_behind`, or `"force": true`). On a cluster at version 4, a learner is added only once
+its node is running and answering, so start the new node first. Every change is idempotent, so a
+lost answer is safe to repeat. To replace node 3 after its disk is gone:
 
 ```bash
 curl -X DELETE http://queen-1:6632/api/v1/system/raft/membership/members/3

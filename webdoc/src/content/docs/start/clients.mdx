@@ -29,6 +29,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
 # links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
 # moved; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): server/Cargo.toml is 2.0.1; the SDKs stay 2.0.0.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same
@@ -175,7 +176,7 @@ See [Laravel](/guides/laravel/).
 </TabItem>
 </Tabs>
 
-Every SDK is 2.0.0, like the broker, and all of them talk to a 2.0 broker. The Go client's module
+Every SDK is 2.0.0, and all of them talk to any 2.0 broker (the broker is at 2.0.1). The Go client's module
 path ends in `/v2`, as Go requires for a major version above 1.
 
 ## curl is a client

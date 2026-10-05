@@ -21,6 +21,7 @@ sourceOfTruth:
   - server/src/obs.rs
   - server/src/obs/panic_policy.rs
   - app/src/router/index.js
+# sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): health examples now show 2.0.1 at cluster version 4; the memory row names anonBytes and container_memory_rss, plus rows for the engine parts and the trace store gauges.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -50,7 +51,7 @@ curl -s http://queen-1:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.0-beta.6","raft":{"role":"follower","leader":true,"term":5,"applied":112,"commit":112,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"apply":{"failure":null,"skipped":[]}}}
+{"status":"healthy","engine":"raft","version":"2.0.1","raft":{"role":"follower","leader":true,"term":5,"applied":112,"commit":112,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}}
 ```
 
 It answers `200 healthy` when the node knows a leader and its `lag` is at most
@@ -82,7 +83,7 @@ curl -s http://queen-1:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.0-beta.6","raft":{"role":"leader","leader":true,"term":4,"applied":111,"commit":111,"lag":0,"storageReady":true,"clusterVersion":3,"kinds":3,"apply":{"failure":null,"skipped":[]}}}
+{"status":"healthy","engine":"raft","version":"2.0.1","raft":{"role":"leader","leader":true,"term":4,"applied":111,"commit":111,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}}
 ```
 
 ```bash
@@ -115,7 +116,9 @@ the families in [metrics](/reference/metrics/). These are the series worth an al
 | Dead letters accumulate | `queen_dlq_depth_by_queue` rises (on the leader, for queues that have dead letters) |
 | Consumers fall behind | `queen_queue_pop_lag_milliseconds{stat="max"}`, delivery time minus creation time over the last minute |
 | A node restarts | `queen_uptime_seconds < 300` |
-| Memory grows | `queen_process_resident_memory_bytes` against the container limit |
+| Memory grows | The process's anonymous memory against the container limit: `container_memory_rss` in Kubernetes, or the dashboard's memory meter (`anonBytes` in `/api/v1/raft/members`). `queen_process_resident_memory_bytes` and the pod's working set also count the store's LMDB file and the queue logs, page cache the kernel drops before it kills anything |
+| The leader holds many consumer parts | `queen_consume_engine{kind="parts"}`, on the leader; idle ones leave after `QUEEN_CONSUME_IDLE_UNLOAD_S` (600 s), counted in `queen_consume_parts_total{kind="unloaded"}` |
+| Traces pile up | `queen_raft_traces_stored` and `queen_raft_traces_map_bytes{kind="used"}`, against `QUEEN_RAFT_TRACE_RETENTION_S` |
 | Ephemeral memory nears its ceiling (`503` above it) | `queen_ephemeral_bytes` against `QUEEN_EPHEMERAL_MAX_BYTES` (256 MiB) |
 | Ephemeral messages are dropped | `rate(queen_ephemeral_dropped_total[5m])` by `cause`: `bounds`, `ttl` or `retry` |
 | An ephemeral hand-over failed | `increase(queen_ephemeral_wipes_total[15m]) > 0` |
