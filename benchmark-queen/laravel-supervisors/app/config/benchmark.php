@@ -113,9 +113,12 @@ if ($retryAfter <= $timeout) {
     throw new \InvalidArgumentException('BENCH_RETRY_AFTER must be longer than BENCH_TIMEOUT.');
 }
 
-$queenPrefetch = $integer('QUEEN_PREFETCH', 1, 1, 1_000);
+// "auto" sizes each pop from the jobs' runtime, up to 16 jobs.
+$queenPrefetch = strtolower(trim((string) env('QUEEN_PREFETCH', '1'))) === 'auto'
+    ? 'auto'
+    : $integer('QUEEN_PREFETCH', 1, 1, 1_000);
 $queenAckBatch = $integer('QUEEN_ACK_BATCH', 1, 1, 1_000);
-if ($queenAckBatch > $queenPrefetch) {
+if ($queenAckBatch > ($queenPrefetch === 'auto' ? 16 : $queenPrefetch)) {
     throw new \InvalidArgumentException('QUEEN_ACK_BATCH must not exceed QUEEN_PREFETCH.');
 }
 
