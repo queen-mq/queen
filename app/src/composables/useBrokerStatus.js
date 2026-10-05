@@ -7,6 +7,11 @@
 //                             last interval, percent of ONE core (4 busy = 400)
 //   cpus                      the CPUs it may use (affinity, cgroup quota)
 //   rssBytes, memLimitBytes   resident memory, and the cgroup's limit or the RAM
+//   anonBytes                 the part of it the process holds itself: the rest
+//                             is file pages it maps (the store's LMDB file is
+//                             read whole at boot), page cache the kernel drops
+//                             before it kills anything. The meter shows this when
+//                             the broker reports it (2.0.1), else the resident set
 //   disk                      the data filesystem: usedPct, usedBytes,
 //                             totalBytes, and the node's write gate (gate,
 //                             highPct, lowPct, writesRefused)
@@ -38,8 +43,10 @@ export function hostReading(member) {
   const cpuPct = num(h.cpuPct)
   const cpuShare = cpuPct !== null && cpus ? cpuPct / (cpus * 100) : null
   const rss = num(h.rssBytes)
+  const anon = num(h.anonBytes)
+  const held = anon ?? rss
   const limit = num(h.memLimitBytes)
-  const memShare = rss !== null && limit ? rss / limit : null
+  const memShare = held !== null && limit ? held / limit : null
   const d = h.disk && typeof h.disk === 'object' ? h.disk : null
   const disk = {
     usedPct: d ? num(d.usedPct) : null,
@@ -54,7 +61,7 @@ export function hostReading(member) {
   disk.sev = diskSeverity(disk)
   return {
     cpu: { pct: cpuPct, cpus, share: cpuShare, windowSeconds: num(h.cpuWindowSeconds), sev: cpuShareSeverity(cpuShare) },
-    mem: { rss, limit, share: memShare, sev: memoryShareSeverity(memShare) },
+    mem: { held, rss, anon, limit, share: memShare, sev: memoryShareSeverity(memShare) },
     disk,
   }
 }

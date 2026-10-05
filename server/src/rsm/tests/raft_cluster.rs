@@ -731,6 +731,13 @@ fn open_facade(dir: &Path, cluster: ClusterConfig, opts: RaftOpts) -> RaftFacade
     };
     let batcher = crate::rsm::batcher::BatcherConfig {
         maintenance_every_ms: 0,
+        // The cluster stays at the baseline catalogue version: these tests add
+        // learners that are not running (the config entry is what they
+        // exercise), and above the baseline a leader first asks a learner
+        // what it reads (D20) — `cluster_version.rs` and
+        // `every_member_says_what_it_reads_and_one_that_reads_less_is_refused`
+        // cover that.
+        cluster_version_every_ms: 0,
         ..crate::rsm::batcher::BatcherConfig::from_env()
     };
     let id = cluster.node_id;

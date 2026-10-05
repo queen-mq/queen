@@ -203,6 +203,7 @@ pub fn cfg() -> ApplyConfig {
         // effects on the shards, so the whole suite checks the sharded path.
         apply_shards: test_shards(),
         apply_shard_min: 1,
+        traces: crate::rsm::traces::TraceOpts::default(),
     }
 }
 

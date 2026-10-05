@@ -382,6 +382,12 @@ impl BatcherConfig {
                     d.maintenance.txn_window_min_s as u64,
                 ) as i64,
                 partition_walk: true,
+                // The facade names its data directory's trace environment.
+                traces_dir: None,
+                trace_trim_limit: num(
+                    "QUEEN_RAFT_TRACE_TRIM_LIMIT",
+                    d.maintenance.trace_trim_limit as u64,
+                ) as usize,
             },
             keep_overlay: flag("QUEEN_RAFT_KEEP_OVERLAY", d.keep_overlay),
             lanes: std::env::var("QUEEN_LANES")
@@ -568,7 +574,7 @@ impl Command {
         let effects_grow = |effects: &[Effect]| {
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::TraceAppend { .. }))
+                .any(|e| matches!(e, Effect::TraceAppend { .. } | Effect::TraceRecord { .. }))
         };
         match self {
             Command::Push(_) | Command::MultiPush(_) => true,

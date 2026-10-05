@@ -1343,6 +1343,14 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         if c.effects.is_empty() {
             return Ok(Plan::Empty(Outcome::Empty));
         }
+        // A trace whose key would pass the store's limit is refused here: in
+        // apply it is `KeyTooLong`, which stops every node on the entry.
+        for e in &c.effects {
+            if let Effect::TraceAppend { event } | Effect::TraceRecord { event } = e {
+                crate::rsm::traces::check_keys(event, self.reads().max_key_len())
+                    .map_err(|why| Refusal::client("name_too_long", why))?;
+            }
+        }
         self.check_partition_rows(ov, &c.effects)?;
         let mut effects = c.effects.clone();
         self.cover_dropped_partitions(ov, &mut effects)?;

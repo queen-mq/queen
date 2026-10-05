@@ -3,6 +3,36 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 2.0.1 - 2026-10-05
+
+Everything in 2.0.1-beta below, and:
+
+**Traces live on disk.** A trace was a row in every node's RAM, about one and a half times its
+stored size, until `QUEEN_RAFT_TRACE_RETENTION_S` (7 days by default) expired it, so a client
+that traced every message with a few KB of data grew every node by hundreds of MB an hour. Each
+node now keeps its traces in a second LMDB environment, `<QUEEN_RAFT_DIR>/traces/`, whose pages
+are page cache the kernel can drop: 100,000 traces of 5 KB add 56 MB to a node's process memory
+instead of 810 MB. The trace routes, their fields, order and pagination are unchanged, and traces
+written before the upgrade stay readable until they expire. Expiry runs in bounded steps (512
+traces each, a few ms at most) instead of one step for everything past the cutoff (139,000
+traces took 1.24 s on 2026-10-05). New gauges: `queen_raft_traces_map_bytes` and
+`queen_raft_traces_stored`.
+
+**The upgrade is one-way.** A cluster writes traces to disk once every member runs 2.0.1: the
+leader then raises the cluster version to 4, and from then on a 2.0.1-beta or older binary
+refuses to start on the data directory. On a cluster at version 4, a learner can be added only
+once its node is running and answering (as `QUEEN_RAFT_JOIN` already requires).
+
+**A trace with a very long transaction id or name no longer stops the cluster.** Its store key
+went past LMDB's 511-byte limit and every node stopped applying at that entry. The request is now
+refused with a 400 (`name_too_long`).
+
+**The dashboard shows the memory a node holds.** A node's memory meter showed its resident set,
+which counts the file pages the process maps: the store's LMDB file is read whole at boot, so a
+node looked about 1 GB fuller than it was. The meter now shows the process's anonymous memory,
+the part that can run a node out of memory, reported as `anonBytes` in `/api/v1/raft/members`;
+an older broker still shows its resident set.
+
 ## 2.0.1-beta - 2026-10-05
 
 **A new partition's first message reaches every consumer group.** On a queue read by two or more

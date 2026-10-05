@@ -47,6 +47,16 @@ pub struct Config {
     /// when the background scanner ([`crate::rsm::retention_scan`]) walks them:
     /// then [`plan`] keeps only the garbage and trace steps.
     pub partition_walk: bool,
+    /// The node's trace environment (`<data_dir>/traces`, `rsm/traces.rs`),
+    /// looked up in the process's registry when a step is planned. `None`
+    /// (a batcher without a facade): only the legacy RAM traces are judged.
+    pub traces_dir: Option<std::path::PathBuf>,
+    /// `QUEEN_RAFT_TRACE_TRIM_LIMIT` (default 512): the most traces one
+    /// `TraceTrim` deletes from each of the legacy RAM keyspaces and the trace
+    /// environment. It travels in the effect, so every node deletes the same
+    /// rows; more due than this sets [`Planned::more`] and the next step runs
+    /// at once.
+    pub trace_trim_limit: usize,
 }
 
 impl Default for Config {
@@ -62,6 +72,8 @@ impl Default for Config {
             walk_queue: Default::default(),
             txn_window_min_s: 900,
             partition_walk: true,
+            traces_dir: None,
+            trace_trim_limit: 512,
         }
     }
 }
@@ -333,6 +345,10 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
 
     // D18: only log an expiry command when the oldest index row is due.
     let trace_cutoff = now_us.saturating_sub(cfg.trace_retention_s.max(1) * 1_000_000);
+    if crate::rsm::effect::cluster_allows(r.cluster_version()?, crate::rsm::effect::VERSION_4) {
+        plan_trace_trim(r, cfg, trace_cutoff, &mut out)?;
+        return Ok(out);
+    }
     let mut trace_due = false;
     r.scan_raw(Keyspace::TraceExpiry, &[], &[], 1, &mut |key, _| {
         trace_due = keys::trace_expiry_created_of(key).is_some_and(|at| at < trace_cutoff);
@@ -344,6 +360,46 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
         });
     }
     Ok(out)
+}
+
+/// Catalogue version 4 (traces on disk): one BOUNDED trim step when a legacy
+/// RAM trace or a trace in the trace environment is past retention, instead
+/// of a `TraceExpire` that deletes every one of them in one apply step. More
+/// due than one step deletes asks for the next step at once (`more`).
+fn plan_trace_trim<R: Reads + ?Sized>(
+    r: &R,
+    cfg: &Config,
+    cutoff_us: i64,
+    out: &mut Planned,
+) -> Result<()> {
+    let limit = cfg.trace_trim_limit.clamp(1, u32::MAX as usize);
+    let mut ram_due = 0usize;
+    r.scan_raw(Keyspace::TraceExpiry, &[], &[], limit + 1, &mut |key, _| {
+        if keys::trace_expiry_created_of(key).is_some_and(|at| at < cutoff_us) {
+            ram_due += 1;
+            true
+        } else {
+            false
+        }
+    })?;
+    let disk_due = match cfg
+        .traces_dir
+        .as_deref()
+        .and_then(crate::rsm::traces::lookup)
+    {
+        Some(t) => t.read(|t| t.due(cutoff_us, limit + 1))?,
+        None => 0,
+    };
+    if ram_due > 0 || disk_due > 0 {
+        out.effects.push(Effect::TraceTrim {
+            cutoff_us,
+            limit: limit as u32,
+        });
+        if ram_due > limit || disk_due > limit {
+            out.more = true;
+        }
+    }
+    Ok(())
 }
 
 /// A queue's retention cutoffs at `now_us` ([`judge_partition`]).

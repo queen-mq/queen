@@ -1204,8 +1204,10 @@ pub(crate) fn local_node_json(
 /// process's CPU over the metrics collector's last interval (percent of one
 /// core, so 4 busy cores are 400; before the first interval closes, the
 /// average since start) against the CPUs it may use, its resident
-/// memory against the limit it runs under (the cgroup's, else the RAM), and
-/// the data directory's filesystem against the disk gate's two lines.
+/// memory and the part of it the process holds itself (`anonBytes`: the file
+/// pages it maps, the store's LMDB file first, are page cache) against the
+/// limit it runs under (the cgroup's, else the RAM), and the data directory's
+/// filesystem against the disk gate's two lines.
 fn host_json() -> Value {
     let (user_us, sys_us, rss) = crate::syscollect::rusage();
     // Until the collector's first interval closes, the average since start.
@@ -1234,6 +1236,7 @@ fn host_json() -> Value {
         "cpuWindowSeconds":cpu.map(|c| c.1),
         "cpus":crate::syscollect::cpus(),
         "rssBytes":rss,
+        "anonBytes":crate::syscollect::anon_bytes(),
         "memLimitBytes":crate::syscollect::memory_limit_bytes(),
         "disk":disk
     })

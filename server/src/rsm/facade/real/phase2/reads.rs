@@ -1224,9 +1224,20 @@ impl RaftFacade {
             names,
             created_at_us: super::super::wall_micros(),
         };
+        // A key over the engine's limit would reach apply as `KeyTooLong`,
+        // which stops every node on the same entry: refused here instead.
+        if let Err(why) = crate::rsm::traces::check_keys(&event, self.store.max_key_len()) {
+            return Ok(ApiOut::json(400, json!({"error":why}).to_string()));
+        }
         let id = uuid_bytes_to_string(&event.trace_id);
-        self.submit_effects(&ctx, vec![Effect::TraceAppend { event }])
-            .await?;
+        // Catalogue version 4 keeps traces on disk (`rsm/traces.rs`), once
+        // every member reads it; until then the version-1 RAM row.
+        let effect = if self.cluster_allows(crate::rsm::effect::VERSION_4) {
+            Effect::TraceRecord { event }
+        } else {
+            Effect::TraceAppend { event }
+        };
+        self.submit_effects(&ctx, vec![effect]).await?;
         Ok(ApiOut::json(
             201,
             json!({"success":true,"traceId":id}).to_string(),
@@ -1249,42 +1260,41 @@ impl RaftFacade {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0usize);
         let store = self.store.clone();
+        let traces = self.traces.clone();
         let tenant = ctx.tenant.clone();
         let names = tokio::task::spawn_blocking(move || {
+            // name → (traces carrying it, the distinct messages it touched,
+            // last at): the legacy RAM rows of this tenant, then the trace
+            // environment's index (no body is read).
+            let mut stats: std::collections::BTreeMap<String, crate::rsm::traces::NameStat> =
+                std::collections::BTreeMap::new();
             store.read(|r| {
-                // name → (count, the (pid, partition) it touched, last at).
-                type TraceStats = (usize, BTreeSet<(Option<Pid>, String)>, i64);
-                let mut stats: std::collections::BTreeMap<String, TraceStats> =
-                    std::collections::BTreeMap::new();
-                r.scan_traces(usize::MAX, &mut |_k, e| {
-                    if e.tenant == tenant {
-                        for n in &e.names {
-                            let stat = stats
-                                .entry(n.clone())
-                                .or_insert_with(|| (0, BTreeSet::new(), e.created_at_us));
-                            stat.0 += 1;
-                            stat.1.insert((e.pid, e.txn.clone()));
-                            stat.2 = stat.2.max(e.created_at_us);
-                        }
+                legacy_traces(r, &tenant, None, None, &mut |_k, e| {
+                    let msg = crate::rsm::traces::message_hash(e.pid, &e.txn);
+                    for n in &e.names {
+                        stats
+                            .entry(n.clone())
+                            .or_default()
+                            .add(1, msg, e.created_at_us);
                     }
-                    true
-                })?;
-                let total = stats.len();
-                let rows = stats
-                    .into_iter()
-                    .skip(offset)
-                    .take(limit)
-                    .map(|(name, (trace_count, messages, last_seen))| {
-                        json!({
-                            "trace_name":name,
-                            "trace_count":trace_count,
-                            "message_count":messages.len(),
-                            "last_seen":crate::rsm::planner::timers::iso_us(last_seen)
-                        })
+                })
+            })?;
+            traces.read(|t| t.name_stats(&tenant, &mut stats))?;
+            let total = stats.len();
+            let rows = stats
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .map(|(name, s)| {
+                    json!({
+                        "trace_name":name,
+                        "trace_count":s.traces,
+                        "message_count":s.messages.len(),
+                        "last_seen":crate::rsm::planner::timers::iso_us(s.last_seen_us)
                     })
-                    .collect::<Vec<_>>();
-                Ok((total, rows))
-            })
+                })
+                .collect::<Vec<_>>();
+            Ok::<_, crate::rsm::store::StoreError>((total, rows))
         })
         .await
         .map_err(|e| RsmError::Internal(format!("trace names: {e}")))?
@@ -1326,37 +1336,80 @@ impl RaftFacade {
         let txn = txn.map(str::to_string);
         let name = name.map(str::to_string);
         let store = self.store.clone();
-        let mut events = tokio::task::spawn_blocking(move || {
+        let traces = self.traces.clone();
+        let (total, events) = tokio::task::spawn_blocking(move || {
+            // Newest first; traces of one instant in the order the legacy read
+            // gave them (its stable sort over the primary key order). Only the
+            // page is kept: every other match is counted from the index.
+            let mut legacy: Vec<(i64, Vec<u8>, TraceEvent)> = Vec::new();
             store.read(|r| {
-                let mut out = Vec::new();
-                r.scan_traces(usize::MAX, &mut |_k, e| {
-                    if e.tenant == tenant
-                        && wanted_pid.is_none_or(|p| e.pid == Some(p))
-                        && txn.as_ref().is_none_or(|t| &e.txn == t)
-                        && name.as_ref().is_none_or(|n| e.names.contains(n))
-                    {
+                legacy_traces(
+                    r,
+                    &tenant,
+                    wanted_pid.zip(txn.as_deref()),
+                    name.as_deref(),
+                    &mut |k, e| {
+                        let tie = crate::rsm::traces::legacy_tie(&tenant, k).unwrap_or_default();
+                        legacy.push((e.created_at_us, tie, e));
+                    },
+                )
+            })?;
+            legacy.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            let mut legacy = legacy.into_iter().peekable();
+            let (total, page) = traces.read(|t| {
+                let mut pager: crate::rsm::traces::Pager<FoundTrace> =
+                    crate::rsm::traces::Pager::new(offset, limit);
+                {
+                    let mut feed = |created: i64, tie: &[u8], id| {
+                        while let Some((at, _, _)) = legacy.peek() {
+                            if *at < created {
+                                break;
+                            }
+                            if let Some((at, tie, e)) = legacy.next() {
+                                pager.push(at, &tie, FoundTrace::Legacy(e));
+                            }
+                        }
+                        pager.push(created, tie, FoundTrace::Disk(id));
+                        true
+                    };
+                    match (wanted_pid, txn.as_deref(), name.as_deref()) {
+                        (Some(p), Some(x), _) => t.message_rev(&tenant, Some(p), x, &mut feed)?,
+                        (None, None, Some(n)) => t.name_rev(&tenant, n, &mut feed)?,
+                        _ => {}
+                    }
+                }
+                for (at, tie, e) in legacy.by_ref() {
+                    pager.push(at, &tie, FoundTrace::Legacy(e));
+                }
+                let (total, found) = pager.finish();
+                // The page's bodies, in this same read: a trim between the
+                // index walk and the bodies cannot take one away.
+                let mut page = Vec::with_capacity(found.len());
+                for f in found {
+                    match f {
+                        FoundTrace::Legacy(e) => page.push(e),
+                        FoundTrace::Disk(id) => page.extend(t.body(id)?),
+                    }
+                }
+                Ok((total, page))
+            })?;
+            let events = store.read(|r| {
+                Ok(page
+                    .into_iter()
+                    .map(|e| {
                         let location = e
                             .pid
                             .and_then(|pid| r.partition(pid).ok().flatten())
                             .map(|p| (p.queue, p.partition));
-                        out.push((e.created_at_us, trace_json(e, location)));
-                    }
-                    true
-                })?;
-                Ok(out)
-            })
+                        trace_json(e, location)
+                    })
+                    .collect::<Vec<Value>>())
+            })?;
+            Ok::<_, crate::rsm::store::StoreError>((total, events))
         })
         .await
         .map_err(|e| RsmError::Internal(format!("traces: {e}")))?
         .map_err(read_error)?;
-        events.sort_by(|a, b| b.0.cmp(&a.0));
-        let total = events.len();
-        let events: Vec<Value> = events
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(|(_, event)| event)
-            .collect();
         let events2 = events.clone();
         Ok(ApiOut::json(
             200,
@@ -2061,6 +2114,61 @@ fn group_view<R: Reads + ?Sized>(
         }));
     }
     Ok(out)
+}
+
+/// A trace a listing found: a legacy RAM row (catalogue version 1), already
+/// decoded, or a row of the trace environment, whose body is read only if it
+/// makes the page.
+enum FoundTrace {
+    Legacy(TraceEvent),
+    Disk(crate::rsm::traces::TraceId),
+}
+
+/// The legacy RAM traces (catalogue version 1) of `tenant` — of one message
+/// when `msg` names it, else all of the tenant's — that carry `name` when one
+/// is given, in primary-key order: `cb(primary key, event)`. A prefix walk of
+/// the tenant's rows, where the read before traces moved to disk walked every
+/// tenant's.
+fn legacy_traces<R: Reads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    msg: Option<(Pid, &str)>,
+    name: Option<&str>,
+    cb: &mut dyn FnMut(&[u8], TraceEvent),
+) -> Result<(), crate::rsm::store::StoreError> {
+    let prefix = match msg {
+        Some((pid, txn)) => keys::trace_prefix(tenant, Some(pid), txn),
+        None => keys::queues_prefix(tenant),
+    };
+    let mut err = None;
+    r.scan_raw(
+        Keyspace::Traces,
+        &prefix,
+        &prefix,
+        usize::MAX,
+        &mut |k, v| match rows::trace_decode(v) {
+            Ok(e) => {
+                if e.tenant == tenant
+                    && msg.is_none_or(|(p, t)| e.pid == Some(p) && e.txn == t)
+                    && name.is_none_or(|n| e.names.iter().any(|x| x == n))
+                {
+                    cb(k, e);
+                }
+                true
+            }
+            Err(e) => {
+                err = Some(crate::rsm::store::StoreError::corrupt(
+                    Keyspace::Traces,
+                    format!("{e}"),
+                ));
+                false
+            }
+        },
+    )?;
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 fn trace_json(e: TraceEvent, location: Option<(String, String)>) -> Value {

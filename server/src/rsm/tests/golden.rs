@@ -61,6 +61,8 @@ fn fixture(kind: Kind) -> &'static [u8] {
         Kind::ClusterVersionSet => include_bytes!("golden/effect_cluster_version_set.bin"),
         Kind::MembershipNote => include_bytes!("golden/effect_membership_note.bin"),
         Kind::TenantPurge => include_bytes!("golden/effect_tenant_purge.bin"),
+        Kind::TraceRecord => include_bytes!("golden/effect_trace_record.bin"),
+        Kind::TraceTrim => include_bytes!("golden/effect_trace_trim.bin"),
     }
 }
 

@@ -39,6 +39,11 @@
 //!   running store, completes passes over a healthy one, and ends with it.
 //! - [`cluster_version`] the cluster version (§12.8, D20) on running clusters:
 //!   it rises by itself to what every member reads, and never falls.
+//! - [`traces`] traces on disk (`PLAN_TRACES_ON_DISK.md`): apply into the
+//!   trace environment, exactly once across a crash replay, bounded trims,
+//!   the tenant purge, two nodes to one digest, a snapshot's catch-up, the
+//!   legacy RAM rows beside them, every read route through the facade, and
+//!   the catalogue-version gate in a mixed cluster.
 
 mod apply;
 mod apply_crash;
@@ -85,3 +90,4 @@ mod store_scrub;
 mod store_sigbus;
 mod timers;
 mod timers_crash;
+mod traces;
