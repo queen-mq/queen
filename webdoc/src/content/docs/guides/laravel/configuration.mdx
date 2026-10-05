@@ -47,31 +47,45 @@ php artisan vendor:publish --tag=queen-config
 
 ## Set per environment
 
-| Variable | Config key | Default | Meaning |
-| --- | --- | --- | --- |
-| `QUEEN_URL` | `url` | `http://localhost:6632` | The broker's address, used while `urls` is empty. |
-| `QUEEN_URLS` | `urls` | unset | Several broker addresses, comma-separated; they replace `url`. |
-| `QUEEN_BEARER_TOKEN` | `bearer_token` | unset | The credential sent with every broker request. |
-| `QUEEN_QUEUE` | `queue` | `default` | The default queue; also the queue of the `default` pool and of the `waits` entry. |
-| `QUEEN_CONSUMER_GROUP` | `consumer_group` | `laravel` | The consumer group of the workers; also the group of the `default` pool. |
-| `QUEEN_PARTITIONS` | `partitions` | `64` | Partition stripes that ordinary jobs are spread over, 1 to 1,024. |
-| `QUEEN_SUPERVISOR_READ_BEARER_TOKEN` | `supervisor.read_bearer_token` | unset (the connection's token) | The token for the supervisor's and the dashboard's reads. |
-| `QUEEN_SUPERVISOR_STATE_DIRECTORY` | `supervisor.state_directory` | `storage/queen-supervisor` | The supervisor's private state directory. |
-| `QUEEN_SUPERVISOR_REMOTE_STATUS` | `supervisor.remote_status.enabled` | `false` | Also publish the supervisor's status to the broker. |
-| `QUEEN_SUPERVISOR_PREFORK` | `supervisor.prefork` | `false` | Fork every worker from one booted Laravel. |
-| `QUEEN_SUPERVISOR_COORDINATION` | `supervisor.coordination.enabled` | `false` | Share each autoscaling pool's target with the other replicas. |
-| `QUEEN_DASHBOARD_ENABLED` | `dashboard.enabled` | `false` | Register the dashboard routes. |
-| `QUEEN_DASHBOARD_PATH` | `dashboard.path` | `queen` | The URL prefix of the dashboard. |
-| `QUEEN_DASHBOARD_DOMAIN` | `dashboard.domain` | unset | The host name the dashboard answers on. |
-| `QUEEN_DASHBOARD_CONSOLE_URL` | `dashboard.console_url` | unset | The address of the Queen web console, for the links of the Workload page. |
-| `QUEEN_NOTIFY_MAIL` | `notifications.mail` | unset | The addresses that `queen:check-waits` mails a long wait to. |
-| `QUEEN_METRICS_ENABLED` | `metrics.enabled` | `false` | Serve the Prometheus endpoint. |
-| `QUEEN_METRICS_TOKEN` | `metrics.token` | unset | The bearer token the Prometheus scraper sends. |
-| `QUEEN_SUPERVISOR_INSTALL_PATH` | `supervisor_binary.install_path` | `storage/queen-supervisor-bin` | The directory of the Rust binary; the launcher reads the variable too. |
-| `QUEEN_SUPERVISOR_RELEASE_BASE_URL` | `supervisor_binary.release_base_url` | unset | An HTTPS mirror of the supervisor releases. |
+These 20 variables are the values that usually differ between environments. Each sets the key named
+in its area's table below.
 
-Each key is described with its area below. A few variables are read outside `config/queen.php`,
-from the environment of the process:
+**Broker and queue**
+
+| Variable | What it sets |
+| --- | --- |
+| `QUEEN_URL` | The broker's address, used while `QUEEN_URLS` is empty. Default `http://localhost:6632`. |
+| `QUEEN_URLS` | Several broker addresses, comma-separated; they replace `QUEEN_URL`. |
+| `QUEEN_BEARER_TOKEN` | The credential sent with every broker request. |
+| `QUEEN_QUEUE` | The default queue, also used by the `default` pool and the `waits` entry. Default `default`. |
+| `QUEEN_CONSUMER_GROUP` | The workers' consumer group, also used by the `default` pool. Default `laravel`. |
+| `QUEEN_PARTITIONS` | Stripes that ordinary jobs are spread over, 1 to 1,024. Default 64. |
+
+**Supervisor**
+
+| Variable | What it sets |
+| --- | --- |
+| `QUEEN_SUPERVISOR_PREFORK` | Fork every worker from one booted Laravel. Default off. |
+| `QUEEN_SUPERVISOR_COORDINATION` | Share each autoscaling pool's target with the other replicas. Default off. |
+| `QUEEN_SUPERVISOR_REMOTE_STATUS` | Also publish the supervisor's status to the broker. Default off. |
+| `QUEEN_SUPERVISOR_STATE_DIRECTORY` | The supervisor's private state directory. Default `storage/queen-supervisor`. |
+| `QUEEN_SUPERVISOR_READ_BEARER_TOKEN` | The token for the supervisor's and the dashboard's reads. Default: the connection's token. |
+| `QUEEN_SUPERVISOR_INSTALL_PATH` | The directory of the Rust binary; the launcher reads it too. Default `storage/queen-supervisor-bin`. |
+| `QUEEN_SUPERVISOR_RELEASE_BASE_URL` | An HTTPS mirror of the supervisor releases. |
+
+**Dashboard, alerts and metrics**
+
+| Variable | What it sets |
+| --- | --- |
+| `QUEEN_DASHBOARD_ENABLED` | Register the dashboard routes. Default off. |
+| `QUEEN_DASHBOARD_PATH` | The URL prefix of the dashboard. Default `queen`. |
+| `QUEEN_DASHBOARD_DOMAIN` | The host name the dashboard answers on. |
+| `QUEEN_DASHBOARD_CONSOLE_URL` | The Queen web console, for the links of the Workload page. |
+| `QUEEN_NOTIFY_MAIL` | The addresses that `queen:check-waits` mails a long wait to. |
+| `QUEEN_METRICS_ENABLED` | Serve the Prometheus endpoint. Default off. |
+| `QUEEN_METRICS_TOKEN` | The bearer token the Prometheus scraper sends. |
+
+A few more variables are read outside `config/queen.php`, from the environment of the process:
 
 - `QUEEN_SDK_HTTP_TRANSPORT=guzzle` sends every request of the client through Guzzle instead of its
   cURL transport ([connection and client](#connection-and-client)).
@@ -111,9 +125,9 @@ from the environment of the process:
 
 | Config key | Default | Meaning |
 | --- | --- | --- |
-| `url` (`QUEEN_URL`) | `http://localhost:6632` | The broker's address, used while `urls` is empty. |
-| `urls` (`QUEEN_URLS`) | unset | Several broker addresses, comma-separated in the variable; they replace `url`. |
-| `bearer_token` (`QUEEN_BEARER_TOKEN`) | unset | Sent as `Authorization: Bearer <token>` on every request. |
+| `url` | `http://localhost:6632` | The broker's address, used while `urls` is empty. Variable: `QUEEN_URL`. |
+| `urls` | unset | Several broker addresses, comma-separated in the variable; they replace `url`. Variable: `QUEEN_URLS`. |
+| `bearer_token` | unset | Sent as `Authorization: Bearer <token>` on every request. Variable: `QUEEN_BEARER_TOKEN`. |
 | `headers` | `[]` | Extra HTTP headers on every request, as a PHP array. |
 | `timeout` | `30000` | How long one broker request may take, in milliseconds. |
 | `retry_attempts` | `3` | Tries for a request that meets a network error or a 5xx, the first included. |
@@ -122,9 +136,9 @@ from the environment of the process:
 | `enable_failover` | `true` | With several URLs, a network error or a 5xx sends the request to the next backend, one try each. |
 | `affinity_hash_ring` | `150` | Virtual nodes per backend on the `affinity` hash ring. |
 | `health_retry_after` | `30000` | How long a backend that failed stays out of rotation, in milliseconds. |
-| `retry_429.maxAttempts` | `null` (10, unbounded for a long-poll pop) | Tries for a request rate limited with HTTP 429, the first included. |
-| `retry_429.baseMs` | `null` (`500`) | First wait after a 429, in milliseconds; it doubles for each later try. |
-| `retry_429.capMs` | `null` (`30000`) | Longest wait after a 429, in milliseconds, at most 300,000. |
+| `retry_429.maxAttempts` | `null` | Tries for a request rate limited with HTTP 429, the first included. When `null`: 10, unbounded for a long-poll pop. |
+| `retry_429.baseMs` | `null` | First wait after a 429, in milliseconds; it doubles for each later try. When `null`: `500`. |
+| `retry_429.capMs` | `null` | Longest wait after a 429, in milliseconds, at most 300,000. When `null`: `30000`. |
 
 With a single URL the load-balancing keys have no effect. With several, `enable_failover` takes the
 place of `retry_attempts`: each backend gets one try, and a backend that failed is skipped for
@@ -150,9 +164,9 @@ container), not only in `.env`.
 
 | Config key | Default | Meaning |
 | --- | --- | --- |
-| `queue` (`QUEEN_QUEUE`) | `default` | The queue a job goes to when it names none. |
-| `consumer_group` (`QUEEN_CONSUMER_GROUP`) | `laravel` | The consumer group the workers pop with. |
-| `partitions` (`QUEEN_PARTITIONS`) | `64` | Partition stripes that ordinary jobs are spread over, 1 to 1,024; a pop asks for at most 64. |
+| `queue` | `default` | The queue a job goes to when it names none. Variable: `QUEEN_QUEUE`. |
+| `consumer_group` | `laravel` | The consumer group the workers pop with. Variable: `QUEEN_CONSUMER_GROUP`. |
+| `partitions` | `64` | Partition stripes that ordinary jobs are spread over, 1 to 1,024; a pop asks for at most 64. Variable: `QUEEN_PARTITIONS`. |
 | `partition_prefix` | `laravel` | Start of the stripe names, `<prefix>-0000` to `<prefix>-<partitions - 1>`. |
 | `retry_after` | `90` | The lease, in seconds: a job not acknowledged by then is delivered again. |
 | `block_for` | `0` | How long a pop on an empty queue waits for a job, in seconds. |
@@ -178,7 +192,7 @@ stripes](/guides/laravel/concepts/#queues-and-stripes)). `prefetch` above 1 and 
 | Config key | Default | Meaning |
 | --- | --- | --- |
 | `lease_renewal` | `false` | Renew the lease of a running job, and stop the worker before a lease it cannot renew runs out. |
-| `lease_renewal_interval` | `null` (`retry_after` / 3, at least 1) | Time between two renewals, in seconds. |
+| `lease_renewal_interval` | `null` | Time between two renewals, in seconds. When `null`: `retry_after` / 3, at least 1. |
 | `lease_renewal_timeout` | `5` | How long one renewal request may take for each broker URL, in seconds. |
 | `lease_renewal_kill_grace` | `2` | Time between SIGTERM and SIGKILL for a worker whose lease cannot be renewed in time, in seconds. |
 | `lease_renewal_safety_margin` | `1` | Time kept free before the lease deadline, in seconds. |
@@ -196,7 +210,7 @@ anywhere else each worker starts one PHP helper
 | Config key | Default | Meaning |
 | --- | --- | --- |
 | `sync_failed_jobs` | `true` | Keep the broker's dead-letter copy in step with Laravel's `failed_jobs` on retry, forget, flush and prune. |
-| `failed_jobs_lock_store` | `null` (Laravel's default cache store) | The cache store whose lock serializes those commands. |
+| `failed_jobs_lock_store` | `null` | The cache store whose lock serializes those commands. When `null`: Laravel's default cache store. |
 | `failed_jobs_lock_name` | `queen:failed-jobs` | The name of that lock. |
 | `failed_jobs_lock_ttl` | `600` | How long one command may hold the lock, in seconds. |
 | `failed_jobs_lock_wait` | `600` | How long a command waits for the lock, in seconds. |
@@ -214,22 +228,22 @@ ownership is checked before Laravel's row changes ([failed jobs](/guides/laravel
 | `supervisor.poll_interval` | `3` | How often the master reads the backlog and resizes its pools, in seconds. |
 | `supervisor.http_timeout` | `5` | How long one request of the master to the broker may take, in seconds. |
 | `supervisor.control_ttl` | `3600` | How long a pause, continue or terminate request stays valid, in seconds, 30 to 86,400. |
-| `supervisor.heartbeat_timeout` | `null` (one control-loop pass + 1, at least 15) | Heartbeat age at which the master shows as stale, in seconds, at most 86,400. |
-| `supervisor.read_bearer_token` (`QUEEN_SUPERVISOR_READ_BEARER_TOKEN`) | unset (the connection's token) | Token for the depth reads, the event-driven poll, the dashboard's reads and `queen:check-waits`. |
+| `supervisor.heartbeat_timeout` | `null` | Heartbeat age at which the master shows as stale, in seconds, at most 86,400. When `null`: one control-loop pass + 1, at least 15. |
+| `supervisor.read_bearer_token` | unset | Token for the depth reads, the event-driven poll, the dashboard's reads and `queen:check-waits`. When unset: the connection's token. Variable: `QUEEN_SUPERVISOR_READ_BEARER_TOKEN`. |
 | `supervisor.shutdown_grace` | `75` | How long a stopping worker may finish its job before it is killed, in seconds. |
 | `supervisor.process_limit` | `256` | Most child processes the master runs, renewal helpers included, at most 4,096. |
-| `supervisor.state_directory` (`QUEEN_SUPERVISOR_STATE_DIRECTORY`) | `storage/queen-supervisor` | The private directory for status, the lock, controls, telemetry and exit markers. |
+| `supervisor.state_directory` | `storage/queen-supervisor` | The private directory for status, the lock, controls, telemetry and exit markers. Variable: `QUEEN_SUPERVISOR_STATE_DIRECTORY`. |
 | `supervisor.telemetry_ttl` | `300` | How long worker runtime samples are kept for the `time` strategy, in seconds. |
-| `supervisor.remote_status.enabled` (`QUEEN_SUPERVISOR_REMOTE_STATUS`) | `false` | Also publish the status to the broker, for a dashboard on another host. |
+| `supervisor.remote_status.enabled` | `false` | Also publish the status to the broker, for a dashboard on another host. Variable: `QUEEN_SUPERVISOR_REMOTE_STATUS`. |
 | `supervisor.remote_status.connection` | `queen` | The queue connection whose broker and write credential are used. |
 | `supervisor.remote_status.namespace` | `queen-supervisor` | The key/value namespace. |
 | `supervisor.remote_status.key` | a slug of `APP_NAME` and `APP_ENV`, such as `laravel-production` | The key the status goes under, one per application and environment on a broker. |
-| `supervisor.remote_status.interval` | `null` (`poll_interval`) | Time between two publishes, in seconds, shorter than `heartbeat_timeout`. |
-| `supervisor.remote_status.ttl` | `null` (twice `heartbeat_timeout`, at least 300) | How long a published copy lives, in seconds, at most 86,400. |
-| `supervisor.prefork` (`QUEEN_SUPERVISOR_PREFORK`) | `false` | Boot Laravel once in a fork server and fork every worker from it. |
+| `supervisor.remote_status.interval` | `null` | Time between two publishes, in seconds, shorter than `heartbeat_timeout`. When `null`: `poll_interval`. |
+| `supervisor.remote_status.ttl` | `null` | How long a published copy lives, in seconds, at most 86,400. When `null`: twice `heartbeat_timeout`, at least 300. |
+| `supervisor.prefork` | `false` | Boot Laravel once in a fork server and fork every worker from it. Variable: `QUEEN_SUPERVISOR_PREFORK`. |
 | `supervisor.event_driven` | `false` | Resize a pool when jobs arrive, through a read-only long poll, instead of at the next poll. |
 | `supervisor.lease_service` | `true` | Rust engine on Linux: the master renews the leases of every `lease_renewal` worker; `false` starts one PHP helper beside each. |
-| `supervisor.coordination.enabled` (`QUEEN_SUPERVISOR_COORDINATION`) | `false` | Share each autoscaling pool's target with the other replicas of this supervisor. |
+| `supervisor.coordination.enabled` | `false` | Share each autoscaling pool's target with the other replicas of this supervisor. Variable: `QUEEN_SUPERVISOR_COORDINATION`. |
 | `supervisor.coordination.connection` | `queen` | The queue connection whose broker and write credential hold the replica keys. |
 | `supervisor.coordination.namespace` | `queen-supervisor` | The key/value namespace. |
 
@@ -289,14 +303,14 @@ and [run the PHP engine](/guides/laravel/supervisors/#run-the-php-engine).
 
 | Config key | Default | Meaning |
 | --- | --- | --- |
-| `dashboard.enabled` (`QUEEN_DASHBOARD_ENABLED`) | `false` | Register the dashboard routes. |
-| `dashboard.path` (`QUEEN_DASHBOARD_PATH`) | `queen` | The URL prefix of the dashboard. |
-| `dashboard.domain` (`QUEEN_DASHBOARD_DOMAIN`) | unset | The host name the routes answer on; unset answers on every host. |
+| `dashboard.enabled` | `false` | Register the dashboard routes. Variable: `QUEEN_DASHBOARD_ENABLED`. |
+| `dashboard.path` | `queen` | The URL prefix of the dashboard. Variable: `QUEEN_DASHBOARD_PATH`. |
+| `dashboard.domain` | unset | The host name the routes answer on; unset answers on every host. Variable: `QUEEN_DASHBOARD_DOMAIN`. |
 | `dashboard.middleware` | `['web']` | Middleware in front of the dashboard; `web` is always kept, so add your authentication. |
 | `dashboard.refresh_seconds` | `5` | How often a page refreshes itself, in seconds; a value outside 2 to 60 gives 5. |
 | `dashboard.allow_local` | `true` | Let everyone in, in the `local` and `testing` environments, while no `viewQueenDashboard` Gate exists. |
 | `dashboard.failed_jobs_limit` | `50` | Rows on one page of failed jobs; a value outside 1 to 200 gives 50. |
-| `dashboard.console_url` (`QUEEN_DASHBOARD_CONSOLE_URL`) | unset | The address of the Queen web console, which the Workload page then links each queue to. |
+| `dashboard.console_url` | unset | The address of the Queen web console, which the Workload page then links each queue to. Variable: `QUEEN_DASHBOARD_CONSOLE_URL`. |
 
 In production the dashboard lets nobody in until the application defines the `viewQueenDashboard`
 Gate ([authorize production access](/guides/laravel/dashboard/#authorize-production-access)). A path,
@@ -310,7 +324,7 @@ fragment, does not: it is reported to the log at boot and the Workload page show
 | Config key | Default | Meaning |
 | --- | --- | --- |
 | `waits` | `['queen:default' => 60]` | Seconds the oldest job of a `connection:queue` may wait before `queen:check-waits` reports it. |
-| `notifications.mail` (`QUEEN_NOTIFY_MAIL`) | unset | Comma-separated addresses that `queen:check-waits` mails a long wait to. |
+| `notifications.mail` | unset | Comma-separated addresses that `queen:check-waits` mails a long wait to. Variable: `QUEEN_NOTIFY_MAIL`. |
 | `notifications.throttle_minutes` | `5` | Least time between two notifications for one queue and group, in minutes; 0 turns the limit off. |
 | `job_metrics.enabled` | `true` | Count jobs, failures and runtime per job class in every worker, for the Jobs page. |
 | `job_metrics.connection` | `queen` | The queue connection whose broker stores the counts. |
@@ -319,9 +333,9 @@ fragment, does not: it is reported to the log at boot and the Workload page show
 | `tags.connection` | `queen` | The queue connection whose broker stores the recorded jobs. |
 | `tags.namespace` | `queen-metrics` | The key/value namespace. |
 | `tags.retention_minutes` | `1440` | How long a recorded job stays listed, in minutes. |
-| `metrics.enabled` (`QUEEN_METRICS_ENABLED`) | `false` | Serve the Prometheus endpoint. |
+| `metrics.enabled` | `false` | Serve the Prometheus endpoint. Variable: `QUEEN_METRICS_ENABLED`. |
 | `metrics.path` | `queen/metrics` | The path of the endpoint. |
-| `metrics.token` (`QUEEN_METRICS_TOKEN`) | unset | The bearer token the scraper sends, 32 characters or more; required when on. |
+| `metrics.token` | unset | The bearer token the scraper sends, 32 characters or more; required when on. Variable: `QUEEN_METRICS_TOKEN`. |
 
 The file sets one `waits` entry, for the queue in `QUEEN_QUEUE`; add the other queues to the array.
 Workers record monitored tags only while `job_metrics.enabled` is on too. The guide covers
@@ -334,9 +348,9 @@ Workers record monitored tags only while `job_metrics.enabled` is on too. The gu
 
 | Config key | Default | Meaning |
 | --- | --- | --- |
-| `supervisor_binary.install_path` (`QUEEN_SUPERVISOR_INSTALL_PATH`) | `storage/queen-supervisor-bin` | The directory `queen:supervisor-install` puts the Rust binary in. |
-| `supervisor_binary.release_base_url` (`QUEEN_SUPERVISOR_RELEASE_BASE_URL`) | unset (the GitHub release of the pinned version) | An HTTPS mirror to download the manifest and the archive from. |
-| `supervisor_binary.manifest` | `null` (`queen-supervisor-manifest.json` of the release) | The release manifest to install from, a URL or a local file. |
+| `supervisor_binary.install_path` | `storage/queen-supervisor-bin` | The directory `queen:supervisor-install` puts the Rust binary in. Variable: `QUEEN_SUPERVISOR_INSTALL_PATH`. |
+| `supervisor_binary.release_base_url` | unset | An HTTPS mirror to download the manifest and the archive from. When unset: the GitHub release of the pinned version. Variable: `QUEEN_SUPERVISOR_RELEASE_BASE_URL`. |
+| `supervisor_binary.manifest` | `null` | The release manifest to install from, a URL or a local file. When `null`: `queen-supervisor-manifest.json` of the release. |
 | `supervisor_binary.manifest_sha256` | `null` | The SHA-256 the manifest must have, from one you verified against its Sigstore bundle. |
 
 The launcher, `vendor/bin/queen-supervisor`, reads neither `config/queen.php` nor `.env`. It looks

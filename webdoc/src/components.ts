@@ -12,6 +12,7 @@ import { CardGrid } from "./components/ui/card-grid";
 import Chart from "./components/Chart.astro";
 import { Code } from "./components/ui/code";
 import { CodeGroup } from "./components/ui/code-group";
+import Expected from "./components/Expected.astro";
 import Figure from "./components/Figure.astro";
 import { FileTree } from "./components/ui/file-tree";
 import { Frame } from "./components/ui/frame";
@@ -23,6 +24,7 @@ import { PackageManagers } from "./components/ui/package-managers";
 import Partition from "./components/Partition.astro";
 import PreforkMemory from "./components/PreforkMemory.astro";
 import Render from "./components/Render.astro";
+import Result from "./components/Result.astro";
 import RollingUpdate from "./components/RollingUpdate.astro";
 import Screenshot from "./components/Screenshot.astro";
 import { Step, Steps } from "./components/ui/steps";
@@ -42,6 +44,7 @@ export const components = {
   Chart,
   Code,
   CodeGroup,
+  Expected,
   Figure,
   FileTree,
   Frame,
@@ -53,6 +56,7 @@ export const components = {
   Partition,
   PreforkMemory,
   Render,
+  Result,
   RollingUpdate,
   Screenshot,
   Step,
