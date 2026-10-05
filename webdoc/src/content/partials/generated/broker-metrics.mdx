@@ -14,7 +14,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
       - server/src/rsm/replicator/raft/forward.rs
 */}
 
-`GET /metrics/prometheus` exposes **107 families**. Every one describes the node that answered: `queen_process_*` counts what this node did since it started, and the `queen_raft_*` families describe its replicated log, its store and its pipeline. Scrape every node. The pipeline timing, admission and forwarding families are skipped when `QUEEN_RAFT_METRICS` is `0`, `false`, `off` or `no`; it is on by default. The per-queue families are written only for queues that have something to report. 27 families are declared but not written by this release; their Help says so.
+`GET /metrics/prometheus` exposes **111 families**. Every one describes the node that answered: `queen_process_*` counts what this node did since it started, and the `queen_raft_*` families describe its replicated log, its store and its pipeline. Scrape every node. The pipeline timing, admission and forwarding families are skipped when `QUEEN_RAFT_METRICS` is `0`, `false`, `off` or `no`; it is on by default. The per-queue families are written only for queues that have something to report. 27 families are declared but not written by this release; their Help says so.
 
 ### Process (this broker instance)
 
@@ -105,6 +105,8 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_raft_qlog_early_codec_waiting` | gauge | Early compression jobs not yet taken by a proposal |
 | `queen_raft_queue_wait_seconds` | summary | Command arrival to the cycle that drained it (PERF-G leg 1) |
 | `queen_raft_slow_commands_total` | counter | Commands over QUEEN_RAFT_SLOW_COMMAND_MS |
+| `queen_raft_traces_map_bytes` | gauge | Trace store (LMDB) map capacity and use |
+| `queen_raft_traces_stored` | gauge | Traces in the trace store |
 | `queen_raft_writer_pickup_seconds` | summary | Entry proposed to the writer starting its group fsync (PERF-G) |
 
 ### Per-queue rates and depth
@@ -167,3 +169,10 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_timers_oldest_late_seconds` | gauge | Lateness of the oldest due timer. Nothing in this release writes it, so it reads 0. |
 | `queen_timers_poisoned_total` | counter | Batches replayed one segment per call after a permanent error. Nothing in this release writes it, so it reads 0. |
 | `queen_timers_schedule_rejected_total` | counter | Timer schedules refused |
+
+### Other
+
+| Family | Type | Help |
+| --- | --- | --- |
+| `queen_consume_engine` | gauge | What the consumption engine holds in memory (only the leader holds any): groups, (group, partition) parts, partitions |
+| `queen_consume_parts_total` | counter | Parts the engine loaded (first contacts and loads back) and unloaded (idle) |
