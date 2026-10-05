@@ -39,9 +39,9 @@ import {
 // and globals.css flips it under [data-mode="dark"].
 const SHIKI = { light: "github-light", dark: "github-dark" } as const;
 
-const eyebrow = "text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground";
-const h2 = "mt-3 text-3xl font-semibold tracking-tight text-foreground lg:text-[2.5rem] lg:leading-[1.1]";
-const lead = "mt-5 max-w-3xl text-lg leading-relaxed text-muted-foreground";
+const eyebrow = "text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-muted-foreground";
+const h2 = "mt-3 text-2xl font-semibold tracking-tight text-foreground lg:text-[1.875rem] lg:leading-[1.15]";
+const lead = "mt-4 max-w-2xl text-base leading-relaxed text-muted-foreground";
 const card =
   "block rounded-xl border border-border bg-background p-5 no-underline transition-colors hover:border-border-strong";
 ---
@@ -54,44 +54,44 @@ const card =
       {/* Hero: full height, two halves from lg up; the scene fills the right
           42% under the clear header. Below lg the scene sits under the text. */}
       <section class="lg:-mt-[calc(3.5rem+1px)] lg:grid lg:min-h-svh lg:grid-cols-[minmax(0,1fr)_42%]">
-        <div class="flex lg:items-center lg:justify-center lg:px-12">
-          <div class="mx-auto w-full max-w-6xl px-6 pb-12 pt-12 lg:max-w-[36rem] lg:px-0 lg:py-20">
+        <div class="flex lg:items-center lg:justify-center lg:px-16 xl:px-24">
+          <div class="mx-auto w-full max-w-6xl px-6 pb-12 pt-12 lg:max-w-[30rem] lg:px-0 lg:py-24">
             <p class={eyebrow}>{hero.eyebrow}</p>
             <h1
               data-md
               class="mt-5 text-foreground"
-              style="font-size: clamp(2.6rem, 5.4vw, 4.25rem); line-height: 1.02; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
+              style="font-size: clamp(2.25rem, 3.4vw, 3.125rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
             >
               {hero.headline}
             </h1>
-            <p data-md class="mt-7 text-xl leading-relaxed text-foreground/85">{hero.lead}</p>
-            <p data-md class="mt-4 text-base leading-relaxed text-muted-foreground">{hero.second}</p>
+            <p data-md class="mt-6 text-[1.0625rem] leading-relaxed text-foreground/85">{hero.lead}</p>
+            <p data-md class="mt-4 text-[0.9375rem] leading-relaxed text-muted-foreground">{hero.second}</p>
 
-            <div class="mt-9 flex flex-wrap items-center gap-3">
+            <div class="mt-8 flex flex-wrap items-center gap-3">
               <a
                 href={hero.primary.href}
-                class="rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background no-underline transition-opacity hover:opacity-90"
+                class="rounded-lg bg-foreground px-4 py-2 text-[0.8125rem] font-medium text-background no-underline transition-opacity hover:opacity-90"
               >
                 {hero.primary.label}
               </a>
               <a
                 href={hero.secondary.href}
-                class="rounded-lg border border-border px-5 py-2.5 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
+                class="rounded-lg border border-border px-4 py-2 text-[0.8125rem] font-medium text-foreground no-underline transition-colors hover:border-border-strong"
               >
                 {hero.secondary.label}
               </a>
               <a
                 href="https://github.com/queen-mq/queen"
-                class="px-2 py-2.5 text-sm text-muted-foreground no-underline transition-colors hover:text-foreground"
+                class="px-2 py-2 text-[0.8125rem] text-muted-foreground no-underline transition-colors hover:text-foreground"
               >
                 GitHub →
               </a>
             </div>
 
-            <div class="mt-9 rounded-lg border border-border bg-card px-4 py-3">
-              <pre class="overflow-x-auto text-[0.8125rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{hero.run}</code></pre>
+            <div class="mt-8 rounded-lg border border-border bg-card px-4 py-3">
+              <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{hero.run}</code></pre>
             </div>
-            <p class="mt-3 text-sm text-muted-foreground">{hero.runNote}</p>
+            <p class="mt-3 text-[0.8125rem] text-muted-foreground">{hero.runNote}</p>
           </div>
         </div>
 
@@ -117,7 +117,7 @@ const card =
 
       {/* One step, one commit */}
       <section class="border-t border-border">
-        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <p class={eyebrow}>{stepSection.eyebrow}</p>
           <h2 data-md class={h2}>{stepSection.title}</h2>
           <p data-md class={lead}>{stepSection.lead}</p>
@@ -127,23 +127,23 @@ const card =
               <span class="font-medium">One step, as one call</span>
               <span>JavaScript</span>
             </div>
-            <div class="overflow-x-auto px-5 py-4 text-[0.8125rem]">
+            <div class="overflow-x-auto px-5 py-4 text-[0.75rem]">
               <Code code={step} lang="js" themes={SHIKI} defaultColor={false} />
             </div>
             <ol class="grid grid-cols-2 border-t border-border sm:grid-cols-3 lg:grid-cols-6">
               {
                 roles.map((r) => (
                   <li class="border-b border-r border-border px-5 py-4 lg:border-b-0">
-                    <a href={r.href} class="font-medium text-foreground no-underline hover:underline">
+                    <a href={r.href} class="text-[0.875rem] font-medium text-foreground no-underline hover:underline">
                       {r.role}
                     </a>
-                    <p data-md class="mt-1 text-sm leading-snug text-muted-foreground">{r.primitive}</p>
+                    <p data-md class="mt-1 text-[0.8125rem] leading-snug text-muted-foreground">{r.primitive}</p>
                   </li>
                 ))
               }
               <li class="bg-background px-5 py-4">
-                <span class="font-medium text-foreground">One entry</span>
-                <p class="mt-1 text-sm leading-snug text-muted-foreground">committed whole, or not at all</p>
+                <span class="text-[0.875rem] font-medium text-foreground">One entry</span>
+                <p class="mt-1 text-[0.8125rem] leading-snug text-muted-foreground">committed whole, or not at all</p>
               </li>
             </ol>
           </div>
@@ -153,8 +153,8 @@ const card =
               <Figure id="concepts/four-systems" />
             </div>
             <div class="lg:col-span-4">
-              <p data-md class="leading-relaxed text-muted-foreground">{stepSection.after}</p>
-              <a href={stepSection.link.href} class="mt-4 inline-block text-sm font-medium">
+              <p data-md class="text-[0.9375rem] leading-relaxed text-muted-foreground">{stepSection.after}</p>
+              <a href={stepSection.link.href} class="mt-4 inline-block text-[0.8125rem] font-medium">
                 {stepSection.link.label} →
               </a>
             </div>
@@ -164,18 +164,18 @@ const card =
 
       {/* Partitions */}
       <section class="border-t border-border bg-card">
-        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <div class="grid grid-cols-1 gap-10 lg:grid-cols-12">
-            <div class="lg:col-span-5">
+            <div class="lg:col-span-4">
               <p class={eyebrow}>{partitionSection.eyebrow}</p>
               <h2 data-md class={h2}>{partitionSection.title}</h2>
-              <p data-md class="mt-5 text-lg leading-relaxed text-muted-foreground">{partitionSection.lead}</p>
-              <p data-md class="mt-4 leading-relaxed text-muted-foreground">{partitionSection.after}</p>
-              <a href={partitionSection.link.href} class="mt-4 inline-block text-sm font-medium">
+              <p data-md class="mt-4 text-base leading-relaxed text-muted-foreground">{partitionSection.lead}</p>
+              <p data-md class="mt-4 text-[0.9375rem] leading-relaxed text-muted-foreground">{partitionSection.after}</p>
+              <a href={partitionSection.link.href} class="mt-4 inline-block text-[0.8125rem] font-medium">
                 {partitionSection.link.label} →
               </a>
             </div>
-            <div class="lg:col-span-7 lg:pt-2">
+            <div class="lg:col-span-8 lg:pt-2">
               <Figure id="benchmarks/partitions-p99" />
             </div>
           </div>
@@ -184,15 +184,15 @@ const card =
 
       {/* Primitives */}
       <section class="border-t border-border">
-        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <p class={eyebrow}>Everything in one log</p>
           <h2 class={h2}>The pieces a step needs, sharing one commit</h2>
           <div class="mt-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {
               primitives.map((p) => (
                 <a href={p.href} class={card}>
-                  <div class="font-medium text-foreground">{p.title}</div>
-                  <p data-md class="mt-1.5 text-sm leading-relaxed text-muted-foreground">{p.body}</p>
+                  <div class="text-[0.9375rem] font-medium text-foreground">{p.title}</div>
+                  <p data-md class="mt-1.5 text-[0.8125rem] leading-relaxed text-muted-foreground">{p.body}</p>
                 </a>
               ))
             }
@@ -202,7 +202,7 @@ const card =
 
       {/* Doors */}
       <section class="border-t border-border bg-card">
-        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <p class={eyebrow}>{doorsSection.eyebrow}</p>
           <h2 data-md class={h2}>{doorsSection.title}</h2>
           <p data-md class={lead}>{doorsSection.lead}</p>
@@ -212,8 +212,8 @@ const card =
               {
                 doors.map((d, i) => (
                   <a href={d.href} class={i === doors.length - 1 && doors.length % 2 === 1 ? `${card} sm:col-span-2` : card}>
-                    <div class="font-medium text-foreground">{d.title}</div>
-                    <p data-md class="mt-1.5 text-sm leading-relaxed text-muted-foreground">{d.body}</p>
+                    <div class="text-[0.9375rem] font-medium text-foreground">{d.title}</div>
+                    <p data-md class="mt-1.5 text-[0.8125rem] leading-relaxed text-muted-foreground">{d.body}</p>
                   </a>
                 ))
               }
@@ -222,10 +222,10 @@ const card =
               <div class="border-b border-border px-4 py-2.5 text-xs font-medium text-muted-foreground">
                 {doorsSection.snippetTitle}
               </div>
-              <div class="overflow-x-auto px-5 py-4 text-[0.8125rem]">
+              <div class="overflow-x-auto px-5 py-4 text-[0.75rem]">
                 <Code code={doorsSection.snippet} lang="bash" themes={SHIKI} defaultColor={false} />
               </div>
-              <p class="border-t border-border px-4 py-3 text-sm text-muted-foreground">
+              <p class="border-t border-border px-4 py-3 text-[0.8125rem] text-muted-foreground">
                 The source copies the rows already there, then streams every committed change. A
                 sink is the same call with <code>"kind": "sink"</code>.
                 <a href="/guides/postgres/"> PostgreSQL →</a>
@@ -237,15 +237,15 @@ const card =
 
       {/* Dashboard */}
       <section class="border-t border-border">
-        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <div class="grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-end">
             <div class="lg:col-span-7">
               <p class={eyebrow}>{dashboardSection.eyebrow}</p>
               <h2 data-md class={h2}>{dashboardSection.title}</h2>
             </div>
             <div class="lg:col-span-5">
-              <p data-md class="leading-relaxed text-muted-foreground">{dashboardSection.lead}</p>
-              <a href={dashboardSection.link.href} class="mt-3 inline-block text-sm font-medium">
+              <p data-md class="text-[0.9375rem] leading-relaxed text-muted-foreground">{dashboardSection.lead}</p>
+              <a href={dashboardSection.link.href} class="mt-3 inline-block text-[0.8125rem] font-medium">
                 {dashboardSection.link.label} →
               </a>
             </div>
@@ -275,7 +275,7 @@ const card =
 
       {/* Proof */}
       <section class="border-t border-border bg-card">
-        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <p class={eyebrow}>{proofSection.eyebrow}</p>
           <h2 data-md class={h2}>{proofSection.title}</h2>
           <p data-md class={lead}>{proofSection.lead}</p>
@@ -283,14 +283,14 @@ const card =
             {
               proof.map((p) => (
                 <a href={p.href} class={card}>
-                  <div class="text-3xl font-semibold tracking-tight text-foreground">{p.figure}</div>
-                  <div class="mt-1 text-xs uppercase tracking-wide text-muted-foreground">{p.unit}</div>
-                  <p data-md class="mt-4 text-sm leading-relaxed text-muted-foreground">{p.body}</p>
+                  <div class="text-2xl font-semibold tracking-tight text-foreground">{p.figure}</div>
+                  <div class="mt-1 text-[0.6875rem] uppercase tracking-wide text-muted-foreground">{p.unit}</div>
+                  <p data-md class="mt-3 text-[0.8125rem] leading-relaxed text-muted-foreground">{p.body}</p>
                 </a>
               ))
             }
           </div>
-          <a href={proofSection.link.href} class="mt-8 inline-block text-sm font-medium">
+          <a href={proofSection.link.href} class="mt-8 inline-block text-[0.8125rem] font-medium">
             {proofSection.link.label} →
           </a>
         </div>
@@ -298,19 +298,19 @@ const card =
 
       {/* Operations */}
       <section class="border-t border-border">
-        <div class="mx-auto w-full max-w-6xl px-6 py-20 lg:py-24">
+        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <p class={eyebrow}>{runSection.eyebrow}</p>
           <h2 class={h2}>{runSection.title}</h2>
           <div class="mt-12 grid grid-cols-1 gap-x-12 gap-y-10 sm:grid-cols-2">
             {
               differentiators.map((d) => (
                 <div class="border-t border-border pt-5">
-                  <h3 class="font-medium text-foreground">
+                  <h3 class="text-[0.9375rem] font-medium text-foreground">
                     <a href={d.href} class="no-underline">
                       {d.title}
                     </a>
                   </h3>
-                  <p data-md class="mt-2 leading-relaxed text-muted-foreground">{d.body}</p>
+                  <p data-md class="mt-2 text-[0.9375rem] leading-relaxed text-muted-foreground">{d.body}</p>
                 </div>
               ))
             }
@@ -320,8 +320,8 @@ const card =
 
       {/* Limits */}
       <section class="border-t border-border bg-card">
-        <div class="mx-auto w-full max-w-6xl px-6 py-12">
-          <p data-md class="max-w-4xl leading-relaxed text-muted-foreground">
+        <div class="mx-auto w-full max-w-5xl px-6 py-12 lg:px-10 lg:py-14">
+          <p data-md class="max-w-3xl text-[0.9375rem] leading-relaxed text-muted-foreground">
             {limits}
             <a href="/reference/limits/"> Read the full list before you design around it →</a>
           </p>
@@ -330,14 +330,14 @@ const card =
 
       {/* Start */}
       <section class="border-t border-border">
-        <div class="mx-auto w-full max-w-6xl px-6 py-20">
-          <h2 class="text-2xl font-semibold tracking-tight text-foreground">Start here</h2>
+        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-24">
+          <h2 class="text-xl font-semibold tracking-tight text-foreground">Start here</h2>
           <div class="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {
               start.map((s) => (
                 <a href={s.href} class={card}>
-                  <div class="font-medium text-foreground">{s.title}</div>
-                  <p class="mt-1 text-sm leading-relaxed text-muted-foreground">{s.body}</p>
+                  <div class="text-[0.9375rem] font-medium text-foreground">{s.title}</div>
+                  <p class="mt-1 text-[0.8125rem] leading-relaxed text-muted-foreground">{s.body}</p>
                 </a>
               ))
             }
@@ -346,7 +346,7 @@ const card =
       </section>
 
       <footer class="border-t border-border">
-        <div class="mx-auto flex w-full max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-6 py-8 text-sm text-muted-foreground">
+        <div class="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-x-6 gap-y-2 px-6 py-8 text-[0.8125rem] text-muted-foreground lg:px-10">
           <span>Apache 2.0</span>
           <a href="https://github.com/queen-mq/queen">GitHub</a>
           <a href="/reference/">Reference</a>
