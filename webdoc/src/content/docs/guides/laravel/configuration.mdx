@@ -29,6 +29,9 @@ sourceOfTruth:
   - clients/client-php/bin/queen-supervisor
   - supervisor/src/main.rs
 # sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in PHP client 2.1.0, down from 95; the page leads with those 20, the area tables give each key and its default and name a variable only where the file reads one, supervisor.lease_service replaces QUEEN_SUPERVISOR_LEASE_SERVICE (read by the Rust master until the supervisor released with 2.1.0), remote_status.key defaults to a slug of APP_NAME and APP_ENV and is no longer required, a pool without queues or consumer_group takes the top-level ones, the switches paragraph follows the new file, QUEEN_SDK_POP_AUTOPILOT and the variables the supervisors set for their workers are named, and Upgrading from 2.0.0 maps every removed variable to its key.
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. Since PHP client 2.1.0 the

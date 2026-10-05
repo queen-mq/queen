@@ -31,6 +31,9 @@ sourceOfTruth:
 # Packagist, which pins queen-supervisor 0.6.0.
 # sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in PHP client 2.1.0, so step 2 keeps only those in its dotenv block and sets failed_jobs_lock_store in the file, the config/queue.php map gives the keys of config/queen.php and names a variable only for queue, consumer_group and partitions (a key on the queen connection in config/queue.php wins, as QueenConnector merges them), and the Horizon, pool and tags rows name job_metrics.enabled, tags.retention_minutes, the four namespace keys and failed_jobs_lock_store; a pool without consumer_group takes the top-level one, and without retry_after its connection's.
 # sourceOfTruth re-read 2026-10-05 (2.0.0 on master): adds the client and supervisor files the runbook states; the config/queue.php map names each key of config/queen.php again (queue, retry_after, block_for, after_commit, consumer_group, partitions), and the retry_after pitfall and the checklist say that without lease renewal QueenQueue::assertJobTimeoutIsSafe also refuses $timeout = 0; no Docker Desktop number was on the page.
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place

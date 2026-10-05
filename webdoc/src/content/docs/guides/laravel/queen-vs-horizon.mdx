@@ -36,6 +36,9 @@ sourceOfTruth:
 # Describes clients/client-php and supervisor/ as they are on master (PHP client 2.0.0, which pins
 # supervisor 0.6.0); the measurements are the Linux-server archives above, on master too.
 # sourceOfTruth re-read 2026-10-05 (docs restore): master carries clients/client-php, supervisor/ and the Laravel archives, so the files this page describes join the list; only Linux-server results remain (no Docker Desktop run); restored the Evidence column, the Queue backend and size-limit rows, the Horizon-docs sentence, the control-plane caveat, the global backlog analytics and the link to the crashes still charged an attempt; corrected the failure count (15 plus 2 replica scenarios), the four-profile soak, the pop_ahead rule (full batch, one queue) and the PHP master's memory (58.5 MiB, above Horizon's 49.1).
+# sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
+# links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
+# moved; nothing this page states changes.
 ---
 
 Horizon and Queen both run ordinary Laravel jobs and both supervise their workers, on different
