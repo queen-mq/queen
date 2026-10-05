@@ -7,9 +7,10 @@ namespace Queen\Laravel\Supervisor\Prefork;
  *
  * A supervisor master starts one fork server. The server boots Laravel once,
  * opens no queue, database or cache connection, and then forks one child per
- * worker the master asks for. Every child shares the booted framework (and
- * the opcache) copy-on-write, sets up its own worker environment and becomes
- * `queue:work` with the same arguments a spawned worker gets.
+ * worker the master asks for. Every child shares the opcache's compiled code
+ * outright and the booted heap copy-on-write, sets up its own worker
+ * environment and becomes `queue:work` with the same arguments a spawned
+ * worker gets.
  *
  * Protocol (JSON, one object per line):
  *
