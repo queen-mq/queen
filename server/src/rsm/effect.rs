@@ -64,8 +64,10 @@
 //! committed state on the leader; until then the writer emits the version-N
 //! shape (the feature is off). A rolling upgrade is then an ordinary one: the
 //! old nodes never see N+1, and once the last node is up on the new release
-//! the leader raises the version and the feature turns on. The gate today is
-//! [`CursorRow::admit`]: version 2's metadata, version 3's released lease.
+//! the leader raises the version and the feature turns on. The gates today are
+//! [`CursorRow::admit`] (version 2's metadata, version 3's released lease) and
+//! the trace writers (version 4: the facade's trace POST and the leader's
+//! trace maintenance, `PLAN_TRACES_ON_DISK.md`).
 //! The batcher refuses an entry whose `kinds_version` is above the cluster's,
 //! so a writer that forgot the gate fails its own commands instead of
 //! stopping every older node.
@@ -107,11 +109,19 @@ pub const VERSION_2: u16 = 2;
 /// and every cluster since is at least here ([`BASELINE_KINDS_VERSION`]).
 pub const VERSION_3: u16 = 3;
 
+/// The fourth catalogue version: traces on disk (`PLAN_TRACES_ON_DISK.md`).
+/// Two new kinds, [`Kind::TraceRecord`] and [`Kind::TraceTrim`], which apply
+/// to the node's trace environment (`rsm/traces.rs`) instead of the RAM
+/// keyspaces. The facade and the leader's maintenance emit them only where
+/// [`cluster_allows`]`(cluster, VERSION_4)`; below it they emit the version-1
+/// [`Kind::TraceAppend`] and [`Kind::TraceExpire`], which keep their old apply.
+pub const VERSION_4: u16 = 4;
+
 /// The highest catalogue version this build can decode and apply. The
 /// replicated cluster version (§12.8) may be lower; it never rises above the
 /// minimum of every member's value (D20). A node reports it to the leader on
 /// every append it answers.
-pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_3 as u32;
+pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_4 as u32;
 
 /// The cluster version of a store that holds none, and of a member that
 /// reports none: 3. Every node of a 2.0.0-beta.1 cluster or later reads it
@@ -184,6 +194,14 @@ pub enum Kind {
     /// tenant's partition-owned rows are retired separately through the
     /// bounded `GarbageAdd` / `DeleteChunk` protocol.
     TenantPurge = 32,
+    /// Record a trace event in the node's trace environment (catalogue
+    /// version 4, `rsm/traces.rs`): the body of [`Kind::TraceAppend`], kept on
+    /// disk instead of in a RAM keyspace.
+    TraceRecord = 33,
+    /// Delete at most `limit` traces created before the cutoff, oldest first,
+    /// from the legacy RAM keyspaces and at most `limit` from the trace
+    /// environment (catalogue version 4): the bounded [`Kind::TraceExpire`].
+    TraceTrim = 34,
 }
 
 /// `Effect` travels between nodes (a follower's prepared command) in its own
@@ -247,6 +265,8 @@ impl Kind {
             30 => Kind::ClusterVersionSet,
             31 => Kind::MembershipNote,
             32 => Kind::TenantPurge,
+            33 => Kind::TraceRecord,
+            34 => Kind::TraceTrim,
             _ => return None,
         })
     }
@@ -287,12 +307,14 @@ impl Kind {
             Kind::ClusterVersionSet => "cluster_version_set",
             Kind::MembershipNote => "membership_note",
             Kind::TenantPurge => "tenant_purge",
+            Kind::TraceRecord => "trace_record",
+            Kind::TraceTrim => "trace_trim",
         }
     }
 
     /// Every kind, in id order. The golden test walks this, so a kind added
     /// without a fixture fails the build.
-    pub const ALL: [Kind; 33] = [
+    pub const ALL: [Kind; 35] = [
         Kind::Noop,
         Kind::QueueUpsert,
         Kind::QueueDelete,
@@ -326,6 +348,8 @@ impl Kind {
         Kind::ClusterVersionSet,
         Kind::MembershipNote,
         Kind::TenantPurge,
+        Kind::TraceRecord,
+        Kind::TraceTrim,
     ];
 }
 
@@ -863,6 +887,17 @@ pub enum Effect {
     /// Partition-owned rows are already hidden by `GarbageAdd` in the same
     /// entry and are reclaimed by bounded `DeleteChunk` entries.
     TenantPurge { tenant: String },
+
+    /// Record a trace event on disk (catalogue version 4): the trace
+    /// environment's rows are keyed by the entry's index and this effect's
+    /// ordinal, which every node and every replay agree on
+    /// (`rsm/traces.rs`).
+    TraceRecord { event: TraceEvent },
+    /// Delete at most `limit` traces created before `cutoff_us`, oldest
+    /// first, from the legacy RAM keyspaces, and at most `limit` from the
+    /// trace environment (catalogue version 4). `limit` travels in the effect
+    /// so every node deletes the same rows.
+    TraceTrim { cutoff_us: i64, limit: u32 },
 }
 
 /// The counter an effect consumes from the entry header's bases (I18, §5.1).
@@ -913,6 +948,8 @@ impl Effect {
             Effect::ClusterVersionSet { .. } => Kind::ClusterVersionSet,
             Effect::MembershipNote { .. } => Kind::MembershipNote,
             Effect::TenantPurge { .. } => Kind::TenantPurge,
+            Effect::TraceRecord { .. } => Kind::TraceRecord,
+            Effect::TraceTrim { .. } => Kind::TraceTrim,
         }
     }
 
@@ -972,6 +1009,8 @@ impl Effect {
             | Kind::ClusterVersionSet
             | Kind::MembershipNote => VERSION_1,
             Kind::TenantPurge => VERSION_1,
+            // Traces on disk: emitted only where the cluster version admits 4.
+            Kind::TraceRecord | Kind::TraceTrim => VERSION_4,
         }
     }
 
@@ -1023,6 +1062,9 @@ impl Effect {
             | Effect::ClusterVersionSet { .. }
             | Effect::MembershipNote { .. } => Assigns::Nothing,
             Effect::TenantPurge { .. } => Assigns::Nothing,
+            // The trace keys come from the entry's index and the effect's
+            // ordinal, not from a counter base.
+            Effect::TraceRecord { .. } | Effect::TraceTrim { .. } => Assigns::Nothing,
         }
     }
 
@@ -1333,19 +1375,7 @@ impl Effect {
                 w.str(key);
             }
 
-            Effect::TraceAppend { event } => {
-                w.bytes16(&event.trace_id);
-                w.str(&event.tenant);
-                w.opt_u64(event.pid);
-                w.opt_bytes16(event.message_id.as_ref());
-                w.str(&event.txn);
-                w.opt_str(event.consumer_group.as_deref());
-                w.str(&event.event_type);
-                w.blob(&event.data);
-                w.opt_str(event.worker.as_deref());
-                w.vec_str(&event.names);
-                w.i64(event.created_at_us);
-            }
+            Effect::TraceAppend { event } => write_trace_event(&mut w, event),
             Effect::TraceExpire { cutoff_us } => w.i64(*cutoff_us),
 
             Effect::FlagSet { key, value } => {
@@ -1424,6 +1454,13 @@ impl Effect {
                 w.str(address);
             }
             Effect::TenantPurge { tenant } => w.str(tenant),
+
+            // The body of a `TraceAppend`, byte for byte.
+            Effect::TraceRecord { event } => write_trace_event(&mut w, event),
+            Effect::TraceTrim { cutoff_us, limit } => {
+                w.i64(*cutoff_us);
+                w.u32(*limit);
+            }
         }
         w.into_inner()
     }
@@ -1440,7 +1477,7 @@ impl Effect {
             Effect::TimerUpsert { row, .. } => 160 + row.frame.len(),
             Effect::CursorSet { row, .. } => 96 + row.delivered.len() * 16 + row.metadata.len(),
             Effect::KvPut { value, key, .. } => 96 + value.len() + key.len(),
-            Effect::TraceAppend { event } => 160 + event.data.len(),
+            Effect::TraceAppend { event } | Effect::TraceRecord { event } => 160 + event.data.len(),
             _ => 128,
         }
     }
@@ -1449,9 +1486,13 @@ impl Effect {
     /// failed, so a corrupt entry is diagnosable from one log line.
     pub fn decode_body(kind: Kind, version: u16, body: &[u8]) -> Result<Effect, CodecError> {
         // Versions 2 and 3 exist for one kind only (see [`VERSION_2`],
-        // [`VERSION_3`]).
-        let known = version == VERSION_1
-            || ((version == VERSION_2 || version == VERSION_3) && kind == Kind::CursorSet);
+        // [`VERSION_3`]); version 4 is the two trace kinds, which exist at no
+        // other version ([`VERSION_4`]).
+        let known = match kind {
+            Kind::TraceRecord | Kind::TraceTrim => version == VERSION_4,
+            Kind::CursorSet => version == VERSION_1 || version == VERSION_2 || version == VERSION_3,
+            _ => version == VERSION_1,
+        };
         if !known {
             return Err(CodecError::UnknownVersion {
                 kind: kind as u16,
@@ -1693,19 +1734,7 @@ impl Effect {
             },
 
             Kind::TraceAppend => Effect::TraceAppend {
-                event: TraceEvent {
-                    trace_id: r.bytes16("trace_id")?,
-                    tenant: r.str("tenant")?,
-                    pid: r.opt_u64("pid")?,
-                    message_id: r.opt_bytes16("message_id")?,
-                    txn: r.str("txn")?,
-                    consumer_group: r.opt_str("consumer_group")?,
-                    event_type: r.str("event_type")?,
-                    data: r.blob("data")?,
-                    worker: r.opt_str("worker")?,
-                    names: r.vec_str("names")?,
-                    created_at_us: r.i64("created_at")?,
-                },
+                event: read_trace_event(&mut r)?,
             },
             Kind::TraceExpire => Effect::TraceExpire {
                 cutoff_us: r.i64("cutoff")?,
@@ -1773,6 +1802,14 @@ impl Effect {
             Kind::TenantPurge => Effect::TenantPurge {
                 tenant: r.str("tenant")?,
             },
+
+            Kind::TraceRecord => Effect::TraceRecord {
+                event: read_trace_event(&mut r)?,
+            },
+            Kind::TraceTrim => Effect::TraceTrim {
+                cutoff_us: r.i64("cutoff")?,
+                limit: r.u32("limit")?,
+            },
         };
         if !r.done() {
             return Err(CodecError::Field("trailing bytes"));
@@ -1794,6 +1831,38 @@ pub fn kinds_version_of(effects: &[Effect]) -> u32 {
         .map(|e| e.version() as u32)
         .max()
         .unwrap_or(0)
+}
+
+/// The body of a trace effect ([`Kind::TraceAppend`] and, unchanged,
+/// [`Kind::TraceRecord`]): one place writes it, one reads it.
+fn write_trace_event(w: &mut Writer, event: &TraceEvent) {
+    w.bytes16(&event.trace_id);
+    w.str(&event.tenant);
+    w.opt_u64(event.pid);
+    w.opt_bytes16(event.message_id.as_ref());
+    w.str(&event.txn);
+    w.opt_str(event.consumer_group.as_deref());
+    w.str(&event.event_type);
+    w.blob(&event.data);
+    w.opt_str(event.worker.as_deref());
+    w.vec_str(&event.names);
+    w.i64(event.created_at_us);
+}
+
+fn read_trace_event(r: &mut Reader<'_>) -> Result<TraceEvent, CodecError> {
+    Ok(TraceEvent {
+        trace_id: r.bytes16("trace_id")?,
+        tenant: r.str("tenant")?,
+        pid: r.opt_u64("pid")?,
+        message_id: r.opt_bytes16("message_id")?,
+        txn: r.str("txn")?,
+        consumer_group: r.opt_str("consumer_group")?,
+        event_type: r.str("event_type")?,
+        data: r.blob("data")?,
+        worker: r.opt_str("worker")?,
+        names: r.vec_str("names")?,
+        created_at_us: r.i64("created_at")?,
+    })
 }
 
 /// One effect, framed: `kind:u16 | version:u16 | body_len:u32 | body`.

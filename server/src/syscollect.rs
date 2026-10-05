@@ -109,6 +109,29 @@ fn current_rss_bytes() -> Option<u64> {
     None
 }
 
+/// The memory this process holds itself: its resident set without the file
+/// pages it maps. Those (the store's LMDB file, read whole at boot; the binary)
+/// are page cache the kernel drops under pressure before it kills anything, so
+/// the resident set overstates what can run a node out of memory by about the
+/// size of its store. None where the platform has no such split.
+#[cfg(target_os = "linux")]
+pub(crate) fn anon_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kb: u64 = status
+        .lines()
+        .find_map(|l| l.strip_prefix("RssAnon:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kb.saturating_mul(1024))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn anon_bytes() -> Option<u64> {
+    None
+}
+
 /// The CPUs this process may run on: its affinity and, on Linux, a cgroup CPU
 /// quota (std reads both), so a broker held to 4 cores of 16 says 4.
 pub(crate) fn cpus() -> Option<usize> {
@@ -193,6 +216,11 @@ mod tests {
     fn the_host_probes_answer_on_this_machine() {
         assert!(super::cpus().is_some_and(|n| n >= 1));
         assert!(super::memory_limit_bytes().is_some_and(|b| b > 0));
+        if cfg!(target_os = "linux") {
+            let anon = super::anon_bytes().expect("RssAnon in /proc/self/status");
+            let rss = super::rusage().2;
+            assert!(anon > 0 && anon <= rss, "anon {anon} rss {rss}");
+        }
         if cfg!(unix) {
             let (total, available) =
                 super::filesystem_usage(&std::env::temp_dir()).expect("statvfs of the temp dir");

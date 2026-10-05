@@ -723,6 +723,10 @@ pub struct ApplyConfig {
     /// sleeping shard thread costs a wake-up (~5-50 µs), which a handful of
     /// 15 µs effects does not repay. Node-local, like the shard count.
     pub apply_shard_min: usize,
+    /// How the trace environment (`rsm/traces.rs`, `<data_dir>/traces`) is
+    /// opened: `QUEEN_RAFT_TRACE_MAP_BYTES`. Node-local: it decides how much
+    /// address space the map reserves, never what it holds.
+    pub traces: crate::rsm::traces::TraceOpts,
 }
 
 impl Default for ApplyConfig {
@@ -756,6 +760,7 @@ impl Default for ApplyConfig {
             // `from_env` (the shipped binary) defaults to four.
             apply_shards: 1,
             apply_shard_min: 8,
+            traces: crate::rsm::traces::TraceOpts::default(),
         }
     }
 }
@@ -817,6 +822,7 @@ impl ApplyConfig {
                 .unwrap_or(4)
                 .min(64),
             apply_shard_min: num("QUEEN_RAFT_APPLY_SHARD_MIN", d.apply_shard_min as u64) as usize,
+            traces: crate::rsm::traces::TraceOpts::from_env(),
         }
     }
 }
@@ -875,6 +881,13 @@ pub struct ApplyStats {
     /// Skip markers applied: entries an operator stepped over
     /// (`QUEEN_RAFT_APPLY_SKIP`).
     pub skipped_by_operator: u64,
+    /// Entries whose trace half ran in the trace environment (one write
+    /// transaction each, `rsm/traces.rs`).
+    pub trace_writes: u64,
+    /// Entries replayed after a crash whose trace half the trace environment
+    /// already held (its applied index was at or above theirs): skipped, so a
+    /// trace is never recorded or trimmed twice.
+    pub trace_replays: u64,
 }
 
 impl ApplyStats {
@@ -897,6 +910,8 @@ impl ApplyStats {
         self.rows_swept += o.rows_swept;
         self.missing_rows += o.missing_rows;
         self.skipped_by_operator += o.skipped_by_operator;
+        self.trace_writes += o.trace_writes;
+        self.trace_replays += o.trace_replays;
         self
     }
 }
@@ -1150,6 +1165,16 @@ pub struct Applier<'s, S: Store> {
     qlog: Option<QLogSet>,
     /// Node-local D17 history, shared with the facade for dashboard reads.
     local_metrics: Arc<crate::rsm::local_metrics::LocalMetrics>,
+    /// The trace environment (`<data_dir>/traces`, `rsm/traces.rs`): where the
+    /// traces of catalogue version 4 live instead of a RAM keyspace. Shared
+    /// with the facade (reads), the leader's maintenance and the snapshot
+    /// sender; apply is its only writer.
+    traces: Arc<crate::rsm::traces::TraceStore>,
+    /// The ordinals of the entry's effects with a trace-environment half
+    /// (`TraceRecord`, `TraceTrim`, `TenantPurge`), run together after the
+    /// entry's other effects in ONE trace-environment transaction
+    /// ([`Applier::flush_traces`]).
+    trace_ops: Vec<u32>,
     cfg: ApplyConfig,
     notify: Arc<dyn Notify>,
     /// The consumption engine this apply feeds ([`Notify::engine`], resolved
@@ -1425,6 +1450,10 @@ impl<'s, S: Store> Applier<'s, S> {
             .unwrap_or_else(|| std::path::Path::new("."));
         let local_metrics = crate::rsm::local_metrics::open(data_dir.join("local.db"))
             .map_err(ApplyError::LocalMetrics)?;
+        // Traces on disk: the trace environment and the index of the last
+        // entry whose trace half it holds. A replay below that index skips the
+        // trace half (`flush_traces`), so it is applied exactly once.
+        let traces = crate::rsm::traces::open(&data_dir.join(crate::rsm::traces::DIR), cfg.traces)?;
         let nshards = cfg.apply_shards.max(1);
         let shards: Vec<Shard> = (0..nshards)
             .map(|_| Shard::new(cfg.batch_counters, max_created_at_us))
@@ -1474,6 +1503,8 @@ impl<'s, S: Store> Applier<'s, S> {
             segments,
             qlog,
             local_metrics,
+            traces,
+            trace_ops: Vec::new(),
             counters: CounterCache::new(cfg.batch_counters),
             shards,
             run: shard::Run::new(nshards),
@@ -1525,6 +1556,7 @@ impl<'s, S: Store> Applier<'s, S> {
             scanned_frames = rec.segments.scanned_frames,
             shards = applier.shards.len(),
             shard_threads = applier.pool.as_ref().map_or(0, |p| p.workers()),
+            traces_applied = applier.traces.applied_index(),
             "rsm apply recovered",
         );
         Ok((applier, rec))
@@ -1571,6 +1603,11 @@ impl<'s, S: Store> Applier<'s, S> {
     /// the moment [`QLogSet::flush`] lands it.
     pub fn qlog_reader(&self) -> Option<crate::rsm::qlog::set::QLogReader> {
         self.qlog.as_ref().map(|s| s.reader())
+    }
+
+    /// The trace environment this applier writes (`rsm/traces.rs`).
+    pub fn trace_store(&self) -> Arc<crate::rsm::traces::TraceStore> {
+        self.traces.clone()
     }
 
     /// The segment writer, for a caller that owns a step apply does not: a
@@ -1885,6 +1922,7 @@ impl<'s, S: Store> Applier<'s, S> {
         let mut pids_assigned = 0u64;
         let mut kv_versions_assigned = 0u64;
         let max_created_before = self.max_created_at_us;
+        self.trace_ops.clear();
         // A test's injected refusal (`faults::refuse_apply_of`): off unless a
         // test armed one, one relaxed load per entry.
         let refuse_at = crate::rsm::faults::apply_refusal(&c.entry);
@@ -1957,6 +1995,10 @@ impl<'s, S: Store> Applier<'s, S> {
             }
         }
         self.flush_run(c, &ecx)?;
+        // The entry's trace-environment half, in one transaction, committed
+        // before the answer below (a trace is readable on this node when its
+        // POST returns, as it was from RAM).
+        self.flush_traces(c)?;
         self.failed_effect = None;
         self.stats.effects += effects.len() as u64;
         for s in &self.shards {
@@ -2512,6 +2554,92 @@ impl<'s, S: Store> Applier<'s, S> {
         Ok(())
     }
 
+    // -- the trace environment ---------------------------------------------
+
+    /// The entry's trace-environment half (`rsm/traces.rs`): every effect
+    /// [`Applier::effect`] noted in [`Applier::trace_ops`], in entry order, in
+    /// ONE write transaction that also records this entry's index, then a
+    /// commit. Readers see it at once; the durable point makes it durable.
+    ///
+    /// Exactly once: an entry at or below the environment's applied index is
+    /// a replay (the environment commits per entry, the store at its durable
+    /// point, so after a crash it may be ahead) and its trace half is already
+    /// there — skipped. A refusal aborts the transaction, so a failed entry
+    /// leaves nothing in it.
+    fn flush_traces(&mut self, c: &Committed) -> Result<()> {
+        if self.trace_ops.is_empty() {
+            return Ok(());
+        }
+        let ops = std::mem::take(&mut self.trace_ops);
+        if c.index <= self.traces.applied_index() {
+            self.stats.trace_replays += 1;
+        } else {
+            self.failed_effect = ops.first().copied();
+            let effects = &c.entry.effects;
+            self.traces.write_entry(c.index, |w| {
+                for &o in &ops {
+                    match effects.get(o as usize) {
+                        Some(Effect::TraceRecord { event }) => w.record(o, event)?,
+                        Some(Effect::TraceTrim { cutoff_us, limit }) => {
+                            w.trim(*cutoff_us, *limit as usize)?;
+                        }
+                        Some(Effect::TenantPurge { tenant }) => {
+                            w.purge_tenant(tenant)?;
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(())
+            })?;
+            self.stats.trace_writes += 1;
+        }
+        // Keep the allocation for the next entry.
+        self.trace_ops = ops;
+        self.trace_ops.clear();
+        Ok(())
+    }
+
+    /// Delete at most `limit` legacy RAM traces created before `cutoff_us`,
+    /// oldest first: [`Effect::TraceExpire`] (`usize::MAX`, unchanged) and the
+    /// RAM half of [`Effect::TraceTrim`].
+    fn legacy_trace_expire(&mut self, cutoff_us: i64, limit: usize) -> Result<()> {
+        let mut indexed: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        self.writes.scan_raw(
+            Keyspace::TraceExpiry,
+            &[],
+            &[],
+            limit,
+            &mut |expiry_key, primary| {
+                if keys::trace_expiry_created_of(expiry_key)
+                    .is_none_or(|created| created >= cutoff_us)
+                {
+                    return false;
+                }
+                indexed.push((expiry_key.to_vec(), primary.to_vec()));
+                true
+            },
+        )?;
+        for (expiry_key, primary) in indexed {
+            let Some(raw) = self.writes.get_raw(Keyspace::Traces, &primary)? else {
+                self.writes.del_raw(Keyspace::TraceExpiry, &expiry_key)?;
+                self.stats.missing_rows += 1;
+                continue;
+            };
+            let event = rows::trace_decode(raw)
+                .map_err(|e| StoreError::corrupt(Keyspace::Traces, format!("{e}")))?;
+            for name in &event.names {
+                self.writes.del_raw(
+                    Keyspace::TraceNames,
+                    &keys::trace_name(&event.tenant, name, event.created_at_us, &event.trace_id),
+                )?;
+            }
+            self.writes.del_raw(Keyspace::Traces, &primary)?;
+            self.writes.del_raw(Keyspace::TraceExpiry, &expiry_key)?;
+            self.stats.rows_swept += 1;
+        }
+        Ok(())
+    }
+
     // -- one effect --------------------------------------------------------
 
     /// One effect, on this thread. A pid-keyed one goes to its shard's code
@@ -2737,7 +2865,15 @@ impl<'s, S: Store> Applier<'s, S> {
                 self.writes.set_meta_blob(&key, &w.into_inner())?;
                 Ok(())
             }
-            Effect::TenantPurge { tenant } => self.tenant_purge(tenant),
+            // The tenant's traces in the trace environment go with the rest,
+            // in `flush_traces`. Before the cluster reached catalogue version
+            // 4 nothing was ever written there, so for every older entry this
+            // half deletes nothing.
+            Effect::TenantPurge { tenant } => {
+                self.tenant_purge(tenant)?;
+                self.trace_ops.push(ord);
+                Ok(())
+            }
 
             // Timers (WP-2.3). Plain overwrites of one row and its
             // fire-order index entry, from values the planner computed — no
@@ -2853,46 +2989,20 @@ impl<'s, S: Store> Applier<'s, S> {
                 )?;
                 Ok(())
             }
-            Effect::TraceExpire { cutoff_us } => {
-                let mut indexed: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-                self.writes.scan_raw(
-                    Keyspace::TraceExpiry,
-                    &[],
-                    &[],
-                    usize::MAX,
-                    &mut |expiry_key, primary| {
-                        if keys::trace_expiry_created_of(expiry_key)
-                            .is_none_or(|created| created >= *cutoff_us)
-                        {
-                            return false;
-                        }
-                        indexed.push((expiry_key.to_vec(), primary.to_vec()));
-                        true
-                    },
-                )?;
-                for (expiry_key, primary) in indexed {
-                    let Some(raw) = self.writes.get_raw(Keyspace::Traces, &primary)? else {
-                        self.writes.del_raw(Keyspace::TraceExpiry, &expiry_key)?;
-                        self.stats.missing_rows += 1;
-                        continue;
-                    };
-                    let event = rows::trace_decode(raw)
-                        .map_err(|e| StoreError::corrupt(Keyspace::Traces, format!("{e}")))?;
-                    for name in &event.names {
-                        self.writes.del_raw(
-                            Keyspace::TraceNames,
-                            &keys::trace_name(
-                                &event.tenant,
-                                name,
-                                event.created_at_us,
-                                &event.trace_id,
-                            ),
-                        )?;
-                    }
-                    self.writes.del_raw(Keyspace::Traces, &primary)?;
-                    self.writes.del_raw(Keyspace::TraceExpiry, &expiry_key)?;
-                    self.stats.rows_swept += 1;
-                }
+            // Version 1, unchanged: every legacy RAM trace past the cutoff, in
+            // this one step.
+            Effect::TraceExpire { cutoff_us } => self.legacy_trace_expire(*cutoff_us, usize::MAX),
+            // Version 4 (traces on disk). The trace environment's half runs
+            // with the rest of the entry's in `flush_traces`.
+            Effect::TraceRecord { .. } => {
+                self.trace_ops.push(ord);
+                Ok(())
+            }
+            // The legacy RAM traces here (bounded: at most `limit`), the trace
+            // environment's in `flush_traces` (at most `limit` too).
+            Effect::TraceTrim { cutoff_us, limit } => {
+                self.legacy_trace_expire(*cutoff_us, *limit as usize)?;
+                self.trace_ops.push(ord);
                 Ok(())
             }
 
@@ -4000,7 +4110,15 @@ impl<'s, S: Store> Applier<'s, S> {
     /// Step 2's commit and step 3, inline: the durable store commit, then the
     /// durable index reported and GC phase two.
     fn commit_point_inline(&mut self, seals: Vec<(u16, u32)>) -> Result<u64> {
-        match self.writes.durable_commit() {
+        // Step 1 for the trace environment: every trace committed for an
+        // entry at or below this point reaches the platter before the store
+        // records the point (a no-op when no trace was written since the last
+        // one).
+        match self
+            .traces
+            .sync()
+            .and_then(|()| self.writes.durable_commit())
+        {
             Ok(()) => {}
             Err(e) => {
                 self.stats.durable_points_failed += 1;
@@ -4451,7 +4569,11 @@ pub(crate) struct CkptDone {
 }
 
 impl Checkpointer {
-    fn spawn<S: Store + 'static>(store: Arc<S>, clock: Arc<dyn Clock>) -> Checkpointer {
+    fn spawn<S: Store + 'static>(
+        store: Arc<S>,
+        traces: Arc<crate::rsm::traces::TraceStore>,
+        clock: Arc<dyn Clock>,
+    ) -> Checkpointer {
         let (tx, rx) = std::sync::mpsc::sync_channel::<CkptJob>(1);
         let (dtx, done) = std::sync::mpsc::channel::<CkptDone>();
         let join = std::thread::Builder::new()
@@ -4460,7 +4582,11 @@ impl Checkpointer {
                 while let Ok(mut job) = rx.recv() {
                     let t0 = clock.now();
                     let rows = job.cut.keys();
-                    let result = store.write_cut(&mut job.cut);
+                    // The trace environment first: apply committed every trace
+                    // of an entry at or below the cut's index before it took
+                    // the cut, so this sync covers them, and the point is not
+                    // recorded until it has.
+                    let result = traces.sync().and_then(|()| store.write_cut(&mut job.cut));
                     let write = clock.now().duration_since(t0);
                     if result.is_err() {
                         store.restore_cut(job.cut);
@@ -4750,7 +4876,7 @@ pub fn spawn_with_reader<S: Store + 'static>(
             // no cut outlives the thread, and the store is released with it.
             let ckpt = cfg
                 .checkpoint_async
-                .then(|| Checkpointer::spawn(store.clone(), clock.clone()));
+                .then(|| Checkpointer::spawn(store.clone(), applier.trace_store(), clock.clone()));
             tracing::info!(
                 target: "rsm",
                 replay_after = rec.replay_after,

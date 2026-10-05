@@ -1394,3 +1394,125 @@ async fn an_entry_above_the_cluster_version_is_refused_and_never_proposed() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Traces on disk in a mixed cluster (`PLAN_TRACES_ON_DISK.md`): while a
+/// member reads only catalogue version 3, the cluster version stays 3 and a
+/// `TraceRecord` (version 4) is never proposed — its command is refused, and
+/// the version-1 `TraceAppend` goes as before. Once the cluster version is 4
+/// the record goes too, and so does the bounded trim. A trace whose key would
+/// pass the store's limit is refused by the planner either way, as a client
+/// error, instead of reaching apply as `KeyTooLong`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trace_record_waits_for_cluster_version_four() {
+    use crate::rsm::effect::TraceEvent;
+    use crate::rsm::store::{TypedWrites, Writes};
+
+    let dir = scratch("trace-version");
+    let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+    let fake = Arc::new(FakeReplicator::new(1));
+    let (tx, handle) = Batcher::new(store.clone(), fake.clone(), small_pipeline(4, 5_000)).spawn();
+    let event = |txn: &str| TraceEvent {
+        trace_id: [9; 16],
+        tenant: TENANT.into(),
+        pid: None,
+        message_id: None,
+        txn: txn.into(),
+        consumer_group: None,
+        event_type: "info".into(),
+        data: b"{}".to_vec(),
+        worker: None,
+        names: vec!["n".into()],
+        created_at_us: 1,
+    };
+    let effects = |id: u64, effects: Vec<Effect>| {
+        Command::Effects(EffectsCommand {
+            request_id: rid(id),
+            tenant: TENANT.to_string(),
+            effects,
+        })
+    };
+
+    // The baseline (3): the record is refused, nothing reaches the log; the
+    // old kind goes.
+    match submit(
+        &tx,
+        effects(1, vec![Effect::TraceRecord { event: event("a") }]),
+    )
+    .await
+    {
+        Reply::Refused(r) => assert_eq!(r.code, "entry_encode_failed", "{r:?}"),
+        other => panic!("expected the entry refused, got {other:?}"),
+    }
+    assert_eq!(fake.proposal_count(), 0, "nothing reached the log");
+    done(
+        &submit(
+            &tx,
+            effects(2, vec![Effect::TraceAppend { event: event("a") }]),
+        )
+        .await,
+    );
+    assert_eq!(fake.proposal_count(), 1);
+    // Too long a key: a client refusal from the planner, for either kind.
+    let long = "x".repeat(600);
+    for (id, e) in [
+        (
+            3,
+            Effect::TraceAppend {
+                event: event(&long),
+            },
+        ),
+        (
+            4,
+            Effect::TraceRecord {
+                event: event(&long),
+            },
+        ),
+    ] {
+        match submit(&tx, effects(id, vec![e])).await {
+            Reply::Refused(r) => {
+                assert_eq!(r.code, "name_too_long", "{r:?}");
+                assert!(!r.retryable);
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+    assert_eq!(fake.proposal_count(), 1);
+
+    // Every member reads 4: the record and the trim go.
+    {
+        let mut w = store.write().expect("write");
+        w.set_meta_u32(crate::rsm::store::meta::CLUSTER_VERSION, 4)
+            .expect("meta");
+        w.commit().expect("commit");
+    }
+    done(
+        &submit(
+            &tx,
+            effects(5, vec![Effect::TraceRecord { event: event("b") }]),
+        )
+        .await,
+    );
+    done(
+        &submit(
+            &tx,
+            effects(
+                6,
+                vec![Effect::TraceTrim {
+                    cutoff_us: 0,
+                    limit: 8,
+                }],
+            ),
+        )
+        .await,
+    );
+    let proposals = fake.proposals();
+    assert_eq!(proposals.len(), 3);
+    for p in &proposals[1..] {
+        let entry = decode_entry(p).expect("decode");
+        assert_eq!(entry.kinds_version, 4);
+    }
+
+    drop(tx);
+    let _ = handle.await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

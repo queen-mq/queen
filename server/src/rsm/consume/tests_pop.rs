@@ -203,6 +203,33 @@ fn a_late_partition_seeds_from_the_registration_not_the_tail() {
 }
 
 #[test]
+fn a_new_partitions_first_message_reaches_every_group_whatever_the_load_order() {
+    // 2026-10-05: a group that loaded a new partition before its first append
+    // was written waited for that append's hook; a second group loading it
+    // after the write raised the shared tail and armed only its own part, so
+    // the hook found nothing new and the first group never got the message
+    // (not until the partition's next one).
+    let mut h = H::new("pop-load-order");
+    h.queue("q", qcfg());
+    assert!(h.wildcard("q", "a", "w1").is_empty());
+    assert!(h.wildcard("q", "b", "w2").is_empty());
+    h.advance(1_000_000);
+    let pid = h.create_partition("q", "p0");
+    assert!(h.wildcard("q", "a", "w1").is_empty(), "nothing in it yet");
+    let now = h.now;
+    let (_, _, last) = h.write_append("q", "p0", &["m"], now);
+    let c = only(h.wildcard("q", "b", "w2"));
+    assert_eq!(
+        (c.pid, c.start_offset),
+        (pid, 0),
+        "b loads it after the write"
+    );
+    h.e.on_append(pid, last);
+    let c = only(h.wildcard("q", "a", "w1"));
+    assert_eq!((c.pid, c.start_offset, c.end_offset), (pid, 0, 0));
+}
+
+#[test]
 fn delayed_processing_hides_a_fresh_frame_until_its_deadline() {
     let mut h = H::new("pop-delayed");
     let mut cfg = qcfg();

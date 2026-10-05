@@ -300,7 +300,10 @@ pub enum Keyspace {
     Quotas,
     /// `(tenant, queue) → ephemeral queue options JSON`.
     EphConfig,
-    /// `(tenant, pid?, transaction, sequence) → TraceEvent`.
+    /// `(tenant, pid?, transaction, sequence) → TraceEvent`. The LEGACY trace
+    /// rows (catalogue version 1, `TraceAppend`); from version 4 traces live
+    /// in the node's trace environment instead (`rsm/traces.rs`), and these
+    /// three keyspaces only drain.
     Traces,
     /// `(tenant, trace name, created_at, trace_id) → primary trace key`.
     TraceNames,

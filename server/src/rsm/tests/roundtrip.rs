@@ -62,6 +62,8 @@ fn kind_ids_are_stable_and_bijective() {
         (30, Kind::ClusterVersionSet),
         (31, Kind::MembershipNote),
         (32, Kind::TenantPurge),
+        (33, Kind::TraceRecord),
+        (34, Kind::TraceTrim),
     ];
     assert_eq!(
         expected.len(),
@@ -129,6 +131,9 @@ fn every_kind_pins_its_catalogue_version() {
         (Kind::ClusterVersionSet, VERSION_1),
         (Kind::MembershipNote, VERSION_1),
         (Kind::TenantPurge, VERSION_1),
+        // Traces on disk.
+        (Kind::TraceRecord, crate::rsm::effect::VERSION_4),
+        (Kind::TraceTrim, crate::rsm::effect::VERSION_4),
     ];
     assert_eq!(
         expected.len(),

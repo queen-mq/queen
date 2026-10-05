@@ -98,10 +98,15 @@ impl Restart {
 /// and term the copy holds.
 pub(crate) type CopyStore = Box<dyn Fn(&Path) -> io::Result<(u64, u64)> + Send + Sync>;
 
+/// Copies the trace environment (`rsm/traces.rs`) into a directory when the
+/// snapshot carries it; answers whether it does.
+pub(crate) type CopyTraces = Box<dyn Fn(&Path) -> io::Result<bool> + Send + Sync>;
+
 /// What a node needs to send its snapshot.
 pub(crate) struct SendCtx {
     pub(crate) data_dir: PathBuf,
     pub(crate) copy_store: CopyStore,
+    pub(crate) copy_traces: CopyTraces,
     pub(crate) qlog: QLogReader,
     /// The membership in force at the copied checkpoint.
     pub(crate) membership_at: MembershipAt,
@@ -114,12 +119,34 @@ impl SendCtx {
         qlog: QLogReader,
         membership_at: MembershipAt,
     ) -> SendCtx {
+        let traces_dir = data_dir.join(crate::rsm::traces::DIR);
+        let versions = store.clone();
         SendCtx {
             data_dir,
             copy_store: Box::new(move |dir| {
                 store
                     .copy_checkpoint(dir)
                     .map_err(|e| io::Error::other(format!("copy the store: {e}")))
+            }),
+            copy_traces: Box::new(move |dir| {
+                // Catalogue version 4 only (traces on disk). Below it no trace
+                // was ever written there — the receiver's correct trace store
+                // is the empty one — and a 2.0.x receiver refuses a `traces/`
+                // path, so nothing is sent.
+                use crate::rsm::store::TypedReads;
+                let cluster = versions
+                    .read(|r| r.cluster_version())
+                    .map_err(|e| io::Error::other(format!("read the cluster version: {e}")))?;
+                if !crate::rsm::effect::cluster_allows(cluster, crate::rsm::effect::VERSION_4) {
+                    return Ok(false);
+                }
+                let traces = crate::rsm::traces::lookup(&traces_dir).ok_or_else(|| {
+                    io::Error::other("the trace store is not open on this node; try again")
+                })?;
+                traces
+                    .copy_to(dir)
+                    .map_err(|e| io::Error::other(format!("copy the trace store: {e}")))?;
+                Ok(true)
             }),
             qlog,
             membership_at,
@@ -163,6 +190,11 @@ struct Pending {
     applied_term: u64,
     last_log_id: Option<LogId>,
     membership: StoredMembership,
+    /// Whether the snapshot carries the trace environment (`traces/`). One
+    /// that does not replaces this node's with an empty one at the swap. A
+    /// marker an older build wrote has no such field: it carried none.
+    #[serde(default)]
+    traces: bool,
 }
 
 fn stamp() -> u128 {
@@ -249,6 +281,17 @@ fn materialize(ctx: &SendCtx, dir: &Path) -> io::Result<(u64, u64, Vec<FileEntry
         path: "store/data.mdb".into(),
         len: fs::metadata(dir.join("store").join("data.mdb"))?.len(),
     }];
+    // The trace environment AFTER the store: every trace of an entry at or
+    // below the store copy's index was committed before that copy began, so
+    // this copy holds them, and its own applied index tells the receiver which
+    // entries above the store's index to skip the trace half of.
+    let traces = dir.join(crate::rsm::traces::DIR);
+    if (ctx.copy_traces)(&traces)? {
+        files.push(FileEntry {
+            path: format!("{}/data.mdb", crate::rsm::traces::DIR),
+            len: fs::metadata(traces.join("data.mdb"))?.len(),
+        });
+    }
     link_tree(ctx.qlog.root(), &dir.join("qlog"), "qlog", &mut files)?;
     link_tree(
         &ctx.data_dir.join("seg"),
@@ -459,7 +502,7 @@ fn safe_rel(p: &str) -> io::Result<PathBuf> {
         && path
             .components()
             .all(|c| matches!(c, std::path::Component::Normal(_)))
-        && ["store/", "qlog/", "seg/"]
+        && ["store/", "qlog/", "seg/", "traces/"]
             .iter()
             .any(|pre| p.starts_with(pre));
     if ok {
@@ -596,12 +639,17 @@ pub(crate) async fn receive<S: Store + 'static>(
 
     // The marker goes down BEFORE openraft sees the snapshot: see the module
     // header, step 1.
+    let traces_prefix = format!("{}/", crate::rsm::traces::DIR);
     let pending = Pending {
         staged: rel_dir,
         applied: header.applied,
         applied_term: header.applied_term,
         last_log_id: header.meta.last_log_id,
         membership: header.meta.last_membership.clone(),
+        traces: header
+            .files
+            .iter()
+            .any(|f| f.path.starts_with(&traces_prefix)),
     };
     write_atomic(
         &ctx.data_dir,
@@ -711,7 +759,32 @@ pub fn apply_pending(data_dir: &Path, qopts: QLogOptions) -> io::Result<bool> {
     );
     let replaced = data_dir.join(SNAP_DIR).join("replaced");
     fs::create_dir_all(&replaced)?;
-    for comp in ["store", "qlog", "seg"] {
+    // The trace environment is swapped with the rest, so it must not be open:
+    // an instance still open in this process would go on serving the files
+    // moved out from under it.
+    let traces_dir = data_dir.join(crate::rsm::traces::DIR);
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while crate::rsm::traces::lookup(&traces_dir).is_some() {
+        // In-process reopens (tests): the last owner may be finishing a read.
+        if std::time::Instant::now() >= until {
+            return Err(io::Error::other(format!(
+                "{} is open in this process: a snapshot is swapped in before it opens",
+                traces_dir.display()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !p.traces && traces_dir.exists() {
+        // A snapshot without the trace environment comes from a cluster below
+        // catalogue version 4, where no trace was ever written to it: this
+        // node's goes too, and it reopens empty, which is that state.
+        let old = replaced.join(crate::rsm::traces::DIR);
+        if old.exists() {
+            fs::remove_dir_all(&old)?;
+        }
+        fs::rename(&traces_dir, &old)?;
+    }
+    for comp in ["store", "qlog", "seg", crate::rsm::traces::DIR] {
         let src = staged.join(comp);
         if !src.exists() {
             continue;

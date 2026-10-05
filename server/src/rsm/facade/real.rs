@@ -318,6 +318,10 @@ pub struct RaftFacade {
     qlog_reader: Option<QLogReader>,
     /// Persistent node-local metrics/history (`<data_dir>/local.db`, D17).
     local_metrics: Arc<crate::rsm::local_metrics::LocalMetrics>,
+    /// The trace environment (`<data_dir>/traces`, `rsm/traces.rs`): the
+    /// traces of catalogue version 4, read by the `/traces` routes. Apply is
+    /// its writer; this is the same instance.
+    traces: Arc<crate::rsm::traces::TraceStore>,
     /// At-rest payload cipher shared by push, transaction, timers, pop, and
     /// management reads. Queue policy remains replicated in `QueueConfig`;
     /// only key material is node-local configuration.
@@ -640,7 +644,12 @@ impl RaftFacade {
         {
             return self.storage_full.load(Ordering::Relaxed);
         }
-        let map_pct = self.store.map_usage().pct();
+        // The trace environment has a map of its own: the worse one gates.
+        let map_pct = self
+            .store
+            .map_usage()
+            .pct()
+            .max(self.traces.map_usage().pct());
         let disk_pct = filesystem_used_pct(&self.data_dir).unwrap_or(0.0);
         let was_full = self.storage_full.load(Ordering::Relaxed);
         let full = if was_full {
@@ -707,7 +716,7 @@ impl RaftFacade {
     /// environment says (a test's, [`RaftFacade::open_cluster_node_for_test`]).
     fn open_inner(
         ctx: &RsmBuildCtx,
-        batcher_cfg: BatcherConfig,
+        mut batcher_cfg: BatcherConfig,
         storage_pressure_enabled: bool,
         group: usize,
         multi_group: bool,
@@ -810,6 +819,14 @@ impl RaftFacade {
         let qlog_reader = repl.qlog_reader();
         let local_metrics = crate::rsm::local_metrics::open(dir.join("local.db"))
             .map_err(|e| format!("open local metrics at {}/local.db: {e}", dir.display()))?;
+        // The trace environment the apply thread opened (or opens) under the
+        // same directory: one instance per process. The leader's maintenance
+        // finds it by its directory.
+        let traces_dir = dir.join(crate::rsm::traces::DIR);
+        let traces =
+            crate::rsm::traces::open(&traces_dir, crate::rsm::traces::TraceOpts::from_env())
+                .map_err(|e| format!("open the trace store at {}: {e}", traces_dir.display()))?;
+        batcher_cfg.maintenance.traces_dir = Some(traces_dir);
         // The node's dashboard rows (D17): one store and one collector per
         // process, whichever group opens first. Weak: the facade's shutdown
         // takes the replicator back by value.
@@ -964,6 +981,7 @@ impl RaftFacade {
             reader,
             qlog_reader,
             local_metrics,
+            traces,
             encryption: crate::encryption::Encryption::from_env(),
             cmd_tx,
             notifier: ctx.notifier.clone(),
@@ -1009,6 +1027,7 @@ impl RaftFacade {
             reader,
             qlog_reader,
             local_metrics: _,
+            traces,
             encryption: _,
             cmd_tx,
             notifier: _,
@@ -1062,10 +1081,16 @@ impl RaftFacade {
         };
         let Some(r) = r else {
             drop(store);
+            drop(traces);
             return;
         };
         // Joins the apply and writer threads; returns the sole store Arc.
-        match r.shutdown() {
+        let joined = r.shutdown();
+        // The applier's trace handle went with its thread: this is the last
+        // one, and dropping it closes the trace environment, so the SAME
+        // directory reopens in this process.
+        drop(traces);
+        match joined {
             Ok((_stats, store2)) => {
                 drop(store); // the facade's own clone
                 let mut store2 = store2;
@@ -1489,6 +1514,23 @@ impl RaftFacade {
         self.store
             .read(|r| phase2::tenant_backlogs(r, wall_micros()))
             .expect("read backlogs")
+    }
+
+    /// Test-only: where this node's traces are — `(legacy RAM rows, rows of
+    /// the trace environment)`.
+    #[cfg(test)]
+    pub(crate) fn trace_rows_for_test(&self) -> (u64, u64) {
+        use crate::rsm::store::{Keyspace, Reads};
+        let ram = self
+            .store
+            .read(|r| r.count(Keyspace::Traces))
+            .expect("count the legacy traces");
+        let disk = self
+            .traces
+            .read(|t| t.rows())
+            .expect("count the trace store")
+            .0;
+        (ram, disk)
     }
 }
 
@@ -5019,6 +5061,17 @@ impl Rsm for RaftFacade {
             "queen_raft_store_map_bytes{{kind=\"capacity\"}} {}\nqueen_raft_store_map_bytes{{kind=\"used\"}} {}\n",
             map.map_bytes, map.used_bytes
         ));
+        // The trace environment (`rsm/traces.rs`): its own map, and its rows.
+        let tmap = self.traces.map_usage();
+        out.push_str("# HELP queen_raft_traces_map_bytes Trace store (LMDB) map capacity and use\n# TYPE queen_raft_traces_map_bytes gauge\n");
+        out.push_str(&format!(
+            "queen_raft_traces_map_bytes{{kind=\"capacity\"}} {}\nqueen_raft_traces_map_bytes{{kind=\"used\"}} {}\n",
+            tmap.map_bytes, tmap.used_bytes
+        ));
+        if let Ok((bodies, _, _, _)) = self.traces.read(|t| t.rows()) {
+            out.push_str("# HELP queen_raft_traces_stored Traces in the trace store\n# TYPE queen_raft_traces_stored gauge\n");
+            out.push_str(&format!("queen_raft_traces_stored {bodies}\n"));
+        }
         out.push_str("# HELP queen_raft_store_ram_rows Rows per RAM keyspace: live, and keys dirty since the last checkpoint\n# TYPE queen_raft_store_ram_rows gauge\n");
         for (ks, live, dirty) in self.store.ram_stats() {
             out.push_str(&format!(
@@ -5054,6 +5107,17 @@ impl Rsm for RaftFacade {
         out.push_str(&format!(
             "queen_raft_storage_full {}\n",
             u8::from(self.storage_full.load(std::sync::atomic::Ordering::Relaxed))
+        ));
+        let es = self.engine.engine_stats();
+        out.push_str("# HELP queen_consume_engine What the consumption engine holds in memory (only the leader holds any): groups, (group, partition) parts, partitions\n# TYPE queen_consume_engine gauge\n");
+        out.push_str(&format!(
+            "queen_consume_engine{{kind=\"groups\"}} {}\nqueen_consume_engine{{kind=\"parts\"}} {}\nqueen_consume_engine{{kind=\"partitions\"}} {}\n",
+            es.groups, es.parts, es.partitions
+        ));
+        out.push_str("# HELP queen_consume_parts_total Parts the engine loaded (first contacts and loads back) and unloaded (idle)\n# TYPE queen_consume_parts_total counter\n");
+        out.push_str(&format!(
+            "queen_consume_parts_total{{kind=\"loaded\"}} {}\nqueen_consume_parts_total{{kind=\"unloaded\"}} {}\n",
+            es.loaded_total, es.unloaded_total
         ));
         out
     }

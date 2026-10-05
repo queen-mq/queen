@@ -264,6 +264,10 @@ pub(crate) struct Part {
     pub reserved: Option<[u8; 16]>,
     /// The due time of the timer pending for this part (`0`: none).
     pub timer_at: i64,
+    /// The idle-part unloader's view ([`super::unload`]): the version it last
+    /// saw, and since when it has seen no other.
+    pub seen_ver: u64,
+    pub idle_since_us: i64,
 }
 
 impl Part {
@@ -285,6 +289,9 @@ impl Part {
             dlq_sent: Vec::new(),
             reserved: None,
             timer_at: 0,
+            // Never a version: the unloader's first look starts the clock.
+            seen_ver: u64::MAX,
+            idle_since_us: 0,
         }
     }
 
@@ -303,7 +310,9 @@ pub(crate) struct PidInfo {
     pub txns_start: u64,
     /// When the newest append was applied here (the window buffer), µs.
     pub last_append_us: i64,
-    /// The groups holding this partition.
+    /// The groups holding this partition. A watcher's part may be missing: a
+    /// whole-queue group's part the unloader dropped ([`super::unload`]); the
+    /// next append here loads it back.
     pub watchers: SmallVec<[Gid; 2]>,
 }
 

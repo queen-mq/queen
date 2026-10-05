@@ -38,6 +38,55 @@ the threads, and the master spawns its workers instead. It warns about sockets t
 which every forked worker would share, and it releases the database and Redis connections, log
 channels and mailers the boot opened before the first fork, not in each child only.
 
+## 2.0.1 - 2026-10-05
+
+Everything in 2.0.1-beta below, and:
+
+**Traces live on disk.** A trace was a row in every node's RAM, about one and a half times its
+stored size, until `QUEEN_RAFT_TRACE_RETENTION_S` (7 days by default) expired it, so a client
+that traced every message with a few KB of data grew every node by hundreds of MB an hour. Each
+node now keeps its traces in a second LMDB environment, `<QUEEN_RAFT_DIR>/traces/`, whose pages
+are page cache the kernel can drop: 100,000 traces of 5 KB add 56 MB to a node's process memory
+instead of 810 MB. The trace routes, their fields, order and pagination are unchanged, and traces
+written before the upgrade stay readable until they expire. Expiry runs in bounded steps (512
+traces each, a few ms at most) instead of one step for everything past the cutoff (139,000
+traces took 1.24 s on 2026-10-05). New gauges: `queen_raft_traces_map_bytes` and
+`queen_raft_traces_stored`.
+
+**The upgrade is one-way.** A cluster writes traces to disk once every member runs 2.0.1: the
+leader then raises the cluster version to 4, and from then on a 2.0.1-beta or older binary
+refuses to start on the data directory. On a cluster at version 4, a learner can be added only
+once its node is running and answering (as `QUEEN_RAFT_JOIN` already requires).
+
+**A trace with a very long transaction id or name no longer stops the cluster.** Its store key
+went past LMDB's 511-byte limit and every node stopped applying at that entry. The request is now
+refused with a 400 (`name_too_long`).
+
+**The dashboard shows the memory a node holds.** A node's memory meter showed its resident set,
+which counts the file pages the process maps: the store's LMDB file is read whole at boot, so a
+node looked about 1 GB fuller than it was. The meter now shows the process's anonymous memory,
+the part that can run a node out of memory, reported as `anonBytes` in `/api/v1/raft/members`;
+an older broker still shows its resident set.
+
+## 2.0.1-beta - 2026-10-05
+
+**A new partition's first message reaches every consumer group.** On a queue read by two or more
+consumer groups, a group that took a new partition into the leader's memory before the partition's
+first message was written could miss that message until the partition's next message or a change
+of leader. A second group loading the partition a moment later raised the shared tail and armed
+only its own cursor, so the append's own wake-up found nothing left to do. A group's load now arms
+every group already watching the partition whenever it finds the tail moved.
+
+**The leader keeps only the consumer state that is in use.** The consumption engine kept every
+(consumer group, partition) pair it had served in the leader's memory, about 1 KB each, until the
+partition or the group was deleted, and a partition is deleted only after `PARTITION_CLEANUP_DAYS`
+(30 by default). A workload that keeps opening partitions, one per conversation or entity, grew the
+leader without bound. A whole-queue group's pair that holds nothing (no lease, nothing to deliver,
+no hold, every change durable) and stays so for `QUEEN_CONSUME_IDLE_UNLOAD_S` (default 600; `0`
+keeps every pair) now leaves memory. The next message on its partition loads it back from its
+cursor row, as a new leader does. New gauges: `queen_consume_engine{kind="groups"|"parts"|"partitions"}`
+and `queen_consume_parts_total{kind="loaded"|"unloaded"}`.
+
 ## 2.0.0 - 2026-10-03
 
 **The PostgreSQL storage class is removed.** Queen 2.0 has one storage class, its own replicated

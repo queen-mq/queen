@@ -66,6 +66,18 @@ test('the fullest node speaks for a measure; every node gets a meter', () => {
   assert.equal(s.sev, 'bad')
 })
 
+test('memory is what the process holds when the broker says so, else its resident set', () => {
+  // 2.0.1 reports anonBytes: the resident set less the file pages it maps (the
+  // store's LMDB file), which the kernel drops before it kills anything.
+  const now = hostReading(member(1, { host: host({ rssBytes: 7.5 * GiB, anonBytes: 2 * GiB }) }))
+  assert.equal(now.mem.held, 2 * GiB)
+  assert.equal(now.mem.share, 0.25)
+  assert.equal(now.mem.sev, '')
+  const older = hostReading(member(1, { host: host({ rssBytes: 7.5 * GiB }) }))
+  assert.equal(older.mem.held, 7.5 * GiB)
+  assert.equal(older.mem.sev, 'bad')
+})
+
 test('an unreachable member is unknown, not idle, and costs the quorum a voter', () => {
   const s = brokerStatus({
     leaderId: 1,

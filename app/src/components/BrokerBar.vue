@@ -26,7 +26,7 @@
           <i class="bbar-meter" aria-hidden="true"><i :class="status.cpu.sev" :style="bar(status.cpu.top?.share ?? null)" /></i>
         </span>
         <span class="bbar-item bbar-full">
-          <span class="k">Memory</span><b :class="status.mem.sev">{{ size(status.mem.top?.rss ?? null) }}</b>
+          <span class="k">Memory</span><b :class="status.mem.sev">{{ size(status.mem.top?.held ?? null) }}</b>
           <i class="bbar-meter" aria-hidden="true"><i :class="status.mem.sev" :style="bar(status.mem.top?.share ?? null)" /></i>
         </span>
         <span class="bbar-item bbar-full">
@@ -76,7 +76,7 @@
                     <i class="bbar-meter" aria-hidden="true"><i :class="n.cpu.sev" :style="bar(n.cpu.share)" /></i>
                   </td>
                   <td>
-                    <span class="bbar-cell"><b :class="n.mem.sev">{{ size(n.mem.rss) }}</b><span>of {{ size(n.mem.limit) }}</span></span>
+                    <span class="bbar-cell"><b :class="n.mem.sev">{{ size(n.mem.held) }}</b><span>of {{ size(n.mem.limit) }}</span></span>
                     <i class="bbar-meter" aria-hidden="true"><i :class="n.mem.sev" :style="bar(n.mem.share)" /></i>
                   </td>
                   <td>
@@ -94,7 +94,7 @@
         </div>
         <p v-if="measured" class="bbar-foot">
           {{ raftLine }}. CPU is the average of the last {{ status.cpu.top?.windowSeconds || 60 }} s, of the cores the node may use;
-          memory is against the limit it runs under; the mark on a disk bar is where that node stops taking writes.
+          memory is what the process holds, not the page cache it maps, against the limit it runs under; the mark on a disk bar is where that node stops taking writes.
         </p>
         <p v-else class="bbar-foot">
           {{ raftLine }}. This broker does not report its CPU, memory or disk; a newer build does.

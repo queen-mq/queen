@@ -275,11 +275,13 @@ impl Engine {
         }
     }
 
-    /// The clock work (timers, deadlines, reservation TTLs, the pause).
+    /// The clock work (timers, deadlines, reservation TTLs, the pause, the
+    /// idle parts).
     pub(crate) fn tick_inner(&self, now: i64) {
         self.run_timers(now);
         self.sweep_deadlines(now);
         self.expire_txns(now);
+        self.unload_idle(now);
         if now >= self.serve_after_us.load(Ordering::Acquire) {
             let held = std::mem::take(&mut *lock(&self.paused));
             for h in held {

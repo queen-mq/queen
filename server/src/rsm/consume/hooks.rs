@@ -1,7 +1,8 @@
 //! The apply hooks (every node; only the leader's engine holds anything).
 //!
 //! * [`Engine::hook_append`]: a partition's tail moved — the groups holding it
-//!   arm it, and their parked pops wake.
+//!   arm it, and their parked pops wake; a group whose part the unloader
+//!   dropped gets it loaded back ([`super::unload`]).
 //! * [`Engine::hook_effect`]: the catalog and cursor effects apply wrote —
 //!   a created partition joins the groups that hold its whole queue, a delete
 //!   (partition, garbage, queue, tenant, group) drops what it names, a queue
@@ -96,9 +97,21 @@ impl Engine {
             }
         };
         let mut woken: Vec<Gid> = Vec::new();
-        self.append_locked(&mut sh, pid, last, self.now_us(), self.grace(), &mut woken);
+        let mut reload: Vec<(Arc<Group>, Pid)> = Vec::new();
+        self.append_locked(
+            &mut sh,
+            pid,
+            last,
+            self.now_us(),
+            self.grace(),
+            &mut woken,
+            &mut reload,
+        );
         drop(sh);
         let t_wake = Instant::now();
+        if !reload.is_empty() {
+            self.reload_parts(reload);
+        }
         for gid in woken {
             self.wake_group(gid);
         }
@@ -116,6 +129,7 @@ impl Engine {
         let now = self.now_us();
         let grace = self.grace();
         let mut woken: Vec<Gid> = Vec::new();
+        let mut reload: Vec<(Arc<Group>, Pid)> = Vec::new();
         for si in 0..self.appends.len() {
             let queued = std::mem::take(&mut *lock(&self.appends[si]));
             if queued.is_empty() {
@@ -123,8 +137,11 @@ impl Engine {
             }
             let mut sh = lock(&self.shards[si]);
             for (pid, last) in queued {
-                self.append_locked(&mut sh, pid, last, now, grace, &mut woken);
+                self.append_locked(&mut sh, pid, last, now, grace, &mut woken, &mut reload);
             }
+        }
+        if !reload.is_empty() {
+            self.reload_parts(reload);
         }
         woken.sort_unstable();
         woken.dedup();
@@ -134,8 +151,12 @@ impl Engine {
     }
 
     /// One append under its shard's lock: the tail, and the groups that hold
-    /// the partition arm it (`woken`: those whose parked pops may now claim).
-    fn append_locked(
+    /// the partition arm it (`woken`: those whose parked pops may now claim;
+    /// `reload`: those whose part the unloader dropped, loaded back once the
+    /// shard is released, [`Engine::reload_parts`]). Also a part's load that
+    /// finds the tail past what the watchers saw ([`Engine::ensure_part`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn append_locked(
         &self,
         sh: &mut super::state::Shard,
         pid: Pid,
@@ -143,6 +164,7 @@ impl Engine {
         now: i64,
         grace: i64,
         woken: &mut Vec<Gid>,
+        reload: &mut Vec<(Arc<Group>, Pid)>,
     ) {
         let Some(pi) = sh.pids.get_mut(&pid) else {
             return;
@@ -155,6 +177,16 @@ impl Engine {
         pi.last_append_us = now;
         let watchers = pi.watchers.clone();
         for gid in watchers {
+            match sh.groups.get(&gid) {
+                None => continue,
+                // Dropped while idle ([`super::unload`]): its group still
+                // follows the partition.
+                Some(gs) if !gs.parts.contains_key(&pid) => {
+                    reload.push((gs.g.clone(), pid));
+                    continue;
+                }
+                Some(_) => {}
+            }
             // A delayed or windowed queue holds a partition that had no
             // work until the new frames are old / quiet enough.
             let hold = sh.groups.get(&gid).and_then(|gs| {

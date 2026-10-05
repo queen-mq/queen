@@ -41,6 +41,9 @@ x-broker-env: &broker-env
   # truthful on this network.
   QUEEN_KV_TRUSTED_PROXY: "1"
   QUEEN_KV_REQUIRE_GRANT: "${QUEEN_TEST_KV_REQUIRE_GRANT:-false}"
+  # Idle consumer parts leave the leader's memory after this; see
+  # docker-compose.single.yml.
+  QUEEN_CONSUME_IDLE_UNLOAD_S: "${QUEEN_TEST_IDLE_UNLOAD_S:-600}"
 
 services:
   queen-1:

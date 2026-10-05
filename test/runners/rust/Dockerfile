@@ -22,6 +22,8 @@ COPY protocols/queen-kafka/src ./protocols/queen-kafka/src
 # feature: the same rule, the whole graph resolves before anything compiles.
 COPY connectors/queen-pg/Cargo.toml ./connectors/queen-pg/Cargo.toml
 COPY connectors/queen-pg/src ./connectors/queen-pg/src
+COPY connectors/queen-s3/Cargo.toml ./connectors/queen-s3/Cargo.toml
+COPY connectors/queen-s3/src ./connectors/queen-s3/src
 COPY proxy/Cargo.toml ./proxy/Cargo.toml
 COPY proxy/src ./proxy/src
 # The proxy embeds its console's committed build (`console/dist`) with

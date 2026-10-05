@@ -70,6 +70,8 @@ pub mod facade;
 pub mod local_metrics;
 pub mod maintenance;
 pub mod retention_scan;
+/// Traces on disk: the node's trace environment (`PLAN_TRACES_ON_DISK.md`).
+pub mod traces;
 
 // ---------------------------------------------------------------------------
 // The map as stubs. One line each, replaced by the owning WP (see the header).

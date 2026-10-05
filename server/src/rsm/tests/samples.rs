@@ -335,6 +335,15 @@ pub fn effect_sample(kind: Kind) -> Effect {
             address: "queen-mq-2.queen-mq:6634".into(),
         },
         Kind::TenantPurge => Effect::TenantPurge { tenant: T0.into() },
+        // The `TraceAppend` sample's event: the body is the same bytes.
+        Kind::TraceRecord => match effect_sample(Kind::TraceAppend) {
+            Effect::TraceAppend { event } => Effect::TraceRecord { event },
+            other => unreachable!("the trace sample is {other:?}"),
+        },
+        Kind::TraceTrim => Effect::TraceTrim {
+            cutoff_us: 1_767_395_200_000_000,
+            limit: 512,
+        },
     }
 }
 
