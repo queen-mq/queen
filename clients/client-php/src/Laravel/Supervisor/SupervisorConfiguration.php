@@ -3,6 +3,7 @@
 namespace Queen\Laravel\Supervisor;
 
 use InvalidArgumentException;
+use Queen\Laravel\Queue\AdaptiveBatch;
 use Queen\Laravel\Queue\QueenQueue;
 
 final class SupervisorConfiguration
@@ -170,7 +171,10 @@ final class SupervisorConfiguration
             if ($retryAfter <= $timeout) {
                 throw new InvalidArgumentException("Queen supervisor [{$name}] retry_after must be longer than timeout.");
             }
-            $prefetch = self::positiveInteger(
+            // "auto" sizes each pop up to its ceiling, so it is a prefetch
+            // above 1 for every rule below.
+            $adaptivePrefetch = AdaptiveBatch::isAuto($connectionConfig['prefetch'] ?? 1);
+            $prefetch = $adaptivePrefetch ? AdaptiveBatch::CEILING : self::positiveInteger(
                 $connectionConfig['prefetch'] ?? 1,
                 "supervisor [{$name}] connection prefetch",
             );
@@ -188,7 +192,7 @@ final class SupervisorConfiguration
             // renewal helper that fences the worker before unsafe expiry.
             if ($prefetch > 1 && !$leaseRenewal) {
                 throw new InvalidArgumentException(
-                    "Queen supervisor [{$name}] connection prefetch [{$prefetch}] requires lease_renewal.",
+                    "Queen supervisor [{$name}] connection prefetch [" . ($adaptivePrefetch ? 'auto' : $prefetch) . '] requires lease_renewal.',
                 );
             }
             if ($leaseRenewal) {

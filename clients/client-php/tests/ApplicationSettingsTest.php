@@ -91,6 +91,18 @@ final class ApplicationSettingsTest extends TestCase
         )));
     }
 
+    public function testAutoPrefetchShowsAsAutoAndNeedsLeaseRenewalLikeAPrefetchAboveOne(): void
+    {
+        $row = $this->row($this->settings([], ['prefetch' => 'auto', 'lease_renewal' => true]), 'connection', 'prefetch');
+        $this->assertSame(['auto, up to 16 per pop', false, true], [$row['value'], $row['invalid'], $row['changed']]);
+
+        $refused = $this->row($this->settings([], ['prefetch' => 'auto']), 'connection', 'prefetch');
+        $this->assertSame(['auto, up to 16 per pop (needs lease_renewal)', true], [$refused['value'], $refused['invalid']]);
+
+        $tooMany = $this->row($this->settings([], ['prefetch' => 'auto', 'ack_batch' => 17, 'lease_renewal' => true]), 'connection', 'ack_batch');
+        $this->assertSame(['17 (above prefetch)', true], [$tooMany['value'], $tooMany['invalid']]);
+    }
+
     public function testAPoolReadsItsConnectionAsTheSupervisorDoes(): void
     {
         $settings = new ApplicationSettings([

@@ -2,6 +2,8 @@
 
 namespace Queen\Laravel\Dashboard;
 
+use Queen\Laravel\Queue\AdaptiveBatch;
+
 /**
  * This application's Queen settings as this host resolves them, each with its
  * default and what it does: the Settings of the Configuration page, and the
@@ -38,7 +40,7 @@ final class ApplicationSettings
     private const CONNECTION = [
         'timeout' => [null, 'milliseconds', 30000, 1, null, 'How long one broker request may take.'],
         'retry_attempts' => [null, 'count', 3, 0, null, 'How many times a failed broker request is tried.'],
-        'prefetch' => [null, 'count', 1, 1, 1000, 'Jobs a worker leases in one pop. Above 1 needs lease_renewal.'],
+        'prefetch' => [null, 'count', 1, 1, 1000, "Jobs a worker leases in one pop, or auto to size each pop from the jobs' runtime. Above 1, and auto, need lease_renewal."],
         'ack_batch' => [null, 'count', 1, 1, 1000, 'Completed jobs a worker acknowledges in one request.'],
         'ack_async' => [null, 'switch', false, 0, null, 'Start the next job without waiting for the answer to the acknowledgement.'],
         'pop_ahead' => [null, 'switch', false, 0, null, 'Pop the next batch while the last job of the current one runs. Needs lease_renewal.'],
@@ -94,6 +96,14 @@ final class ApplicationSettings
     public function connectionInteger(string $key, int $default, string $connection = 'queen'): ?int
     {
         return self::integerOr($this->connection($connection)[$key] ?? null, $default);
+    }
+
+    /** A connection's prefetch, "auto" counted as its ceiling; null when invalid. */
+    public function connectionPrefetch(string $connection = 'queen'): ?int
+    {
+        return AdaptiveBatch::isAuto($this->connection($connection)['prefetch'] ?? null)
+            ? AdaptiveBatch::CEILING
+            : $this->connectionInteger('prefetch', 1, $connection);
     }
 
     /** A connection's switch: the default when unset, null when not a boolean. */
@@ -282,7 +292,7 @@ final class ApplicationSettings
      */
     private function refusedTogether(array $rows): array
     {
-        $prefetch = $this->connectionInteger('prefetch', 1);
+        $prefetch = $this->connectionPrefetch();
         $ackBatch = $this->connectionInteger('ack_batch', 1);
         $renewal = $this->connectionSwitch('lease_renewal', false);
         $reasons = [
@@ -370,6 +380,9 @@ final class ApplicationSettings
         ];
         if ($value === null || ($value === '' && $computed !== null && ($computed[2] ?? true))) {
             return [...$row, 'value' => $computed !== null ? ($computed[0] ?? $computed[1]) : $row['default']];
+        }
+        if ($name === 'prefetch' && AdaptiveBatch::isAuto($value)) {
+            return [...$row, 'value' => 'auto, up to ' . AdaptiveBatch::CEILING . ' per pop', 'changed' => true];
         }
         $parsed = $kind === 'switch' ? self::switchOr($value, false) : self::integerOr($value, 0);
         if ($parsed === null

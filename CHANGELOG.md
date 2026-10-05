@@ -5,6 +5,22 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a
+batch holds about 250 ms of work: short jobs get batches of up to 16, a job of a second or more
+gets one per pop. A job is timed from the moment the worker hands it to Laravel to its next pop,
+its ACK included, so an empty long poll or the worker's sleep never counts as work. A queue starts
+at one job per pop and grows at most twofold, only after a pop that came back full; a short pop
+sets the next one to what the queue had, an empty pop to one job, and slower jobs shrink it at
+once. A worker that serves several queues sizes each on its own. It runs in the worker, so it needs
+no supervisor and applies at once, and like any prefetch above 1 it needs `lease_renewal`. On the
+Linux server, 32 workers ran 2,007 jobs/s of 10 ms jobs with it against 1,548 at prefetch 1, and
+2,836 with `ack_async` and `pop_ahead`, as many as a fixed prefetch of 4 with a third of its pops
+(`benchmark-queen/2026-10-05-laravel-auto-prefetch`). The Laravel guide now describes three
+profiles, safe, balanced and fast. The dashboard shows `'auto'`, and its advice for short jobs
+suggests it.
+
+## PHP client 2.1.0, supervisor 0.7.0 - 2026-10-05
+
 PHP client 2.1.0 pins supervisor 0.7.0: the Rust master reads `lease_service` from its
 configuration and handles the `queue:restart` exit below, so 0.6.0 cannot run with it.
 

@@ -59,7 +59,13 @@ class QueenConnector implements ConnectorInterface
             0,
             intdiv(PHP_INT_MAX - 5000, 1000),
         );
-        $prefetch = self::boundedInteger($config['prefetch'] ?? 1, 'prefetch', 1, 1000);
+        // "auto" sizes each pop from the jobs' runtime (AdaptiveBatch), up to
+        // its ceiling; every rule for a prefetch above 1 applies to it.
+        $adaptivePrefetch = AdaptiveBatch::isAuto($config['prefetch'] ?? 1);
+        $prefetch = $adaptivePrefetch
+            ? AdaptiveBatch::CEILING
+            : self::boundedInteger($config['prefetch'] ?? 1, 'prefetch', 1, 1000);
+        $prefetchLabel = $adaptivePrefetch ? 'auto' : (string) $prefetch;
         $ackBatch = self::boundedInteger($config['ack_batch'] ?? 1, 'ack_batch', 1, $prefetch);
         $bulkBatch = self::boundedInteger($config['bulk_batch'] ?? 100, 'bulk_batch', 1, 1000);
         $ackAsync = self::boolean($config['ack_async'] ?? false, 'ack_async');
@@ -78,7 +84,7 @@ class QueenConnector implements ConnectorInterface
         // where no handler is ever injected.
         if ($prefetch > 1 && !$leaseRenewal && !array_key_exists('handler', $config)) {
             throw new InvalidArgumentException(
-                "Queen Laravel prefetch [{$prefetch}] requires lease_renewal so every prefetched lease remains fenced while Laravel executes synchronous job code.",
+                "Queen Laravel prefetch [{$prefetchLabel}] requires lease_renewal so every prefetched lease remains fenced while Laravel executes synchronous job code.",
             );
         }
         // A batch popped ahead is a local tail too.
@@ -240,6 +246,7 @@ class QueenConnector implements ConnectorInterface
             leaseRenewer: $leaseRenewer,
             failedJobRetryHandler: $this->failedJobRetryHandler,
             shutdownClient: $shutdownClient,
+            adaptiveBatch: $adaptivePrefetch ? new AdaptiveBatch() : null,
         );
     }
 

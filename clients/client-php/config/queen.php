@@ -48,6 +48,8 @@ return [
     // at-least-once delivery but widen the duplicate/recovery window. A
     // Laravel worker may pause indefinitely while retaining its prefetched
     // tail, so Queen supervisors require lease_renewal whenever prefetch > 1.
+    // 'auto' sizes each pop from the jobs' runtime: about 250 ms of work per
+    // batch, from 1 up to 16 jobs; it needs lease_renewal too.
     'prefetch' => 1,
     'ack_batch' => 1,
     // Send each successful ACK without waiting for the answer, which the
