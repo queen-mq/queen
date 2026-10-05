@@ -123,10 +123,20 @@ What the split shows:
   saving is the booted framework, and the ratio falls from 8.7 to 3.3 as the
   job's own memory grows.
 
-The `aging` lane's first run stopped before the Queen engine ran: the
-harness's result check read the 600,000 results with PHP's default 128 MiB
-and ran out of memory (`run.sh` now gives it 1 GiB). Over its 24 minutes the
-Horizon workers stayed at 37.1 MiB private. The lane is being run again.
+The `aging` lane (`raw/aging.csv`, its second run: the first stopped when the
+harness's result check read the 600,000 results with PHP's default 128 MiB;
+`run.sh` now gives it 1 GiB). Both engines completed all 600,000 jobs once,
+about 9,400 per worker. Medians per minute:
+
+| Minute | Horizon, private per worker | Queen, private per worker | Queen, PSS of the 64 workers |
+| ---: | ---: | ---: | ---: |
+| 0 | 37.1 | 10.1 | 674.8 |
+| 10 | 37.1 | 10.1 | 681.8 |
+| 20 | 37.1 | 10.1 | 682.2 |
+
+Over 20 minutes the forked workers copied about 7 MiB more of the shared
+pages between them, 0.1 MiB each. The containers grew by about 350 MiB on both
+engines, all of it page cache (`inactive_file`) for the result files.
 
 ## Harness
 

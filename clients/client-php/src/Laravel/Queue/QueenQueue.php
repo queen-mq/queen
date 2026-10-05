@@ -85,7 +85,7 @@ class QueenQueue extends BaseQueue implements QueueContract
      * The pop_ahead request on the wire while the last job of a batch runs,
      * settled when that job ends.
      *
-     * @var array{queue: string, started: int, builder: QueueBuilder, promise: PromiseInterface}|null
+     * @var array{queue: string, started: int, builder: QueueBuilder, promise: PromiseInterface, requested: int}|null
      */
     private ?array $pendingPop = null;
 
@@ -134,6 +134,10 @@ class QueenQueue extends BaseQueue implements QueueContract
         private ?\Closure $shutdownClient = null,
         private bool $ackAsync = false,
         private bool $popAhead = false,
+        // prefetch "auto": sizes each pop from the jobs' runtime, up to
+        // $prefetch. Every path that depends on prefetch above 1 (the
+        // journal, the active delivery) keys off that ceiling.
+        private ?AdaptiveBatch $adaptiveBatch = null,
     ) {
         $this->dispatchAfterCommit = $dispatchAfterCommit;
     }
@@ -534,6 +538,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         }
 
         $this->consumerPid ??= getmypid();
+        $this->adaptiveBatch?->popping();
         $queue = $this->getQueue($queue);
         if ($this->prefetch > 1 && isset($this->activeDeliveries[$queue])) {
             throw new RuntimeException(
@@ -543,7 +548,13 @@ class QueenQueue extends BaseQueue implements QueueContract
 
         $message = $this->takePrefetched($queue) ?? $this->nextFromBroker($queue);
         if (!$this->popAhead) {
-            return $message === null ? null : $this->makeJob($message, $queue);
+            if ($message === null) {
+                return null;
+            }
+            $job = $this->makeJob($message, $queue);
+            $this->adaptiveBatch?->handedOut($queue);
+
+            return $job;
         }
 
         $previousJobMillis = $this->jobHandedOutMillis === null ? 0 : self::monotonicMillis() - $this->jobHandedOutMillis;
@@ -553,6 +564,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             return null;
         }
         $job = $this->makeJob($message, $queue);
+        $this->adaptiveBatch?->handedOut($queue);
         $this->jobHandedOutMillis = self::monotonicMillis();
         // The batch popped ahead waits for this job, leased but not renewed:
         // skip it after a job long enough to eat into that lease, and on a
@@ -579,8 +591,10 @@ class QueenQueue extends BaseQueue implements QueueContract
         // deadline before the request can only fence early (especially with
         // long-poll), never renew past an expired broker lease.
         $popStartedMillis = self::monotonicMillis();
-        $messages = array_values($this->popBuilder($queue, $this->blockFor > 0)->pop());
-        $this->lastBatchFull = count($messages) >= $this->prefetch;
+        $requested = $this->batchSize($queue);
+        $messages = array_values($this->popBuilder($queue, $this->blockFor > 0, $requested)->pop());
+        $this->lastBatchFull = count($messages) >= $requested;
+        $this->adaptiveBatch?->popped($queue, $requested, count($messages));
         if ($messages === []) {
             return null;
         }
@@ -593,7 +607,8 @@ class QueenQueue extends BaseQueue implements QueueContract
     private function popAhead(string $queue): void
     {
         // It never long-polls, so settling it cannot hold up the end of the job.
-        $builder = $this->popBuilder($queue, false);
+        $requested = $this->batchSize($queue);
+        $builder = $this->popBuilder($queue, false, $requested);
         $started = self::monotonicMillis();
         try {
             $promise = $builder->popDetached();
@@ -601,10 +616,22 @@ class QueenQueue extends BaseQueue implements QueueContract
             // Nothing reached the broker: the next pop() asks as usual.
             return;
         }
-        $this->pendingPop = ['queue' => $queue, 'started' => $started, 'builder' => $builder, 'promise' => $promise];
+        $this->pendingPop = [
+            'queue' => $queue,
+            'started' => $started,
+            'builder' => $builder,
+            'promise' => $promise,
+            'requested' => $requested,
+        ];
     }
 
-    private function popBuilder(string $queue, bool $wait): QueueBuilder
+    /** The jobs the next pop of $queue asks for: prefetch, or "auto"'s size. */
+    private function batchSize(string $queue): int
+    {
+        return $this->adaptiveBatch?->size($queue) ?? $this->prefetch;
+    }
+
+    private function popBuilder(string $queue, bool $wait, int $batch): QueueBuilder
     {
         // QueueBuilder gives the HTTP request a further 5 s of slack. For a
         // non-blocking Laravel worker retain the normal 30 s request budget
@@ -615,10 +642,11 @@ class QueenQueue extends BaseQueue implements QueueContract
             ->group($this->consumerGroup)
             ->conflation(false)
             ->subscriptionMode('all')
-            ->batch($this->prefetch)
+            ->batch($batch)
             // Only the sweep width is ever delegated. The batch stays pinned to
-            // prefetch because the local prefetch buffer, the ack_batch bound
-            // and the lease budget are all sized from it, and partitionCount
+            // prefetch, or to "auto"'s size below it, because the local
+            // prefetch buffer, the ack_batch bound and the lease budget are
+            // all sized from prefetch, and partitionCount
             // keeps striping pushes either way. partitions(0) is the builder's
             // "unset" spelling, which is what makes the broker size it. More
             // stripes than one pop can check out are swept a pop at a time:
@@ -786,7 +814,8 @@ class QueenQueue extends BaseQueue implements QueueContract
 
         try {
             $messages = array_values($pending['builder']->settlePop($pending['promise'], $timeoutMillis));
-            $this->lastBatchFull = count($messages) >= $this->prefetch;
+            $this->lastBatchFull = count($messages) >= $pending['requested'];
+            $this->adaptiveBatch?->popped($pending['queue'], $pending['requested'], count($messages));
         } catch (\Throwable $lost) {
             $this->reportQuietly(new RuntimeException(
                 'Queen Laravel could not read the jobs it popped ahead; any it leased run after the lease expires: '

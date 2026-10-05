@@ -98,7 +98,8 @@ Options:
   --backlog-first 0|1           Hold every worker while the measured jobs are
                                 dispatched, then release them: the rate is
                                 the drain of a full queue (default: 0)
-  --queen-prefetch N            Jobs claimed by each Queen pop (default: 1)
+  --queen-prefetch N|auto       Jobs claimed by each Queen pop; auto sizes each pop
+                                from the jobs' runtime, up to 16 (default: 1)
   --queen-ack-batch N           Deferred Queen ACK batch; <= prefetch (default: 1)
   --queen-bulk-batch N          Jobs per bulk producer call/request (default: 100)
   --queen-partitions N          Queen partition stripes jobs are spread over, 1 to 1024; a pop
@@ -298,7 +299,13 @@ require_positive_int "--max-workers" "$MAX_WORKERS"
 require_positive_int "--runs" "$RUNS"
 require_uint "--sleep-ms" "$SLEEP_MS"
 require_uint "--cpu-iterations" "$CPU_ITERATIONS"
-require_positive_int "--queen-prefetch" "$QUEEN_PREFETCH"
+# "auto" sizes each pop up to 16 jobs: every bound below treats it as 16.
+if [ "$QUEEN_PREFETCH" = auto ]; then
+    QUEEN_PREFETCH_COUNT=16
+else
+    require_positive_int "--queen-prefetch" "$QUEEN_PREFETCH"
+    QUEEN_PREFETCH_COUNT="$QUEEN_PREFETCH"
+fi
 require_positive_int "--queen-ack-batch" "$QUEEN_ACK_BATCH"
 require_positive_int "--queen-bulk-batch" "$QUEEN_BULK_BATCH"
 require_positive_int "--queen-partitions" "$QUEEN_PARTITIONS"
@@ -318,7 +325,7 @@ require_positive_int "--timeout" "$WAIT_TIMEOUT"
 require_positive_int "--worker-timeout" "$WORKER_TIMEOUT"
 LEASE_RENEWAL=false
 # A batch popped ahead is a local tail too: both require renewal.
-if [ "$QUEEN_PREFETCH" -gt 1 ] || [ "$QUEEN_POP_AHEAD" = 1 ]; then
+if [ "$QUEEN_PREFETCH_COUNT" -gt 1 ] || [ "$QUEEN_POP_AHEAD" = 1 ]; then
     LEASE_RENEWAL=true
 fi
 if [ "$RETRY_AFTER" = "0" ]; then
@@ -330,7 +337,7 @@ if [ "$RETRY_AFTER" = "0" ]; then
     if [ "$LEASE_RENEWAL" = true ]; then
         RETRY_AFTER=$(( WORKER_TIMEOUT + 1 ))
     else
-        RETRY_AFTER=$(( QUEEN_PREFETCH * WORKER_TIMEOUT + 1 ))
+        RETRY_AFTER=$(( QUEEN_PREFETCH_COUNT * WORKER_TIMEOUT + 1 ))
     fi
     if [ "$RETRY_AFTER" -lt 180 ]; then
         RETRY_AFTER=180
@@ -341,8 +348,8 @@ require_positive_int "--target-jobs" "$TARGET_JOBS_PER_PROCESS"
 require_decimal "--sample-interval" "$SAMPLE_INTERVAL"
 require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$MIN_WORKERS" -le "$MAX_WORKERS" ] || die "--min-workers must not exceed --max-workers"
-[ "$QUEEN_PREFETCH" -le 1000 ] || die "--queen-prefetch must not exceed 1000"
-[ "$QUEEN_ACK_BATCH" -le "$QUEEN_PREFETCH" ] || die "--queen-ack-batch must not exceed --queen-prefetch"
+[ "$QUEEN_PREFETCH_COUNT" -le 1000 ] || die "--queen-prefetch must not exceed 1000"
+[ "$QUEEN_ACK_BATCH" -le "$QUEEN_PREFETCH_COUNT" ] || die "--queen-ack-batch must not exceed --queen-prefetch"
 [ "$QUEEN_BULK_BATCH" -le 1000 ] || die "--queen-bulk-batch must not exceed 1000"
 [ "$QUEEN_PARTITIONS" -le 1024 ] || die "--queen-partitions must not exceed 1024"
 [ "$QUEEN_POP_FUSION" -le 1 ] || die "--queen-pop-fusion must be 0 or 1"
@@ -374,7 +381,7 @@ esac
 if [ "$LEASE_RENEWAL" = true ]; then
     [ "$RETRY_AFTER" -gt "$WORKER_TIMEOUT" ] || die "--retry-after must exceed --worker-timeout when lease renewal is enabled"
 else
-    [ "$RETRY_AFTER" -gt $(( QUEEN_PREFETCH * WORKER_TIMEOUT )) ] || die "--retry-after must exceed --queen-prefetch multiplied by --worker-timeout without lease renewal"
+    [ "$RETRY_AFTER" -gt $(( QUEEN_PREFETCH_COUNT * WORKER_TIMEOUT )) ] || die "--retry-after must exceed --queen-prefetch multiplied by --worker-timeout without lease renewal"
 fi
 case "$DISPATCH_MODE" in single|bulk) ;; *) die "--dispatch-mode must be single or bulk" ;; esac
 require_uint "--dispatch-rate" "$DISPATCH_RATE"
@@ -1138,7 +1145,10 @@ settings = {
     "queues": [os.environ["BENCHMARK_QUEUE"]],
     "failed_driver": os.environ["BENCHMARK_FAILED_DRIVER"],
     "lease_renewal": os.environ["BENCHMARK_LEASE_RENEWAL"] == "true",
-    "queen_prefetch": int(os.environ["BENCHMARK_QUEEN_PREFETCH"]),
+    "queen_prefetch": (
+        "auto" if os.environ["BENCHMARK_QUEEN_PREFETCH"] == "auto"
+        else int(os.environ["BENCHMARK_QUEEN_PREFETCH"])
+    ),
     "queen_ack_batch": int(os.environ["BENCHMARK_QUEEN_ACK_BATCH"]),
     "queen_bulk_batch": int(os.environ["BENCHMARK_QUEEN_BULK_BATCH"]),
     "queen_partitions": int(os.environ["BENCHMARK_QUEEN_PARTITIONS"]),

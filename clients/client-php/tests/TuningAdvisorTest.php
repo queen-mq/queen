@@ -86,14 +86,14 @@ final class TuningAdvisorTest extends TestCase
         $this->assertStringContainsString('App\Jobs\Ping', $advice[0]['evidence']);
         $this->assertStringContainsString('12 ms', $advice[0]['evidence']);
         $this->assertStringNotContainsString('App\Jobs\Report', $advice[0]['evidence']);
-        foreach (['prefetch 4 with ack_async and pop_ahead true', 'config/queen.php', 'queen connection in config/queue.php', 'need lease_renewal true'] as $setting) {
+        foreach (["prefetch 'auto', which sizes each pop from the jobs' runtime, with ack_async and pop_ahead true", 'config/queen.php', 'queen connection in config/queue.php', 'need lease_renewal true'] as $setting) {
             $this->assertStringContainsString($setting, $advice[0]['action']);
         }
         $this->assertStringEndsWith(
             'Keep tries at 2 or more: after a crash that is not handed back, such as a lost node, each job a worker had prefetched comes back with one attempt more.',
             $advice[0]['action'],
         );
-        $this->assertSame('https://queenmq.com/guides/laravel#a-faster-profile', $advice[0]['doc']);
+        $this->assertSame('https://queenmq.com/guides/laravel#fast', $advice[0]['doc']);
     }
 
     public function testPrefetchAdviceIsAWarningForAPoolWithOneTry(): void
@@ -140,7 +140,7 @@ final class TuningAdvisorTest extends TestCase
         $this->assertSame(['warning'], array_column($advice, 'severity'));
         $this->assertSame('Pool default can fail a job that never ran', $advice[0]['title']);
         $this->assertStringContainsString(
-            'its connection queen prefetches 4 jobs and pops the next batch ahead',
+            'its connection queen prefetches up to 4 jobs and pops the next batch ahead',
             $advice[0]['evidence'],
         );
         $this->assertStringContainsString('Set tries to 2 or more for pool default', $advice[0]['action']);

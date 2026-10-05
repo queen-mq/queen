@@ -170,7 +170,7 @@ final class TuningAdvisor
      */
     private function shortJobs(ApplicationSettings $settings, array $classes, array $published): array
     {
-        if ($settings->connectionInteger('prefetch', 1) !== 1 || $settings->connectionSwitch('pop_ahead', false) === true) {
+        if ($settings->connectionPrefetch() !== 1 || $settings->connectionSwitch('pop_ahead', false) === true) {
             return [];
         }
         $short = array_values(array_filter(
@@ -187,10 +187,11 @@ final class TuningAdvisor
             static fn (array $class): string => "{$class['class']} ({$class['average_ms']} ms)",
             array_slice($short, 0, self::MAX_CLASSES),
         );
-        $action = 'Try prefetch 4 with ack_async and pop_ahead true, in config/queen.php or on the queen connection in'
-            . ' config/queue.php (whose values win), then compare the Jobs page.';
+        $action = "Try prefetch 'auto', which sizes each pop from the jobs' runtime, with ack_async and pop_ahead true,"
+            . ' in config/queen.php or on the queen connection in config/queue.php (whose values win), then compare the'
+            . ' Jobs page.';
         if ($settings->connectionSwitch('lease_renewal', false) !== true) {
-            $action .= ' Prefetch above 1 and pop_ahead need lease_renewal true.';
+            $action .= ' Prefetch above 1 or auto, and pop_ahead, need lease_renewal true.';
         }
         // A crash nobody hands back fails each prefetched job that has no try left.
         $action .= ' Keep tries at 2 or more: after a crash that is not handed back, such as a lost node, each job'
@@ -208,7 +209,7 @@ final class TuningAdvisor
             . self::SHORT_JOB_MS . ' ms on average: ' . self::list(array_values($named)) . '.'
             . ($oneTry === [] ? '' : ' ' . (count($oneTry) === 1 ? "Pool {$oneTry[0]} has" : 'Pools ' . self::list($oneTry) . ' have') . ' tries 1.'),
             $action,
-            '/guides/laravel#a-faster-profile',
+            '/guides/laravel#fast',
         )];
     }
 
@@ -227,10 +228,10 @@ final class TuningAdvisor
             if (($pool['tries'] ?? null) !== 1 || !is_string($connection)) {
                 continue;
             }
-            $prefetch = $settings->connectionInteger('prefetch', 1, $connection);
+            $prefetch = $settings->connectionPrefetch($connection);
             $popAhead = $settings->connectionSwitch('pop_ahead', false, $connection) === true;
             $held = array_filter([
-                $prefetch !== null && $prefetch > 1 ? "prefetches {$prefetch} jobs" : null,
+                $prefetch !== null && $prefetch > 1 ? "prefetches up to {$prefetch} jobs" : null,
                 $popAhead ? 'pops the next batch ahead' : null,
             ]);
             if ($held === []) {

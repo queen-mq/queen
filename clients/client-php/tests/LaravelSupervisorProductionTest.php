@@ -432,6 +432,24 @@ class LaravelSupervisorProductionTest extends TestCase
         ]);
     }
 
+    public function testAutoPrefetchIsAPrefetchAboveOneForTheSupervisor(): void
+    {
+        $resolved = SupervisorConfiguration::resolve([
+            'supervisor' => ['supervisors' => ['jobs' => ['timeout' => 10, 'retry_after' => 160]]],
+        ], '/app', queueConnections: [
+            'queen' => ['driver' => 'queen', 'prefetch' => 'auto', 'lease_renewal' => true],
+        ]);
+        $this->assertArrayHasKey('jobs', $resolved['supervisors']);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('connection prefetch [auto] requires lease_renewal');
+        SupervisorConfiguration::resolve([
+            'supervisor' => ['supervisors' => ['jobs' => ['timeout' => 10, 'retry_after' => 160]]],
+        ], '/app', queueConnections: [
+            'queen' => ['driver' => 'queen', 'prefetch' => 'auto'],
+        ]);
+    }
+
     public function testEvenALongLeaseAndRestCannotMakeUnrenewedPrefetchPauseSafe(): void
     {
         $this->expectException(InvalidArgumentException::class);

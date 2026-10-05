@@ -324,9 +324,9 @@ manager signals. The installation leaf's parent has to be a real directory (a sy
 and an existing leaf must not be group- or world-writable, which is why it lives apart from
 Laravel's `storage/`.
 
-PHP client 2.1.0 pins supervisor 0.7.0; neither is released yet. PHP client 2.0.0, on Packagist,
-pins supervisor 0.6.0, as 1.9.0 did. Its GitHub release, `supervisor/v0.6.0`, publishes static (musl) Linux builds and macOS builds for amd64 and arm64,
-with a manifest and its Sigstore bundle, so the online install works on those hosts. On any other
+PHP client 2.1.0 pins supervisor 0.7.0. Its GitHub release, `supervisor/v0.7.0`, publishes static
+(musl) Linux builds and macOS builds for amd64 and arm64, with a manifest and its Sigstore bundle,
+so the online install works on those hosts. On any other
 host the installer fails closed; run the PHP engine there.
 
 Without `QUEEN_SUPERVISOR_INSTALL_PATH`, the binary goes to `storage/queen-supervisor-bin`, which

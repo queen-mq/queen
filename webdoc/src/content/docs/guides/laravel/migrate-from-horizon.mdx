@@ -34,6 +34,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
 # links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
 # moved; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-05 (prefetch auto): the prefetch row names 'auto' (QueenConnector, QueenQueue, SupervisorConfiguration).
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place
@@ -322,7 +323,7 @@ value. On Queen, pick one of two profiles:
 | What `retry_after` sets | the longest a job may run | how soon the job a crashed worker was running runs again |
 | Checked at startup | a pool's `timeout` is shorter than `retry_after` | the same, and the renewal timing fits inside `retry_after` |
 | A job class whose own `$timeout` is 0 or at least `retry_after` | refused, see below | runs, its lease renewed every third of `retry_after` |
-| Prefetch | 1 only | up to 1,000, and `pop_ahead` |
+| Prefetch | 1 only | up to 1,000 or `'auto'`, and `pop_ahead` |
 
 Laravel's own timeout still stops a job in both profiles; a job that must run longer than the
 pool's `timeout` declares a longer `$timeout` in its class.
