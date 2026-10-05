@@ -7,20 +7,39 @@ status: preview
 sidebar:
   order: 7
 sourceOfTruth:
+  - clients/client-php/config/queen.php
+  - clients/client-php/src/Admin.php
+  - clients/client-php/src/Laravel/QueenServiceProvider.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Monitoring/JobMetricsRecorder.php
+  - clients/client-php/src/Laravel/Monitoring/JobTags.php
+  - clients/client-php/src/Laravel/Monitoring/QueueWaits.php
+  - clients/client-php/src/Laravel/Monitoring/TagMonitor.php
+  - clients/client-php/src/Laravel/Dashboard/JobMetricsReader.php
+  - clients/client-php/src/Laravel/Dashboard/PrometheusMetrics.php
+  - clients/client-php/src/Laravel/Commands/CheckWaitsCommand.php
+  - clients/client-php/src/Laravel/Events/LongWaitDetected.php
+  - clients/client-php/src/Laravel/Notifications/LongWaitDetected.php
+  - clients/client-php/src/Laravel/Http/Controllers/MetricsController.php
+  - clients/client-php/src/Laravel/Http/Controllers/TagController.php
+  - clients/client-php/src/Laravel/Http/Middleware/AuthorizeMetrics.php
+  - server/src/auth.rs
+  - proxy/src/routes.rs
   - server/src/handlers/kv.rs
   - server/src/rsm/planner/kv.rs
   - server/src/rsm/facade/real/phase2/reads.rs
   - server/src/rsm/facade/real/phase2.rs
-# Describes clients/client-php as it is on origin/master (PHP client 1.7.0 and later). Add
-# config/queen.php, Monitoring/{JobMetricsRecorder,JobTags,TagMonitor,QueueWaits}.php,
-# Dashboard/{JobMetricsReader,PrometheusMetrics}.php, Commands/CheckWaitsCommand.php and
-# Events/LongWaitDetected.php once the 2.0 line carries that tree.
+# Describes clients/client-php as master carries it: PHP client 2.0.0, published on Packagist,
+# which pins queen-supervisor 0.6.0.
+# sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in PHP client 2.1.0, so the job metrics, tags, long-wait and Prometheus tables give the keys of config/queen.php (job_metrics.*, tags.*, waits, notifications.throttle_minutes, metrics.path) and name a variable only for notifications.mail, metrics.enabled and metrics.token.
+# sourceOfTruth re-read 2026-10-05 (2.0.0 on master): adds the client files the page states; the read-only token paragraph is corrected (JobMetricsReader lists through POST /api/v1/resources/kv/list, a read route for the broker and the proxy, and falls back to getPrefix only on 403 or 404); restores max_ms missing from earlier workers, QUEEN_WAIT_THRESHOLD, QUEEN_NOTIFY_THROTTLE_MINUTES and QUEEN_METRICS_PATH with their defaults, and what size(), pendingSize(), reservedSize() and delayedSize() count; the read-only token needs 2.0.0, and the 1.9.0 markers stay on what 1.9.0 brought.
 ---
 
 The [dashboard](/guides/laravel/dashboard/) shows what the supervisors are doing. This page is about
 what the jobs are doing: how many of each class ran, how many failed and how long they took, which
 recent jobs carry a tag you care about, which queue has a job that has waited too long, and a
-Prometheus endpoint an autoscaler can read. All of it needs PHP client 1.7.0 or later.
+Prometheus endpoint an autoscaler can read. All of it needs PHP client 1.7.0 or later; reading the
+Jobs page with a read-only token needs 2.0.0.
 
 The workers record everything themselves, into the broker's [key/value store](/concepts/kv/). We
 put it there on purpose: the numbers then cover every worker of every host or pod, whichever engine
@@ -49,28 +68,31 @@ jobs/v1/<bucket>/<worker>   {"classes": {"App\\Jobs\\SendInvoice": {"processed":
 ```
 
 That is one write per worker every ten seconds, never one per job, and no two workers ever write
-the same key. Keys expire after 25 hours, which bounds the longest window. `max_ms`, the longest single attempt (PHP client 1.9.0), is not on the Jobs
-page: the Configuration page's [tuning advice](/guides/laravel/dashboard/#tuning-advice-and-settings)
-compares it with `shutdown_grace`. Recording is best effort. Since 1.9.0 it makes one attempt of at
-most two seconds, with no failover and no retry, and a failed write is dropped without ever
-reaching the job. A preforked worker starts its own counts after its fork.
+the same key. Keys expire after 25 hours, which bounds the longest window. `max_ms`, the longest
+single attempt (PHP client 1.9.0), is not on the Jobs page: the Configuration page's
+[tuning advice](/guides/laravel/dashboard/#tuning-advice-and-settings) compares it with
+`shutdown_grace`. Records of earlier workers have no `max_ms`, and a class without one is not
+compared. Recording is best effort: since 1.9.0 it makes one attempt of at most two seconds, with
+no failover and no retry, and a failed write is dropped without ever reaching the job. A preforked worker starts its
+own counts after its fork.
 
-| Variable | Default | Meaning |
+| Key of `config/queen.php` | Default | Meaning |
 | --- | --- | --- |
-| `QUEEN_JOB_METRICS` | `true` | record per-class metrics |
-| `QUEEN_JOB_METRICS_CONNECTION` | `queen` | the Queen connection whose broker stores them |
-| `QUEEN_JOB_METRICS_NAMESPACE` | `queen-metrics` | the key/value namespace |
+| `job_metrics.enabled` | `true` | record per-class metrics |
+| `job_metrics.connection` | `queen` | the Queen connection whose broker stores them |
+| `job_metrics.namespace` | `queen-metrics` | the key/value namespace |
 
-The dashboard reads them with a paged `getPrefix` from the window's first bucket, cached for fifteen
-seconds. One read takes at most 50,000 keys, a day of buckets for about 170 workers. Past that, the
-page marks the table as partial, covering the oldest part of the window, and a shorter window shows
-the rest.
+The dashboard reads them in pages from the window's first bucket, cached for fifteen seconds. One
+read takes at most 50,000 keys, a day of buckets for about 170 workers. Past that, the page marks
+the table as partial, covering the oldest part of the window, and a shorter window shows the rest.
 
-That read uses the supervisor's `read_bearer_token` when one is set. On a 2.0 broker a prefix read
-goes through `POST /api/v1/kv`, the key/value route that also writes, so a strictly read-only
-credential (a `read-only` JWT, or a proxy key with only the `read` scope) is refused there and the
-Jobs page shows its metrics as unavailable. Give the read token key/value access, or leave it unset
-so the page reads with the connection's token.
+That read uses the supervisor's `read_bearer_token` when one is set, and a strictly read-only
+credential (a `read-only` JWT, or a proxy key with only the `read` scope) is enough. Since PHP
+client 2.0.0 the page lists the keys through `POST /api/v1/resources/kv/list`, which the broker and
+its [embedded proxy](/operate/tenants/#api-keys-and-roles) both treat as a read. Only when that
+route answers `403` or `404` does it fall back to a `getPrefix` through `POST /api/v1/kv`, the
+key/value route that also writes and needs read-write access. Before 2.0.0 the page used
+`getPrefix` alone, so a read-only token showed the metrics as unavailable.
 
 ## Monitored tags
 
@@ -101,12 +123,12 @@ queue, attempts and runtime. The list of monitored tags is one key updated with 
 each other. At most 50 tags can be monitored, and a job keeps at most 20 tags of up to 128 bytes.
 Horizon's silenced jobs have no equivalent.
 
-| Variable | Default | Meaning |
+| Key of `config/queen.php` | Default | Meaning |
 | --- | --- | --- |
-| `QUEEN_TAGS` | `true` | tag jobs and record the monitored ones |
-| `QUEEN_TAGS_CONNECTION` | `queen` | the Queen connection whose broker stores them |
-| `QUEEN_TAGS_NAMESPACE` | `queen-metrics` | the key/value namespace |
-| `QUEEN_TAGS_RETENTION_MINUTES` | `1440` | how long a recorded job stays listed |
+| `tags.enabled` | `true` | tag jobs and record the monitored ones |
+| `tags.connection` | `queen` | the Queen connection whose broker stores them |
+| `tags.namespace` | `queen-metrics` | the key/value namespace |
+| `tags.retention_minutes` | `1440` | how long a recorded job stays listed, in minutes |
 
 ## Long-wait alerts
 
@@ -142,6 +164,27 @@ consumer group, seconds, threshold) and, when `queen.notifications.mail` is set,
 queue and group notifies at most once per throttle window, and an alert that fails to send is tried
 again at the next run. Listen to the event to send the alert anywhere else, such as Slack.
 
+| Key of `config/queen.php` | Default | Meaning |
+| --- | --- | --- |
+| `waits` | one entry, `queen:` followed by `QUEEN_QUEUE`, at `60` | the threshold, in seconds, of each `connection:queue` |
+| `notifications.mail` (`QUEEN_NOTIFY_MAIL`) | none | the addresses to mail an alert to |
+| `notifications.throttle_minutes` | `5` | the throttle window of one queue and group, in minutes |
+
+## Queue sizes
+
+On a Queen connection, Laravel's size methods read the consumer group's depth from the broker
+(`GET /api/v1/resources/queues/:queue/depth`) and the queue's [timers](/concepts/timers/):
+
+| Method | Counts |
+| --- | --- |
+| `Queue::size()` | every job not yet acknowledged, waiting or under a live lease, plus the delayed jobs Laravel holds in timers |
+| `pendingSize()` | the jobs a worker can claim now, the depth's `ready` |
+| `reservedSize()` | the jobs under a live lease, the depth's `processing` |
+| `delayedSize()` | Laravel's pending timers for the queue |
+
+`php artisan queue:monitor` shows all four and compares `size()` with its `--max`, so running and
+delayed jobs count toward that threshold, as they do on Redis.
+
 ## Prometheus and Kubernetes autoscaling
 
 With a token set, `GET /queen/metrics` answers in the Prometheus text format. The scraper sends the
@@ -151,6 +194,12 @@ token as a bearer token; the route has no session and no Gate, and answers `404`
 QUEEN_METRICS_ENABLED=true
 QUEEN_METRICS_TOKEN=a-secret-of-at-least-32-characters
 ```
+
+| Key of `config/queen.php` | Default | Meaning |
+| --- | --- | --- |
+| `metrics.enabled` (`QUEEN_METRICS_ENABLED`) | `false` | serve the endpoint |
+| `metrics.path` | `queen/metrics` | its route path |
+| `metrics.token` (`QUEEN_METRICS_TOKEN`) | none | the bearer token; with the endpoint on, a missing token or one shorter than 32 characters stops the application at boot |
 
 | Metric | Labels | Meaning |
 | --- | --- | --- |

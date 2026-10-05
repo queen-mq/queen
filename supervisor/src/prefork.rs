@@ -349,6 +349,14 @@ pub(crate) enum WorkerProcess {
 }
 
 impl WorkerProcess {
+    /// Whether this worker was forked by `server`.
+    pub(crate) fn forked_by(&self, server: Option<&Rc<RefCell<ForkServer>>>) -> bool {
+        match (self, server) {
+            (Self::Forked { server: own, .. }, Some(server)) => Rc::ptr_eq(own, server),
+            _ => false,
+        }
+    }
+
     pub(crate) fn id(&self) -> u32 {
         match self {
             Self::Spawned(child) => child.id(),

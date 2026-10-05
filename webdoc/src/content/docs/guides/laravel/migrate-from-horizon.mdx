@@ -7,17 +7,30 @@ status: preview
 sidebar:
   order: 4
 sourceOfTruth:
+  - clients/client-php/config/queen.php
+  - clients/client-php/src/Laravel/QueenServiceProvider.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Queue/QueenConnector.php
+  - clients/client-php/src/Laravel/Queue/QueenJob.php
   - clients/client-php/src/Laravel/Queue/SyncedFailedJobProvider.php
-  - clients/client-php/src/Laravel/Http/Middleware/AuthorizeDashboard.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-php/src/Laravel/Supervisor/AutoScaler.php
+  - clients/client-php/src/Laravel/Supervisor/PhpSupervisor.php
+  - clients/client-php/src/Laravel/Commands/CheckWaitsCommand.php
   - clients/client-php/src/Laravel/Commands/SupervisorControlCommand.php
+  - clients/client-php/src/Laravel/Events/LongWaitDetected.php
+  - clients/client-php/src/Laravel/Monitoring/JobMetricsRecorder.php
+  - clients/client-php/src/Laravel/Monitoring/JobTags.php
+  - clients/client-php/src/Laravel/Monitoring/TagMonitor.php
+  - clients/client-php/src/Laravel/Http/Middleware/AuthorizeDashboard.php
+  - supervisor/src/main.rs
   - server/src/rsm/apply_shard.rs
   - server/src/rsm/planner/timers.rs
   - proxy/src/routes.rs
-# Describes clients/client-php and supervisor/ as they are on origin/master (PHP client 1.9.0,
-# tagged). Add config/queen.php, Queue/{QueenQueue,QueenConnector,QueenJob}.php,
-# Supervisor/{SupervisorConfiguration,AutoScaler,PhpSupervisor}.php, CheckWaitsCommand.php,
-# LongWaitDetected.php, Monitoring/{JobTags,TagMonitor,JobMetricsRecorder}.php and
-# supervisor/src/main.rs once the 2.0 line carries that tree.
+# Describes clients/client-php and supervisor/ as master carries them: PHP client 2.0.0, published on
+# Packagist, which pins queen-supervisor 0.6.0.
+# sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in PHP client 2.1.0, so step 2 keeps only those in its dotenv block and sets failed_jobs_lock_store in the file, the config/queue.php map gives the keys of config/queen.php and names a variable only for queue, consumer_group and partitions (a key on the queen connection in config/queue.php wins, as QueenConnector merges them), and the Horizon, pool and tags rows name job_metrics.enabled, tags.retention_minutes, the four namespace keys and failed_jobs_lock_store; a pool without consumer_group takes the top-level one, and without retry_after its connection's.
+# sourceOfTruth re-read 2026-10-05 (2.0.0 on master): adds the client and supervisor files the runbook states; the config/queue.php map names each key of config/queen.php again (queue, retry_after, block_for, after_commit, consumer_group, partitions), and the retry_after pitfall and the checklist say that without lease renewal QueenQueue::assertJobTimeoutIsSafe also refuses $timeout = 0; no Docker Desktop number was on the page.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place
@@ -93,14 +106,18 @@ Horizon](/guides/laravel/queen-vs-horizon/) compares the two feature by feature.
    QUEUE_CONNECTION=redis
    QUEEN_URL=http://queen.internal.example:6632
    QUEEN_CONSUMER_GROUP=laravel
-   QUEEN_PREFETCH=1
-   QUEEN_ACK_BATCH=1
-   QUEEN_FAILED_JOBS_LOCK_STORE=redis
    QUEEN_SUPERVISOR_STATE_DIRECTORY=/srv/example/queen-supervisor-state
    ```
 
    Add `QUEEN_BEARER_TOKEN` when the broker requires a credential (the
-   [install section](/guides/laravel/#install) says which).
+   [install section](/guides/laravel/#install) says which). In `config/queen.php`, keep `prefetch`
+   and `ack_batch` at 1, their defaults, and give the failed-jobs lock a cache store that every
+   worker host sees:
+
+   ```php
+   // config/queen.php
+   'failed_jobs_lock_store' => 'redis',
+   ```
 
 3. **Create the state directory** as the user that will run the supervisor.
 
@@ -129,31 +146,36 @@ though, so a pool configured to the same numbers will not make exactly the same 
 
 ### From `config/queue.php`
 
+The Queen column names the key of `config/queen.php` that the `queen` queue connection reads, and
+the environment variable when the file reads one. The same key on the `queen` connection in
+`config/queue.php` wins over `config/queen.php`. The
+[configuration reference](/guides/laravel/configuration/) lists them all.
+
 | Redis connection | Queen | Note |
 | --- | --- | --- |
 | `QUEUE_CONNECTION=redis` | `QUEUE_CONNECTION=queen` | change it at the cutover |
 | `connection` (the Redis connection) | `QUEEN_URL` or `QUEEN_URLS`, and `QUEEN_BEARER_TOKEN` | the driver talks to the broker over HTTP |
-| `queue` | `QUEEN_QUEUE` (default `default`) | queue names stay the same |
-| `retry_after` | `QUEEN_RETRY_AFTER` (default 90) | the lease; read the [pitfall](#retry_after-with-and-without-lease-renewal) before you copy the value |
-| `block_for` | `QUEEN_BLOCK_FOR` (default 0) | keep 0 when workers serve a comma-separated priority list |
-| `after_commit` | `QUEEN_AFTER_COMMIT` | same meaning |
-| none | `QUEEN_CONSUMER_GROUP` (default `laravel`) | one group per application and environment |
-| none | `QUEEN_PARTITIONS` (default 64, up to 1,024) | the stripes of every queue |
+| `queue` | `queue` (`QUEEN_QUEUE`, default `default`) | queue names stay the same |
+| `retry_after` | `retry_after` (default 90) | the lease; read the [pitfall](#retry_after-with-and-without-lease-renewal) before you copy the value |
+| `block_for` | `block_for` (default 0) | keep 0 when workers serve a comma-separated priority list |
+| `after_commit` | `after_commit` (default `false`) | same meaning |
+| none | `consumer_group` (`QUEEN_CONSUMER_GROUP`, default `laravel`) | one group per application and environment |
+| none | `partitions` (`QUEEN_PARTITIONS`, default 64, up to 1,024) | the stripes of every queue |
 
 ### From `config/horizon.php`
 
 | Horizon | Queen | Note |
 | --- | --- | --- |
 | `use` | `QUEEN_URL` or `QUEEN_URLS`, and `QUEEN_BEARER_TOKEN` | Horizon's Redis connection becomes the broker's address |
-| `prefix` | `QUEEN_JOB_METRICS_NAMESPACE`, `QUEEN_TAGS_NAMESPACE`, `QUEEN_SUPERVISOR_COORDINATION_NAMESPACE`, `QUEEN_SUPERVISOR_REMOTE_STATUS_NAMESPACE` | only when several applications share a broker; their jobs are kept apart by queue names |
+| `prefix` | `job_metrics.namespace`, `tags.namespace`, `supervisor.coordination.namespace`, `supervisor.remote_status.namespace` | only when several applications share a broker; their jobs are kept apart by queue names |
 | `path`, `domain`, `middleware` | `QUEEN_DASHBOARD_PATH` (default `queen`), `QUEEN_DASHBOARD_DOMAIN`, `dashboard.middleware` | the panel is off until `QUEEN_DASHBOARD_ENABLED=true` |
 | Gate `viewHorizon` | Gate `viewQueenDashboard` | production access is denied until you define it |
 | `waits` | `waits` | the same `connection:queue => seconds` shape; schedule `queen:check-waits` every minute |
 | `trim.recent`, `trim.pending`, `trim.completed` | none | Queen keeps no job lists |
 | `trim.failed`, `trim.recent_failed` | `failed_jobs` with `queue:prune-failed` | pruning removes the dead-letter entries too |
-| `trim.monitored` | `QUEEN_TAGS_RETENTION_MINUTES` (default 1440) | how long a job with a monitored tag stays listed |
+| `trim.monitored` | `tags.retention_minutes` (default 1440) | how long a job with a monitored tag stays listed |
 | `silenced`, `silenced_tags` | none | |
-| `metrics.trim_snapshots` and the `horizon:snapshot` schedule | `job_metrics` (`QUEEN_JOB_METRICS`, on by default) | every worker records live, kept a day; drop the schedule |
+| `metrics.trim_snapshots` and the `horizon:snapshot` schedule | `job_metrics.enabled` (on by default) | every worker records live, kept a day; drop the schedule |
 | `fast_termination` | none | `queen:supervisor terminate` drains for up to `shutdown_grace` |
 | `memory_limit` | none | it restarts Horizon's master; Queen has no such setting |
 | `defaults` and `environments` | `supervisor.supervisors` | one set of pools; vary values per environment with `env()` |
@@ -181,7 +203,7 @@ though, so a pool configured to the same numbers will not make exactly the same 
 | `timeout`, `tries`, `memory`, `sleep`, `rest`, `force` | the same names | the same worker settings |
 | `nice` | none | keep OS priority outside Queen |
 | an array `backoff` | none | the supervisor takes one integer |
-| none | `consumer_group`, `retry_after` | per pool; default to `QUEEN_CONSUMER_GROUP` and `QUEEN_RETRY_AFTER` |
+| none | `consumer_group`, `retry_after` | per pool; default to the top-level `consumer_group` (`QUEEN_CONSUMER_GROUP`) and the connection's `retry_after` |
 
 For strict priority such as `high,default`, use `balance=off`, `prefetch=1` and a non-blocking
 queue scan (`block_for` 0). Auto balancing allocates by measured pressure and ignores queue order.
@@ -296,15 +318,16 @@ value. On Queen, pick one of two profiles:
 | --- | --- | --- |
 | What `retry_after` sets | the longest a job may run | how soon the job a crashed worker was running runs again |
 | Checked at startup | a pool's `timeout` is shorter than `retry_after` | the same, and the renewal timing fits inside `retry_after` |
-| A job class whose own `$timeout` exceeds `retry_after` | refused, see below | runs, its lease renewed every third of `retry_after` |
+| A job class whose own `$timeout` is 0 or at least `retry_after` | refused, see below | runs, its lease renewed every third of `retry_after` |
 | Prefetch | 1 only | up to 1,000, and `pop_ahead` |
 
 Laravel's own timeout still stops a job in both profiles; a job that must run longer than the
 pool's `timeout` declares a longer `$timeout` in its class.
 
-Without renewal, the driver refuses a job whose own `$timeout` is not shorter than `retry_after`.
-The worker reports the error and leaves the job, which comes back after its lease expires and is
-refused again: it never runs and never reaches `tries`. Lower the job's `$timeout`, raise
+Without renewal, the driver refuses a job whose own `$timeout` is not shorter than `retry_after`,
+and a job with `$timeout = 0`, which would run with no limit at all. The worker reports the error
+and leaves the job, which comes back after its lease expires and is refused again: it never runs
+and never reaches `tries`. Give the job a `$timeout` above 0 and below `retry_after`, raise
 `retry_after`, or turn renewal on.
 
 A large `retry_after` also costs more on Queen than on Redis. When a worker dies, its lease holds
@@ -330,8 +353,8 @@ entry, and keeps them in step ([failed jobs](/guides/laravel/concepts/#failed-jo
   retention passes them if the queue has any.
 - Do not retry a Laravel job from the dead-letter page of the Queen dashboard. Laravel owns the
   failed index, the attempt reset and the cleanup.
-- With more than one process or host, set `QUEEN_FAILED_JOBS_LOCK_STORE` to a cache store whose
-  locks every host can see.
+- With more than one process or host, set `failed_jobs_lock_store` in `config/queen.php` to a cache
+  store whose locks every host can see.
 - Through the broker's embedded proxy, deleting a dead-letter entry is queue administration, so the
   connection's API key needs the `admin` scope for these commands to work.
 - A delayed job whose timer the broker cannot deliver at all ends in the dead-letter queue under
@@ -352,7 +375,7 @@ when it must not do its work.
 | Horizon | Queen | What to change |
 | --- | --- | --- |
 | Automatic tags and `tags()` | the same tags, set at dispatch | nothing; monitor them on the panel's **Tags** page |
-| Monitored tags, kept `trim.monitored` minutes | jobs with a monitored tag, listed for `QUEEN_TAGS_RETENTION_MINUTES` (a day) | at most 50 monitored tags, and 20 tags of up to 128 bytes per job |
+| Monitored tags, kept `trim.monitored` minutes | jobs with a monitored tag, listed for `tags.retention_minutes` (a day) | at most 50 monitored tags, and 20 tags of up to 128 bytes per job |
 | Silenced jobs and tags | none | no replacement yet |
 | Metrics from the scheduled `horizon:snapshot` | recorded live by every worker into the broker, kept a day | remove the `horizon:snapshot` schedule |
 | `waits`, from Horizon's estimate | `waits`, from the broker's age of the oldest waiting job | schedule `queen:check-waits` every minute |
@@ -368,7 +391,8 @@ when it must not do its work.
 - Every job with an external side effect is idempotent.
 - `retry_after` is longer than `timeout` and the lease covers the real runtime, or lease renewal is
   on.
-- No job class has its own `$timeout` at or above `retry_after` while lease renewal is off.
+- No job class has its own `$timeout` of 0, or at or above `retry_after`, while lease renewal is
+  off.
 - `shutdown_grace` covers the longest job and `terminationGracePeriodSeconds` covers
   `shutdown_grace`, or the long jobs run in chunks.
 - Long jobs have a queue of their own.

@@ -37,7 +37,6 @@ class SupervisorConfigCommand extends Command
         foreach (TuningAdvisor::startupWarnings([
             'queen' => $this->laravel['config']->get('queen', []),
             'queue' => ['connections' => $this->laravel['config']->get('queue.connections', [])],
-            'env' => [],
         ]) as $warning) {
             $this->output->getErrorStyle()->writeln("Queen warning: {$warning}");
         }

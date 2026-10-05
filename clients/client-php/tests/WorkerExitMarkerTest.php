@@ -12,6 +12,8 @@ use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\WorkerStopReason;
 use PHPUnit\Framework\TestCase;
 use Queen\Laravel\Supervisor\PhpSupervisor;
+use Queen\Laravel\Supervisor\Prefork\ForkedProcess;
+use Queen\Laravel\Supervisor\Prefork\ForkServerClient;
 use Queen\Laravel\Supervisor\SupervisorState;
 use Queen\Laravel\Supervisor\WorkerExitMarker;
 use ReflectionMethod;
@@ -106,6 +108,32 @@ final class WorkerExitMarkerTest extends TestCase
         $legacy->dispatch(new JobProcessing('queen', $this->createStub(Job::class)));
         $legacy->dispatch(new WorkerStopping(12));
         $this->assertSame('memory', file_get_contents($marker));
+    }
+
+    public function testAQueueRestartIsAnnouncedWithOrWithoutAJob(): void
+    {
+        $directory = $this->privateDirectory();
+        putenv(WorkerExitMarker::ENVIRONMENT . '=' . $directory);
+        $marker = $directory . '/' . getmypid();
+
+        $idle = new Dispatcher(new Container());
+        WorkerExitMarker::listenFromEnvironment($idle);
+        $idle->dispatch(new WorkerStopping(0, null, WorkerStopReason::ReceivedRestartSignal));
+        $this->assertSame('restart', file_get_contents($marker));
+        unlink($marker);
+
+        $busy = new Dispatcher(new Container());
+        WorkerExitMarker::listenFromEnvironment($busy);
+        $busy->dispatch(new JobProcessing('queen', $this->createStub(Job::class)));
+        $busy->dispatch(new WorkerStopping(0, null, WorkerStopReason::ReceivedRestartSignal));
+        $this->assertSame('restart', file_get_contents($marker));
+        unlink($marker);
+
+        // Before Laravel 12 nothing says why a worker exited 0.
+        $legacy = new Dispatcher(new Container());
+        WorkerExitMarker::listenFromEnvironment($legacy);
+        $legacy->dispatch(new WorkerStopping(0));
+        $this->assertFileDoesNotExist($marker);
     }
 
     public function testTheMarkerIsOnlyWrittenIntoAPrivateRealDirectory(): void
@@ -216,6 +244,102 @@ final class WorkerExitMarkerTest extends TestCase
 
         $this->assertSame([$this->key($supervisor) => 1], $this->property($supervisor, 'crashCount'));
         $this->assertNull($this->permission($supervisor));
+    }
+
+    public function testAQueueRestartIsACleanExitAndOnlyExplainsExitZero(): void
+    {
+        [$supervisor, $exits] = $this->supervisor();
+        $this->writeMarker($exits, 4246, 'restart');
+        $this->track($supervisor, $this->exited(0), 4246);
+
+        $this->reap($supervisor);
+
+        $this->assertSame([], $this->property($supervisor, 'crashCount'));
+        $this->assertSame([], $this->entries($exits));
+        // A spawned worker starts from the code on disk anyway.
+        $this->assertFalse($this->property($supervisor, 'forkServerStale'));
+
+        $this->writeMarker($exits, 4247, 'restart');
+        $this->track($supervisor, $this->exited(1), 4247);
+
+        $this->reap($supervisor);
+
+        $this->assertSame([$this->key($supervisor) => 1], $this->property($supervisor, 'crashCount'));
+    }
+
+    public function testAQueueRestartReplacesTheForkServerAndRetiresTheOldOneWithItsLastWorker(): void
+    {
+        if (!function_exists('pcntl_fork') || !function_exists('posix_setsid')) {
+            $this->markTestSkipped('ext-pcntl and ext-posix are required.');
+        }
+        $stateDirectory = $this->privateDirectory();
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            [
+                'state_directory' => $stateDirectory,
+                'supervisors' => ['orders' => self::OPTIONS],
+                'prefork' => true,
+                'php_binary' => PHP_BINARY,
+                'artisan' => __DIR__ . '/Fixtures/Prefork/fork_server.php',
+                'cwd' => __DIR__,
+            ],
+            output: function (string $buffer): void {
+                $this->output[] = $buffer;
+            },
+        );
+        (new ReflectionMethod(PhpSupervisor::class, 'prepareExitMarkers'))->invoke($supervisor);
+        (new ReflectionMethod(PhpSupervisor::class, 'startForkServer'))->invoke($supervisor);
+        $first = $this->property($supervisor, 'forkServer');
+        $this->assertInstanceOf(ForkServerClient::class, $first);
+        $exits = realpath($stateDirectory) . '/exits';
+        $fork = new ReflectionMethod(PhpSupervisor::class, 'forkWorker');
+        $report = $exits . '/report';
+
+        try {
+            $restarted = $fork->invoke($supervisor, 'orders', 'high', ['exit', $report, '0'], []);
+            $busy = $fork->invoke($supervisor, 'orders', 'high', ['sleep', $report, '0'], []);
+            $this->assertInstanceOf(ForkedProcess::class, $restarted);
+            $restartedPid = $restarted->getPid() ?? $this->waitForPid($restarted);
+            $deadline = microtime(true) + 10;
+            while ($restarted->isRunning() && microtime(true) < $deadline) {
+                usleep(20_000);
+            }
+            $this->writeMarker($exits, $restartedPid, 'restart');
+            $this->setProperty($supervisor, 'processes', ['orders' => ['high' => [$restarted, $busy]]]);
+            $this->setProperty($supervisor, 'workerPids', [
+                spl_object_id($restarted) => $restartedPid,
+                spl_object_id($busy) => $busy->getPid(),
+            ]);
+            $refresh = new ReflectionMethod(PhpSupervisor::class, 'refreshForkServer');
+
+            $this->reap($supervisor);
+            $refresh->invoke($supervisor);
+
+            $second = $this->property($supervisor, 'forkServer');
+            $this->assertInstanceOf(ForkServerClient::class, $second);
+            $this->assertNotSame($first, $second);
+            $this->assertSame([$first], $this->property($supervisor, 'retiredForkServers'));
+            $this->assertTrue($first->isAlive(), 'the old server stays open for the worker it forked');
+            $this->assertTrue($busy->isRunning());
+            $this->assertStringContainsString('prefork: queue:restart received, starting a new fork server', implode('', $this->output));
+
+            // The new server forks; the old one closes with its last worker.
+            $next = $fork->invoke($supervisor, 'orders', 'high', ['sleep', $report, '0'], []);
+            $this->assertSame($second, $next->server());
+            $busy->signal(SIGTERM);
+            $deadline = microtime(true) + 10;
+            while ($busy->isRunning() && microtime(true) < $deadline) {
+                usleep(20_000);
+            }
+            $this->setProperty($supervisor, 'processes', ['orders' => ['high' => [$next]]]);
+            $refresh->invoke($supervisor);
+
+            $this->assertSame([], $this->property($supervisor, 'retiredForkServers'));
+            $this->assertFalse($first->isAlive());
+            $this->assertTrue($next->isRunning());
+        } finally {
+            (new ReflectionMethod(PhpSupervisor::class, 'closeForkServer'))->invoke($supervisor);
+        }
     }
 
     public function testATimedOutProbeIsReplacedAtOnceAndLeavesTheCircuitAsItWas(): void
@@ -399,6 +523,14 @@ final class WorkerExitMarkerTest extends TestCase
         $process->method('getExitCode')->willReturn($exitCode);
 
         return $process;
+    }
+
+    private function waitForPid(ForkedProcess $process): int
+    {
+        $pid = (new ReflectionProperty($process, 'forkedPid'))->getValue($process);
+        $this->assertIsInt($pid);
+
+        return $pid;
     }
 
     private function writeMarker(string $directory, int $pid, string $contents): void

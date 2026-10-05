@@ -193,5 +193,6 @@ return [
     'queen_pop_ahead' => filter_var(env('QUEEN_POP_AHEAD', false), FILTER_VALIDATE_BOOL),
     'queen_bulk_batch' => $integer('QUEEN_BULK_BATCH', 100, 1, 1_000),
     'queen_partitions' => $integer('QUEEN_PARTITIONS', 64, 1, 1024),
+    'job_alloc_kb' => $integer('BENCH_JOB_ALLOC_KB', 0, 0, 65_536),
     'queen_pop_fusion' => $integer('QUEEN_POP_FUSION', 0, 0, 1) === 1,
 ];

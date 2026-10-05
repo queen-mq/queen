@@ -27,51 +27,53 @@ final class ApplicationSettings
     private const MAX_URLS = 16;
 
     /**
-     * Settings of the `queen` connection: environment variable, kind, default
-     * (null when computed), minimum, maximum and meaning. A connection's own
-     * value wins over config('queen'), as QueenConnector merges them.
+     * Settings of the `queen` connection: the environment variable the
+     * published config/queen.php reads (null when it reads none), kind,
+     * default (null when computed), minimum, maximum and meaning. A
+     * connection's own value wins over config('queen'), as QueenConnector
+     * merges them.
      *
      * @var array<string, array{0: ?string, 1: string, 2: int|bool|null, 3: int, 4: ?int, 5: string}>
      */
     private const CONNECTION = [
-        'timeout' => ['QUEEN_TIMEOUT', 'milliseconds', 30000, 1, null, 'How long one broker request may take.'],
-        'retry_attempts' => ['QUEEN_RETRY_ATTEMPTS', 'count', 3, 0, null, 'How many times a failed broker request is tried.'],
-        'prefetch' => ['QUEEN_PREFETCH', 'count', 1, 1, 1000, 'Jobs a worker leases in one pop. Above 1 needs lease_renewal.'],
-        'ack_batch' => ['QUEEN_ACK_BATCH', 'count', 1, 1, 1000, 'Completed jobs a worker acknowledges in one request.'],
-        'ack_async' => ['QUEEN_ACK_ASYNC', 'switch', false, 0, null, 'Start the next job without waiting for the answer to the acknowledgement.'],
-        'pop_ahead' => ['QUEEN_POP_AHEAD', 'switch', false, 0, null, 'Pop the next batch while the last job of the current one runs. Needs lease_renewal.'],
-        'lease_renewal' => ['QUEEN_LEASE_RENEWAL', 'switch', false, 0, null, 'Renew the lease of a running job, so a long job is not delivered twice.'],
-        'lease_renewal_interval' => ['QUEEN_LEASE_RENEWAL_INTERVAL', 'seconds', null, 1, null, 'Time between two renewals of a lease.'],
-        'lease_renewal_timeout' => ['QUEEN_LEASE_RENEWAL_TIMEOUT', 'seconds', 5, 1, null, 'How long one renewal request may take.'],
-        'lease_renewal_kill_grace' => ['QUEEN_LEASE_RENEWAL_KILL_GRACE', 'seconds', 2, 0, null, 'Time between SIGTERM and SIGKILL for a worker whose lease cannot be renewed in time.'],
-        'lease_renewal_safety_margin' => ['QUEEN_LEASE_RENEWAL_SAFETY_MARGIN', 'seconds', 1, 1, null, 'Time kept free before the lease deadline.'],
-        'retry_after' => ['QUEEN_RETRY_AFTER', 'seconds', 90, 1, null, 'How long a lease lasts: a job not acknowledged by then is delivered again.'],
-        'block_for' => ['QUEEN_BLOCK_FOR', 'seconds', 0, 0, null, 'How long a pop on an empty queue waits for a job.'],
+        'timeout' => [null, 'milliseconds', 30000, 1, null, 'How long one broker request may take.'],
+        'retry_attempts' => [null, 'count', 3, 0, null, 'How many times a failed broker request is tried.'],
+        'prefetch' => [null, 'count', 1, 1, 1000, 'Jobs a worker leases in one pop. Above 1 needs lease_renewal.'],
+        'ack_batch' => [null, 'count', 1, 1, 1000, 'Completed jobs a worker acknowledges in one request.'],
+        'ack_async' => [null, 'switch', false, 0, null, 'Start the next job without waiting for the answer to the acknowledgement.'],
+        'pop_ahead' => [null, 'switch', false, 0, null, 'Pop the next batch while the last job of the current one runs. Needs lease_renewal.'],
+        'lease_renewal' => [null, 'switch', false, 0, null, 'Renew the lease of a running job, so a long job is not delivered twice.'],
+        'lease_renewal_interval' => [null, 'seconds', null, 1, null, 'Time between two renewals of a lease.'],
+        'lease_renewal_timeout' => [null, 'seconds', 5, 1, null, 'How long one renewal request may take.'],
+        'lease_renewal_kill_grace' => [null, 'seconds', 2, 0, null, 'Time between SIGTERM and SIGKILL for a worker whose lease cannot be renewed in time.'],
+        'lease_renewal_safety_margin' => [null, 'seconds', 1, 1, null, 'Time kept free before the lease deadline.'],
+        'retry_after' => [null, 'seconds', 90, 1, null, 'How long a lease lasts: a job not acknowledged by then is delivered again.'],
+        'block_for' => [null, 'seconds', 0, 0, null, 'How long a pop on an empty queue waits for a job.'],
         'partitions' => ['QUEEN_PARTITIONS', 'count', 64, 1, 1024, 'Partition stripes that ordinary jobs are spread over.'],
-        'bulk_batch' => ['QUEEN_BULK_BATCH', 'count', 100, 1, 1000, 'Jobs in one push request of Queue::bulk().'],
-        'after_commit' => ['QUEEN_AFTER_COMMIT', 'switch', false, 0, null, 'Dispatch a job only after the open database transaction commits.'],
+        'bulk_batch' => [null, 'count', 100, 1, 1000, 'Jobs in one push request of Queue::bulk().'],
+        'after_commit' => [null, 'switch', false, 0, null, 'Dispatch a job only after the open database transaction commits.'],
     ];
 
     /** @var array<string, array{0: ?string, 1: string, 2: int|bool|null, 3: int, 4: ?int, 5: string}> keys of queen.supervisor */
     private const SUPERVISOR = [
-        'poll_interval' => ['QUEEN_SUPERVISOR_POLL_INTERVAL', 'seconds', 3, 1, null, 'How often the supervisor reads the backlog and resizes its pools.'],
-        'http_timeout' => ['QUEEN_SUPERVISOR_HTTP_TIMEOUT', 'seconds', 5, 1, null, 'How long one supervisor request to the broker may take.'],
-        'shutdown_grace' => ['QUEEN_SUPERVISOR_SHUTDOWN_GRACE', 'seconds', 75, 1, null, 'How long a stopping worker may finish its job before the supervisor kills it.'],
-        'process_limit' => ['QUEEN_SUPERVISOR_PROCESS_LIMIT', 'count', 256, 1, 4096, 'Most child processes the master runs, lease helpers included.'],
-        'heartbeat_timeout' => ['QUEEN_SUPERVISOR_HEARTBEAT_TIMEOUT', 'seconds', null, 1, 86400, 'Heartbeat age at which the supervisor shows as stale.'],
-        'telemetry_ttl' => ['QUEEN_SUPERVISOR_TELEMETRY_TTL', 'seconds', 300, 1, null, 'How long worker runtime samples are kept for the time strategy.'],
+        'poll_interval' => [null, 'seconds', 3, 1, null, 'How often the supervisor reads the backlog and resizes its pools.'],
+        'http_timeout' => [null, 'seconds', 5, 1, null, 'How long one supervisor request to the broker may take.'],
+        'shutdown_grace' => [null, 'seconds', 75, 1, null, 'How long a stopping worker may finish its job before the supervisor kills it.'],
+        'process_limit' => [null, 'count', 256, 1, 4096, 'Most child processes the master runs, lease helpers included.'],
+        'heartbeat_timeout' => [null, 'seconds', null, 1, 86400, 'Heartbeat age at which the supervisor shows as stale.'],
+        'telemetry_ttl' => [null, 'seconds', 300, 1, null, 'How long worker runtime samples are kept for the time strategy.'],
         'prefork' => ['QUEEN_SUPERVISOR_PREFORK', 'switch', false, 0, null, 'Boot Laravel once and fork every worker from it.'],
-        'event_driven' => ['QUEEN_SUPERVISOR_EVENT_DRIVEN', 'switch', false, 0, null, 'Resize a pool when jobs arrive instead of at the next poll.'],
+        'event_driven' => [null, 'switch', false, 0, null, 'Resize a pool when jobs arrive instead of at the next poll.'],
         'coordination.enabled' => ['QUEEN_SUPERVISOR_COORDINATION', 'switch', false, 0, null, "Share each autoscaling pool's worker target with the other replicas."],
+        'lease_service' => [null, 'switch', true, 0, null, "Rust engine on Linux: the master renews the workers' leases; off starts a PHP helper per worker."],
         'remote_status.enabled' => ['QUEEN_SUPERVISOR_REMOTE_STATUS', 'switch', false, 0, null, 'Publish the status to the broker for dashboards on other hosts.'],
-        'remote_status.interval' => ['QUEEN_SUPERVISOR_REMOTE_STATUS_INTERVAL', 'seconds', null, 1, null, 'Time between two publishes of the status.'],
-        'remote_status.ttl' => ['QUEEN_SUPERVISOR_REMOTE_STATUS_TTL', 'seconds', null, 1, 86400, 'How long the published status is kept.'],
+        'remote_status.interval' => [null, 'seconds', null, 1, null, 'Time between two publishes of the status.'],
+        'remote_status.ttl' => [null, 'seconds', null, 1, 86400, 'How long the published status is kept.'],
     ];
 
     /**
      * @param array<string, mixed> $config `queen` and `queue` as in Laravel's
-     *   configuration, and `env`: the environment variables the Rust master
-     *   reads itself, as this host sees them
+     *   configuration
      */
     public function __construct(private array $config)
     {
@@ -113,14 +115,13 @@ final class ApplicationSettings
     }
 
     /**
-     * Whether QUEEN_SUPERVISOR_LEASE_SERVICE turns the Rust master's lease
-     * service off, read as the master reads it: 0, false, no or off.
+     * Whether queen.supervisor.lease_service turns the Rust master's lease
+     * service off. Only false does: the supervisor refuses any other value
+     * that is not true.
      */
     public function leaseServiceDisabled(): bool
     {
-        $value = $this->environment('QUEEN_SUPERVISOR_LEASE_SERVICE');
-
-        return $value !== null && in_array(strtolower(trim($value)), ['0', 'false', 'no', 'off'], true);
+        return $this->supervisorSwitch('lease_service', true) === false;
     }
 
     /**
@@ -223,8 +224,9 @@ final class ApplicationSettings
 
     /**
      * The Connection and Supervisor settings, ready to show: each row has its
-     * name, environment variable, value, default, meaning, whether the value
-     * differs from the default and whether it is invalid.
+     * config key, the environment variable the published config/queen.php
+     * reads for it (null when none), value, default, meaning, whether the
+     * value differs from the default and whether it is invalid.
      *
      * @return array{connection: list<array<string, mixed>>, supervisor: list<array<string, mixed>>}
      */
@@ -245,9 +247,9 @@ final class ApplicationSettings
                 default => null,
             });
         }
-        $connectionRows[] = $this->setting('sync_failed_jobs', ['QUEEN_SYNC_FAILED_JOBS', 'switch', true, 0, null, "Keep Laravel's failed jobs and Queen's dead-letter queue in step."], $this->queen()['sync_failed_jobs'] ?? null);
+        $connectionRows[] = $this->setting('sync_failed_jobs', [null, 'switch', true, 0, null, "Keep Laravel's failed jobs and Queen's dead-letter queue in step."], $this->queen()['sync_failed_jobs'] ?? null);
         if (array_key_exists('autopilot', $connection)) {
-            $connectionRows[] = $this->setting('autopilot', ['QUEEN_AUTOPILOT', 'switch', false, 0, null, 'Let the broker choose how many partitions one pop sweeps.'], $connection['autopilot']);
+            $connectionRows[] = $this->setting('autopilot', [null, 'switch', false, 0, null, 'Let the broker choose how many partitions one pop sweeps.'], $connection['autopilot']);
         }
         $connectionRows = $this->refusedTogether($connectionRows);
 
@@ -261,9 +263,9 @@ final class ApplicationSettings
             $this->supervisorSetting('event_driven'),
             $this->fastScaleUp(),
             $this->supervisorSetting('coordination.enabled'),
-            $this->leaseService(),
+            $this->supervisorSetting('lease_service'),
             $this->supervisorSetting('remote_status.enabled'),
-            $this->secret('remote_status.key', 'QUEEN_SUPERVISOR_REMOTE_STATUS_KEY', $this->supervisorValue('remote_status.key'), 'Key the status is published under.'),
+            $this->secret('remote_status.key', null, $this->supervisorValue('remote_status.key'), 'Key the status is published under.'),
             $this->supervisorSetting('remote_status.interval'),
             $this->supervisorSetting('remote_status.ttl'),
         ];
@@ -339,22 +341,6 @@ final class ApplicationSettings
             'remote_status.ttl' => ['computed at start', 'twice heartbeat_timeout, at least 300 s'],
             default => null,
         });
-    }
-
-    /** @return array<string, mixed> an environment variable of the Rust master, as this host sees it */
-    private function leaseService(): array
-    {
-        $disabled = $this->leaseServiceDisabled();
-
-        return [
-            'name' => 'QUEEN_SUPERVISOR_LEASE_SERVICE',
-            'env' => null,
-            'value' => $disabled ? 'off' : 'on',
-            'default' => 'on',
-            'changed' => $disabled,
-            'invalid' => false,
-            'meaning' => "Rust engine on Linux: the master renews the workers' leases; off starts a PHP helper per worker. Read from this host's environment.",
-        ];
     }
 
     /**
@@ -479,7 +465,7 @@ final class ApplicationSettings
 
         return [
             'name' => 'fast_scale_up',
-            'env' => 'QUEEN_SUPERVISOR_FAST_SCALE_UP',
+            'env' => null,
             'value' => $invalid ? 'invalid' : ($on === [] ? 'off' : 'on for ' . implode(', ', $on)),
             'default' => 'off',
             'changed' => $on !== [],
@@ -515,14 +501,6 @@ final class ApplicationSettings
         }
 
         return $value;
-    }
-
-    private function environment(string $name): ?string
-    {
-        $environment = is_array($this->config['env'] ?? null) ? $this->config['env'] : [];
-        $value = $environment[$name] ?? null;
-
-        return is_string($value) ? $value : null;
     }
 
     private static function isSecret(string $name): bool

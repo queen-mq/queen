@@ -24,6 +24,8 @@ verifiedBy:
   - examples/tutorials/cpp/01-hello-world.cpp
   - examples/tutorials/php/01-hello-world.php
   - server/tests/embedded_raft_smoke.rs
+# sourceOfTruth re-read 2026-10-05 (Laravel env cut): config/queen.php still reads QUEEN_URL, the
+# only variable the PHP snippet sets besides Laravel's QUEUE_CONNECTION; nothing else changes.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same

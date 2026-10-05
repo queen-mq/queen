@@ -109,7 +109,7 @@ final class TuningAdvisor
                 "Its longest run in the last {$window} took " . self::duration($class['max_ms'])
                 . ". A stopping worker gets {$grace} s (shutdown_grace) before the supervisor kills it, so a deploy can"
                 . ' stop this job before it ends, and the job then runs again from the start.',
-                "Raise QUEEN_SUPERVISOR_SHUTDOWN_GRACE above the longest run, and the pod's terminationGracePeriodSeconds"
+                "Raise queen.supervisor.shutdown_grace above the longest run, and the pod's terminationGracePeriodSeconds"
                 . ' above that, or split the job into shorter jobs.',
                 '/use/laravel/supervisors',
             );
@@ -151,7 +151,7 @@ final class TuningAdvisor
                 "Pool {$pool['name']} has one worker for " . count($pool['queues']) . ' queues',
                 'Its max_processes is 1, so ' . self::list($pool['queues']) . " take turns on one worker, and {$longest} has "
                 . self::jobs($waiting[$longest]) . ' waiting.',
-                'Raise min_processes and max_processes (QUEEN_SUPERVISOR_MIN_PROCESSES, QUEEN_SUPERVISOR_MAX_PROCESSES),'
+                "Raise min_processes and max_processes in queen.supervisor.supervisors.{$pool['name']},"
                 . ' or give the long queue its own pool.',
                 '/use/laravel/supervisors#dedicated-and-balancing-workers',
             );
@@ -187,9 +187,10 @@ final class TuningAdvisor
             static fn (array $class): string => "{$class['class']} ({$class['average_ms']} ms)",
             array_slice($short, 0, self::MAX_CLASSES),
         );
-        $action = 'Try QUEEN_PREFETCH=4 with QUEEN_ACK_ASYNC=true and QUEEN_POP_AHEAD=true, then compare the Jobs page.';
+        $action = 'Try prefetch 4 with ack_async and pop_ahead true, in config/queen.php or on the queen connection in'
+            . ' config/queue.php (whose values win), then compare the Jobs page.';
         if ($settings->connectionSwitch('lease_renewal', false) !== true) {
-            $action .= ' Prefetch above 1 and pop_ahead need QUEEN_LEASE_RENEWAL=true.';
+            $action .= ' Prefetch above 1 and pop_ahead need lease_renewal true.';
         }
         // A crash nobody hands back fails each prefetched job that has no try left.
         $action .= ' Keep tries at 2 or more: after a crash that is not handed back, such as a lost node, each job'
@@ -282,11 +283,11 @@ final class TuningAdvisor
         return [self::item(
             'info',
             'Every worker starts its own lease helper',
-            "lease_renewal is on and QUEEN_SUPERVISOR_LEASE_SERVICE turns the master's lease service off, so each"
+            "lease_renewal is on and queen.supervisor.lease_service turns the master's lease service off, so each"
             . ' worker runs a PHP helper beside it. Measured with eight prefetching workers and their master: 161 MiB'
             . ' with a helper per worker, 70 MiB without.',
-            "Remove QUEEN_SUPERVISOR_LEASE_SERVICE=false from the master's environment: the Rust supervisor on Linux"
-            . ' then renews every lease itself.',
+            'Set queen.supervisor.lease_service to true, its default: the Rust supervisor on Linux then renews every'
+            . ' lease itself.',
             '/use/laravel/supervisors#lease-renewal-in-the-master',
         )];
     }
@@ -319,7 +320,7 @@ final class TuningAdvisor
             (count($auto) === 1 ? "Pool {$auto[0]} follows" : 'Pools ' . self::list($auto) . ' follow')
             . " the backlog (balance auto) and event-driven scaling is off, so new jobs are seen at the next poll, every {$poll} s."
             . ' Measured with fast_scale_up: twenty workers after a burst in 5.6 s with event-driven scaling, 13.9 s without.',
-            'Set QUEEN_SUPERVISOR_EVENT_DRIVEN=true: the broker then wakes the supervisor when jobs arrive.',
+            'Set queen.supervisor.event_driven to true: the broker then wakes the supervisor when jobs arrive.',
             '/use/laravel/supervisors#event-driven-scaling',
         )];
     }
@@ -344,8 +345,8 @@ final class TuningAdvisor
                     "Pool {$pool['name']} can run a job twice at once",
                     "Its timeout is {$pool['timeout']} s and its lease (retry_after) {$pool['retry_after']} s, with lease renewal"
                     . ' off: a job still running when its lease ends is handed to a second worker while the first one goes on.',
-                    'Raise retry_after above the timeout (QUEEN_RETRY_AFTER), or lower the timeout. The Queen supervisor does'
-                    . ' not start with this pool until then.',
+                    "Raise queen.supervisor.supervisors.{$pool['name']}.retry_after above the timeout, or lower the timeout."
+                    . ' The Queen supervisor does not start with this pool until then.',
                     '/use/laravel/supervisors#configure-a-pool',
                 );
             } elseif ($pool['lease_renewal'] === true) {
@@ -356,7 +357,7 @@ final class TuningAdvisor
                     "The supervisor does not start with pool {$pool['name']}",
                     "Its timeout is {$pool['timeout']} s and its retry_after {$pool['retry_after']} s. The supervisor requires"
                     . ' retry_after to be longer than the timeout, even with lease renewal on.',
-                    'Raise retry_after above the timeout (QUEEN_RETRY_AFTER), or lower the timeout.',
+                    "Raise queen.supervisor.supervisors.{$pool['name']}.retry_after above the timeout, or lower the timeout.",
                     '/use/laravel/supervisors#configure-a-pool',
                 );
             }

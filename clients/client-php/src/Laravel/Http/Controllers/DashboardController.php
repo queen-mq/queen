@@ -4,7 +4,6 @@ namespace Queen\Laravel\Http\Controllers;
 
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\Request;
-use Illuminate\Support\Env;
 use Queen\Laravel\Dashboard\ApplicationSettings;
 use Queen\Laravel\Dashboard\ConsoleLinks;
 use Queen\Laravel\Dashboard\DashboardPage;
@@ -88,8 +87,7 @@ final class DashboardController
     }
 
     /**
-     * This application's Queen configuration, and the environment variable
-     * the Rust master reads itself, as this host sees it.
+     * This application's Queen configuration, as this host resolves it.
      *
      * @return array<string, mixed>
      */
@@ -98,7 +96,6 @@ final class DashboardController
         return [
             'queen' => config('queen'),
             'queue' => ['connections' => config('queue.connections')],
-            'env' => ['QUEEN_SUPERVISOR_LEASE_SERVICE' => Env::getRepository()->get('QUEEN_SUPERVISOR_LEASE_SERVICE')],
         ];
     }
 

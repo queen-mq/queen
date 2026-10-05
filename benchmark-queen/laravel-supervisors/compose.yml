@@ -31,6 +31,9 @@ x-app-environment: &app-environment
   BENCH_WORKER_MEMORY: ${BENCH_WORKER_MEMORY:-128}
   BENCH_POLL_INTERVAL: ${BENCH_POLL_INTERVAL:-1}
   BENCH_OPCACHE_CLI: ${BENCH_OPCACHE_CLI:-0}
+  # KiB every benchmark job allocates and holds while it runs, as a real job
+  # builds models and collections; 0 keeps the tiny job.
+  BENCH_JOB_ALLOC_KB: ${BENCH_JOB_ALLOC_KB:-0}
   QUEEN_SUPERVISOR_PREFORK: "${BENCH_QUEEN_PREFORK:-false}"
   QUEEN_SUPERVISOR_EVENT_DRIVEN: "${BENCH_QUEEN_EVENT_DRIVEN:-false}"
   QUEEN_SUPERVISOR_FAST_SCALE_UP: "${BENCH_QUEEN_FAST_SCALE_UP:-false}"

@@ -7,14 +7,29 @@ status: preview
 sidebar:
   order: 8
 sourceOfTruth:
+  - clients/client-php/config/queen.php
   - clients/client-php/src/Laravel/Commands/SupervisorControlCommand.php
   - clients/client-php/src/Laravel/Commands/SupervisorInstallCommand.php
+  - clients/client-php/src/Laravel/Supervisor/ReplicaCoordinator.php
+  - clients/client-php/src/Laravel/Supervisor/QueueWatcher.php
+  - clients/client-php/src/Laravel/Dashboard/PrometheusMetrics.php
+  - supervisor/src/main.rs
+  - supervisor/src/coordination.rs
+  - supervisor/src/prefork.rs
+  - supervisor/src/watch.rs
+  - server/src/rsm/facade/real/phase2.rs
   - server/src/rsm/facade/real/phase2/reads.rs
   - server/src/handlers/kv.rs
-# Describes clients/client-php and supervisor/ as they are on origin/master (PHP client 1.9.0,
-# tagged). Add config/queen.php, ReplicaCoordinator.php, QueueWatcher.php,
-# PrometheusMetrics.php and supervisor/src/{main,coordination,prefork,watch}.rs once the 2.0 line
-# carries that tree.
+# Describes clients/client-php and supervisor/ as they are on master (PHP client 2.0.0 on
+# Packagist, which pins supervisor 0.6.0; both tagged).
+# sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in
+# PHP client 2.1.0, so the switch table names the keys ack_async, pop_ahead and
+# supervisor.event_driven, event_driven moves from the dotenv block into the config/queen.php
+# snippet, and QUEEN_SUPERVISOR_REMOTE_STATUS_KEY goes: remote_status.key defaults to a slug of
+# APP_NAME and APP_ENV, which web and worker pods share.
+# sourceOfTruth re-read 2026-10-05 (docs 2.0 restore): the What to expect table keeps only the
+# Linux server's rows, the Docker Desktop rows and the prefork caution go, and the page says that
+# every 2.0 broker serves the event-driven long poll.
 ---
 
 This page puts the supervisor features together for the setup most teams end up with: Laravel
@@ -22,14 +37,15 @@ workers in a Kubernetes Deployment, several pods sharing the backlog of the same
 replica count that follows that backlog. Inside each pod a supervisor fills its share of the target
 within seconds of a burst; across pods, KEDA or an autoscaler adds and removes pods over minutes.
 Every feature is optional and off by default, so start from the table and turn on what your
-workload needs.
+workload needs. The switches in capitals are environment variables; `ack_async`, `pop_ahead`,
+`supervisor.event_driven` and the pool keys go in `config/queen.php`.
 
 | Situation | Feature | Switch |
 | --- | --- | --- |
 | Several pods work the same queues and consumer group | [Coordinated replicas](/guides/laravel/supervisors/#several-replicas) share one worker target | `QUEEN_SUPERVISOR_COORDINATION=true` |
 | Worker memory decides how many workers fit in a pod | [Prefork](/guides/laravel/supervisors/#prefork-workers): Laravel boots once per pod and every worker is forked from it | `QUEEN_SUPERVISOR_PREFORK=true` and `opcache.enable_cli=1` |
-| Short jobs, where the broker round trip dominates | [Asynchronous ACKs and popping ahead](/guides/laravel/#a-faster-profile) | `QUEEN_ACK_ASYNC=true` and `QUEEN_POP_AHEAD=true` |
-| Bursts must be served in seconds | [Event-driven scaling](/guides/laravel/supervisors/#event-driven-scaling) with fast scale-up | `QUEEN_SUPERVISOR_EVENT_DRIVEN=true` and `fast_scale_up` |
+| Short jobs, where the broker round trip dominates | [Asynchronous ACKs and popping ahead](/guides/laravel/#a-faster-profile) | `ack_async` and `pop_ahead` |
+| Bursts must be served in seconds | [Event-driven scaling](/guides/laravel/supervisors/#event-driven-scaling) with fast scale-up | `supervisor.event_driven` and `fast_scale_up` |
 | A quiet queue must not wait for a cold start | A per-queue minimum | `min_processes_per_queue` |
 | Some queues need workers of their own | A `simple` pool beside an `auto` pool | two entries in `supervisors` |
 | The number of pods follows the backlog | The [Prometheus endpoint](/guides/laravel/monitoring/#prometheus-and-kubernetes-autoscaling), read by KEDA or an HPA | `QUEEN_METRICS_ENABLED=true` |
@@ -37,7 +53,7 @@ workload needs.
 
 Coordination, prefork, the per-queue minimum, fast scale-up and the Prometheus endpoint need PHP
 client 1.7.0; event-driven scaling 1.8.0; asynchronous ACKs, popping ahead and lease renewal in the
-master 1.9.0.
+master 1.9.0. PHP client 2.0.0 has all of them.
 
 ## Configure the pools
 
@@ -49,6 +65,7 @@ between 1 and 10 workers per pod across three other queues, by backlog:
 'supervisor' => [
     'shutdown_grace' => 75,
     'process_limit' => 16,
+    'event_driven' => true,
     'supervisors' => [
         'payments' => [
             'queues' => ['payments'],
@@ -74,11 +91,9 @@ between 1 and 10 workers per pod across three other queues, by backlog:
 ```dotenv
 QUEEN_SUPERVISOR_COORDINATION=true
 QUEEN_SUPERVISOR_PREFORK=true
-QUEEN_SUPERVISOR_EVENT_DRIVEN=true
 QUEEN_SUPERVISOR_STATE_DIRECTORY=/var/lib/queen-supervisor
 QUEEN_SUPERVISOR_INSTALL_PATH=/opt/queen-supervisor-bin
 QUEEN_SUPERVISOR_REMOTE_STATUS=true
-QUEEN_SUPERVISOR_REMOTE_STATUS_KEY=orders-production
 ```
 
 With coordination, `min_processes` and `max_processes` apply to each pod: three pods run the
@@ -86,8 +101,10 @@ With coordination, `min_processes` and `max_processes` apply to each pod: three 
 also turn on lease renewal (the faster profile needs it), every worker reserves two process slots,
 one for its renewal helper, so these two pools need a `process_limit` of 24. Remote
 status lets the dashboard and the Prometheus endpoint on the web pods see every worker pod, so set
-the two `REMOTE_STATUS` variables on the web pods too. `event_driven` holds its long poll with the
-token the supervisor reads depth with, and through the broker's
+`QUEEN_SUPERVISOR_REMOTE_STATUS` on the web pods too. The status goes under a key that defaults to
+a slug of `APP_NAME` and `APP_ENV`, such as `orders-production`, so web and worker pods that share
+both values agree on it. Every 2.0 broker serves the long poll of
+`event_driven`. The supervisor holds it with the token it reads depth with, and through the broker's
 [embedded proxy](/operate/security/) that poll carries the authority of a pop: if the pods reach
 the broker through the proxy with a read-only key, the supervisor logs it once and keeps polling.
 
@@ -200,26 +217,19 @@ pod's share within seconds, while KEDA changes the number of pods over minutes.
 
 ## What to expect
 
-Each row comes from the [Laravel benchmark](/benchmarks/laravel/). The first three ran on Docker
-Desktop against a Queen 1.6.0 broker on PostgreSQL (2026-09-30), the fourth and fifth on Docker
-Desktop against a single Raft node, the last two on a 16-vCPU Linux server against a single Raft
-node (2026-10-01). Read them as the size of each effect, not a promise for your cluster.
+The rows come from the [Laravel benchmark](/benchmarks/laravel/), on a 16-vCPU Linux server against
+a single Raft node: prefork from the
+[memory runs](/benchmarks/laravel/#where-the-difference-comes-from) of 2026-10-05, the other two
+from the [feature lanes](/benchmarks/laravel/#the-worker-side-features-one-at-a-time) of
+2026-10-01, with 50,000 jobs of 10 ms. Read them as the size of each effect, not a promise for your
+cluster.
 
 | Feature | Without | With |
 | --- | ---: | ---: |
-| Coordination, two pods of 8 on a draining backlog | up to twice the fleet target (12 workers for 6) | the target at every sample |
-| Prefork and opcache, 8 workers after 600 jobs | 336 MiB | 85 MiB |
-| `event_driven` with `fast_scale_up`, time to 20 workers after a burst | 13.9 s | 5.6 s |
-| Lease renewal in the master, 8 prefetching workers and their master | 161 MiB | 70 MiB |
-| `ack_async` and `pop_ahead`, 10 ms jobs, 8 workers | 453 jobs/s | 643 jobs/s |
-| Lease renewal in the master, 32 workers | 417 MiB | 116 MiB |
+| Prefork and the opcache, application memory of 64 workers idle after 10 ms jobs | 2,062 MiB | 225 MiB |
+| The same, after jobs that each held 8 MiB | 2,590 MiB | 755 MiB |
+| Lease renewal in the master, application memory of 32 workers | 417 MiB | 116 MiB |
 | `ack_async` and `pop_ahead`, 32 workers | 1,879 jobs/s | 2,794 jobs/s |
-
-<Aside type="caution">
-The prefork memory was measured 15 seconds after the burst. A worker that runs for hours writes to
-more of the pages it shares, so the saving shrinks. Measure the pods' memory after a day of real
-jobs before you lower their limits.
-</Aside>
 
 Next: [the supervisor settings](/guides/laravel/supervisors/) used here, and
 [monitoring](/guides/laravel/monitoring/) for job metrics, tags and long-wait alerts.

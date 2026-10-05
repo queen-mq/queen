@@ -1,6 +1,6 @@
 [package]
 name = "queen-supervisor"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Low-memory process supervisor for Queen-backed Laravel workers"

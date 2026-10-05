@@ -53,6 +53,7 @@ const MAX_EXIT_MARKER_BYTES: u64 = 64;
 const MAX_EXIT_MARKER_ENTRIES: usize = 8_192;
 const JOB_TIMEOUT_MARKER: &str = "timeout";
 const MEMORY_LIMIT_MARKER: &str = "memory";
+const QUEUE_RESTART_MARKER: &str = "restart";
 // Laravel's Worker::EXIT_MEMORY_LIMIT.
 const LARAVEL_EXIT_MEMORY_LIMIT: i32 = 12;
 const MAX_DEPTH_POLL_CONCURRENCY: usize = 16;
@@ -94,6 +95,11 @@ struct Config {
     // Emitted by Laravel only when enabled, so an absent key means disabled.
     #[serde(default)]
     event_driven: Option<watch::EventDrivenConfig>,
+    // queen.supervisor.lease_service: whether the master serves lease
+    // renewal on Linux. Emitted by Laravel only when false, so an absent key,
+    // as in documents from earlier releases, means on.
+    #[serde(default = "default_lease_service")]
+    lease_service: bool,
     // The master's lease renewal socket, set when the service runs.
     #[serde(skip)]
     lease_socket: Option<String>,
@@ -221,6 +227,10 @@ fn default_stable_after() -> u64 {
 }
 
 fn default_quiet() -> bool {
+    true
+}
+
+fn default_lease_service() -> bool {
     true
 }
 
@@ -463,7 +473,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(|settings| Coordinator::new(settings, &state.instance_id, state.hostname.as_deref()));
     let coordinated_scopes = coordinated_scopes(&config);
-    let fork_server = if config.prefork {
+    let mut fork_server = if config.prefork {
         match ForkServer::start(&config, &running) {
             Ok(server) => {
                 eprintln!("prefork: fork server started");
@@ -477,6 +487,9 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    // Fork servers replaced after queue:restart, open while a worker they
+    // forked still runs; see refresh_fork_server.
+    let mut retired_forks: Vec<Rc<RefCell<ForkServer>>> = Vec::new();
     let mut replica_counts = current_replica_counts(coordinator.as_ref(), &coordinated_scopes);
     let wakes = match config.event_driven.as_ref() {
         Some(settings) => Some(watch::start(&config, settings, Arc::clone(&running))?),
@@ -582,13 +595,19 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         // command() verifies the pinned state generation before any reap can
         // remove telemetry or any reconcile can spawn a worker into it.
-        reap(
+        let restarted = reap(
             &config,
             &mut pools,
             &mut restarts,
             &mut pending_telemetry_cleanup,
+            fork_server.as_ref(),
         );
         reap_draining(&config, &mut draining, &mut pending_telemetry_cleanup);
+        if restarted {
+            fork_server =
+                refresh_fork_server(&config, &running, fork_server.take(), &mut retired_forks);
+        }
+        close_retired_forks(&mut retired_forks);
         observe_stable_workers(&config, &mut pools, &mut restarts);
         let poll_due = last_poll.elapsed() >= Duration::from_secs(config.poll_interval);
         let event_due = match (&wakes, paused) {
@@ -867,7 +886,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             }
         },
     );
-    if let Some(server) = &fork_server {
+    for server in retired_forks.iter().chain(fork_server.iter()) {
         // Every worker has drained: the server exits, fencing any straggler.
         server.borrow_mut().close(Duration::from_secs(5));
     }
@@ -3233,22 +3252,11 @@ fn process_budget_used(config: &Config, pools: &Pools, draining: &Draining) -> u
 
 /// Serve lease renewal from the master when a pool renews leases. Linux only:
 /// there a worker dies with its master (PDEATHSIG, or the fork server) and a
-/// pidfd pins it for fencing. Elsewhere, or with
-/// QUEEN_SUPERVISOR_LEASE_SERVICE=false, each worker starts a PHP helper. A
-/// helper still counts in process_cost, since a worker falls back to one when
-/// the service refuses it.
+/// pidfd pins it for fencing. Elsewhere, or with queen.supervisor.lease_service
+/// false, each worker starts a PHP helper. A helper still counts in
+/// process_cost, since a worker falls back to one when the service refuses it.
 fn start_lease_service(config: &Config, directory: &Path) -> Option<String> {
-    if !cfg!(target_os = "linux") || !config.supervisors.values().any(|o| o.lease_renewal) {
-        return None;
-    }
-    let disabled = std::env::var("QUEEN_SUPERVISOR_LEASE_SERVICE").is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        )
-    });
-    if disabled {
-        eprintln!("lease renewal: one helper process per worker (QUEEN_SUPERVISOR_LEASE_SERVICE)");
+    if !serves_lease_renewal(config, cfg!(target_os = "linux")) {
         return None;
     }
     match lease::start(directory, lease::signal_fence()) {
@@ -3261,6 +3269,25 @@ fn start_lease_service(config: &Config, directory: &Path) -> Option<String> {
             None
         }
     }
+}
+
+/// Whether the master serves lease renewal, on `linux`, for this
+/// configuration. The configuration alone decides: the environment variable
+/// QUEEN_SUPERVISOR_LEASE_SERVICE of earlier releases is no longer read. When
+/// queen.supervisor.lease_service turns the service off for pools that renew
+/// leases, this says so.
+fn serves_lease_renewal(config: &Config, linux: bool) -> bool {
+    if !linux || !config.supervisors.values().any(|o| o.lease_renewal) {
+        return false;
+    }
+    if !config.lease_service {
+        eprintln!(
+            "lease renewal: off in the master, queen.supervisor.lease_service is false: \
+             one helper process per worker"
+        );
+        return false;
+    }
+    true
 }
 
 fn remaining_process_slots(limit: usize, used: usize) -> usize {
@@ -3420,12 +3447,16 @@ fn worker_command(config: &Config, name: &str, queue: &str, o: &SupervisorConfig
     command
 }
 
+/// Returns whether a worker forked by `forks`, the current fork server,
+/// stopped for `php artisan queue:restart`.
 fn reap(
     config: &Config,
     pools: &mut Pools,
     restarts: &mut RestartStates,
     pending: &mut PendingTelemetryCleanup,
-) {
+    forks: Option<&Rc<RefCell<ForkServer>>>,
+) -> bool {
+    let mut restarted = false;
     for (key, pool) in pools.iter_mut() {
         let Some(options) = config.supervisors.get(&key.0) else {
             continue;
@@ -3436,6 +3467,9 @@ fn reap(
             Ok(Some(status)) => {
                 let pid = worker.child.id();
                 let announced = announced_exit(config, pid, status);
+                if announced == Some(AnnouncedExit::QueueRestart) && worker.child.forked_by(forks) {
+                    restarted = true;
+                }
                 record_worker_exit(key, worker, status, announced, options, restart);
                 schedule_telemetry_cleanup(config, &key.0, pid, pending);
                 false
@@ -3451,6 +3485,43 @@ fn reap(
             }
         });
     }
+    restarted
+}
+
+/// After `queue:restart`, boot a new fork server, so the workers forked from
+/// then on run the code on disk, as spawned ones do. The old server stays
+/// open while a worker it forked still runs (each holds a reference to it):
+/// closing it would SIGKILL that worker. If the new one cannot start, workers
+/// are spawned from then on.
+fn refresh_fork_server(
+    config: &Config,
+    running: &AtomicBool,
+    current: Option<Rc<RefCell<ForkServer>>>,
+    retired: &mut Vec<Rc<RefCell<ForkServer>>>,
+) -> Option<Rc<RefCell<ForkServer>>> {
+    retired.extend(current);
+    eprintln!("prefork: queue:restart received, starting a new fork server");
+    match ForkServer::start(config, running) {
+        Ok(server) => {
+            eprintln!("prefork: fork server started");
+            Some(Rc::new(RefCell::new(server)))
+        }
+        Err(error) => {
+            eprintln!("prefork disabled, spawning workers: {error}");
+            None
+        }
+    }
+}
+
+/// Close each replaced fork server once no worker it forked is left.
+fn close_retired_forks(retired: &mut Vec<Rc<RefCell<ForkServer>>>) {
+    retired.retain(|server| {
+        if Rc::strong_count(server) > 1 {
+            return true;
+        }
+        server.borrow_mut().close(Duration::from_secs(5));
+        false
+    });
 }
 
 /// `announced`: what the worker said about this exit; see announced_exit.
@@ -3587,11 +3658,14 @@ enum AnnouncedExit {
     JobTimeout,
     /// It passed --memory after handling a job.
     MemoryLimit,
+    /// It stopped for `php artisan queue:restart` (Laravel 12 says why).
+    QueueRestart,
 }
 
 /// What the worker announced before this exit: Laravel's job timeout, when
-/// SIGKILL ended it, or its memory limit after a job, when it exited 12. A
-/// marker explains no other exit. Either way the marker is consumed.
+/// SIGKILL ended it, its memory limit after a job, when it exited 12, or
+/// queue:restart, when it exited 0. A marker explains no other exit. Either
+/// way the marker is consumed.
 fn announced_exit(config: &Config, pid: u32, status: ExitStatus) -> Option<AnnouncedExit> {
     let directory = config.exit_markers.as_deref()?;
     match take_exit_marker(Path::new(directory), pid)?.as_str() {
@@ -3599,6 +3673,7 @@ fn announced_exit(config: &Config, pid: u32, status: ExitStatus) -> Option<Annou
         MEMORY_LIMIT_MARKER if status.code() == Some(LARAVEL_EXIT_MEMORY_LIMIT) => {
             Some(AnnouncedExit::MemoryLimit)
         }
+        QUEUE_RESTART_MARKER if status.success() => Some(AnnouncedExit::QueueRestart),
         _ => None,
     }
 }
@@ -4033,6 +4108,7 @@ mod tests {
             coordination: None,
             prefork: false,
             event_driven: None,
+            lease_service: true,
             lease_socket: None,
             exit_markers: None,
         }
@@ -4855,7 +4931,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !pools[key].is_empty() {
             assert!(Instant::now() < deadline, "the worker never exited");
-            reap(config, pools, restarts, &mut pending);
+            reap(config, pools, restarts, &mut pending, None);
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -4867,6 +4943,137 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// `queue:restart` stops a worker with status 0; the marker explains
+    /// nothing else.
+    #[cfg(unix)]
+    #[test]
+    fn a_queue_restart_is_announced_only_for_a_clean_exit() {
+        let (resolved, state_directory) = exit_marker_config("queue-restart");
+        let exits = state_directory.join("exits");
+
+        let (clean, status) = exited_worker(0, false);
+        write_private_file(&exits.join(clean.child.id().to_string()), b"restart");
+        assert_eq!(
+            announced_exit(&resolved, clean.child.id(), status),
+            Some(AnnouncedExit::QueueRestart)
+        );
+
+        let (failed, status) = exited_worker(1, false);
+        write_private_file(&exits.join(failed.child.id().to_string()), b"restart");
+        assert_eq!(announced_exit(&resolved, failed.child.id(), status), None);
+        assert!(entries(&exits).is_empty());
+        fs::remove_dir_all(state_directory).unwrap();
+    }
+
+    /// After queue:restart the master boots a new fork server, and closes the
+    /// old one with the last worker it forked.
+    #[cfg(unix)]
+    #[test]
+    fn a_queue_restart_replaces_the_fork_server_and_retires_the_old_one() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../clients/client-php/tests/Fixtures/Prefork/fork_server.php");
+        let autoload =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../clients/client-php/vendor/autoload.php");
+        let php = Command::new("php")
+            .args([
+                "-r",
+                "exit(function_exists('pcntl_fork') && function_exists('posix_setsid') ? 0 : 1);",
+            ])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !php || !fixture.exists() || !autoload.exists() {
+            eprintln!("skipped: PHP with pcntl/posix and the Laravel package are required");
+            return;
+        }
+        let (mut resolved, state_directory) = exit_marker_config("fork-server-restart");
+        resolved.prefork = true;
+        resolved.php_binary = "php".to_owned();
+        resolved.artisan = fixture.to_string_lossy().into_owned();
+        resolved.cwd = fixture.parent().unwrap().to_string_lossy().into_owned();
+        let exits = state_directory.join("exits");
+        let report = state_directory
+            .join("report")
+            .to_string_lossy()
+            .into_owned();
+        let running = AtomicBool::new(true);
+        let first = Rc::new(RefCell::new(
+            ForkServer::start(&resolved, &running).unwrap(),
+        ));
+        let fork = |server: &Rc<RefCell<ForkServer>>, mode: &str| {
+            let argv = vec![mode.to_owned(), report.clone(), "0".to_owned()];
+            let pid = server.borrow_mut().fork(&argv, &[]).unwrap();
+            Worker::from_process(
+                WorkerProcess::Forked {
+                    pid,
+                    server: Rc::clone(server),
+                    status: None,
+                },
+                false,
+            )
+        };
+        let restarted = fork(&first, "exit");
+        write_private_file(&exits.join(restarted.child.id().to_string()), b"restart");
+        let busy = fork(&first, "sleep");
+        let busy_pid = busy.child.id();
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut pools = Pools::from([(key.clone(), vec![restarted, busy])]);
+        let mut restarts = RestartStates::new();
+        let mut pending = PendingTelemetryCleanup::new();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut announced = false;
+        while pools[&key].len() > 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the restarted worker never exited"
+            );
+            announced |= reap(
+                &resolved,
+                &mut pools,
+                &mut restarts,
+                &mut pending,
+                Some(&first),
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(announced);
+
+        let old = Rc::downgrade(&first);
+        let mut retired = Vec::new();
+        let second = refresh_fork_server(&resolved, &running, Some(first), &mut retired).unwrap();
+        close_retired_forks(&mut retired);
+        assert_eq!(retired.len(), 1, "the old server stays open for its worker");
+        pools.get_mut(&key).unwrap().push(fork(&second, "sleep"));
+
+        // SAFETY: plain signal delivery to the worker this test forked.
+        unsafe { libc::kill(busy_pid as i32, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pools[&key]
+            .iter()
+            .any(|worker| worker.child.id() == busy_pid)
+        {
+            assert!(Instant::now() < deadline, "the old worker never exited");
+            assert!(!reap(
+                &resolved,
+                &mut pools,
+                &mut restarts,
+                &mut pending,
+                Some(&second)
+            ));
+            thread::sleep(Duration::from_millis(10));
+        }
+        close_retired_forks(&mut retired);
+
+        assert!(retired.is_empty());
+        assert!(
+            old.upgrade().is_none(),
+            "the old server was closed and dropped"
+        );
+        pools.clear();
+        second.borrow_mut().close(Duration::from_secs(5));
+        fs::remove_dir_all(state_directory).unwrap();
     }
 
     /// Laravel SIGKILLs a worker whose job outlives its timeout, which the
@@ -5115,6 +5322,65 @@ mod tests {
             let _ = worker.child.kill();
             let _ = worker.child.wait();
         }
+    }
+
+    #[test]
+    fn lease_service_is_on_unless_the_document_turns_it_off() {
+        let mut document = serde_json::json!({
+            "version": 2,
+            "cwd": "/app",
+            "php_binary": "/usr/bin/php",
+            "artisan": "/app/artisan",
+            "state_directory": "/tmp/queen-supervisor-test",
+            "poll_interval": 3,
+            "http_timeout": 5,
+            "shutdown_grace": 75,
+            "telemetry_ttl": 300,
+            "process_limit": 256,
+            "queen": {
+                "url": "http://127.0.0.1:6632",
+                "urls": ["http://127.0.0.1:6632"],
+                "bearer_token": null,
+                "headers": {}
+            },
+            "supervisors": {}
+        });
+
+        // Laravel emits the key only when false; earlier releases never did.
+        let absent: Config = serde_json::from_value(document.clone()).unwrap();
+        assert!(absent.lease_service);
+        document["lease_service"] = serde_json::json!(false);
+        let off: Config = serde_json::from_value(document.clone()).unwrap();
+        assert!(!off.lease_service);
+        document["lease_service"] = serde_json::json!(true);
+        let on: Config = serde_json::from_value(document.clone()).unwrap();
+        assert!(on.lease_service);
+        // A switch is a JSON boolean, as Laravel validates it.
+        document["lease_service"] = serde_json::json!("false");
+        assert!(serde_json::from_value::<Config>(document).is_err());
+    }
+
+    #[test]
+    fn lease_service_false_leaves_renewal_to_one_helper_per_worker() {
+        let mut renewing = options("auto");
+        renewing.lease_renewal = true;
+        let mut resolved = config(renewing);
+        assert!(serves_lease_renewal(&resolved, true));
+        assert!(!serves_lease_renewal(&resolved, false), "Linux only");
+
+        resolved.lease_service = false;
+        assert!(!serves_lease_renewal(&resolved, true));
+        let directory = temporary_directory("lease-service-off");
+        assert_eq!(start_lease_service(&resolved, &directory), None);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 0, "no socket");
+        fs::remove_dir_all(&directory).unwrap();
+
+        // Without a pool that renews leases there is nothing to serve.
+        resolved.lease_service = true;
+        for options in resolved.supervisors.values_mut() {
+            options.lease_renewal = false;
+        }
+        assert!(!serves_lease_renewal(&resolved, true));
     }
 
     #[test]
