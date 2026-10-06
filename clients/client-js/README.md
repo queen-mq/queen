@@ -796,6 +796,11 @@ const msgs = await queen.queue('q').batch(200).partitions(50).pop()  // multi-pa
 const { messages, autopilot } = await queen.queue('q').popResult()   // + what the broker chose
 ```
 
+A pop long-polls, waiting up to `timeoutMillis` (30 s) for a message, unless you call
+`.wait(false)`, and its messages always come back leased: the ack is yours. `.autoAck()` belongs
+to `consume()`, where it is the ack the client sends after your handler; the broker's at-most-once
+auto-ack is not exposed to clients, so it has no effect on a pop.
+
 ### Consume
 
 ```javascript
@@ -949,6 +954,17 @@ await queen.close()  // Flush buffers and close connections
 (the default) a knob you never set is not defaulted at all, it is delegated to
 the broker. These values are what comes back with `.autopilot(false)` or
 `QUEEN_SDK_POP_AUTOPILOT=off`.
+
+### Pop Defaults
+
+```javascript
+{
+  batch: 1,              // autopilot OFF only, as for consume
+  wait: true,            // long-polls; .wait(false) returns at once
+  timeoutMillis: 30000,  // the long-poll limit
+  autoAck: false         // never sent: a pop is always leased
+}
+```
 
 ---
 

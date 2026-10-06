@@ -61,6 +61,23 @@ after each pop that reached no broker instead of polling in a tight loop. `HighL
 `lastPopError()`, and its `ack()` and `nack()` take an optional error. The help of `--batch` and
 `--conflation` now says what they do.
 
+**JavaScript client: the pop defaults say what `pop()` does.** `POP_DEFAULTS` and the README said
+a pop returns at once and that `autoAck(true)` commits it at delivery. Neither was ever true, and
+neither is meant to be: a pop long-polls for `timeoutMillis` unless `.wait(false)`, and its
+messages always come back leased, because `autoAck()` is the ack `consume()` sends after the
+handler and the broker's at-most-once auto-ack is not exposed to clients. `POP_DEFAULTS.wait` is
+now `true`, the README and the builder's comments say so, and tests pin both. No behaviour
+changes.
+
+**JavaScript client: `admin.moveMessageToDLQ()` and `admin.clearQueue()` are deprecated and
+throw.** They sent `POST /api/v1/messages/:partitionId/:transactionId/dlq` and
+`DELETE /api/v1/queues/:name/clear`, routes the 2.x broker does not have, so every call failed
+with a 404 `no_such_route` and the message `not found`. Both now reject before any request and
+name the way that works. For a dead letter, ack the message with the `dlq` status,
+`queen.ack(message, 'dlq', { group })`, while its consumer group holds the lease. To skip what is
+queued, seek each consumer group to the end, `queen.admin.seekConsumerGroup(group, queue,
+{ toEnd: true })`; a pop without a group reads as the group `__QUEUE_MODE__`.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

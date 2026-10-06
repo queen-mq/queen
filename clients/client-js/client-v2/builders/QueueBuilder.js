@@ -45,8 +45,11 @@ export class QueueBuilder {
   #batch = null
   #limit = CONSUME_DEFAULTS.limit
   #idleMillis = CONSUME_DEFAULTS.idleMillis
-  #autoAck = CONSUME_DEFAULTS.autoAck
-  #wait = CONSUME_DEFAULTS.wait
+  // autoAck and wait hold the USER's value, and null means the setter was never
+  // called: consume() applies CONSUME_DEFAULTS and pop() POP_DEFAULTS at
+  // emission time. autoAck is consume()'s alone; pop() never sends it.
+  #autoAck = null
+  #wait = null
   #timeoutMillis = CONSUME_DEFAULTS.timeoutMillis
   #renewLease = CONSUME_DEFAULTS.renewLease
   #renewLeaseIntervalMillis = CONSUME_DEFAULTS.renewLeaseIntervalMillis
@@ -301,6 +304,12 @@ export class QueueBuilder {
     return this
   }
 
+  /**
+   * consume(): ack each message after the handler returns (default true; the
+   * client acks, nothing is sent with the pop). No effect on pop(), whose
+   * messages always come back leased: the broker's at-most-once autoAck is not
+   * exposed to clients, by design.
+   */
   autoAck(enabled) {
     this.#autoAck = enabled
     return this
@@ -372,8 +381,8 @@ export class QueueBuilder {
       batch: this.#batch,
       limit: this.#limit,
       idleMillis: this.#idleMillis,
-      autoAck: this.#autoAck,
-      wait: this.#wait,
+      autoAck: this.#autoAck ?? CONSUME_DEFAULTS.autoAck,
+      wait: this.#wait ?? CONSUME_DEFAULTS.wait,
       timeoutMillis: this.#timeoutMillis,
       renewLease: this.#renewLease,
       renewLeaseIntervalMillis: this.#renewLeaseIntervalMillis,
@@ -397,6 +406,10 @@ export class QueueBuilder {
   // Pop Methods
   // ===========================
 
+  /**
+   * Long-poll: wait up to timeoutMillis for a message instead of returning
+   * empty at once. Default true for both pop() and consume().
+   */
   wait(enabled) {
     this.#wait = enabled
     return this
@@ -437,14 +450,16 @@ export class QueueBuilder {
   }
 
   async #popWithDecision() {
-    logger.log('QueueBuilder.pop', { queue: this.#queueName, partition: this.#partition, namespace: this.#namespace, task: this.#task, batch: this.#batch, wait: this.#wait, group: this.#group })
+    // For pop(), use POP defaults (not CONSUME defaults) for what the caller
+    // did not set. autoAck() is consume()'s ack after the handler: the
+    // broker's at-most-once autoAck is not exposed to clients, by design, so
+    // a pop never sends it and always comes back leased.
+    const effectiveWait = this.#wait ?? POP_DEFAULTS.wait
+
+    logger.log('QueueBuilder.pop', { queue: this.#queueName, partition: this.#partition, namespace: this.#namespace, task: this.#task, batch: this.#batch, wait: effectiveWait, group: this.#group })
     
     try {
       const path = this.#buildPopPath()
-      
-      // For pop(), use POP defaults (not CONSUME defaults)
-      // Override autoAck to false unless explicitly set
-      const effectiveAutoAck = this.#autoAck !== CONSUME_DEFAULTS.autoAck ? this.#autoAck : POP_DEFAULTS.autoAck
       
       // Batch, partitions and with them the autopilot flag. The RULE for which
       // of the three travel lives in one place (utils/autopilot.js) because
@@ -458,17 +473,15 @@ export class QueueBuilder {
         autopilot: this.#autopilotEnabled()
       })
 
-      // Build params with correct autoAck for pop
       const params = new URLSearchParams()
       if (sizing.autopilot) params.append('autopilot', 'true')
       if (sizing.batch !== null) params.append('batch', sizing.batch)
-      params.append('wait', this.#wait.toString())
+      params.append('wait', effectiveWait.toString())
       params.append('timeout', this.#timeoutMillis.toString())
 
       if (this.#group) params.append('consumerGroup', this.#group)
       if (this.#namespace) params.append('namespace', this.#namespace)
       if (this.#task) params.append('task', this.#task)
-      if (effectiveAutoAck) params.append('autoAck', 'true')
       if (this.#subscriptionMode) params.append('subscriptionMode', this.#subscriptionMode)
       if (this.#subscriptionFrom) params.append('subscriptionFrom', this.#subscriptionFrom)
       if (sizing.partitions !== null) params.append('partitions', sizing.partitions)
@@ -483,7 +496,7 @@ export class QueueBuilder {
 
       // wait=true is a long-poll: on 429 it should back off and keep waiting
       // rather than give up after a handful of tries (retryKind: 'pop').
-      const result = await this.#httpClient.get(`${path}?${params}`, this.#timeoutMillis + 5000, affinityKey, this.#wait ? 'pop' : null)
+      const result = await this.#httpClient.get(`${path}?${params}`, this.#timeoutMillis + 5000, affinityKey, effectiveWait ? 'pop' : null)
 
       // Degrade-loudly (PLAN_CONFLATION §4), BEFORE the empty-response return:
       // an old broker's empty pop is a bodiless 204 (result === null), and that

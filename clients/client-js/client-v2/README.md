@@ -1915,7 +1915,7 @@ await queen.close()
 ```javascript
 {
   batch: 1,
-  wait: false,                        // No long polling
+  wait: true,                         // Long polling; .wait(false) returns at once
   autoAck: false                      // Manual ack required
 }
 ```

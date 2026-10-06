@@ -81,9 +81,9 @@ export const CONSUME_DEFAULTS = {
 // As in CONSUME_DEFAULTS, batch is the autopilot-OFF default.
 export const POP_DEFAULTS = {
   batch: 1,                            // One message (autopilot off only)
-  wait: false,                         // No long polling (immediate return)
+  wait: true,                          // Long polling, as every pop has done; .wait(false) returns at once
   timeoutMillis: 30000,                // 30 seconds if wait=true
-  autoAck: false                       // Server-side auto-ack (false = manual ack required)
+  autoAck: false                       // Never sent: the broker's at-most-once autoAck is not exposed to clients
 }
 
 export const BUFFER_DEFAULTS = {

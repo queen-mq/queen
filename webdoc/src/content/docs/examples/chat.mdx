@@ -17,6 +17,7 @@ verifiedBy:
   - examples/apps/php/chat.php
   - examples/apps/cpp/chat.cpp
   - examples/apps/http/chat.sh
+# sourceOfTruth re-read 2026-10-06 (JS client fixes): QueueBuilder.js keeps pop()'s behaviour (it long-polls, never sends autoAck) and its defaults and comments now say so; consume() does not change. This page uses consume() and .partitions(1) only. Nothing this page states changes.
 ---
 
 Queen began as the broker of a hotel messaging product, so this is the application we know best.
