@@ -77,6 +77,13 @@ expired, was released by an ack or nack, or never existed, and `Renew()` reporte
 `Success: true`. It now reads `success` from the body and fills `Error` when it is false, as the
 JavaScript and Rust clients do.
 
+**Go client: a pop the broker refuses no longer loops.** The consume loop answered any error
+other than a network error, a 403 or a 429 by popping again at once: a token the broker refused
+(401) brought 14,546 pops in one second, and a conflating consumer without a group 2,937 pops in
+half a second, with nothing shown unless logging was on. A 4xx now stops the worker and comes back
+out of `Execute`, as a 403 does; a 5xx waits a second before the next pop, as a network error
+does.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

@@ -243,12 +243,30 @@ func (cm *ConsumerManager) worker(
 				return err
 			}
 
-			// Other errors - log and continue
+			// Any other 4xx (a bad request, an unauthorized token, an unknown
+			// route) is refused the same way next time: stop this worker and
+			// surface it, as for a 403, instead of popping again at once.
+			if httpErr, ok := err.(*HTTPError); ok && httpErr.StatusCode >= 400 && httpErr.StatusCode < 500 {
+				logError("ConsumerManager.worker", map[string]interface{}{
+					"workerId": workerID,
+					"status":   httpErr.StatusCode,
+					"error":    err.Error(),
+				})
+				return err
+			}
+
+			// Other errors (a 5xx) may pass: wait before the next pop, as
+			// after a network error, never in a tight loop.
 			logError("ConsumerManager.worker", map[string]interface{}{
 				"workerId": workerID,
 				"error":    err.Error(),
 			})
-			continue
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+				continue
+			}
 		}
 
 		// Conflation echo check, BEFORE anything is parsed or handled
