@@ -1,0 +1,53 @@
+---
+params: []
+description: "Verified snippet extracted from examples/apps/laravel/config/queue.php."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/apps/laravel/config/queue.php by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```php title="examples/apps/laravel/config/queue.php"
+// The connection most examples use: one job per pop. An idle worker
+// long-polls for a second (block_for) instead of sleeping, so it takes
+// the next job as soon as the broker has one.
+'queen' => [
+    'driver' => 'queen',
+    'retry_after' => 30,
+    'block_for' => 1,
+],
+
+// prefetch 'auto': each pop asks for about 250 ms of work, 1 to 16
+// jobs. The jobs of a batch wait, leased, while the ones before them
+// run, so a prefetch above 1 needs lease renewal.
+'queen-auto' => [
+    'driver' => 'queen',
+    'retry_after' => 30,
+    'block_for' => 1,
+    'prefetch' => 'auto',
+    'lease_renewal' => true,
+],
+
+// A lease of 6 seconds that nothing renews.
+'queen-short-lease' => [
+    'driver' => 'queen',
+    'retry_after' => 6,
+    'block_for' => 1,
+],
+
+// The same lease, renewed every second while the job runs. The
+// connection refuses a timing that may not fit in the lease: the
+// interval, two request budgets, one second, the kill grace and the
+// safety margin must add up to less than retry_after (1+1+1+1+0+1 = 5).
+'queen-renewed-lease' => [
+    'driver' => 'queen',
+    'retry_after' => 6,
+    'block_for' => 1,
+    'lease_renewal' => true,
+    'lease_renewal_interval' => 1,
+    'lease_renewal_timeout' => 1,
+    'lease_renewal_kill_grace' => 0,
+    'lease_renewal_safety_margin' => 1,
+],
+```

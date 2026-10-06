@@ -1,0 +1,14 @@
+# Installed by `composer install` (examples/apps/run.sh runs it), and resolved
+# again on each fresh install, like the other example apps' dependency trees.
+/vendor/
+composer.lock
+/bootstrap/cache/*.php
+# What the examples write while they run: job records, worker output, the
+# supervisor's private state directory and Laravel's file cache.
+/storage/examples/*
+!/storage/examples/.gitignore
+/storage/framework/cache/*
+!/storage/framework/cache/.gitignore
+/storage/logs/*
+!/storage/logs/.gitignore
+/storage/queen-supervisor/

@@ -1,0 +1,142 @@
+---
+title: A job longer than its lease
+description: "One 8-second Laravel job on a 6-second lease, two workers. Without lease renewal the other worker runs it again, every ACK is refused and the job ends in the dead-letter queue unfinished. With lease renewal it runs once."
+type: example
+tier: use
+sidebar:
+  order: 5
+sourceOfTruth:
+  - examples/apps/laravel/app/Console/Commands/Examples/LeaseExample.php
+  - examples/apps/laravel/app/Jobs/BuildReport.php
+  - examples/apps/laravel/config/queue.php
+  - examples/apps/laravel/app/Providers/AppServiceProvider.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Queue/QueenJob.php
+  - clients/client-php/src/Laravel/Queue/QueenConnector.php
+  - clients/client-php/src/Laravel/Queue/LeaseRenewerFactory.php
+  - clients/client-php/src/Laravel/Queue/ProcessLeaseRenewer.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+verifiedBy:
+  - examples/apps/laravel/app/Console/Commands/Examples/LeaseExample.php
+---
+
+Without lease renewal, a job that runs longer than `retry_after` goes to a second worker while the
+first one still runs it. Here every run outlives its lease, so no ACK is accepted: the job runs
+until Laravel's tries are spent and ends in the dead-letter queue, unfinished. With lease renewal
+the same job runs once.
+
+## Run it
+
+```bash
+php artisan example:lease   # in examples/apps/laravel
+```
+
+What it printed against a 2.0.1 node ([setup](/examples/laravel/#run-them)):
+
+```text
+broker http://localhost:6632
+
+a) lease of 6 s, not renewed, a job of 8 s, --tries=2
+    0.1 s  w1  started attempt 1
+    6.1 s  w2  started attempt 2
+    8.1 s  w1  ended, ACK refused: invalid or expired lease
+   12.2 s  w1  failed: BuildReport has been attempted too many times.
+   14.2 s  w2  ended, ACK refused: invalid or expired lease
+  ok: the job ran twice
+  ok: the second run was on the other worker
+  ok: the second run began when the first lease expired, 6.0 s in
+  ok: both ACKs were refused: each run outlived its lease
+  ok: the third delivery failed the job without running it
+  ok: the job is in the dead-letter queue, never completed
+
+b) the same lease, renewed every second, the same job
+    0.2 s  w2  started attempt 1
+    8.2 s  w2  ended, ACK accepted
+  ok: the job ran once
+  ok: no ACK was refused
+  ok: its ACK was accepted
+  ok: nothing is left in the queue
+
+PASS: 10 checks
+```
+
+<Figure id="examples/laravel-lease" />
+
+- **Two runs at once.** From 6.1 s to 8.1 s both workers ran the job. Anything the job did, such
+  as an email or a charge, happened twice.
+- **No run counted.** Both runs did all their work, and the broker refused both ACKs.
+- **The end.** The third delivery was past `--tries=2`, so Laravel failed it without running it,
+  and the driver filed it in the dead-letter queue.
+
+## The program
+
+The job runs for 8 seconds and records each start:
+
+<Render file="snippets/app-laravel-lease-job" />
+
+The command runs one job per phase on two workers and checks what happened to it. The ACK
+outcomes come from Laravel's queue events, which the application records in
+`app/Providers/AppServiceProvider.php`:
+
+<Render file="snippets/app-laravel-lease" />
+
+Phase a uses `queen-short-lease`, phase b `queen-renewed-lease`, both in
+[config/queue.php](/examples/laravel/#what-the-application-holds).
+
+## How it works
+
+### The lease and the ACK
+
+- **The pop takes a lease.** It lasts `retry_after` seconds from the pop. Until it ends, no other
+  worker of the consumer group receives the job ([the lease](/guides/laravel/concepts/#the-lease)).
+- **An expired lease frees the job.** The broker delivers it again to the next pop, with a
+  delivery count one higher, which Laravel's `attempts()` reads.
+- **The ACK carries the lease.** The broker refuses an ACK under a lease that has expired. The
+  driver throws `Unable to acknowledge job: invalid or expired lease`, Laravel reports it, and the
+  worker goes on. The job is already deleted on the worker's side, so it is not released again.
+
+### What renewal changes
+
+With `lease_renewal`, each `queue:work` starts a small PHP helper process that extends the lease
+every `lease_renewal_interval` while the job runs. If a renewal cannot finish in time, the helper
+stops the worker before the lease ends, so two runs never overlap
+([lease renewal and fencing](/guides/laravel/concepts/#lease-renewal-and-fencing)).
+
+The connection refuses a renewal timing that may not fit in the lease:
+
+| Term | Phase b |
+| --- | --- |
+| `lease_renewal_interval` | 1 s |
+| two request budgets, `lease_renewal_timeout` each | 2 s |
+| one second for a retry | 1 s |
+| `lease_renewal_kill_grace` | 0 s |
+| `lease_renewal_safety_margin` | 1 s |
+| the sum, which must be below `retry_after` (6 s) | 5 s |
+
+Every term has a minimum, and the minimums add up to 5 s, so no timing passes with a
+`retry_after` of 5 s. That is why both phases use 6 s.
+
+### What the checks at start allow
+
+- **`queen:supervise`** refuses a pool whose `timeout` is not shorter than `retry_after`, with
+  renewal or without. With renewal, a job that runs longer declares a longer `$timeout` in its
+  class.
+- **The connection** refuses to run a job whose class sets a `$timeout` that is not shorter than
+  `retry_after`, while renewal is off.
+- **A plain `queue:work`** does not check its `--timeout`. Both phases run with `--timeout=20` and
+  a job class without `$timeout`, so phase a is the setup the two rules exist to stop
+  ([refused at start](/guides/laravel/configuration/#refused-at-start)).
+
+## Limits
+
+- **Renewal is not exactly once.** A worker that crashes mid-job still leaves the job to run again
+  after `retry_after` ([at-least-once delivery](/guides/laravel/concepts/#at-least-once-delivery)).
+- **Laravel's timeout still applies.** Laravel stops a job that runs longer than the worker's
+  `--timeout`, or than its own `$timeout`, renewal or not.
+- **Renewal costs a helper process per worker.** Under the Rust supervisor on Linux the master
+  renews the leases instead ([lease renewal in the master](/guides/laravel/supervisors/#lease-renewal-in-the-master)).
+
+## Next
+
+[Lease renewal](/guides/laravel/configuration/#lease-renewal) lists the keys, and the
+[card charger](/examples/exactly-once/) shows how to make a repeated run harmless.

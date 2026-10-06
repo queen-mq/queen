@@ -86,6 +86,16 @@ const SOURCES = [
     suite: "Client tutorials",
     command: "examples/tutorials/run.sh",
   },
+  // The Laravel application under examples/apps: Artisan commands that start
+  // real workers and a supervisor. Listed before examples/apps, which would
+  // otherwise claim its files: a file belongs to the first source that finds
+  // it, so these snippets name the command that runs them.
+  {
+    dir: "examples/apps/laravel",
+    lang: "php",
+    suite: "Laravel examples",
+    command: "examples/apps/run.sh laravel",
+  },
   // The complete applications behind the Full examples section: whole programs
   // that assert the property they exist to demonstrate.
   {
@@ -123,10 +133,12 @@ const EXT_LANG = {
 function walk(abs, out = []) {
   for (const name of readdirSync(abs)) {
     // Dependency trees, never sources: node_modules for JS, vendor for PHP
-    // (the tutorials symlink it), __pycache__ for Python.
+    // (the tutorials symlink it), __pycache__ for Python. `storage` is what the
+    // Laravel examples write while they run: job records and worker logs.
     if (
       name === "node_modules" ||
       name === "vendor" ||
+      name === "storage" ||
       name === "__pycache__" ||
       name.startsWith(".")
     ) {
@@ -177,6 +189,8 @@ function dedent(lines) {
 function main() {
   const check = isCheck();
   const found = new Map();
+  // Files already read by an earlier, narrower source.
+  const claimed = new Set();
 
   for (const src of SOURCES) {
     let files;
@@ -187,6 +201,8 @@ function main() {
     }
     for (const abs of files) {
       const rel = relative(REPO, abs);
+      if (claimed.has(rel)) continue;
+      claimed.add(rel);
       const ext = abs.slice(abs.lastIndexOf("."));
       const lang = EXT_LANG[ext] ?? src.lang;
       let text;

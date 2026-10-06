@@ -1,0 +1,105 @@
+---
+title: Laravel examples
+description: "Four Artisan commands in one small Laravel 12 application. Each starts real workers or a supervisor, prints what they did and checks it: per-customer ordering, how prefetch fills a batch, what prefork changes, and a job longer than its lease."
+type: overview
+tier: use
+sidebar:
+  order: 8
+sourceOfTruth:
+  - examples/apps/run.sh
+  - examples/apps/laravel/composer.json
+  - examples/apps/laravel/config/queue.php
+  - examples/apps/laravel/config/queen.php
+  - examples/apps/laravel/app/Examples/ExampleCommand.php
+  - examples/apps/laravel/app/Examples/Journal.php
+  - examples/apps/laravel/app/Providers/AppServiceProvider.php
+verifiedBy:
+  - examples/apps/run.sh
+---
+
+Four programs that show what the Queen queue connection does inside a Laravel worker. Each one is
+an Artisan command that starts real `php artisan queue:work` workers, or `php artisan
+queen:supervise`, prints what they did, and ends with `PASS` or `FAIL`.
+
+<CardGrid>
+  <LinkCard
+    href="/examples/laravel/ordering/"
+    title="One customer at a time"
+    description="Jobs that name their partition run in dispatch order, one at a time per customer, and in parallel across customers."
+  />
+  <LinkCard
+    href="/examples/laravel/prefetch/"
+    title="How prefetch fills a batch"
+    description="One job per pop with prefetch 1. With 'auto', a batch that doubles on a backlog of short jobs and stays at one for long jobs."
+  />
+  <LinkCard
+    href="/examples/laravel/prefork/"
+    title="What prefork changes"
+    description="The process tree of queen:supervise, the memory of a forked worker, a new fork server at queue:restart, and a clean stop."
+  />
+  <LinkCard
+    href="/examples/laravel/lease/"
+    title="A job longer than its lease"
+    description="Without lease renewal the job runs again on the other worker and never completes. With renewal it runs once."
+  />
+</CardGrid>
+
+## Run them
+
+You need Docker for the broker, PHP 8.3 or later with the `pcntl` and `posix` extensions, and
+Composer.
+
+```bash
+docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+git clone https://github.com/queen-mq/queen
+cd queen/examples/apps/laravel
+composer install
+php artisan example:ordering   # or example:prefetch, example:prefork, example:lease
+```
+
+- **All four at once:** `examples/apps/run.sh laravel`, from the root of the clone. It installs
+  the application's dependencies when they are missing and reinstalls the PHP client from the
+  clone, so the examples run the client of your checkout.
+- **Another broker:** every command reads `QUEEN_URL` (default `http://localhost:6632`).
+- **No database, no Redis:** the application uses Laravel's file cache and no failed-jobs table.
+
+We ran them on an Apple-silicon laptop with PHP 8.4.25, Laravel 12.69.3 and PHP client 2.3.0 from
+the repository, against a 2.0.1 node in Docker (the amd64 image, emulated). `run.sh laravel` ran
+the four in about 40 seconds: 3 for ordering, 10 for prefetch, 4 for prefork and 24 for lease
+(2026-10-06). We also ran them on Linux, with PHP 8.3.35 in Docker, where `example:prefork` also
+measures each worker's private memory.
+
+## What the application holds
+
+| File | What it holds |
+| --- | --- |
+| `config/queue.php` | the four Queen connections the examples use |
+| `config/queen.php` | the two supervisor pools of `example:prefork` |
+| `app/Jobs/` | one job class per example |
+| `app/Console/Commands/Examples/` | the four programs |
+| `app/Examples/` | what they share: workers, job records, checks |
+
+The connections differ only in the keys an example needs. Every Queen connection takes the rest
+from `config/queen.php`, and that file takes what it does not set from the package.
+
+<Render file="snippets/app-laravel-connections" />
+
+## What they have in common
+
+- **Real processes.** Each worker is its own PHP process. The jobs write one JSON line per event
+  to `storage/examples/<queue>.jsonl`, the one place every process can write to, and the
+  program reads that file to check what happened.
+- **Fresh queues.** Each run uses queue names no earlier run used, so two runs never see each
+  other's jobs.
+- **Waits with a deadline.** A program waits for a condition, such as "every job has run", and
+  fails after a deadline. No step waits for a fixed time.
+- **Checks and an exit code.** A run ends with `PASS: N checks` and exit code 0, or with `FAIL`,
+  the reason and the output of every worker, and a non-zero exit code.
+- **Clean up after a pass.** A passing run deletes its queues and its files. A failing run keeps
+  them, for you to read.
+
+## Next
+
+The [Laravel guide](/guides/laravel/) sets up the connection in your own application, and
+[how Queen runs Laravel jobs](/guides/laravel/concepts/) explains each mechanism these programs
+show.

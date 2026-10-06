@@ -1,0 +1,102 @@
+---
+title: One customer at a time
+description: "A Laravel job that names its partition with QueenPartitionable. Three customers' jobs, dispatched interleaved to four workers, run in dispatch order and one at a time per customer, while different customers run in parallel."
+type: example
+tier: use
+sidebar:
+  order: 2
+sourceOfTruth:
+  - examples/apps/laravel/app/Console/Commands/Examples/OrderingExample.php
+  - examples/apps/laravel/app/Jobs/RebuildCustomer.php
+  - clients/client-php/src/Laravel/Contracts/QueenPartitionable.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+verifiedBy:
+  - examples/apps/laravel/app/Console/Commands/Examples/OrderingExample.php
+---
+
+A job that implements `QueenPartitionable` waits until the job before it of the same customer has
+ended, whichever worker takes it. Jobs of different customers still run at the same time. The
+program dispatches 5 jobs for each of 3 customers, runs them on 4 workers, and checks both.
+
+## Run it
+
+```bash
+php artisan example:ordering   # in examples/apps/laravel
+```
+
+What it printed against a 2.0.1 node ([setup](/examples/laravel/#run-them)):
+
+```text
+broker http://localhost:6632
+
+dispatched 15 jobs, then started 4 workers (php artisan queue:work)
+
+  customer  run order   on workers       from    to
+  acme      1 2 3 4 5   w1 w1 w4 w2 w1   0.0 s   1.6 s
+  globex    1 2 3 4 5   w2 w4 w2 w1 w3   0.0 s   1.5 s
+  initech   1 2 3 4 5   w3 w3 w3 w4 w2   0.0 s   1.6 s
+
+  at most 3 jobs ran at the same time, on 4 workers
+
+checking
+  ok: acme's jobs ran in dispatch order
+  ok: acme's jobs never ran at the same time
+  ok: globex's jobs ran in dispatch order
+  ok: globex's jobs never ran at the same time
+  ok: initech's jobs ran in dispatch order
+  ok: initech's jobs never ran at the same time
+  ok: jobs of different customers ran in parallel
+  ok: at most 3 jobs at once, one per customer, on 4 workers
+
+PASS: 8 checks
+```
+
+- **The order held, the worker changed.** acme's five jobs ran on w1, w1, w4, w2 and w1. Order
+  does not come from pinning a customer to a worker.
+- **Three at a time, not four.** Three customers are three partitions. While all three ran, the
+  fourth worker had nothing it was allowed to take.
+- **1.6 seconds for 15 jobs of 300 ms.** The three customers ran side by side; one after another
+  they would have taken 4.5 seconds.
+
+## The program
+
+The job names its partition:
+
+<Render file="snippets/app-laravel-ordering-job" />
+
+The command dispatches the jobs, starts the workers on the `queen` connection (one job per pop),
+and checks what the jobs recorded:
+
+<Render file="snippets/app-laravel-ordering" />
+
+## How it works
+
+1. **The partition.** `dispatch()` pushes each job to the partition its `queenPartition()` names,
+   `customer:acme` here, created by the first push. A job without the interface goes to one of
+   the queue's 64 stripes instead, by a hash of its UUID
+   ([queues and stripes](/guides/laravel/concepts/#queues-and-stripes)).
+2. **One worker per partition.** A pop takes jobs under a lease, and the broker leases a partition
+   to one worker of the consumer group at a time. Until that worker acknowledges acme 1, no other
+   worker receives acme 2 ([the lease](/guides/laravel/concepts/#the-lease)).
+3. **The next job goes to whoever asks.** The ACK releases the partition. The next pop of any
+   worker can take acme 2: here the idle workers long-poll (`block_for` 1), so one of them takes
+   it at once.
+
+The partition is a property of the storage, so the order also holds across a crash. A worker that
+dies holding acme 2 holds its lease until `retry_after` ends; acme 3 waits, and acme 2 runs again
+first.
+
+## Limits
+
+- **A slow job holds up its customer.** acme 3 waits for acme 2, however long acme 2 takes. Other
+  customers do not wait.
+- **Parallelism is capped by the number of customers with work.** Workers beyond that number stay
+  idle on the queue: here one of the four was always idle.
+- **Delivery is at least once.** A job that runs again after a crash runs before the next job of
+  its customer, so make jobs safe to repeat ([at-least-once
+  delivery](/guides/laravel/concepts/#at-least-once-delivery)).
+
+## Next
+
+[Order jobs per entity](/guides/laravel/#order-jobs-per-entity) adds the interface to your own
+job, and [partitions](/concepts/partitions/) explains what a partition costs the broker.

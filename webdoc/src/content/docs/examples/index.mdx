@@ -1,6 +1,6 @@
 ---
 title: Examples
-description: "Whole applications on Queen MQ: a chat backend, a webhook sender, a card charger, a booking saga, two rate limiters and a Kafka bridge, each one a program that checks what it claims."
+description: "Whole applications on Queen MQ: a chat backend, a webhook sender, a card charger, a booking saga, two rate limiters, a Kafka bridge and four Laravel programs, each one a program that checks what it claims."
 type: overview
 tier: use
 sidebar:
@@ -10,6 +10,8 @@ sourceOfTruth:
   - examples/cross-protocol/bridge.mjs
 verifiedBy:
   - examples/apps/run.sh
+# sourceOfTruth re-read 2026-10-06 (Laravel examples): run.sh gains the laravel language, which
+# installs examples/apps/laravel and runs its four Artisan commands; the Laravel group below.
 ---
 
 These are whole programs, the kind you would start a service from. Each one builds an
@@ -52,6 +54,34 @@ claim on the page holds on your machine.
   />
 </CardGrid>
 
+## Laravel
+
+Four Artisan commands in one Laravel application, each starting real workers to show what the
+queue connection does inside ([how to run them](/examples/laravel/)).
+
+<CardGrid>
+  <LinkCard
+    href="/examples/laravel/ordering/"
+    title="One customer at a time"
+    description="Jobs that name their partition run in dispatch order, one at a time per customer, in parallel across customers."
+  />
+  <LinkCard
+    href="/examples/laravel/prefetch/"
+    title="How prefetch fills a batch"
+    description="One job per pop with prefetch 1; with 'auto', a batch that doubles on a backlog of short jobs."
+  />
+  <LinkCard
+    href="/examples/laravel/prefork/"
+    title="What prefork changes"
+    description="The process tree, a forked worker's private memory, a new fork server at queue:restart."
+  />
+  <LinkCard
+    href="/examples/laravel/lease/"
+    title="A job longer than its lease"
+    description="Without renewal it runs again and never completes; with renewal it runs once."
+  />
+</CardGrid>
+
 ## Run one
 
 Start a node, save the JavaScript version of a program from its page, install the client, and run
@@ -70,7 +100,7 @@ seconds, five of the seven in under 10 (2026-10-02).
 
 From a clone of [the repository](https://github.com/queen-mq/queen), `examples/apps/run.sh` runs
 every program in every language it finds a toolchain for, against the node at `QUEEN_URL`, and
-`examples/apps/run.sh py go` runs only those two. The pages show the programs from the same files,
+`examples/apps/run.sh py go` runs only those two; `laravel` is the Laravel programs. The pages show the programs from the same files,
 so what you read is what ran. The Kafka bridge lives in `examples/cross-protocol/`, because it
 needs a node with the Kafka listener on.
 

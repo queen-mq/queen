@@ -52,8 +52,10 @@ const base = spec.x.log ? sx.at(sx.ticks[0]) : sx.at(0);
 
 const groupTop = (k: number) => top + k * (groupH + GROUP_GAP);
 
+// One series needs no legend: the axis label names it, and no row is left for
+// one above the bars (legendH is 0).
 let lx = x0;
-const legend = series.map((s) => {
+const legend = (n > 1 ? series : []).map((s) => {
   const item = { x: lx, label: s.label, tone: s.tone };
   lx += textWidth(s.label, 12) + 34;
   return item;
