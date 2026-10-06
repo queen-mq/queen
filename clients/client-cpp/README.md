@@ -597,7 +597,7 @@ Output:
 - `partitions(n)` - Pin the sweep width (unset = the broker sizes it)
 - `autopilot(enabled)` - Turn broker-side pop sizing off for this builder
 - `limit(count)` - Set message limit
-- `auto_ack(enabled)` - Enable/disable auto-ack
+- `auto_ack(enabled)` - Ack after the `consume()` handler returns. No effect on `pop()`, which never sends the broker's `autoAck`
 - `wait(enabled)` - Enable/disable long polling
 - `renew_lease(enabled, interval)` - Auto-renew leases
 

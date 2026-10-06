@@ -3652,6 +3652,12 @@ public:
         return *this;
     }
     
+    /**
+     * Ack after the consume() handler returns: each message with each(),
+     * otherwise the batch. Client side and consume() only: it has no effect on
+     * pop(), which never sends the broker's `autoAck` (a commit at delivery,
+     * at-most-once, that this SDK does not expose).
+     */
     QueueBuilder& auto_ack(bool enabled) {
         auto_ack_ = enabled;
         return *this;
