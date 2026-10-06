@@ -138,6 +138,29 @@ Over 20 minutes the forked workers copied about 7 MiB more of the shared
 pages between them, 0.1 MiB each. The containers grew by about 350 MiB on both
 engines, all of it page cache (`inactive_file`) for the result files.
 
+### Boot against fork
+
+Added on 2026-10-06, on the same droplet with nothing else running:
+`scripts/boot-fork-campaign.sh` ran `scripts/boot-fork.php` in the `:auto`
+application image (PHP 8.3.35, 8 CPUs), and `raw/boot-fork.jsonl` holds every
+line. A boot is a new PHP process that bootstraps the console kernel, 30 times
+with the command-line opcache off and 30 with it on; a fork is `pcntl_fork()`
+of a booted process until the child runs, 50 forks in each of 5 processes.
+
+| What a new worker pays | Median | Slowest |
+| --- | ---: | ---: |
+| Boot, opcache off: bootstrap / the whole process | 70.7 / 87.7 ms | 73.4 ms bootstrap |
+| Boot, opcache on: bootstrap / the whole process | 154.2 / 174.0 ms | 178.3 ms bootstrap |
+| Fork from a booted process | 0.48 ms | 1.15 ms |
+
+- With the opcache on, a process started on its own boots twice as slowly: it
+  creates its opcache memory and compiles every file into it, which only pays
+  off for the processes that share that memory, the forked ones.
+- The benchmark application is small: one job class and the package. An
+  application with more providers and code boots slower. A fork copies the
+  page tables of what was booted, so it grows with the application too; how
+  much was not measured.
+
 ## Harness
 
 This campaign added to `benchmark-queen/laravel-supervisors`:
