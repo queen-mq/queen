@@ -9,6 +9,8 @@ use Queen\Laravel\QueenServiceProvider;
 use Queen\Laravel\Commands\SuperviseCommand;
 use Queen\Laravel\Commands\SupervisorConfigCommand;
 use Queen\Laravel\Commands\SupervisorInstallCommand;
+use Queen\Laravel\Queue\LeaseRenewer;
+use Queen\Laravel\Queue\LeaseRenewerFactory;
 use Queen\Laravel\Queue\QueenQueue;
 use Queen\Laravel\Queue\SyncedFailedJobProvider;
 use Queen\Tests\Support\PlanHandler;
@@ -239,5 +241,27 @@ class LaravelServiceProviderTest extends TestCase
         $this->expectExceptionMessage('queen.failed_jobs_lock_ttl must be an integer of at least 1.');
 
         $this->app['queue.failer'];
+    }
+
+    public function testTheQueueConnectionBuildsItsLeaseRenewerThroughTheContainersFactory(): void
+    {
+        $this->app['config']->set('queue.connections.queen.lease_renewal', true);
+        $this->app['config']->set('queue.connections.queen.retry_after', 120);
+        $factory = new class extends LeaseRenewerFactory {
+            /** @var list<int> */
+            public array $leases = [];
+
+            public function make(array $clientConfig, int $leaseSeconds, array $timing, string $leaseName = 'retry_after'): LeaseRenewer
+            {
+                $this->leases[] = $leaseSeconds;
+
+                return parent::make($clientConfig, $leaseSeconds, $timing, $leaseName);
+            }
+        };
+        $this->app->instance(LeaseRenewerFactory::class, $factory);
+
+        $this->app->make(QueueManager::class)->connection('queen');
+
+        $this->assertSame([120], $factory->leases);
     }
 }

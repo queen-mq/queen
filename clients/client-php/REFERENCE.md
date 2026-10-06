@@ -42,6 +42,8 @@ this page.
 
 The `queen:consume` Artisan command is part of the Laravel integration
 (`src/Laravel/Commands/ConsumeCommand.php`); see the [Laravel guide](https://queenmq.com/guides/laravel/).
+It runs the [KafkaConsumer-style consumer](#the-kafkaconsumer-style-consumer) below and passes each
+message to a handler class: [consume Queen messages](https://queenmq.com/guides/laravel/consume/).
 
 ## Connect
 
@@ -485,9 +487,10 @@ while (!$consumer->isClosed()) {
 | `subscribe(): void` | Resolves the pop route and options. Call it first. |
 | `consume(int $timeoutMs = 1000): ?array` | One message, or `null`. |
 | `consumeBatch(int $timeoutMs = 1000, int $maxMessages = 10): array` | Up to `$maxMessages`, or `[]`. |
-| `ack(array $message, bool $success = true): array` | `Queen::ack()` with the consumer's group. |
-| `nack(array $message): array` | `ack($message, false)`. |
+| `ack(array $message, bool $success = true, ?string $error = null): array` | `Queen::ack()` with the consumer's group, and `$error` as the context's `error`. |
+| `nack(array $message, ?string $error = null): array` | `ack($message, false, $error)`. |
 | `renewLease(array\|string $messageOrLeaseId, ?int $seconds = null): array` | `Queen::renew()`. |
+| `lastPopError(): ?string` | The network failure the last pops returned as empty, or `null`. |
 | `isClosed(): bool` | Dispatches pending signals, then reports the state. |
 | `close(): void` | Marks the consumer closed. |
 
@@ -500,6 +503,9 @@ How it behaves:
   consumer closed, and they replace any handler you installed for those signals.
 - A timeout or a network failure returns `null` or `[]`. `ConflationUnsupportedException` and
   every other error propagate.
+- `lastPopError()` keeps the message of that network failure until a pop gets an answer, empty
+  or not. A timeout leaves it as it was. Read it to tell a broker you cannot reach from a quiet
+  queue.
 - `ack()` and `nack()` accept one message or a list of messages. The consumer never acks by
   itself.
 - Returned messages carry a `trace` closure.

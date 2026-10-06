@@ -26,6 +26,7 @@ use Illuminate\Queue\Events\WorkerStopping;
 use Queen\Laravel\Dashboard\ThroughputReader;
 use Queen\Laravel\Http\Middleware\AuthorizeDashboard;
 use Queen\Laravel\Http\Middleware\SecureDashboardResponse;
+use Queen\Laravel\Queue\LeaseRenewerFactory;
 use Queen\Laravel\Queue\QueenConnector;
 use Queen\Laravel\Queue\SyncedFailedJobProvider;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
@@ -123,42 +124,54 @@ class QueenServiceProvider extends ServiceProvider
                 return new QueenConnector(
                     $this->app['config']->get('queen', []),
                     $retryHandler,
+                    $this->app->make(LeaseRenewerFactory::class),
                 );
             });
         });
 
-        $this->app->singleton(Queen::class, function ($app) {
-            $config = $app['config']['queen'];
-            $retry429 = $config['retry_429'] ?? [];
-            if (is_array($retry429)) {
-                // Unset env vars land here as nulls; drop them so the
-                // per-request-kind defaults in Retry429Policy apply.
-                $retry429 = array_filter($retry429, fn ($value) => $value !== null);
-            }
-
-            $queenConfig = [
-                'bearerToken' => $config['bearer_token'],
-                'timeoutMillis' => $config['timeout'],
-                'retryAttempts' => $config['retry_attempts'],
-                'retryDelayMillis' => $config['retry_delay'] ?? 1000,
-                'loadBalancingStrategy' => $config['load_balancing_strategy'],
-                'enableFailover' => $config['enable_failover'] ?? true,
-                'affinityHashRing' => $config['affinity_hash_ring'] ?? 150,
-                'healthRetryAfterMillis' => $config['health_retry_after'] ?? 30000,
-                'headers' => $config['headers'] ?? [],
-                'retry429' => $retry429,
-            ];
-
-            if (!empty($config['urls'])) {
-                $queenConfig['urls'] = $config['urls'];
-            } else {
-                $queenConfig['url'] = $config['url'];
-            }
-
-            return new Queen($queenConfig);
-        });
+        $this->app->singleton(Queen::class, fn ($app) => new Queen(self::clientConfig($app['config']['queen'])));
 
         $this->app->alias(Queen::class, 'queen');
+
+        // queue:work (through QueenConnector) and queen:consume build their
+        // lease renewers here; a test swaps it for a renewer of its own.
+        $this->app->singleton(LeaseRenewerFactory::class);
+    }
+
+    /**
+     * The Queen client configuration that config/queen.php describes: the
+     * client the container holds, and the one a queen:consume lease renewer
+     * connects with.
+     */
+    public static function clientConfig(array $config): array
+    {
+        $retry429 = $config['retry_429'] ?? [];
+        if (is_array($retry429)) {
+            // Unset env vars land here as nulls; drop them so the
+            // per-request-kind defaults in Retry429Policy apply.
+            $retry429 = array_filter($retry429, fn ($value) => $value !== null);
+        }
+
+        $queenConfig = [
+            'bearerToken' => $config['bearer_token'],
+            'timeoutMillis' => $config['timeout'],
+            'retryAttempts' => $config['retry_attempts'],
+            'retryDelayMillis' => $config['retry_delay'] ?? 1000,
+            'loadBalancingStrategy' => $config['load_balancing_strategy'],
+            'enableFailover' => $config['enable_failover'] ?? true,
+            'affinityHashRing' => $config['affinity_hash_ring'] ?? 150,
+            'healthRetryAfterMillis' => $config['health_retry_after'] ?? 30000,
+            'headers' => $config['headers'] ?? [],
+            'retry429' => $retry429,
+        ];
+
+        if (!empty($config['urls'])) {
+            $queenConfig['urls'] = $config['urls'];
+        } else {
+            $queenConfig['url'] = $config['url'];
+        }
+
+        return $queenConfig;
     }
 
     private function registerDefaultQueueConnection(): void

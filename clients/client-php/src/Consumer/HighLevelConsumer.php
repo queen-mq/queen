@@ -47,6 +47,8 @@ class HighLevelConsumer
     private ?string $affinityKey = null;
     /** [requested, queue, group, namespace, task] — see ConflationGuard. */
     private array $conflationScope = [false, null, null, null, null];
+    /** The connection error the pops have swallowed since the last answer; see lastPopError(). */
+    private ?string $lastPopError = null;
 
     public function __construct(HttpClient $httpClient, Queen $queen, array $options)
     {
@@ -138,6 +140,7 @@ class HighLevelConsumer
             // Always a long-poll (wait=true above): a 429 backs off and keeps
             // waiting instead of exhausting the bounded push-like budget.
             $result = $this->httpClient->get("{$this->popPath}?{$queryString}", $clientTimeout, $this->affinityKey, Retry429Policy::KIND_POP);
+            $this->lastPopError = null;
 
             // Ahead of the empty-response shortcut: an old broker answers an
             // empty pop with a bodiless 204, which arrives here as null, and
@@ -175,6 +178,7 @@ class HighLevelConsumer
 
             // Network errors — return null, caller can retry
             if (str_contains($error->getMessage(), 'Connection refused') || str_contains($error->getMessage(), 'cURL error')) {
+                $this->lastPopError = $error->getMessage();
                 return null;
             }
 
@@ -212,6 +216,7 @@ class HighLevelConsumer
         try {
             $clientTimeout = $timeoutMs + 5000;
             $result = $this->httpClient->get("{$this->popPath}?{$queryString}", $clientTimeout, $this->affinityKey, Retry429Policy::KIND_POP);
+            $this->lastPopError = null;
 
             // See consume(): the check goes ahead of the empty shortcut so an
             // old broker's bodiless 204 cannot pass for a quiet queue.
@@ -237,6 +242,7 @@ class HighLevelConsumer
                 return [];
             }
             if (str_contains($error->getMessage(), 'Connection refused') || str_contains($error->getMessage(), 'cURL error')) {
+                $this->lastPopError = $error->getMessage();
                 return [];
             }
             throw $error;
@@ -248,8 +254,9 @@ class HighLevelConsumer
      *
      * @param array $message A single message or array of messages
      * @param bool $success Whether processing succeeded
+     * @param string|null $error Sent with each message; the broker keeps it on a dead letter
      */
-    public function ack(array $message, bool $success = true): array
+    public function ack(array $message, bool $success = true, ?string $error = null): array
     {
         $context = [];
         $group = $this->options['group'] ?? null;
@@ -259,6 +266,9 @@ class HighLevelConsumer
         if ($this->affinityKey !== null) {
             $context['affinityKey'] = $this->affinityKey;
         }
+        if ($error !== null) {
+            $context['error'] = $error;
+        }
 
         return $this->queen->ack($message, $success, $context);
     }
@@ -266,9 +276,9 @@ class HighLevelConsumer
     /**
      * Negative-acknowledge a message (mark as failed).
      */
-    public function nack(array $message): array
+    public function nack(array $message, ?string $error = null): array
     {
-        return $this->ack($message, false);
+        return $this->ack($message, false, $error);
     }
 
     /**
@@ -277,6 +287,18 @@ class HighLevelConsumer
     public function renewLease(array|string $messageOrLeaseId, ?int $seconds = null): array
     {
         return $this->queen->renew($messageOrLeaseId, $seconds);
+    }
+
+    /**
+     * The connection error that consume() or consumeBatch() swallowed on the
+     * last pops, or null. Both return null or [] for it, as for an empty pop,
+     * so this is how a caller tells a broker it cannot reach from a quiet
+     * queue. A pop that gets an answer, empty or not, clears it; a long-poll
+     * timeout leaves it as it was.
+     */
+    public function lastPopError(): ?string
+    {
+        return $this->lastPopError;
     }
 
     /**

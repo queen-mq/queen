@@ -231,4 +231,42 @@ class HighLevelConsumerTest extends TestCase
         $this->expectExceptionMessage('Unexpected error');
         $consumer->consume(100);
     }
+
+    public function testLastPopErrorKeepsAConnectionFailureUntilAPopAnswers(): void
+    {
+        $httpClient = $this->createStub(HttpClient::class);
+        $httpClient->method('get')->willReturnOnConsecutiveCalls(
+            $this->throwException(new \RuntimeException('cURL error 7: Failed to connect to queen: Connection refused')),
+            $this->throwException(new \RuntimeException('cURL error 28: Operation timed out after 35000 milliseconds')),
+            ['messages' => []],
+        );
+        $consumer = new HighLevelConsumer($httpClient, $this->createStub(Queen::class), ['queue' => 'test', 'group' => 'g1']);
+        $consumer->subscribe();
+
+        $this->assertNull($consumer->lastPopError());
+        $this->assertNull($consumer->consume(100));
+        $this->assertSame('cURL error 7: Failed to connect to queen: Connection refused', $consumer->lastPopError());
+        // A timeout proves nothing either way: the error stays.
+        $this->assertNull($consumer->consume(100));
+        $this->assertStringContainsString('Connection refused', (string) $consumer->lastPopError());
+        // An answer, even an empty one, clears it.
+        $this->assertNull($consumer->consume(100));
+        $this->assertNull($consumer->lastPopError());
+    }
+
+    public function testConsumeBatchRecordsAndClearsTheLastPopErrorToo(): void
+    {
+        $httpClient = $this->createStub(HttpClient::class);
+        $httpClient->method('get')->willReturnOnConsecutiveCalls(
+            $this->throwException(new \RuntimeException('cURL error 6: Could not resolve host: queen')),
+            ['messages' => [['transactionId' => 'tx-1', 'partitionId' => 'p1']]],
+        );
+        $consumer = new HighLevelConsumer($httpClient, $this->createStub(Queen::class), ['queue' => 'test', 'group' => 'g1']);
+        $consumer->subscribe();
+
+        $this->assertSame([], $consumer->consumeBatch(100, 10));
+        $this->assertSame('cURL error 6: Could not resolve host: queen', $consumer->lastPopError());
+        $this->assertCount(1, $consumer->consumeBatch(100, 10));
+        $this->assertNull($consumer->lastPopError());
+    }
 }
