@@ -49,6 +49,16 @@ method now throws `BadMethodCallException` before any request and names the way 
 the message with the `dlq` status, `$queen->ack($message, 'dlq', ['group' => $group])`, while its
 consumer group holds the lease.
 
+**PHP client: `renewLease()` in batch mode counts from the pop.** With `concurrency(N)`, `consume()`
+handles the batches of a poll round one after the other, but it started each batch's renewal
+interval when the batch reached its handler, so the check before that handler never found it due.
+The interval now runs from the pop answer, and a batch that waited behind other handlers longer
+than the interval is renewed before its own handler starts. The loop still cannot renew while a
+handler runs: PHP runs the handler on the loop's only thread, and the client has no timer that can
+interrupt it. A batch handled as soon as it arrives, and a single message in `each()` mode, get no
+renewal during their handler. The reference now says so, and names the ways out: a `leaseSeconds()`
+above the longest handler, or `$queen->renew($messages, $seconds)` from inside the handler.
+
 ## PHP client 2.1.0, supervisor 0.7.0 - 2026-10-05
 
 PHP client 2.1.0 pins supervisor 0.7.0: the Rust master reads `lease_service` from its

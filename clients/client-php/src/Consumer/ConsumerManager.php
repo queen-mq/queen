@@ -187,6 +187,11 @@ class ConsumerManager
 
             // Settle all — don't throw on individual failures
             $results = HttpClient::settleAll($promises);
+            // Every pop of this round has answered, so its lease runs from here
+            // at the latest. The results are handled one after the other: a
+            // batch that waits behind the handlers before it must count that
+            // wait toward its renewal interval.
+            $poppedAt = $this->nowMillis();
 
             if (function_exists('pcntl_signal_dispatch')) {
                 pcntl_signal_dispatch();
@@ -262,7 +267,7 @@ class ConsumerManager
 
                 $leaseRenewalTime = null;
                 if ($renewLease && $renewLeaseIntervalMillis !== null) {
-                    $leaseRenewalTime = $this->nowMillis() + $renewLeaseIntervalMillis;
+                    $leaseRenewalTime = $poppedAt + $renewLeaseIntervalMillis;
                 }
 
                 if ($each) {

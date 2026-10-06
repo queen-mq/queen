@@ -405,7 +405,7 @@ covers the batch.
 | `concurrency(int $count)` | `1` | Concurrent long-polls. At least 1. |
 | `limit(int $count)` | none | Stop after this many messages. |
 | `idleMillis(int $millis)` | none | Stop after this long without a message. |
-| `renewLease(bool $enabled, ?int $intervalMillis = null)` | off | Extend the lease while messages are handled. |
+| `renewLease(bool $enabled, ?int $intervalMillis = null)` | off | Extend the lease between handler calls. See below. |
 | `each()` | batch mode | Call the handler once per message. |
 
 `consume(Closure $handler)` returns a `ConsumeBuilder` with `onSuccess(Closure)`, `onError(Closure)`
@@ -428,10 +428,22 @@ How the loop behaves:
   batch and restores the previous handlers when `execute()` returns.
 - `concurrency(N)` with N above 1 sends N long-polls at once through Guzzle and handles their
   results one after the other. `limit()` then applies per poller as `ceil(limit / N)`.
-- `renewLease(true, $intervalMillis)` renews only when `$intervalMillis` is set. The check runs
-  before each message in `each()` mode, so it can renew between messages of a batch. In batch mode
-  it runs once before the handler, when the interval has not yet passed, so it never renews. A
-  renewal extends by the broker default of 60 s, and a renewal failure is ignored.
+- `renewLease(true, $intervalMillis)` renews only when `$intervalMillis` is set. The interval runs
+  from the pop answer. The loop checks it where it has control: before each message in `each()`
+  mode, and once before the handler in batch mode. A due check renews the leases of the batch with
+  the broker default of 60 s: each lease then ends 60 s after the renewal at the earliest, and a
+  renewal never shortens a lease. A renewal failure is ignored.
+
+The loop cannot renew while a handler runs. PHP runs the handler on the only thread of the loop,
+and the client has no timer or signal that can interrupt it. So:
+
+- In batch mode, the check is due only for a batch that waited behind the handlers of other
+  pollers (`concurrency(N)`). A batch that goes to the handler as soon as it arrives gets no
+  renewal during its handler.
+- In `each()` mode, a message gets no renewal during its own handler.
+
+For a handler that can run longer than the lease, set `leaseSeconds()` above the longest handler,
+or call `$queen->renew($messages, $seconds)` from inside the handler between parts of the work.
 
 ## The KafkaConsumer-style consumer
 
