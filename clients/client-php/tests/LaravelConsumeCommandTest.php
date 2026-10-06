@@ -95,6 +95,58 @@ final class LaravelConsumeCommandTest extends TestCase
     }
 
     // ===========================
+    // Ack and nack
+    // ===========================
+
+    public function testAHandlerThatThrowsIsNackedWithoutAutoAck(): void
+    {
+        $this->broker([[ConsumeBroker::message('tx-1')]]);
+
+        [$exit] = $this->consume(['--group' => 'ledger', '--limit' => 1], function (): void {
+            throw new \RuntimeException('handler failed');
+        });
+
+        $this->assertSame(0, $exit);
+        $this->assertCount(1, $this->broker->acks);
+        $this->assertSame('failed', $this->broker->acks[0]['status']);
+        $this->assertSame('handler failed', $this->broker->acks[0]['error']);
+        $this->assertSame('ledger', $this->broker->acks[0]['consumerGroup']);
+        $this->assertSame('lease-1', $this->broker->acks[0]['leaseId']);
+    }
+
+    public function testABatchWhoseHandlerThrowsIsNackedInOneRequest(): void
+    {
+        $this->broker([[ConsumeBroker::message('tx-1'), ConsumeBroker::message('tx-2')]]);
+
+        $this->consume(['--group' => 'ledger', '--batch' => 2, '--limit' => 2], function (): void {
+            throw new \RuntimeException('batch failed');
+        });
+
+        $this->assertCount(1, $this->broker->acks);
+        $this->assertSame(['failed', 'failed'], array_column($this->broker->acks[0]['acknowledgments'], 'status'));
+        $this->assertSame(['batch failed', 'batch failed'], array_column($this->broker->acks[0]['acknowledgments'], 'error'));
+    }
+
+    public function testWithoutAutoAckAHandlerThatReturnsLeavesTheAckToIt(): void
+    {
+        $this->broker([[ConsumeBroker::message('tx-1')]]);
+
+        $this->consume(['--group' => 'ledger', '--limit' => 1]);
+
+        $this->assertSame([], $this->broker->acks);
+    }
+
+    public function testAutoAckAcksAHandlerThatReturns(): void
+    {
+        $this->broker([[ConsumeBroker::message('tx-1')]]);
+
+        $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--limit' => 1]);
+
+        $this->assertCount(1, $this->broker->acks);
+        $this->assertSame('completed', $this->broker->acks[0]['status']);
+    }
+
+    // ===========================
     // Helpers
     // ===========================
 

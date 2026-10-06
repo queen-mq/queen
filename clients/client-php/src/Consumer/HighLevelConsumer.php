@@ -248,8 +248,9 @@ class HighLevelConsumer
      *
      * @param array $message A single message or array of messages
      * @param bool $success Whether processing succeeded
+     * @param string|null $error Sent with each message; the broker keeps it on a dead letter
      */
-    public function ack(array $message, bool $success = true): array
+    public function ack(array $message, bool $success = true, ?string $error = null): array
     {
         $context = [];
         $group = $this->options['group'] ?? null;
@@ -259,6 +260,9 @@ class HighLevelConsumer
         if ($this->affinityKey !== null) {
             $context['affinityKey'] = $this->affinityKey;
         }
+        if ($error !== null) {
+            $context['error'] = $error;
+        }
 
         return $this->queen->ack($message, $success, $context);
     }
@@ -266,9 +270,9 @@ class HighLevelConsumer
     /**
      * Negative-acknowledge a message (mark as failed).
      */
-    public function nack(array $message): array
+    public function nack(array $message, ?string $error = null): array
     {
-        return $this->ack($message, false);
+        return $this->ack($message, false, $error);
     }
 
     /**

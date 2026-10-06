@@ -487,8 +487,8 @@ while (!$consumer->isClosed()) {
 | `subscribe(): void` | Resolves the pop route and options. Call it first. |
 | `consume(int $timeoutMs = 1000): ?array` | One message, or `null`. |
 | `consumeBatch(int $timeoutMs = 1000, int $maxMessages = 10): array` | Up to `$maxMessages`, or `[]`. |
-| `ack(array $message, bool $success = true): array` | `Queen::ack()` with the consumer's group. |
-| `nack(array $message): array` | `ack($message, false)`. |
+| `ack(array $message, bool $success = true, ?string $error = null): array` | `Queen::ack()` with the consumer's group, and `$error` as the context's `error`. |
+| `nack(array $message, ?string $error = null): array` | `ack($message, false, $error)`. |
 | `renewLease(array\|string $messageOrLeaseId, ?int $seconds = null): array` | `Queen::renew()`. |
 | `isClosed(): bool` | Dispatches pending signals, then reports the state. |
 | `close(): void` | Marks the consumer closed. |

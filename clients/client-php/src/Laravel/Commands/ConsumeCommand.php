@@ -14,7 +14,7 @@ class ConsumeCommand extends Command
         {--batch= : Messages per pop, default 1. Above 1, handle() receives a list of messages}
         {--partitions= : Partitions to claim per pop. Omit and the broker sizes it; --partitions=1 pins the legacy single-partition claim}
         {--no-autopilot : Restore the pre-1.2 client-side defaults (batch 1, partitions 1) and send no autopilot parameter}
-        {--auto-ack : Enable auto-acknowledgment}
+        {--auto-ack : Ack each message (or batch) when handle() returns. A handler that throws is nacked either way}
         {--subscription-mode= : Subscription mode}
         {--subscription-from= : Subscription start point}
         {--conflation : Last-value delivery: process only the newest message per partition (needs --group, broker >= 1.1.0)}
@@ -123,9 +123,10 @@ class ConsumeCommand extends Command
                     }
                 } catch (\Throwable $e) {
                     $this->error("Error processing batch: {$e->getMessage()}");
-                    if ($autoAck) {
-                        $consumer->nack($messages);
-                    }
+                    // Nacked with or without --auto-ack: a failure spends a
+                    // retry, so a message that always fails reaches the
+                    // dead-letter queue instead of coming back forever.
+                    $consumer->nack($messages, $e->getMessage());
                 }
             } else {
                 $message = $consumer->consume($timeout);
@@ -141,9 +142,7 @@ class ConsumeCommand extends Command
                     }
                 } catch (\Throwable $e) {
                     $this->error("Error processing message: {$e->getMessage()}");
-                    if ($autoAck) {
-                        $consumer->nack($message);
-                    }
+                    $consumer->nack($message, $e->getMessage());
                 }
             }
 
