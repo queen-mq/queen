@@ -88,6 +88,11 @@ pub enum StopReason {
     Ended,
 }
 
+/// What `consume` and `consume_batch` answer, before any request, for a builder
+/// with [`QueueBuilder::commit_on_delivery`].
+const COMMIT_ON_DELIVERY_IN_CONSUME: &str =
+    "commit_on_delivery is a pop option; consume always leases its messages";
+
 struct Shared {
     processed: AtomicU64,
     acked: AtomicU64,
@@ -175,6 +180,9 @@ impl QueueBuilder {
         F: Fn(Vec<Message>, WorkerCtx) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = ()> + Send,
     {
+        if self.commit_on_delivery {
+            return Err(Error::Invalid(COMMIT_ON_DELIVERY_IN_CONSUME.into()));
+        }
         if self.queue.is_none() && self.namespace.is_none() && self.task.is_none() {
             return Err(Error::Invalid(
                 "consume needs a queue, or a namespace/task to discover one".into(),
@@ -262,10 +270,10 @@ where
             }
         }
 
-        // Never take a broker-side auto-ack here: consume settles messages
-        // itself, and a server-side ack at delivery would lose the batch on a
-        // handler crash.
-        let popped = match builder.pop_result().await {
+        // Always a leased pop: consume settles messages itself, and a commit
+        // at delivery would lose the batch on a handler crash. `run` refuses a
+        // builder with commit_on_delivery before it gets here.
+        let popped = match builder.pop_once(false).await {
             Ok(m) => m,
             Err(e) => {
                 if e.is_terminal_refusal() {

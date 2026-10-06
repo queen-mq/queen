@@ -658,7 +658,7 @@ async fn a_claimed_message_carries_its_lease_and_identity() {
 }
 
 #[tokio::test]
-async fn an_auto_ack_pop_takes_no_lease_and_commits_immediately() {
+async fn a_commit_on_delivery_pop_takes_no_lease_and_commits_immediately() {
     let q = broker!();
     let queue = unique("pop-autoack");
     create_queue(&q, &queue, short_lease(1)).await;
@@ -675,7 +675,8 @@ async fn an_auto_ack_pop_takes_no_lease_and_commits_immediately() {
             .group("g-auto")
             .wait(false)
             .subscription_mode(SubscriptionMode::All)
-            .pop_auto_ack()
+            .commit_on_delivery(true)
+            .pop()
             .await
             .unwrap();
         if !msgs.is_empty() {
@@ -684,7 +685,10 @@ async fn an_auto_ack_pop_takes_no_lease_and_commits_immediately() {
         sleep_ms(150).await;
     }
     assert_eq!(msgs.len(), 1);
-    assert!(!msgs[0].is_leased(), "autoAck must not take a lease");
+    assert!(
+        !msgs[0].is_leased(),
+        "a pop that commits on delivery must not take a lease"
+    );
 
     // The cursor already moved, so nothing redelivers once the (short) lease
     // window has passed.
@@ -697,7 +701,10 @@ async fn an_auto_ack_pop_takes_no_lease_and_commits_immediately() {
         .pop()
         .await
         .unwrap();
-    assert!(again.is_empty(), "autoAck message was redelivered");
+    assert!(
+        again.is_empty(),
+        "a message committed on delivery was redelivered"
+    );
 
     drop_queue(&q, &queue).await;
 }

@@ -1207,3 +1207,85 @@ async fn a_group_that_stores_conflation_off_keeps_the_consumer_running() {
 
     assert_eq!(summary.processed, 2);
 }
+
+// ===========================================================================
+// commit_on_delivery: the pop that commits as the broker hands messages out
+// ===========================================================================
+
+// On the wire a pop that commits on delivery is `autoAck=true`: the broker
+// moves the group's cursor past the messages as it hands them out, with no
+// lease and nothing to ack. Every other pop is leased and says nothing about
+// autoAck. `pop_auto_ack()` is the deprecated spelling and still sends it; the
+// consume loop's `auto_ack` never reaches a pop.
+#[tokio::test]
+#[allow(deprecated)]
+async fn a_pop_sends_auto_ack_only_when_it_commits_on_delivery() {
+    let broker = FakeBroker::start(vec![Reply::ok(r#"{"messages":[]}"#)]).await;
+    let q = client(&broker);
+    let base = || q.queue("orders").group("billing").wait(false);
+
+    base().commit_on_delivery(true).pop().await.unwrap();
+    base().commit_on_delivery(true).pop_result().await.unwrap();
+    base().pop_auto_ack().await.unwrap();
+    base().commit_on_delivery(false).pop().await.unwrap();
+    base().pop_result().await.unwrap();
+    base().auto_ack(true).pop().await.unwrap();
+
+    let sent: Vec<Option<String>> = broker
+        .hits()
+        .iter()
+        .map(|h| h.query("autoAck").map(str::to_string))
+        .collect();
+    let commit = Some("true".to_string());
+    assert_eq!(
+        sent,
+        vec![commit.clone(), commit.clone(), commit, None, None, None],
+        "autoAck per pop: commit_on_delivery(true).pop, commit_on_delivery(true).pop_result, \
+         pop_auto_ack, commit_on_delivery(false).pop, pop_result, auto_ack(true).pop"
+    );
+}
+
+// A consumer always leases its messages, so a builder that commits on delivery
+// is refused before a single request leaves.
+#[tokio::test]
+async fn consume_refuses_commit_on_delivery_before_any_request() {
+    let broker = FakeBroker::start(vec![Reply::ok(r#"{"messages":[]}"#)]).await;
+    let q = client(&broker);
+    let builder = || {
+        q.queue("orders")
+            .group("billing")
+            .commit_on_delivery(true)
+            .wait(false)
+            .idle(Duration::from_millis(300))
+    };
+
+    let single = builder()
+        .consume(|_msg| async { Ok::<_, std::convert::Infallible>(()) })
+        .await;
+    let batch = builder()
+        .consume_batch(|_msgs| async { Ok::<_, std::convert::Infallible>(()) })
+        .await;
+
+    for (name, out) in [("consume", single), ("consume_batch", batch)] {
+        let err = out.expect_err(&format!("{name} must refuse commit_on_delivery"));
+        assert!(
+            matches!(err, queen_mq::Error::Invalid(_)),
+            "{name}: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "commit_on_delivery is a pop option; consume always leases its messages",
+            "{name}"
+        );
+    }
+    assert_eq!(
+        broker.hit_count(),
+        0,
+        "the refusal must come before any request: {:?}",
+        broker
+            .hits()
+            .iter()
+            .map(|h| h.path.clone())
+            .collect::<Vec<_>>()
+    );
+}

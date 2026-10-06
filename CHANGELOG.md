@@ -71,6 +71,16 @@ with the broker's reason and, for a batch, how many items it refused. The loop s
 "nacked" all the same, and `consume_batch()` logged nothing. Both now log the handler's error as a
 warning that says the message was not nacked.
 
+**Rust client: `commit_on_delivery()` replaces `pop_auto_ack()`.** On a pop, the broker's
+`autoAck=true` moves the consumer group's cursor past the messages as it hands them out: no lease,
+nothing to ack, at-most-once. The builder now has an option for it, `commit_on_delivery(true)`,
+which `pop()` and `pop_result()` send; without it both stay leased, as before. `pop_auto_ack()` is
+deprecated in favour of `commit_on_delivery(true).pop()` and sends the same request. `consume()` and
+`consume_batch()` refuse a builder with `commit_on_delivery(true)` with `Error::Invalid` before any
+request, since a consumer always leases its messages; `auto_ack()` stays the loop's ack after the
+handler and never reaches the wire. The ephemeral pop builder gains `commit_on_delivery()` too, and
+its `auto_ack()` is a deprecated alias with the same effect.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

@@ -537,7 +537,7 @@ async fn a_dead_lettered_message_carries_the_reason_its_nack_gave() {
 }
 
 #[tokio::test]
-async fn an_auto_ack_pop_commits_every_lane_it_claimed() {
+async fn a_commit_on_delivery_pop_commits_every_lane_it_claimed() {
     let q = broker!();
     let queue = unique("cov-autoack-multi");
     create_queue(&q, &queue, short_lease(1)).await;
@@ -551,7 +551,7 @@ async fn an_auto_ack_pop_commits_every_lane_it_claimed() {
             .unwrap();
     }
 
-    // Broker-side autoAck commits at delivery and takes no lease. Across
+    // A pop that commits on delivery takes no lease. Across
     // several lanes it has to advance EVERY claimed partition's cursor, not
     // just the one the response reports at the top level — and the single-lane
     // test cannot tell those apart, because there the two are the same
@@ -566,7 +566,8 @@ async fn an_auto_ack_pop_commits_every_lane_it_claimed() {
             .partitions(8)
             .wait(false)
             .subscription_mode(SubscriptionMode::All)
-            .pop_auto_ack()
+            .commit_on_delivery(true)
+            .pop()
             .await
             .unwrap();
         if msgs.is_empty() {

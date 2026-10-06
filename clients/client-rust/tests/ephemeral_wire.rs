@@ -296,7 +296,7 @@ async fn a_pop_carries_every_option_it_was_given_in_a_stable_order() {
         .wait(true)
         .poll_timeout(Duration::from_millis(1500))
         .group("workers")
-        .auto_ack(true)
+        .commit_on_delivery(true)
         .send()
         .await
         .expect("pop");
@@ -318,12 +318,41 @@ async fn a_declined_flag_is_indistinguishable_from_an_unset_one() {
         .ephemeral()
         .pop("inbox")
         .wait(false)
-        .auto_ack(false)
+        .commit_on_delivery(false)
         .send()
         .await
         .expect("pop");
 
     assert_eq!(broker.hits()[0].path, "/api/v1/ephemeral/pop?queue=inbox");
+}
+
+// `commit_on_delivery(true)` is `autoAck=true` on the ephemeral pop: the cursor
+// moves at delivery, at-most-once, with nothing to ack. `auto_ack` is its
+// deprecated spelling and must keep doing the same.
+#[tokio::test]
+#[allow(deprecated)]
+async fn commit_on_delivery_and_its_deprecated_alias_send_auto_ack() {
+    let broker = FakeBroker::start(vec![Reply::ok(r#"{"queue":"inbox","messages":[]}"#)]).await;
+    let q = client(&broker);
+
+    q.ephemeral()
+        .pop("inbox")
+        .commit_on_delivery(true)
+        .send()
+        .await
+        .expect("pop");
+    q.ephemeral()
+        .pop("inbox")
+        .auto_ack(true)
+        .send()
+        .await
+        .expect("pop");
+
+    let hits = broker.hits();
+    assert_eq!(hits.len(), 2);
+    for hit in hits {
+        assert_eq!(hit.query("autoAck"), Some("true"), "{}", hit.path);
+    }
 }
 
 #[tokio::test]
