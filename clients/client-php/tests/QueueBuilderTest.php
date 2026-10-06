@@ -12,6 +12,7 @@ use Queen\Builders\OperationBuilder;
 use Queen\Builders\PushBuilder;
 use Queen\Builders\DLQBuilder;
 use Queen\Consumer\HighLevelConsumer;
+use Queen\Exceptions\HttpException;
 use Queen\Tests\Support\PlanHandler;
 
 class QueueBuilderTest extends TestCase
@@ -156,9 +157,9 @@ class QueueBuilderTest extends TestCase
     // ===========================
 
     /**
-     * autoAck() is consume()'s ack after the handler. The broker's
-     * at-most-once auto-ack is not exposed to clients, by design: a pop
-     * sends no autoAck whatever autoAck() said, and comes back leased.
+     * autoAck() is consume()'s ack after the handler and never reaches the
+     * wire: a pop sends no autoAck whatever autoAck() said, and comes back
+     * leased. The broker's at-most-once auto-ack is commitOnDelivery(), below.
      */
     public function testPopSendsNoAutoAckAfterAutoAckTrue(): void
     {
@@ -207,6 +208,133 @@ class QueueBuilderTest extends TestCase
         $handler = new PlanHandler([self::popAnswer()], ['status' => 200, 'json' => ['success' => true]]);
 
         $this->wiredQueen($handler)->queue('orders')->group('workers')->autoAck(true)->limit(1)
+            ->consume(function (): void {})
+            ->execute();
+
+        $this->assertArrayNotHasKey('autoAck', self::query($handler->requests[0]));
+        $this->assertSame('/api/v1/ack/batch', $handler->requests[1]->getUri()->getPath());
+    }
+
+    // ===========================
+    // commitOnDelivery on the pop wire
+    // ===========================
+
+    /**
+     * commitOnDelivery() is the pop's own option for the broker's commit at
+     * delivery: pop(), popResult() and popDetached() send autoAck=true, the
+     * wire name every 2.x broker reads, and nothing else changes.
+     */
+    public function testPopFamilySendsAutoAckAfterCommitOnDeliveryAndNothingElse(): void
+    {
+        $handler = new PlanHandler([], self::popAnswer());
+        $queen = $this->wiredQueen($handler);
+
+        $queen->queue('orders')->group('workers')->pop();
+        $queen->queue('orders')->group('workers')->commitOnDelivery()->pop();
+        $queen->queue('orders')->group('workers')->commitOnDelivery(true)->popResult();
+        $detached = $queen->queue('orders')->group('workers')->commitOnDelivery();
+        $detached->settlePop($detached->popDetached());
+
+        $this->assertCount(4, $handler->requests);
+        $plain = $handler->requests[0];
+        foreach (array_slice($handler->requests, 1) as $request) {
+            $query = self::query($request);
+            $this->assertSame('true', $query['autoAck'] ?? null);
+            unset($query['autoAck']);
+            $this->assertSame(self::query($plain), $query);
+            $this->assertSame($plain->getUri()->getPath(), $request->getUri()->getPath());
+        }
+    }
+
+    public function testCommitOnDeliveryFalseSendsNoAutoAck(): void
+    {
+        $handler = new PlanHandler([], self::popAnswer());
+
+        $this->wiredQueen($handler)->queue('orders')->group('workers')
+            ->commitOnDelivery()->commitOnDelivery(false)->pop();
+
+        $this->assertArrayNotHasKey('autoAck', self::query($handler->requests[0]));
+    }
+
+    /** autoAck() stays consume()'s and does not turn the commit at delivery off. */
+    public function testCommitOnDeliveryDoesNotDependOnAutoAck(): void
+    {
+        $handler = new PlanHandler([], self::popAnswer());
+
+        $this->wiredQueen($handler)->queue('orders')->group('workers')
+            ->autoAck(false)->commitOnDelivery()->pop();
+
+        $this->assertSame('true', self::query($handler->requests[0])['autoAck'] ?? null);
+    }
+
+    /**
+     * The broker refuses conflation together with a commit at delivery
+     * (server/src/handlers/data.rs, conflation_refusal), and pop() lets that
+     * 400 through.
+     */
+    public function testConflationWithCommitOnDeliveryRaisesTheBroker400(): void
+    {
+        $handler = new PlanHandler([], ['status' => 400, 'json' => [
+            'success' => false,
+            'error' => 'conflation cannot be combined with autoAck',
+            'messages' => [],
+        ]]);
+
+        try {
+            $this->wiredQueen($handler)->queue('orders')->group('workers')
+                ->conflation()->commitOnDelivery()->pop();
+            $this->fail('the broker refusal must reach the caller');
+        } catch (HttpException $e) {
+            $this->assertSame(400, $e->statusCode);
+        }
+
+        $query = self::query($handler->requests[0]);
+        $this->assertSame('true', $query['autoAck'] ?? null);
+        $this->assertSame('true', $query['conflation'] ?? null);
+    }
+
+    /** consume() always leases: it refuses the option before any request. */
+    public function testConsumeRefusesCommitOnDeliveryBeforeAnyRequest(): void
+    {
+        $handler = new PlanHandler([], self::popAnswer());
+
+        try {
+            $this->wiredQueen($handler)->queue('orders')->group('workers')->commitOnDelivery()
+                ->consume(function (): void {});
+            $this->fail('consume() must refuse commitOnDelivery()');
+        } catch (\LogicException $e) {
+            $this->assertSame(
+                'commitOnDelivery() is a pop() option; consume() always leases its messages',
+                $e->getMessage()
+            );
+        }
+
+        $this->assertCount(0, $handler->requests);
+    }
+
+    /** getConsumer() polls leased too, so it refuses the option the same way. */
+    public function testGetConsumerRefusesCommitOnDeliveryBeforeAnyRequest(): void
+    {
+        $handler = new PlanHandler([], self::popAnswer());
+
+        try {
+            $this->wiredQueen($handler)->queue('orders')->group('workers')->commitOnDelivery()->getConsumer();
+            $this->fail('getConsumer() must refuse commitOnDelivery()');
+        } catch (\LogicException $e) {
+            $this->assertSame(
+                'commitOnDelivery() is a pop() option; getConsumer() always leases its messages',
+                $e->getMessage()
+            );
+        }
+
+        $this->assertCount(0, $handler->requests);
+    }
+
+    public function testConsumeAfterCommitOnDeliveryFalseLeasesAsBefore(): void
+    {
+        $handler = new PlanHandler([self::popAnswer()], ['status' => 200, 'json' => ['success' => true]]);
+
+        $this->wiredQueen($handler)->queue('orders')->group('workers')->commitOnDelivery(false)->limit(1)
             ->consume(function (): void {})
             ->execute();
 

@@ -18,9 +18,22 @@ for a worker that booted the benchmark application on its own
 
 **PHP client: `autoAck()` is the ack `consume()` sends after the handler.** The reference said
 that on `pop()` it was the broker's at-most-once auto-ack, which never reached the broker. It is not
-meant to: the broker's auto-ack is not exposed to clients, by design, so `pop()`, `popResult()` and
-`popDetached()` always come back leased. The reference and the builder now say so, and tests pin
-it. No behaviour changes.
+meant to: `autoAck()` has no effect on `pop()`, `popResult()` and `popDetached()`. A pop commits at
+delivery only with the new `commitOnDelivery()`, below. The reference and the builder now say so,
+and tests pin it. No behaviour changes.
+
+**PHP client: `commitOnDelivery()` commits a pop at delivery.** The broker can move a consumer
+group's cursor past the messages as it hands them out, with no lease and nothing to ack, but this
+client could not ask for it. `$queen->queue($q)->group($g)->commitOnDelivery()->pop()`, and
+`popResult()` and `popDetached()`, now send `autoAck=true`, the parameter every 2.x broker reads,
+and nothing else; the messages come back with an empty `leaseId`. This is at-most-once: a crash
+after the pop loses the messages. `consume()` and `getConsumer()` always lease their messages, so
+they throw `LogicException` before any request when the builder has `commitOnDelivery()`.
+`autoAck()` stays the ack `consume()` sends after the handler and still never reaches the broker.
+The broker refuses `commitOnDelivery()` together with `conflation()` (400), and `pop()` throws
+that `HttpException`. On ephemeral queues, `$queen->ephemeral()->pop()` takes
+`'commitOnDelivery' => true`; its `autoAck` option, which meant the same, still works and is
+deprecated, and passing both throws `InvalidArgumentException`.
 
 **PHP client: `Admin::moveMessageToDLQ()` is deprecated and throws.** It posted to
 `/api/v1/messages/:partitionId/:transactionId/dlq`, a route the 2.x broker does not have, so every
