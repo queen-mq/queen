@@ -3,6 +3,7 @@
 namespace Queen\Tests;
 
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Sleep;
 use Illuminate\Support\Facades\Artisan;
 use Orchestra\Testbench\TestCase;
 use Queen\Laravel\Commands\ConsumeCommand;
@@ -255,9 +256,13 @@ final class LaravelConsumeCommandTest extends TestCase
 
     public function testAnUnreachableBrokerIsReportedOnceAndSoIsItsReturn(): void
     {
+        Sleep::fake();
         $this->broker(['refused', 'refused', [ConsumeBroker::message('tx-1')]]);
 
         [$exit, $output] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--limit' => 1]);
+
+        Sleep::assertSleptTimes(2);
+        Sleep::assertSequence([Sleep::for(1)->second(), Sleep::for(1)->second()]);
 
         $this->assertSame(0, $exit);
         $this->assertSame(1, substr_count($output, 'unreachable'));
@@ -276,6 +281,7 @@ final class LaravelConsumeCommandTest extends TestCase
             };
         };
 
+        Sleep::fake();
         try {
             $this->broker([$after(0), $after(10), $after(29), $after(31), $after(40), [ConsumeBroker::message('tx-1')]]);
 

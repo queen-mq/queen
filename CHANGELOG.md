@@ -56,7 +56,8 @@ says so: a handler that acks by itself releases the lease, and renewing it would
 `--idle-timeout`, which did nothing, now stops the command with exit code 0 after N ms without a
 message. `--limit` counts every message handed to `handle()`, failed ones too, and a pop never asks
 for more than it leaves. A refused ack or nack prints one warning, and a broker the pops cannot
-reach is reported at most every 30 s, then once when it answers again. `HighLevelConsumer` gains
+reach is reported at most every 30 s, then once when it answers again; the command waits 1 s
+after each pop that reached no broker instead of polling in a tight loop. `HighLevelConsumer` gains
 `lastPopError()`, and its `ack()` and `nack()` take an optional error. The help of `--batch` and
 `--conflation` now says what they do.
 

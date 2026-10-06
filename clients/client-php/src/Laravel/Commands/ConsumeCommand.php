@@ -4,6 +4,7 @@ namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Sleep;
 use InvalidArgumentException;
 use Queen\Consumer\HighLevelConsumer;
 use Queen\Laravel\QueenServiceProvider;
@@ -42,6 +43,9 @@ class ConsumeCommand extends Command
         'invalid or expired lease',
         'transaction is unresolvable, already committed, or acknowledgment is stale',
     ];
+
+    /** The wait after a pop that reached no broker. */
+    private const RECONNECT_DELAY_MICROS = 1_000_000;
 
     /** While the broker stays unreachable, one more warning at most this often. */
     private const UNREACHABLE_WARNING_INTERVAL_MILLIS = 30_000;
@@ -179,6 +183,12 @@ class ConsumeCommand extends Command
             }
             $this->watchBroker($consumer);
             if ($messages === []) {
+                // A pop that reached no broker comes back at once, after one
+                // attempt per URL: wait before the next one, as consume()'s
+                // own loop does, instead of polling in a tight loop.
+                if ($consumer->lastPopError() !== null) {
+                    Sleep::usleep(self::RECONNECT_DELAY_MICROS);
+                }
                 continue;
             }
 

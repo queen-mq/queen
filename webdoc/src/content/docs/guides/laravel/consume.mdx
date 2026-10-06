@@ -204,9 +204,10 @@ Every pop asks for a lease of `--lease` seconds, by default `retry_after` of `co
 prints `Consumer stopped. Processed N messages.` This needs `pcntl`, and the handlers the command
 installs replace yours for those two signals.
 
-A pop that times out, or fails with a connection error, counts as an empty pop. A connection error
-also prints `Queen broker unreachable:` and the error, again at most every 30 s while it lasts,
-and `Queen broker reachable again after N s.` once a pop gets an answer.
+A pop that times out, or fails with a connection error, counts as an empty pop. After a connection
+error the command waits 1 s before the next pop. It also prints `Queen broker unreachable:` and the
+error, again at most every 30 s while it lasts, and `Queen broker reachable again after N s.` once
+a pop gets an answer.
 
 | Exit code | When |
 | --- | --- |
