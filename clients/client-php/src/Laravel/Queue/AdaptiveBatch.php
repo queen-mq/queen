@@ -19,8 +19,9 @@ namespace Queen\Laravel\Queue;
  * it would hold jobs that idle workers could run, behind the job running
  * here. A pop that comes back short means the queue had no backlog, so the
  * next pop asks for what the queue had, one job after an empty pop. Under a
- * backlog every pop comes back full and the batch reaches 16 within eight
- * pops.
+ * backlog every pop comes back full: the first two ask for one job, the first
+ * before any job was timed, then 2, 2, 4, 4, 8, 8, so the batch reaches 16 on
+ * the ninth pop at the earliest, or stops lower when 250 ms holds fewer jobs.
  */
 final class AdaptiveBatch
 {

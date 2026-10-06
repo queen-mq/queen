@@ -61,6 +61,13 @@ after each pop that reached no broker instead of polling in a tight loop. `HighL
 `lastPopError()`, and its `ack()` and `nack()` take an optional error. The help of `--batch` and
 `--conflation` now says what they do.
 
+**Laravel: the lease renewal helper finds the application's autoloader.** It walked up from
+the package's `Queen.php` to the first `vendor/autoload.php`. When Composer links the package in
+from a path repository, PHP reports that file by the link's target, outside the application, so
+the helper failed to start ("Unable to locate Composer autoload.php") or loaded the package's own
+development autoloader. It now asks Composer for the autoloader that loaded the package, and
+walks up only when Composer registers none.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

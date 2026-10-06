@@ -2,6 +2,7 @@
 
 namespace Queen\Laravel\Queue;
 
+use Composer\Autoload\ClassLoader;
 use RuntimeException;
 
 /**
@@ -596,8 +597,25 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         return ($status['running'] ?? false) === true;
     }
 
+    /**
+     * The autoloader the helper starts with: the Composer autoloader that
+     * loaded this package, asked of Composer. The package's own path is no
+     * guide when a path repository links it into vendor/: PHP reports
+     * Queen.php by the link's target, outside the application, where a walk
+     * up finds no autoloader or the package's own development one. The walk
+     * stays for an autoloader Composer does not register.
+     */
     private function findAutoload(): string
     {
+        if (method_exists(ClassLoader::class, 'getRegisteredLoaders')) {
+            foreach (ClassLoader::getRegisteredLoaders() as $vendorDirectory => $loader) {
+                $autoload = "{$vendorDirectory}/autoload.php";
+                if ($loader->findFile(\Queen\Queen::class) !== false && is_file($autoload)) {
+                    return $autoload;
+                }
+            }
+        }
+
         $reflection = new \ReflectionClass(\Queen\Queen::class);
         $directory = dirname((string) $reflection->getFileName());
         while (true) {
