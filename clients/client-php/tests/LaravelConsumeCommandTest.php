@@ -2,6 +2,7 @@
 
 namespace Queen\Tests;
 
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Orchestra\Testbench\TestCase;
 use Queen\Laravel\Commands\ConsumeCommand;
@@ -243,6 +244,46 @@ final class LaravelConsumeCommandTest extends TestCase
         $this->assertSame(0, $exit);
         $this->assertCount(1, $this->handler->received);
         $this->assertGreaterThanOrEqual(310, $elapsedMillis);
+    }
+
+    // ===========================
+    // An unreachable broker
+    // ===========================
+
+    public function testAnUnreachableBrokerIsReportedOnceAndSoIsItsReturn(): void
+    {
+        $this->broker(['refused', 'refused', [ConsumeBroker::message('tx-1')]]);
+
+        [$exit, $output] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--limit' => 1]);
+
+        $this->assertSame(0, $exit);
+        $this->assertSame(1, substr_count($output, 'unreachable'));
+        $this->assertStringContainsString('Queen broker unreachable: cURL error 7', $output);
+        $this->assertStringContainsString('Queen broker reachable again', $output);
+    }
+
+    public function testTheUnreachableWarningRepeatsAtMostEveryThirtySeconds(): void
+    {
+        Carbon::setTestNow('2026-10-06 12:00:00');
+        $after = static function (int $seconds): \Closure {
+            return static function () use ($seconds): string {
+                Carbon::setTestNow(Carbon::parse('2026-10-06 12:00:00')->addSeconds($seconds));
+
+                return 'refused';
+            };
+        };
+
+        try {
+            $this->broker([$after(0), $after(10), $after(29), $after(31), $after(40), [ConsumeBroker::message('tx-1')]]);
+
+            [, $output] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--limit' => 1]);
+        } finally {
+            Carbon::setTestNow();
+        }
+
+        $this->assertSame(2, substr_count($output, 'unreachable'));
+        $this->assertStringContainsString('Queen broker still unreachable after 31 s: cURL error 7', $output);
+        $this->assertStringContainsString('Queen broker reachable again after 40 s.', $output);
     }
 
     // ===========================

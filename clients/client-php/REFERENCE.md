@@ -490,6 +490,7 @@ while (!$consumer->isClosed()) {
 | `ack(array $message, bool $success = true, ?string $error = null): array` | `Queen::ack()` with the consumer's group, and `$error` as the context's `error`. |
 | `nack(array $message, ?string $error = null): array` | `ack($message, false, $error)`. |
 | `renewLease(array\|string $messageOrLeaseId, ?int $seconds = null): array` | `Queen::renew()`. |
+| `lastPopError(): ?string` | The network failure the last pops returned as empty, or `null`. |
 | `isClosed(): bool` | Dispatches pending signals, then reports the state. |
 | `close(): void` | Marks the consumer closed. |
 
@@ -502,6 +503,9 @@ How it behaves:
   consumer closed, and they replace any handler you installed for those signals.
 - A timeout or a network failure returns `null` or `[]`. `ConflationUnsupportedException` and
   every other error propagate.
+- `lastPopError()` keeps the message of that network failure until a pop gets an answer, empty
+  or not. A timeout leaves it as it was. Read it to tell a broker you cannot reach from a quiet
+  queue.
 - `ack()` and `nack()` accept one message or a list of messages. The consumer never acks by
   itself.
 - Returned messages carry a `trace` closure.

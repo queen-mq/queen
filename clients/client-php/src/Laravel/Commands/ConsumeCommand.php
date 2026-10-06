@@ -3,6 +3,7 @@
 namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Carbon;
 use Queen\Consumer\HighLevelConsumer;
 use Queen\Queen;
 
@@ -34,6 +35,14 @@ class ConsumeCommand extends Command
         'invalid or expired lease',
         'transaction is unresolvable, already committed, or acknowledgment is stale',
     ];
+
+    /** While the broker stays unreachable, one more warning at most this often. */
+    private const UNREACHABLE_WARNING_INTERVAL_MILLIS = 30_000;
+
+    /** Wall-clock ms when the pops began to fail to connect; null while they get answers. */
+    private ?int $unreachableSince = null;
+
+    private ?int $lastUnreachableWarning = null;
 
     public function handle(Queen $queen): int
     {
@@ -137,6 +146,7 @@ class ConsumeCommand extends Command
                 $message = $consumer->consume($popTimeout);
                 $messages = $message === null ? [] : [$message];
             }
+            $this->watchBroker($consumer);
             if ($messages === []) {
                 continue;
             }
@@ -184,6 +194,43 @@ class ConsumeCommand extends Command
 
         if ($autoAck) {
             $this->settle($consumer, $payload, count($messages), true, null);
+        }
+    }
+
+    /**
+     * Say when the pops stop reaching the broker, at most every 30 s while
+     * that lasts, and once when it answers again: HighLevelConsumer returns a
+     * connection error as an empty pop, so without this the output of a
+     * consumer cut off from its broker reads as a quiet queue.
+     */
+    private function watchBroker(HighLevelConsumer $consumer): void
+    {
+        $error = $consumer->lastPopError();
+        $now = Carbon::now()->getTimestampMs();
+
+        if ($error === null) {
+            if ($this->unreachableSince !== null) {
+                $seconds = intdiv($now - $this->unreachableSince, 1000);
+                $this->info("Queen broker reachable again after {$seconds} s.");
+                $this->unreachableSince = null;
+                $this->lastUnreachableWarning = null;
+            }
+
+            return;
+        }
+
+        if ($this->unreachableSince === null) {
+            $this->unreachableSince = $now;
+            $this->lastUnreachableWarning = $now;
+            $this->warn("Queen broker unreachable: {$error}. Still polling.");
+
+            return;
+        }
+
+        if ($now - $this->lastUnreachableWarning >= self::UNREACHABLE_WARNING_INTERVAL_MILLIS) {
+            $this->lastUnreachableWarning = $now;
+            $seconds = intdiv($now - $this->unreachableSince, 1000);
+            $this->warn("Queen broker still unreachable after {$seconds} s: {$error}");
         }
     }
 
