@@ -16,24 +16,6 @@ queen:supervisor-install` after the upgrade. A fork took 0.48 ms on the Linux se
 for a worker that booted the benchmark application on its own
 (`benchmark-queen/2026-10-05-laravel-worker-memory`).
 
-## PHP client 2.2.0 - 2026-10-06
-
-**Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a
-batch holds about 250 ms of work: short jobs get batches of up to 16, a job of a second or more
-gets one per pop. A job is timed from the moment the worker hands it to Laravel to its next pop,
-its ACK included, so an empty long poll or the worker's sleep never counts as work. A queue starts
-at one job per pop and doubles only after two pops in a row came back full; a short pop sets the
-next one to what the queue had, an empty pop to one job, and slower jobs shrink it at once. A
-worker that serves several queues sizes each on its own. It runs in the worker, so it needs no
-supervisor and applies at once, and like any prefetch above 1 it needs `lease_renewal`. On the
-Linux server, 32 workers ran 2,003 jobs/s of 10 ms jobs with it against 1,548 at prefetch 1, and
-2,867 with `ack_async` and `pop_ahead`, as many as a fixed prefetch of 4 with a third of its pops
-(`benchmark-queen/2026-10-05-laravel-auto-prefetch`). The Laravel guide now describes three
-profiles, safe, balanced and fast; balanced and fast long-poll (`block_for` 1) with the pool's
-`sleep` at 0, since workers asleep when a burst began left it to the few awake ones and pushed the
-p99 at 500 jobs/s to 338 ms in one run of five. The dashboard shows `'auto'`, and its advice for
-short jobs suggests it.
-
 **PHP client: `pop()` sends `autoAck(true)`.** The builder took a value equal to the `consume()`
 default for one that was never set, so a `pop()` after `autoAck(true)` sent no `autoAck` and stayed
 leased. It now sends `autoAck=true` from `pop()`, `popResult()` and `popDetached()`, and the broker
@@ -58,6 +40,24 @@ handler runs: PHP runs the handler on the loop's only thread, and the client has
 interrupt it. A batch handled as soon as it arrives, and a single message in `each()` mode, get no
 renewal during their handler. The reference now says so, and names the ways out: a `leaseSeconds()`
 above the longest handler, or `$queen->renew($messages, $seconds)` from inside the handler.
+
+## PHP client 2.2.0 - 2026-10-06
+
+**Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a
+batch holds about 250 ms of work: short jobs get batches of up to 16, a job of a second or more
+gets one per pop. A job is timed from the moment the worker hands it to Laravel to its next pop,
+its ACK included, so an empty long poll or the worker's sleep never counts as work. A queue starts
+at one job per pop and doubles only after two pops in a row came back full; a short pop sets the
+next one to what the queue had, an empty pop to one job, and slower jobs shrink it at once. A
+worker that serves several queues sizes each on its own. It runs in the worker, so it needs no
+supervisor and applies at once, and like any prefetch above 1 it needs `lease_renewal`. On the
+Linux server, 32 workers ran 2,003 jobs/s of 10 ms jobs with it against 1,548 at prefetch 1, and
+2,867 with `ack_async` and `pop_ahead`, as many as a fixed prefetch of 4 with a third of its pops
+(`benchmark-queen/2026-10-05-laravel-auto-prefetch`). The Laravel guide now describes three
+profiles, safe, balanced and fast; balanced and fast long-poll (`block_for` 1) with the pool's
+`sleep` at 0, since workers asleep when a burst began left it to the few awake ones and pushed the
+p99 at 500 jobs/s to 338 ms in one run of five. The dashboard shows `'auto'`, and its advice for
+short jobs suggests it.
 
 ## PHP client 2.1.0, supervisor 0.7.0 - 2026-10-05
 
