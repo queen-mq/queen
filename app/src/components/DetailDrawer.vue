@@ -1,45 +1,49 @@
 <template>
   <Teleport to="body">
-    <div v-if="open" class="modal-backdrop" @click="emit('close')"></div>
+    <Transition name="drawer-scrim">
+      <div v-if="open" class="modal-backdrop" @click="emit('close')"></div>
+    </Transition>
 
-    <aside
-      v-if="open"
-      class="drawer-panel"
-      :class="{ 'detail-drawer-wide': wide }"
-      role="dialog"
-      aria-modal="true"
-      :aria-label="title"
-    >
-      <div class="card-header detail-drawer-header">
-        <slot name="leading"></slot>
-        <h3>{{ title }}</h3>
-        <span v-if="subtitle" class="card-sub font-mono" :title="subtitle">{{ subtitle }}</span>
-        <div v-if="$slots.actions" class="detail-drawer-actions">
-          <slot name="actions"></slot>
+    <Transition name="drawer-slide">
+      <aside
+        v-if="open"
+        class="drawer-panel"
+        :class="{ 'detail-drawer-wide': wide }"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="title"
+      >
+        <div class="card-header detail-drawer-header">
+          <slot name="leading"></slot>
+          <h3>{{ title }}</h3>
+          <span v-if="subtitle" class="card-sub font-mono" :title="subtitle">{{ subtitle }}</span>
+          <div v-if="$slots.actions" class="detail-drawer-actions">
+            <slot name="actions"></slot>
+          </div>
+          <button
+            class="btn btn-ghost btn-icon modal-close"
+            :aria-label="`Close ${title}`"
+            @click="emit('close')"
+          >
+            <svg style="width:18px; height:18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
         </div>
-        <button
-          class="btn btn-ghost btn-icon modal-close"
-          :aria-label="`Close ${title}`"
-          @click="emit('close')"
-        >
-          <svg style="width:18px; height:18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
 
-      <div class="card-body" :class="{ 'detail-drawer-split': split }">
-        <template v-if="split">
-          <div class="detail-drawer-primary"><slot></slot></div>
-          <div class="detail-drawer-secondary"><slot name="secondary"></slot></div>
-        </template>
-        <slot v-else></slot>
-      </div>
+        <div class="card-body" :class="{ 'detail-drawer-split': split }">
+          <template v-if="split">
+            <div class="detail-drawer-primary"><slot></slot></div>
+            <div class="detail-drawer-secondary"><slot name="secondary"></slot></div>
+          </template>
+          <slot v-else></slot>
+        </div>
 
-      <div v-if="$slots.footer" class="modal-foot">
-        <slot name="footer"></slot>
-      </div>
-    </aside>
+        <div v-if="$slots.footer" class="modal-foot">
+          <slot name="footer"></slot>
+        </div>
+      </aside>
+    </Transition>
   </Teleport>
 </template>
 

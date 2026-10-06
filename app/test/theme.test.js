@@ -59,9 +59,9 @@ test('the light token set covers every colour token in :root', () => {
   const dark = names(block('  :root {'))
   const light = names(block('  html.light {'))
 
-  // Scheme-independent by design: a radius, a font and an easing curve do not
+  // Scheme-independent by design: radii, fonts and motion settings do not
   // change with the colour scheme and must NOT be restated.
-  const INVARIANT = new Set(['--r-chip', '--r-control', '--r-card', '--r-pill', '--font-mono', '--ease'])
+  const INVARIANT = new Set(['--r-chip', '--r-control', '--r-card', '--r-pill', '--font-mono', '--ease', '--drawer-duration', '--drawer-ease'])
 
   const missing = [...dark].filter((n) => !light.has(n) && !INVARIANT.has(n))
   assert.deepEqual(missing, [], `light set is missing: ${missing.join(', ')}`)
