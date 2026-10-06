@@ -61,6 +61,14 @@ after each pop that reached no broker instead of polling in a tight loop. `HighL
 `lastPopError()`, and its `ack()` and `nack()` take an optional error. The help of `--batch` and
 `--conflation` now says what they do.
 
+**JavaScript client: a nack in `each()` mode skips only its own partition.** A multi-partition
+pop claims several partitions under one lease, and a nack releases only the failed message's
+partition. The loop dropped the whole rest of the pop after a nack, so the other partitions'
+messages stayed leased and came back only when the lease expired: live, with a 6 s lease, the two
+messages of partition B waited 6 s after a message of partition A failed. It now skips only the
+later messages of the failed partition, which the broker redelivers, and handles the others at
+once.
+
 **JavaScript client: the pop defaults say what `pop()` does.** `POP_DEFAULTS` and the README said
 a pop returns at once and that `autoAck(true)` commits it at delivery. Neither was ever true, and
 neither is meant to be: a pop long-polls for `timeoutMillis` unless `.wait(false)`, and its

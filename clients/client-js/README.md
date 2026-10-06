@@ -281,8 +281,9 @@ await queen.queue('tasks')
 
 **When the handler throws**, the consumer nacks what it was given (the message, or the whole batch)
 and keeps consuming. The broker redelivers it, and moves it to the dead letter queue once the queue's
-`retryLimit` is spent. With `.each()`, the rest of the popped batch is dropped after a nack: the
-broker redelivers it too.
+`retryLimit` is spent. With `.each()`, the later messages of the failed message's partition are
+skipped after a nack (the broker redelivers them too); the other partitions of the same pop are
+still handled.
 
 This is the same with `.autoAck(false)`. That setting hands the *success* path to your handler (it
 acks), not the failure path: a handler that threw never got to settle its messages. A message your
