@@ -9,7 +9,7 @@ use Queen\Queen;
 class QueenConnector implements ConnectorInterface
 {
     /** The broker wire encodes lease horizons as signed int32 seconds. */
-    private const MAX_RETRY_AFTER_SECONDS = 2_147_483_647;
+    public const MAX_RETRY_AFTER_SECONDS = 2_147_483_647;
 
     /** A stopping worker must never spend its whole shutdown grace on a tail release. */
     private const SHUTDOWN_RELEASE_TIMEOUT_MILLIS = 2_000;
@@ -18,6 +18,7 @@ class QueenConnector implements ConnectorInterface
     public function __construct(
         private array $defaults = [],
         private ?\Closure $failedJobRetryHandler = null,
+        private ?LeaseRenewerFactory $leaseRenewers = null,
     ) {
     }
 
@@ -93,33 +94,7 @@ class QueenConnector implements ConnectorInterface
                 'Queen Laravel pop_ahead requires lease_renewal so the batch it pops ahead remains fenced.',
             );
         }
-        $leaseRenewalIntervalOption = $config['lease_renewal_interval'] ?? null;
-        $leaseRenewalInterval = self::boundedInteger(
-            $leaseRenewalIntervalOption === null || $leaseRenewalIntervalOption === ''
-                ? max(1, intdiv($retryAfter, 3))
-                : $leaseRenewalIntervalOption,
-            'lease_renewal_interval',
-            1,
-            PHP_INT_MAX,
-        );
-        $leaseRenewalTimeout = self::boundedInteger(
-            $config['lease_renewal_timeout'] ?? 5,
-            'lease_renewal_timeout',
-            1,
-            PHP_INT_MAX,
-        );
-        $leaseRenewalKillGrace = self::boundedInteger(
-            $config['lease_renewal_kill_grace'] ?? 2,
-            'lease_renewal_kill_grace',
-            0,
-            PHP_INT_MAX,
-        );
-        $leaseRenewalSafetyMargin = self::boundedInteger(
-            $config['lease_renewal_safety_margin'] ?? 1,
-            'lease_renewal_safety_margin',
-            1,
-            PHP_INT_MAX,
-        );
+        $leaseRenewalTiming = LeaseRenewerFactory::timing($config, $retryAfter);
 
         $urls = $config['urls'] ?? null;
         if (is_string($urls)) {
@@ -171,62 +146,9 @@ class QueenConnector implements ConnectorInterface
             return $shutdownQueen ??= new Queen($shutdownClientConfig);
         };
 
-        $leaseRenewer = null;
-        if ($leaseRenewal) {
-            if (array_key_exists('handler', $clientConfig)) {
-                throw new InvalidArgumentException(
-                    'Queen Laravel lease_renewal cannot use the internal test HTTP handler override.',
-                );
-            }
-
-            $backendCount = is_array($urls) && $urls !== [] ? count($urls) : 1;
-            if ($leaseRenewalTimeout > intdiv(PHP_INT_MAX, $backendCount)) {
-                throw new InvalidArgumentException('Queen Laravel lease renewal request budget is too large.');
-            }
-            $requestBudget = $leaseRenewalTimeout * $backendCount;
-            // One scheduled attempt plus one bounded retry must fit before a
-            // TERM/KILL fence and the previous lease's safety margin.
-            if (!self::sumIsBelow(
-                [
-                    $leaseRenewalInterval,
-                    $requestBudget,
-                    $requestBudget,
-                    1,
-                    $leaseRenewalKillGrace,
-                    $leaseRenewalSafetyMargin,
-                ],
-                $retryAfter,
-            )) {
-                throw new InvalidArgumentException(
-                    'Queen Laravel lease_renewal timing is unsafe: interval + two request budgets + retry + kill grace + safety margin must be shorter than retry_after.',
-                );
-            }
-
-            $timing = [
-                $retryAfter,
-                $leaseRenewalInterval,
-                $leaseRenewalTimeout,
-                $requestBudget,
-                $leaseRenewalKillGrace,
-                $leaseRenewalSafetyMargin,
-            ];
-            $leaseRenewer = new LazyLeaseRenewer(
-                static function () use ($clientConfig, $timing): LeaseRenewer {
-                    // The native supervisor serves renewal for its workers; a
-                    // worker it refuses renews through its own helper.
-                    $socket = getenv('QUEEN_SUPERVISOR_LEASE_SOCKET');
-                    if (is_string($socket) && $socket !== '') {
-                        try {
-                            return new SupervisorLeaseRenewer($socket, $clientConfig, ...$timing);
-                        } catch (\Throwable $exception) {
-                            error_log('Queen lease renewal falls back to a helper process: ' . $exception->getMessage());
-                        }
-                    }
-
-                    return new ProcessLeaseRenewer($clientConfig, ...$timing);
-                },
-            );
-        }
+        $leaseRenewer = $leaseRenewal
+            ? ($this->leaseRenewers ?? new LeaseRenewerFactory())->make($clientConfig, $retryAfter, $leaseRenewalTiming)
+            : null;
 
         return new QueenQueue(
             new Queen($clientConfig),
@@ -261,7 +183,13 @@ class QueenConnector implements ConnectorInterface
         return $value;
     }
 
-    private static function boundedInteger(mixed $value, string $label, int $minimum, int $maximum): int
+    /**
+     * An integer setting in [$minimum, $maximum], from an int or a decimal
+     * string; anything else throws, naming the setting.
+     *
+     * @internal Shared with LeaseRenewerFactory and queen:consume.
+     */
+    public static function boundedInteger(mixed $value, string $label, int $minimum, int $maximum): int
     {
         if (is_bool($value)) {
             $integer = false;
@@ -299,19 +227,5 @@ class QueenConnector implements ConnectorInterface
         }
 
         return $value;
-    }
-
-    /** @param list<int> $values */
-    private static function sumIsBelow(array $values, int $limit): bool
-    {
-        $sum = 0;
-        foreach ($values as $value) {
-            if ($value >= $limit - $sum) {
-                return false;
-            }
-            $sum += $value;
-        }
-
-        return true;
     }
 }

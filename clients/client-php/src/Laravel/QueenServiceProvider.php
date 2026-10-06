@@ -26,6 +26,7 @@ use Illuminate\Queue\Events\WorkerStopping;
 use Queen\Laravel\Dashboard\ThroughputReader;
 use Queen\Laravel\Http\Middleware\AuthorizeDashboard;
 use Queen\Laravel\Http\Middleware\SecureDashboardResponse;
+use Queen\Laravel\Queue\LeaseRenewerFactory;
 use Queen\Laravel\Queue\QueenConnector;
 use Queen\Laravel\Queue\SyncedFailedJobProvider;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
@@ -123,6 +124,7 @@ class QueenServiceProvider extends ServiceProvider
                 return new QueenConnector(
                     $this->app['config']->get('queen', []),
                     $retryHandler,
+                    $this->app->make(LeaseRenewerFactory::class),
                 );
             });
         });
@@ -159,6 +161,10 @@ class QueenServiceProvider extends ServiceProvider
         });
 
         $this->app->alias(Queen::class, 'queen');
+
+        // queue:work (through QueenConnector) and queen:consume build their
+        // lease renewers here; a test swaps it for a renewer of its own.
+        $this->app->singleton(LeaseRenewerFactory::class);
     }
 
     private function registerDefaultQueueConnection(): void
