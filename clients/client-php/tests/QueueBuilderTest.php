@@ -2,7 +2,9 @@
 
 namespace Queen\Tests;
 
+use GuzzleHttp\HandlerStack;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\RequestInterface;
 use Queen\Queen;
 use Queen\Builders\QueueBuilder;
 use Queen\Builders\ConsumeBuilder;
@@ -10,6 +12,7 @@ use Queen\Builders\OperationBuilder;
 use Queen\Builders\PushBuilder;
 use Queen\Builders\DLQBuilder;
 use Queen\Consumer\HighLevelConsumer;
+use Queen\Tests\Support\PlanHandler;
 
 class QueueBuilderTest extends TestCase
 {
@@ -146,5 +149,96 @@ class QueueBuilderTest extends TestCase
         $builder = $this->queen->queue('test');
         $result = $builder->batch(0);
         $this->assertSame($builder, $result);
+    }
+
+    // ===========================
+    // autoAck on the pop wire
+    // ===========================
+
+    /**
+     * autoAck(true) equals the consume() default, and pop() used to read
+     * "equals the default" as "never called", so the broker-side auto-ack the
+     * caller asked for never travelled.
+     */
+    public function testPopSendsAutoAckWhenTheCallerAskedForIt(): void
+    {
+        $handler = new PlanHandler([], self::popAnswer());
+
+        $this->wiredQueen($handler)->queue('orders')->group('workers')->autoAck(true)->pop();
+
+        $this->assertSame('true', self::query($handler->requests[0])['autoAck'] ?? null);
+    }
+
+    public function testPopDetachedSendsAutoAckWhenTheCallerAskedForIt(): void
+    {
+        $handler = new PlanHandler([], self::popAnswer());
+        $builder = $this->wiredQueen($handler)->queue('orders')->group('workers')->autoAck(true);
+
+        $builder->settlePop($builder->popDetached());
+
+        $this->assertSame('true', self::query($handler->requests[0])['autoAck'] ?? null);
+    }
+
+    /** A pop that never mentions autoAck stays leased: the caller acks. */
+    public function testPopLeasesWhenAutoAckWasNeverCalled(): void
+    {
+        $handler = new PlanHandler([], self::popAnswer());
+
+        $this->wiredQueen($handler)->queue('orders')->group('workers')->pop();
+
+        $this->assertArrayNotHasKey('autoAck', self::query($handler->requests[0]));
+    }
+
+    public function testPopWithAutoAckOffSendsNoAutoAck(): void
+    {
+        $handler = new PlanHandler([], self::popAnswer());
+
+        $this->wiredQueen($handler)->queue('orders')->group('workers')->autoAck(false)->pop();
+
+        $this->assertArrayNotHasKey('autoAck', self::query($handler->requests[0]));
+    }
+
+    /**
+     * consume() keeps its client-side meaning: the loop acks after the
+     * handler, and the pop it sends stays leased so a crash redelivers.
+     */
+    public function testConsumeAutoAckStaysClientSide(): void
+    {
+        $handler = new PlanHandler([self::popAnswer()], ['status' => 200, 'json' => ['success' => true]]);
+
+        $this->wiredQueen($handler)->queue('orders')->group('workers')->autoAck(true)->limit(1)
+            ->consume(function (): void {})
+            ->execute();
+
+        $this->assertArrayNotHasKey('autoAck', self::query($handler->requests[0]));
+        $this->assertSame('/api/v1/ack/batch', $handler->requests[1]->getUri()->getPath());
+    }
+
+    private function wiredQueen(PlanHandler $handler): Queen
+    {
+        return new Queen([
+            'url' => 'http://queen.test',
+            'retryAttempts' => 1,
+            'handler' => HandlerStack::create($handler),
+        ]);
+    }
+
+    private static function popAnswer(): array
+    {
+        return ['status' => 200, 'json' => ['messages' => [[
+            'transactionId' => 'tx-1',
+            'partitionId' => 'p1',
+            'queue' => 'orders',
+            'partition' => 'Default',
+            'data' => ['n' => 1],
+            'leaseId' => 'lease-1',
+        ]]]];
+    }
+
+    private static function query(RequestInterface $request): array
+    {
+        parse_str($request->getUri()->getQuery(), $query);
+
+        return $query;
     }
 }

@@ -35,7 +35,10 @@ class QueueBuilder
     private ?int $consumeBatch = null;
     private ?int $consumeLimit;
     private ?int $consumeIdleMillis;
-    private bool $consumeAutoAck;
+    // null means autoAck() was never called. The two read paths have opposite
+    // defaults (consume() acks client-side, pop() stays leased), so the setter's
+    // value cannot stand in for "unset" without swallowing autoAck(true) on pop.
+    private ?bool $consumeAutoAck = null;
     private bool $consumeWait;
     private int $consumeTimeoutMillis;
     private ?int $consumeLeaseSeconds = null;
@@ -64,7 +67,6 @@ class QueueBuilder
         $this->consumeConcurrency = $d['concurrency'];
         $this->consumeLimit = $d['limit'];
         $this->consumeIdleMillis = $d['idleMillis'];
-        $this->consumeAutoAck = $d['autoAck'];
         $this->consumeWait = $d['wait'];
         $this->consumeTimeoutMillis = $d['timeoutMillis'];
         $this->consumeRenewLease = $d['renewLease'];
@@ -293,6 +295,16 @@ class QueueBuilder
         return $this;
     }
 
+    /**
+     * Two meanings, one per read path.
+     *
+     * consume(): the loop acks after the handler and nacks when it throws. On
+     * unless autoAck(false); the pop it sends stays leased either way.
+     *
+     * pop(): autoAck(true) asks the broker to commit the messages at delivery,
+     * with no lease and nothing to ack. That is at-most-once: a crash after the
+     * pop loses them. Without it a pop is leased and you ack it yourself.
+     */
     public function autoAck(bool $enabled): static
     {
         $this->consumeAutoAck = $enabled;
@@ -432,10 +444,8 @@ class QueueBuilder
     {
         $path = $this->buildPopPath();
 
-        // Pop uses POP_DEFAULTS for autoAck unless explicitly changed
-        $effectiveAutoAck = $this->consumeAutoAck !== Defaults::CONSUME_DEFAULTS['autoAck']
-            ? $this->consumeAutoAck
-            : Defaults::POP_DEFAULTS['autoAck'];
+        // Pop uses POP_DEFAULTS for autoAck unless the caller set it.
+        $effectiveAutoAck = $this->consumeAutoAck ?? Defaults::POP_DEFAULTS['autoAck'];
 
         // Batch, partitions and with them the autopilot flag. The RULE for which
         // of the three travel lives in one place (Support\PopAutopilot) because
@@ -606,7 +616,7 @@ class QueueBuilder
             'batch' => $this->consumeBatch,
             'limit' => $this->consumeLimit,
             'idleMillis' => $this->consumeIdleMillis,
-            'autoAck' => $this->consumeAutoAck,
+            'autoAck' => $this->consumeAutoAck ?? Defaults::CONSUME_DEFAULTS['autoAck'],
             'wait' => $this->consumeWait,
             'timeoutMillis' => $this->consumeTimeoutMillis,
             'leaseSeconds' => $this->consumeLeaseSeconds,

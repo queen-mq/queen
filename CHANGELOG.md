@@ -34,6 +34,14 @@ profiles, safe, balanced and fast; balanced and fast long-poll (`block_for` 1) w
 p99 at 500 jobs/s to 338 ms in one run of five. The dashboard shows `'auto'`, and its advice for
 short jobs suggests it.
 
+**PHP client: `pop()` sends `autoAck(true)`.** The builder took a value equal to the `consume()`
+default for one that was never set, so a `pop()` after `autoAck(true)` sent no `autoAck` and stayed
+leased. It now sends `autoAck=true` from `pop()`, `popResult()` and `popDetached()`, and the broker
+commits the messages at delivery with no lease. A pop that never calls `autoAck()`, or calls
+`autoAck(false)`, stays leased as before, and `consume()` still acks after its handler. A builder
+that calls `autoAck(true)` and also pops now gets at-most-once pops: remove the call there to keep
+acking yourself.
+
 ## PHP client 2.1.0, supervisor 0.7.0 - 2026-10-05
 
 PHP client 2.1.0 pins supervisor 0.7.0: the Rust master reads `lease_service` from its
