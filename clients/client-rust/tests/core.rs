@@ -4,6 +4,7 @@
 //! `load` areas of the JS, Go and Python suites.
 
 mod common;
+mod support;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1263,6 +1264,50 @@ async fn auto_ack_off_leaves_the_message_claimed() {
     sleep_ms(2500).await;
     let again = pop_retry(&q, &queue, Some("g-manual"), 1, 25).await;
     assert_eq!(again.len(), 1);
+
+    drop_queue(&q, &queue).await;
+}
+
+// A handler that outlives its lease gets its ack refused: HTTP 200 with
+// `success: false` and "invalid or expired lease" on the item. The consume loop
+// carries on, and the log is the only place that can say so.
+#[tokio::test]
+async fn an_ack_refused_on_an_expired_lease_is_logged_by_the_consume_loop() {
+    let q = broker!();
+    let queue = unique("consume-late-ack");
+    create_queue(&q, &queue, short_lease(1)).await;
+
+    q.queue(&queue)
+        .push(serde_json::json!({ "n": 1 }))
+        .await
+        .unwrap();
+
+    let logs = support::Logs::capture();
+    let summary = q
+        .queue(&queue)
+        .group("g-late-ack")
+        .limit(1)
+        .wait(false)
+        .idle(Duration::from_secs(5))
+        .subscription_mode(SubscriptionMode::All)
+        .consume(|_msg| async {
+            sleep_ms(2500).await;
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        summary.acked, 1,
+        "the summary counts decisions: {summary:?}"
+    );
+    assert!(
+        !logs
+            .matching(tracing::Level::ERROR, &["invalid or expired lease"])
+            .is_empty(),
+        "the broker refused the ack and the log says nothing: {:?}",
+        logs.lines()
+    );
 
     drop_queue(&q, &queue).await;
 }

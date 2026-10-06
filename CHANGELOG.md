@@ -61,6 +61,16 @@ after each pop that reached no broker instead of polling in a tight loop. `HighL
 `lastPopError()`, and its `ack()` and `nack()` take an optional error. The help of `--batch` and
 `--conflation` now says what they do.
 
+**Rust client: the consume loop logs a refused ack.** The broker refuses an ack, for example one
+sent after the lease expired, with HTTP 200 and `success: false` on the item. The loop read only the
+transport result, so a handler that outlived its lease had its ack refused without a trace.
+`consume()` and `consume_batch()` now read the verdict and log a refused ack or nack at error level,
+with the broker's reason and, for a batch, how many items it refused. The loop still carries on, and
+`ConsumeSummary` still counts what the loop decided, not what the broker accepted. Under
+`auto_ack(false)` the loop sends no nack for a handler that returns `Err`, by design, but it logged
+"nacked" all the same, and `consume_batch()` logged nothing. Both now log the handler's error as a
+warning that says the message was not nacked.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

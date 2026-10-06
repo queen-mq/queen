@@ -41,7 +41,11 @@ async fn main() -> queen_mq::Result<()> {
 
 The handler's return value settles the message: `Ok` acks it, `Err` nacks it and records the
 reason on the DLQ row if that nack exhausts the retry budget. Turn that off with
-`.auto_ack(false)` and call `queen.ack(&msg)` yourself.
+`.auto_ack(false)` and call `queen.ack(&msg)` yourself. The loop then sends nothing: an `Err` is
+logged, not nacked, and the message comes back when its lease expires. The broker refuses an ack on
+an expired lease with HTTP 200 and `success: false`; the loop logs that refusal at error level and
+carries on. The `acked` and `nacked` counts in `ConsumeSummary` say what the loop decided, not what
+the broker accepted.
 
 ## Sharing the protocol with the broker
 
