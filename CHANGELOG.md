@@ -42,6 +42,13 @@ commits the messages at delivery with no lease. A pop that never calls `autoAck(
 that calls `autoAck(true)` and also pops now gets at-most-once pops: remove the call there to keep
 acking yourself.
 
+**PHP client: `Admin::moveMessageToDLQ()` is deprecated and throws.** It posted to
+`/api/v1/messages/:partitionId/:transactionId/dlq`, a route the 2.x broker does not have, so every
+call failed with a 404 `no_such_route`. No 2.x route dead-letters a message by its address. The
+method now throws `BadMethodCallException` before any request and names the way that works: ack
+the message with the `dlq` status, `$queen->ack($message, 'dlq', ['group' => $group])`, while its
+consumer group holds the lease.
+
 ## PHP client 2.1.0, supervisor 0.7.0 - 2026-10-05
 
 PHP client 2.1.0 pins supervisor 0.7.0: the Rust master reads `lease_service` from its

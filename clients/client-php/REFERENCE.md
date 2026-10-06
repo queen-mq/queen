@@ -1000,9 +1000,13 @@ queue clear.
 | `getTracesByName(string $traceName, array $params = [])` | `GET /api/v1/traces/by-name/:traceName` |
 | `getTracesForMessage(string $partitionId, string $transactionId)` | `GET /api/v1/traces/:partitionId/:transactionId` |
 
-`getTracesForMessage()` does not URL-encode its arguments. `moveMessageToDLQ()` posts to
-`/api/v1/messages/:partitionId/:transactionId/dlq`, a route that the 2.x broker does not have; it
-throws `HttpException` 404 `no_such_route`.
+`getTracesForMessage()` does not URL-encode its arguments.
+
+`moveMessageToDLQ()` is deprecated and always throws `BadMethodCallException`, before any request.
+The 2.x broker has no route that dead-letters a message by its partition and transaction id. A
+dead letter comes from an ack with the `dlq` status, on a message that the consumer group holds a
+live lease for: `$queen->ack($message, 'dlq', ['group' => 'billing'])`. See
+[Ack, nack and lease renewal](#ack-nack-and-lease-renewal).
 
 ### Status and analytics
 
