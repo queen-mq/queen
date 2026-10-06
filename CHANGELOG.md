@@ -68,6 +68,14 @@ the helper failed to start ("Unable to locate Composer autoload.php") or loaded 
 development autoloader. It now asks Composer for the autoloader that loaded the package, and
 walks up only when Composer registers none.
 
+**Laravel: the supervisor checks the settings its workers run with, on every connection.** A
+worker's queue connection starts from `config/queen.php` whatever its name, but the supervisor
+and the dashboard read `config/queen.php` only under the connection named `queen`. A pool on a
+second connection, for example one that sets only `'prefetch' => 'auto'`, was refused for a
+missing `lease_renewal` that its workers did have, and the dashboard showed lease renewal off for
+pools whose workers renewed. Both now start every queen connection from `config/queen.php`, as
+the workers do.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

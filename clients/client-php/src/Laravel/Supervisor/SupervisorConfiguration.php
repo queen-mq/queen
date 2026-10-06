@@ -669,7 +669,10 @@ final class SupervisorConfiguration
             throw new InvalidArgumentException("Supervisor connection [{$name}] must use the Queen queue driver.");
         }
 
-        $resolved = array_replace($name === 'queen' ? $queen : [], $connection);
+        // As QueenConnector builds every queen connection: config/queen.php
+        // first, the connection's own keys over it. The supervisor checks
+        // the settings its workers will run with.
+        $resolved = array_replace($queen, $connection);
         if (array_key_exists('read_bearer_token', $supervisor) && $supervisor['read_bearer_token'] !== null) {
             $resolved['bearer_token'] = $supervisor['read_bearer_token'];
             if (is_array($resolved['headers'] ?? null)) {

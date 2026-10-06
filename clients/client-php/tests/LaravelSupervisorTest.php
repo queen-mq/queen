@@ -79,6 +79,24 @@ class LaravelSupervisorTest extends TestCase
         $this->assertSame(120, $config['supervisors']['orders']['retry_after']);
     }
 
+    public function testAnotherQueenConnectionStartsFromConfigQueenLikeItsWorkers(): void
+    {
+        // QueenConnector starts every queen connection from config/queen.php,
+        // so the supervisor checks the settings its workers will run with.
+        $config = SupervisorConfiguration::resolve([
+            'retry_after' => 300,
+            'lease_renewal' => true,
+            'supervisor' => [
+                'supervisors' => ['reports' => ['connection' => 'queen-auto', 'timeout' => 30]],
+            ],
+        ], '/app', queueConnections: [
+            'queen-auto' => ['driver' => 'queen', 'prefetch' => 'auto'],
+        ]);
+
+        $this->assertSame(300, $config['supervisors']['reports']['retry_after']);
+        $this->assertTrue($config['supervisors']['reports']['lease_renewal']);
+    }
+
     public function testReadOnlyBearerTokenReplacesAWorkerAuthorizationHeader(): void
     {
         $config = SupervisorConfiguration::resolve([
