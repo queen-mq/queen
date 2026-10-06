@@ -35,6 +35,10 @@ sourceOfTruth:
 # moved; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (queen:consume): ConsumeCommand joins the list; one sentence before Read next points at the new Consume Queen messages page. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-06 (queen:consume fixes): the 2.3.0 row adds the queen:consume
+# fixes (a nack when the handler throws, --lease and its renewal, --idle-timeout); QueenConnector
+# builds its renewer through LeaseRenewerFactory and QueenServiceProvider its client through
+# clientConfig(), which changes nothing else this page states.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and
@@ -312,7 +316,7 @@ Everything not listed here works from 1.6.0 on.
 | 2.0.0 | 0.6.0 | every transaction ACK names its own lease; the dashboard's Jobs page works with a read-only token |
 | 2.1.0 | 0.7.0 | `config/queen.php` reads 20 environment variables instead of 95 ([upgrading](/guides/laravel/configuration/#upgrading-from-200)); `supervisor.lease_service` replaces `QUEEN_SUPERVISOR_LEASE_SERVICE`; with prefork, `queue:restart` runs the deployed code, and a fork server that is not safe to fork is not used |
 | 2.2.0 | 0.7.0 | `prefetch` `'auto'` sizes each pop from the jobs' runtime; the safe, balanced and fast profiles |
-| 2.3.0 | 0.8.0 | a pool's own `prefork` ([prefork for some pools only](/guides/laravel/supervisors/#prefork-for-some-pools-only)) |
+| 2.3.0 | 0.8.0 | a pool's own `prefork` ([prefork for some pools only](/guides/laravel/supervisors/#prefork-for-some-pools-only)); `queen:consume` nacks a handler that throws, sets and renews its lease, and stops on `--idle-timeout` ([consume Queen messages](/guides/laravel/consume/)) |
 
 ## Limits
 

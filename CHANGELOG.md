@@ -43,6 +43,23 @@ interval, and returns whether the broker extended them; a long handler calls it 
 its work. A one-parameter handler is called as before. The loop's own renewal sends one request per
 lease instead of one per message.
 
+**Laravel: `queen:consume` nacks a failed handler, sets and renews its lease, and stops on
+`--idle-timeout`.** Behaviour change: a handler that throws is now nacked, with the exception's
+message as the error, also without `--auto-ack`. Before, the message came back only when its lease
+expired, which spends no retry, so a message that always failed never reached the dead-letter
+queue; now each failure spends a retry. `--auto-ack` decides only the ack after a `handle()` that
+returns. `--lease=SECONDS`, default `retry_after` (90), sets the lease of every pop; with
+`lease_renewal` on in `config/queen.php` and `--auto-ack`, the command renews it while `handle()`
+runs, with the renewer `queue:work` uses, checks it before the ack or nack, and neither acks nor
+nacks a lease it can no longer vouch for. Without `--auto-ack` renewal stays off and the command
+says so: a handler that acks by itself releases the lease, and renewing it would stop the process.
+`--idle-timeout`, which did nothing, now stops the command with exit code 0 after N ms without a
+message. `--limit` counts every message handed to `handle()`, failed ones too, and a pop never asks
+for more than it leaves. A refused ack or nack prints one warning, and a broker the pops cannot
+reach is reported at most every 30 s, then once when it answers again. `HighLevelConsumer` gains
+`lastPopError()`, and its `ack()` and `nack()` take an optional error. The help of `--batch` and
+`--conflation` now says what they do.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a
