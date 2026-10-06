@@ -1,0 +1,27 @@
+---
+params: []
+description: "Verified snippet extracted from examples/apps/laravel/app/Jobs/RecordWorker.php."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/apps/laravel/app/Jobs/RecordWorker.php by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```php title="examples/apps/laravel/app/Jobs/RecordWorker.php"
+final class RecordWorker implements ShouldQueue
+{
+    use Queueable;
+
+    public function handle(): void
+    {
+        // Journal::record() adds the worker's pid. The parent tells a
+        // forked worker (a child of the fork server) from a spawned one
+        // (a child of the master).
+        Journal::record($this->job, [
+            'event' => 'ran',
+            'ppid' => posix_getppid(),
+        ]);
+    }
+}
+```

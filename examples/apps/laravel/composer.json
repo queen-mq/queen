@@ -1,0 +1,44 @@
+{
+    "$schema": "https://getcomposer.org/schema.json",
+    "name": "queen-mq/laravel-examples",
+    "description": "Laravel examples for the Queen MQ docs: per-entity ordering, prefetch, prefork and lease renewal, each a runnable Artisan command",
+    "type": "project",
+    "license": "Apache-2.0",
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../../../clients/client-php",
+            "options": {
+                "symlink": false,
+                "versions": {
+                    "queen-mq/php-client": "dev-main"
+                }
+            }
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "ext-pcntl": "*",
+        "ext-posix": "*",
+        "laravel/framework": "^12.0",
+        "queen-mq/php-client": "dev-main"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/"
+        }
+    },
+    "scripts": {
+        "post-autoload-dump": [
+            "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+            "@php artisan package:discover --ansi"
+        ]
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

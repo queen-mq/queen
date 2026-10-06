@@ -1,0 +1,31 @@
+---
+params: []
+description: "Verified snippet extracted from examples/apps/laravel/app/Jobs/BuildReport.php."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/apps/laravel/app/Jobs/BuildReport.php by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```php title="examples/apps/laravel/app/Jobs/BuildReport.php"
+final class BuildReport implements ShouldQueue
+{
+    use Queueable;
+
+    // No $timeout here: the worker's --timeout applies. Without lease
+    // renewal, the connection refuses to run a job whose own $timeout
+    // is not shorter than retry_after.
+
+    public function __construct(public int $seconds) {}
+
+    public function handle(): void
+    {
+        Journal::record($this->job, [
+            'event' => 'started',
+            'attempt' => $this->attempts(),
+        ]);
+        sleep($this->seconds); // longer than the lease
+    }
+}
+```
