@@ -31,6 +31,8 @@ sourceOfTruth:
 # what changed.
 # sourceOfTruth re-read 2026-10-06 (queen:consume idle clock): ConsumeCommand measures --idle-timeout in
 # nanoseconds and never stops before it has passed; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (pop autoAck): QueueBuilder no longer sends autoAck from pop(); the
+# command never used it, and --auto-ack stays the client's ack after handle(). Nothing this page states changes.
 ---
 
 `php artisan queen:consume` reads a Queen queue and passes each message to a class of yours. Use it
