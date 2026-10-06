@@ -146,6 +146,57 @@ final class LaravelConsumeCommandTest extends TestCase
         $this->assertSame('completed', $this->broker->acks[0]['status']);
     }
 
+    public function testARefusedAckPrintsOneWarningWithTheError(): void
+    {
+        $this->broker([[ConsumeBroker::message('tx-1')]], [ConsumeBroker::refused(1, 'invalid or expired lease')]);
+
+        [, $output] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--limit' => 1]);
+
+        $this->assertSame(1, substr_count($output, 'Ack refused'));
+        $this->assertStringContainsString('Ack refused for 1 of 1 message: invalid or expired lease', $output);
+    }
+
+    public function testAnAckCallThatFailsPrintsTheCountItCovered(): void
+    {
+        $this->broker(
+            [[ConsumeBroker::message('tx-1'), ConsumeBroker::message('tx-2')]],
+            [['error' => 'consumer group not found']],
+        );
+
+        [, $output] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--batch' => 2, '--limit' => 2]);
+
+        $this->assertStringContainsString('Ack failed for 2 messages: consumer group not found', $output);
+    }
+
+    public function testANackRefusedForItsOwnReasonPrintsAWarning(): void
+    {
+        $this->broker([[ConsumeBroker::message('tx-1')]], [ConsumeBroker::refused(1, 'queue is paused')]);
+
+        [, $output] = $this->consume(['--group' => 'ledger', '--limit' => 1], function (): void {
+            throw new \RuntimeException('handler failed');
+        });
+
+        $this->assertStringContainsString('Nack refused for 1 of 1 message: queue is paused', $output);
+    }
+
+    public function testANackAfterAThrowIsSilentAboutWhatTheHandlerSettledItself(): void
+    {
+        $this->broker(
+            [[ConsumeBroker::message('tx-1')], [ConsumeBroker::message('tx-2')]],
+            [
+                ConsumeBroker::refused(1, 'transaction is unresolvable, already committed, or acknowledgment is stale'),
+                ConsumeBroker::refused(1, 'invalid or expired lease'),
+            ],
+        );
+
+        [, $output] = $this->consume(['--group' => 'ledger', '--limit' => 2], function (): void {
+            throw new \RuntimeException('acked, then failed');
+        });
+
+        $this->assertCount(2, $this->broker->acks);
+        $this->assertStringNotContainsString('refused', $output);
+    }
+
     // ===========================
     // Helpers
     // ===========================

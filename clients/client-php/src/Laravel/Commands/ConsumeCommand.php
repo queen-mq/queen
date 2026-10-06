@@ -3,6 +3,7 @@
 namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
+use Queen\Consumer\HighLevelConsumer;
 use Queen\Queen;
 
 class ConsumeCommand extends Command
@@ -23,6 +24,16 @@ class ConsumeCommand extends Command
         {--limit= : Stop after handing N messages to handle(), failed ones included}';
 
     protected $description = 'Consume messages from a Queen MQ queue';
+
+    /**
+     * The broker's answers for an item that an earlier ack already settled
+     * (server/src/rsm/facade/real.rs, the ack render): its lease is released,
+     * or its transaction is below the cursor.
+     */
+    private const ALREADY_SETTLED = [
+        'invalid or expired lease',
+        'transaction is unresolvable, already committed, or acknowledgment is stale',
+    ];
 
     public function handle(Queen $queen): int
     {
@@ -101,7 +112,7 @@ class ConsumeCommand extends Command
         // choice of batch is about the claim, and this loop hands the caller one
         // message at a time either way.
         $batch = $this->option('batch') !== null ? (int) $this->option('batch') : 1;
-        $autoAck = $this->option('auto-ack');
+        $autoAck = (bool) $this->option('auto-ack');
         $timeout = (int) $this->option('timeout');
         $limit = $this->option('limit') ? (int) $this->option('limit') : null;
 
@@ -111,40 +122,16 @@ class ConsumeCommand extends Command
                 // past it would sit leased until its lease ran out.
                 $wanted = $limit === null ? $batch : min($batch, $limit - $processed);
                 $messages = $consumer->consumeBatch($timeout, $wanted);
-                if (empty($messages)) {
-                    continue;
-                }
-
-                $processed += count($messages);
-                try {
-                    $handler->handle($messages);
-                    if ($autoAck) {
-                        $consumer->ack($messages);
-                    }
-                } catch (\Throwable $e) {
-                    $this->error("Error processing batch: {$e->getMessage()}");
-                    // Nacked with or without --auto-ack: a failure spends a
-                    // retry, so a message that always fails reaches the
-                    // dead-letter queue instead of coming back forever.
-                    $consumer->nack($messages, $e->getMessage());
-                }
             } else {
                 $message = $consumer->consume($timeout);
-                if ($message === null) {
-                    continue;
-                }
-
-                $processed++;
-                try {
-                    $handler->handle($message);
-                    if ($autoAck) {
-                        $consumer->ack($message);
-                    }
-                } catch (\Throwable $e) {
-                    $this->error("Error processing message: {$e->getMessage()}");
-                    $consumer->nack($message, $e->getMessage());
-                }
+                $messages = $message === null ? [] : [$message];
             }
+            if ($messages === []) {
+                continue;
+            }
+
+            $processed += count($messages);
+            $this->handOut($consumer, $handler, $messages, $batch > 1, $autoAck);
 
             if ($limit !== null && $processed >= $limit) {
                 $this->info("Message limit reached ({$limit})");
@@ -156,5 +143,70 @@ class ConsumeCommand extends Command
         $this->info("Consumer stopped. Processed {$processed} messages.");
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Run the handler on one pop's messages, then settle them: a nack when it
+     * threw, with or without --auto-ack, so a failure spends a retry and a
+     * message that always fails reaches the dead-letter queue; an ack when it
+     * returned, with --auto-ack only.
+     *
+     * @param list<array> $messages
+     */
+    private function handOut(
+        HighLevelConsumer $consumer,
+        object $handler,
+        array $messages,
+        bool $asList,
+        bool $autoAck,
+    ): void {
+        $payload = $asList ? $messages : $messages[0];
+        try {
+            $handler->handle($payload);
+        } catch (\Throwable $e) {
+            $this->error(($asList ? 'Error processing batch: ' : 'Error processing message: ') . $e->getMessage());
+            $this->settle($consumer, $payload, count($messages), false, $e->getMessage());
+
+            return;
+        }
+
+        if ($autoAck) {
+            $this->settle($consumer, $payload, count($messages), true, null);
+        }
+    }
+
+    /** One ack or nack call, and one warning line when the broker refused it. */
+    private function settle(HighLevelConsumer $consumer, array $payload, int $count, bool $success, ?string $error): void
+    {
+        $result = $success ? $consumer->ack($payload) : $consumer->nack($payload, $error);
+        $verb = $success ? 'Ack' : 'Nack';
+        $noun = $count === 1 ? 'message' : 'messages';
+
+        if (($result['success'] ?? false) !== true) {
+            $this->warn("{$verb} failed for {$count} {$noun}: " . (string) ($result['error'] ?? 'no answer'));
+
+            return;
+        }
+
+        $refused = 0;
+        $reason = null;
+        foreach ($result as $key => $item) {
+            if (!is_int($key) || !is_array($item) || ($item['success'] ?? true) !== false) {
+                continue;
+            }
+            $itemError = (string) ($item['error'] ?? 'refused');
+            // A handler may ack or nack by itself before it throws. The nack
+            // that follows then finds the message settled and its lease
+            // released, which is no news: the handler's own call won.
+            if (!$success && in_array($itemError, self::ALREADY_SETTLED, true)) {
+                continue;
+            }
+            ++$refused;
+            $reason ??= $itemError;
+        }
+
+        if ($refused > 0) {
+            $this->warn("{$verb} refused for {$refused} of {$count} {$noun}: {$reason}");
+        }
     }
 }
