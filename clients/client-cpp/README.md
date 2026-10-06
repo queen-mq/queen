@@ -330,6 +330,9 @@ for (const auto& msg : dlq["messages"]) {
 
 ### Lease Renewal
 
+`renew()` answers `success: false` when the broker extended nothing: the lease
+expired or was released, and the message may already be with another consumer.
+
 ```cpp
 // Pop message
 auto messages = client.queue("long-tasks").pop();
@@ -340,7 +343,9 @@ std::thread processing_thread([&]() {
     // Renew lease every 30 seconds
     while (processing) {
         std::this_thread::sleep_for(std::chrono::seconds(30));
-        client.renew(msg);
+        if (!client.renew(msg)["success"].get<bool>()) {
+            break;  // the lease is gone: stop the work
+        }
     }
 });
 
@@ -438,6 +443,7 @@ make test
 # No broker needed: these serve their own responses in-process.
 # retry429  = the proxy contract (bearer token, 429 backoff, terminal 403)
 # kvtimers  = the KV/timer wire contract (exact JSON body, method and path)
+# consumer  = the consume path: ack()/renew() results and the consume loop
 make run-unit
 
 # Against a live broker (localhost:6632 by default)
@@ -567,8 +573,8 @@ Output:
 - `QueenClient(urls, config)` - Create client with multiple servers
 - `queue(name)` - Get queue builder
 - `transaction()` - Create transaction builder
-- `ack(message, status, context)` - Acknowledge message(s)
-- `renew(message)` - Renew message lease
+- `ack(message, status, context)` - Acknowledge message(s). `success` is false when the broker refused any of them; its answer is in `result`
+- `renew(message)` - Renew message lease. `success` is false when the broker extended nothing
 - `flush_all_buffers(deadline_millis = -1)` - Flush all client-side buffers (retries failed batches; a deadline bounds that and throws `BufferFlushError` on expiry)
 - `get_buffer_stats()` - Get buffer statistics
 - `close()` - Graceful shutdown
@@ -768,6 +774,10 @@ Two smaller gaps against client-js, for the same honesty:
   carrying `incr` anyway. The ETag saves bandwidth, never the round trip.
 
 ## Error Handling
+
+`ack()` and `renew()` return `success: false` with an `error` when the broker
+settled or extended nothing. Both routes answer HTTP 200 in that case, so read
+`success`; for an ack, the per-message results stay in `result`.
 
 ```cpp
 try {

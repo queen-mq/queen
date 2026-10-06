@@ -1072,6 +1072,115 @@ inline int empty_poll_delay_millis(const AutopilotDecision& decision) {
                                                         : EMPTY_POLL_BACKOFF_MILLIS;
 }
 
+// ---------------------------------------------------------------------------
+// Ack and lease-renewal answers
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the broker's answer to POST /api/v1/ack or /api/v1/ack/batch. Both
+ * routes answer HTTP 200 with one item per acknowledgment, in request order:
+ *
+ *   [{index, transactionId, success, error, leaseReleased, dlq, noop}]
+ *
+ * A refused acknowledgment (its lease expired or was released, its message is
+ * already settled) is an item with success:false, still under a 200, so the
+ * per-item flag is the only signal that the broker settled anything. Returns
+ * {success, result[, error]}: `result` is the answer as it came, `error` names
+ * the first refusal. The same reading as the JS client's parseAckResults.
+ */
+inline json ack_outcome(const json& answer, size_t expected) {
+    json out = {{"success", true}, {"result", answer}};
+    auto fail = [&out](const std::string& error) {
+        out["success"] = false;
+        out["error"] = error;
+        return out;
+    };
+    auto error_of = [](const json& item) -> std::string {
+        return item.contains("error") && item["error"].is_string()
+            ? item["error"].get<std::string>() : std::string();
+    };
+
+    if (!answer.is_array()) {
+        // A top-level error envelope: the whole request was refused.
+        if (answer.is_object() && !error_of(answer).empty()) {
+            return fail(error_of(answer));
+        }
+        return fail("Unexpected ack response format: missing per-item result array");
+    }
+    // A short or misaligned answer fails loudly instead of being read against
+    // the wrong message.
+    if (answer.size() != expected) {
+        return fail("Ack response has " + std::to_string(answer.size()) +
+                    " results, expected " + std::to_string(expected));
+    }
+
+    size_t refused = 0;
+    std::string first_error;
+    for (const auto& item : answer) {
+        if (!item.is_object()) {
+            return fail("Unexpected ack result item: " + item.dump());
+        }
+        std::string error = error_of(item);
+        bool success = error.empty() &&
+            !(item.contains("success") && item["success"].is_boolean() &&
+              !item["success"].get<bool>());
+        if (!success && refused++ == 0) {
+            first_error = error.empty() ? "Acknowledgment rejected by server" : error;
+        }
+    }
+    if (refused == 0) {
+        return out;
+    }
+    if (refused == 1) {
+        return fail(first_error);
+    }
+    return fail(std::to_string(refused) + " of " + std::to_string(answer.size()) +
+                " acknowledgments rejected: " + first_error);
+}
+
+/**
+ * Read the broker's answer to POST /api/v1/lease/:leaseId/extend, which is
+ * HTTP 200 whether or not anything was renewed:
+ *
+ *   {leaseId, success, renewed, newExpiresAt, expiresAt, lease_expires_at}
+ *
+ * success:false (renewed 0) means the lease is gone -- expired, released by an
+ * ack or nack, or never there -- so nothing was extended, and its messages can
+ * already be on their way to another consumer. Returns {leaseId, success,
+ * newExpiresAt[, renewed][, error]}, the JS client's parseRenewResult reading.
+ */
+inline json renew_outcome(const json& answer, const std::string& lease_id) {
+    const json& item = (answer.is_array() && !answer.empty()) ? answer[0] : answer;
+    if (!item.is_object()) {
+        return {{"leaseId", lease_id}, {"success", false}, {"newExpiresAt", nullptr},
+                {"error", "Unexpected lease renewal response"}};
+    }
+
+    json expires = nullptr;
+    for (const char* key : {"newExpiresAt", "expiresAt", "lease_expires_at"}) {
+        if (item.contains(key) && !item[key].is_null()) {
+            expires = item[key];
+            break;
+        }
+    }
+    bool success = (item.contains("success") && item["success"].is_boolean())
+        ? item["success"].get<bool>() : !expires.is_null();
+
+    json out = {{"leaseId", lease_id}, {"success", success}, {"newExpiresAt", expires}};
+    if (item.contains("renewed") && item["renewed"].is_number()) {
+        out["renewed"] = item["renewed"];
+    }
+    if (!success) {
+        bool has_error = item.contains("error") && item["error"].is_string() &&
+                         !item["error"].get<std::string>().empty();
+        out["error"] = has_error
+            ? item["error"].get<std::string>()
+            : std::string("Lease not renewed: it expired, was released by an ack or nack, "
+                          "or does not exist");
+    }
+    return out;
+}
+
 } // namespace util
 
 /**
@@ -4104,7 +4213,8 @@ public:
             
             try {
                 json result = http_client_->post("/api/v1/ack/batch", request);
-                return {{"success", true}, {"result", result}};
+                // HTTP 200 also carries refusals: read the per-item flags.
+                return util::ack_outcome(result, acknowledgments.size());
             } catch (const std::exception& e) {
                 return {{"success", false}, {"error", e.what()}};
             }
@@ -4146,7 +4256,8 @@ public:
         
         try {
             json result = http_client_->post("/api/v1/ack", body);
-            return {{"success", true}, {"result", result}};
+            // HTTP 200 also carries a refusal: read the item's flag.
+            return util::ack_outcome(result, 1);
         } catch (const std::exception& e) {
             return {{"success", false}, {"error", e.what()}};
         }
@@ -4194,12 +4305,8 @@ public:
         for (const auto& lease_id : lease_ids) {
             try {
                 json result = http_client_->post("/api/v1/lease/" + lease_id + "/extend", json::object());
-                results.push_back({
-                    {"leaseId", lease_id},
-                    {"success", true},
-                    {"newExpiresAt", result.contains("newExpiresAt") ? result["newExpiresAt"] : 
-                                     result.contains("lease_expires_at") ? result["lease_expires_at"] : nullptr}
-                });
+                // Always HTTP 200: the body says whether anything was renewed.
+                results.push_back(util::renew_outcome(result, lease_id));
             } catch (const std::exception& e) {
                 results.push_back({
                     {"leaseId", lease_id},

@@ -1119,6 +1119,56 @@ bool test_transaction_acks_two_live_leases(const std::string& server_url) {
 }
 
 // ============================================================================
+// SETTLEMENT TESTS
+// ============================================================================
+// What the broker does with the consume loop's acks, nacks and renewals. The
+// exact requests are pinned without a broker in test_consumer.cpp; these show
+// the effect on a real queue.
+
+std::string unique_queue(const std::string& prefix) {
+    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return prefix + std::to_string(timestamp);
+}
+
+// ack() and renew() say when the broker settled or extended nothing, which it
+// answers with HTTP 200 and success:false in the body.
+bool test_ack_and_renew_report_a_broker_refusal(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-refusal-");
+    DropQueuesOnExit drop{client, {queue}};
+
+    client.queue(queue).create();
+    client.queue(queue).push({{{"data", {{"n", 1}}}}});
+    json popped = client.queue(queue).group("cpp-refusal").subscription_mode("all")
+        .batch(1).wait(false).pop();
+    if (popped.size() != 1) {
+        std::cerr << "expected one message, got " << popped.dump() << std::endl;
+        return false;
+    }
+    json msg = popped[0];
+    json group = {{"group", "cpp-refusal"}};
+
+    json unknown_lease = client.renew("00000000-0000-0000-0000-000000000000");
+    json live_lease = client.renew(msg);
+    json wrong_lease = msg;
+    wrong_lease["leaseId"] = "00000000-0000-0000-0000-000000000000";
+    json refused = client.ack(wrong_lease, true, group);
+    json accepted = client.ack(msg, true, group);
+
+    bool ok = unknown_lease.value("success", true) == false &&
+              live_lease.value("success", false) &&
+              refused.value("success", true) == false &&
+              accepted.value("success", false);
+    if (!ok) {
+        std::cerr << "renew unknown=" << unknown_lease.dump() << " renew live="
+                  << live_lease.dump() << " ack wrong lease=" << refused.dump()
+                  << " ack=" << accepted.dump() << std::endl;
+    }
+    return ok;
+}
+
+// ============================================================================
 // DLQ TEST
 // ============================================================================
 
@@ -1774,6 +1824,11 @@ int main(int argc, char** argv) {
                     [&]() { return test_transaction_refuses_an_ack_under_an_expired_lease(server_url); });
     runner.run_test("Transaction ACKs two live leases",
                     [&]() { return test_transaction_acks_two_live_leases(server_url); });
+
+    // SETTLEMENT TESTS
+    std::cout << YELLOW << "\n=== SETTLEMENT TESTS ===" << RESET << "\n" << std::endl;
+    runner.run_test("ACK and renew report a broker refusal",
+                    [&]() { return test_ack_and_renew_report_a_broker_refusal(server_url); });
     
     // DLQ TEST
     std::cout << YELLOW << "\n=== DLQ TESTS ===" << RESET << "\n" << std::endl;

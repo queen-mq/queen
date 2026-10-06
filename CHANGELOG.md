@@ -5,6 +5,12 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**C++ client: `ack()` and `renew()` report what the broker refused.** `ack()` returned
+`success: true` for any HTTP 200 and `renew()` for any answer, but the broker answers 200 with
+`success: false` when it settled or extended nothing, for example under an expired or released
+lease. Both now read the body: `success` is false with an `error`, and `ack()` keeps the broker's
+answer in `result`.
+
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
 switch. One forking pool is enough to start the fork server, and both engines spawn the workers of

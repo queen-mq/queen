@@ -274,9 +274,8 @@ int main() {
                     json ack = client.ack(msg, error.empty(), context);
 
                     // A refused acknowledgement still arrives as HTTP 200 with
-                    // success: false on the item, so the item is the broker's
-                    // verdict. The outer "success" only says the call did not
-                    // throw.
+                    // success: false on the item. ack() reads the item, so its
+                    // outer "success" is false too.
                     if (!ack.value("success", false) || !ack["result"].is_array() ||
                         ack["result"].empty() ||
                         !ack["result"][0].value("success", false)) {
