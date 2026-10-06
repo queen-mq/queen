@@ -77,11 +77,12 @@ final class LaravelConfigFileTest extends TestCase
         $supervisor = $config['supervisor'];
         $this->assertSame([3, 75, 256, null], [$supervisor['poll_interval'], $supervisor['shutdown_grace'], $supervisor['process_limit'], $supervisor['heartbeat_timeout']]);
         $this->assertSame([false, false, true, false], [$supervisor['prefork'], $supervisor['event_driven'], $supervisor['lease_service'], $supervisor['coordination']['enabled']]);
-        $this->assertSame([['default'], 'laravel', 10, false], [
+        $this->assertSame([['default'], 'laravel', 10, false, null], [
             $supervisor['supervisors']['default']['queues'],
             $supervisor['supervisors']['default']['consumer_group'],
             $supervisor['supervisors']['default']['max_processes'],
             $supervisor['supervisors']['default']['fast_scale_up'],
+            $supervisor['supervisors']['default']['prefork'],
         ]);
         $this->assertSame([true, true, false], [$config['job_metrics']['enabled'], $config['tags']['enabled'], $config['metrics']['enabled']]);
         $this->assertSame([null, null], [$config['supervisor_binary']['manifest'], $config['supervisor_binary']['manifest_sha256']]);

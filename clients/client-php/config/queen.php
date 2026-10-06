@@ -189,6 +189,10 @@ return [
                 // Close half of the gap to the target every cycle when the
                 // backlog grows, instead of one balance_max_shift step.
                 'fast_scale_up' => false,
+                // This pool's own prefork: false spawns its workers, for
+                // code that must not run in a forked process; true forks
+                // them; null follows supervisor.prefork.
+                'prefork' => null,
                 'max_processes' => 10,
                 'target_jobs_per_process' => 10,
                 'target_clear_seconds' => 60,

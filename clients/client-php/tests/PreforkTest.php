@@ -242,6 +242,94 @@ final class PreforkTest extends TestCase
         $this->assertTrue(\Queen\Laravel\Supervisor\SupervisorConfiguration::resolve($queen(['prefork' => true]), '/app')['prefork']);
     }
 
+    public function testAPoolCanTurnPreforkOffWhileTheOthersStayForked(): void
+    {
+        $resolved = $this->resolve([
+            'prefork' => true,
+            'supervisors' => ['kafka' => ['queues' => ['kafka'], 'prefork' => false], 'default' => []],
+        ]);
+
+        $this->assertTrue($resolved['prefork']);
+        $this->assertFalse($resolved['supervisors']['kafka']['prefork']);
+        $this->assertArrayNotHasKey('prefork', $resolved['supervisors']['default']);
+    }
+
+    public function testAPoolCanTurnPreforkOnAlone(): void
+    {
+        $resolved = $this->resolve([
+            'supervisors' => ['emails' => ['queues' => ['emails'], 'prefork' => true], 'default' => []],
+        ]);
+
+        $this->assertTrue($resolved['prefork']);
+        $this->assertArrayNotHasKey('prefork', $resolved['supervisors']['emails']);
+        $this->assertFalse($resolved['supervisors']['default']['prefork']);
+    }
+
+    public function testAPoolWithoutTheKeyFollowsTheSupervisorSwitch(): void
+    {
+        $resolved = $this->resolve(['prefork' => true, 'supervisors' => ['default' => ['prefork' => null]]]);
+
+        $this->assertTrue($resolved['prefork']);
+        $this->assertArrayNotHasKey('prefork', $resolved['supervisors']['default']);
+    }
+
+    public function testNoForkServerStartsWhenEveryPoolTurnsPreforkOff(): void
+    {
+        $resolved = $this->resolve(['prefork' => true, 'supervisors' => ['default' => ['prefork' => false]]]);
+
+        $this->assertArrayNotHasKey('prefork', $resolved);
+        $this->assertArrayNotHasKey('prefork', $resolved['supervisors']['default']);
+    }
+
+    public function testAPoolPreforkMustBeABoolean(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Queen supervisor supervisor [default] prefork must be a boolean.');
+
+        $this->resolve(['supervisors' => ['default' => ['prefork' => 'yes']]]);
+    }
+
+    public function testThePhpEngineSpawnsTheWorkersOfAPoolWithPreforkOff(): void
+    {
+        $stateDirectory = sys_get_temp_dir() . '/queen-prefork-pools-' . bin2hex(random_bytes(6));
+        mkdir($stateDirectory, 0700);
+        $supervisor = new \Queen\Laravel\Supervisor\PhpSupervisor(
+            $this->createStub(\Illuminate\Queue\QueueManager::class),
+            [
+                'state_directory' => $stateDirectory,
+                'supervisors' => ['kafka' => ['prefork' => false], 'default' => []],
+                'prefork' => true,
+                'php_binary' => PHP_BINARY,
+                'artisan' => __DIR__ . '/Fixtures/Prefork/fork_server.php',
+                'cwd' => __DIR__,
+            ],
+            output: function (): void {
+            },
+        );
+        (new \ReflectionMethod($supervisor, 'startForkServer'))->invoke($supervisor);
+        $fork = new \ReflectionMethod($supervisor, 'forkWorker');
+        $report = $this->report();
+
+        try {
+            $this->assertNull($fork->invoke($supervisor, 'kafka', 'kafka', ['exit', $report, '0'], []));
+            $forked = $fork->invoke($supervisor, 'default', 'default', ['exit', $report, '0'], []);
+            $this->assertInstanceOf(ForkedProcess::class, $forked);
+            $this->waitUntil(fn (): bool => !$forked->isRunning());
+        } finally {
+            (new \ReflectionMethod($supervisor, 'closeForkServer'))->invoke($supervisor);
+            @rmdir($stateDirectory);
+        }
+    }
+
+    /** @param array<string, mixed> $supervisor */
+    private function resolve(array $supervisor): array
+    {
+        return \Queen\Laravel\Supervisor\SupervisorConfiguration::resolve(
+            ['url' => 'http://queen.test:6632', 'supervisor' => $supervisor],
+            '/app',
+        );
+    }
+
     private function report(): string
     {
         return $this->reports[] = sys_get_temp_dir() . '/queen-prefork-' . bin2hex(random_bytes(6)) . '.json';

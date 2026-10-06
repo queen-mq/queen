@@ -68,6 +68,9 @@ final class SupervisorConfiguration
         $resolved = [];
         $connections = [];
         $statusPools = 0;
+        // A pool's own `prefork` wins; a pool without one follows the switch.
+        $preforkDefault = self::boolean($raw['prefork'] ?? false, 'prefork');
+        $preforkPools = [];
         $maximumControlLoopSeconds = $pollInterval;
         foreach ($supervisors as $name => $options) {
             $name = (string) $name;
@@ -293,6 +296,18 @@ final class SupervisorConfiguration
             if (self::boolean($options['fast_scale_up'] ?? false, "supervisor [{$name}] fast_scale_up")) {
                 $resolved[$name]['fast_scale_up'] = true;
             }
+            $preforkPools[$name] = ($options['prefork'] ?? null) === null
+                ? $preforkDefault
+                : self::boolean($options['prefork'], "supervisor [{$name}] prefork");
+        }
+        // One pool that forks is enough to start the fork server. The pools
+        // that do not are the exception the engines need to be told about,
+        // so the key is emitted only as false, and only beside a server.
+        $prefork = in_array(true, $preforkPools, true);
+        if ($prefork) {
+            foreach (array_keys($preforkPools, false, true) as $name) {
+                $resolved[$name]['prefork'] = false;
+            }
         }
 
         $totalMaxProcesses = array_sum(array_column($resolved, 'max_processes'));
@@ -410,7 +425,7 @@ final class SupervisorConfiguration
             // so a disabled feature keeps the document byte-identical.
             $result['remote_status'] = self::remoteStatusTiming($remoteStatus, $pollInterval, $heartbeatTimeout);
         }
-        if (self::boolean($raw['prefork'] ?? false, 'prefork')) {
+        if ($prefork) {
             // Emitted only when enabled: engines reject unknown contract keys.
             $result['prefork'] = true;
         }

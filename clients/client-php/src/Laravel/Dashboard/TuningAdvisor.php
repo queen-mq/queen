@@ -256,8 +256,10 @@ final class TuningAdvisor
     /** @return list<array<string, mixed>> */
     private function prefork(ApplicationSettings $settings): array
     {
-        // On, or invalid (the supervisor would refuse it): nothing to advise.
-        if ($settings->supervisorSwitch('prefork', false) !== false) {
+        // On, or invalid (the supervisor would refuse it), or on for a pool
+        // that sets its own: nothing to advise.
+        if ($settings->supervisorSwitch('prefork', false) !== false
+            || in_array(true, array_column($settings->pools(), 'prefork'), true)) {
             return [];
         }
 
