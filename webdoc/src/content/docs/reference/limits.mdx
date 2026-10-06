@@ -26,6 +26,7 @@ sourceOfTruth:
   - server/src/rsm/planner/positions.rs
   - server/src/rsm/maintenance.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): defaults checked against 2.0.1; traces are on disk and expire in bounded steps; a trace key over 511 bytes is answered 400.
+# sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps its existing limit and offset handling; the listed request limits are unchanged.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling

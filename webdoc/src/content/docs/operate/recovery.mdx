@@ -53,6 +53,7 @@ digest: >-
   nodes held. A deterministic apply failure stops every node and is stepped over with the
   `QUEEN_RAFT_APPLY_SKIP=<index>:<digest>` value the log prints, set on every node.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs and apply.rs gained the on-disk trace store; 2.0.1 raises the cluster version to 4, which the rollback paragraph now names.
+# sourceOfTruth re-read 2026-10-06 (indexed message browsing): the added QLog index read leaves replay, recovery and durability behavior unchanged.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and
