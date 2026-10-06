@@ -121,8 +121,17 @@ function indexStructs(files) {
       const fields = [];
       let pendingRename = null;
       let pendingDefault = false;
+      // A field whose doc comment starts with "Deprecated" is a name kept only
+      // for the clients that still send it: published with `deprecated: true`
+      // and that doc comment as its description. Plain `//` comments are notes
+      // for the code's readers and are never published.
+      let pendingDoc = [];
       for (const rawLine of block.split("\n")) {
         const line = rawLine.trim();
+        if (line.startsWith("///")) {
+          pendingDoc.push(line.slice(3).trim());
+          continue;
+        }
         if (!line || line.startsWith("//")) continue;
         if (line.startsWith("#[")) {
           const r = line.match(/rename\s*=\s*"([^"]+)"/);
@@ -133,14 +142,17 @@ function indexStructs(files) {
         const f = line.match(/^(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*(.+?),?$/);
         if (!f) continue;
         const [, rustName, rustType] = f;
+        const doc = pendingDoc.join(" ");
         fields.push({
           rustName,
           wireName: pendingRename ?? rustName,
           rustType: rustType.replace(/,$/, "").trim(),
           hasDefault: pendingDefault,
+          deprecated: /^Deprecated\b/.test(doc) ? doc : null,
         });
         pendingRename = null;
         pendingDefault = false;
+        pendingDoc = [];
       }
       if (!out.has(name)) out.set(name, { name, fields });
     }
@@ -223,6 +235,7 @@ function queryParams(handler, structs) {
         return {
           name: f.wireName,
           in: "query",
+          ...(f.deprecated ? { description: f.deprecated, deprecated: true } : {}),
           required: false,
           schema,
         };
@@ -241,16 +254,44 @@ function queryParams(handler, structs) {
   // the long ones — so `GET /api/v1/timers/:queue` published `after` and
   // silently dropped `limit`. A spec that lists three of a route's four
   // parameters is worse than one that lists none, because it reads complete.
+  //
+  // The map is also read through the `qbool` / `qint` helpers in
+  // handlers/mod.rs (`qbool(&q, "wait", false)`), and those keys are
+  // parameters too: matched in the same pass, so the order stays the source's.
+  // `qbool_or_alias(&q, "name", "alias")` reads a flag under its name and under
+  // a deprecated alias, and the alias is published as deprecated.
   const binding = handler.args.match(/Query\(\s*(\w+)\s*\)\s*:\s*Query</)?.[1];
-  const access = binding
-    ? new RegExp(`\\b${binding}\\s*\\.\\s*get\\(\\s*"([a-zA-Z_][\\w]*)"\\s*\\)`, "g")
-    : /\b\w+\s*\.\s*get\(\s*"([a-zA-Z_][\w]*)"\s*\)/g;
-  const keys = [...handler.body.matchAll(access)].map((m) => m[1]);
+  const recv = binding ?? "\\w+";
+  const KEY = `"([a-zA-Z_][\\w]*)"`;
+  const access = new RegExp(
+    `\\b${recv}\\s*\\.\\s*get\\(\\s*${KEY}\\s*\\)` +
+      `|\\bq(?:bool|int)\\(\\s*&\\s*${recv}\\s*,\\s*${KEY}` +
+      `|\\bqbool_or_alias\\(\\s*&\\s*${recv}\\s*,\\s*${KEY}\\s*,\\s*${KEY}`,
+    "g",
+  );
+  const keys = [];
+  const aliases = new Map();
+  for (const m of handler.body.matchAll(access)) {
+    if (m[3]) {
+      keys.push(m[3], m[4]);
+      aliases.set(m[4], m[3]);
+    } else {
+      keys.push(m[1] ?? m[2]);
+    }
+  }
   const uniq = [...new Set(keys)];
   if (uniq.length) {
     return {
       mode: "adhoc",
-      params: uniq.map((k) => ({ name: k, in: "query", required: false, schema: { type: "string" } })),
+      params: uniq.map((k) => ({
+        name: k,
+        in: "query",
+        ...(aliases.has(k)
+          ? { description: `Deprecated alias of \`${aliases.get(k)}\`.`, deprecated: true }
+          : {}),
+        required: false,
+        schema: { type: "string" },
+      })),
     };
   }
   // A handler that takes the map only to REFUSE it. The KV path routes do this
