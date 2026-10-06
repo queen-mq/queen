@@ -28,6 +28,8 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/Binary/SupervisorBinary.php
   - clients/client-php/bin/queen-supervisor
   - supervisor/src/main.rs
+# sourceOfTruth re-read 2026-10-06 (prefork per pool): the pool table adds prefork (null follows
+# supervisor.prefork) and the supervisor.prefork row says a pool's key wins.
 # sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in PHP client 2.1.0, down from 95; the page leads with those 20, the area tables give each key and its default and name a variable only where the file reads one, supervisor.lease_service replaces QUEEN_SUPERVISOR_LEASE_SERVICE (read by the Rust master until the supervisor released with 2.1.0), remote_status.key defaults to a slug of APP_NAME and APP_ENV and is no longer required, a pool without queues or consumer_group takes the top-level ones, the switches paragraph follows the new file, QUEEN_SDK_POP_AUTOPILOT and the variables the supervisors set for their workers are named, and Upgrading from 2.0.0 maps every removed variable to its key.
 # sourceOfTruth re-read 2026-10-05 (advice and comments): TuningAdvisor cites the Linux runs and
 # links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
@@ -243,7 +245,7 @@ ownership is checked before Laravel's row changes ([failed jobs](/guides/laravel
 | `supervisor.remote_status.key` | a slug of `APP_NAME` and `APP_ENV`, such as `laravel-production` | The key the status goes under, one per application and environment on a broker. |
 | `supervisor.remote_status.interval` | `null` | Time between two publishes, in seconds, shorter than `heartbeat_timeout`. When `null`: `poll_interval`. |
 | `supervisor.remote_status.ttl` | `null` | How long a published copy lives, in seconds, at most 86,400. When `null`: twice `heartbeat_timeout`, at least 300. |
-| `supervisor.prefork` | `false` | Boot Laravel once in a fork server and fork every worker from it. Variable: `QUEEN_SUPERVISOR_PREFORK`. |
+| `supervisor.prefork` | `false` | Boot Laravel once in a fork server and fork every worker from it; a pool's `prefork` wins. Variable: `QUEEN_SUPERVISOR_PREFORK`. |
 | `supervisor.event_driven` | `false` | Resize a pool when jobs arrive, through a read-only long poll, instead of at the next poll. |
 | `supervisor.lease_service` | `true` | Rust engine on Linux: the master renews the leases of every `lease_renewal` worker; `false` starts one PHP helper beside each. |
 | `supervisor.coordination.enabled` | `false` | Share each autoscaling pool's target with the other replicas of this supervisor. Variable: `QUEEN_SUPERVISOR_COORDINATION`. |
@@ -275,6 +277,7 @@ Each entry of `supervisor.supervisors` is a pool. The file ships one, `default`,
 | `min_processes` | `1` | Fewest workers of the pool. |
 | `min_processes_per_queue` | `0` | Workers that every queue of an `auto` pool keeps without a backlog. |
 | `fast_scale_up` | `false` | Close half of the gap to the target in each cycle while the pool grows. |
+| `prefork` | `null` | This pool's own prefork: `false` spawns its workers, `true` forks them, `null` follows `supervisor.prefork`. |
 | `max_processes` | `10` | Most workers of the pool, and the size of a `simple` pool that sets no `processes`. |
 | `target_jobs_per_process` | `10` | Backlog jobs per worker that the `size` strategy aims at. |
 | `target_clear_seconds` | `60` | Time in which the `time` strategy aims to clear the backlog, in seconds. |

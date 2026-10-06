@@ -601,16 +601,19 @@ final class PhpSupervisor
     }
 
     /**
-     * A worker forked from the booted fork server, or null to spawn one.
-     * After a failed fork the rest of this run spawns, while the server stays
-     * open to report the exits of the workers it already forked.
+     * A worker forked from the booted fork server, or null to spawn one: a
+     * pool with `prefork` false always spawns. After a failed fork the rest
+     * of this run spawns, while the server stays open to report the exits of
+     * the workers it already forked.
      *
      * @param list<string> $arguments
      * @param array<string, string|false|null> $environment
      */
     private function forkWorker(string $name, string $queue, array $arguments, array $environment): ?ForkedProcess
     {
-        if (!$this->forkServer instanceof ForkServerClient || $this->preforkFailed) {
+        if (!$this->forkServer instanceof ForkServerClient
+            || $this->preforkFailed
+            || ($this->config['supervisors'][$name]['prefork'] ?? true) === false) {
             return null;
         }
         try {

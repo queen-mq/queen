@@ -186,6 +186,27 @@ final class ApplicationSettingsTest extends TestCase
         $this->assertSame(['on for emails', 'off'], $this->valueAndDefault($settings, 'supervisor', 'fast_scale_up'));
     }
 
+    public function testPreforkNamesThePoolsThatDifferFromTheSwitch(): void
+    {
+        $pools = ['kafka' => ['queues' => ['kafka'], 'prefork' => false], 'emails' => ['queues' => ['emails']]];
+
+        $this->assertSame(
+            ['on, off for kafka', 'off'],
+            $this->valueAndDefault($this->settings(['supervisor' => ['prefork' => true, 'supervisors' => $pools]]), 'supervisor', 'prefork'),
+        );
+        $this->assertSame(
+            ['off, on for emails', 'off'],
+            $this->valueAndDefault($this->settings(['supervisor' => ['supervisors' => [
+                'emails' => ['queues' => ['emails'], 'prefork' => true],
+                'reports' => ['queues' => ['reports']],
+            ]]]), 'supervisor', 'prefork'),
+        );
+        $this->assertSame(
+            'invalid',
+            $this->row($this->settings(['supervisor' => ['supervisors' => ['default' => ['prefork' => 'yes']]]]), 'supervisor', 'prefork')['value'],
+        );
+    }
+
     public function testPoolsGetTheDefaultsTheSupervisorApplies(): void
     {
         $settings = $this->settings(

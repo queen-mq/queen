@@ -1,0 +1,1 @@
+{"argv":["queen","--queue=high","--sleep=1","--timeout=60","--tries=3","--memory=128","--backoff=0","--max-jobs=0","--max-time=0","--rest=0","--quiet"],"value":false,"removed":false,"pid":26205,"pgid":26205}

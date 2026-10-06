@@ -179,6 +179,10 @@ final class TuningAdvisorTest extends TestCase
         $this->assertStringContainsString('QUEEN_SUPERVISOR_PREFORK=true', $advice[0]['action']);
         $this->assertSame('https://queenmq.com/guides/laravel/supervisors#prefork-workers', $advice[0]['doc']);
         $this->assertSame([], $this->advise(config: $this->config(['supervisor' => ['prefork' => true]])));
+        $this->assertSame([], $this->advise(config: $this->config(['supervisor' => [
+            'prefork' => false,
+            'supervisors' => ['default' => ['prefork' => true]],
+        ]])), 'a pool that forks already knows about prefork');
     }
 
     public function testALeaseHelperPerWorkerIsFlaggedOnlyWhenTheMastersServiceIsTurnedOff(): void

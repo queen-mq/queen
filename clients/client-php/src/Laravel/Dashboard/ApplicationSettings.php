@@ -64,7 +64,7 @@ final class ApplicationSettings
         'process_limit' => [null, 'count', 256, 1, 4096, 'Most child processes the master runs, lease helpers included.'],
         'heartbeat_timeout' => [null, 'seconds', null, 1, 86400, 'Heartbeat age at which the supervisor shows as stale.'],
         'telemetry_ttl' => [null, 'seconds', 300, 1, null, 'How long worker runtime samples are kept for the time strategy.'],
-        'prefork' => ['QUEEN_SUPERVISOR_PREFORK', 'switch', false, 0, null, 'Boot Laravel once and fork every worker from it.'],
+        'prefork' => ['QUEEN_SUPERVISOR_PREFORK', 'switch', false, 0, null, 'Boot Laravel once and fork every worker from it. A pool may set its own.'],
         'event_driven' => [null, 'switch', false, 0, null, 'Resize a pool when jobs arrive instead of at the next poll.'],
         'coordination.enabled' => ['QUEEN_SUPERVISOR_COORDINATION', 'switch', false, 0, null, "Share each autoscaling pool's worker target with the other replicas."],
         'lease_service' => [null, 'switch', true, 0, null, "Rust engine on Linux: the master renews the workers' leases; off starts a PHP helper per worker."],
@@ -192,6 +192,8 @@ final class ApplicationSettings
                 'max_time' => self::integerOr($options['max_time'] ?? null, 0),
                 'sleep' => self::integerOr($options['sleep'] ?? null, 1),
                 'fast_scale_up' => self::switchOr($options['fast_scale_up'] ?? null, false),
+                // A pool's own prefork, or the supervisor's switch.
+                'prefork' => self::switchOr($options['prefork'] ?? null, $this->supervisorSwitch('prefork', false) ?? false),
                 'lease_renewal' => self::switchOr($connection['lease_renewal'] ?? null, false),
                 // Why the supervisor would refuse the pool's sizes, if it would.
                 'refused' => $min !== null && $max !== null && $min > $max ? 'min_processes above max_processes' : null,
@@ -269,7 +271,7 @@ final class ApplicationSettings
                 ['poll_interval', 'http_timeout', 'shutdown_grace', 'process_limit', 'heartbeat_timeout', 'telemetry_ttl'],
             ),
             $this->secret('read_bearer_token', 'QUEEN_SUPERVISOR_READ_BEARER_TOKEN', $this->supervisorValue('read_bearer_token'), 'Read-only credential for depth reads and this dashboard.'),
-            $this->supervisorSetting('prefork'),
+            $this->prefork(),
             $this->supervisorSetting('event_driven'),
             $this->fastScaleUp(),
             $this->supervisorSetting('coordination.enabled'),
@@ -466,6 +468,27 @@ final class ApplicationSettings
             'changed' => $headers !== [],
             'invalid' => !is_array($headers),
             'meaning' => 'Extra HTTP headers sent with every broker request.',
+        ];
+    }
+
+    /** @return array<string, mixed> prefork: the switch, and the pools that set the other value */
+    private function prefork(): array
+    {
+        $row = $this->supervisorSetting('prefork');
+        $switch = $this->supervisorSwitch('prefork', false);
+        $pools = $this->pools();
+        if ($switch === null || in_array(null, array_column($pools, 'prefork'), true)) {
+            return [...$row, 'value' => 'invalid', 'invalid' => true];
+        }
+        $others = array_column(array_filter($pools, static fn (array $pool): bool => $pool['prefork'] !== $switch), 'name');
+        if ($others === []) {
+            return $row;
+        }
+
+        return [
+            ...$row,
+            'value' => ($switch ? 'on, off for ' : 'off, on for ') . implode(', ', $others),
+            'changed' => true,
         ];
     }
 
