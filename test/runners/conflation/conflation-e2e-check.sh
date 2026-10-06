@@ -569,8 +569,10 @@ eq "a flag-less empty pop stays a bodiless 204" "204" "$QW_RC"
 # other way, THIS assertion is the one to change.)
 req GET "/api/v1/pop/queue/$Q_CONF?conflation=true"
 eq "conflation without a consumerGroup is refused (400)" "400" "$QW_RC"
+req GET "/api/v1/pop/queue/$Q_CONF?consumerGroup=refuse-$RUN&conflation=true&commitOnDelivery=true"
+eq "conflation + commitOnDelivery is refused (400)" "400" "$QW_RC"
 req GET "/api/v1/pop/queue/$Q_CONF?consumerGroup=refuse-$RUN&conflation=true&autoAck=true"
-eq "conflation + autoAck is refused (400)" "400" "$QW_RC"
+eq "conflation + autoAck (the deprecated alias) is refused (400)" "400" "$QW_RC"
 scenario_end
 
 # =============================================================================

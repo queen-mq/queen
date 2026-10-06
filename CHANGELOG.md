@@ -5,6 +5,18 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Server: the pop parameter `commitOnDelivery`.** `commitOnDelivery=true` is the new name of a
+pop's `autoAck=true`: the broker moves the group's cursor past the messages as it hands them out,
+with no lease and nothing to ack, so delivery is at-most-once. Every SDK also has an `autoAck()` on
+`consume()`, which is client-side: the pop stays leased and the SDK acks after the handler, so
+delivery stays at-least-once. The broker option now has a name of its own. `autoAck` is still
+accepted as a deprecated alias, so the released Go and Rust SDKs and the CLI keep working: a pop
+that sends either name set to true commits at delivery, and a pop that sends neither is leased as
+before. The queue, partition, discovery and ephemeral pops read both names, conflation refuses
+both with a 400 that names both, and the OpenAPI document marks `autoAck` deprecated. The docs
+name only `commitOnDelivery`. A broker up to 2.0.1 reads only `autoAck`: it ignores
+`commitOnDelivery` and leases the batch.
+
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
 switch. One forking pool is enough to start the fork server, and both engines spawn the workers of

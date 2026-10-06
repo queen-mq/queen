@@ -11,6 +11,7 @@ wires it in with a `#[path]` attribute, so the test reaches the owner's private 
 | `switch_levels.rs` | `src/switches.rs` | `#[cfg(test)]`<br>`#[path = "tests_unit/switch_levels.rs"]`<br>`mod switch_levels_tests;` |
 | `ephemeral_engine.rs` | `src/ephemeral.rs` | `#[cfg(test)]`<br>`#[path = "tests_unit/ephemeral_engine.rs"]`<br>`mod ephemeral_engine_tests;` |
 | `ephemeral_handover.rs` | `src/handlers/ephemeral.rs` | `#[cfg(all(test, feature = "server"))]`<br>`#[path = "../tests_unit/ephemeral_handover.rs"]`<br>`mod ephemeral_handover_tests;` |
+| `pop_commit_on_delivery.rs` | `src/handlers/data.rs` | `#[cfg(test)]`<br>`#[path = "../tests_unit/pop_commit_on_delivery.rs"]`<br>`mod pop_commit_on_delivery_tests;` |
 
 `quota_overshoot.rs` is the one to read first if you are new to the quota: it runs the real gate
 under both the rejected design and the shipped one and measures the difference (PLAN_KV_TIMERS
