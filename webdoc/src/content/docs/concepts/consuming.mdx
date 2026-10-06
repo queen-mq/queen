@@ -33,7 +33,10 @@ and nacks it (`failed`) when the handler throws, and keeps consuming either way.
 acks inside a [transaction](/concepts/transactions/), turn the automatic ack off with
 `.autoAck(false)`. A handler that throws is still nacked for whatever it had not acked, so its
 partition comes back at once instead of waiting out the lease, and `.onError()` on `consume` hands
-that failure to your own code instead (queen-mq 2.0; the 1.x SDK stopped the loop there). `pop`
+that failure to your own code instead (queen-mq 2.0; the 1.x SDK stopped the loop there).
+Stopping `consume`, by aborting the `signal` passed as `consume(handler, { signal })`, closes its
+long poll at once, and under `.each()` it gives back the messages it popped but did not start with
+a `retry` ack, so a rolling restart leaves no partition waiting out a lease. `pop`
 hands you the leased messages and leaves the ack to you:
 
 <Render file="snippets/js-pop" />

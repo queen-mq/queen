@@ -4,6 +4,18 @@
 
 import * as logger from '../utils/logger.js'
 
+/**
+ * The error a request ends with when its caller aborted it (a consumer being
+ * stopped). It says nothing about the backend: it is never retried, never
+ * fails over to another node, and never marks a node unhealthy.
+ */
+function callerAborted(method, url) {
+  const error = new Error(`${method} ${url} aborted by the caller`)
+  error.name = 'AbortError'
+  error.aborted = true
+  return error
+}
+
 // --------------------------------------------------------------------------
 // Host-routed proxy support (queen_proxy selects the tenant cluster from the
 // first DNS label of the Host header -- proxy/src/cache.rs
@@ -211,14 +223,15 @@ export class HttpClient {
    * only status this layer treats as retryable; 5xx/network retry and
    * cross-backend failover are handled by the caller.
    */
-  async #executeWithRetry429(url, method, body, requestTimeoutMillis, retryKind) {
+  async #executeWithRetry429(url, method, body, requestTimeoutMillis, retryKind, signal = null) {
     const { maxAttempts, baseMs, capMs } = this.#retry429PolicyFor(retryKind)
     let tries = 0
     // eslint-disable-next-line no-constant-condition
     while (true) {
+      if (signal?.aborted) throw callerAborted(method, url)
       tries++
       try {
-        return await this.#executeRequest(url, method, body, requestTimeoutMillis)
+        return await this.#executeRequest(url, method, body, requestTimeoutMillis, signal)
       } catch (error) {
         if (error.status !== 429) throw error
 
@@ -323,7 +336,8 @@ export class HttpClient {
     }
   }
 
-  async #executeRequest(url, method, body = null, requestTimeoutMillis = null) {
+  async #executeRequest(url, method, body = null, requestTimeoutMillis = null, signal = null) {
+    if (signal?.aborted) throw callerAborted(method, url)
     const effectiveTimeout = requestTimeoutMillis || this.#timeoutMillis
     logger.log('HttpClient.request', { method, url, hasBody: !!body, timeout: effectiveTimeout, host: this.#hostOverride ? this.#hostOverride.authority : undefined })
 
@@ -339,7 +353,9 @@ export class HttpClient {
 
       const options = {
         method,
-        signal: controller.signal,
+        // The caller's signal closes the request too: a long poll its consumer
+        // no longer wants must not stay open for the broker to hand it a message.
+        signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
         headers
       }
 
@@ -424,6 +440,10 @@ export class HttpClient {
       return response.json()
 
     } catch (error) {
+      if (signal?.aborted) {
+        logger.log('HttpClient.request', { method, url, status: 'aborted-by-caller' })
+        throw callerAborted(method, url)
+      }
       if (error.name === 'AbortError') {
         const timeoutError = new Error(`Request timeout after ${effectiveTimeout}ms`)
         timeoutError.name = 'AbortError'
@@ -445,14 +465,15 @@ export class HttpClient {
     }
   }
 
-  async #requestWithRetry(method, path, body = null, requestTimeoutMillis = null, retryKind = null) {
+  async #requestWithRetry(method, path, body = null, requestTimeoutMillis = null, retryKind = null, signal = null) {
     let lastError = null
 
     for (let attempt = 0; attempt < this.#retryAttempts; attempt++) {
       try {
         const url = this.#getUrl() + path
-        return await this.#executeWithRetry429(url, method, body, requestTimeoutMillis, retryKind)
+        return await this.#executeWithRetry429(url, method, body, requestTimeoutMillis, retryKind, signal)
       } catch (error) {
+        if (error.aborted) throw error
         lastError = error
 
         // Don't retry on client errors (4xx)
@@ -473,9 +494,9 @@ export class HttpClient {
     throw lastError
   }
 
-  async #requestWithFailover(method, path, body = null, requestTimeoutMillis = null, affinityKey = null, retryKind = null) {
+  async #requestWithFailover(method, path, body = null, requestTimeoutMillis = null, affinityKey = null, retryKind = null, signal = null) {
     if (!this.#loadBalancer || !this.#enableFailover) {
-      return this.#requestWithRetry(method, path, body, requestTimeoutMillis, retryKind)
+      return this.#requestWithRetry(method, path, body, requestTimeoutMillis, retryKind, signal)
     }
 
     const urls = this.#loadBalancer.getAllUrls()
@@ -498,13 +519,16 @@ export class HttpClient {
         // 429s are retried in place (same backend, backoff-paced) inside
         // #executeWithRetry429 -- they are not a backend-health signal, so
         // they must not trigger failover to a different server.
-        const result = await this.#executeWithRetry429(url + path, method, body, requestTimeoutMillis, retryKind)
+        const result = await this.#executeWithRetry429(url + path, method, body, requestTimeoutMillis, retryKind, signal)
 
         // Mark backend as healthy on success
         this.#loadBalancer.markHealthy(url)
 
         return result
       } catch (error) {
+        // Stopped by its caller: this node did nothing wrong, and another
+        // node must not get the request instead.
+        if (error.aborted) throw error
         lastError = error
 
         // Mark backend as unhealthy on failure (5xx or network errors)
@@ -538,8 +562,10 @@ export class HttpClient {
   // `retryKind`: pass 'pop' for long-poll (wait=true) pop requests to get the
   // unbounded-with-backoff 429 policy; omit for everything else (push, admin
   // calls, non-waiting pop), which get the bounded default (10 attempts).
-  async get(path, requestTimeoutMillis = null, affinityKey = null, retryKind = null) {
-    return this.#requestWithFailover('GET', path, null, requestTimeoutMillis, affinityKey, retryKind)
+  // `signal`: aborting it closes the request, which then rejects with an
+  // error carrying `aborted: true` -- never retried and never failed over.
+  async get(path, requestTimeoutMillis = null, affinityKey = null, retryKind = null, signal = null) {
+    return this.#requestWithFailover('GET', path, null, requestTimeoutMillis, affinityKey, retryKind, signal)
   }
 
   async post(path, body = null, requestTimeoutMillis = null, affinityKey = null, retryKind = null) {

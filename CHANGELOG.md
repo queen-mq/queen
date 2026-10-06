@@ -5,6 +5,18 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**JS client: stopping a consumer never strands a message.** Aborting the `signal` passed to
+`consume()` was checked only between polls. A long poll open at the abort stayed open for up to its
+timeout, and the broker could still hand it a message. `.each()` then dropped that message without
+settling it, so its partition stayed blocked until the lease expired, on every rolling restart. The
+abort now closes the poll in flight, and the broker hands nothing to a poll whose caller is gone.
+Under `.each()`, messages popped but not yet handed to the handler, and those popped beyond
+`.limit()`, go back with a `retry` ack: the lease is released and no retry is charged. An aborted
+request is not a backend failure: it is not retried, does not fail over to another node and does not
+mark one unhealthy. A `wait(false)` consumer stopped during a pop now resolves instead of rejecting.
+Measured on a three-node 2.0.1 cluster, a consumer stopped as a message arrived: 40 of 40 messages
+waited out the lease before, none after.
+
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
 switch. One forking pool is enough to start the fork server, and both engines spawn the workers of
