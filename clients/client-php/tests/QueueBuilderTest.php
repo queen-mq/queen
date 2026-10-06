@@ -156,27 +156,27 @@ class QueueBuilderTest extends TestCase
     // ===========================
 
     /**
-     * autoAck(true) equals the consume() default, and pop() used to read
-     * "equals the default" as "never called", so the broker-side auto-ack the
-     * caller asked for never travelled.
+     * autoAck() is consume()'s ack after the handler. The broker's
+     * at-most-once auto-ack is not exposed to clients, by design: a pop
+     * sends no autoAck whatever autoAck() said, and comes back leased.
      */
-    public function testPopSendsAutoAckWhenTheCallerAskedForIt(): void
+    public function testPopSendsNoAutoAckAfterAutoAckTrue(): void
     {
         $handler = new PlanHandler([], self::popAnswer());
 
         $this->wiredQueen($handler)->queue('orders')->group('workers')->autoAck(true)->pop();
 
-        $this->assertSame('true', self::query($handler->requests[0])['autoAck'] ?? null);
+        $this->assertArrayNotHasKey('autoAck', self::query($handler->requests[0]));
     }
 
-    public function testPopDetachedSendsAutoAckWhenTheCallerAskedForIt(): void
+    public function testPopDetachedSendsNoAutoAckAfterAutoAckTrue(): void
     {
         $handler = new PlanHandler([], self::popAnswer());
         $builder = $this->wiredQueen($handler)->queue('orders')->group('workers')->autoAck(true);
 
         $builder->settlePop($builder->popDetached());
 
-        $this->assertSame('true', self::query($handler->requests[0])['autoAck'] ?? null);
+        $this->assertArrayNotHasKey('autoAck', self::query($handler->requests[0]));
     }
 
     /** A pop that never mentions autoAck stays leased: the caller acks. */

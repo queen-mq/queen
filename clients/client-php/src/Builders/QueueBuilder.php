@@ -35,9 +35,8 @@ class QueueBuilder
     private ?int $consumeBatch = null;
     private ?int $consumeLimit;
     private ?int $consumeIdleMillis;
-    // null means autoAck() was never called. The two read paths have opposite
-    // defaults (consume() acks client-side, pop() stays leased), so the setter's
-    // value cannot stand in for "unset" without swallowing autoAck(true) on pop.
+    // null means autoAck() was never called; consume() applies its default.
+    // pop() never reads it: a pop always stays leased.
     private ?bool $consumeAutoAck = null;
     private bool $consumeWait;
     private int $consumeTimeoutMillis;
@@ -296,14 +295,11 @@ class QueueBuilder
     }
 
     /**
-     * Two meanings, one per read path.
-     *
      * consume(): the loop acks after the handler and nacks when it throws. On
      * unless autoAck(false); the pop it sends stays leased either way.
      *
-     * pop(): autoAck(true) asks the broker to commit the messages at delivery,
-     * with no lease and nothing to ack. That is at-most-once: a crash after the
-     * pop loses them. Without it a pop is leased and you ack it yourself.
+     * No effect on pop(), which always comes back leased: the broker's
+     * at-most-once auto-ack is not exposed to clients, by design.
      */
     public function autoAck(bool $enabled): static
     {
@@ -444,9 +440,6 @@ class QueueBuilder
     {
         $path = $this->buildPopPath();
 
-        // Pop uses POP_DEFAULTS for autoAck unless the caller set it.
-        $effectiveAutoAck = $this->consumeAutoAck ?? Defaults::POP_DEFAULTS['autoAck'];
-
         // Batch, partitions and with them the autopilot flag. The RULE for which
         // of the three travel lives in one place (Support\PopAutopilot) because
         // this SDK has three pop param builders; only the PLACEMENT is here, and
@@ -482,9 +475,6 @@ class QueueBuilder
         if ($this->task !== null) {
             $params['task'] = $this->task;
         }
-        if ($effectiveAutoAck) {
-            $params['autoAck'] = 'true';
-        }
         if ($this->consumeSubscriptionMode !== null) {
             $params['subscriptionMode'] = $this->consumeSubscriptionMode;
         }
@@ -496,8 +486,7 @@ class QueueBuilder
         if ($sizing['partitions'] !== null) {
             $params['partitions'] = $sizing['partitions'];
         }
-        // Only ever sent when true, the rule autoAck follows above: the broker
-        // treats presence as opt-in, and an explicit conflation=false would read
+        // Only ever sent when true: the broker treats presence as opt-in, and an explicit conflation=false would read
         // as a DISAGREEMENT with a group whose stored policy is true.
         if ($this->consumeConflation) {
             $params['conflation'] = 'true';

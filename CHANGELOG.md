@@ -16,13 +16,11 @@ queen:supervisor-install` after the upgrade. A fork took 0.48 ms on the Linux se
 for a worker that booted the benchmark application on its own
 (`benchmark-queen/2026-10-05-laravel-worker-memory`).
 
-**PHP client: `pop()` sends `autoAck(true)`.** The builder took a value equal to the `consume()`
-default for one that was never set, so a `pop()` after `autoAck(true)` sent no `autoAck` and stayed
-leased. It now sends `autoAck=true` from `pop()`, `popResult()` and `popDetached()`, and the broker
-commits the messages at delivery with no lease. A pop that never calls `autoAck()`, or calls
-`autoAck(false)`, stays leased as before, and `consume()` still acks after its handler. A builder
-that calls `autoAck(true)` and also pops now gets at-most-once pops: remove the call there to keep
-acking yourself.
+**PHP client: `autoAck()` is the ack `consume()` sends after the handler.** The reference said
+that on `pop()` it was the broker's at-most-once auto-ack, which never reached the broker. It is not
+meant to: the broker's auto-ack is not exposed to clients, by design, so `pop()`, `popResult()` and
+`popDetached()` always come back leased. The reference and the builder now say so, and tests pin
+it. No behaviour changes.
 
 **PHP client: `Admin::moveMessageToDLQ()` is deprecated and throws.** It posted to
 `/api/v1/messages/:partitionId/:transactionId/dlq`, a route the 2.x broker does not have, so every
