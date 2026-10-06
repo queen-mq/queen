@@ -36,6 +36,13 @@ same, still works and is deprecated. `POP_DEFAULTS` now says what a pop does: `w
 every pop has long-polled unless `.wait(False)`, and `auto_ack` is never sent. No other behaviour
 changes.
 
+**Python client: `pop()` raises the broker's 400 refusal of a conflating pop.** `pop()` returns
+an empty list when a pop fails, and did so for the broker's 400 refusal of a conflating pop too:
+one without a consumer group, or one with `commit_on_delivery()`. No retry can make either
+succeed, and an empty list reads as an empty queue, so a consumer that asked for last-value
+delivery never learned that it was not getting it. `pop()` and `pop_result()` now raise that 400,
+as the JavaScript client does. Every other failure still returns an empty list.
+
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
 switch. One forking pool is enough to start the fork server, and both engines spawn the workers of

@@ -567,13 +567,23 @@ class QueueBuilder:
             # policy it asked for.
             raise
         except Exception as error:
+            status_code = getattr(getattr(error, "response", None), "status_code", None)
+            # The broker's 400 refusals of a conflating pop (no consumer group,
+            # or commit_on_delivery() as well) are permanent config faults: []
+            # would read as "no messages right now" on every call, the silent
+            # version §4 rules out. Raised, as in the JS client.
+            if self._conflation and status_code == 400:
+                logger.error(
+                    "QueueBuilder.pop",
+                    {"error": str(error), "status_code": status_code, "conflation": True},
+                )
+                raise
             # Return empty array on error instead of throwing. This also
             # covers a 429 whose retry_429 policy was exhausted (bounded
             # pop, or an explicit max_attempts override) and a terminal 403
             # (e.g. cluster_suspended) -- both are logged with their status
             # code/`.code` rather than raising, matching this method's
             # existing swallow-to-[] contract.
-            status_code = getattr(getattr(error, "response", None), "status_code", None)
             logger.error(
                 "QueueBuilder.pop",
                 {"error": str(error), "status_code": status_code, "code": getattr(error, "code", None)},
