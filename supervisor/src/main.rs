@@ -196,6 +196,10 @@ struct SupervisorConfig {
     force: bool,
     #[serde(default = "default_quiet")]
     quiet: bool,
+    // Emitted by Laravel only as false, beside a fork server: this pool's
+    // workers are spawned while the server forks the other pools' workers.
+    #[serde(default = "default_prefork")]
+    prefork: bool,
 }
 
 fn default_retry_after() -> u64 {
@@ -224,6 +228,10 @@ fn default_restart_backoff_max() -> u64 {
 
 fn default_stable_after() -> u64 {
     60
+}
+
+fn default_prefork() -> bool {
+    true
 }
 
 fn default_quiet() -> bool {
@@ -3302,7 +3310,7 @@ fn spawn_worker(
     restart_probe: bool,
     forks: Option<&Rc<RefCell<ForkServer>>>,
 ) -> Result<Worker, std::io::Error> {
-    if let Some(server) = forks.filter(|server| !server.borrow().disabled) {
+    if let Some(server) = forks.filter(|server| o.prefork && !server.borrow().disabled) {
         let (arguments, environment) = worker_invocation(config, name, queue, o);
         let forked = server.borrow_mut().fork(&arguments, &environment);
         match forked {
@@ -4024,6 +4032,7 @@ mod tests {
             quiet: true,
             min_processes_per_queue: 0,
             fast_scale_up: false,
+            prefork: true,
         }
     }
 
@@ -5073,6 +5082,77 @@ mod tests {
         );
         pools.clear();
         second.borrow_mut().close(Duration::from_secs(5));
+        fs::remove_dir_all(state_directory).unwrap();
+    }
+
+    #[test]
+    fn a_pool_forks_unless_it_turns_prefork_off() {
+        let pool = |extra: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "connection": "queen", "consumer_group": "workers", "queues": ["kafka"],
+                "balance": "auto", "strategy": "size", "processes": 1, "min_processes": 1,
+                "max_processes": 2, "target_jobs_per_process": 10, "target_clear_seconds": 60.0,
+                "default_runtime_seconds": 1.0, "balance_cooldown": 3, "balance_max_shift": 1,
+                "sleep": 1, "timeout": 60, "tries": 3, "memory": 128, "backoff": 0,
+                "max_jobs": 0, "max_time": 0, "rest": 0, "force": false
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<SupervisorConfig>(value).unwrap()
+        };
+
+        assert!(pool(serde_json::json!({})).prefork);
+        assert!(!pool(serde_json::json!({"prefork": false})).prefork);
+    }
+
+    /// A pool with prefork off spawns its workers while the fork server
+    /// forks those of the other pools.
+    #[cfg(unix)]
+    #[test]
+    fn a_pool_with_prefork_off_spawns_beside_the_fork_server() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../clients/client-php/tests/Fixtures/Prefork/fork_server.php");
+        let autoload =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../clients/client-php/vendor/autoload.php");
+        let php = Command::new("php")
+            .args([
+                "-r",
+                "exit(function_exists('pcntl_fork') && function_exists('posix_setsid') ? 0 : 1);",
+            ])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !php || !fixture.exists() || !autoload.exists() {
+            eprintln!("skipped: PHP with pcntl/posix and the Laravel package are required");
+            return;
+        }
+        let (mut resolved, state_directory) = exit_marker_config("pool-prefork-off");
+        resolved.prefork = true;
+        resolved.php_binary = "php".to_owned();
+        resolved.artisan = fixture.to_string_lossy().into_owned();
+        resolved.cwd = fixture.parent().unwrap().to_string_lossy().into_owned();
+        let running = AtomicBool::new(true);
+        let server = Rc::new(RefCell::new(
+            ForkServer::start(&resolved, &running).unwrap(),
+        ));
+        let forking = options("auto");
+        let mut spawning = options("auto");
+        spawning.prefork = false;
+
+        let mut forked =
+            spawn_worker(&resolved, "default", "high", &forking, false, Some(&server)).unwrap();
+        let mut spawned =
+            spawn_worker(&resolved, "kafka", "kafka", &spawning, false, Some(&server)).unwrap();
+
+        assert!(forked.child.forked_by(Some(&server)));
+        assert!(!spawned.child.forked_by(Some(&server)));
+        for worker in [&mut forked, &mut spawned] {
+            let _ = worker.child.kill();
+            let _ = worker.child.wait();
+        }
+        drop((forked, spawned));
+        server.borrow_mut().close(Duration::from_secs(5));
         fs::remove_dir_all(state_directory).unwrap();
     }
 
