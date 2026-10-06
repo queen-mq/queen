@@ -70,9 +70,11 @@ CONSUME_DEFAULTS: Dict[str, Any] = {
 # As in CONSUME_DEFAULTS, `batch` is the autopilot-OFF default.
 POP_DEFAULTS: Dict[str, Any] = {
     "batch": 1,  # One message (autopilot off only)
-    "wait": False,  # No long polling (immediate return)
+    "wait": True,  # Long polling, as every pop has done; .wait(False) returns at once
     "timeout_millis": 30000,  # 30 seconds if wait=true
-    "auto_ack": False,  # Server-side auto-ack (false = manual ack required)
+    "auto_ack": False,  # Never sent: auto_ack() is consume()'s ack after the handler
+    # Leased; True sends autoAck=true, the broker's at-most-once commit at delivery
+    "commit_on_delivery": False,
 }
 
 BUFFER_DEFAULTS: Dict[str, Any] = {

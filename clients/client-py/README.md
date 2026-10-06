@@ -268,6 +268,26 @@ single-partition behaviour.
 `.partitions(N)` only applies to **wildcard** pops; specifying
 `.partition('name')` ignores the cap.
 
+### Commit at Delivery
+
+`commit_on_delivery()` commits a `pop()` at delivery: the broker moves the
+consumer group's cursor past the messages as it hands them out. There is no
+lease and nothing to ack, so the delivery is at-most-once: a message that your
+code loses after the pop does not come back. It is a `pop()` option:
+`consume()` always leases its messages and raises `ValueError` when it is set.
+The broker refuses it together with `conflation()`.
+
+```python
+messages = await (queen.queue('metrics')
+                  .group('dashboard')
+                  .commit_on_delivery()
+                  .pop())  # already committed: do not ack these
+```
+
+The ephemeral pop has the same option:
+`await queen.ephemeral.pop('inbox', commit_on_delivery=True)`. Its old name,
+`auto_ack=True`, still works and is deprecated.
+
 ### Pop Autopilot (Let the Broker Size the Pop)
 
 Since 1.2, `batch` and `partitions` that you do **not** set are chosen by the
@@ -584,6 +604,10 @@ await queen.queue('q').limit(10).consume(single_handler)
 await queen.queue('q').concurrency(5).consume(single_handler)
 await queen.queue('q').group('my-group').consume(single_handler)
 ```
+
+`auto_ack(False)` leaves the ack of a handler that returns to you. `auto_ack()`
+has no effect on `pop()`: a pop commits at delivery only with
+`commit_on_delivery()`.
 
 ### Acknowledgment
 

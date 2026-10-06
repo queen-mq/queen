@@ -23,6 +23,19 @@ when it extended nothing: the lease expired, was released by an ack or nack, or 
 also returns `renewed`, the count the broker extended. A batch `ack()` reports `success: False`
 when the broker refused any item, with each item's verdict in `results`.
 
+**Python client: `commit_on_delivery()` commits a pop at delivery.** The broker can move a
+consumer group's cursor past the messages as it hands them out, with no lease and nothing to ack,
+but this client could not ask for it: `auto_ack(True)` on a pop never reached the broker.
+`queen.queue(q).group(g).commit_on_delivery().pop()`, and `pop_result()`, now send `autoAck=true`,
+the parameter every 2.x broker reads; the messages come back with no `leaseId`. This is
+at-most-once: a crash after the pop loses the messages. `consume()` always leases, so it raises
+`ValueError` before any request when the builder has `commit_on_delivery()`. `auto_ack()` stays the
+ack `consume()` sends after the handler and still never reaches the broker. On ephemeral queues,
+`queen.ephemeral.pop()` takes `commit_on_delivery=True`; its `auto_ack` argument, which meant the
+same, still works and is deprecated. `POP_DEFAULTS` now says what a pop does: `wait` is `True`, as
+every pop has long-polled unless `.wait(False)`, and `auto_ack` is never sent. No other behaviour
+changes.
+
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
 switch. One forking pool is enough to start the fork server, and both engines spawn the workers of
