@@ -73,6 +73,7 @@
     "/reference/limits",
     "/reference/metrics",
     "/reference/queenctl",
+    "/reference/supervisor-status",
     "/reference/transaction",
     "/start",
     "/start/ai-agents",

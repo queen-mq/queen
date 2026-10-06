@@ -122,7 +122,19 @@ final class RemoteStatusPublisherTest extends TestCase
         $this->assertStringContainsString('no valid instance_id', $this->output[0][0]);
     }
 
-    private function publisher(PlanHandler $handler): RemoteStatusPublisher
+    public function testAnInvalidGroupFailsPublicationWithoutSendingOrThrowing(): void
+    {
+        $handler = $this->applyingHandler();
+        $publisher = $this->publisher($handler, 'coordination');
+        $publisher->publish($this->document('running'));
+        $this->now += 5;
+        $publisher->publish($this->document('running'));
+        $this->assertSame(0, $handler->count());
+        $this->assertCount(1, $this->output);
+        $this->assertStringContainsString('supervisor group', $this->output[0][0]);
+    }
+
+    private function publisher(PlanHandler $handler, string $group = 'orders'): RemoteStatusPublisher
     {
         return new RemoteStatusPublisher(
             new Queen([
@@ -132,7 +144,7 @@ final class RemoteStatusPublisherTest extends TestCase
                 'handler' => HandlerStack::create($handler),
             ]),
             'queen-supervisor',
-            'orders',
+            $group,
             5,
             900,
             function (string $buffer, string $type): void {

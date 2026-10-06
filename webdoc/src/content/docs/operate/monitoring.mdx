@@ -21,6 +21,8 @@ sourceOfTruth:
   - server/src/obs.rs
   - server/src/obs/panic_policy.rs
   - app/src/router/index.js
+  - app/src/views/Supervisors.vue
+  - app/src/composables/supervisorStatus.js
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): health examples now show 2.0.1 at cluster version 4; the memory row names anonBytes and container_memory_rss, plus rows for the engine parts and the trace store gauges.
 ---
 
@@ -34,7 +36,7 @@ dashboard needs a login.
 
 The dashboard is compiled into the binary from `app/`, so there is nothing else to deploy: open
 `http://<node>:6632/`. It has an Overview, Queue operations, the queues and each queue on its own,
-Ephemeral queues, Consumer groups, Messages, KV, Timers, Traces, Analytics, Workload and Dead
+Ephemeral queues, Consumer groups, Messages, KV, Timers, Traces, Supervisors, Analytics, Workload and Dead
 letter. System shows the replicated log, each node with its role, term, indexes and store usage,
 and the members; the bar at the top of every page says when a node refuses writes because its
 disk is full.
@@ -43,6 +45,32 @@ On the broker's port with JWT off, the dashboard runs as an administrator and sh
 With the broker's JWT on, it cannot sign anyone in and points you to the proxy. Through the proxy,
 the same dashboard sits behind the console login: admins also get Members and API keys, and
 [operators](/operate/tenants/#the-console-and-sign-in) get System and Users.
+
+### Published supervisors
+
+**Supervisors** reads the acting cluster's `queen-supervisor` KV namespace. It groups instances by
+publication group and shows an overview card for each: distinct queues, pools, reported workers
+against the target, pools needing attention and heartbeat age. Groups with issues come first.
+Click a card to open the instance's drawer, then search and filter its queue/pool table, ten rows
+per page. The drawer separates readiness from target capacity and shows worker shortfall,
+draining, process headroom, master PID, versions and uptime at the heartbeat when published.
+Expand a pool for diagnostic evidence, effective scaling and lease settings, consumer group,
+coordinated replicas and reported worker PIDs. **Load queue metrics** requests one queue's
+throughput, acknowledgement failures and sampled backlog on the acting cluster; these metrics
+cover all of that queue's consumers, not just this instance. Counts on the card
+cover the whole published inventory, independently of the table's current page or filter. It uses the read-only KV resource listing, so
+viewers can inspect the publications when KV access is available. **Source** accepts a custom
+namespace and an exact group, such as `pmsintool`.
+
+Metrics cover the loaded publications. The first read loads at most 100 KV rows; **Load more
+publications** reads another page. Each automatic refresh, every 30 seconds while the page is
+visible, re-reads the loaded pages. Worker totals use recent heartbeats; queue depths are not
+summed across replicas. A stale heartbeat or failed read leaves current health unconfirmed.
+
+Laravel's PHP and Rust supervisor engines can [publish remote status](/guides/laravel/dashboard/#a-supervisor-on-another-host).
+Other implementations can adopt the same [supervisor status contract](/reference/supervisor-status/).
+The broker view reads published observations; host-local controls and worker logs stay on the
+supervisor's host.
 
 ## /health
 

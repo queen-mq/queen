@@ -66,6 +66,8 @@ const CONTROL_LOOP_MARGIN_SECONDS: u64 = 5;
 #[serde(deny_unknown_fields)]
 struct Config {
     version: u32,
+    #[serde(default)]
+    client_version: Option<String>,
     cwd: String,
     php_binary: String,
     artisan: String,
@@ -360,6 +362,8 @@ struct TelemetryScope<'a> {
 struct State {
     directory: PathBuf,
     instance_id: String,
+    started_at_epoch: u64,
+    started_at: Instant,
     hostname: Option<String>,
     _lock: File,
     #[cfg(unix)]
@@ -945,6 +949,9 @@ fn export_artisan_config(
         .arg(&options.artisan)
         .arg("queen:supervisor-config")
         .arg("--for-engine")
+        // Older PHP exporters ignore this. Older Rust engines do not set it,
+        // so updated PHP keeps their strict configuration contract intact.
+        .env("QUEEN_SUPERVISOR_ENGINE_METADATA", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()?;
@@ -1834,6 +1841,7 @@ impl State {
         assert_same_state_directory(&directory, &metadata)?;
         let instance_id = new_instance_id();
         let started_at_epoch = now_epoch();
+        let started_at = Instant::now();
         lock.set_len(0)?;
         write!(
             lock,
@@ -1850,6 +1858,8 @@ impl State {
         Ok(Self {
             directory,
             instance_id,
+            started_at_epoch,
+            started_at,
             hostname: hostname(),
             _lock: lock,
             #[cfg(unix)]
@@ -2102,6 +2112,10 @@ impl State {
             "instance_id": &self.instance_id,
             "updated_at": iso8601_from_epoch(updated_at_epoch),
             "updated_at_epoch": updated_at_epoch,
+            "started_at_epoch": self.started_at_epoch,
+            "uptime_seconds": self.started_at.elapsed().as_secs(),
+            "engine_version": env!("CARGO_PKG_VERSION"),
+            "client_version": config.client_version.as_deref().filter(|version| !version.is_empty() && version.len() <= 64 && !version.chars().any(char::is_control)),
             "paused": state == "paused",
             "stopping": state == "terminating",
             "ready": ready,
@@ -4094,6 +4108,7 @@ mod tests {
     fn config(options: SupervisorConfig) -> Config {
         Config {
             version: CONFIG_VERSION,
+            client_version: None,
             cwd: "/app".into(),
             php_binary: "/usr/bin/php".into(),
             artisan: "/app/artisan".into(),
@@ -6208,7 +6223,8 @@ mod tests {
         assert!(state.command(None).is_err());
         assert!(!directory.join("control.json").exists());
 
-        let resolved = config(options("auto"));
+        let mut resolved = config(options("auto"));
+        resolved.client_version = Some("1.2.3".into());
         let desired = HashMap::from([(
             "default".to_owned(),
             HashMap::from([("high".to_owned(), 3), ("default".to_owned(), 1)]),
@@ -6239,6 +6255,10 @@ mod tests {
                 .unwrap();
         assert_eq!(status["pool_status"][0]["replicas"], 2);
         assert_eq!(status["instance_id"], state.instance_id);
+        assert_eq!(status["started_at_epoch"], state.started_at_epoch);
+        assert!(status["uptime_seconds"].as_u64().unwrap() <= state.started_at.elapsed().as_secs());
+        assert_eq!(status["engine_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(status["client_version"], "1.2.3");
         // The dashboard tells published instances apart by host.
         let hostname = status["hostname"].as_str().unwrap();
         assert!(!hostname.is_empty() && !hostname.contains('\0'));
@@ -6748,6 +6768,55 @@ mod tests {
             "1234"
         );
         assert!(read_text_limited(std::io::Cursor::new(b"12345"), "test", 4).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artisan_export_negotiates_optional_client_metadata() {
+        let directory = temporary_directory("config-metadata");
+        let script = directory.join("artisan");
+        fs::write(
+            &script,
+            "printf '%s' \"$QUEEN_SUPERVISOR_ENGINE_METADATA\"\n",
+        )
+        .unwrap();
+        let options = CliOptions {
+            config: None,
+            php: "/bin/sh".into(),
+            artisan: script.to_string_lossy().into_owned(),
+        };
+        assert_eq!(
+            export_artisan_config(&options, Duration::from_secs(2)).unwrap(),
+            "1"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn client_version_is_optional_in_legacy_engine_configuration() {
+        let mut document = serde_json::json!({
+            "version": 2, "cwd": "/app", "php_binary": "/usr/bin/php", "artisan": "/app/artisan",
+            "state_directory": "/tmp/queen-supervisor-test", "poll_interval": 3, "http_timeout": 5,
+            "shutdown_grace": 75, "telemetry_ttl": 300, "process_limit": 256,
+            "queen": {"url": "http://127.0.0.1:6632", "urls": [], "headers": {}}, "supervisors": {}
+        });
+        assert!(serde_json::from_value::<Config>(document.clone())
+            .unwrap()
+            .client_version
+            .is_none());
+        document["client_version"] = serde_json::json!("1.2.3");
+        assert_eq!(
+            serde_json::from_value::<Config>(document.clone())
+                .unwrap()
+                .client_version
+                .as_deref(),
+            Some("1.2.3")
+        );
+        document["client_version"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<Config>(document)
+            .unwrap()
+            .client_version
+            .is_none());
     }
 
     #[cfg(unix)]

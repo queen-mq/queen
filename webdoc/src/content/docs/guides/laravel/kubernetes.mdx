@@ -109,7 +109,11 @@ one for its renewal helper, so these two pools need a `process_limit` of 24. Rem
 status lets the dashboard and the Prometheus endpoint on the web pods see every worker pod, so set
 `QUEEN_SUPERVISOR_REMOTE_STATUS` on the web pods too. The status goes under a key that defaults to
 a slug of `APP_NAME` and `APP_ENV`, such as `orders-production`, so web and worker pods that share
-both values agree on it. Every 2.0 broker serves the long poll of
+both values agree on it. The key is a publication group: use one segment of letters, digits, dots,
+underscores or hyphens, starting with a letter or digit; `coordination` is reserved. Every pod
+writes to its own instance slot. The broker's [Supervisors page](/operate/monitoring/#published-supervisors)
+can read the same publications. This grouping does not change replica coordination
+([status contract](/reference/supervisor-status/)). Every 2.0 broker serves the long poll of
 `event_driven`. The supervisor holds it with the token it reads depth with, and through the broker's
 [embedded proxy](/operate/security/) that poll carries the authority of a pop: if the pods reach
 the broker through the proxy with a read-only key, the supervisor logs it once and keeps polling.

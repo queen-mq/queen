@@ -69,6 +69,30 @@ class LaravelSupervisorCommandTest extends TestCase
         $this->assertInstanceOf(\stdClass::class, $object->connections->queen->headers);
     }
 
+    public function testClientMetadataRequiresExplicitNativeEngineNegotiation(): void
+    {
+        $previous = getenv('QUEEN_SUPERVISOR_ENGINE_METADATA');
+        $kernel = $this->app->make(\Illuminate\Contracts\Console\Kernel::class);
+        try {
+            foreach ([false, '1'] as $negotiated) {
+                putenv($negotiated === false ? 'QUEEN_SUPERVISOR_ENGINE_METADATA' : 'QUEEN_SUPERVISOR_ENGINE_METADATA=1');
+                foreach ([false, true] as $forEngine) {
+                    $output = new BufferedOutput();
+                    $this->assertSame(0, $kernel->call('queen:supervisor-config', $forEngine ? ['--for-engine' => true] : [], $output));
+                    $document = json_decode(trim($output->fetch()), true, 512, JSON_THROW_ON_ERROR);
+                    if ($negotiated && $forEngine) {
+                        $this->assertArrayHasKey('client_version', $document);
+                        $this->assertSame(\Queen\Laravel\Supervisor\SupervisorMetadata::clientVersion(), $document['client_version']);
+                    } else {
+                        $this->assertArrayNotHasKey('client_version', $document, 'Older strict native engines must keep their existing export.');
+                    }
+                }
+            }
+        } finally {
+            putenv($previous === false ? 'QUEEN_SUPERVISOR_ENGINE_METADATA' : 'QUEEN_SUPERVISOR_ENGINE_METADATA=' . $previous);
+        }
+    }
+
     public function testConfigurationExportRedactsSecretsUnlessRequestedForAnEngine(): void
     {
         $this->app['config']->set('queue.connections.queen.bearer_token', 'worker-secret');
