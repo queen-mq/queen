@@ -11,13 +11,13 @@ class ConsumeCommand extends Command
         {queue : Queue name to consume from}
         {handler : Fully qualified class name with handle() method}
         {--group= : Consumer group name}
-        {--batch= : Messages per pop. Omit and the broker sizes it (pop autopilot, broker >= 1.2)}
+        {--batch= : Messages per pop, default 1. Above 1, handle() receives a list of messages}
         {--partitions= : Partitions to claim per pop. Omit and the broker sizes it; --partitions=1 pins the legacy single-partition claim}
         {--no-autopilot : Restore the pre-1.2 client-side defaults (batch 1, partitions 1) and send no autopilot parameter}
         {--auto-ack : Enable auto-acknowledgment}
         {--subscription-mode= : Subscription mode}
         {--subscription-from= : Subscription start point}
-        {--conflation : Last-value delivery: process only the newest message per partition (needs --group, refuses --auto-ack, broker >= 1.1.0)}
+        {--conflation : Last-value delivery: process only the newest message per partition (needs --group, broker >= 1.1.0)}
         {--timeout=30000 : Long poll timeout in milliseconds}
         {--idle-timeout= : Stop after N milliseconds of inactivity}
         {--limit= : Stop after processing N messages}';
