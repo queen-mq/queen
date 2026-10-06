@@ -2,7 +2,12 @@ package queen
 
 import (
 	"context"
+	"errors"
 )
+
+// ErrCommitOnDeliveryConsume is what Execute returns, before any request, for a
+// builder with CommitOnDelivery(true): a consumer always leases its messages.
+var ErrCommitOnDeliveryConsume = errors.New("CommitOnDelivery is a Pop option; Consume always leases its messages")
 
 // ConsumeBuilder provides a fluent API for starting consumers.
 type ConsumeBuilder struct {
@@ -32,6 +37,9 @@ func NewConsumeBatchBuilder(qb *QueueBuilder, handler BatchMessageHandler) *Cons
 
 // Execute starts the consumer and blocks until completion.
 func (cb *ConsumeBuilder) Execute(ctx context.Context) error {
+	if cb.qb.commitOnDelivery {
+		return ErrCommitOnDeliveryConsume
+	}
 	opts := cb.qb.getConsumeOptions()
 
 	// Create consumer manager

@@ -27,12 +27,12 @@ import (
 // to have.
 //
 // DELIVERY IS NOT "AT MOST ONCE" (§1.3), and the docs must not say it is. The
-// class picks what can be LOST; the ack mode picks the guarantee. AutoAck
-// advances the cursor at delivery and is at-most-once. The default -- explicit
-// ack -- is at-least-once for as long as the owning broker incarnation lives: an
-// unacked message redelivers when its lease expires, with Attempts incremented,
-// until retryLimit, after which it is DROPPED and counted (no DLQ, §9). Consumers
-// still need idempotency, exactly as on durable queues.
+// class picks what can be LOST; the ack mode picks the guarantee.
+// CommitOnDelivery advances the cursor at delivery and is at-most-once. The
+// default -- explicit ack -- is at-least-once for as long as the owning broker
+// incarnation lives: an unacked message redelivers when its lease expires, with
+// Attempts incremented, until retryLimit, after which it is DROPPED and counted
+// (no DLQ, §9). Consumers still need idempotency, exactly as on durable queues.
 //
 // CONSUMPTION SEMANTICS COME FROM THE GROUP, EXACTLY AS ON THE DURABLE ENGINE
 // (§1.5). There is no queue-level mode to choose:
@@ -339,8 +339,15 @@ type EphemeralPopOptions struct {
 	// competing consumers, own group = fan-out, empty = queue mode.
 	Group string
 
-	// AutoAck commits at delivery. At-most-once, and no lease bookkeeping at
-	// all -- there is nothing to ack afterwards.
+	// CommitOnDelivery commits the group's cursor at delivery. At-most-once,
+	// and no lease bookkeeping at all -- there is nothing to ack afterwards.
+	// Sent as autoAck=true, and only when true.
+	CommitOnDelivery bool
+
+	// AutoAck is the old name of CommitOnDelivery, with the same effect: either
+	// one set commits at delivery.
+	//
+	// Deprecated: use CommitOnDelivery.
 	AutoAck bool
 }
 
@@ -628,7 +635,7 @@ func (e *Ephemeral) Pop(ctx context.Context, queue string, opts ...EphemeralPopO
 	if opt.Group != "" {
 		params.Set("group", opt.Group)
 	}
-	if opt.AutoAck {
+	if opt.CommitOnDelivery || opt.AutoAck {
 		params.Set("autoAck", "true")
 	}
 

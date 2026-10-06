@@ -24,6 +24,7 @@ type QueueBuilder struct {
 	limit            int
 	idleMillis       int
 	autoAck          *bool
+	commitOnDelivery bool
 	wait             *bool
 	timeoutMillis    int
 	renewLease       bool
@@ -184,9 +185,28 @@ func (qb *QueueBuilder) IdleMillis(millis int) *QueueBuilder {
 	return qb
 }
 
-// AutoAck sets whether to automatically acknowledge messages.
+// AutoAck sets whether Consume and ConsumeBatch ack a message after the
+// handler returns nil (on by default). It applies to those two only and has no
+// effect on Pop or PopResult.
 func (qb *QueueBuilder) AutoAck(enabled bool) *QueueBuilder {
 	qb.autoAck = &enabled
+	return qb
+}
+
+// CommitOnDelivery makes Pop and PopResult commit the consumer group's cursor
+// as the broker hands the messages out: the pop takes no lease and there is
+// nothing to ack afterwards. That is at-most-once delivery, because a crash
+// after the pop loses the messages it returned. Off by default, and then a pop
+// is leased and you ack what it returns.
+//
+// On the wire it is autoAck=true on the pop request, which every 2.x broker
+// understands. The broker refuses it together with Conflation.
+//
+// It is a pop option. Consume and ConsumeBatch always lease their messages,
+// and Execute returns ErrCommitOnDeliveryConsume, before any request, for a
+// builder with CommitOnDelivery(true).
+func (qb *QueueBuilder) CommitOnDelivery(enabled bool) *QueueBuilder {
+	qb.commitOnDelivery = enabled
 	return qb
 }
 
@@ -405,9 +425,10 @@ func (qb *QueueBuilder) buildPopParams() string {
 		params.Set("consumerGroup", qb.consumerGroup)
 	}
 
-	// Auto ack (for pop, this is server-side)
-	if qb.autoAck != nil {
-		params.Set("autoAck", strconv.FormatBool(*qb.autoAck))
+	// Commit on delivery. Sent ONLY when true: a leased pop is the broker's
+	// default. AutoAck is the consume loop's ack and never reaches this query.
+	if qb.commitOnDelivery {
+		params.Set("autoAck", "true")
 	}
 
 	// Subscription mode

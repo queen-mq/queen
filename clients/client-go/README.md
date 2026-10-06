@@ -211,7 +211,21 @@ messages, err := client.Queue("my-queue").
 messages, err := client.Queue("my-queue").
     Group("my-group").
     Pop(ctx)
+
+// Pop that commits at delivery: no lease, nothing to ack
+messages, err := client.Queue("my-queue").
+    Group("my-group").
+    CommitOnDelivery(true).
+    Pop(ctx)
 ```
+
+A pop is leased: ack what it returns (see Acknowledge Messages), or the
+messages come back when the lease expires. With `CommitOnDelivery(true)` the
+broker moves the group's cursor past the messages as it hands them out: there
+is no lease and nothing to ack. That is at-most-once, because a crash after the
+pop loses the messages. It is an option of `Pop` and `PopResult`. A consumer
+always leases its messages, so `Consume(...).Execute` returns
+`queen.ErrCommitOnDeliveryConsume` before any request when the builder has it.
 
 ### Consume Messages
 
@@ -702,6 +716,7 @@ go test ./tests/... -v
 | Partitions per pop | broker-chosen (autopilot); 1 with autopilot off |
 | Pop autopilot | on (`QUEEN_SDK_POP_AUTOPILOT=off` to disable) |
 | Auto-ack | true |
+| Commit on delivery (pop) | false |
 | Wait (long poll) | true (consume), false (pop) |
 | Buffer count | 100 |
 | Buffer time | 1 second |

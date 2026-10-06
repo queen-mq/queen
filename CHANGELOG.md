@@ -84,6 +84,18 @@ half a second, with nothing shown unless logging was on. A 4xx now stops the wor
 out of `Execute`, as a 403 does; a 5xx waits a second before the next pop, as a network error
 does.
 
+**Go client: `CommitOnDelivery()` is the pop's option, and `AutoAck()` no longer affects a pop.**
+Behaviour change. On a pop, the broker's `autoAck=true` moves the consumer group's cursor past the
+messages as it hands them out: no lease, nothing to ack, at-most-once. `AutoAck()` sent it from
+`Pop` and `PopResult`, while on `Consume` it is the ack the loop sends after the handler, which
+never reaches the wire. The pop now has its own option: `CommitOnDelivery(true)` sends
+`autoAck=true` from `Pop` and `PopResult`, and `AutoAck()` applies to `Consume` and `ConsumeBatch`
+only. A pop after `AutoAck(true)` is now leased, so it is at-least-once (a message can come again,
+none is lost) and you ack what it returns; call `CommitOnDelivery(true)` there to keep committing at
+delivery. `Consume` and `ConsumeBatch` refuse a builder with `CommitOnDelivery(true)`: `Execute`
+returns `ErrCommitOnDeliveryConsume` before any request. `EphemeralPopOptions` gains
+`CommitOnDelivery`, and its `AutoAck` stays as a deprecated alias with the same effect.
+
 **CLI: `queenctl pop --commit-on-delivery`.** The broker moves the group's cursor past the messages
 as it hands them out: no lease, nothing to ack, at-most-once. `ephemeral pop` takes the same flag.
 On both, `--auto-ack` is now a hidden, deprecated alias with the same effect, and using it prints a
