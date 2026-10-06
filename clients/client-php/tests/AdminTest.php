@@ -37,6 +37,25 @@ final class AdminTest extends TestCase
         );
     }
 
+    /**
+     * The 2.x broker has no route that dead-letters a message by its address:
+     * the old POST answered 404 no_such_route. The method fails before any
+     * request and names the ack that does it.
+     */
+    public function testMoveMessageToDlqThrowsAndNamesTheAckThatDeadLetters(): void
+    {
+        $handler = new PlanHandler([], ['status' => 404, 'json' => ['code' => 'no_such_route']]);
+
+        try {
+            $this->queen($handler)->admin()->moveMessageToDLQ('p1', 'tx-1');
+            $this->fail('moveMessageToDLQ() must throw');
+        } catch (\BadMethodCallException $e) {
+            $this->assertStringContainsString("ack(\$message, 'dlq'", $e->getMessage());
+        }
+
+        $this->assertSame(0, $handler->count(), 'no request may leave the client');
+    }
+
     private function queen(PlanHandler $handler): Queen
     {
         return new Queen(['url' => 'http://queen.test:6632', 'handler' => HandlerStack::create($handler)]);

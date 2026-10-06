@@ -355,7 +355,7 @@ These setters apply to `pop()`, `popResult()`, `consume()` and, where noted, `ge
 | `subscriptionMode(string $mode)` | broker default | `'new'` or `'all'`, read on the group's first pop. |
 | `subscriptionFrom(string $from)` | none | `'now'` or an ISO timestamp, read on the group's first pop. |
 | `conflation(bool $enabled = true)` | off | Last-value delivery; see [Conflation](#conflation). |
-| `autoAck(bool $enabled)` | `true` | `consume()` only: ack after the handler. See below. |
+| `autoAck(bool $enabled)` | on for `consume()`, off for `pop()` | Who acks. See below. |
 
 `getConsumer()` reads `leaseSeconds`, `subscriptionMode`, `subscriptionFrom`, `partitions`,
 `conflation` and `autopilot`. It ignores the other setters in this table.
@@ -363,10 +363,16 @@ These setters apply to `pop()`, `popResult()`, `consume()` and, where noted, `ge
 Keep a worker's own job timeout shorter than the lease. A job that outlives its lease is delivered
 again while it still runs.
 
-`autoAck` never reaches the broker from this client. On `consume()` it means that the client acks
-after the handler returns and nacks when the handler throws. On `pop()` it has no effect:
-`pop()` sends `autoAck=true` only when the value differs from the builder default, which is
-`true`, so it never sends it (`QueueBuilder::popRequestPath()`). Ack popped messages yourself.
+`autoAck` has one meaning for each read path:
+
+- On `consume()`, the client acks after the handler returns and nacks when the handler throws.
+  The pop that `consume()` sends never carries `autoAck`, so its messages stay leased until that
+  ack.
+- On `pop()`, `popResult()` and `popDetached()`, `autoAck(true)` sends `autoAck=true`. The broker
+  commits the messages at delivery and takes no lease, so there is nothing to ack. This is
+  at-most-once: a crash after the pop loses the messages.
+- A pop without `autoAck(true)` is leased, and you ack its messages yourself. `autoAck(false)`
+  sends nothing, because a leased pop is the broker default.
 
 The broker semantics of these parameters are on
 [pop options](https://queenmq.com/concepts/consuming/#pop-options).
@@ -399,7 +405,7 @@ covers the batch.
 | `concurrency(int $count)` | `1` | Concurrent long-polls. At least 1. |
 | `limit(int $count)` | none | Stop after this many messages. |
 | `idleMillis(int $millis)` | none | Stop after this long without a message. |
-| `renewLease(bool $enabled, ?int $intervalMillis = null)` | off | Extend the lease while messages are handled. |
+| `renewLease(bool $enabled, ?int $intervalMillis = null)` | off | Extend the lease between handler calls. See below. |
 | `each()` | batch mode | Call the handler once per message. |
 
 `consume(Closure $handler)` returns a `ConsumeBuilder` with `onSuccess(Closure)`, `onError(Closure)`
@@ -422,10 +428,37 @@ How the loop behaves:
   batch and restores the previous handlers when `execute()` returns.
 - `concurrency(N)` with N above 1 sends N long-polls at once through Guzzle and handles their
   results one after the other. `limit()` then applies per poller as `ceil(limit / N)`.
-- `renewLease(true, $intervalMillis)` renews only when `$intervalMillis` is set. The check runs
-  before each message in `each()` mode, so it can renew between messages of a batch. In batch mode
-  it runs once before the handler, when the interval has not yet passed, so it never renews. A
-  renewal extends by the broker default of 60 s, and a renewal failure is ignored.
+- `renewLease(true, $intervalMillis)` renews only when `$intervalMillis` is set. The interval runs
+  from the pop answer. The loop checks it where it has control: before each message in `each()`
+  mode, and once before the handler in batch mode. A due check renews the leases of the batch with
+  the broker default of 60 s: each lease then ends 60 s after the renewal at the earliest, and a
+  renewal never shortens a lease. It sends one renewal per lease, and a failure is ignored.
+
+The loop cannot renew while a handler runs: PHP runs the handler on the only thread of the loop.
+A handler that can run longer than the lease renews itself. Declare a second parameter and the loop
+passes a renewal call (2.3.0):
+
+```php
+$queen->queue('orders')->group('workers')
+    ->batch(50)
+    ->renewLease(true, 10_000)
+    ->consume(function (array $messages, \Closure $renew): void {
+        foreach ($messages as $message) {
+            handleOne($message);
+            $renew();
+        }
+    })
+    ->execute();
+```
+
+- `$renew()` renews the leases of the messages in hand and returns `true` when the broker extended
+  every one, `false` when it refused one or nothing was due.
+- With `renewLease(true, $intervalMillis)` it renews only once the interval has passed since the
+  pop or the last renewal, so calling it often costs nothing. Without an interval every call renews.
+- In `each()` mode it renews the lease of the whole pop, which the remaining messages share.
+- A handler with one parameter is called exactly as before.
+
+`leaseSeconds()` above the longest handler is the other way out.
 
 ## The KafkaConsumer-style consumer
 
@@ -534,8 +567,9 @@ $queen->queue('recompute')
 - It is a property of the group, stored at the group's first registration. Later consumers of the
   group get the stored setting.
 - The client sends `conflation=true` only when it is on, never `false`.
-- The broker refuses conflation with a broker-side `autoAck`. This client never sends `autoAck`
-  on a pop, and the client-side ack of `consume()` is compatible.
+- The broker refuses conflation with a broker-side `autoAck` and answers 400. `pop()` sends
+  `autoAck` after `autoAck(true)`, so do not use the two together on `pop()`. The client-side ack
+  of `consume()` is compatible.
 
 Every pop answer goes through `Support\ConflationGuard`:
 
@@ -993,9 +1027,13 @@ queue clear.
 | `getTracesByName(string $traceName, array $params = [])` | `GET /api/v1/traces/by-name/:traceName` |
 | `getTracesForMessage(string $partitionId, string $transactionId)` | `GET /api/v1/traces/:partitionId/:transactionId` |
 
-`getTracesForMessage()` does not URL-encode its arguments. `moveMessageToDLQ()` posts to
-`/api/v1/messages/:partitionId/:transactionId/dlq`, a route that the 2.x broker does not have; it
-throws `HttpException` 404 `no_such_route`.
+`getTracesForMessage()` does not URL-encode its arguments.
+
+`moveMessageToDLQ()` is deprecated and always throws `BadMethodCallException`, before any request.
+The 2.x broker has no route that dead-letters a message by its partition and transaction id. A
+dead letter comes from an ack with the `dlq` status, on a message that the consumer group holds a
+live lease for: `$queen->ack($message, 'dlq', ['group' => 'billing'])`. See
+[Ack, nack and lease renewal](#ack-nack-and-lease-renewal).
 
 ### Status and analytics
 

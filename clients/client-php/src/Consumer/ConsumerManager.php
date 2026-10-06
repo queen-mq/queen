@@ -16,6 +16,8 @@ class ConsumerManager
 {
     private HttpClient $httpClient;
     private Queen $queen;
+    /** Whether the handler takes a second argument, the lease renewal call. */
+    private bool $handlerTakesRenew = false;
 
     public function __construct(HttpClient $httpClient, Queen $queen)
     {
@@ -25,6 +27,7 @@ class ConsumerManager
 
     public function start(\Closure $handler, array $options): void
     {
+        $this->handlerTakesRenew = self::takesRenew($handler);
         $queue = $options['queue'] ?? null;
         $partition = $options['partition'] ?? null;
         $namespace = $options['namespace'] ?? null;
@@ -187,6 +190,11 @@ class ConsumerManager
 
             // Settle all — don't throw on individual failures
             $results = HttpClient::settleAll($promises);
+            // Every pop of this round has answered, so its lease runs from here
+            // at the latest. The results are handled one after the other: a
+            // batch that waits behind the handlers before it must count that
+            // wait toward its renewal interval.
+            $poppedAt = $this->nowMillis();
 
             if (function_exists('pcntl_signal_dispatch')) {
                 pcntl_signal_dispatch();
@@ -262,8 +270,9 @@ class ConsumerManager
 
                 $leaseRenewalTime = null;
                 if ($renewLease && $renewLeaseIntervalMillis !== null) {
-                    $leaseRenewalTime = $this->nowMillis() + $renewLeaseIntervalMillis;
+                    $leaseRenewalTime = $poppedAt + $renewLeaseIntervalMillis;
                 }
+                $renew = $this->renewer($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
 
                 if ($each) {
                     foreach ($messages as $message) {
@@ -271,7 +280,7 @@ class ConsumerManager
                             break;
                         }
                         $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                        $this->processMessage($message, $handler, $autoAck, $group, $affinityKey);
+                        $this->processMessage($message, $handler, $autoAck, $group, $affinityKey, $renew);
                         $workerProcessed[$w]++;
                         if ($perWorkerLimit !== null && $workerProcessed[$w] >= $perWorkerLimit) {
                             break;
@@ -279,7 +288,7 @@ class ConsumerManager
                     }
                 } else {
                     $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                    $this->processBatch($messages, $handler, $autoAck, $group, $affinityKey);
+                    $this->processBatch($messages, $handler, $autoAck, $group, $affinityKey, $renew);
                     $workerProcessed[$w] += count($messages);
                 }
             }
@@ -386,6 +395,7 @@ class ConsumerManager
                 if ($renewLease && $renewLeaseIntervalMillis !== null) {
                     $leaseRenewalTime = $this->nowMillis() + $renewLeaseIntervalMillis;
                 }
+                $renew = $this->renewer($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
 
                 if ($each) {
                     foreach ($messages as $message) {
@@ -394,7 +404,7 @@ class ConsumerManager
                         }
 
                         $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                        $this->processMessage($message, $handler, $autoAck, $group, $affinityKey);
+                        $this->processMessage($message, $handler, $autoAck, $group, $affinityKey, $renew);
                         $processedCount++;
 
                         if ($limit !== null && $processedCount >= $limit) {
@@ -403,7 +413,7 @@ class ConsumerManager
                     }
                 } else {
                     $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                    $this->processBatch($messages, $handler, $autoAck, $group, $affinityKey);
+                    $this->processBatch($messages, $handler, $autoAck, $group, $affinityKey, $renew);
                     $processedCount += count($messages);
                 }
             } catch (\Throwable $error) {
@@ -450,10 +460,11 @@ class ConsumerManager
         bool $autoAck,
         ?string $group,
         ?string $affinityKey,
+        \Closure $renew,
     ): void
     {
         try {
-            $handler($message);
+            $this->handlerTakesRenew ? $handler($message, $renew) : $handler($message);
 
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
@@ -481,10 +492,11 @@ class ConsumerManager
         bool $autoAck,
         ?string $group,
         ?string $affinityKey,
+        \Closure $renew,
     ): void
     {
         try {
-            $handler($messages);
+            $this->handlerTakesRenew ? $handler($messages, $renew) : $handler($messages);
 
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
@@ -506,6 +518,42 @@ class ConsumerManager
         }
     }
 
+    /**
+     * Whether a handler declares a second parameter: only such a handler gets
+     * the renewal call, so a one-parameter callable keeps its exact call.
+     */
+    public static function takesRenew(\Closure $handler): bool
+    {
+        $signature = new \ReflectionFunction($handler);
+
+        return $signature->isVariadic() || $signature->getNumberOfParameters() >= 2;
+    }
+
+    /**
+     * The handler's second argument, when it takes one: a call that renews the
+     * lease of the messages in hand and says whether the broker extended it.
+     * PHP runs the handler on the loop's only thread, so the loop cannot renew
+     * while a handler runs; a long handler calls this between parts of its
+     * work. With renewLease(true, $intervalMillis) it renews once the interval
+     * has passed since the pop or the last renewal, and returns false when
+     * nothing was due; without it every call renews.
+     */
+    private function renewer(array $messages, ?int &$leaseRenewalTime, ?int $intervalMillis): \Closure
+    {
+        return function () use ($messages, &$leaseRenewalTime, $intervalMillis): bool {
+            if ($leaseRenewalTime !== null && $intervalMillis !== null) {
+                if ($this->nowMillis() < $leaseRenewalTime) {
+                    return false;
+                }
+                $leaseRenewalTime = $this->nowMillis() + $intervalMillis;
+            }
+            $results = $this->queen->renew($messages);
+            $results = isset($results[0]) ? $results : [$results];
+
+            return $results !== [] && array_filter($results, fn(array $result): bool => ($result['success'] ?? false) !== true) === [];
+        };
+    }
+
     private function renewLeaseIfNeeded(array $messages, ?int &$leaseRenewalTime, ?int $intervalMillis): void
     {
         if ($leaseRenewalTime === null || $intervalMillis === null) {
@@ -515,7 +563,8 @@ class ConsumerManager
         if ($this->nowMillis() >= $leaseRenewalTime) {
             // Fire async renewal — don't block processing
             try {
-                $leaseIds = array_filter(array_column($messages, 'leaseId'), fn($id) => $id !== null);
+                // One renewal per lease: the messages of a pop share it.
+                $leaseIds = array_unique(array_filter(array_column($messages, 'leaseId'), fn($id) => $id !== null));
                 $promises = [];
                 foreach ($leaseIds as $leaseId) {
                     $promises[] = $this->httpClient->postAsync("/api/v1/lease/{$leaseId}/extend", []);

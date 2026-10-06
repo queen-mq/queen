@@ -16,6 +16,33 @@ queen:supervisor-install` after the upgrade. A fork took 0.48 ms on the Linux se
 for a worker that booted the benchmark application on its own
 (`benchmark-queen/2026-10-05-laravel-worker-memory`).
 
+**PHP client: `pop()` sends `autoAck(true)`.** The builder took a value equal to the `consume()`
+default for one that was never set, so a `pop()` after `autoAck(true)` sent no `autoAck` and stayed
+leased. It now sends `autoAck=true` from `pop()`, `popResult()` and `popDetached()`, and the broker
+commits the messages at delivery with no lease. A pop that never calls `autoAck()`, or calls
+`autoAck(false)`, stays leased as before, and `consume()` still acks after its handler. A builder
+that calls `autoAck(true)` and also pops now gets at-most-once pops: remove the call there to keep
+acking yourself.
+
+**PHP client: `Admin::moveMessageToDLQ()` is deprecated and throws.** It posted to
+`/api/v1/messages/:partitionId/:transactionId/dlq`, a route the 2.x broker does not have, so every
+call failed with a 404 `no_such_route`. No 2.x route dead-letters a message by its address. The
+method now throws `BadMethodCallException` before any request and names the way that works: ack
+the message with the `dlq` status, `$queen->ack($message, 'dlq', ['group' => $group])`, while its
+consumer group holds the lease.
+
+**PHP client: `renewLease()` in batch mode counts from the pop.** With `concurrency(N)`, `consume()`
+handles the batches of a poll round one after the other, but it started each batch's renewal
+interval when the batch reached its handler, so the check before that handler never found it due.
+The interval now runs from the pop answer, and a batch that waited behind other handlers longer
+than the interval is renewed before its own handler starts. The loop still cannot renew while a
+handler runs, since PHP runs the handler on the loop's only thread, so a handler that declares a
+second parameter now gets a renewal call: `function (array $messages, \Closure $renew)`. `$renew()`
+renews the leases in hand once `renewLease()`'s interval has passed, or on every call without an
+interval, and returns whether the broker extended them; a long handler calls it between parts of
+its work. A one-parameter handler is called as before. The loop's own renewal sends one request per
+lease instead of one per message.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

@@ -146,9 +146,23 @@ class Admin
         return $this->httpClient->post('/api/v1/messages/' . rawurlencode($partitionId) . '/' . rawurlencode($transactionId) . '/retry', []);
     }
 
+    /**
+     * @deprecated The 2.x broker has no route that dead-letters a message by
+     *             its address, so this always throws. Ack the leased message
+     *             with the `dlq` status instead.
+     *
+     * The old POST /api/v1/messages/:partitionId/:transactionId/dlq answers
+     * 404 no_such_route on 2.x. A dead letter is filed only by an ack with the
+     * `dlq` status, on a message the consumer group holds a live lease for,
+     * which an address alone cannot name.
+     */
     public function moveMessageToDLQ(string $partitionId, string $transactionId): mixed
     {
-        return $this->httpClient->post('/api/v1/messages/' . rawurlencode($partitionId) . '/' . rawurlencode($transactionId) . '/dlq', []);
+        throw new \BadMethodCallException(
+            'Queen 2.x has no route that moves a message to the DLQ by its address. Pop the message for '
+            . "its consumer group and call \$queen->ack(\$message, 'dlq', ['group' => \$group]) while you hold "
+            . 'its lease.'
+        );
     }
 
     // ===========================
