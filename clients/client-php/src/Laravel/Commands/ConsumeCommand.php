@@ -154,18 +154,20 @@ class ConsumeCommand extends Command
         // HighLevelConsumer has no idle stop, so the command keeps the clock:
         // from the start, then from the end of the last handle().
         $idleMillis = $this->option('idle-timeout') ? (int) $this->option('idle-timeout') : null;
-        $lastMessageAt = self::monotonicMillis();
+        // In nanoseconds: whole milliseconds on both ends could stop up to
+        // a millisecond before the idle time has really passed.
+        $lastMessageAt = hrtime(true);
 
         while (!$consumer->isClosed()) {
             $popTimeout = $timeout;
             if ($idleMillis !== null) {
-                $idleLeft = $idleMillis - (self::monotonicMillis() - $lastMessageAt);
-                if ($idleLeft <= 0) {
+                $idleLeftNanos = $idleMillis * 1_000_000 - (hrtime(true) - $lastMessageAt);
+                if ($idleLeftNanos <= 0) {
                     $this->info("No message for {$idleMillis} ms (--idle-timeout): stopping.");
                     break;
                 }
                 // A long poll must not outlast the idle deadline.
-                $popTimeout = min($timeout, $idleLeft);
+                $popTimeout = min($timeout, intdiv($idleLeftNanos + 999_999, 1_000_000));
             }
 
             // The broker starts the lease inside this request. A deadline
@@ -195,7 +197,7 @@ class ConsumeCommand extends Command
             $processed += count($messages);
             $leases = $this->trackLeases($messages, $popStartedAt + $lease * 1000);
             $this->handOut($consumer, $handler, $messages, $batch > 1, $autoAck, $leases);
-            $lastMessageAt = self::monotonicMillis();
+            $lastMessageAt = hrtime(true);
 
             if ($limit !== null && $processed >= $limit) {
                 $this->info("Message limit reached ({$limit})");
