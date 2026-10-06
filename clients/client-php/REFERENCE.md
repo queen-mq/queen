@@ -42,6 +42,8 @@ this page.
 
 The `queen:consume` Artisan command is part of the Laravel integration
 (`src/Laravel/Commands/ConsumeCommand.php`); see the [Laravel guide](https://queenmq.com/guides/laravel/).
+It runs the [KafkaConsumer-style consumer](#the-kafkaconsumer-style-consumer) below and passes each
+message to a handler class: [consume Queen messages](https://queenmq.com/guides/laravel/consume/).
 
 ## Connect
 
