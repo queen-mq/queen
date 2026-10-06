@@ -912,3 +912,24 @@ body:has(dialog.drawer[open]) { overflow: hidden; }
     .layout { display: block; }
     .card { box-shadow: none; border: 1px solid var(--border); break-inside: avoid; }
 }
+
+.pool-diagnostics { margin-top: 24px; border-top: 1px solid var(--border); }
+.pool-diagnostics-heading { padding: 22px 24px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pool-diagnostics-heading h3 { font-size: 17px; margin: 0; }
+.pool-diagnostics-heading p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.pool-budget { margin: 0 24px 18px; padding: 12px 14px; background: var(--surface-muted); border: 1px solid var(--border); border-radius: var(--radius); display: flex; align-items: center; justify-content: space-between; gap: 18px; font-size: 12px; }
+.pool-budget strong { font-weight: 600; }
+.pool-budget a, .pool-next a { color: var(--brand); font-size: 12px; }
+.pool-budget a { flex-shrink: 0; }
+.pool-muted { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 400; white-space: normal; }
+.pool-diagnostic-table { min-width: 850px; }
+.pool-diagnostic-table td { vertical-align: top; }
+.pool-diagnostic-table td:first-child { max-width: 190px; white-space: normal; overflow-wrap: anywhere; }
+.pool-diagnostic-table .pool-next { width: 30%; min-width: 235px; white-space: normal; color: var(--muted-strong); font-size: 12px; line-height: 1.6; }
+.pool-diagnostic-note { margin: 0; padding: 14px 24px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); }
+.pool-process-details { border-top: 1px solid var(--border); }
+.pool-process-details > summary { padding: 16px 24px; cursor: pointer; font-size: 13px; font-weight: 550; }
+@media (max-width: 650px) {
+    .pool-diagnostics-heading, .pool-budget { align-items: start; flex-direction: column; }
+    .pool-budget { gap: 10px; }
+}

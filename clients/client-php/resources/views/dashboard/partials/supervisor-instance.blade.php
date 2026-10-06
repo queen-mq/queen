@@ -38,7 +38,10 @@
         <div><span class="meta-label">Last heartbeat</span><span class="meta-value">{{ $instance['updated_at'] ?? 'Unavailable' }}</span></div>
     </div>
 
-    <h3 class="subsection-title">Worker pools</h3>
+    @include('queen::dashboard.partials.pool-diagnostics')
+
+    <details class="pool-process-details" data-refresh-details="pool-processes-{{ $instance['instance_id'] ?? $instanceNumber }}">
+    <summary>Worker pools · process details</summary>
     @if ($instance['pools'] === [])
         <div class="empty">No pool state is available.</div>
     @else
@@ -53,4 +56,5 @@
             </table>
         </div>
     @endif
+    </details>
 </section>
