@@ -5,6 +5,15 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**C++ client: `commit_on_delivery()` commits a pop at delivery.** The new
+`QueueBuilder::commit_on_delivery()` makes `pop()` and `pop_result()` send the broker's
+`autoAck=true`: the broker moves the consumer group's cursor past the messages as it hands them
+out, with no lease and nothing to ack, so the delivery is at-most-once. `auto_ack()` still decides
+only the ack after a `consume()` handler and has no effect on `pop()`. `consume()` always leases
+its messages, and with `commit_on_delivery()` it throws `std::invalid_argument` before any request.
+On the ephemeral pop, `EphemeralPopOptions::commit_on_delivery` is the new name of `auto_ack`, which
+still works and is deprecated.
+
 **C++ client: a handler that throws no longer loses a message.** With `auto_ack(false)` and
 `each()`, a handler exception was dropped without a log line and the loop went on with the rest of
 the pop: a handler that then acked a later message of the same partition moved the cursor past the

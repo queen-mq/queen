@@ -29,6 +29,11 @@
  *     are redelivered and an ack for one of them is refused: handling them now
  *     only makes duplicates. The other partitions of a multi-partition pop
  *     keep their lease, and their messages are handled.
+ *   - commit_on_delivery() IS A pop() OPTION. It puts the broker's
+ *     `autoAck=true` on the pop and nothing else: the broker moves the group's
+ *     cursor as it hands the messages out, so there is no lease and nothing to
+ *     ack. consume() always leases its messages, so it refuses the option
+ *     before any request, and auto_ack() never sends it.
  *
  * Like its siblings this runs against an in-process httplib::Server -- no
  * broker, so every response is the one the test chose:
@@ -49,6 +54,7 @@
 #include <vector>
 #include <string>
 #include <set>
+#include <map>
 
 using namespace queen;
 using json = nlohmann::json;
@@ -66,6 +72,7 @@ struct RecordedCall {
     std::string method;
     std::string path;                        // path only, no query string
     std::string body;
+    std::string target;                      // raw request target, query string included
 };
 
 using Responder = std::function<void(const httplib::Request&, httplib::Response&)>;
@@ -86,7 +93,7 @@ public:
         auto handler = [this](const httplib::Request& req, httplib::Response& res) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                calls_.push_back({req.method, req.path, req.body});
+                calls_.push_back({req.method, req.path, req.body, req.target});
             }
             responder_(req, res);
         };
@@ -645,6 +652,103 @@ void test_a_handler_that_throws_a_non_standard_value_is_nacked() {
 }
 
 // ============================================================================
+// commit_on_delivery() commits at delivery, on pop() only
+// ============================================================================
+
+/// The query of a request target as name -> value. httplib's client sorts the
+/// parameters again before it sends them (see test_ephemeral.cpp), so the set
+/// of parameters is what a test can pin, not their order.
+std::map<std::string, std::string> query_of(const std::string& target) {
+    std::map<std::string, std::string> params;
+    auto mark = target.find('?');
+    if (mark == std::string::npos) return params;
+    std::string query = target.substr(mark + 1);
+    size_t start = 0;
+    while (start < query.size()) {
+        size_t end = query.find('&', start);
+        std::string pair = query.substr(start, end == std::string::npos ? std::string::npos
+                                                                        : end - start);
+        auto eq = pair.find('=');
+        if (!pair.empty()) {
+            params[pair.substr(0, eq)] = eq == std::string::npos ? "" : pair.substr(eq + 1);
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return params;
+}
+
+/// The query of the one pop that `configure` sends, to a broker with nothing to
+/// give.
+std::map<std::string, std::string> pop_query(const std::function<void(QueueBuilder&)>& configure) {
+    StubServer server([](const httplib::Request&, httplib::Response& res) { res.status = 204; });
+    QueenClient client({server.url()}, fast_config());
+
+    auto builder = client.queue("commit-on-delivery");
+    builder.group("workers").wait(false);
+    configure(builder);
+    builder.pop();
+
+    auto calls = server.calls();
+    if (calls.size() != 1) return {{"<requests>", std::to_string(calls.size())}};
+    return query_of(calls[0].target);
+}
+
+void test_commit_on_delivery_puts_auto_ack_on_the_pop() {
+    auto leased = pop_query([](QueueBuilder&) {});
+    auto committed = pop_query([](QueueBuilder& b) { b.commit_on_delivery(); });
+
+    check(leased.count("autoAck") == 0,
+          "a plain pop must not send autoAck, got " + json(leased).dump());
+    check(committed.count("autoAck") == 1 && committed["autoAck"] == "true",
+          "commit_on_delivery() must send autoAck=true, got " + json(committed).dump());
+    committed.erase("autoAck");
+    check(committed == leased,
+          "commit_on_delivery() must add autoAck=true and nothing else, got " +
+          json(committed).dump() + " against " + json(leased).dump());
+}
+
+void test_only_commit_on_delivery_sends_auto_ack() {
+    auto off = pop_query([](QueueBuilder& b) { b.commit_on_delivery(false); });
+    auto turned_off = pop_query([](QueueBuilder& b) {
+        b.commit_on_delivery().commit_on_delivery(false);
+    });
+    auto acked = pop_query([](QueueBuilder& b) { b.auto_ack(true); });
+
+    check(off.count("autoAck") == 0,
+          "commit_on_delivery(false) must not send autoAck, got " + json(off).dump());
+    check(turned_off.count("autoAck") == 0,
+          "commit_on_delivery(false) must undo commit_on_delivery(), got " +
+          json(turned_off).dump());
+    check(acked.count("autoAck") == 0,
+          "auto_ack() is the consume() handler's ack and must not reach the pop, got " +
+          json(acked).dump());
+}
+
+void test_consume_refuses_commit_on_delivery_before_any_request() {
+    StubServer server(one_claim(popped(1, "lease-1")));
+    QueenClient client({server.url()}, fast_config());
+
+    std::atomic<int> handled{0};
+    std::string reason;
+    StopAfter watchdog(3000);
+    try {
+        client.queue("consume-commit-on-delivery").group("workers").commit_on_delivery()
+              .wait(false).idle_millis(300)
+              .consume([&handled](const json&) { handled++; }, watchdog.signal());
+    } catch (const std::invalid_argument& e) {
+        reason = e.what();
+    }
+
+    check(!reason.empty(), "consume() must refuse commit_on_delivery() with std::invalid_argument");
+    check(reason.find("commit_on_delivery") != std::string::npos,
+          "the refusal must name the option, got: " + reason);
+    check(server.calls().empty(), "the refusal must come before any request, got " +
+          std::to_string(server.calls().size()) + " request(s)");
+    check(handled.load() == 0, "no message may reach the handler");
+}
+
+// ============================================================================
 
 int main() {
     std::cout << "========================================" << std::endl;
@@ -679,6 +783,12 @@ int main() {
              test_a_nack_survives_an_error_that_is_not_utf8_or_short);
     run_test("a handler that throws a non-standard value is nacked",
              test_a_handler_that_throws_a_non_standard_value_is_nacked);
+
+    run_test("commit_on_delivery() puts autoAck=true on the pop",
+             test_commit_on_delivery_puts_auto_ack_on_the_pop);
+    run_test("only commit_on_delivery() sends autoAck", test_only_commit_on_delivery_sends_auto_ack);
+    run_test("consume() refuses commit_on_delivery() before any request",
+             test_consume_refuses_commit_on_delivery_before_any_request);
 
     std::cout << std::endl;
     if (failures == 0) {

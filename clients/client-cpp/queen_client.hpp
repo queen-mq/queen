@@ -1425,7 +1425,12 @@ struct EphemeralPopOptions {
     /// The WHOLE of the consumption semantics (§1.5): same group = competing
     /// consumers, own group = fan-out, empty = the groupless queue mode.
     std::string group;
-    /// Commit at delivery. At-most-once, and the only mode that is.
+    /// Commit at delivery: the broker moves the cursor past the messages as it
+    /// hands them out. No lease, nothing to ack, at-most-once, and the only
+    /// mode that is.
+    bool commit_on_delivery = false;
+    /// DEPRECATED: the old name of commit_on_delivery, kept so existing code
+    /// still compiles. Either one set to true commits at delivery.
     bool auto_ack = false;
 };
 
@@ -3170,11 +3175,12 @@ public:
 // history to have.
 //
 // DELIVERY IS NOT "AT MOST ONCE" (§1.3), and the docs must not say it is. The
-// class picks what can be LOST; the ack mode picks the guarantee. `auto_ack`
-// advances the cursor at delivery and is at-most-once. The default -- explicit
-// ack -- is at-least-once for as long as the owning broker incarnation lives:
-// an unacked message redelivers when its lease expires, with `attempts`
-// incremented, until retryLimit, after which it is DROPPED and counted.
+// class picks what can be LOST; the ack mode picks the guarantee.
+// `commit_on_delivery` (formerly `auto_ack`) advances the cursor at delivery
+// and is at-most-once. The default -- explicit ack -- is at-least-once for as
+// long as the owning broker incarnation lives: an unacked message redelivers
+// when its lease expires, with `attempts` incremented, until retryLimit, after
+// which it is DROPPED and counted.
 // Consumers still need idempotency, exactly as on durable queues.
 //
 // CONSUMPTION SEMANTICS COME FROM THE GROUP, EXACTLY AS ON THE DURABLE ENGINE
@@ -3362,7 +3368,7 @@ public:
         if (!options.group.empty()) {
             path << "&group=" << util::url_encode(options.group);
         }
-        if (options.auto_ack) {
+        if (options.commit_on_delivery || options.auto_ack) {
             path << "&autoAck=true";
         }
 
@@ -3619,6 +3625,7 @@ private:
     int limit_ = 0;
     int idle_millis_ = 0;
     bool auto_ack_ = true;
+    bool commit_on_delivery_ = false;
     bool wait_ = true;
     int timeout_millis_ = 30000;
     bool renew_lease_ = false;
@@ -3808,12 +3815,23 @@ public:
     /**
      * Ack after the consume() handler returns: each message with each(),
      * otherwise the batch. Client side and consume() only: it has no effect on
-     * pop(), which never sends the broker's `autoAck` (a commit at delivery,
-     * at-most-once, that this SDK does not expose). With it, a handler that
-     * throws is nacked; without it, the failure is logged and nothing is sent.
+     * pop(). With it, a handler that throws is nacked; without it, the failure
+     * is logged and nothing is sent.
      */
     QueueBuilder& auto_ack(bool enabled) {
         auto_ack_ = enabled;
+        return *this;
+    }
+    
+    /**
+     * Commit at delivery on pop(): the broker moves the group's cursor past the
+     * messages as it hands them out. No lease, nothing to ack, at-most-once: a
+     * message lost after the pop is not delivered again. pop() and pop_result()
+     * only: consume() always leases its messages and throws
+     * std::invalid_argument. The broker refuses it with conflation() (a 400).
+     */
+    QueueBuilder& commit_on_delivery(bool enabled = true) {
+        commit_on_delivery_ = enabled;
         return *this;
     }
     
@@ -3854,9 +3872,10 @@ public:
      *
      * Composes with this client's auto_ack(), which defaults to true. The
      * combination §3.3 refuses is the broker-side `autoAck` query param, which
-     * commits at delivery with no lease -- this SDK never sends it. auto_ack()
-     * here means "ack after the handler returns", i.e. the leased at-least-once
-     * shape conflation is built on, so the §1.3 guarantee holds.
+     * commits at delivery with no lease -- this SDK sends it only for
+     * commit_on_delivery(), on pop(). auto_ack() here means "ack after the
+     * handler returns", i.e. the leased at-least-once shape conflation is built
+     * on, so the §1.3 guarantee holds.
      */
     QueueBuilder& conflation(bool enabled = true) {
         conflation_ = enabled;
@@ -3968,6 +3987,11 @@ private:
         // conflating group it would merely book a conflict.
         if (conflation_) {
             params << "&conflation=true";
+        }
+        // Commit at delivery: no lease, nothing to ack, at-most-once. `autoAck`
+        // is the name every 2.x broker reads.
+        if (commit_on_delivery_) {
+            params << "&autoAck=true";
         }
 
         try {
@@ -4908,6 +4932,11 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
 
 inline void QueueBuilder::consume(std::function<void(const json&)> handler,
                                   std::atomic<bool>* stop_signal) {
+    if (commit_on_delivery_) {
+        throw std::invalid_argument(
+            "commit_on_delivery() is a pop() option; consume() always leases its messages");
+    }
+
     ConsumeOptions options;
     options.queue = queue_name_;
     options.partition = partition_ != "Default" ? partition_ : "";

@@ -1287,6 +1287,45 @@ bool test_consumer_surfaces_a_refused_pop(const std::string& server_url) {
     return true;
 }
 
+// commit_on_delivery() commits at delivery: the message comes without a lease
+// and does not come back after the queue's lease time. A second group pops the
+// same message without it, and its message does come back, which shows that
+// the wait was long enough for a lease to run out.
+bool test_pop_commit_on_delivery(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-commit-on-delivery-");
+    DropQueuesOnExit drop{client, {queue}};
+
+    QueueConfig config;
+    config.lease_time = 1;
+    client.queue(queue).config(config).create();
+    client.queue(queue).push({{{"data", {{"n", 1}}}}});
+
+    json committed = client.queue(queue).group("cpp-commit").subscription_mode("all")
+        .commit_on_delivery().batch(1).wait(false).pop();
+    json leased = client.queue(queue).group("cpp-leased").subscription_mode("all")
+        .batch(1).wait(false).pop();
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    json committed_again = client.queue(queue).group("cpp-commit").batch(1).wait(false).pop();
+    json leased_again = client.queue(queue).group("cpp-leased").batch(1).wait(true).pop();
+
+    auto lease_of = [](const json& messages) {
+        const json& msg = messages[0];
+        return msg.contains("leaseId") && msg["leaseId"].is_string()
+                   ? msg["leaseId"].get<std::string>() : std::string();
+    };
+    bool ok = committed.size() == 1 && lease_of(committed).empty() &&
+              leased.size() == 1 && !lease_of(leased).empty() &&
+              committed_again.empty() && leased_again.size() == 1;
+    if (!ok) {
+        std::cerr << "committed=" << committed.dump() << " leased=" << leased.dump()
+                  << " committed again=" << committed_again.dump()
+                  << " leased again=" << leased_again.dump() << std::endl;
+    }
+    return ok;
+}
+
 // ============================================================================
 // DLQ TEST
 // ============================================================================
@@ -1956,6 +1995,8 @@ int main(int argc, char** argv) {
                     [&]() { return test_ack_and_renew_report_a_broker_refusal(server_url); });
     runner.run_test("Consumer surfaces a refused pop",
                     [&]() { return test_consumer_surfaces_a_refused_pop(server_url); });
+    runner.run_test("Pop with commit_on_delivery commits at delivery",
+                    [&]() { return test_pop_commit_on_delivery(server_url); });
     
     // DLQ TEST
     std::cout << YELLOW << "\n=== DLQ TESTS ===" << RESET << "\n" << std::endl;

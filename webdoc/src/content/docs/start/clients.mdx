@@ -39,6 +39,9 @@ verifiedBy:
 # returns an empty result, as the matrix says.
 # sourceOfTruth re-read 2026-10-06 (C++ handler errors): queen_client.hpp logs a handler that throws,
 # nacks it under auto_ack, and skips the rest of its partition. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (commitOnDelivery): queen_client.hpp adds commit_on_delivery() to the
+# queue pop and to the ephemeral pop, where auto_ack stays as a deprecated alias. Nothing this page states
+# changes.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same

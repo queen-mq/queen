@@ -575,6 +575,25 @@ client.queue("tasks")
     });
 ```
 
+### Commit at Delivery
+
+`commit_on_delivery()` commits a `pop()` at delivery: the broker moves the
+consumer group's cursor past the messages as it hands them out. There is no
+lease and nothing to ack, so the delivery is at-most-once: a message that your
+code loses after the pop does not come back. It is a `pop()` option:
+`consume()` always leases its messages and throws `std::invalid_argument` when
+it is set. The broker refuses it together with `conflation()`.
+
+```cpp
+auto messages = client.queue("metrics")
+    .group("dashboard")
+    .commit_on_delivery()
+    .pop();  // already committed: do not ack these
+```
+
+The ephemeral pop has the same option, `EphemeralPopOptions::commit_on_delivery`.
+Its old name, `auto_ack`, still works and is deprecated.
+
 ## Logging
 
 Enable debug logging:
@@ -628,7 +647,8 @@ Output:
 - `partitions(n)` - Pin the sweep width (unset = the broker sizes it)
 - `autopilot(enabled)` - Turn broker-side pop sizing off for this builder
 - `limit(count)` - Set message limit
-- `auto_ack(enabled)` - Ack after the `consume()` handler returns. No effect on `pop()`, which never sends the broker's `autoAck`. With it, a handler that throws is nacked; without it, the failure is only logged
+- `auto_ack(enabled)` - Ack after the `consume()` handler returns. No effect on `pop()`. With it, a handler that throws is nacked; without it, the failure is only logged
+- `commit_on_delivery(enabled = true)` - `pop()` only: the broker moves the group's cursor past the messages as it hands them out. No lease, nothing to ack, at-most-once. See Commit at Delivery
 - `wait(enabled)` - Enable/disable long polling
 - `renew_lease(enabled, interval)` - Renew the batch's lease every interval while the handler runs
 
