@@ -21,7 +21,11 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/ReplicaCoordinator.php
   - clients/client-php/src/Laravel/Supervisor/QueueWatcher.php
   - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServer.php
+  - clients/client-php/src/Laravel/Commands/ForkServerCommand.php
+  - clients/client-php/src/Laravel/Supervisor/WorkerExitMarker.php
+  - clients/client-php/src/Laravel/Supervisor/WorkerTelemetry.php
   - clients/client-php/src/Laravel/Dashboard/TuningAdvisor.php
+  - supervisor/src/prefork.rs
   - supervisor/src/watch.rs
   - supervisor/src/lease/mod.rs
   - supervisor/src/lease/hand_back.rs
@@ -34,6 +38,10 @@ sourceOfTruth:
   - server/src/handlers/timers.rs
 # Describes clients/client-php and supervisor/ as they are on master (PHP client 2.0.0 on
 # Packagist, which pins supervisor 0.6.0; both tagged).
+# sourceOfTruth re-read 2026-10-06 (prefork channels): ForkServer, ForkServerCommand, prefork.rs,
+# WorkerExitMarker, WorkerTelemetry and lease/mod.rs give the new section on how a forked worker
+# talks to its master: the fork server's stdin and fd 3 (ready, forked, failed, exited), the worker
+# environment, lease.sock, the exit-marker and telemetry files, signals, stdout and stderr.
 # sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in
 # PHP client 2.1.0, so the closing settings of each section name the keys of config/queen.php
 # (partition_prefix, prefetch, retry_after, bulk_batch, after_commit, the lease_renewal keys,
@@ -356,6 +364,48 @@ the application, its container, its configuration and every service provider. `h
 plain `queue:work` both do, so 64 workers hold 64 copies of the same booted framework. With prefork
 (PHP client 1.7.0), the master starts one fork server that boots Laravel once, opens no connection,
 and forks every worker from itself.
+
+### How a forked worker talks to its master
+
+A forked worker is a child of the fork server, not of the master, and it shares no memory with the
+master. They talk over pipes, a Unix socket, signals and small files. Only the worker's birth and
+its exit go through the fork server; everything else goes straight between the worker and the
+master, exactly as with a worker started on its own.
+
+<Figure id="laravel/prefork" />
+
+| Channel | Direction | What travels |
+| --- | --- | --- |
+| The fork server's stdin | master → fork server | `fork` requests: the worker's `queue:work` arguments and environment |
+| A pipe on fd 3 | fork server → master | `ready`, `forked` with the pid, `failed`, `exited` with the exit status |
+| The environment | master → worker, at the fork | its pool, connection, consumer group, `retry_after`, the paths below |
+| The Unix socket `lease.sock` | worker ↔ master | the lease to renew (`track`, `forget`); the master's `tracked` or `unsafe` |
+| Files in the state directory | worker → master | job runtimes per queue; why the worker exits: `timeout`, `memory`, `restart` |
+| Signals | master → worker | SIGTERM to drain; SIGKILL to fence, to the worker's whole process group |
+| HTTP | worker ↔ Queen | pop and ACK, as any worker: the master never relays a job |
+| stdout and stderr | worker → the master's output | inherited, so the worker's lines land where the master's do |
+
+- **Messages are JSON, one per line,** on the pipes and on the socket. Both engines speak the same
+  fork server protocol, `queen.fork-server/v1`.
+- **The exit goes through the fork server.** Only a process's parent can collect its exit status,
+  so the fork server reaps the worker and reports `exited` on fd 3. The master then counts the exit
+  and restarts the worker as it would a spawned one.
+- **Signals reach the worker directly.** Each forked worker leads its own session, so the master
+  signals its pid, or its process group, without the fork server.
+- **The lease socket** is the Rust engine's, on Linux, for a connection with `lease_renewal`
+  (`supervisor.lease_service`, on by default). The master knows the worker from the kernel, by the
+  connecting process and a pidfd, never from a pid in a message. A socket that breaks while it
+  tracks a lease makes the master kill the worker. Otherwise each worker starts a PHP helper of its
+  own and talks to it over a pipe ([lease renewal](#lease-renewal-and-fencing)).
+- **The files** sit in private directories (mode 0700) of the master's state directory, written to
+  a temporary name and renamed, so the master never reads half a file. Runtimes are written only
+  for pools that scale with the `time` strategy. The exit reason tells a job timeout from a crash,
+  and `restart` makes the master start a new fork server.
+- **When the master dies,** the fork server sees its stdin close, or on Linux gets SIGTERM as its
+  parent-death signal, and SIGKILLs every worker it forked. No worker outlives its master.
+- **Nothing the boot opened is shared.** The fork server closes the database and Redis connections,
+  log channels and mailers before it forks, and each worker opens its own connections and its own
+  lease socket after the fork.
 
 ### Why a forked worker is smaller, when it is still PHP
 

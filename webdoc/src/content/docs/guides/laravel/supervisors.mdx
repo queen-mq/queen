@@ -446,7 +446,9 @@ signal. A SIGTERM or SIGINT while the master lives, such as systemd stopping the
 a terminal, leaves the workers to the master, which drains them. If the fork server cannot start,
 or a fork fails or times out, the supervisor logs it and spawns workers from then on. The fork
 server stays open for the workers it already forked, and a worker forked after its request timed
-out is stopped, because no pool counts it.
+out is stopped, because no pool counts it. [How a forked worker talks to its
+master](/guides/laravel/concepts/#how-a-forked-worker-talks-to-its-master) lists every channel
+between them.
 
 A service provider that opens a connection while Laravel boots would share it across every fork.
 Before the first fork, the fork server closes the database and Redis connections, log channels and
