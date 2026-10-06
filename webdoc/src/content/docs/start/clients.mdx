@@ -33,6 +33,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-05 (prefetch auto): the PHP snippet still matches config/queen.php after prefetch 'auto'.
 # sourceOfTruth re-read 2026-10-06 (prefork per pool): config/queen.php adds a pool's prefork key; nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-10-06 (C++ consume fixes): queen_client.hpp says auto_ack() has no effect on
+# pop(), reads the ack and renewal answers, surfaces a pop's 4xx from consume() and renews leases inside the
+# consume loop. The capability matrix gives C++ the lease renewal row; pop() still logs a failure and
+# returns an empty result, as the matrix says.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same

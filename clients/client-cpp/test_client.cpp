@@ -1131,6 +1131,38 @@ std::string unique_queue(const std::string& prefix) {
     return prefix + std::to_string(timestamp);
 }
 
+// renew_lease() keeps a 2 s lease alive through a 4.5 s handler: no other
+// consumer of the group can take the message meanwhile, and the ack that
+// follows the handler is accepted.
+bool test_consumer_renews_the_lease_while_the_handler_runs(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-renew-");
+    DropQueuesOnExit drop{client, {queue}};
+
+    QueueConfig config;
+    config.lease_time = 2;
+    client.queue(queue).config(config).create();
+    client.queue(queue).push({{{"data", {{"slow", true}}}}});
+
+    std::atomic<bool> stolen{false};
+    client.queue(queue).group("cpp-renew").subscription_mode("all").batch(1)
+        .wait(false).limit(1).renew_lease(true, 500)
+        .consume([&](const json&) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            json other = client.queue(queue).group("cpp-renew").batch(1).wait(false).pop();
+            stolen = !other.empty();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        });
+
+    json after = client.queue(queue).group("cpp-renew").batch(1).wait(false).pop();
+    if (stolen.load() || !after.empty()) {
+        std::cerr << "the lease lapsed under the handler: stolen=" << stolen.load()
+                  << ", redelivered after the ack=" << after.dump() << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // ack() and renew() say when the broker settled or extended nothing, which it
 // answers with HTTP 200 and success:false in the body.
 bool test_ack_and_renew_report_a_broker_refusal(const std::string& server_url) {
@@ -1850,6 +1882,8 @@ int main(int argc, char** argv) {
 
     // SETTLEMENT TESTS
     std::cout << YELLOW << "\n=== SETTLEMENT TESTS ===" << RESET << "\n" << std::endl;
+    runner.run_test("Consumer renews the lease while the handler runs",
+                    [&]() { return test_consumer_renews_the_lease_while_the_handler_runs(server_url); });
     runner.run_test("ACK and renew report a broker refusal",
                     [&]() { return test_ack_and_renew_report_a_broker_refusal(server_url); });
     runner.run_test("Consumer surfaces a refused pop",

@@ -4367,6 +4367,109 @@ public:
 };
 
 // ============================================================================
+// LeaseRenewal - keeps one popped batch's lease alive while it is handled
+// ============================================================================
+
+/**
+ * consume()'s renew_lease(): while a popped batch is handled, renew its lease
+ * every interval, as the JS (setInterval), Go (ticker) and Rust (spawned task)
+ * consumers do. One POST /api/v1/lease/:leaseId/extend per DISTINCT leaseId per
+ * tick: every message of a pop shares its leaseId, a multi-partition claim
+ * included, so a batch is one request and not one per message. The broker
+ * extends by its default (60 s), so the interval has to be shorter than that
+ * and than the queue's leaseTime for renewal to keep anything alive.
+ *
+ * Scoped: the destructor stops the timer and joins it, so renewal ends with the
+ * batch, after its ack or nack, however the processing block is left. A failed
+ * renewal is logged and never stops the consumer.
+ */
+class LeaseRenewal {
+private:
+    QueenClient* queen_;
+    json lease_ids_ = json::array();
+    std::chrono::milliseconds interval_;
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    bool stopped_ = false;
+    std::thread thread_;
+
+    // Runs on the renewal thread, so nothing may leave it: an exception that
+    // escapes a std::thread ends the process.
+    void renew_once() noexcept {
+        try {
+            json results = queen_->renew(lease_ids_);
+            for (const auto& result : results) {
+                if (result.value("success", false)) {
+                    continue;
+                }
+                std::string error = result.contains("error") && result["error"].is_string()
+                    ? result["error"].get<std::string>() : std::string("not renewed");
+                util::log_error("ConsumerManager.leaseRenewal",
+                                "lease " + result.value("leaseId", std::string()) + ": " + error);
+            }
+        } catch (const std::exception& e) {
+            util::log_error("ConsumerManager.leaseRenewal", e.what());
+        } catch (...) {
+            util::log_error("ConsumerManager.leaseRenewal", "renewal failed");
+        }
+    }
+
+public:
+    LeaseRenewal(QueenClient* queen, const json& messages, int interval_millis)
+        : queen_(queen), interval_(interval_millis) {
+        std::unordered_set<std::string> seen;
+        for (const auto& message : messages) {
+            // An autoAck delivery carries an empty leaseId: nothing to renew.
+            if (!message.is_object() || !message.contains("leaseId") ||
+                !message["leaseId"].is_string()) {
+                continue;
+            }
+            std::string lease_id = message["leaseId"].get<std::string>();
+            if (!lease_id.empty() && seen.insert(lease_id).second) {
+                lease_ids_.push_back(lease_id);
+            }
+        }
+        if (lease_ids_.empty() || interval_millis <= 0) {
+            return;
+        }
+        try {
+            thread_ = std::thread([this]() {
+                try {
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    while (!wake_.wait_for(lock, interval_, [this]() { return stopped_; })) {
+                        lock.unlock();
+                        renew_once();
+                        lock.lock();
+                    }
+                } catch (...) {
+                    // A failed lock or wait: stop renewing, never the process.
+                    util::log_error("ConsumerManager.leaseRenewal", "renewal stopped");
+                }
+            });
+        } catch (const std::exception& e) {
+            // No thread to renew with (std::system_error): handle the batch
+            // without renewal rather than stop the consumer over it.
+            util::log_error("ConsumerManager.leaseRenewal",
+                            std::string("renewal not started for this batch: ") + e.what());
+        }
+    }
+
+    ~LeaseRenewal() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopped_ = true;
+        }
+        wake_.notify_all();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    LeaseRenewal(const LeaseRenewal&) = delete;
+    LeaseRenewal& operator=(const LeaseRenewal&) = delete;
+};
+
+// ============================================================================
 // ConsumerManager Implementation (after QueenClient is defined)
 // ============================================================================
 
@@ -4527,9 +4630,15 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                 }
                 
                 last_message_time = std::chrono::steady_clock::now();
-                
-                // TODO: Set up lease renewal if enabled
-                
+
+                // renew_lease(): keep this batch's lease alive until it is
+                // settled. Scoped to this iteration, so the timer stops after
+                // the ack or nack below, however the block is left.
+                std::optional<LeaseRenewal> renewal;
+                if (options.renew_lease && options.renew_lease_interval_millis > 0) {
+                    renewal.emplace(queen_, messages, options.renew_lease_interval_millis);
+                }
+
                 // Process messages
                 if (options.each) {
                     for (const auto& msg : messages) {

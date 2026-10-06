@@ -330,8 +330,23 @@ for (const auto& msg : dlq["messages"]) {
 
 ### Lease Renewal
 
-`renew()` answers `success: false` when the broker extended nothing: the lease
-expired or was released, and the message may already be with another consumer.
+In a consumer, `renew_lease(true, interval_millis)` renews the batch's lease
+every interval while the handler runs, and stops after the ack or nack. Every
+message of a pop shares one leaseId, so a batch is one renewal request per
+interval. The broker extends a lease by 60 seconds, so pick an interval shorter
+than that and than the queue's `lease_time`:
+
+```cpp
+client.queue("long-tasks")
+    .renew_lease(true, 30000)   // every 30 s while the handler runs
+    .consume([](const json& msg) {
+        process_large_file(msg["data"]);
+    });
+```
+
+After a manual `pop()`, renew the lease yourself. `renew()` answers
+`success: false` when the broker extended nothing: the lease expired or was
+released, and the message may already be with another consumer.
 
 ```cpp
 // Pop message
@@ -605,7 +620,7 @@ Output:
 - `limit(count)` - Set message limit
 - `auto_ack(enabled)` - Ack after the `consume()` handler returns. No effect on `pop()`, which never sends the broker's `autoAck`
 - `wait(enabled)` - Enable/disable long polling
-- `renew_lease(enabled, interval)` - Auto-renew leases
+- `renew_lease(enabled, interval)` - Renew the batch's lease every interval while the handler runs
 
 **Buffering:**
 - `buffer(options)` - Enable client-side buffering (bounded: blocks at `max_size`)

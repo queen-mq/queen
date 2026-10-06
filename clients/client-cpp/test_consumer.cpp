@@ -11,6 +11,10 @@
  *     worker runs in a pool task whose future is only waited on, so an error
  *     thrown there is gone unless the loop carries it out. A 5xx is a broker
  *     restarting or electing: the loop waits and polls again.
+ *   - renew_lease() RENEWS. While the handler runs, one
+ *     POST /api/v1/lease/:leaseId/extend per lease per interval: every message
+ *     of a pop shares its leaseId, so a batch is one request, not one per
+ *     message. Nothing after the handler returns.
  *
  * Like its siblings this runs against an in-process httplib::Server -- no
  * broker, so every response is the one the test chose:
@@ -391,6 +395,51 @@ void test_a_5xx_keeps_consume_polling() {
 }
 
 // ============================================================================
+// renew_lease() renews while the handler runs
+// ============================================================================
+
+void test_renew_lease_renews_while_the_handler_runs() {
+    StubServer server(one_claim(popped(3, "lease-1")));
+    QueenClient client({server.url()}, fast_config());
+
+    StopAfter watchdog(5000);
+    client.queue("consume-renew").group("workers").renew_lease(true, 100)
+          .wait(false).idle_millis(300)
+          .consume([](const json&) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(450));
+          }, watchdog.signal());
+
+    size_t renewals = server.count_with_prefix("/api/v1/lease/");
+    check(server.count_with_prefix("/api/v1/lease/lease-1/extend") == renewals,
+          "every renewal must be for the batch's lease");
+    // 450 ms at a 100 ms interval is four ticks; one request per message would
+    // be twelve. The bounds leave room for a slow scheduler.
+    check(renewals >= 2, "expected the lease renewed while the handler ran, got " +
+          std::to_string(renewals) + " renewal(s)");
+    check(renewals <= 6, "expected one renewal per lease per interval, got " +
+          std::to_string(renewals));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    check(server.count_with_prefix("/api/v1/lease/") == renewals,
+          "renewal must stop when the handler returns");
+}
+
+void test_no_renewal_unless_asked() {
+    StubServer server(one_claim(popped(1, "lease-1")));
+    QueenClient client({server.url()}, fast_config());
+
+    StopAfter watchdog(5000);
+    client.queue("consume-no-renew").group("workers")
+          .wait(false).idle_millis(300)
+          .consume([](const json&) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(250));
+          }, watchdog.signal());
+
+    check(server.count_with_prefix("/api/v1/lease/") == 0,
+          "renew_lease() was never called, so nothing may be renewed");
+}
+
+// ============================================================================
 
 int main() {
     std::cout << "========================================" << std::endl;
@@ -406,6 +455,10 @@ int main() {
     run_test("a 4xx on a pop stops consume() with that error",
              test_a_4xx_on_a_pop_stops_consume_with_that_error);
     run_test("a 5xx keeps consume() polling", test_a_5xx_keeps_consume_polling);
+
+    run_test("renew_lease() renews while the handler runs",
+             test_renew_lease_renews_while_the_handler_runs);
+    run_test("no renewal unless asked", test_no_renewal_unless_asked);
 
     std::cout << std::endl;
     if (failures == 0) {

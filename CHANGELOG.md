@@ -5,6 +5,10 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**C++ client: `renew_lease()` renews.** The consume loop accepted the setting and never renewed.
+While the handler runs, it now renews the batch's lease every `interval_millis`, one request per
+lease, and stops after the ack or nack, as the JS, Go and Rust clients do.
+
 **C++ client: `consume()` throws a pop's 4xx and waits out a 5xx.** A 4xx on a pop other than a
 403 or a 429, such as a 400, ended the worker inside a pool task whose result nobody read, so
 `consume()` returned as if it had finished. It now throws that error once every worker has
