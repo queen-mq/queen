@@ -304,6 +304,81 @@ fn qidx_encode_open_probe() {
 }
 
 #[test]
+fn timestamp_predecessors_match_a_scan_in_active_and_sealed_indexes() {
+    use super::index::{self, ActiveIndex};
+    let td = TmpDir::new("time-predecessor");
+    let mut records = Vec::new();
+    // Sparse offsets, repeated timestamps, multi-message appends and several
+    // partitions exercise both exclusive bounds without assuming dense keys.
+    for pid in [1, 3, 9] {
+        for i in 0..40 {
+            let mut r = rec(pid, i * 7 + 2, 3, i * 10);
+            r.created_at_us = (i / 3) as i64 * 100;
+            records.push(r);
+        }
+    }
+    let path = td.path().join("time.qidx");
+    std::fs::write(&path, index::encode(1, 4096, &records)).unwrap();
+    let sealed = index::View::open(&path, Some(4096)).unwrap();
+    let mut active = ActiveIndex::new();
+    active.open(1);
+    for r in &records {
+        active.insert(*r);
+    }
+    for pid in 0..=10 {
+        for high in [0, 1, 2, 3, 9, 10, 11, 150, 275, 999, u64::MAX] {
+            for before in [-1, 0, 1, 100, 101, 600, 1300, i64::MAX] {
+                let expected = records
+                    .iter()
+                    .rev()
+                    .find(|r| r.pid == pid && r.base_offset < high && r.created_at_us < before)
+                    .copied();
+                assert_eq!(
+                    sealed.record_before(pid, high, before),
+                    expected,
+                    "sealed: pid={pid}, high={high}, before={before}"
+                );
+                assert_eq!(
+                    active.record_before(pid, high, before),
+                    expected,
+                    "active: pid={pid}, high={high}, before={before}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn timestamp_predecessor_merges_rolled_files_and_replayed_appends() {
+    let td = TmpDir::new("time-replay");
+    let opts = QLogOptions::testing(4096);
+    let (mut q, _) = QLog::open(td.path(), 1, opts.clone()).unwrap();
+    for i in 0..5 {
+        append_one(&mut q, i + 1, 1, i * 2, 100 + i as i64 * 10);
+        q.seal_active(i + 2).unwrap();
+    }
+    // Recovery can replay an older append into the active file. It must not
+    // hide newer records still present in sealed indexes.
+    append_one(&mut q, 6, 1, 2, 110);
+    for high in 0..12 {
+        for before in [100, 110, 111, 130, 141] {
+            let expected = (0..5)
+                .rev()
+                .find(|i| i * 2 < high && 100 + *i as i64 * 10 < before);
+            assert_eq!(
+                q.record_before(1, high, before).map(|r| r.base_offset),
+                expected.map(|i| i * 2)
+            );
+        }
+    }
+    drop(q);
+    let (q, _) = QLog::open(td.path(), 1, opts).unwrap();
+    assert_eq!(q.record_before(1, 9, 141).unwrap().base_offset, 8);
+    assert_eq!(q.record_before(1, 9, 130).unwrap().base_offset, 4);
+    assert!(q.record_before(2, 9, 141).is_none());
+}
+
+#[test]
 fn qidx_staleness_and_checksums() {
     use super::index::{self, IndexError};
     let td = TmpDir::new("qidx-stale");

@@ -1259,6 +1259,29 @@ async fn raft_push_stamps_authenticated_subject_and_round_trips_encrypted_payloa
     assert_eq!(detail["producerSub"], "alice-producer", "{detail}");
     assert_eq!(detail["isEncrypted"], true, "{detail}");
 
+    let listed = facade
+        .api(
+            ctx(),
+            ApiReq {
+                method: "GET".into(),
+                path: "/api/v1/messages".into(),
+                query: Some("queue=secret&limit=1&offset=0".into()),
+                body: Vec::new(),
+            },
+        )
+        .await
+        .expect("encrypted message list");
+    assert_eq!(listed.status, 200);
+    let listed = parse(&listed.body);
+    assert_eq!(listed["messages"].as_array().map(Vec::len), Some(1));
+    assert_eq!(listed["messages"][0]["data"]["secret"], 42, "{listed}");
+    assert_eq!(listed["messages"][0]["producerSub"], "alice-producer");
+    assert_eq!(listed["messages"][0]["isEncrypted"], true);
+    assert_eq!(
+        listed["pagination"],
+        serde_json::json!({"limit": 1, "offset": 0})
+    );
+
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
