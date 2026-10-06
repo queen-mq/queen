@@ -605,8 +605,11 @@ await queen.queue('q').concurrency(5).consume(single_handler)
 await queen.queue('q').group('my-group').consume(single_handler)
 ```
 
-`auto_ack(False)` leaves the ack of a handler that returns to you. `auto_ack()`
-has no effect on `pop()`: a pop commits at delivery only with
+`auto_ack(False)` leaves the ack of a handler that returns to you. A handler
+that raises then stops the consumer: `consume()` raises its error and sends no
+nack, so the message comes back when its lease expires. With `auto_ack` (the
+default), a handler that raises is nacked and the consumer goes on.
+`auto_ack()` has no effect on `pop()`: a pop commits at delivery only with
 `commit_on_delivery()`.
 
 ### Acknowledgment

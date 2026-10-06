@@ -49,6 +49,12 @@ partition. The loop dropped the whole rest of the pop after a nack, so the other
 messages stayed leased and came back only when the lease expired. It now skips only the later
 messages of the failed partition, which the broker redelivers, and handles the others at once.
 
+**Python client: a handler error is never taken for a pop error.** With `auto_ack(False)`,
+`consume()` sends no nack for a handler that raises, by design, and the error stops the consumer.
+When the error's text said "timeout" or "connection", the loop read it as a long-poll timeout or a
+network fault instead: it polled again with the message still leased, and the error was lost. Such
+an error now stops the consumer like any other handler error.
+
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
 switch. One forking pool is enough to start the fork server, and both engines spawn the workers of

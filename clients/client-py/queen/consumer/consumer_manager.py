@@ -157,6 +157,11 @@ class ConsumerManager:
         last_message_time = time.time() if idle_millis else None
 
         while True:
+            # True while a handler runs under auto_ack(False): then nothing in
+            # the processing block talks to the broker, so whatever it raises
+            # is the handler's error.
+            handler_owns_errors = False
+
             # Check abort signal
             if signal and signal.is_set():
                 logger.log(
@@ -251,6 +256,7 @@ class ConsumerManager:
                 if renew_lease and renew_lease_interval_millis:
                     renewal_task = self._setup_lease_renewal(messages, renew_lease_interval_millis)
 
+                handler_owns_errors = not auto_ack
                 try:
                     # Process messages
                     if each:
@@ -328,6 +334,13 @@ class ConsumerManager:
                 )
                 raise
             except Exception as error:
+                # A handler error under auto_ack(False) is not nacked, by
+                # design, and stops the consumer. Its text can say "timeout"
+                # or "connection": it is still the handler's error, not the
+                # broker's, so the triage below never sees it.
+                if handler_owns_errors:
+                    raise
+
                 # Check if this is a timeout error (expected for long polling)
                 error_str = str(error)
                 is_timeout_error = "timeout" in error_str.lower() or "timed out" in error_str.lower()
