@@ -4,8 +4,14 @@ namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
+use InvalidArgumentException;
 use Queen\Consumer\HighLevelConsumer;
+use Queen\Laravel\QueenServiceProvider;
+use Queen\Laravel\Queue\LeaseRenewer;
+use Queen\Laravel\Queue\LeaseRenewerFactory;
+use Queen\Laravel\Queue\QueenConnector;
 use Queen\Queen;
+use RuntimeException;
 
 class ConsumeCommand extends Command
 {
@@ -17,6 +23,7 @@ class ConsumeCommand extends Command
         {--partitions= : Partitions to claim per pop. Omit and the broker sizes it; --partitions=1 pins the legacy single-partition claim}
         {--no-autopilot : Restore the pre-1.2 client-side defaults (batch 1, partitions 1) and send no autopilot parameter}
         {--auto-ack : Ack each message (or batch) when handle() returns. A handler that throws is nacked either way}
+        {--lease= : Lease of each pop in seconds. Default: retry_after in config/queen.php}
         {--subscription-mode= : Subscription mode}
         {--subscription-from= : Subscription start point}
         {--conflation : Last-value delivery: process only the newest message per partition (needs --group, broker >= 1.1.0)}
@@ -44,6 +51,9 @@ class ConsumeCommand extends Command
 
     private ?int $lastUnreachableWarning = null;
 
+    /** Renews the lease of the messages in hand; null unless lease_renewal and --auto-ack. */
+    private ?LeaseRenewer $renewer = null;
+
     public function handle(Queen $queen): int
     {
         $queueName = $this->argument('queue');
@@ -62,7 +72,16 @@ class ConsumeCommand extends Command
 
         $this->info("Starting Queen consumer on queue: {$queueName}");
 
-        $builder = $queen->queue($queueName);
+        $autoAck = (bool) $this->option('auto-ack');
+        try {
+            [$lease, $leaseName] = $this->lease();
+            $this->renewer = $this->leaseRenewer($lease, $leaseName, $autoAck);
+        } catch (InvalidArgumentException $invalid) {
+            $this->error($invalid->getMessage());
+            return self::FAILURE;
+        }
+
+        $builder = $queen->queue($queueName)->leaseSeconds($lease);
 
         // Pop autopilot: an option the operator TYPED is a pin, an option left
         // out is the broker's to choose. A default of 1 here would have pinned
@@ -85,10 +104,6 @@ class ConsumeCommand extends Command
             $this->info("Consumer group: {$this->option('group')}");
         }
 
-        if ($this->option('auto-ack')) {
-            $builder->autoAck(true);
-        }
-
         if ($this->option('subscription-mode')) {
             $builder->subscriptionMode($this->option('subscription-mode'));
         }
@@ -108,16 +123,28 @@ class ConsumeCommand extends Command
 
         $this->info('Consumer subscribed. Waiting for messages... (Ctrl+C to stop)');
 
+        try {
+            $processed = $this->consume($consumer, $handler, $lease, $autoAck);
+        } finally {
+            $this->renewer?->close();
+            $consumer->close();
+        }
+
+        $this->info("Consumer stopped. Processed {$processed} messages.");
+
+        return self::SUCCESS;
+    }
+
+    /** Pop, hand out and settle until a signal, --limit or --idle-timeout; returns the messages handed out. */
+    private function consume(HighLevelConsumer $consumer, object $handler, int $lease, bool $autoAck): int
+    {
         // Every message handed to handle() counts, failed or not, so --limit
         // bounds the work the command takes on rather than its successes.
         $processed = 0;
         // Which consume surface to drive, not what to put on the wire: the
-        // sizing already reached the builder above. An operator who named no
-        // batch gets the one-message loop, exactly as before -- the broker's
-        // choice of batch is about the claim, and this loop hands the caller one
-        // message at a time either way.
+        // sizing already reached the builder. Without --batch the command
+        // drives consume(), which pins batch=1, and hands out one message.
         $batch = $this->option('batch') !== null ? (int) $this->option('batch') : 1;
-        $autoAck = (bool) $this->option('auto-ack');
         $timeout = (int) $this->option('timeout');
         $limit = $this->option('limit') ? (int) $this->option('limit') : null;
         // HighLevelConsumer has no idle stop, so the command keeps the clock:
@@ -137,6 +164,10 @@ class ConsumeCommand extends Command
                 $popTimeout = min($timeout, $idleLeft);
             }
 
+            // The broker starts the lease inside this request. A deadline
+            // counted from before it can only fence early, never renew past
+            // the broker's own expiry.
+            $popStartedAt = self::monotonicMillis();
             if ($batch > 1) {
                 // Never claim more than the limit leaves: a message popped
                 // past it would sit leased until its lease ran out.
@@ -152,7 +183,8 @@ class ConsumeCommand extends Command
             }
 
             $processed += count($messages);
-            $this->handOut($consumer, $handler, $messages, $batch > 1, $autoAck);
+            $leases = $this->trackLeases($messages, $popStartedAt + $lease * 1000);
+            $this->handOut($consumer, $handler, $messages, $batch > 1, $autoAck, $leases);
             $lastMessageAt = self::monotonicMillis();
 
             if ($limit !== null && $processed >= $limit) {
@@ -161,10 +193,99 @@ class ConsumeCommand extends Command
             }
         }
 
-        $consumer->close();
-        $this->info("Consumer stopped. Processed {$processed} messages.");
+        return $processed;
+    }
 
-        return self::SUCCESS;
+    /**
+     * The lease of every pop: --lease, else retry_after of config/queen.php.
+     *
+     * @return array{0: int, 1: string} the seconds, and the name errors give them
+     */
+    private function lease(): array
+    {
+        $option = $this->option('lease');
+        $name = $option !== null ? '--lease' : 'retry_after';
+
+        return [
+            QueenConnector::boundedInteger(
+                $option ?? config('queen.retry_after', 90),
+                $name,
+                1,
+                QueenConnector::MAX_RETRY_AFTER_SECONDS,
+            ),
+            $name,
+        ];
+    }
+
+    /**
+     * The renewer queue:work would use, when config/queen.php turns
+     * lease_renewal on. Only with --auto-ack: without it the handler may ack
+     * by itself, and a renewer that goes on renewing the lease that ack
+     * released fails, and fences (kills) this process.
+     */
+    private function leaseRenewer(int $lease, string $leaseName, bool $autoAck): ?LeaseRenewer
+    {
+        if (config('queen.lease_renewal') !== true) {
+            return null;
+        }
+        if (!$autoAck) {
+            $this->warn('Lease renewal is off: queen:consume needs --auto-ack to renew leases, since a handler that acks by itself releases its lease.');
+
+            return null;
+        }
+
+        $config = (array) config('queen', []);
+        $timing = LeaseRenewerFactory::timing($config, $lease);
+        $renewer = app(LeaseRenewerFactory::class)->make(
+            QueenServiceProvider::clientConfig($config),
+            $lease,
+            $timing,
+            $leaseName,
+        );
+        $this->info("Lease renewal: on, every {$timing['interval']} s, for a lease of {$lease} s.");
+
+        return $renewer;
+    }
+
+    /**
+     * Start renewing the lease of the messages just popped (one pop, one
+     * lease), until they are settled.
+     *
+     * @param list<array> $messages
+     * @return list<string> the lease IDs tracked
+     */
+    private function trackLeases(array $messages, int $deadlineMonotonicMillis): array
+    {
+        if ($this->renewer === null) {
+            return [];
+        }
+
+        $leases = [];
+        foreach ($messages as $message) {
+            $leaseId = $message['leaseId'] ?? null;
+            if (!is_string($leaseId) || $leaseId === '') {
+                throw new RuntimeException('Queen returned a message without a lease ID while lease renewal is enabled.');
+            }
+            $leases[$leaseId] = true;
+        }
+
+        $tracked = [];
+        try {
+            foreach (array_keys($leases) as $leaseId) {
+                $this->renewer->track($leaseId, $deadlineMonotonicMillis);
+                $tracked[] = $leaseId;
+            }
+        } catch (\Throwable $exception) {
+            foreach ($tracked as $leaseId) {
+                $this->renewer->forget($leaseId);
+            }
+            // A failed track has an ambiguous outcome on the helper's side:
+            // close it so no unconfirmed lease is renewed as an orphan.
+            $this->renewer->close();
+            throw $exception;
+        }
+
+        return $tracked;
     }
 
     /**
@@ -174,6 +295,7 @@ class ConsumeCommand extends Command
      * returned, with --auto-ack only.
      *
      * @param list<array> $messages
+     * @param list<string> $leases tracked by the renewer
      */
     private function handOut(
         HighLevelConsumer $consumer,
@@ -181,20 +303,101 @@ class ConsumeCommand extends Command
         array $messages,
         bool $asList,
         bool $autoAck,
+        array $leases,
     ): void {
         $payload = $asList ? $messages : $messages[0];
         try {
             $handler->handle($payload);
         } catch (\Throwable $e) {
             $this->error(($asList ? 'Error processing batch: ' : 'Error processing message: ') . $e->getMessage());
-            $this->settle($consumer, $payload, count($messages), false, $e->getMessage());
+            $this->settle($consumer, $payload, count($messages), false, $e->getMessage(), $leases);
 
             return;
         }
 
         if ($autoAck) {
-            $this->settle($consumer, $payload, count($messages), true, null);
+            $this->settle($consumer, $payload, count($messages), true, null, $leases);
         }
+    }
+
+    /**
+     * One ack or nack call, and one warning line when the broker refused it.
+     * A renewed lease is checked and forgotten first: a lease the renewer can
+     * no longer vouch for is never settled, and one the ack releases must not
+     * be renewed after it.
+     *
+     * @param list<string> $leases
+     */
+    private function settle(
+        HighLevelConsumer $consumer,
+        array $payload,
+        int $count,
+        bool $success,
+        ?string $error,
+        array $leases,
+    ): void {
+        $verb = $success ? 'Ack' : 'Nack';
+        $unsafe = $this->releaseLeases($leases);
+        if ($unsafe !== null) {
+            $this->warn('Not ' . strtolower($verb) . "ed: {$unsafe}. The broker hands the message out again after its lease.");
+
+            return;
+        }
+
+        $result = $success ? $consumer->ack($payload) : $consumer->nack($payload, $error);
+        $noun = $count === 1 ? 'message' : 'messages';
+
+        if (($result['success'] ?? false) !== true) {
+            $this->warn("{$verb} failed for {$count} {$noun}: " . (string) ($result['error'] ?? 'no answer'));
+
+            return;
+        }
+
+        $refused = 0;
+        $reason = null;
+        foreach ($result as $key => $item) {
+            if (!is_int($key) || !is_array($item) || ($item['success'] ?? true) !== false) {
+                continue;
+            }
+            $itemError = (string) ($item['error'] ?? 'refused');
+            // A handler may ack or nack by itself before it throws. The nack
+            // that follows then finds the message settled and its lease
+            // released, which is no news: the handler's own call won.
+            if (!$success && in_array($itemError, self::ALREADY_SETTLED, true)) {
+                continue;
+            }
+            ++$refused;
+            $reason ??= $itemError;
+        }
+
+        if ($refused > 0) {
+            $this->warn("{$verb} refused for {$refused} of {$count} {$noun}: {$reason}");
+        }
+    }
+
+    /**
+     * Check, then forget, every tracked lease.
+     *
+     * @param list<string> $leases
+     * @return string|null why a lease is no longer safe to settle, or null
+     */
+    private function releaseLeases(array $leases): ?string
+    {
+        if ($this->renewer === null) {
+            return null;
+        }
+
+        $unsafe = null;
+        foreach ($leases as $leaseId) {
+            try {
+                $this->renewer->assertHealthy($leaseId);
+            } catch (\Throwable $exception) {
+                $unsafe ??= $exception->getMessage();
+            }
+            $this->renewer->forget($leaseId);
+        }
+
+        return $unsafe;
     }
 
     /**
@@ -237,40 +440,5 @@ class ConsumeCommand extends Command
     private static function monotonicMillis(): int
     {
         return intdiv(hrtime(true), 1_000_000);
-    }
-
-    /** One ack or nack call, and one warning line when the broker refused it. */
-    private function settle(HighLevelConsumer $consumer, array $payload, int $count, bool $success, ?string $error): void
-    {
-        $result = $success ? $consumer->ack($payload) : $consumer->nack($payload, $error);
-        $verb = $success ? 'Ack' : 'Nack';
-        $noun = $count === 1 ? 'message' : 'messages';
-
-        if (($result['success'] ?? false) !== true) {
-            $this->warn("{$verb} failed for {$count} {$noun}: " . (string) ($result['error'] ?? 'no answer'));
-
-            return;
-        }
-
-        $refused = 0;
-        $reason = null;
-        foreach ($result as $key => $item) {
-            if (!is_int($key) || !is_array($item) || ($item['success'] ?? true) !== false) {
-                continue;
-            }
-            $itemError = (string) ($item['error'] ?? 'refused');
-            // A handler may ack or nack by itself before it throws. The nack
-            // that follows then finds the message settled and its lease
-            // released, which is no news: the handler's own call won.
-            if (!$success && in_array($itemError, self::ALREADY_SETTLED, true)) {
-                continue;
-            }
-            ++$refused;
-            $reason ??= $itemError;
-        }
-
-        if ($refused > 0) {
-            $this->warn("{$verb} refused for {$refused} of {$count} {$noun}: {$reason}");
-        }
     }
 }
