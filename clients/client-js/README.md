@@ -192,8 +192,8 @@ Notes:
   the partition cap; either way it is clamped to 64, so a conflating pop returns
   at most 64 messages per round-trip whatever `batch` says.
 - Refused with 400 by the broker without a `.group(...)`, and together with
-  `.autoAck(true)` (auto-ack commits at delivery, which would turn the guarantee
-  above into at-most-once).
+  `.commitOnDelivery()` (a commit at delivery would turn the guarantee above
+  into at-most-once). `pop()` raises that 400 instead of returning `[]`.
 - Requires broker **>= 1.1.0**. An older broker ignores the flag and would
   quietly deliver the whole backlog, so the SDK raises
   `conflation was requested but this broker did not apply it` on the first
@@ -795,12 +795,19 @@ const msgs = await queen.queue('q').batch(10).pop()
 const msgs = await queen.queue('q').batch(10).wait(true).pop()
 const msgs = await queen.queue('q').batch(200).partitions(50).pop()  // multi-partition pop
 const { messages, autopilot } = await queen.queue('q').popResult()   // + what the broker chose
+const msgs = await queen.queue('q').group('g').commitOnDelivery().pop()  // committed at delivery, nothing to ack
 ```
 
 A pop long-polls, waiting up to `timeoutMillis` (30 s) for a message, unless you call
-`.wait(false)`, and its messages always come back leased: the ack is yours. `.autoAck()` belongs
-to `consume()`, where it is the ack the client sends after your handler; the broker's at-most-once
-auto-ack is not exposed to clients, so it has no effect on a pop.
+`.wait(false)`. Its messages come back leased, and the ack is yours.
+
+`.commitOnDelivery()` changes that for `pop()` and `popResult()`. The broker moves the group's
+cursor past the messages as it hands them out: there is no lease (`leaseId` is empty) and nothing
+to ack. This is at-most-once delivery: a crash after the pop loses the messages. The broker
+refuses it together with `.conflation()` (400). `consume()` always leases its messages, so it
+throws before any request when the builder has `.commitOnDelivery()`.
+
+`.autoAck()` is `consume()`'s ack after your handler and has no effect on a pop.
 
 ### Consume
 
@@ -963,7 +970,8 @@ the broker. These values are what comes back with `.autopilot(false)` or
   batch: 1,              // autopilot OFF only, as for consume
   wait: true,            // long-polls; .wait(false) returns at once
   timeoutMillis: 30000,  // the long-poll limit
-  autoAck: false         // never sent: a pop is always leased
+  autoAck: false,        // consume()'s ack after the handler; no effect on pop()
+  commitOnDelivery: false // leased; .commitOnDelivery() commits at delivery (at-most-once)
 }
 ```
 

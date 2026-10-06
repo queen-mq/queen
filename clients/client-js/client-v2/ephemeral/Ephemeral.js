@@ -17,12 +17,13 @@
  * history to have.
  *
  * DELIVERY IS NOT "AT MOST ONCE" (§1.3), and the docs must not say it is. The
- * class picks what can be LOST; the ack mode picks the guarantee. `autoAck`
- * advances the cursor at delivery and is at-most-once. The default -- explicit
- * ack -- is at-least-once for as long as the owning broker incarnation lives:
- * an unacked message redelivers when its lease expires, with `attempts`
- * incremented, until `retryLimit`, after which it is DROPPED and counted (no
- * DLQ, §9). Consumers still need idempotency, exactly as on durable queues.
+ * class picks what can be LOST; the ack mode picks the guarantee.
+ * `commitOnDelivery` advances the cursor at delivery and is at-most-once. The
+ * default -- explicit ack -- is at-least-once for as long as the owning broker
+ * incarnation lives: an unacked message redelivers when its lease expires,
+ * with `attempts` incremented, until `retryLimit`, after which it is DROPPED
+ * and counted (no DLQ, §9). Consumers still need idempotency, exactly as on
+ * durable queues.
  *
  * CONSUMPTION SEMANTICS COME FROM THE GROUP, EXACTLY AS ON THE DURABLE ENGINE
  * (§1.5). There is no queue-level mode to choose:
@@ -404,7 +405,23 @@ export class Ephemeral {
    *
    * `group` is the whole of the consumption semantics (§1.5): same group =
    * competing consumers, own group = fan-out, no group = queue mode.
-   * `autoAck:true` commits at delivery and is at-most-once.
+   *
+   * `commitOnDelivery:true` commits at delivery: the broker moves the group's
+   * cursor past the messages as it hands them out, with no lease and nothing
+   * to ack. That is at-most-once: a crash after the pop loses them. It
+   * travels as `autoAck=true`, the parameter the broker reads.
+   *
+   * @param {string} queue
+   * @param {object} [opts]
+   * @param {string} [opts.partition]
+   * @param {number} [opts.batch]
+   * @param {boolean} [opts.wait]
+   * @param {number} [opts.timeout] Milliseconds; `timeoutMillis` is the same.
+   * @param {string} [opts.group]
+   * @param {boolean} [opts.commitOnDelivery] Commit at delivery (at-most-once).
+   * @param {boolean} [opts.autoAck] Deprecated: the old name of
+   *   `commitOnDelivery`, still read with the same meaning. Pass one or the
+   *   other, not both.
    */
   async pop(queue, opts = {}) {
     requireQueue(queue)
@@ -413,6 +430,7 @@ export class Ephemeral {
     const group = opts.group ?? null
     const wait = opts.wait === true
     const timeoutMillis = resolveTimeout(opts)
+    const commitOnDelivery = resolveCommitOnDelivery(opts)
 
     const params = new URLSearchParams({ queue })
     if (partition !== null) params.append('partition', partition)
@@ -424,7 +442,7 @@ export class Ephemeral {
       params.append('timeout', String(timeoutMillis))
     }
     if (group !== null) params.append('group', group)
-    if (opts.autoAck === true) params.append('autoAck', 'true')
+    if (commitOnDelivery) params.append('autoAck', 'true')
 
     logger.log('Ephemeral.pop', { queue, partition, group, batch: opts.batch ?? null, wait })
 
@@ -546,4 +564,18 @@ function resolveTimeout(opts) {
   if (hasTimeout) return opts.timeout
   if (hasMillis) return opts.timeoutMillis
   return DEFAULT_WAIT_TIMEOUT_MILLIS
+}
+
+/**
+ * The pop's commit at delivery, from `commitOnDelivery` or its deprecated
+ * alias `autoAck`. Both spellings at once are refused, as for the timeout: two
+ * values for one setting would have to be resolved by a rule nobody reads.
+ */
+function resolveCommitOnDelivery(opts) {
+  const hasName = opts.commitOnDelivery !== undefined && opts.commitOnDelivery !== null
+  const hasAlias = opts.autoAck !== undefined && opts.autoAck !== null
+  if (hasName && hasAlias) {
+    throw new Error('ephemeral: pass either `commitOnDelivery` or its deprecated alias `autoAck`, not both')
+  }
+  return (hasName ? opts.commitOnDelivery : opts.autoAck) === true
 }

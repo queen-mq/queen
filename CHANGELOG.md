@@ -70,12 +70,23 @@ later messages of the failed partition, which the broker redelivers, and handles
 once.
 
 **JavaScript client: the pop defaults say what `pop()` does.** `POP_DEFAULTS` and the README said
-a pop returns at once and that `autoAck(true)` commits it at delivery. Neither was ever true, and
-neither is meant to be: a pop long-polls for `timeoutMillis` unless `.wait(false)`, and its
-messages always come back leased, because `autoAck()` is the ack `consume()` sends after the
-handler and the broker's at-most-once auto-ack is not exposed to clients. `POP_DEFAULTS.wait` is
-now `true`, the README and the builder's comments say so, and tests pin both. No behaviour
-changes.
+a pop returns at once and that `autoAck(true)` commits it at delivery. Neither was ever true: a pop
+long-polls for `timeoutMillis` unless `.wait(false)`, and `autoAck()` never reaches the broker,
+because it is the ack `consume()` sends after the handler. A pop commits at delivery only with the
+new `commitOnDelivery()`, below. `POP_DEFAULTS.wait` is now `true`, the README and the builder's
+comments say so, and tests pin both. No behaviour changes.
+
+**JavaScript client: `commitOnDelivery()` commits a pop at delivery.** The broker can move a
+consumer group's cursor past the messages as it hands them out, with no lease and nothing to ack,
+but this client could not ask for it: `autoAck(true)` on a pop never reached the broker.
+`queen.queue(q).group(g).commitOnDelivery().pop()`, and `popResult()`, now send `autoAck=true`, the
+parameter every 2.x broker reads, and nothing else; the messages come back with an empty `leaseId`.
+This is at-most-once: a crash after the pop loses the messages. `consume()` always leases, so it
+throws before any request when the builder has `commitOnDelivery()`. `autoAck()` stays the ack
+`consume()` sends after the handler and still never reaches the broker. The broker refuses
+`commitOnDelivery()` together with `conflation()` (400), and `pop()` raises that 400. On ephemeral
+queues, `queen.ephemeral.pop()` takes `commitOnDelivery: true`; its `autoAck` option, which meant
+the same, still works and is deprecated, and passing both throws.
 
 **JavaScript client: `admin.moveMessageToDLQ()` and `admin.clearQueue()` are deprecated and
 throw.** They sent `POST /api/v1/messages/:partitionId/:transactionId/dlq` and

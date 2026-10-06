@@ -1,12 +1,14 @@
 /**
  * pop() and consume() share one builder but not their defaults.
  *
- *            autoAck                     wait
- *   pop()    never sent                  true  (POP_DEFAULTS)
- *   consume  true, client-side           true  (CONSUME_DEFAULTS)
+ *            autoAck                     commitOnDelivery        wait
+ *   pop()    never sent                  off; on sends autoAck   true  (POP_DEFAULTS)
+ *   consume  true, client-side           refused                 true  (CONSUME_DEFAULTS)
  *
- * autoAck is consume()'s ack after the handler; the broker's at-most-once
- * autoAck is not exposed to clients, by design, so pop() never sends it.
+ * autoAck() is consume()'s ack after the handler and never reaches the wire.
+ * The broker's at-most-once commit at delivery is the pop's own option,
+ * commitOnDelivery(), which sends autoAck=true; consume() always leases, so it
+ * refuses that option before any request.
  * POP_DEFAULTS.wait said false while every pop long-polled; the long poll is
  * what callers rely on, so it stays, and POP_DEFAULTS and the guide say so.
  *
@@ -64,9 +66,9 @@ async function withQueen(plan, defaultResponse, run) {
 }
 
 describe('pop() — autoAck', () => {
-  // autoAck() is consume()'s ack after the handler. The broker's at-most-once
-  // autoAck is not exposed to clients, by design: a pop always comes back
-  // leased, whatever autoAck() said.
+  // autoAck() is consume()'s ack after the handler and never reaches the
+  // wire: a pop comes back leased whatever autoAck() said. The broker's
+  // at-most-once autoAck is commitOnDelivery(), below.
   for (const [label, build] of [
     ['autoAck() never called', (q) => q.group(GROUP)],
     ['autoAck(true)', (q) => q.group(GROUP).autoAck(true)],
@@ -83,6 +85,86 @@ describe('pop() — autoAck', () => {
       })
     })
   }
+})
+
+describe('pop() — commitOnDelivery', () => {
+  // The broker's commit at delivery, on the wire name every 2.x broker reads:
+  // the pop carries autoAck=true and nothing else changes.
+  it('pop() and popResult() send autoAck=true and nothing else', async () => {
+    await withQueen([popBody(), popBody(), popBody()], popBody(), async (queen, hits) => {
+      await queen.queue(QUEUE).group(GROUP).pop()
+      await queen.queue(QUEUE).group(GROUP).commitOnDelivery().pop()
+      await queen.queue(QUEUE).group(GROUP).commitOnDelivery(true).popResult()
+
+      const [plain, ...committed] = pops(hits)
+      assert.equal(committed.length, 2)
+      for (const hit of committed) {
+        const q = query(hit.url)
+        assert.equal(q.get('autoAck'), 'true')
+        q.delete('autoAck')
+        assert.deepEqual(Object.fromEntries(q), Object.fromEntries(query(plain.url)))
+        assert.equal(hit.url.split('?')[0], plain.url.split('?')[0])
+      }
+    })
+  })
+
+  it('sends no autoAck after commitOnDelivery(false)', async () => {
+    await withQueen([popBody()], popBody(), async (queen, hits) => {
+      await queen.queue(QUEUE).group(GROUP).commitOnDelivery(true).commitOnDelivery(false).pop()
+
+      assert.equal(query(pops(hits)[0].url).has('autoAck'), false)
+    })
+  })
+
+  it('does not depend on autoAck(), which stays consume()\'s', async () => {
+    await withQueen([popBody()], popBody(), async (queen, hits) => {
+      await queen.queue(QUEUE).group(GROUP).autoAck(false).commitOnDelivery().pop()
+
+      assert.equal(query(pops(hits)[0].url).get('autoAck'), 'true')
+    })
+  })
+
+  it('with conflation(), sends both and raises the broker\'s 400 instead of returning []', async () => {
+    // The broker refuses conflation together with a commit at delivery
+    // (server/src/handlers/data.rs, conflation_refusal).
+    const refusal = {
+      status: 400,
+      body: { success: false, error: 'conflation cannot be combined with autoAck', messages: [] }
+    }
+    await withQueen([refusal], refusal, async (queen, hits) => {
+      await assert.rejects(
+        () => queen.queue(QUEUE).group(GROUP).conflation().commitOnDelivery().pop(),
+        (err) => err.status === 400
+      )
+
+      const q = query(pops(hits)[0].url)
+      assert.equal(q.get('autoAck'), 'true')
+      assert.equal(q.get('conflation'), 'true')
+    })
+  })
+})
+
+describe('consume() refuses commitOnDelivery()', () => {
+  it('throws before any request', async () => {
+    await withQueen([], popBody(), async (queen, hits) => {
+      assert.throws(
+        () => queen.queue(QUEUE).group(GROUP).commitOnDelivery().consume(async () => {}),
+        {
+          message: 'commitOnDelivery() is a pop() option; consume() always leases its messages'
+        }
+      )
+      assert.equal(hits.length, 0)
+    })
+  })
+
+  it('consumes as before after commitOnDelivery(false)', async () => {
+    await withQueen([popBody(), ackBody], ackBody, async (queen, hits) => {
+      await queen.queue(QUEUE).group(GROUP).commitOnDelivery(false).limit(1).consume(async () => {})
+
+      assert.equal(query(pops(hits)[0].url).has('autoAck'), false)
+      assert.equal(acks(hits).length, 1)
+    })
+  })
 })
 
 describe('pop() — wait', () => {

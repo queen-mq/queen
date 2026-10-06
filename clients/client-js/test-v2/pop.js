@@ -363,9 +363,9 @@ export async function renewReportsAReleasedLease(client) {
 }
 
 
-// autoAck() is consume()'s ack after the handler. The broker's at-most-once
-// autoAck is not exposed to clients, by design: a pop after autoAck(true) is
-// leased like any pop, and with a 1 s lease the message comes back.
+// autoAck() is consume()'s ack after the handler and never reaches the wire: a
+// pop after autoAck(true) is leased like any pop, and with a 1 s lease the
+// message comes back. The broker's at-most-once autoAck is commitOnDelivery().
 export async function popAutoAckStaysLeased(client) {
     const queueName = 'test-queue-v2-pop-auto-ack'
     const queue = await client.queue(queueName).config({ leaseTime: 1 }).create()
@@ -383,6 +383,29 @@ export async function popAutoAckStaysLeased(client) {
     const again = await client.queue(queueName).batch(1).wait(true).timeoutMillis(3000).pop()
 
     const success = typeof message.leaseId === 'string' && message.leaseId !== '' && again.length === 1
+    return { success, message: `leaseId ${JSON.stringify(message.leaseId)}, delivered again after the lease: ${again.length}` }
+}
+
+// commitOnDelivery() sends autoAck=true: the broker moves the group's cursor
+// past the message as it hands it out, so the pop has no lease and the message
+// does not come back after the 1 s lease of the queue.
+export async function popCommitOnDeliveryNotRedelivered(client) {
+    const queueName = 'test-queue-v2-pop-commit-on-delivery'
+    const queue = await client.queue(queueName).config({ leaseTime: 1 }).create()
+    if (!queue.configured) {
+        return { success: false, message: 'Queue not created' }
+    }
+    await client.queue(queueName).push([{ data: { n: 1 } }])
+
+    const [message] = await client.queue(queueName).batch(1).wait(true).timeoutMillis(5000).commitOnDelivery().pop()
+    if (!message) {
+        return { success: false, message: 'Nothing popped' }
+    }
+    // Past the 1 s lease: a leased message would be delivered again now.
+    await new Promise(resolve => setTimeout(resolve, 2500))
+    const again = await client.queue(queueName).batch(1).wait(true).timeoutMillis(1500).pop()
+
+    const success = !message.leaseId && again.length === 0
     return { success, message: `leaseId ${JSON.stringify(message.leaseId)}, delivered again after the lease: ${again.length}` }
 }
 

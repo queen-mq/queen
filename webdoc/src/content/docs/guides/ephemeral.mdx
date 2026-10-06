@@ -15,6 +15,9 @@ verifiedBy:
   - clients/client-js/test-v2/ephemeral-unit/ephemeralWire.test.js
 sidebar:
   order: 6
+# sourceOfTruth re-read 2026-10-06 (commitOnDelivery): Ephemeral.js pop() takes commitOnDelivery, sent as
+# autoAck=true; its autoAck option is a deprecated alias, and passing both throws. The request/reply example and
+# the acks paragraph now use and describe commitOnDelivery. Nothing else this page states changes.
 ---
 
 An ephemeral queue keeps its messages in memory and nowhere else. A push is a memory write and a
@@ -41,7 +44,7 @@ await queen.ephemeral.ack('rpc-requests', messages, { group: 'workers' })
 // Requester: push, then park on the inbox until the answer arrives.
 const inbox = `rpc-inbox-${randomUUID()}`
 await queen.ephemeral.push('rpc-requests', [{ n: 7, replyTo: inbox }])
-const reply = await queen.ephemeral.pop(inbox, { wait: true, timeout: 5000, autoAck: true })
+const reply = await queen.ephemeral.pop(inbox, { wait: true, timeout: 5000, commitOnDelivery: true })
 if (reply.messages.length === 0) throw new Error('no reply within 5 s')
 ```
 
@@ -64,11 +67,12 @@ The pop's `group` decides how a queue is consumed, as it does on a durable queue
 share a group compete for messages, a subscriber with a group of its own sees every message, and a
 pop with no group reads in queue mode. However many groups read a message, it sits in memory once.
 
-Without `autoAck`, a popped message is leased for 30 seconds. If the lease runs out, or you ack it
+By default, a popped message is leased for 30 seconds. If the lease runs out, or you ack it
 `failed` or `retry`, it comes back with `attempts` incremented, and after `retryLimit` attempts (5)
 it is dropped and counted. That is at-least-once for as long as the message stays in memory, so a
-consumer needs to tolerate a repeat exactly as it would on a durable queue. With `autoAck: true`
-the message counts as delivered when it leaves the broker, which is at-most-once.
+consumer needs to tolerate a repeat exactly as it would on a durable queue. With
+`commitOnDelivery: true` the broker moves the group's cursor past the messages as it hands them
+out: there is no lease and nothing to ack, which is at-most-once.
 
 Declare a queue when the defaults don't fit it:
 

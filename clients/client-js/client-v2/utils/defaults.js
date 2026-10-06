@@ -83,7 +83,8 @@ export const POP_DEFAULTS = {
   batch: 1,                            // One message (autopilot off only)
   wait: true,                          // Long polling, as every pop has done; .wait(false) returns at once
   timeoutMillis: 30000,                // 30 seconds if wait=true
-  autoAck: false                       // Never sent: the broker's at-most-once autoAck is not exposed to clients
+  autoAck: false,                      // Never sent: autoAck() is consume()'s ack after the handler
+  commitOnDelivery: false              // Leased; true sends autoAck=true, the broker's at-most-once commit at delivery
 }
 
 export const BUFFER_DEFAULTS = {

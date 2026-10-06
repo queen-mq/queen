@@ -26,6 +26,9 @@ sidebar:
 # sourceOfTruth re-read 2026-10-06 (JS client fixes): Admin.js now rejects clearQueue() and moveMessageToDLQ() before any request, since the 2.x broker has neither route. This page uses admin.retryMessage() and queen.ack(msg, 'dlq', ...), which do not change. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (JS nack scope): ConsumerManager.js in each() mode now skips only the nacked
 # partition's later messages and handles the other partitions of the pop. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (commitOnDelivery): QueueBuilder.js adds commitOnDelivery(), a pop() option that sends
+# autoAck=true, and consume() throws when it is set. This page uses consume() with autoAck(), which still never
+# reaches the broker. Nothing this page states changes.
 ---
 
 Put every delivery in the partition of the endpoint it is for, let the broker's retry budget do the
