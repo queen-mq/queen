@@ -72,3 +72,52 @@ async def test_ack_unknown_txn_must_fail(client):
     # The rejected calls must not have burned the lease: real batch still acks.
     r3 = await client.ack(msgs)
     assert r3["success"], f"real batch ack failed after ghost rejections: {r3.get('error')}"
+
+
+@pytest.mark.asyncio
+async def test_batch_ack_under_a_stale_lease_reports_failure(client):
+    """The broker answers 200 with success=False per item when it refuses an
+    ack; a batch ack must report that, not the HTTP status."""
+    queue = uniq("stale-lease")
+    await client.queue(queue).config({"lease_time": 30}).create()
+    await client.queue(queue).partition("Default").push(
+        [{"data": {"n": n}, "transactionId": f"{queue}-tx-{n}"} for n in (1, 2)]
+    )
+
+    msgs = await pop_retry(client, queue, batch=2)
+    assert len(msgs) == 2, f"Expected 2 messages, got {len(msgs)}"
+
+    stale = [{**m, "leaseId": "01a00000-0000-7000-8000-000000000000"} for m in msgs]
+    refused = await client.ack(stale)
+    assert refused["success"] is False, f"refused batch ack reported success: {refused}"
+    assert "lease" in (refused.get("error") or "").lower(), refused.get("error")
+    assert [r["success"] for r in refused["results"]] == [False, False]
+
+    accepted = await client.ack(msgs)
+    assert accepted["success"] is True, f"real batch ack failed: {accepted.get('error')}"
+
+
+@pytest.mark.asyncio
+async def test_renew_of_a_released_lease_reports_failure(client):
+    """The broker answers 200 with success=False, renewed=0 when it extended
+    nothing; renew() must report that."""
+    queue = uniq("renew")
+    await client.queue(queue).config({"lease_time": 30}).create()
+    await client.queue(queue).partition("Default").push(
+        [{"data": {"n": 1}, "transactionId": f"{queue}-tx-1"}]
+    )
+
+    msgs = await pop_retry(client, queue, batch=1)
+    assert len(msgs) == 1
+
+    live = await client.renew(msgs[0])
+    assert live["success"] is True and live.get("renewed") == 1, live
+    assert live["newExpiresAt"]
+
+    acked = await client.ack(msgs[0])
+    assert acked["success"] is True, acked.get("error")
+
+    gone = await client.renew(msgs[0])
+    assert gone["success"] is False, f"renew of a released lease reported success: {gone}"
+    assert gone.get("renewed") == 0
+    assert gone["newExpiresAt"] is None

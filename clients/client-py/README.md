@@ -594,6 +594,10 @@ await queen.ack(message, False, {'error': 'reason'})
 await queen.ack([msg1, msg2], True)  # Batch ack
 ```
 
+The broker answers HTTP 200 even when it refuses an ack, for example under an
+expired lease. `success` is `False` then, with the broker's `error`; for a
+batch, each item's verdict is in `results`.
+
 ### Transactions
 
 ```python
@@ -607,13 +611,16 @@ await (queen.transaction()
 ### Lease Renewal
 
 ```python
-await queen.renew(message)
-await queen.renew([msg1, msg2, msg3])
+res = await queen.renew(message)    # {leaseId, success, newExpiresAt, renewed}
+await queen.renew([msg1, msg2, msg3])  # one result per distinct lease
 
 async def handler(msg):
     ...
 await queen.queue('q').renew_lease(True, 60000).consume(handler)
 ```
+
+`success` is `False` when the broker extended nothing: the lease expired, was
+released by an ack or nack, or does not exist.
 
 ### Buffering
 

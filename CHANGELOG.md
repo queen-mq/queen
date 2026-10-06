@@ -15,6 +15,14 @@ skip what is queued, seek the consumer group to the end,
 `await queen.admin.seek_consumer_group(group, queue, {'toEnd': True})`; to drop the queue with its
 messages and configuration, `await queen.queue(name).delete()`.
 
+**Python client: `renew()` and the batch `ack()` read the broker's verdict.** The broker answers
+HTTP 200 whether or not it extended a lease or took an ack, and says which in the body. `renew()`
+reported `success: True` for every 200, and a batch `ack()` did the same for a refused ack, for
+example under an expired lease. `renew()` now reports `success: False`, with the broker's error,
+when it extended nothing: the lease expired, was released by an ack or nack, or does not exist. It
+also returns `renewed`, the count the broker extended. A batch `ack()` reports `success: False`
+when the broker refused any item, with each item's verdict in `results`.
+
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
 switch. One forking pool is enough to start the fork server, and both engines spawn the workers of
