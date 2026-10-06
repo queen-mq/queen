@@ -63,6 +63,38 @@ final class LaravelConsumeCommandTest extends TestCase
     }
 
     // ===========================
+    // --limit
+    // ===========================
+
+    public function testLimitCountsTheMessagesWhoseHandlerThrew(): void
+    {
+        $this->broker([[ConsumeBroker::message('tx-1')], [ConsumeBroker::message('tx-2')]]);
+
+        [$exit] = $this->consume(['--group' => 'ledger', '--limit' => 2], function (): void {
+            throw new \RuntimeException('handler failed');
+        });
+
+        $this->assertSame(0, $exit);
+        $this->assertCount(2, $this->handler->received);
+        $this->assertCount(2, $this->broker->pops());
+    }
+
+    public function testEachPopAsksForNoMoreThanTheLimitLeaves(): void
+    {
+        $this->broker([
+            [ConsumeBroker::message('tx-1'), ConsumeBroker::message('tx-2')],
+            [ConsumeBroker::message('tx-3')],
+        ]);
+
+        [$exit] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--batch' => 2, '--limit' => 3]);
+
+        $this->assertSame(0, $exit);
+        $this->assertSame(['2', '1'], array_column($this->broker->pops(), 'batch'));
+        $this->assertCount(2, $this->handler->received[0]);
+        $this->assertCount(1, $this->handler->received[1]);
+    }
+
+    // ===========================
     // Helpers
     // ===========================
 

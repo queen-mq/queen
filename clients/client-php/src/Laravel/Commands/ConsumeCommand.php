@@ -20,7 +20,7 @@ class ConsumeCommand extends Command
         {--conflation : Last-value delivery: process only the newest message per partition (needs --group, broker >= 1.1.0)}
         {--timeout=30000 : Long poll timeout in milliseconds}
         {--idle-timeout= : Stop after N milliseconds of inactivity}
-        {--limit= : Stop after processing N messages}';
+        {--limit= : Stop after handing N messages to handle(), failed ones included}';
 
     protected $description = 'Consume messages from a Queen MQ queue';
 
@@ -86,16 +86,14 @@ class ConsumeCommand extends Command
             $builder->idleMillis((int) $this->option('idle-timeout'));
         }
 
-        if ($this->option('limit')) {
-            $builder->limit((int) $this->option('limit'));
-        }
-
         // Use the high-level consumer (rdkafka-style)
         $consumer = $builder->getConsumer();
         $consumer->subscribe();
 
         $this->info('Consumer subscribed. Waiting for messages... (Ctrl+C to stop)');
 
+        // Every message handed to handle() counts, failed or not, so --limit
+        // bounds the work the command takes on rather than its successes.
         $processed = 0;
         // Which consume surface to drive, not what to put on the wire: the
         // sizing already reached the builder above. An operator who named no
@@ -109,17 +107,20 @@ class ConsumeCommand extends Command
 
         while (!$consumer->isClosed()) {
             if ($batch > 1) {
-                $messages = $consumer->consumeBatch($timeout, $batch);
+                // Never claim more than the limit leaves: a message popped
+                // past it would sit leased until its lease ran out.
+                $wanted = $limit === null ? $batch : min($batch, $limit - $processed);
+                $messages = $consumer->consumeBatch($timeout, $wanted);
                 if (empty($messages)) {
                     continue;
                 }
 
+                $processed += count($messages);
                 try {
                     $handler->handle($messages);
                     if ($autoAck) {
                         $consumer->ack($messages);
                     }
-                    $processed += count($messages);
                 } catch (\Throwable $e) {
                     $this->error("Error processing batch: {$e->getMessage()}");
                     if ($autoAck) {
@@ -132,12 +133,12 @@ class ConsumeCommand extends Command
                     continue;
                 }
 
+                $processed++;
                 try {
                     $handler->handle($message);
                     if ($autoAck) {
                         $consumer->ack($message);
                     }
-                    $processed++;
                 } catch (\Throwable $e) {
                     $this->error("Error processing message: {$e->getMessage()}");
                     if ($autoAck) {
