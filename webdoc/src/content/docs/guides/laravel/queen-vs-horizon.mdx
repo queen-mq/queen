@@ -40,6 +40,8 @@ sourceOfTruth:
 # links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
 # moved; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the trace routes read the on-disk trace store and refuse a key over 511 bytes (400 name_too_long). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (prefork per pool): SupervisorConfiguration and main.rs let a pool spawn while
+# the others fork; the comparison still holds, so nothing this page states changes.
 ---
 
 Horizon and Queen both run ordinary Laravel jobs and both supervise their workers, on different
