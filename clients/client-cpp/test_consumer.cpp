@@ -15,6 +15,20 @@
  *     POST /api/v1/lease/:leaseId/extend per lease per interval: every message
  *     of a pop shares its leaseId, so a batch is one request, not one per
  *     message. Nothing after the handler returns.
+ *   - A HANDLER THAT THROWS IS NACKED, whatever auto_ack() says. auto_ack(false)
+ *     hands the SUCCESS path to the handler, not the failure path: a handler
+ *     that threw never settled its messages. Left leased, a poison message
+ *     comes back only when its lease expires, which never charges the queue's
+ *     retry budget (server/src/rsm/consume/pop.rs: "The retry budget is
+ *     charged only by an explicit `failed`, never by an expiry"), so it never
+ *     reaches the DLQ.
+ *   - A NACK DROPS THE LATER MESSAGES OF ITS PARTITION, AND ONLY THOSE. The
+ *     nack releases the lease of its message's partition and leaves that
+ *     partition's cursor at the completed prefix (server/src/rsm/consume/
+ *     ack.rs, the `Failed` branch), so the later messages of that partition
+ *     are redelivered and an ack for one of them is refused: handling them now
+ *     only makes duplicates. The other partitions of a multi-partition pop
+ *     keep their lease, and their messages are handled.
  *
  * Like its siblings this runs against an in-process httplib::Server -- no
  * broker, so every response is the one the test chose:
@@ -231,6 +245,25 @@ Responder one_claim(const std::string& first_pop) {
     };
 }
 
+/// Every acknowledgment the client sent, flattened across /api/v1/ack and
+/// /api/v1/ack/batch, in the order they arrived. The consumer group of a batch
+/// is copied onto each of its items.
+std::vector<json> acks_sent(const StubServer& server) {
+    std::vector<json> out;
+    for (const auto& call : server.calls()) {
+        if (call.path == "/api/v1/ack") {
+            out.push_back(json::parse(call.body));
+        } else if (call.path == "/api/v1/ack/batch") {
+            json body = json::parse(call.body);
+            for (auto item : body["acknowledgments"]) {
+                item["consumerGroup"] = body["consumerGroup"];
+                out.push_back(item);
+            }
+        }
+    }
+    return out;
+}
+
 // ============================================================================
 // Assertions
 // ============================================================================
@@ -440,6 +473,178 @@ void test_no_renewal_unless_asked() {
 }
 
 // ============================================================================
+// A throwing handler is nacked
+// ============================================================================
+
+// auto_ack(false) leaves settling to the handler, failures included: the
+// consumer sends no nack, by design, and the message comes back when its lease
+// expires. A throw must not stop consume() either.
+void test_a_throwing_handler_is_not_nacked_without_auto_ack() {
+    StubServer server(one_claim(popped(1, "lease-1")));
+    QueenClient client({server.url()}, fast_config());
+
+    bool threw = false;
+    StopAfter watchdog(5000);
+    try {
+        client.queue("consume-no-nack").group("workers").each().auto_ack(false)
+              .wait(false).idle_millis(300)
+              .consume([](const json&) { throw std::runtime_error("boom"); }, watchdog.signal());
+    } catch (...) {
+        threw = true;
+    }
+
+    check(!threw, "a failing handler must not stop consume()");
+    auto acks = acks_sent(server);
+    check(acks.empty(), "auto_ack(false) sends no nack, got " + json(acks).dump());
+}
+
+void test_a_throwing_batch_handler_is_not_nacked_without_auto_ack() {
+    StubServer server(one_claim(popped(2, "lease-1")));
+    QueenClient client({server.url()}, fast_config());
+
+    StopAfter watchdog(5000);
+    client.queue("consume-no-nack-batch").group("workers").auto_ack(false)
+          .wait(false).idle_millis(300)
+          .consume([](const json&) { throw std::runtime_error("boom"); }, watchdog.signal());
+
+    auto acks = acks_sent(server);
+    check(acks.empty(), "auto_ack(false) sends no nack, got " + json(acks).dump());
+}
+
+// Without auto_ack, the handler acks by itself. After a failure, an ack of a
+// later message of the SAME partition would move the cursor past the failed
+// one, which would never come back: those messages are not handled. The other
+// partition of the claim is.
+void test_without_auto_ack_a_failure_skips_the_rest_of_its_partition() {
+    // t1 and t3 in p1, t2 and t4 in p2, one lease: a multi-partition pop.
+    StubServer server(one_claim(popped(4, "lease-1", "workers", {"p1", "p2"})));
+    QueenClient client({server.url()}, fast_config());
+
+    std::vector<std::string> handled;
+    StopAfter watchdog(5000);
+    client.queue("consume-no-nack-skip").group("workers").each().auto_ack(false)
+          .wait(false).idle_millis(300)
+          .consume([&](const json& msg) {
+              handled.push_back(msg["transactionId"].get<std::string>());
+              if (msg["transactionId"] == "t1") throw std::runtime_error("boom");
+              client.ack(msg, true, {{"group", "workers"}});
+          }, watchdog.signal());
+
+    check(handled == std::vector<std::string>({"t1", "t2", "t4"}),
+          "p1 after the failed t1 must not be handled, p2 must; handled " + json(handled).dump());
+
+    std::vector<std::string> settled;
+    for (const auto& ack : acks_sent(server)) {
+        settled.push_back(ack.value("transactionId", "") + ":" + ack.value("status", ""));
+    }
+    check(settled == std::vector<std::string>({"t2:completed", "t4:completed"}),
+          "only the handler's own acks, and no nack, got " + json(settled).dump());
+}
+
+void test_a_nack_drops_the_later_messages_of_its_partition() {
+    StubServer server(one_claim(popped(3, "lease-1")));
+    QueenClient client({server.url()}, fast_config());
+
+    std::vector<std::string> handled;
+    StopAfter watchdog(5000);
+    client.queue("consume-abandon").group("workers").each()
+          .wait(false).idle_millis(300)
+          .consume([&handled](const json& msg) {
+              handled.push_back(msg["transactionId"].get<std::string>());
+              if (msg["transactionId"] == "t2") throw std::runtime_error("boom");
+          }, watchdog.signal());
+
+    check(handled == std::vector<std::string>({"t1", "t2"}),
+          "the message after a nack in its partition must not be handled, handled " +
+          json(handled).dump());
+
+    auto acks = acks_sent(server);
+    check(acks.size() == 2, "expected an ack and a nack, got " + std::to_string(acks.size()) +
+          " acknowledgment(s)");
+    if (acks.size() != 2) return;
+    check(acks[0].value("transactionId", "") == "t1" && acks[0].value("status", "") == "completed",
+          "t1 must be acked, got " + acks[0].dump());
+    check(acks[1].value("transactionId", "") == "t2" && acks[1].value("status", "") == "failed",
+          "t2 must be nacked, got " + acks[1].dump());
+}
+
+void test_a_nack_leaves_the_other_partitions_of_the_claim_alone() {
+    // t1 and t3 in p1, t2 and t4 in p2, one lease: a multi-partition pop.
+    StubServer server(one_claim(popped(4, "lease-1", "workers", {"p1", "p2"})));
+    QueenClient client({server.url()}, fast_config());
+
+    std::vector<std::string> handled;
+    StopAfter watchdog(5000);
+    client.queue("consume-multi-partition").group("workers").each()
+          .wait(false).idle_millis(300)
+          .consume([&handled](const json& msg) {
+              handled.push_back(msg["transactionId"].get<std::string>());
+              if (msg["transactionId"] == "t1") throw std::runtime_error("boom");
+          }, watchdog.signal());
+
+    check(handled == std::vector<std::string>({"t1", "t2", "t4"}),
+          "p2 keeps its lease and must be handled, p1 after t1 must not; handled " +
+          json(handled).dump());
+
+    auto acks = acks_sent(server);
+    std::vector<std::string> settled;
+    for (const auto& ack : acks) {
+        settled.push_back(ack.value("transactionId", "") + ":" + ack.value("status", ""));
+    }
+    check(settled == std::vector<std::string>({"t1:failed", "t2:completed", "t4:completed"}),
+          "expected t1 nacked and t2, t4 acked, got " + json(settled).dump());
+}
+
+void test_a_nack_survives_an_error_that_is_not_utf8_or_short() {
+    StubServer server(one_claim(popped(2, "lease-1", "workers", {"p1", "p2"})));
+    QueenClient client({server.url()}, fast_config());
+
+    const std::string latin1 = std::string("cannot open caf") + '\xe9' + ".txt";
+    const std::string huge(20000, 'x');
+    StopAfter watchdog(5000);
+    client.queue("consume-bad-reason").group("workers").each()
+          .wait(false).idle_millis(300)
+          .consume([&](const json& msg) {
+              throw std::runtime_error(msg["transactionId"] == "t1" ? latin1 : huge);
+          }, watchdog.signal());
+
+    auto acks = acks_sent(server);
+    check(acks.size() == 2, "both messages must be nacked, got " + std::to_string(acks.size()));
+    if (acks.size() != 2) return;
+    auto error_of = [](const json& ack) {
+        return ack.contains("error") && ack["error"].is_string() ? ack["error"].get<std::string>()
+                                                                 : std::string();
+    };
+    std::string first = error_of(acks[0]);
+    check(first.rfind("cannot open caf", 0) == 0 && first.find("\xef\xbf\xbd") != std::string::npos,
+          "an invalid byte is replaced by U+FFFD, got " + acks[0].dump());
+    std::string second = error_of(acks[1]);
+    check(second.size() == util::MAX_NACK_ERROR_BYTES,
+          "a long error is capped at " + std::to_string(util::MAX_NACK_ERROR_BYTES) +
+          " bytes, got " + std::to_string(second.size()));
+}
+
+void test_a_handler_that_throws_a_non_standard_value_is_nacked() {
+    StubServer server(one_claim(popped(1, "lease-1")));
+    QueenClient client({server.url()}, fast_config());
+
+    bool threw = false;
+    StopAfter watchdog(5000);
+    try {
+        client.queue("consume-throw-int").group("workers").each()
+              .wait(false).idle_millis(300)
+              .consume([](const json&) { throw 42; }, watchdog.signal());
+    } catch (...) {
+        threw = true;
+    }
+
+    check(!threw, "a failing handler must not stop consume()");
+    auto acks = acks_sent(server);
+    check(acks.size() == 1 && acks[0].value("status", "") == "failed",
+          "the message must be nacked, got " + json(acks).dump());
+}
+
+// ============================================================================
 
 int main() {
     std::cout << "========================================" << std::endl;
@@ -459,6 +664,21 @@ int main() {
     run_test("renew_lease() renews while the handler runs",
              test_renew_lease_renews_while_the_handler_runs);
     run_test("no renewal unless asked", test_no_renewal_unless_asked);
+
+    run_test("a throwing handler is not nacked without auto_ack",
+             test_a_throwing_handler_is_not_nacked_without_auto_ack);
+    run_test("a throwing batch handler is not nacked without auto_ack",
+             test_a_throwing_batch_handler_is_not_nacked_without_auto_ack);
+    run_test("without auto_ack a failure skips the rest of its partition",
+             test_without_auto_ack_a_failure_skips_the_rest_of_its_partition);
+    run_test("a nack drops the later messages of its partition",
+             test_a_nack_drops_the_later_messages_of_its_partition);
+    run_test("a nack leaves the other partitions of the claim alone",
+             test_a_nack_leaves_the_other_partitions_of_the_claim_alone);
+    run_test("a nack survives an error that is not UTF-8 or short",
+             test_a_nack_survives_an_error_that_is_not_utf8_or_short);
+    run_test("a handler that throws a non-standard value is nacked",
+             test_a_handler_that_throws_a_non_standard_value_is_nacked);
 
     std::cout << std::endl;
     if (failures == 0) {

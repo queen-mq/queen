@@ -52,6 +52,7 @@ A complete C++ client implementation for Queen Message Queue has been created in
   - Batch processing support
   - Auto-ack/manual-ack modes
   - Lease renewal while the handler runs (`renew_lease()`)
+  - A handler that throws is nacked with auto-ack, logged without it
   - Idle timeout and message limits
 
 - **DLQBuilder** - Dead Letter Queue queries

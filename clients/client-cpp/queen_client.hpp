@@ -1181,6 +1181,25 @@ inline json renew_outcome(const json& answer, const std::string& lease_id) {
     return out;
 }
 
+/// The longest handler error a nack carries: a message and the head of a
+/// trace. The broker keeps it with the dead letter, once per message.
+inline constexpr size_t MAX_NACK_ERROR_BYTES = 4096;
+
+/**
+ * A handler's what() made safe to send as a nack's `error`: capped at
+ * MAX_NACK_ERROR_BYTES, and every byte that is not valid UTF-8 replaced by
+ * U+FFFD. nlohmann::json refuses to serialize invalid UTF-8 (type_error 316),
+ * so a raw what() carrying, say, a Latin-1 file name would make the nack's body
+ * unsendable and leave the message leased, which is what the nack is there to
+ * prevent. A cut through a multi-byte character is replaced the same way.
+ */
+inline std::string nack_error_text(const std::string& what) {
+    const std::string capped =
+        what.size() > MAX_NACK_ERROR_BYTES ? what.substr(0, MAX_NACK_ERROR_BYTES) : what;
+    return json::parse(json(capped).dump(-1, ' ', false, json::error_handler_t::replace))
+        .get<std::string>();
+}
+
 } // namespace util
 
 /**
@@ -3532,7 +3551,32 @@ private:
         // Instead, we provide a separate trace function that takes the message
         // The user would call: queen.trace(message, trace_config)
     }
-    
+
+    /**
+     * Run the handler on one message or one batch, and say how it failed if it
+     * did. A handler can throw anything, not only a std::exception, and every
+     * throw is a failed message: none may escape into the worker, where it
+     * would end the loop with the message unsettled.
+     */
+    static std::optional<std::string> run_handler(const std::function<void(const json&)>& handler,
+                                                  const json& input) {
+        try {
+            handler(input);
+            return std::nullopt;
+        } catch (const std::exception& e) {
+            return std::string(e.what());
+        } catch (...) {
+            return std::string("handler threw a non-standard exception");
+        }
+    }
+
+    // Settle what a handler was given, with auto_ack: ack it after a success,
+    // nack it after a failure. Without auto_ack a failure is only logged.
+    // Defined after QueenClient, whose ack() they call.
+    void ack_handled(const json& messages, const ConsumeOptions& options, const char* where);
+    void handle_failure(const json& messages, const std::string& reason,
+                        const ConsumeOptions& options, const char* where);
+
 public:
     ConsumerManager(std::shared_ptr<HttpClient> http_client, QueenClient* queen,
                    int pool_size = std::thread::hardware_concurrency())
@@ -3765,7 +3809,8 @@ public:
      * Ack after the consume() handler returns: each message with each(),
      * otherwise the batch. Client side and consume() only: it has no effect on
      * pop(), which never sends the broker's `autoAck` (a commit at delivery,
-     * at-most-once, that this SDK does not expose).
+     * at-most-once, that this SDK does not expose). With it, a handler that
+     * throws is nacked; without it, the failure is logged and nothing is sent.
      */
     QueueBuilder& auto_ack(bool enabled) {
         auto_ack_ = enabled;
@@ -4473,6 +4518,61 @@ public:
 // ConsumerManager Implementation (after QueenClient is defined)
 // ============================================================================
 
+inline void ConsumerManager::ack_handled(const json& messages, const ConsumeOptions& options,
+                                         const char* where) {
+    json context = options.group.empty() ? json::object() : json{{"group", options.group}};
+    try {
+        json result = queen_->ack(messages, true, context);
+        if (!result.value("success", false)) {
+            // The lease ran out under the handler, or the handler settled the
+            // message itself: the broker keeps or redelivers it, and says why.
+            util::log_error(where, "ack rejected: " + result.value("error", std::string()));
+        }
+    } catch (const std::exception& e) {
+        // A message this client cannot address (no partitionId) cannot be acked;
+        // its lease expires and the broker redelivers it. Not a reason to stop.
+        util::log_error(where, std::string("ack failed: ") + e.what());
+    }
+}
+
+/**
+ * A handler threw. With auto_ack, nack what it was given, with the error, and
+ * let the worker keep consuming: the nack spends the queue's retry budget, and
+ * the message is filed in the DLQ once retryLimit is spent.
+ *
+ * With auto_ack(false) the handler settles its messages itself, so nothing is
+ * sent, by design: the failure is logged, and the message comes back when its
+ * lease expires.
+ */
+inline void ConsumerManager::handle_failure(const json& messages, const std::string& raw_reason,
+                                            const ConsumeOptions& options, const char* where) {
+    // Capped and valid UTF-8, so the handler's message can never be what stops
+    // the nack from being sent.
+    const std::string reason = util::nack_error_text(raw_reason);
+    if (!options.auto_ack) {
+        util::log_error(where, "handler failed (auto_ack off, not nacked; the broker delivers it "
+                               "again when its lease expires): " + reason);
+        return;
+    }
+    util::log_error(where, "handler failed: " + reason);
+
+    json context = {{"error", reason}};
+    if (!options.group.empty()) {
+        context["group"] = options.group;
+    }
+    try {
+        json result = queen_->ack(messages, false, context);
+        if (!result.value("success", false)) {
+            // The lease ran out under the handler.
+            util::log_error(where, "nack rejected: " + result.value("error", std::string()));
+        }
+    } catch (const std::exception& e) {
+        // Not addressable (no partitionId): its lease expires and the broker
+        // redelivers it. Never a reason to stop the consumer.
+        util::log_error(where, std::string("nack failed: ") + e.what());
+    }
+}
+
 inline void ConsumerManager::start(std::function<void(const json&)> handler,
                                    const ConsumeOptions& options) {
     // Build the path
@@ -4641,60 +4741,50 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
 
                 // Process messages
                 if (options.each) {
+                    // After a failure, the later messages of the same partition
+                    // are not handled. With auto_ack, the nack released that
+                    // PARTITION's lease and left its cursor at the failed message
+                    // (server/src/rsm/consume/ack.rs): they are redelivered, and
+                    // an ack for one of them under this lease is refused. Without
+                    // auto_ack, an ack of a later message by the handler would
+                    // move the cursor past the failed one, which would be lost.
+                    // The other partitions of a multi-partition pop are handled.
+                    std::unordered_set<std::string> failed_partitions;
+                    size_t skipped = 0;
                     for (const auto& msg : messages) {
                         if (options.stop_signal && options.stop_signal->load()) break;
-                        
-                        try {
-                            handler(msg);
-                            if (options.auto_ack) {
-                                json context = options.group.empty() ? 
-                                    json::object() : json{{"group", options.group}};
-                                queen_->ack(msg, true, context);
-                            }
-                        } catch (const std::exception& e) {
-                            if (options.auto_ack) {
-                                json context = options.group.empty() ? 
-                                    json::object() : json{{"group", options.group}};
-                                // Now that a worker error reaches the caller, a nack this
-                                // client cannot send (a message with no partitionId, whose
-                                // ack failed the same way) must not be one: log it, and the
-                                // broker redelivers the message when its lease expires.
-                                try {
-                                    queen_->ack(msg, false, context);
-                                } catch (const std::exception& nack_error) {
-                                    util::log_error("ConsumerManager.processMessage",
-                                                    std::string("nack failed: ") + nack_error.what());
-                                }
-                            }
+
+                        const std::string partition = msg.is_object() && msg.contains("partitionId")
+                            ? msg["partitionId"].dump() : std::string();
+                        if (failed_partitions.count(partition) > 0) {
+                            ++skipped;
+                            continue;
                         }
-                        
+
+                        auto failure = run_handler(handler, msg);
+                        if (failure) {
+                            handle_failure(msg, *failure, options, "ConsumerManager.processMessage");
+                            failed_partitions.insert(partition);
+                        } else if (options.auto_ack) {
+                            ack_handled(msg, options, "ConsumerManager.processMessage");
+                        }
                         processed_count++;
+
                         if (options.limit > 0 && processed_count >= options.limit) break;
+                    }
+                    if (skipped > 0) {
+                        util::log_warn("ConsumerManager.worker", std::string("Worker ") +
+                                      std::to_string(worker_id) + " left " +
+                                      std::to_string(skipped) + " message(s) behind a failed "
+                                      "message in their partition; the broker delivers them again");
                     }
                 } else {
                     // Process as batch
-                    try {
-                        handler(messages);
-                        if (options.auto_ack) {
-                            json context = options.group.empty() ? 
-                                json::object() : json{{"group", options.group}};
-                            queen_->ack(messages, true, context);
-                        }
-                    } catch (const std::exception& e) {
-                        if (options.auto_ack) {
-                            json context = options.group.empty() ? 
-                                json::object() : json{{"group", options.group}};
-                            // Now that a worker error reaches the caller, a nack this
-                            // client cannot send (a message with no partitionId, whose
-                            // ack failed the same way) must not be one: log it, and the
-                            // broker redelivers the message when its lease expires.
-                            try {
-                                queen_->ack(messages, false, context);
-                            } catch (const std::exception& nack_error) {
-                                util::log_error("ConsumerManager.processBatch",
-                                                std::string("nack failed: ") + nack_error.what());
-                            }
-                        }
+                    auto failure = run_handler(handler, messages);
+                    if (failure) {
+                        handle_failure(messages, *failure, options, "ConsumerManager.processBatch");
+                    } else if (options.auto_ack) {
+                        ack_handled(messages, options, "ConsumerManager.processBatch");
                     }
                     processed_count += messages.size();
                 }

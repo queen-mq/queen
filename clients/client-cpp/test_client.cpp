@@ -1131,6 +1131,70 @@ std::string unique_queue(const std::string& prefix) {
     return prefix + std::to_string(timestamp);
 }
 
+// auto_ack(false) leaves settling to the handler, failures included: the
+// consumer sends no nack. With retryLimit 1, a nack would bring the message
+// back at once and file it in the DLQ on its second failure; the lease here
+// outlasts the run, so the message is handled once and no dead letter appears.
+bool test_consumer_does_not_nack_without_auto_ack(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-no-nack-");
+    DropQueuesOnExit drop{client, {queue}};
+
+    QueueConfig config;
+    config.retry_limit = 1;
+    client.queue(queue).config(config).create();
+    client.queue(queue).push({{{"data", {{"poison", true}}}}});
+
+    std::atomic<int> attempts{0};
+    client.queue(queue).group("cpp-no-nack").subscription_mode("all").batch(1).each()
+        .auto_ack(false).wait(false).idle_millis(1500)
+        .consume([&](const json&) {
+            attempts++;
+            throw std::runtime_error("poison");
+        });
+
+    json dlq = client.queue(queue).dlq("cpp-no-nack").limit(10).get();
+    if (attempts.load() != 1 || dlq.value("total", 0) != 0) {
+        std::cerr << "expected 1 attempt and no dead letter, got " << attempts.load()
+                  << " attempt(s) and " << dlq.dump() << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// In a multi-partition pop a nack releases ONE partition. The later message of
+// the failed partition comes back and is handled once; the other partition
+// keeps its lease, is handled in the same pass, and never comes back.
+bool test_consumer_nack_leaves_the_other_partitions_alone(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-nack-partitions-");
+    DropQueuesOnExit drop{client, {queue}};
+
+    client.queue(queue).create();
+    client.queue(queue).partition("A").push({{{"data", {{"id", "a1"}}}}, {{"data", {{"id", "a2"}}}}});
+    client.queue(queue).partition("B").push({{{"data", {{"id", "b1"}}}}, {{"data", {{"id", "b2"}}}}});
+
+    std::map<std::string, int> handled;
+    client.queue(queue).group("cpp-nack-partitions").subscription_mode("all")
+        .partitions(2).batch(10).each().wait(false).idle_millis(1500)
+        .consume([&](const json& msg) {
+            std::string id = msg["data"]["id"].get<std::string>();
+            // a1 fails on its first delivery only.
+            if (++handled[id] == 1 && id == "a1") {
+                throw std::runtime_error("a1 fails once");
+            }
+        });
+
+    json leftovers = client.queue(queue).group("cpp-nack-partitions").batch(10).wait(false).pop();
+    std::map<std::string, int> expected = {{"a1", 2}, {"a2", 1}, {"b1", 1}, {"b2", 1}};
+    if (handled != expected || !leftovers.empty()) {
+        std::cerr << "expected a1 twice and every other message once, got "
+                  << json(handled).dump() << ", left over " << leftovers.dump() << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // renew_lease() keeps a 2 s lease alive through a 4.5 s handler: no other
 // consumer of the group can take the message meanwhile, and the ack that
 // follows the handler is accepted.
@@ -1882,6 +1946,10 @@ int main(int argc, char** argv) {
 
     // SETTLEMENT TESTS
     std::cout << YELLOW << "\n=== SETTLEMENT TESTS ===" << RESET << "\n" << std::endl;
+    runner.run_test("Consumer does not nack without auto_ack",
+                    [&]() { return test_consumer_does_not_nack_without_auto_ack(server_url); });
+    runner.run_test("Consumer nack leaves the other partitions alone",
+                    [&]() { return test_consumer_nack_leaves_the_other_partitions_alone(server_url); });
     runner.run_test("Consumer renews the lease while the handler runs",
                     [&]() { return test_consumer_renews_the_lease_while_the_handler_runs(server_url); });
     runner.run_test("ACK and renew report a broker refusal",

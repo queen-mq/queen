@@ -5,6 +5,17 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**C++ client: a handler that throws no longer loses a message.** With `auto_ack(false)` and
+`each()`, a handler exception was dropped without a log line and the loop went on with the rest of
+the pop: a handler that then acked a later message of the same partition moved the cursor past the
+failed one, and the failed message was lost. After a failure, the later messages of the same
+partition in that pop are no longer handled; they come back with the failed one. The other
+partitions of a multi-partition pop are still handled. The consumer still sends no nack under
+`auto_ack(false)`, by design: the failure is now logged, and the message comes back when its lease
+expires. With `auto_ack(true)` the nack now carries the exception's message as its error, capped at
+4096 bytes and with invalid UTF-8 replaced, so the text cannot stop the nack. A handler that throws
+something other than a `std::exception` is handled the same way; before, it ended the worker.
+
 **C++ client: `renew_lease()` renews.** The consume loop accepted the setting and never renewed.
 While the handler runs, it now renews the batch's lease every `interval_millis`, one request per
 lease, and stops after the ack or nack, as the JS, Go and Rust clients do.

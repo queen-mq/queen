@@ -188,12 +188,12 @@ int main() {
         // handler would not.
         //
         // auto_ack(false): the handler acknowledges each delivery itself,
-        // because this client's automatic nack sends no error and the dead
-        // letter would keep none. partitions(1) and batch(1): every pop takes
-        // ONE delivery, from one endpoint. A nack releases the endpoint's
-        // lease, and the broker then refuses acks for anything else popped
-        // under it, so a worker holding more than the failed delivery could not
-        // acknowledge the rest.
+        // because it reads the broker's answer to each one: the dlq flag says
+        // when a failure spent the last retry. partitions(1) and batch(1):
+        // every pop takes ONE delivery, from one endpoint. A nack releases the
+        // endpoint's lease, and the broker then refuses acks for anything else
+        // popped under it, so a worker holding more than the failed delivery
+        // could not acknowledge the rest.
         //
         //   wait(false)     every pop answers at once. This client has no
         //                   setter for the long-poll timeout, which is 30

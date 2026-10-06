@@ -551,6 +551,16 @@ client.queue("tasks")
 
 ### Manual ACK
 
+With `auto_ack` (the default), a handler that throws is nacked, with the
+exception's message as the error (capped at 4096 bytes, invalid UTF-8
+replaced), so the message spends one retry and reaches the DLQ once
+`retry_limit` is spent. `auto_ack(false)` hands settling to the handler,
+failures included: the consumer logs the exception and sends no nack, and the
+message comes back when its lease expires. Either way, with `each()` the
+consumer then skips the later messages of the same partition in that batch,
+which the broker delivers again. Messages of the other partitions of a
+multi-partition pop are still handled.
+
 ```cpp
 // Disable auto-ack for manual control
 client.queue("tasks")
@@ -618,7 +628,7 @@ Output:
 - `partitions(n)` - Pin the sweep width (unset = the broker sizes it)
 - `autopilot(enabled)` - Turn broker-side pop sizing off for this builder
 - `limit(count)` - Set message limit
-- `auto_ack(enabled)` - Ack after the `consume()` handler returns. No effect on `pop()`, which never sends the broker's `autoAck`
+- `auto_ack(enabled)` - Ack after the `consume()` handler returns. No effect on `pop()`, which never sends the broker's `autoAck`. With it, a handler that throws is nacked; without it, the failure is only logged
 - `wait(enabled)` - Enable/disable long polling
 - `renew_lease(enabled, interval)` - Renew the batch's lease every interval while the handler runs
 
@@ -793,8 +803,9 @@ Two smaller gaps against client-js, for the same honesty:
 `consume()` throws the error that stopped a worker, after every worker has
 stopped: a 403, `ConflationUnsupportedError`, or any other 4xx on a pop (an
 `HttpError` with its status). A 5xx, a network fault or a timeout does not stop
-it: it waits a second and polls again. `pop()` logs a failure and returns an
-empty result.
+it: it waits a second and polls again. A handler exception never leaves
+`consume()`: the loop logs it, nacks the message under `auto_ack`, and goes on.
+`pop()` logs a failure and returns an empty result.
 
 `ack()` and `renew()` return `success: false` with an `error` when the broker
 settled or extended nothing. Both routes answer HTTP 200 in that case, so read
