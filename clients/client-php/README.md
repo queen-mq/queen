@@ -362,7 +362,8 @@ php artisan queen:supervisor-config --pretty  # resolved config, credentials red
 **Prefork workers.** `QUEEN_SUPERVISOR_PREFORK=true` boots Laravel once in a fork server and forks
 every worker from it, with the same arguments and environment a spawned worker gets. The server
 opens no connection before forking, purges database and Redis connections in each child, and
-SIGKILLs its workers if the master dies. A failed fork falls back to spawning. Needs `ext-pcntl`
+SIGKILLs its workers if the master dies. A failed fork falls back to spawning. A pool's own
+`'prefork' => false` spawns that pool's workers while the others fork (2.3.0). Needs `ext-pcntl`
 and `ext-posix`. Enable `opcache.enable_cli` with prefork, where the fork server's opcache is shared
 by every worker; without prefork, each worker keeps its own copy and opcache costs memory.
 

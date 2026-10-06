@@ -42,6 +42,10 @@ sourceOfTruth:
 # The supervisors described here are clients/client-php and supervisor/ as they are on master
 # (PHP client 2.0.0 on Packagist, which pins supervisor 0.6.0; both tagged, and the
 # supervisor/v0.6.0 release carries Linux and macOS builds and a signed manifest).
+# sourceOfTruth re-read 2026-10-06 (prefork per pool): SupervisorConfiguration reads a pool's own prefork
+# (emitted to the engines only as false, beside a fork server), PhpSupervisor and main.rs spawn the
+# workers of such a pool, SupervisorBinary pins 0.8.0 for PHP client 2.3.0; the prefork section
+# gains "Prefork for some pools only" and the boot-fork timing of the worker-memory dataset.
 # sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in
 # PHP client 2.1.0, so the global settings table names a variable only for state_directory and
 # read_bearer_token, event_driven is a config/queen.php snippet, supervisor_binary.manifest and
@@ -324,7 +328,7 @@ manager signals. The installation leaf's parent has to be a real directory (a sy
 and an existing leaf must not be group- or world-writable, which is why it lives apart from
 Laravel's `storage/`.
 
-PHP client 2.1.0 pins supervisor 0.7.0. Its GitHub release, `supervisor/v0.7.0`, publishes static
+PHP client 2.3.0 pins supervisor 0.8.0. Its GitHub release, `supervisor/v0.8.0`, publishes static
 (musl) Linux builds and macOS builds for amd64 and arm64, with a manifest and its Sigstore bundle,
 so the online install works on those hosts. On any other
 host the installer fails closed; run the PHP engine there.
@@ -338,7 +342,7 @@ needs a local manifest:
 ```bash
 php artisan queen:supervisor-install \
   --manifest=/srv/mirror/queen-supervisor-manifest.json \
-  --archive=/srv/mirror/queen-supervisor-0.7.0-linux-amd64.tar.gz
+  --archive=/srv/mirror/queen-supervisor-0.8.0-linux-amd64.tar.gz
 ```
 
 A mirror can serve both over HTTPS from one base URL (`QUEEN_SUPERVISOR_RELEASE_BASE_URL`), and a
@@ -419,7 +423,9 @@ provider, and its own compiled copy of the framework, in its heap or, with the c
 on, in opcache memory of its own. With prefork, the master starts one fork server that boots
 Laravel once, opens no queue, database or cache connection, and forks every worker from itself.
 The workers share the opcache's compiled code outright and the booted heap copy-on-write, and a new
-worker is ready in milliseconds.
+worker is ready in about half a millisecond: on the Linux server a fork took 0.48 ms, where a worker
+started on its own took 88 ms to boot the benchmark application, 174 ms with the command-line opcache
+on ([dataset](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-05-laravel-worker-memory)).
 
 ```dotenv
 QUEEN_SUPERVISOR_PREFORK=true
@@ -465,6 +471,36 @@ change to `config/queen.php` still needs the master restarted (`php artisan quee
 terminate`, then your process manager starts it again), as it does without prefork. Prefork needs
 PHP client 1.7.0 (supervisor 0.4.0); the restart and the checks above need PHP client 2.1.0.
 
+### Prefork for some pools only
+
+A pool's own `prefork` wins over the switch (PHP client 2.3.0, supervisor 0.8.0). Turn it off for the
+pool whose jobs must not run in a forked process, and keep the others forked:
+
+```php
+// config/queen.php, under 'supervisor'
+'prefork' => true,
+'supervisors' => [
+    'default' => [
+        'queues' => ['default'],
+    ],
+    'kafka' => [
+        'queues' => ['kafka'],
+        'prefork' => false,
+    ],
+],
+```
+
+- **`false`** spawns the pool's workers: each boots Laravel on its own, as without prefork.
+- **`true`** forks them even when `supervisor.prefork` is off; the master starts the fork server for
+  that pool alone.
+- **No key, or `null`,** follows `supervisor.prefork`.
+- **The fork server still boots the whole application.** On Linux, if the boot starts a thread, for
+  example a Kafka client that a service provider creates, the fork server refuses to serve and every
+  pool spawns. Create such a client when a job first needs it: the boot then stays fork-safe, and the
+  pool that uses the client can spawn while the others fork.
+
+The dashboard's `prefork` setting names the pools that differ from the switch.
+
 ### When not to use prefork
 
 Every worker holds what the fork server's boot holds. Leave prefork off when:
@@ -473,7 +509,9 @@ Every worker holds what the fork server's boot holds. Leave prefork off when:
   (`ext-grpc`, `ext-rdkafka`) and some APM agents start threads while PHP or Laravel boots, and
   `fork()` copies only the thread that calls it, so each worker would lack those threads and any
   lock they held. The fork server refuses to fork then and the master spawns workers, which works but
-  leaves the log warning on every start; turn prefork off instead. A socket the boot opens is
+  leaves the log warning on every start; turn prefork off instead. If only some jobs need such a
+  client and the boot does not create it, turn prefork off for their pool alone
+  ([prefork for some pools only](#prefork-for-some-pools-only)). A socket the boot opens is
   shared by every worker, and two workers that use it corrupt each other's conversation.
 - **Your deploy cannot restart the master and runs Laravel before 12.** Laravel 12 tells the worker
   why it stops. Before it, a forked worker's exit at `queue:restart` looks like any other, so its

@@ -38,6 +38,8 @@ sourceOfTruth:
   - server/src/handlers/timers.rs
 # Describes clients/client-php and supervisor/ as they are on master (PHP client 2.0.0 on
 # Packagist, which pins supervisor 0.6.0; both tagged).
+# sourceOfTruth re-read 2026-10-06 (prefork per pool): SupervisorConfiguration reads a pool's own
+# prefork; the closing line of Prefork says it overrides QUEEN_SUPERVISOR_PREFORK.
 # sourceOfTruth re-read 2026-10-06 (prefork channels): ForkServer, ForkServerCommand, prefork.rs,
 # WorkerExitMarker, WorkerTelemetry and lease/mod.rs give the new section on how a forked worker
 # talks to its master: the fork server's stdin and fd 3 (ready, forked, failed, exited), the worker
@@ -467,8 +469,8 @@ itself held 24 MiB of PSS beside the Rust master's 6.6 MiB; Horizon's master and
   needs the master restarted. Prefork is also not for an application whose boot starts threads or
   keeps connections open: [when not to use it](/guides/laravel/supervisors/#when-not-to-use-prefork).
 
-`QUEEN_SUPERVISOR_PREFORK=true` turns prefork on, and `opcache.enable_cli=1` in the command-line
-`php.ini` lets the workers share the compiled code
+`QUEEN_SUPERVISOR_PREFORK=true` turns prefork on, a pool's own `prefork` overrides it, and
+`opcache.enable_cli=1` in the command-line `php.ini` lets the workers share the compiled code
 ([prefork workers](/guides/laravel/supervisors/#prefork-workers)).
 
 ## Several replicas

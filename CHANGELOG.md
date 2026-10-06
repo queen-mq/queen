@@ -3,6 +3,19 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
+`supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
+switch. One forking pool is enough to start the fork server, and both engines spawn the workers of
+a pool with `prefork` false beside it. Use it for jobs that must not run in a forked process, such
+as a Kafka client the job creates; a boot that starts a thread still makes the fork server refuse to
+serve, and then every pool spawns. The dashboard names the pools that differ from the switch. PHP
+client 2.3.0 pins supervisor 0.8.0, which reads the new key: run `php artisan
+queen:supervisor-install` after the upgrade. A fork took 0.48 ms on the Linux server, against 88 ms
+for a worker that booted the benchmark application on its own
+(`benchmark-queen/2026-10-05-laravel-worker-memory`).
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a
