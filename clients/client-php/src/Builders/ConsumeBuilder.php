@@ -46,9 +46,11 @@ class ConsumeBuilder
         // Callbacks are observers — autoAck remains as configured.
         // ConsumerManager handles ack/nack. The wrapper just adds
         // onSuccess/onError notifications around the user handler.
-        $wrappedHandler = function (array|object $msgOrMsgs) use ($handler, $onSuccess, $onError): void {
+        // The lease renewal call reaches the handler only when it takes it.
+        $takesRenew = ConsumerManager::takesRenew($handler);
+        $wrappedHandler = function (array|object $msgOrMsgs, \Closure $renew) use ($handler, $takesRenew, $onSuccess, $onError): void {
             try {
-                $handler($msgOrMsgs);
+                $takesRenew ? $handler($msgOrMsgs, $renew) : $handler($msgOrMsgs);
 
                 if ($onSuccess !== null) {
                     $onSuccess($msgOrMsgs);

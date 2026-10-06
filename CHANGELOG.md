@@ -36,10 +36,12 @@ handles the batches of a poll round one after the other, but it started each bat
 interval when the batch reached its handler, so the check before that handler never found it due.
 The interval now runs from the pop answer, and a batch that waited behind other handlers longer
 than the interval is renewed before its own handler starts. The loop still cannot renew while a
-handler runs: PHP runs the handler on the loop's only thread, and the client has no timer that can
-interrupt it. A batch handled as soon as it arrives, and a single message in `each()` mode, get no
-renewal during their handler. The reference now says so, and names the ways out: a `leaseSeconds()`
-above the longest handler, or `$queen->renew($messages, $seconds)` from inside the handler.
+handler runs, since PHP runs the handler on the loop's only thread, so a handler that declares a
+second parameter now gets a renewal call: `function (array $messages, \Closure $renew)`. `$renew()`
+renews the leases in hand once `renewLease()`'s interval has passed, or on every call without an
+interval, and returns whether the broker extended them; a long handler calls it between parts of
+its work. A one-parameter handler is called as before. The loop's own renewal sends one request per
+lease instead of one per message.
 
 ## PHP client 2.2.0 - 2026-10-06
 

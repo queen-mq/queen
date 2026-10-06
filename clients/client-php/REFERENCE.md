@@ -432,18 +432,33 @@ How the loop behaves:
   from the pop answer. The loop checks it where it has control: before each message in `each()`
   mode, and once before the handler in batch mode. A due check renews the leases of the batch with
   the broker default of 60 s: each lease then ends 60 s after the renewal at the earliest, and a
-  renewal never shortens a lease. A renewal failure is ignored.
+  renewal never shortens a lease. It sends one renewal per lease, and a failure is ignored.
 
-The loop cannot renew while a handler runs. PHP runs the handler on the only thread of the loop,
-and the client has no timer or signal that can interrupt it. So:
+The loop cannot renew while a handler runs: PHP runs the handler on the only thread of the loop.
+A handler that can run longer than the lease renews itself. Declare a second parameter and the loop
+passes a renewal call (2.3.0):
 
-- In batch mode, the check is due only for a batch that waited behind the handlers of other
-  pollers (`concurrency(N)`). A batch that goes to the handler as soon as it arrives gets no
-  renewal during its handler.
-- In `each()` mode, a message gets no renewal during its own handler.
+```php
+$queen->queue('orders')->group('workers')
+    ->batch(50)
+    ->renewLease(true, 10_000)
+    ->consume(function (array $messages, \Closure $renew): void {
+        foreach ($messages as $message) {
+            handleOne($message);
+            $renew();
+        }
+    })
+    ->execute();
+```
 
-For a handler that can run longer than the lease, set `leaseSeconds()` above the longest handler,
-or call `$queen->renew($messages, $seconds)` from inside the handler between parts of the work.
+- `$renew()` renews the leases of the messages in hand and returns `true` when the broker extended
+  every one, `false` when it refused one or nothing was due.
+- With `renewLease(true, $intervalMillis)` it renews only once the interval has passed since the
+  pop or the last renewal, so calling it often costs nothing. Without an interval every call renews.
+- In `each()` mode it renews the lease of the whole pop, which the remaining messages share.
+- A handler with one parameter is called exactly as before.
+
+`leaseSeconds()` above the longest handler is the other way out.
 
 ## The KafkaConsumer-style consumer
 

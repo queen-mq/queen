@@ -15,7 +15,8 @@ use Queen\Tests\Support\PlanHandler;
  * only where it has control: before each message in each() mode, before the
  * handler in batch mode. The interval runs from the pop answer, when the lease
  * began, so a batch that waited behind another poller's handler is renewed
- * before its own handler starts.
+ * before its own handler starts. Inside a handler, the renewal call it gets as
+ * its second argument renews.
  */
 final class ConsumeLeaseRenewalTest extends TestCase
 {
@@ -78,6 +79,82 @@ final class ConsumeLeaseRenewalTest extends TestCase
             ->execute();
 
         $this->assertSame([], self::extends($handler));
+    }
+
+    public function testABatchHandlerRenewsWhileItRunsThroughItsSecondArgument(): void
+    {
+        $handler = new PlanHandler([self::popAnswer('lease-1', messages: 3), self::renewed()]);
+        $answers = [];
+
+        $this->queen($handler)->queue('orders')->group('workers')
+            ->limit(3)->autoAck(false)
+            ->renewLease(true, self::INTERVAL_MILLIS)
+            ->consume(function (array $messages, \Closure $renew) use (&$answers): void {
+                $answers[] = $renew();
+                usleep(self::SLOW_HANDLER_MICROS);
+                $answers[] = $renew();
+            })
+            ->execute();
+
+        $this->assertSame([false, true], $answers, 'nothing is due at first, then the interval has passed');
+        $this->assertSame(['/api/v1/lease/lease-1/extend'], self::extends($handler), 'one renewal per lease, not per message');
+    }
+
+    public function testWithoutAnIntervalEveryCallRenews(): void
+    {
+        $handler = new PlanHandler([self::popAnswer('lease-1'), self::renewed()]);
+        $renewed = null;
+
+        $this->queen($handler)->queue('orders')->group('workers')
+            ->limit(1)->autoAck(false)
+            ->consume(function (array $messages, \Closure $renew) use (&$renewed): void {
+                $renewed = $renew();
+            })
+            ->execute();
+
+        $this->assertTrue($renewed);
+        $this->assertSame(['/api/v1/lease/lease-1/extend'], self::extends($handler));
+    }
+
+    public function testARefusedRenewalReturnsFalse(): void
+    {
+        $handler = new PlanHandler([
+            self::popAnswer('lease-1'),
+            ['status' => 200, 'json' => ['success' => false, 'renewed' => 0, 'error' => 'Lease not renewed']],
+        ]);
+        $renewed = null;
+
+        $this->queen($handler)->queue('orders')->group('workers')
+            ->limit(1)->autoAck(false)
+            ->consume(function (array $messages, \Closure $renew) use (&$renewed): void {
+                $renewed = $renew();
+            })
+            ->execute();
+
+        $this->assertFalse($renewed);
+    }
+
+    public function testTheLoopRenewsEachLeaseOnceBetweenMessages(): void
+    {
+        $handler = new PlanHandler([self::popAnswer('lease-1', messages: 3)]);
+        $handled = 0;
+
+        $this->queen($handler)->queue('orders')->group('workers')
+            ->each()->limit(2)->autoAck(false)
+            ->renewLease(true, self::INTERVAL_MILLIS)
+            ->consume(function () use (&$handled): void {
+                if (++$handled === 1) {
+                    usleep(self::SLOW_HANDLER_MICROS);
+                }
+            })
+            ->execute();
+
+        $this->assertSame(['/api/v1/lease/lease-1/extend'], self::extends($handler));
+    }
+
+    private static function renewed(): array
+    {
+        return ['status' => 200, 'json' => ['success' => true, 'renewed' => 1, 'newExpiresAt' => '2026-10-06T10:00:00Z']];
     }
 
     private function queen(PlanHandler $handler): Queen
