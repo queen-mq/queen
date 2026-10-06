@@ -64,6 +64,9 @@ sourceOfTruth:
 # connector still refuses an unsafe timing with the same message. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (helper autoload): ProcessLeaseRenewer asks Composer for the autoloader
 # that loaded the package before it walks up from Queen.php; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (connection defaults): SupervisorConfiguration and ApplicationSettings start
+# every queen connection from config/queen.php, as QueenConnector does and as the configuration page
+# already says; nothing this page states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,
