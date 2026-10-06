@@ -630,6 +630,11 @@ dlq = await queen.queue('q').dlq().limit(10).get()
 dlq = await queen.queue('q').dlq('consumer-group').limit(10).get()
 ```
 
+To send a message to the DLQ yourself, ack it with the `dlq` status while you
+hold its lease: `await queen.ack(message, 'dlq', {'group': group})`.
+`admin.move_message_to_dlq()` and `admin.clear_queue()` raise
+`NotImplementedError`: the 2.x broker has no route for either.
+
 ### Shutdown
 
 ```python

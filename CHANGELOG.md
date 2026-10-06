@@ -5,6 +5,16 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Python client: `admin.move_message_to_dlq()` and `admin.clear_queue()` are deprecated and
+raise.** They sent `POST /api/v1/messages/:partitionId/:transactionId/dlq` and
+`DELETE /api/v1/queues/:name/clear`, routes the 2.x broker does not have, so every call failed
+with a 404 `no_such_route`. Both now raise `NotImplementedError` before any request and name the
+way that works. For a dead letter, ack the message with the `dlq` status,
+`await queen.ack(message, 'dlq', {'group': group})`, while its consumer group holds the lease. To
+skip what is queued, seek the consumer group to the end,
+`await queen.admin.seek_consumer_group(group, queue, {'toEnd': True})`; to drop the queue with its
+messages and configuration, `await queen.queue(name).delete()`.
+
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
 switch. One forking pool is enough to start the fork server, and both engines spawn the workers of

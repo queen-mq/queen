@@ -122,18 +122,24 @@ class Admin:
 
     async def clear_queue(self, name: str, partition: Optional[str] = None) -> Dict[str, Any]:
         """
-        Clear all messages from a queue
+        Deprecated: the 2.x broker cannot clear a queue, so this always raises.
 
-        Args:
-            name: Queue name
-            partition: Optional partition to clear
+        It sent DELETE /api/v1/queues/:name/clear, a route the 2.x broker does
+        not have: every call failed with a 404 `no_such_route`. It now raises
+        NotImplementedError before any request. To skip a consumer group's
+        backlog, seek the group to the end with seek_consumer_group(); to drop
+        the queue together with its messages and configuration, call
+        queen.queue(name).delete().
 
-        Returns:
-            Result
+        Raises:
+            NotImplementedError: always
         """
-        logger.log("Admin.clear_queue", {"name": name, "partition": partition})
-        query_string = f"?partition={quote(partition)}" if partition else ""
-        return await self._http_client.delete(f"/api/v1/queues/{quote(name)}/clear{query_string}")
+        raise NotImplementedError(
+            "Queen 2.x has no route that clears a queue. To skip a consumer group's backlog, "
+            "seek it to the end: await queen.admin.seek_consumer_group(group, queue, "
+            "{'toEnd': True}). To drop the queue with its messages and configuration: "
+            "await queen.queue(name).delete()."
+        )
 
     async def get_partitions(self, **params: Any) -> Dict[str, Any]:
         """
@@ -211,17 +217,23 @@ class Admin:
 
     async def move_message_to_dlq(self, partition_id: str, transaction_id: str) -> Dict[str, Any]:
         """
-        Move a message to the Dead Letter Queue
+        Deprecated: the 2.x broker has no route that dead-letters a message by
+        its address, so this always raises.
 
-        Args:
-            partition_id: Partition ID
-            transaction_id: Transaction ID
+        It posted to /api/v1/messages/:partitionId/:transactionId/dlq, which a
+        2.x broker answers 404 `no_such_route`. A dead letter is filed only by
+        an ack with the `dlq` status, on a message the consumer group holds a
+        live lease for, which an address alone cannot name. It now raises
+        NotImplementedError before any request.
 
-        Returns:
-            Result
+        Raises:
+            NotImplementedError: always
         """
-        logger.log("Admin.move_message_to_dlq", {"partition_id": partition_id, "transaction_id": transaction_id})
-        return await self._http_client.post(f"/api/v1/messages/{partition_id}/{transaction_id}/dlq", {})
+        raise NotImplementedError(
+            "Queen 2.x has no route that moves a message to the DLQ by its address. Pop the "
+            "message for its consumer group and call await queen.ack(message, 'dlq', "
+            "{'group': group}) while you hold its lease."
+        )
 
     # ===========================
     # Traces API
