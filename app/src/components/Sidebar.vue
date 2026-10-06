@@ -1,6 +1,8 @@
 <template>
   <!-- Narrow screens: the sidebar is a drawer over the page. -->
-  <div v-if="mobileOpen" class="sidebar-overlay" @click="mobileOpen = false" />
+  <Transition name="drawer-scrim">
+    <div v-if="mobileOpen" class="sidebar-overlay" @click="mobileOpen = false" />
+  </Transition>
 
   <button
     @click="mobileOpen = !mobileOpen"
