@@ -43,6 +43,12 @@ succeed, and an empty list reads as an empty queue, so a consumer that asked for
 delivery never learned that it was not getting it. `pop()` and `pop_result()` now raise that 400,
 as the JavaScript client does. Every other failure still returns an empty list.
 
+**Python client: a nack in `each()` mode skips only its own partition.** A multi-partition pop
+claims several partitions under one lease, and a nack releases only the failed message's
+partition. The loop dropped the whole rest of the pop after a nack, so the other partitions'
+messages stayed leased and came back only when the lease expired. It now skips only the later
+messages of the failed partition, which the broker redelivers, and handles the others at once.
+
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
 switch. One forking pool is enough to start the fork server, and both engines spawn the workers of
