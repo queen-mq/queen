@@ -71,6 +71,12 @@ message, the rest of the batch does not reach the handler, and the error comes b
 the failed message comes back when its lease expires, which spends no retry, so nack it in the
 handler when it should count against the queue's `RetryLimit`.
 
+**Go client: `Renew()` reports a lease the broker did not extend.** `POST
+/api/v1/lease/:leaseId/extend` answers 200 with `success: false` and `renewed: 0` when the lease
+expired, was released by an ack or nack, or never existed, and `Renew()` reported every 200 as
+`Success: true`. It now reads `success` from the body and fills `Error` when it is false, as the
+JavaScript and Rust clients do.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

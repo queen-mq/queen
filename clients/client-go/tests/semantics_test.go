@@ -476,3 +476,56 @@ func TestPopLeaseSecondsOverride(t *testing.T) {
 		t.Fatalf("message not redelivered after 2.5s — ?leaseSeconds=1 override ignored")
 	}
 }
+
+// ===========================================================================
+// Renew reports a lease the broker no longer holds as a failure.
+//
+// POST /api/v1/lease/:leaseId/extend answers HTTP 200 either way; only the
+// body's success/renewed says whether anything was extended
+// (server/src/rsm/facade/real.rs, renew_impl). An ack releases the lease, so a
+// renewal after it extends nothing and must not read as Success.
+// ===========================================================================
+func TestRenewReportsAReleasedLease(t *testing.T) {
+	client := requireClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	queueName := generateQueueName("renew-released")
+	if _, err := client.Queue(queueName).Config(queen.QueueConfig{LeaseTime: 30}).Create().Execute(ctx); err != nil {
+		t.Fatalf("create queue: %v", err)
+	}
+	if _, err := client.Queue(queueName).Partition("Default").
+		Push(map[string]interface{}{"n": 1}).Execute(ctx); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	msgs := popRetryClient(ctx, t, client, queueName, "", 1)
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+
+	held, err := client.Renew(ctx, msgs[0])
+	if err != nil {
+		t.Fatalf("renew of a held lease: %v", err)
+	}
+	if len(held) != 1 || !held[0].Success || held[0].NewExpiresAt.IsZero() {
+		t.Fatalf("renew of a held lease not reported as renewed: %+v", held)
+	}
+
+	if res, err := client.Ack(ctx, msgs[0], true, queen.AckOptions{}); err != nil || !res[0].Success {
+		t.Fatalf("ack failed: %v %+v", err, res)
+	}
+
+	released, err := client.Renew(ctx, msgs[0])
+	if err != nil {
+		t.Fatalf("renew after ack: %v", err)
+	}
+	if len(released) != 1 {
+		t.Fatalf("renew after ack returned %d results, want 1", len(released))
+	}
+	if released[0].Success {
+		t.Fatalf("renew of a lease the ack released reported Success=true: %+v", released[0])
+	}
+	if released[0].Error == "" {
+		t.Fatalf("renew of a released lease carries no Error: %+v", released[0])
+	}
+}

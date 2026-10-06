@@ -437,6 +437,13 @@ client.Renew(ctx, messages)
 
 // Renew by lease ID
 client.Renew(ctx, "lease-id-123")
+
+// The broker answers 200 either way: read Success on each result. It is false,
+// with Error set, when the lease expired or an ack or nack released it.
+results, err := client.Renew(ctx, msg)
+if err == nil && !results[0].Success {
+    // The lease is gone: the message can already be with another consumer.
+}
 ```
 
 ## Transactions
