@@ -7,6 +7,10 @@
  *   - ack() AND renew() READ THE BODY. Both routes answer HTTP 200 when the
  *     broker settled or extended nothing: the per-item `success` of the ack
  *     array, and the `success`/`renewed` of the renewal, are the only signal.
+ *   - A 4xx ON A POP STOPS consume() WITH THAT ERROR; A 5xx DOES NOT. A
+ *     worker runs in a pool task whose future is only waited on, so an error
+ *     thrown there is gone unless the loop carries it out. A 5xx is a broker
+ *     restarting or electing: the loop waits and polls again.
  *
  * Like its siblings this runs against an in-process httplib::Server -- no
  * broker, so every response is the one the test chose:
@@ -102,9 +106,59 @@ public:
         return n;
     }
 };
+/// Raises a stop signal after a budget, so a loop that fails to stop on its own
+/// FAILS its test instead of hanging the suite (the idiom of test_conflation.cpp).
+class StopAfter {
+private:
+    std::atomic<bool> flag_{false};
+    std::atomic<bool> done_{false};
+    std::thread timer_;
+
+public:
+    explicit StopAfter(int budget_millis) {
+        timer_ = std::thread([this, budget_millis]() {
+            auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(budget_millis);
+            while (!done_.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            flag_.store(true);
+        });
+    }
+
+    ~StopAfter() {
+        done_.store(true);
+        if (timer_.joinable()) {
+            timer_.join();
+        }
+    }
+
+    std::atomic<bool>* signal() { return &flag_; }
+};
 // ============================================================================
 // Broker shapes
 // ============================================================================
+
+/// A pop answer: `count` messages t1..tN, all under `lease`, the way a 2.x
+/// broker sends a claim. Message i is in partitions[(i - 1) % size]: one
+/// partition by default, several for a multi-partition claim.
+std::string popped(int count, const std::string& lease, const std::string& group = "workers",
+                   const std::vector<std::string>& partitions = {"p1"}) {
+    json messages = json::array();
+    for (int i = 1; i <= count; ++i) {
+        messages.push_back({
+            {"id", "t" + std::to_string(i)},
+            {"transactionId", "t" + std::to_string(i)},
+            {"partitionId", partitions[(i - 1) % partitions.size()]},
+            {"partition", "Default"},
+            {"leaseId", lease},
+            {"consumerGroup", group},
+            {"data", {{"n", i}}}
+        });
+    }
+    return json{{"success", true}, {"leaseId", lease}, {"messages", messages},
+                {"partitionsClaimed", 1}}.dump();
+}
 
 /// The ack wire answer, `[{index, transactionId, success, error, ...}]`, one
 /// item per acknowledgment in request order, for the single and the batch
@@ -137,6 +191,40 @@ std::string renew_answer(const std::string& lease, bool renewed) {
     return json{{"leaseId", lease}, {"success", renewed}, {"renewed", renewed ? 1 : 0},
                 {"newExpiresAt", expires}, {"expiresAt", expires},
                 {"lease_expires_at", expires}}.dump();
+}
+
+bool starts_with(const std::string& text, const std::string& prefix) {
+    return text.rfind(prefix, 0) == 0;
+}
+
+/// A broker with one claim to hand out: the first pop gets `first_pop`, every
+/// later one a 204. Acks are accepted, renewals succeed.
+Responder one_claim(const std::string& first_pop) {
+    auto pops = std::make_shared<std::atomic<int>>(0);
+    return [pops, first_pop](const httplib::Request& req, httplib::Response& res) {
+        if (starts_with(req.path, "/api/v1/pop")) {
+            if ((*pops)++ == 0) {
+                res.status = 200;
+                res.set_content(first_pop, "application/json");
+            } else {
+                res.status = 204;
+            }
+            return;
+        }
+        if (starts_with(req.path, "/api/v1/ack")) {
+            res.status = 200;
+            res.set_content(ack_answer(req.body), "application/json");
+            return;
+        }
+        if (starts_with(req.path, "/api/v1/lease/")) {
+            std::string lease = req.path.substr(std::string("/api/v1/lease/").size());
+            lease = lease.substr(0, lease.find('/'));
+            res.status = 200;
+            res.set_content(renew_answer(lease, true), "application/json");
+            return;
+        }
+        res.status = 404;
+    };
 }
 
 // ============================================================================
@@ -244,6 +332,65 @@ void test_renew_reports_a_lease_the_broker_did_not_extend() {
 }
 
 // ============================================================================
+// A 4xx on a pop stops consume() with that error, a 5xx does not
+// ============================================================================
+
+void test_a_4xx_on_a_pop_stops_consume_with_that_error() {
+    StubServer server([](const httplib::Request&, httplib::Response& res) {
+        res.status = 400;
+        res.set_content(R"({"success":false,"error":"bad pop","code":"bad_request"})",
+                        "application/json");
+    });
+    QueenClient client({server.url()}, fast_config());
+
+    int status = 0;
+    StopAfter watchdog(3000);
+    try {
+        client.queue("consume-pop-error").group("workers").wait(false)
+              .consume([](const json&) {}, watchdog.signal());
+    } catch (const HttpError& e) {
+        status = e.status_code();
+    }
+
+    check(status == 400, "consume() must rethrow the broker's 400, got status " +
+          std::to_string(status));
+    check(server.count_with_prefix("/api/v1/pop") == 1,
+          "a refused pop is not retried, got " +
+          std::to_string(server.count_with_prefix("/api/v1/pop")) + " pops");
+}
+
+void test_a_5xx_keeps_consume_polling() {
+    // A 503 first (a broker electing a leader), then the claim.
+    auto pops = std::make_shared<std::atomic<int>>(0);
+    Responder claim = one_claim(popped(1, "lease-1"));
+    StubServer server([pops, claim](const httplib::Request& req, httplib::Response& res) {
+        if (starts_with(req.path, "/api/v1/pop") && (*pops)++ == 0) {
+            res.status = 503;
+            res.set_content(R"({"error":"no leader yet"})", "application/json");
+            return;
+        }
+        claim(req, res);
+    });
+    ClientConfig config = fast_config();
+    config.retry_attempts = 1;               // the loop's retry, not HttpClient's
+    QueenClient client({server.url()}, config);
+
+    std::atomic<int> handled{0};
+    bool threw = false;
+    StopAfter watchdog(5000);
+    try {
+        client.queue("consume-5xx").group("workers").wait(false).limit(1)
+              .consume([&handled](const json&) { handled++; }, watchdog.signal());
+    } catch (const std::exception&) {
+        threw = true;
+    }
+
+    check(!threw, "a 5xx must not stop consume()");
+    check(handled.load() == 1, "the claim after the 5xx must be handled, handled " +
+          std::to_string(handled.load()));
+}
+
+// ============================================================================
 
 int main() {
     std::cout << "========================================" << std::endl;
@@ -255,6 +402,10 @@ int main() {
              test_ack_reports_an_accepted_acknowledgment);
     run_test("renew() reports a lease the broker did not extend",
              test_renew_reports_a_lease_the_broker_did_not_extend);
+
+    run_test("a 4xx on a pop stops consume() with that error",
+             test_a_4xx_on_a_pop_stops_consume_with_that_error);
+    run_test("a 5xx keeps consume() polling", test_a_5xx_keeps_consume_polling);
 
     std::cout << std::endl;
     if (failures == 0) {

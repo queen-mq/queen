@@ -4440,14 +4440,21 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
     std::string full_url = path + params.str();
     
     // Workers run inside packaged_tasks whose futures are only wait()ed on, so
-    // a thrown exception would be discarded. A terminal (403) response is
-    // recorded here instead and rethrown to the caller once every worker has
-    // stopped.
+    // a thrown exception would be discarded. An error that stops a worker (a
+    // 403, a conflation fault, any other 4xx on a pop) is recorded here instead
+    // and rethrown to the caller once every worker has stopped.
     struct TerminalError {
         std::mutex mutex;
         std::exception_ptr error;
     };
     auto terminal_error = std::make_shared<TerminalError>();
+    // Called from inside a catch block: keeps the first error of any worker.
+    auto record_current_error = [terminal_error]() {
+        std::lock_guard<std::mutex> lock(terminal_error->mutex);
+        if (!terminal_error->error) {
+            terminal_error->error = std::current_exception();
+        }
+    };
 
     // Names this consumer's target in a conflation warning, and keys the
     // once-per-(target, group) rule (§3.3). Computed once: it cannot change
@@ -4456,7 +4463,7 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
         util::pop_target_label(options.queue, options.namespace_name, options.task);
 
     // Worker function
-    auto worker = [this, handler, full_url, options, terminal_error,
+    auto worker = [this, handler, full_url, options, record_current_error,
                    conflation_target](int worker_id) {
         int processed_count = 0;
         auto last_message_time = std::chrono::steady_clock::now();
@@ -4539,7 +4546,16 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                             if (options.auto_ack) {
                                 json context = options.group.empty() ? 
                                     json::object() : json{{"group", options.group}};
-                                queen_->ack(msg, false, context);
+                                // Now that a worker error reaches the caller, a nack this
+                                // client cannot send (a message with no partitionId, whose
+                                // ack failed the same way) must not be one: log it, and the
+                                // broker redelivers the message when its lease expires.
+                                try {
+                                    queen_->ack(msg, false, context);
+                                } catch (const std::exception& nack_error) {
+                                    util::log_error("ConsumerManager.processMessage",
+                                                    std::string("nack failed: ") + nack_error.what());
+                                }
                             }
                         }
                         
@@ -4559,7 +4575,16 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                         if (options.auto_ack) {
                             json context = options.group.empty() ? 
                                 json::object() : json{{"group", options.group}};
-                            queen_->ack(messages, false, context);
+                            // Now that a worker error reaches the caller, a nack this
+                            // client cannot send (a message with no partitionId, whose
+                            // ack failed the same way) must not be one: log it, and the
+                            // broker redelivers the message when its lease expires.
+                            try {
+                                queen_->ack(messages, false, context);
+                            } catch (const std::exception& nack_error) {
+                                util::log_error("ConsumerManager.processBatch",
+                                                std::string("nack failed: ") + nack_error.what());
+                            }
                         }
                     }
                     processed_count += messages.size();
@@ -4576,12 +4601,7 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                 // ended.
                 util::log_error("ConsumerManager.worker", std::string("Worker ") +
                               std::to_string(worker_id) + " stopping: " + e.what());
-                {
-                    std::lock_guard<std::mutex> lock(terminal_error->mutex);
-                    if (!terminal_error->error) {
-                        terminal_error->error = std::current_exception();
-                    }
-                }
+                record_current_error();
                 break;
             } catch (const HttpError& e) {
                 // 429 (rate limited): HttpClient already retries this internally
@@ -4608,17 +4628,31 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                     util::log_error("ConsumerManager.worker", std::string("Worker ") +
                                   std::to_string(worker_id) + " forbidden (code=" + e.code() +
                                   "): " + e.what());
-                    std::lock_guard<std::mutex> lock(terminal_error->mutex);
-                    if (!terminal_error->error) {
-                        terminal_error->error = std::current_exception();
-                    }
+                    record_current_error();
                     break;
                 }
 
+                // 5xx that HttpClient's own retries did not outlast: a broker
+                // restarting or electing a leader. Transient, like a network
+                // fault: wait and poll again. A 4xx below stops the worker.
+                if (e.status_code() >= 500) {
+                    util::log_warn("ConsumerManager.worker", std::string("Worker ") +
+                                  std::to_string(worker_id) + " pop failed (status=" +
+                                  std::to_string(e.status_code()) + "): " + e.what() +
+                                  ", retrying in 1000ms");
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    continue;
+                }
+
+                // Any other 4xx (a refused pop, e.g. a 400 for a request the
+                // broker will never serve): stop this worker and hand the error
+                // to the caller. A bare `throw;` here would end in the
+                // discarded future.
                 util::log_error("ConsumerManager.worker", std::string("Worker ") +
                               std::to_string(worker_id) + " error: " + e.what() +
                               " (status=" + std::to_string(e.status_code()) + ")");
-                throw;
+                record_current_error();
+                break;
             } catch (const std::exception& e) {
                 // Check if timeout error (expected for long polling)
                 std::string error_msg = e.what();
@@ -4626,17 +4660,21 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                     continue; // Retry on timeout
                 }
                 
-                // Network error - wait before retry
+                // Network error - wait before retry. "timed out" is httplib's
+                // connection timeout, a network fault like the other two.
                 if (error_msg.find("Connection refused") != std::string::npos ||
-                    error_msg.find("connect") != std::string::npos) {
+                    error_msg.find("connect") != std::string::npos ||
+                    error_msg.find("timed out") != std::string::npos) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     continue;
                 }
                 
-                // Other errors - rethrow
+                // Other errors: stop this worker and hand the error to the
+                // caller, as above.
                 util::log_error("ConsumerManager.worker", std::string("Worker ") + 
                               std::to_string(worker_id) + " error: " + e.what());
-                throw;
+                record_current_error();
+                break;
             }
         }
     };
@@ -4644,8 +4682,14 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
     // Start workers in thread pool
     std::vector<std::future<void>> futures;
     for (int i = 0; i < options.concurrency; ++i) {
-        futures.push_back(thread_pool_.future_from_push([worker, i]() {
-            worker(i);
+        // Whatever still escapes a worker is recorded too: the future below is
+        // only wait()ed on, so a throw left in it would never be seen.
+        futures.push_back(thread_pool_.future_from_push([worker, i, record_current_error]() {
+            try {
+                worker(i);
+            } catch (...) {
+                record_current_error();
+            }
         }));
     }
     

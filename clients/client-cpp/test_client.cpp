@@ -1168,6 +1168,29 @@ bool test_ack_and_renew_report_a_broker_refusal(const std::string& server_url) {
     return ok;
 }
 
+// A pop the broker refuses (here conflation without a consumer group, a 400)
+// leaves consume() as an exception instead of a silent return.
+bool test_consumer_surfaces_a_refused_pop(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-refused-pop-");
+    DropQueuesOnExit drop{client, {queue}};
+    client.queue(queue).create();
+
+    int status = 0;
+    try {
+        client.queue(queue).conflation().wait(false).idle_millis(1000)
+            .consume([](const json&) {});
+    } catch (const HttpError& e) {
+        status = e.status_code();
+    }
+    if (status != 400) {
+        std::cerr << "consume() should rethrow the broker's 400, got status " << status
+                  << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // ============================================================================
 // DLQ TEST
 // ============================================================================
@@ -1829,6 +1852,8 @@ int main(int argc, char** argv) {
     std::cout << YELLOW << "\n=== SETTLEMENT TESTS ===" << RESET << "\n" << std::endl;
     runner.run_test("ACK and renew report a broker refusal",
                     [&]() { return test_ack_and_renew_report_a_broker_refusal(server_url); });
+    runner.run_test("Consumer surfaces a refused pop",
+                    [&]() { return test_consumer_surfaces_a_refused_pop(server_url); });
     
     // DLQ TEST
     std::cout << YELLOW << "\n=== DLQ TESTS ===" << RESET << "\n" << std::endl;

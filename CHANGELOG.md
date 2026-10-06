@@ -5,6 +5,13 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**C++ client: `consume()` throws a pop's 4xx and waits out a 5xx.** A 4xx on a pop other than a
+403 or a 429, such as a 400, ended the worker inside a pool task whose result nobody read, so
+`consume()` returned as if it had finished. It now throws that error once every worker has
+stopped, as it does for a 403. A 5xx that outlasted the retries ended the worker the same way; the
+loop now waits a second and polls again, as after a network fault, and a connection timeout now
+counts as a network fault. `pop()` still logs a failure and returns an empty result.
+
 **C++ client: `ack()` and `renew()` report what the broker refused.** `ack()` returned
 `success: true` for any HTTP 200 and `renew()` for any answer, but the broker answers 200 with
 `success: false` when it settled or extended nothing, for example under an expired or released

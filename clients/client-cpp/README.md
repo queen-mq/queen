@@ -775,6 +775,12 @@ Two smaller gaps against client-js, for the same honesty:
 
 ## Error Handling
 
+`consume()` throws the error that stopped a worker, after every worker has
+stopped: a 403, `ConflationUnsupportedError`, or any other 4xx on a pop (an
+`HttpError` with its status). A 5xx, a network fault or a timeout does not stop
+it: it waits a second and polls again. `pop()` logs a failure and returns an
+empty result.
+
 `ack()` and `renew()` return `success: false` with an `error` when the broker
 settled or extended nothing. Both routes answer HTTP 200 in that case, so read
 `success`; for an ack, the per-message results stay in `result`.
