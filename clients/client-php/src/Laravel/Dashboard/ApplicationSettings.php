@@ -156,10 +156,10 @@ final class ApplicationSettings
                 continue;
             }
             $connectionName = self::text($options['connection'] ?? 'queen', 128);
-            // As SupervisorConfiguration::connectionConfig reads it:
-            // config('queen') stands under the queen connection only.
+            // As QueenConnector and SupervisorConfiguration::connectionConfig
+            // read it: config('queen') under every queen connection.
             $connection = $connectionName !== null
-                ? array_replace($connectionName === 'queen' ? $queen : [], $this->ownConnection($connectionName))
+                ? array_replace($queen, $this->ownConnection($connectionName))
                 : [];
             $queues = $options['queues'] ?? $options['queue'] ?? [$queen['queue'] ?? 'default'];
             $queues = is_string($queues) ? explode(',', $queues) : (is_array($queues) ? $queues : []);

@@ -46,6 +46,9 @@ sourceOfTruth:
 # through the new LeaseRenewerFactory, with the same keys, checks and messages, and
 # QueenServiceProvider builds the container's client with clientConfig() and binds that factory.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (connection defaults): SupervisorConfiguration and ApplicationSettings start
+# every queen connection from config/queen.php, as QueenConnector does and as the configuration page
+# already says; nothing this page states changes.
 ---
 
 Horizon and Queen both run ordinary Laravel jobs and both supervise their workers, on different

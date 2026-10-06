@@ -343,6 +343,34 @@ class ProcessLeaseRenewerTest extends TestCase
         $this->assertSame(1, preg_match('/^[\x20-\x7E]*$/D', $error));
     }
 
+    /**
+     * Composer links a path repository's package into vendor/ with a symlink,
+     * and PHP reports Queen.php by the link's target, outside the application:
+     * the helper must load the application's autoloader, the one that loaded
+     * this package, not one found by walking up from the package's own files.
+     */
+    public function testTheHelperLoadsTheAutoloaderThatLoadedThePackage(): void
+    {
+        $vendor = sys_get_temp_dir() . '/queen-app-' . bin2hex(random_bytes(6)) . '/vendor';
+        mkdir($vendor, 0700, true);
+        file_put_contents("{$vendor}/autoload.php", "<?php\n");
+        $loader = new \Composer\Autoload\ClassLoader($vendor);
+        $loader->addPsr4('Queen\\', dirname(__DIR__) . '/src');
+        $loader->register(true);
+
+        try {
+            $renewer = (new \ReflectionClass(ProcessLeaseRenewer::class))->newInstanceWithoutConstructor();
+            $autoload = (new \ReflectionMethod($renewer, 'findAutoload'))->invoke($renewer);
+
+            $this->assertSame("{$vendor}/autoload.php", $autoload);
+        } finally {
+            $loader->unregister();
+            unlink("{$vendor}/autoload.php");
+            rmdir($vendor);
+            rmdir(dirname($vendor));
+        }
+    }
+
     private function renewerWithWorkerCode(string $code): ProcessLeaseRenewer
     {
         return new ProcessLeaseRenewer(

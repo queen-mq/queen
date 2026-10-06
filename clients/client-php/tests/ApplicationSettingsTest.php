@@ -114,8 +114,8 @@ final class ApplicationSettingsTest extends TestCase
         ]);
 
         $pools = array_column($settings->pools(), null, 'name');
-        // config('queen') stands under the queen connection only, except retry_after.
-        $this->assertSame([false, 120], [$pools['mail']['lease_renewal'], $pools['mail']['retry_after']]);
+        // config('queen') stands under every queen connection, as its workers read it.
+        $this->assertSame([true, 120], [$pools['mail']['lease_renewal'], $pools['mail']['retry_after']]);
         $this->assertSame([true, 120], [$pools['main']['lease_renewal'], $pools['main']['retry_after']]);
         $this->assertSame('min_processes above max_processes', $pools['main']['refused']);
         $this->assertNull($pools['mail']['refused']);
