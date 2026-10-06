@@ -252,6 +252,12 @@ Each new pod joins the coordination and takes its share at its next poll, and a 
 scale-down leaves at once. [Scale on Kubernetes](/guides/laravel/kubernetes/) has the whole
 deployment.
 
+The broker dashboard can also inspect the same remote publications on its
+[Supervisors page](/operate/monitoring/#published-supervisors): one overview per instance, with
+worker capacity, process budget and pool details in a drawer. Publication groups follow the
+[shared status contract](/reference/supervisor-status/); they do not replace consumer groups or
+change coordination membership.
+
 The broker has Prometheus metrics of its own, about queues, partitions and the cluster (see
 [monitoring the broker](/operate/monitoring/)). This endpoint covers the Laravel side: workers,
 pools and the depth the supervisors see.

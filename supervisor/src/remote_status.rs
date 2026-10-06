@@ -197,6 +197,17 @@ pub(crate) fn instance_key(
     key: &str,
     document: &serde_json::Value,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    // A publication group is one case-sensitive segment, not a path. Keep
+    // validation inside best-effort publication so local supervision continues.
+    if !(1..=255).contains(&key.len())
+        || !key.as_bytes()[0].is_ascii_alphanumeric()
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        || key == "coordination"
+    {
+        return Err("remote_status.key must be one supervisor group: 1-255 letters, digits, dots, underscores or hyphens, starting with a letter or digit; coordination is reserved".into());
+    }
     let instance_id = document
         .get("instance_id")
         .and_then(serde_json::Value::as_str)
@@ -544,6 +555,47 @@ mod tests {
         );
 
         server.join().unwrap();
+        assert!(publisher.failing);
+    }
+
+    #[test]
+    fn groups_cannot_overlap_with_paths_or_coordination() {
+        let document = serde_json::json!({"instance_id": INSTANCE});
+        for group in [
+            "pmsintool",
+            "pmsintool-staging",
+            "Orders.production_1",
+            &"a".repeat(255),
+        ] {
+            assert_eq!(
+                instance_key(group, &document).unwrap(),
+                format!("{group}/{INSTANCE}")
+            );
+        }
+        for group in [
+            "",
+            "coordination",
+            "/orders",
+            "orders/",
+            "orders/production",
+            ".",
+            "_orders",
+            "a b",
+            "città",
+            "a\n",
+            &"a".repeat(256),
+        ] {
+            assert!(instance_key(group, &document).is_err(), "{group:?}");
+        }
+        let mut config = remote_config(3, 600);
+        config.key = "coordination".into();
+        let mut publisher = RemoteStatusPublisher::new(&config);
+        let sent = Cell::new(0);
+        publisher.publish_at(Instant::now(), &document, |_: &[u8], _: usize| {
+            sent.set(sent.get() + 1);
+            Ok(())
+        });
+        assert_eq!(sent.get(), 0);
         assert!(publisher.failing);
     }
 

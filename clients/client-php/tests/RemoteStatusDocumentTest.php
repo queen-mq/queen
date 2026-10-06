@@ -218,6 +218,25 @@ final class RemoteStatusDocumentTest extends TestCase
         }
     }
 
+    public function testGroupsCannotOverlapWithPathsOrCoordination(): void
+    {
+        $id = str_repeat('a', 32);
+        foreach (['pmsintool', 'pmsintool-staging', 'Orders.production_1', str_repeat('a', 255)] as $group) {
+            $this->assertSame("{$group}/{$id}", RemoteStatusDocument::instanceKey($group, $id));
+        }
+        foreach (['', 'coordination', '/orders', 'orders/', 'orders/production', '.', '_orders', 'a b', 'città', "a\n", str_repeat('a', 256)] as $group) {
+            try {
+                RemoteStatusDocument::instanceKey($group, $id);
+                $this->fail('An invalid group was accepted: ' . json_encode($group));
+            } catch (\InvalidArgumentException $failure) {
+                $this->assertStringContainsString('supervisor group', $failure->getMessage());
+            }
+        }
+        // Legacy readers preserve the complete key rather than regrouping it.
+        $this->assertSame("orders/production/{$id}", RemoteStatusDocument::slot("orders/production/{$id}/head", 'orders/production'));
+        $this->assertNull(RemoteStatusDocument::slot("orders-staging/{$id}/head", 'orders'));
+    }
+
     public function testOnlyEngineGeneratedInstanceIdsNameASlot(): void
     {
         $this->assertSame(

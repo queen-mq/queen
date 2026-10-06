@@ -387,13 +387,19 @@ other.
 | Key of `supervisor.remote_status` | Default | Meaning |
 | --- | --- | --- |
 | `enabled` (`QUEEN_SUPERVISOR_REMOTE_STATUS`) | `false` | publish the status document |
-| `key` | a slug of `APP_NAME` and `APP_ENV` | the key the documents go under |
+| `key` | a slug of `APP_NAME` and `APP_ENV` | the supervisor group the documents go under |
 | `connection` | `queen` | the queue connection whose broker and credentials are used |
 | `namespace` | `queen-supervisor` | the key/value namespace |
 | `interval` | `poll_interval` | seconds between publishes; a state change publishes at once |
 | `ttl` | twice `heartbeat_timeout`, at least 300 | how long a published copy lives |
 
-The Supervisors page then shows one card per instance: a live local supervisor first, then every
+The key is a group name: 1–255 ASCII letters, digits, dots, underscores or hyphens, starting
+with a letter or digit. Names are case-sensitive and cannot contain slashes; `coordination` is
+reserved. See the [publication contract](/reference/supervisor-status/) for identity, compatibility
+and requirements for other implementations. The broker dashboard's **Supervisors** page can also
+read these publications, grouped across applications, without a Laravel web host.
+
+The Laravel Supervisors page then shows one card per instance: a live local supervisor first, then every
 published one, live before stale, each with its host, PID and last heartbeat. The overview, the
 header and the notices add up workers, draining processes and the process budget over the live
 instances, and report ready or healthy only when every live instance is. A stopping or stopped

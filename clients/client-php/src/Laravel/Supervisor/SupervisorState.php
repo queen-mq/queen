@@ -26,6 +26,12 @@ final class SupervisorState
 
     private ?string $instanceId = null;
 
+    private ?int $startedAtEpoch = null;
+
+    private ?int $startedAtMonotonic = null;
+
+    private ?string $clientVersion = null;
+
     /** @var array{dev:int,ino:int,uid:int,mode:int}|null */
     private ?array $generationDirectory = null;
 
@@ -85,6 +91,9 @@ final class SupervisorState
                 throw $error;
             }
             $this->generationDirectory = $candidate;
+            $this->startedAtEpoch = $startedAtEpoch;
+            $this->startedAtMonotonic = hrtime(true);
+            $this->clientVersion = SupervisorMetadata::clientVersion();
 
             return $handle;
         });
@@ -367,6 +376,11 @@ final class SupervisorState
             'pid' => getmypid(),
             'hostname' => is_string($hostname) && $hostname !== '' ? $hostname : null,
             'instance_id' => $this->instanceId,
+            'started_at_epoch' => $this->startedAtEpoch,
+            'uptime_seconds' => $this->startedAtMonotonic === null ? null
+                : intdiv(max(0, hrtime(true) - $this->startedAtMonotonic), 1_000_000_000),
+            'engine_version' => ($status['engine'] ?? null) === 'php' ? $this->clientVersion : null,
+            'client_version' => $this->clientVersion,
             'paused' => $state === 'paused',
             'stopping' => $state === 'terminating',
         ];

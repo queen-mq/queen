@@ -5,6 +5,7 @@ namespace Queen\Laravel\Commands;
 use Illuminate\Console\Command;
 use Queen\Laravel\Dashboard\TuningAdvisor;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
+use Queen\Laravel\Supervisor\SupervisorMetadata;
 
 class SupervisorConfigCommand extends Command
 {
@@ -30,6 +31,11 @@ class SupervisorConfigCommand extends Command
         // remote_status and coordination included: both engines use them.
         if (!$this->option('for-engine')) {
             $resolved = $this->redact($resolved);
+        }
+        // New native engines negotiate this optional field. Older Rust builds
+        // reject unknown config keys; their exports must remain unchanged.
+        if ($this->option('for-engine') && getenv('QUEEN_SUPERVISOR_ENGINE_METADATA') === '1') {
+            $resolved['client_version'] = SupervisorMetadata::clientVersion();
         }
         $resolved = $this->normalizeJsonMaps($resolved);
         // Standard error: the Rust engine reads the document from standard
