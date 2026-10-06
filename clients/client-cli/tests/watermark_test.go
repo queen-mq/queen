@@ -35,7 +35,7 @@ func TestWatermark_SeekBackwardsAllowsReconsume(t *testing.T) {
 
 	// First drain.
 	got := popN(t, q, 100,
-		"--cg", cg, "--auto-ack",
+		"--cg", cg, "--commit-on-delivery",
 		"--from-mode", "all",
 		"--max-partitions", "10",
 		"--timeout", "5s",
@@ -49,7 +49,7 @@ func TestWatermark_SeekBackwardsAllowsReconsume(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	again := popN(t, q, 100,
-		"--cg", cg, "--auto-ack",
+		"--cg", cg, "--commit-on-delivery",
 		"--from-mode", "all",
 		"--max-partitions", "10",
 		"--timeout", "5s",
@@ -73,7 +73,7 @@ func TestWatermark_DeleteCGAllowsReconsume(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	got := popN(t, q, 100,
-		"--cg", cg, "--auto-ack",
+		"--cg", cg, "--commit-on-delivery",
 		"--from-mode", "all",
 		"--max-partitions", "8",
 		"--timeout", "5s",
@@ -89,7 +89,7 @@ func TestWatermark_DeleteCGAllowsReconsume(t *testing.T) {
 
 	// New subscription on the SAME CG must see all 8 again with mode=all.
 	again := popN(t, q, 100,
-		"--cg", cg, "--auto-ack",
+		"--cg", cg, "--commit-on-delivery",
 		"--from-mode", "all",
 		"--max-partitions", "8",
 		"--timeout", "5s",

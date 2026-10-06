@@ -84,6 +84,15 @@ half a second, with nothing shown unless logging was on. A 4xx now stops the wor
 out of `Execute`, as a 403 does; a 5xx waits a second before the next pop, as a network error
 does.
 
+**CLI: `queenctl pop --commit-on-delivery`.** The broker moves the group's cursor past the messages
+as it hands them out: no lease, nothing to ack, at-most-once. `ephemeral pop` takes the same flag.
+On both, `--auto-ack` is now a hidden, deprecated alias with the same effect, and using it prints a
+deprecation line on stderr. `tail --auto-ack` keeps its name, and its help now says what it does:
+the client acks each message after printing it (the help said "ack server-side"). `bench` still
+drains with pops that commit on delivery. Until a client-go release has `CommitOnDelivery`, queenctl
+calls `CommitOnDelivery` or `AutoAck`, whichever the client-go it is built with has, so the
+`go install` build (client-go v2.0.0) and the workspace build both send `autoAck=true`.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

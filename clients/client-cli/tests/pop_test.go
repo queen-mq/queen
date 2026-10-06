@@ -26,7 +26,7 @@ func TestPop_NonEmptyQueue(t *testing.T) {
 	pushOne(t, q, "", map[string]any{"hello": "world"})
 	// Named CGs are seeded at the tail under the broker's default 'new'
 	// mode; a group created after the push must ask for the backlog.
-	got := popN(t, q, 1, "--cg", "ct-pn", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 1, "--cg", "ct-pn", "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	if len(got) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(got))
 	}
@@ -44,14 +44,14 @@ func TestPop_LongPolling(t *testing.T) {
 		time.Sleep(1 * time.Second)
 		pushOne(t, q, "", map[string]any{"deferred": true})
 	}()
-	got := popN(t, q, 1, "--cg", "ct-lp", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 1, "--cg", "ct-lp", "--commit-on-delivery", "--timeout", "5s")
 	if len(got) != 1 || got[0].Data["deferred"] != true {
 		t.Errorf("long-poll yielded %d msgs, payload=%v", len(got), got)
 	}
 }
 
 // TestPop_AckThroughCLI verifies the explicit `queenctl ack` flow against
-// a popped message that was NOT auto-acked. Mirrors pop.js#popWithAck.
+// a popped message that was NOT committed on delivery. Mirrors pop.js#popWithAck.
 func TestPop_AckThroughCLI(t *testing.T) {
 	q := uniqueQueue(t, "pop-ack")
 	createQueue(t, q)
@@ -89,6 +89,36 @@ func TestPop_LeaseExpiryReDelivery(t *testing.T) {
 	}
 }
 
+// TestPop_CommitOnDelivery pops with --commit-on-delivery: the message carries
+// no lease and does not come back on the next pop. --auto-ack is the hidden,
+// deprecated alias and must do the same, with the deprecation on stderr only.
+func TestPop_CommitOnDelivery(t *testing.T) {
+	for _, flag := range []string{"--commit-on-delivery", "--auto-ack"} {
+		q := uniqueQueue(t, "pop-cod")
+		createQueue(t, q)
+		pushOne(t, q, "", map[string]any{"n": 1})
+
+		out, stderr, code := run("pop", q, "-n", "1", "-o", "ndjson", "--cg", "ct-cod",
+			"--from-mode", "all", flag, "--timeout", "5s")
+		if code != 0 {
+			t.Fatalf("%s: pop exit %d\nstdout: %s\nstderr: %s", flag, code, out, stderr)
+		}
+		got := parseNDJSONMessages(t, out) // stdout must stay pure NDJSON
+		if len(got) != 1 {
+			t.Fatalf("%s: pop got %d, want 1", flag, len(got))
+		}
+		if got[0].LeaseID != "" {
+			t.Errorf("%s: a pop that commits on delivery must take no lease, got %q", flag, got[0].LeaseID)
+		}
+		if flag == "--auto-ack" && !strings.Contains(stderr, "--commit-on-delivery") {
+			t.Errorf("--auto-ack must point at --commit-on-delivery on stderr, got: %s", stderr)
+		}
+		if again := popN(t, q, 1, "--cg", "ct-cod", "--wait=false", "--timeout", "200ms"); len(again) != 0 {
+			t.Errorf("%s: the message was committed on delivery, yet the next pop returned %d", flag, len(again))
+		}
+	}
+}
+
 // TestPop_BatchSizeRespected pushes 5, asks for batch=3, expects 3.
 func TestPop_BatchSizeRespected(t *testing.T) {
 	q := uniqueQueue(t, "pop-batch")
@@ -100,7 +130,7 @@ func TestPop_BatchSizeRespected(t *testing.T) {
 		map[string]any{"i": 4},
 		map[string]any{"i": 5},
 	})
-	got := popN(t, q, 3, "--cg", "ct-bsize", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 3, "--cg", "ct-bsize", "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	if len(got) != 3 {
 		t.Errorf("expected 3 messages, got %d", len(got))
 	}
@@ -113,7 +143,7 @@ func TestPop_PartitionScoped(t *testing.T) {
 	pushOne(t, q, "p0", map[string]any{"p": "p0"})
 	pushOne(t, q, "p1", map[string]any{"p": "p1"})
 
-	got := popN(t, q, 5, "--cg", "ct-part", "--from-mode", "all", "--partition", "p0", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 5, "--cg", "ct-part", "--from-mode", "all", "--partition", "p0", "--commit-on-delivery", "--timeout", "5s")
 	if len(got) != 1 {
 		t.Fatalf("expected 1 from p0, got %d", len(got))
 	}

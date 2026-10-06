@@ -34,12 +34,13 @@ var (
 	ephPushFile      string
 	ephPushBatch     int
 
-	ephPopGroup     string
-	ephPopPartition string
-	ephPopBatch     int
-	ephPopWait      bool
-	ephPopTimeout   time.Duration
-	ephPopAutoAck   bool
+	ephPopGroup            string
+	ephPopPartition        string
+	ephPopBatch            int
+	ephPopWait             bool
+	ephPopTimeout          time.Duration
+	ephPopCommitOnDelivery bool
+	ephPopAutoAck          bool // deprecated alias of ephPopCommitOnDelivery
 
 	ephAckGroup  string
 	ephAckStatus string
@@ -71,8 +72,8 @@ and EMPTY. There is no replay, no history, no subscription mode and no DLQ,
 because none of those concepts has a referent when there is no history to have.
 
 Delivery is not "at most once": the class picks what can be LOST, the ack mode
-picks the guarantee. --auto-ack commits at delivery (at-most-once); the default
-is at-least-once for as long as the owning broker incarnation lives.
+picks the guarantee. --commit-on-delivery commits at delivery (at-most-once);
+the default is at-least-once for as long as the owning broker incarnation lives.
 
 Consumption semantics come from the consumer group, exactly as on a durable
 queue: same --cg competes, its own --cg fans out, no --cg is queue mode.
@@ -259,7 +260,10 @@ message. Feed it back to 'ephemeral ack', never parse it.`,
 			Wait:          ephPopWait,
 			TimeoutMillis: int(ephPopTimeout.Milliseconds()),
 			Group:         ephPopGroup,
-			AutoAck:       ephPopAutoAck,
+			// AutoAck is the field the pinned client-go v2.0.0 has; the next
+			// client-go keeps it as an alias of CommitOnDelivery, with the same
+			// effect. Switch to CommitOnDelivery after that release.
+			AutoAck: ephPopCommitOnDelivery || ephPopAutoAck,
 		})
 		if err != nil {
 			return ephemeralFail(err, "pop")
@@ -550,7 +554,9 @@ func init() {
 	ephemeralPopCmd.Flags().IntVarP(&ephPopBatch, "batch", "n", 1, "maximum messages to return")
 	ephemeralPopCmd.Flags().BoolVar(&ephPopWait, "wait", false, "long-poll until messages arrive or timeout")
 	ephemeralPopCmd.Flags().DurationVar(&ephPopTimeout, "timeout", 10*time.Second, "long-poll timeout (only sent with --wait)")
-	ephemeralPopCmd.Flags().BoolVar(&ephPopAutoAck, "auto-ack", false, "commit at delivery (at-most-once; nothing to ack afterwards)")
+	ephemeralPopCmd.Flags().BoolVar(&ephPopCommitOnDelivery, "commit-on-delivery", false, "commit at delivery (at-most-once; nothing to ack afterwards)")
+	ephemeralPopCmd.Flags().BoolVar(&ephPopAutoAck, "auto-ack", false, "deprecated alias of --commit-on-delivery")
+	_ = ephemeralPopCmd.Flags().MarkDeprecated("auto-ack", "use --commit-on-delivery")
 
 	ephemeralAckCmd.Flags().StringVar(&ephAckGroup, "cg", "", "consumer group the pop used")
 	ephemeralAckCmd.Flags().StringVar(&ephAckStatus, "status", "", "completed|failed|retry (default completed)")

@@ -62,8 +62,8 @@ func TestTx_BasicPushAck(t *testing.T) {
 	}
 	runOK(t, "tx", "-f", writeBundle(t, bundle))
 
-	resB := popN(t, b, 1, "--auto-ack", "--timeout", "5s")
-	resA := popN(t, a, 1, "--auto-ack", "--wait=false", "--timeout", "200ms")
+	resB := popN(t, b, 1, "--commit-on-delivery", "--timeout", "5s")
+	resA := popN(t, a, 1, "--commit-on-delivery", "--wait=false", "--timeout", "200ms")
 	if len(resB) != 1 || resB[0].Data["value"] != float64(2) {
 		t.Errorf("queue B: got %d msgs, payload=%v", len(resB), resB)
 	}
@@ -103,9 +103,9 @@ func TestTx_MultiplePushes(t *testing.T) {
 	}
 	runOK(t, "tx", "-f", writeBundle(t, bundle))
 
-	resB := popN(t, b, 1, "--auto-ack", "--timeout", "5s")
-	resC := popN(t, c, 1, "--auto-ack", "--timeout", "5s")
-	resA := popN(t, a, 1, "--auto-ack", "--wait=false", "--timeout", "200ms")
+	resB := popN(t, b, 1, "--commit-on-delivery", "--timeout", "5s")
+	resC := popN(t, c, 1, "--commit-on-delivery", "--timeout", "5s")
+	resA := popN(t, a, 1, "--commit-on-delivery", "--wait=false", "--timeout", "200ms")
 	if len(resB) != 1 || resB[0].Data["id"] != "b" {
 		t.Errorf("B: %d msgs, payload=%v", len(resB), resB)
 	}
@@ -157,11 +157,11 @@ func TestTx_MultipleAcks(t *testing.T) {
 	}
 	runOK(t, "tx", "-f", writeBundle(t, bundle))
 
-	resB := popN(t, b, 1, "--auto-ack", "--timeout", "5s")
+	resB := popN(t, b, 1, "--commit-on-delivery", "--timeout", "5s")
 	if len(resB) != 1 || resB[0].Data["sum"] != float64(6) {
 		t.Errorf("B summary: got %d msgs, payload=%v", len(resB), resB)
 	}
-	resA := popN(t, a, 5, "--auto-ack", "--wait=false", "--timeout", "200ms")
+	resA := popN(t, a, 5, "--commit-on-delivery", "--wait=false", "--timeout", "200ms")
 	if len(resA) != 0 {
 		t.Errorf("A should be empty, got %d", len(resA))
 	}

@@ -110,7 +110,7 @@ func TestPush_LargePayload(t *testing.T) {
 	// push.js#pushLargePayload.
 	// --from-mode all: this CG is created after the push, and the broker
 	// defaults new groups to 'new' (seeded at the tail).
-	got := popN(t, q, 1, "--cg", "ct-large", "--from-mode", "all", "--auto-ack")
+	got := popN(t, q, 1, "--cg", "ct-large", "--from-mode", "all", "--commit-on-delivery")
 	if len(got) != 1 {
 		t.Fatalf("popped %d, want 1", len(got))
 	}
@@ -125,7 +125,7 @@ func TestPush_NullPayload(t *testing.T) {
 	q := uniqueQueue(t, "push-null")
 	createQueue(t, q)
 	pushOne(t, q, "", nil)
-	got := popN(t, q, 1, "--cg", "ct-null", "--from-mode", "all", "--auto-ack")
+	got := popN(t, q, 1, "--cg", "ct-null", "--from-mode", "all", "--commit-on-delivery")
 	if len(got) != 1 {
 		t.Fatalf("got %d msgs, want 1 with null data", len(got))
 	}
@@ -139,7 +139,7 @@ func TestPush_EmptyPayload(t *testing.T) {
 	q := uniqueQueue(t, "push-empty")
 	createQueue(t, q)
 	pushOne(t, q, "", map[string]any{})
-	got := popN(t, q, 1, "--cg", "ct-empty", "--from-mode", "all", "--auto-ack")
+	got := popN(t, q, 1, "--cg", "ct-empty", "--from-mode", "all", "--commit-on-delivery")
 	if len(got) != 1 {
 		t.Fatalf("got %d msgs; want 1 with empty object", len(got))
 	}
@@ -155,12 +155,12 @@ func TestPush_DelayedProcessing(t *testing.T) {
 	pushOne(t, q, "", map[string]any{"hello": "world"})
 
 	// Immediate non-blocking pop must yield nothing.
-	got := popN(t, q, 1, "--cg", "ct-delay", "--from-mode", "all", "--auto-ack", "--wait=false", "--timeout", "100ms")
+	got := popN(t, q, 1, "--cg", "ct-delay", "--from-mode", "all", "--commit-on-delivery", "--wait=false", "--timeout", "100ms")
 	if len(got) != 0 {
 		t.Fatalf("immediate pop returned %d msgs, expected 0 (delayed)", len(got))
 	}
 	time.Sleep(2500 * time.Millisecond)
-	got = popN(t, q, 1, "--cg", "ct-delay", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	got = popN(t, q, 1, "--cg", "ct-delay", "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	if len(got) != 1 {
 		t.Errorf("post-delay pop returned %d, expected 1", len(got))
 	}
@@ -176,12 +176,12 @@ func TestPush_WindowBuffer(t *testing.T) {
 		map[string]any{"i": 3},
 	})
 	// Inside the window, the broker should not surface anything yet.
-	got := popN(t, q, 1, "--cg", "ct-win", "--from-mode", "all", "--auto-ack", "--wait=false", "--timeout", "100ms")
+	got := popN(t, q, 1, "--cg", "ct-win", "--from-mode", "all", "--commit-on-delivery", "--wait=false", "--timeout", "100ms")
 	if len(got) != 0 {
 		t.Fatalf("inside window: pop returned %d, expected 0", len(got))
 	}
 	time.Sleep(2500 * time.Millisecond)
-	got = popN(t, q, 4, "--cg", "ct-win", "--from-mode", "all", "--auto-ack", "--wait=false")
+	got = popN(t, q, 4, "--cg", "ct-win", "--from-mode", "all", "--commit-on-delivery", "--wait=false")
 	if len(got) != 3 {
 		t.Errorf("post-window pop returned %d, expected 3", len(got))
 	}
@@ -285,7 +285,7 @@ func TestPush_EncryptedPayload(t *testing.T) {
 	q := uniqueQueue(t, "push-enc")
 	runOK(t, "queue", "configure", q, "--encrypt")
 	pushOne(t, q, "", map[string]any{"message": "secret-payload"})
-	got := popN(t, q, 1, "--cg", "ct-enc", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 1, "--cg", "ct-enc", "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	if len(got) != 1 {
 		t.Fatalf("encrypted pop returned %d, want 1", len(got))
 	}

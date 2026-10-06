@@ -11,38 +11,43 @@ import (
 )
 
 var (
-	popGroup       string
-	popPartition   string
-	popLimit       int
-	popBatch       int
-	popMaxParts    int
-	popAutoAck     bool
-	popWait        bool
-	popTimeout     time.Duration
-	popNamespace   string
-	popTask        string
-	popSubMode     string
-	popSubFrom     string
-	popConflation  bool
+	popGroup            string
+	popPartition        string
+	popLimit            int
+	popBatch            int
+	popMaxParts         int
+	popCommitOnDelivery bool
+	popAutoAck          bool // deprecated alias of popCommitOnDelivery
+	popWait             bool
+	popTimeout          time.Duration
+	popNamespace        string
+	popTask             string
+	popSubMode          string
+	popSubFrom          string
+	popConflation       bool
 )
 
 var popCmd = &cobra.Command{
 	Use:   "pop <queue>",
 	Short: "Pop one or more messages from a queue",
 	Long: `One-shot pop. By default returns up to 1 message and prints it as
-NDJSON on stdout. Use --limit to retrieve N. Use --auto-ack to have the
-server ack the messages atomically with the pop.
+NDJSON on stdout. Use --limit to retrieve N. The messages are leased: ack them
+with 'queenctl ack', or they come back when the lease expires.
 
-  queenctl pop orders --auto-ack
+--commit-on-delivery makes the broker move the group's cursor past the
+messages as it hands them out: no lease and nothing to ack. That is
+at-most-once delivery, because a crash after the pop loses the messages.
+
+  queenctl pop orders --commit-on-delivery
   queenctl pop orders -n 50 --cg analyzer | jq -s 'length'
 
 --conflation asks for last-value delivery: one message per partition, the
 newest, with everything below it committed. It is a property of the CONSUMER
 GROUP, not of this call — the broker persists it on the group's first
 registration and the stored value wins for every consumer afterwards, so
---conflation requires --cg and cannot be combined with --auto-ack. Requires
-broker >= 1.1.0: against an older one the pop FAILS rather than quietly
-handing back the whole backlog.
+--conflation requires --cg and cannot be combined with --commit-on-delivery.
+Requires broker >= 1.1.0: against an older one the pop FAILS rather than
+quietly handing back the whole backlog.
 
   queenctl pop dirty-entities --cg recompute --conflation --max-partitions 64`,
 	Args: cobra.MaximumNArgs(1),
@@ -92,7 +97,8 @@ handing back the whole backlog.
 			qb = qb.Conflation(true)
 			showConflationWarnings()
 		}
-		qb = qb.AutoAck(popAutoAck).Wait(popWait).TimeoutMillis(int(popTimeout.Milliseconds()))
+		qb = withCommitOnDelivery(qb, popCommitOnDelivery || popAutoAck)
+		qb = qb.Wait(popWait).TimeoutMillis(int(popTimeout.Milliseconds()))
 
 		ctx, cancel := context.WithTimeout(cmd.Context(), popTimeout+10*time.Second)
 		defer cancel()
@@ -149,7 +155,9 @@ func init() {
 	popCmd.Flags().IntVarP(&popLimit, "limit", "n", 1, "maximum messages to print")
 	popCmd.Flags().IntVar(&popBatch, "batch", 0, "batch size sent to server (defaults to --limit)")
 	popCmd.Flags().IntVar(&popMaxParts, "max-partitions", 1, "claim up to N partitions in one call; pass it to pin the sweep, leave it out and the broker sizes it")
-	popCmd.Flags().BoolVar(&popAutoAck, "auto-ack", false, "ack server-side")
+	popCmd.Flags().BoolVar(&popCommitOnDelivery, "commit-on-delivery", false, "commit the group's cursor as the messages are handed out: no lease, nothing to ack (at-most-once)")
+	popCmd.Flags().BoolVar(&popAutoAck, "auto-ack", false, "deprecated alias of --commit-on-delivery")
+	_ = popCmd.Flags().MarkDeprecated("auto-ack", "use --commit-on-delivery")
 	popCmd.Flags().BoolVar(&popWait, "wait", true, "long-poll until messages arrive or timeout")
 	popCmd.Flags().DurationVar(&popTimeout, "timeout", 10*time.Second, "long-poll timeout")
 	popCmd.Flags().StringVar(&popNamespace, "namespace", "", "filter pop by namespace")
