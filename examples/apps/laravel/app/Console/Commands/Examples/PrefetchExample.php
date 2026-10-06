@@ -3,7 +3,6 @@
 namespace App\Console\Commands\Examples;
 
 use App\Examples\ExampleCommand;
-use App\Examples\Journal;
 use App\Jobs\ProbeBatch;
 use Illuminate\Support\Facades\Queue;
 
@@ -12,7 +11,7 @@ final class PrefetchExample extends ExampleCommand
 {
     protected $signature = 'example:prefetch';
 
-    protected $description = 'How prefetch fills a batch: one job per pop, then auto growing on a backlog of short jobs';
+    protected $description = 'How prefetch fills a batch: prefetch 1, then auto';
 
     protected function example(): void
     {
@@ -30,12 +29,21 @@ final class PrefetchExample extends ExampleCommand
         for ($i = 1; $i < count($sizes); $i++) {
             $grewAtMostDouble = $grewAtMostDouble && $sizes[$i] <= 2 * $sizes[$i - 1];
         }
-        $this->check($grewAtMostDouble && max($sizes) <= 16, 'no batch was more than twice the one before it, or above 16');
-        $this->check(count($sizes) * 3 <= 200, sprintf('a pop served %.1f jobs on average, 3 or more', 200 / count($sizes)));
+        $this->check(
+            $grewAtMostDouble && max($sizes) <= 16,
+            'no batch was more than twice the one before it, or above 16',
+        );
+        $this->check(
+            count($sizes) * 3 <= 200,
+            sprintf('a pop served %.1f jobs on average, 3 or more', 200 / count($sizes)),
+        );
 
         $this->line("\nc) prefetch 'auto': 10 jobs of 300 ms, one worker");
         $sizes = $this->drain('queen-auto', 'long', 10, 300);
-        $this->check($sizes === array_fill(0, 10, 1), 'every pop took one job: one of them is more than 250 ms of work');
+        $this->check(
+            $sizes === array_fill(0, 10, 1),
+            'every pop took one job: one of them is more than 250 ms of work',
+        );
     }
 
     /**
@@ -55,7 +63,7 @@ final class PrefetchExample extends ExampleCommand
         Queue::connection($connection)->bulk($batch, '', $queue);
 
         $this->startWorkers(1, $connection, $queue);
-        $ran = $this->waitFor("{$jobs} jobs", 60, fn () => count(Journal::read($queue, 'ran')) >= $jobs ? Journal::read($queue, 'ran') : null);
+        $ran = $this->waitForEvents($queue, 'ran', $jobs, 60);
         $this->stopProcesses();
 
         // One lease per pop: group the jobs by lease, in the order they ran.
@@ -72,11 +80,16 @@ final class PrefetchExample extends ExampleCommand
         $this->line(sprintf('  jobs           %d', count($ran)));
         $this->line(sprintf('  pops           %d', count($sizes)));
         $this->line(sprintf('  jobs per pop   %.1f', count($ran) / count($sizes)));
-        $this->line('  batch sizes    ' . wordwrap($this->runLengths($sizes), 54, "\n" . str_repeat(' ', 17)));
+        $sizesText = wordwrap($this->runLengths($sizes), 54, "\n" . str_repeat(' ', 17));
+        $this->line("  batch sizes    {$sizesText}");
         if ($gaps !== []) {
             sort($gaps);
             $each = $gaps[intdiv(count($gaps), 2)] * 1000;
-            $this->line(sprintf('  one job took about %d ms, its ACK included: 250 ms holds %d', $each, intdiv(250, max(1, (int) $each))));
+            $this->line(sprintf(
+                '  one job took about %d ms, its ACK included: 250 ms holds %d',
+                $each,
+                intdiv(250, max(1, (int) $each)),
+            ));
         }
 
         return $sizes;

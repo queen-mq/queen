@@ -3,7 +3,6 @@
 namespace App\Console\Commands\Examples;
 
 use App\Examples\ExampleCommand;
-use App\Examples\Journal;
 use App\Jobs\RebuildCustomer;
 
 // docs:start(app-laravel-ordering)
@@ -31,14 +30,11 @@ final class OrderingExample extends ExampleCommand
             }
         }
         $total = count(self::CUSTOMERS) * self::JOBS_PER_CUSTOMER;
-        $this->line("\ndispatched {$total} jobs, then started " . self::WORKERS . ' workers (php artisan queue:work)');
-
         $workers = $this->startWorkers(self::WORKERS, 'queen', $queue);
-        $ran = $this->waitFor("{$total} jobs", 60, function () use ($queue, $total) {
-            $ran = Journal::read($queue, 'ran');
+        $this->line("\ndispatched {$total} jobs, then started "
+            . count($workers) . ' workers (php artisan queue:work)');
 
-            return count($ran) >= $total ? $ran : null;
-        });
+        $ran = $this->waitForEvents($queue, 'ran', $total, 60);
         $this->stopProcesses();
 
         // What each customer saw: its jobs in the order they started, and the
@@ -49,22 +45,24 @@ final class OrderingExample extends ExampleCommand
         foreach ($ran as $job) {
             $byCustomer[$job['customer']][] = $job;
         }
-        $this->line(sprintf("\n  %-9s %-11s %-16s %-7s %s", 'customer', 'run order', 'on workers', 'from', 'to'));
+        $row = '  %-9s %-11s %-16s %-7s %s';
+        $this->line(sprintf("\n{$row}", 'customer', 'run order', 'on workers', 'from', 'to'));
         foreach (self::CUSTOMERS as $customer) {
             $jobs = $byCustomer[$customer] ?? [];
             usort($jobs, fn ($a, $b) => $a['started'] <=> $b['started']);
             $byCustomer[$customer] = $jobs;
             $this->line(sprintf(
-                '  %-9s %-11s %-16s %.1f s   %.1f s',
+                $row,
                 $customer,
                 implode(' ', array_column($jobs, 'seq')),
                 implode(' ', array_map(fn ($job) => 'w' . ($name[$job['pid']] + 1), $jobs)),
-                $jobs[0]['started'] - $t0,
-                end($jobs)['ended'] - $t0,
+                sprintf('%.1f s', $jobs[0]['started'] - $t0),
+                sprintf('%.1f s', end($jobs)['ended'] - $t0),
             ));
         }
         $peak = $this->peakConcurrency($ran);
-        $this->line("\n  at most {$peak} jobs ran at the same time, on " . self::WORKERS . ' workers');
+        $this->line("\n  at most {$peak} jobs ran at the same time, on "
+            . self::WORKERS . ' workers');
 
         $this->line("\nchecking");
         foreach (self::CUSTOMERS as $customer) {

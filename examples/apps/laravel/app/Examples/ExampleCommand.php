@@ -209,6 +209,21 @@ abstract class ExampleCommand extends Command
         return implode(' ', $out);
     }
 
+    /**
+     * Wait until $count events $event are recorded on $queue, and return
+     * them; fail after $seconds.
+     *
+     * @return list<array<string, mixed>>
+     */
+    protected function waitForEvents(string $queue, string $event, int $count, float $seconds): array
+    {
+        return $this->waitFor("{$count} {$event} events on {$queue}", $seconds, function () use ($queue, $event, $count) {
+            $rows = Journal::read($queue, $event);
+
+            return count($rows) >= $count ? $rows : null;
+        });
+    }
+
     protected function check(bool $condition, string $description): void
     {
         if (!$condition) {

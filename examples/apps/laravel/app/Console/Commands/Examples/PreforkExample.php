@@ -12,57 +12,69 @@ final class PreforkExample extends ExampleCommand
 {
     protected $signature = 'example:prefork';
 
-    protected $description = 'What prefork changes: the process tree, memory, queue:restart and shutdown under queen:supervise';
+    protected $description = 'What prefork changes, under php artisan queen:supervise';
 
     private const JOBS_PER_POOL = 4;
 
     private int $master;
 
+    /** @var array<string, string> the queue of each pool of config/queen.php */
+    private array $queues;
+
     protected function example(): void
     {
-        // The two pools of config/queen.php: `default` follows the prefork
-        // switch, `isolated` has 'prefork' => false.
-        $forkedQueue = $this->freshQueue('prefork-default');
-        $spawnedQueue = $this->freshQueue('prefork-isolated');
-        $this->master = $this->startArtisan("{$forkedQueue}-supervisor", ['queen:supervise'], [
+        // `default` follows the prefork switch; `isolated` has its own
+        // 'prefork' => false.
+        $this->queues = [
+            'default' => $this->freshQueue('prefork-default'),
+            'isolated' => $this->freshQueue('prefork-isolated'),
+        ];
+        $this->master = $this->startArtisan("{$this->queues['default']}-supervisor", ['queen:supervise'], [
             'QUEEN_SUPERVISOR_PREFORK' => 'true',
-            'EXAMPLE_FORKED_QUEUE' => $forkedQueue,
-            'EXAMPLE_SPAWNED_QUEUE' => $spawnedQueue,
+            'EXAMPLE_FORKED_QUEUE' => $this->queues['default'],
+            'EXAMPLE_SPAWNED_QUEUE' => $this->queues['isolated'],
         ]);
         $this->line("\nstarted php artisan queen:supervise (pid {$this->master}) with prefork on");
 
-        $tree = $this->waitFor('two forked and two spawned workers', 30, fn () => $this->treeWith(2, 2));
-        $this->waitFor('the workers to boot', 30, fn () => $this->booted($tree['forked'], $forkedQueue)
-            && $this->booted($tree['spawned'], $spawnedQueue));
-        $tree = $this->treeWith(2, 2);
+        $tree = $this->waitFor('two forked and two spawned workers', 30, fn () => $this->bootedTree());
         $this->printTree($tree);
-        $this->check(count($tree['forked']) === 2, 'the pool `default` has 2 workers forked by the fork server');
-        $this->check(count($tree['spawned']) === 2, 'the pool `isolated` has 2 workers spawned by the master');
+        $this->check(
+            count($tree['forked']) === 2,
+            'the pool `default` has 2 workers forked by the fork server',
+        );
+        $this->check(
+            count($tree['spawned']) === 2,
+            'the pool `isolated` has 2 workers spawned by the master',
+        );
         $this->printMemory($tree);
 
         // Jobs for both pools: each records the pid of its worker and that
         // worker's parent.
         $this->line("\n" . self::JOBS_PER_POOL . ' jobs to each pool');
-        for ($n = 0; $n < self::JOBS_PER_POOL; $n++) {
-            RecordWorker::dispatch()->onQueue($forkedQueue);
-            RecordWorker::dispatch()->onQueue($spawnedQueue);
+        foreach ($this->queues as $queue) {
+            for ($n = 0; $n < self::JOBS_PER_POOL; $n++) {
+                RecordWorker::dispatch()->onQueue($queue);
+            }
         }
-        foreach (['default' => $forkedQueue, 'isolated' => $spawnedQueue] as $pool => $queue) {
-            $ran = $this->waitFor("the jobs of {$pool}", 30, fn () => count(Journal::read($queue, 'ran')) >= self::JOBS_PER_POOL ? Journal::read($queue, 'ran') : null);
+        foreach ($this->queues as $pool => $queue) {
+            $ran = $this->waitForEvents($queue, 'ran', self::JOBS_PER_POOL, 30);
             $pids = array_values(array_unique(array_column($ran, 'pid')));
             sort($pids);
             $parents = array_values(array_unique(array_column($ran, 'ppid')));
-            $workers = array_keys($pool === 'default' ? $tree['forked'] : $tree['spawned']);
-            $parent = $pool === 'default' ? $tree['forkServer'] : $this->master;
+            [$workers, $parent, $parentRole] = $pool === 'default'
+                ? [$tree['forked'], $tree['forkServer'], 'the fork server']
+                : [$tree['spawned'], $this->master, 'the master'];
             $this->line(sprintf(
                 '  %-9s ran on %s, children of %s',
                 $pool,
                 implode(' and ', $pids),
-                implode(', ', $parents) . ($parents === [$parent] ? ($pool === 'default' ? ' (the fork server)' : ' (the master)') : ''),
+                implode(', ', $parents) . ($parents === [$parent] ? " ({$parentRole})" : ''),
             ));
             $this->check(
-                array_diff($pids, $workers) === [] && $parents === [$parent],
-                $pool === 'default' ? 'the forked workers ran the jobs of default' : 'the spawned workers ran the jobs of isolated',
+                array_diff($pids, array_keys($workers)) === [] && $parents === [$parent],
+                $pool === 'default'
+                    ? 'the forked workers ran the jobs of default'
+                    : 'the spawned workers ran the jobs of isolated',
             );
         }
 
@@ -71,20 +83,24 @@ final class PreforkExample extends ExampleCommand
         $this->line("\nphp artisan queue:restart");
         $this->callSilently('queue:restart');
         $old = $tree;
-        $tree = $this->waitFor('a new fork server and its workers', 30, function () use ($old, $forkedQueue, $spawnedQueue) {
-            $tree = $this->treeWith(2, 2);
+        $tree = $this->waitFor('a new fork server and its workers', 30, function () use ($old) {
+            $tree = $this->bootedTree();
 
             return $tree !== null
                 && $tree['forkServer'] !== $old['forkServer']
                 && array_intersect_key($tree['spawned'], $old['spawned']) === []
-                && !Processes::alive($old['forkServer'])
-                && $this->booted($tree['forked'], $forkedQueue)
-                && $this->booted($tree['spawned'], $spawnedQueue) ? $tree : null;
+                && !Processes::alive($old['forkServer']) ? $tree : null;
         });
         $this->printTree($tree);
-        $this->check($tree['forkServer'] !== $old['forkServer'], "queue:restart brought a new fork server, pid {$tree['forkServer']}");
+        $this->check(
+            $tree['forkServer'] !== $old['forkServer'],
+            "queue:restart brought a new fork server, pid {$tree['forkServer']}",
+        );
         $this->check(count($tree['forked']) === 2, 'the workers forked since then are its children');
-        $this->check(!Processes::alive($old['forkServer']), "the old fork server, pid {$old['forkServer']}, exited with its workers");
+        $this->check(
+            !Processes::alive($old['forkServer']),
+            "the old fork server, pid {$old['forkServer']}, exited with its workers",
+        );
 
         // Stop the supervisor the way a deploy does: it drains every worker,
         // then exits.
@@ -101,12 +117,13 @@ final class PreforkExample extends ExampleCommand
     }
 
     /**
-     * The supervisor's processes, by role, once it runs at least $forked
-     * forked workers and $spawned spawned ones; null until then.
+     * The supervisor's processes by role, once both pools run 2 workers
+     * that have booted (they left their mark: see AppServiceProvider);
+     * null until then.
      *
      * @return array{all: array, forkServer: int, forked: array<int, true>, spawned: array<int, true>}|null
      */
-    private function treeWith(int $forked, int $spawned): ?array
+    private function bootedTree(): ?array
     {
         $all = Processes::all();
         $tree = ['all' => $all, 'forkServer' => 0, 'forked' => [], 'spawned' => []];
@@ -122,20 +139,14 @@ final class PreforkExample extends ExampleCommand
                 $tree['spawned'][$pid] = true;
             }
         }
+        $booted = fn (array $workers, string $queue) => count($workers) >= 2
+            && array_filter(
+                array_keys($workers),
+                fn (int $pid) => !is_file(Journal::readyPath($queue, $pid)),
+            ) === [];
 
-        return count($tree['forked']) >= $forked && count($tree['spawned']) >= $spawned ? $tree : null;
-    }
-
-    /** @param array<int, true> $workers */
-    private function booted(array $workers, string $queue): bool
-    {
-        foreach (array_keys($workers) as $pid) {
-            if (!is_file(Journal::readyPath($queue, $pid))) {
-                return false;
-            }
-        }
-
-        return true;
+        return $booted($tree['forked'], $this->queues['default'])
+            && $booted($tree['spawned'], $this->queues['isolated']) ? $tree : null;
     }
 
     private function printTree(array $tree): void
@@ -150,16 +161,19 @@ final class PreforkExample extends ExampleCommand
         }
         foreach ($rows as $pid => $role) {
             $process = $tree['all'][$pid];
-            $this->line(sprintf('  %-7d %-7d %5.1f MiB  %s', $pid, $process['ppid'], $process['rss_kib'] / 1024, $role));
+            $mib = $process['rss_kib'] / 1024;
+            $this->line(sprintf('  %-7d %-7d %5.1f MiB  %s', $pid, $process['ppid'], $mib, $role));
         }
     }
 
     /** Linux splits a worker's memory into what it shares and what is its own. */
     private function printMemory(array $tree): void
     {
-        $forked = array_key_first($tree['forked']);
-        $spawned = array_key_first($tree['spawned']);
-        if (Processes::smaps($forked) === null) {
+        $workers = [
+            'forked worker' => array_key_first($tree['forked']),
+            'spawned worker' => array_key_first($tree['spawned']),
+        ];
+        if (Processes::smaps($workers['forked worker']) === null) {
             $this->line("\n  memory: resident sets only, this host has no /proc/<pid>/smaps_rollup");
             $this->line('  to split them into shared and private; the memory checks need Linux');
 
@@ -167,13 +181,25 @@ final class PreforkExample extends ExampleCommand
         }
         $this->line("\n  memory           resident   proportional   private");
         $memory = [];
-        foreach (['forked worker' => $forked, 'spawned worker' => $spawned] as $role => $pid) {
-            $m = $memory[$role] = Processes::smaps($pid);
-            $this->line(sprintf('  %-15s %5.1f MiB   %5.1f MiB      %5.1f MiB', $role, $m['rss'] / 1024, $m['pss'] / 1024, $m['private'] / 1024));
+        foreach ($workers as $role => $pid) {
+            $m = $memory[$role] = array_map(fn (int $kib) => $kib / 1024, Processes::smaps($pid));
+            $this->line(sprintf(
+                '  %-15s %5.1f MiB   %5.1f MiB      %5.1f MiB',
+                $role,
+                $m['rss'],
+                $m['pss'],
+                $m['private'],
+            ));
         }
         $forked = $memory['forked worker'];
-        $this->check($forked['private'] < $forked['rss'] / 2, 'a forked worker\'s private memory is under half its resident set');
-        $this->check($forked['private'] < $memory['spawned worker']['private'], 'a forked worker has less private memory than a spawned one');
+        $this->check(
+            $forked['private'] < $forked['rss'] / 2,
+            'a forked worker\'s private memory is under half its resident set',
+        );
+        $this->check(
+            $forked['private'] < $memory['spawned worker']['private'],
+            'a forked worker has less private memory than a spawned one',
+        );
     }
 }
 // docs:end

@@ -13,7 +13,7 @@ final class LeaseExample extends ExampleCommand
 {
     protected $signature = 'example:lease';
 
-    protected $description = 'A job longer than its lease: without renewal it never completes, with renewal it runs once';
+    protected $description = 'A job longer than its lease, without and with lease renewal';
 
     private const JOB_SECONDS = 8;
 
@@ -21,21 +21,38 @@ final class LeaseExample extends ExampleCommand
 
     protected function example(): void
     {
-        $this->line("\na) lease of " . self::LEASE_SECONDS . ' s, not renewed, a job of ' . self::JOB_SECONDS . ' s, --tries=2');
+        $this->line(sprintf(
+            "\na) lease of %d s, not renewed, a job of %d s, --tries=2",
+            self::LEASE_SECONDS,
+            self::JOB_SECONDS,
+        ));
         $events = $this->runOneJob('queen-short-lease', 'expiring');
 
         $started = $events['started'] ?? [];
         $this->check(count($started) === 2, 'the job ran twice');
-        $this->check(count(array_unique(array_column($started, 'pid'))) === 2, 'the second run was on the other worker');
         $this->check(
-            $started[1]['at'] - $started[0]['at'] >= self::LEASE_SECONDS - 0.5,
-            sprintf('the second run began when the first lease expired, %.1f s in', $started[1]['at'] - $started[0]['at']),
+            $started[0]['pid'] !== $started[1]['pid'],
+            'the second run was on the other worker',
         );
-        $refused = array_filter($events['exception'] ?? [], fn ($e) => str_contains($e['error'], 'expired lease'));
+        $gap = $started[1]['at'] - $started[0]['at'];
+        $this->check(
+            $gap >= self::LEASE_SECONDS - 0.5,
+            sprintf('the second run began when the first lease expired, %.1f s in', $gap),
+        );
+        $refused = array_filter(
+            $events['exception'] ?? [],
+            fn ($e) => str_contains($e['error'], 'expired lease'),
+        );
         $this->check(count($refused) === 2, 'both ACKs were refused: each run outlived its lease');
-        $this->check(count($events['failed'] ?? []) === 1, 'the third delivery failed the job without running it');
+        $this->check(
+            count($events['failed'] ?? []) === 1,
+            'the third delivery failed the job without running it',
+        );
         $dead = app(Queen::class)->queue($events['queue'])->dlq()->limit(10)->get();
-        $this->check(count($dead['messages'] ?? []) === 1, 'the job is in the dead-letter queue, never completed');
+        $this->check(
+            count($dead['messages'] ?? []) === 1,
+            'the job is in the dead-letter queue, never completed',
+        );
 
         $this->line("\nb) the same lease, renewed every second, the same job");
         $events = $this->runOneJob('queen-renewed-lease', 'renewed');
@@ -43,7 +60,10 @@ final class LeaseExample extends ExampleCommand
         $this->check(count($events['started'] ?? []) === 1, 'the job ran once');
         $this->check(count($events['exception'] ?? []) === 0, 'no ACK was refused');
         $this->check(count($events['acked'] ?? []) === 1, 'its ACK was accepted');
-        $this->check(Queue::connection('queen-renewed-lease')->size($events['queue']) === 0, 'nothing is left in the queue');
+        $this->check(
+            Queue::connection('queen-renewed-lease')->size($events['queue']) === 0,
+            'nothing is left in the queue',
+        );
     }
 
     /**
@@ -61,23 +81,29 @@ final class LeaseExample extends ExampleCommand
         // ends. --tries=2: a third delivery fails the job instead of running it.
         [$one, $two] = $this->startWorkers(2, $connection, $queue, ['timeout' => 20, 'tries' => 2]);
 
-        $this->waitFor('the job to be acknowledged or failed', 40, fn () => Journal::read($queue, 'acked') ?: Journal::read($queue, 'failed'));
+        $this->waitFor(
+            'the job to be acknowledged or failed',
+            40,
+            fn () => Journal::read($queue, 'acked') ?: Journal::read($queue, 'failed'),
+        );
         // A run ends with its ACK, accepted or refused.
-        $this->waitFor('every run to end', 20, fn () => count(Journal::read($queue, 'acked'))
-            + count(Journal::read($queue, 'exception')) === count(Journal::read($queue, 'started')));
+        $ended = fn () => count(Journal::read($queue, 'acked')) + count(Journal::read($queue, 'exception'));
+        $this->waitFor('every run to end', 20, fn () => $ended() === count(Journal::read($queue, 'started')));
         $this->stopProcesses();
 
         $events = ['queue' => $queue];
         $workers = [$one => 'w1', $two => 'w2'];
         foreach (Journal::read($queue) as $row) {
             $events[$row['event']][] = $row;
-            $this->line(sprintf('  %5.1f s  %s  %s', $row['at'] - $t0, $workers[$row['pid']], match ($row['event']) {
+            $what = match ($row['event']) {
                 'started' => "started attempt {$row['attempt']}",
                 'acked' => 'ended, ACK accepted',
-                // The driver's message, "Unable to acknowledge job: <the broker's reason>".
-                'exception' => 'ended, ACK refused: ' . preg_replace('/^Unable to acknowledge job: /', '', $row['error']),
+                // The driver says "Unable to acknowledge job: <the broker's reason>".
+                'exception' => 'ended, ACK refused: '
+                    . preg_replace('/^Unable to acknowledge job: /', '', $row['error']),
                 'failed' => 'failed: ' . str_replace(BuildReport::class, 'BuildReport', $row['error']),
-            }));
+            };
+            $this->line(sprintf('  %5.1f s  %s  %s', $row['at'] - $t0, $workers[$row['pid']], $what));
         }
 
         return $events;
