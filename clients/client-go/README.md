@@ -253,6 +253,14 @@ client.Queue("my-queue").
     Execute(ctx)
 ```
 
+With `AutoAck(false)` the handler acks by itself and the loop sends no ack or
+nack. A handler error stops the worker that ran it, and `Execute` returns the
+error once every worker has stopped (at once with `Concurrency(1)`). Under
+`Each()` the worker stops at the failed message, and the rest of the popped
+batch does not reach the handler. The failed message comes back when its lease
+expires, which spends no retry: nack it in the handler
+(`client.Ack(ctx, msg, false, ...)`) when it should count against `RetryLimit`.
+
 ### Multi-Partition Pop (Drain Many Partitions Per Call)
 
 ```go

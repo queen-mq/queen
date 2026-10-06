@@ -329,10 +329,20 @@ func (cm *ConsumerManager) worker(
 				// failed message: everything after it in this popped batch WILL
 				// be redelivered. Processing it now would only produce
 				// duplicates and rejected acks — abandon the rest of the batch.
-				if opts.AutoAck && !handledOK {
+				//
+				// Under AutoAck(false) the failed message is still unsettled and
+				// its error stops the consumer below. Handing the handler the
+				// rest of the batch would let its acks commit the failed message
+				// (a completed ack moves the cursor past every earlier message of
+				// the batch), and the next success would overwrite processErr.
+				if !handledOK {
+					status := "batch-abandoned-after-nack"
+					if !opts.AutoAck {
+						status = "batch-abandoned-after-handler-error"
+					}
 					logDebug("ConsumerManager.worker", map[string]interface{}{
 						"workerId":  workerID,
-						"status":    "batch-abandoned-after-nack",
+						"status":    status,
 						"remaining": len(messages) - i - 1,
 					})
 					break

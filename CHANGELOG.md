@@ -61,6 +61,16 @@ after each pop that reached no broker instead of polling in a tight loop. `HighL
 `lastPopError()`, and its `ack()` and `nack()` take an optional error. The help of `--batch` and
 `--conflation` now says what they do.
 
+**Go client: `Each()` with `AutoAck(false)` stops at the first handler error.** The loop handed
+the rest of the popped batch to the handler after a message failed and kept only the last
+message's error. When a later message succeeded, `Execute` returned nil, and if the handler had
+acked that later message, the ack moved the cursor past the failed one, so it was never delivered
+again and never reached the dead-letter queue. Now the first error stops the worker at that
+message, the rest of the batch does not reach the handler, and the error comes back out of
+`Execute`, as the transaction tutorial says. The loop still sends no nack under `AutoAck(false)`:
+the failed message comes back when its lease expires, which spends no retry, so nack it in the
+handler when it should count against the queue's `RetryLimit`.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

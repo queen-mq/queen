@@ -19,6 +19,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -305,5 +306,80 @@ func TestEachStopsBatchAfterNack(t *testing.T) {
 	}
 	if n := dlqTotal(ctx, t, client, queueName, ""); n != 1 {
 		t.Fatalf("poison message not in DLQ (rows=%d)", n)
+	}
+}
+
+// ===========================================================================
+// Each() with AutoAck(false): a handler error stops the consumer, and the
+// rest of the popped batch is not handed to the handler.
+//
+// With auto-ack off the handler acks by itself, and a completed ack moves the
+// cursor past every earlier message of the batch. A consumer that kept going
+// after a failed message would let the next message's ack commit the failed
+// one, and the error would be overwritten by the next success.
+// ===========================================================================
+func TestEachManualAckStopsOnHandlerError(t *testing.T) {
+	client := requireClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	queueName := generateQueueName("each-manual-stop")
+	if _, err := client.Queue(queueName).Config(queen.QueueConfig{LeaseTime: 2}).Create().Execute(ctx); err != nil {
+		t.Fatalf("create queue: %v", err)
+	}
+	if _, err := client.Queue(queueName).Partition("Default").Push([]interface{}{
+		map[string]interface{}{"n": 1},
+		map[string]interface{}{"n": 2},
+		map[string]interface{}{"n": 3},
+	}).Execute(ctx); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	poison := fmt.Errorf("each-manual-stop poison")
+	var mu sync.Mutex
+	var handled []int
+
+	err := client.Queue(queueName).
+		Batch(3).
+		Wait(false).
+		IdleMillis(2000).
+		Each().
+		AutoAck(false).
+		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+			n := int(msg.Data["n"].(float64))
+			mu.Lock()
+			handled = append(handled, n)
+			mu.Unlock()
+			if n == 1 {
+				return poison
+			}
+			res, err := client.Ack(ctx, msg, true, queen.AckOptions{})
+			if err != nil {
+				return err
+			}
+			if !res[0].Success {
+				return fmt.Errorf("ack of n=%d refused: %s", n, res[0].Error)
+			}
+			return nil
+		}).
+		Execute(ctx)
+
+	if !errors.Is(err, poison) {
+		t.Fatalf("Execute returned %v, want the handler error %q", err, poison)
+	}
+	mu.Lock()
+	got := fmt.Sprint(handled)
+	mu.Unlock()
+	if got != "[1]" {
+		t.Fatalf("handler invoked for %s after n=1 failed, want [1]", got)
+	}
+
+	// Nothing acked n=1, so once the 2 s lease lapses the whole batch is
+	// delivered again from it.
+	time.Sleep(2500 * time.Millisecond)
+	again := redeliveredNs(popRetryClient(ctx, t, client, queueName, "", 10))
+	if fmt.Sprint(again) != "[1 2 3]" {
+		t.Fatalf("after the lease expired, redelivered %v, want [1 2 3] (n=1 lost?)", again)
 	}
 }
