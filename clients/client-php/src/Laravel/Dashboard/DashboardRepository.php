@@ -652,6 +652,9 @@ final class DashboardRepository
             'queue' => $queue,
             'processes' => $processes,
             'desired' => $desired,
+            // Fallback counts keep legacy tables usable; diagnosis must only
+            // compare values actually reported by the supervisor.
+            'counts_available' => $reportedProcesses !== null && $reportedDesired !== null,
             'pids' => array_values(array_unique($pids)),
             'draining_pids' => array_values(array_unique($drainingPids)),
             'draining' => $draining,

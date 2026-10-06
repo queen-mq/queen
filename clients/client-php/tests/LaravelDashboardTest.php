@@ -200,6 +200,35 @@ final class LaravelDashboardTest extends TestCase
         $this->assertDashboardButtonState($supervisors, 'Terminate', false);
     }
 
+    public function testPoolDiagnosticsUseReportedCountsAndEscapeQueueNames(): void
+    {
+        $this->liveSupervisor([
+            'engine' => 'php', 'state' => 'running',
+            'pool_status' => [[
+                'supervisor' => 'main', 'queue' => '<script>alert(1)</script>',
+                'running' => 2, 'desired' => 4, 'draining' => 0,
+                'depth' => 19, 'depth_available' => true,
+                'restart_state' => 'backoff', 'restart_failures' => 2, 'restart_in_seconds' => 12,
+            ], [
+                'supervisor' => 'main', 'queue' => 'missing-counts',
+                'depth' => 50, 'depth_available' => true,
+            ]],
+        ]);
+        $html = $this->get('/queen/supervisors')->assertOk()
+            ->assertSee('Pool diagnostics')->assertSee('Restart backoff')
+            ->assertSee('retry in 12s')->assertSee('Incomplete telemetry')
+            ->assertDontSee('Pending work, no workers')
+            ->assertSee('<script>alert(1)</script>')->assertDontSee('<script>alert(1)</script>', false)
+            ->getContent();
+        self::assertStringNotContainsString('@if', $html);
+        self::assertStringNotContainsString('@endif', $html);
+        $xpath = $this->dashboardXPath($html);
+        self::assertStringContainsString('main', $xpath->query('//table[@class="pool-diagnostic-table"]//tbody/tr[1]')->item(0)->textContent);
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('supervisor.pools.2.counts_available', true)
+            ->assertJsonPath('supervisor.pools.3.counts_available', false);
+    }
+
     public function testDashboardSeparatesLivenessReadinessAndDesiredCapacityAndShowsProcessBudget(): void
     {
         $state = $this->liveSupervisor([
