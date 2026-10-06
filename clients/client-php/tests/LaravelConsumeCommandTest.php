@@ -198,13 +198,61 @@ final class LaravelConsumeCommandTest extends TestCase
     }
 
     // ===========================
+    // --idle-timeout
+    // ===========================
+
+    public function testIdleTimeoutStopsTheCommandWithExitZero(): void
+    {
+        $this->broker([], [], emptyPopsAfterScript: 1000, emptyPopMicros: 5_000);
+
+        $started = hrtime(true);
+        [$exit, $output] = $this->consume(['--group' => 'ledger', '--idle-timeout' => 150]);
+        $elapsedMillis = intdiv(hrtime(true) - $started, 1_000_000);
+
+        $this->assertSame(0, $exit);
+        $this->assertStringContainsString('No message for 150 ms (--idle-timeout): stopping.', $output);
+        $this->assertGreaterThanOrEqual(150, $elapsedMillis);
+        $this->assertLessThan(5_000, $elapsedMillis);
+    }
+
+    public function testAPopNeverWaitsPastTheIdleDeadline(): void
+    {
+        $this->broker([], [], emptyPopsAfterScript: 1000, emptyPopMicros: 5_000);
+
+        $this->consume(['--group' => 'ledger', '--idle-timeout' => 150, '--timeout' => 30_000]);
+
+        foreach ($this->broker->pops() as $pop) {
+            $this->assertLessThanOrEqual(150, (int) $pop['timeout']);
+        }
+    }
+
+    public function testIdleTimeoutCountsFromTheLastMessage(): void
+    {
+        $this->broker([
+            function (): array {
+                usleep(120_000);
+
+                return [ConsumeBroker::message('tx-1')];
+            },
+        ], [], emptyPopsAfterScript: 1000, emptyPopMicros: 5_000);
+
+        $started = hrtime(true);
+        [$exit] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--idle-timeout' => 200]);
+        $elapsedMillis = intdiv(hrtime(true) - $started, 1_000_000);
+
+        $this->assertSame(0, $exit);
+        $this->assertCount(1, $this->handler->received);
+        $this->assertGreaterThanOrEqual(310, $elapsedMillis);
+    }
+
+    // ===========================
     // Helpers
     // ===========================
 
     /** @param list<mixed> $pops */
-    private function broker(array $pops, array $acks = [], int $emptyPopsAfterScript = 0): void
+    private function broker(array $pops, array $acks = [], int $emptyPopsAfterScript = 0, int $emptyPopMicros = 0): void
     {
-        $this->broker = new ConsumeBroker($pops, $acks, $emptyPopsAfterScript);
+        $this->broker = new ConsumeBroker($pops, $acks, $emptyPopsAfterScript, $emptyPopMicros);
         $this->app->instance(Queen::class, $this->broker->queen());
     }
 

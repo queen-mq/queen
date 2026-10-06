@@ -34,11 +34,13 @@ final class ConsumeBroker
      * @param list<mixed> $pops
      * @param list<mixed> $ackAnswers JSON bodies for the acks, in order; accepted when absent.
      * @param int $emptyPopsAfterScript empty answers served once $pops ran out, before the test fails
+     * @param int $emptyPopMicros how long each of those empty answers takes, as a short long poll
      */
     public function __construct(
         private array $pops = [],
         private array $ackAnswers = [],
         private int $emptyPopsAfterScript = 0,
+        private int $emptyPopMicros = 0,
     ) {
     }
 
@@ -111,6 +113,8 @@ final class ConsumeBroker
     {
         if ($this->pops === []) {
             if ($this->emptyPops++ < $this->emptyPopsAfterScript) {
+                usleep($this->emptyPopMicros);
+
                 return self::json(['messages' => []]);
             }
             throw new \LogicException('ConsumeBroker: the test scripted no more pops.');

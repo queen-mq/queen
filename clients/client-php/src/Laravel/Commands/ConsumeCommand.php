@@ -20,7 +20,7 @@ class ConsumeCommand extends Command
         {--subscription-from= : Subscription start point}
         {--conflation : Last-value delivery: process only the newest message per partition (needs --group, broker >= 1.1.0)}
         {--timeout=30000 : Long poll timeout in milliseconds}
-        {--idle-timeout= : Stop after N milliseconds of inactivity}
+        {--idle-timeout= : Stop, with exit code 0, after N milliseconds without a message}
         {--limit= : Stop after handing N messages to handle(), failed ones included}';
 
     protected $description = 'Consume messages from a Queen MQ queue';
@@ -93,10 +93,6 @@ class ConsumeCommand extends Command
             $this->info('Conflation: on (only the newest message per partition is processed)');
         }
 
-        if ($this->option('idle-timeout')) {
-            $builder->idleMillis((int) $this->option('idle-timeout'));
-        }
-
         // Use the high-level consumer (rdkafka-style)
         $consumer = $builder->getConsumer();
         $consumer->subscribe();
@@ -115,15 +111,30 @@ class ConsumeCommand extends Command
         $autoAck = (bool) $this->option('auto-ack');
         $timeout = (int) $this->option('timeout');
         $limit = $this->option('limit') ? (int) $this->option('limit') : null;
+        // HighLevelConsumer has no idle stop, so the command keeps the clock:
+        // from the start, then from the end of the last handle().
+        $idleMillis = $this->option('idle-timeout') ? (int) $this->option('idle-timeout') : null;
+        $lastMessageAt = self::monotonicMillis();
 
         while (!$consumer->isClosed()) {
+            $popTimeout = $timeout;
+            if ($idleMillis !== null) {
+                $idleLeft = $idleMillis - (self::monotonicMillis() - $lastMessageAt);
+                if ($idleLeft <= 0) {
+                    $this->info("No message for {$idleMillis} ms (--idle-timeout): stopping.");
+                    break;
+                }
+                // A long poll must not outlast the idle deadline.
+                $popTimeout = min($timeout, $idleLeft);
+            }
+
             if ($batch > 1) {
                 // Never claim more than the limit leaves: a message popped
                 // past it would sit leased until its lease ran out.
                 $wanted = $limit === null ? $batch : min($batch, $limit - $processed);
-                $messages = $consumer->consumeBatch($timeout, $wanted);
+                $messages = $consumer->consumeBatch($popTimeout, $wanted);
             } else {
-                $message = $consumer->consume($timeout);
+                $message = $consumer->consume($popTimeout);
                 $messages = $message === null ? [] : [$message];
             }
             if ($messages === []) {
@@ -132,6 +143,7 @@ class ConsumeCommand extends Command
 
             $processed += count($messages);
             $this->handOut($consumer, $handler, $messages, $batch > 1, $autoAck);
+            $lastMessageAt = self::monotonicMillis();
 
             if ($limit !== null && $processed >= $limit) {
                 $this->info("Message limit reached ({$limit})");
@@ -173,6 +185,11 @@ class ConsumeCommand extends Command
         if ($autoAck) {
             $this->settle($consumer, $payload, count($messages), true, null);
         }
+    }
+
+    private static function monotonicMillis(): int
+    {
+        return intdiv(hrtime(true), 1_000_000);
     }
 
     /** One ack or nack call, and one warning line when the broker refused it. */
