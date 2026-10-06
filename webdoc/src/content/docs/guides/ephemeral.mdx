@@ -15,6 +15,7 @@ verifiedBy:
   - clients/client-js/test-v2/ephemeral-unit/ephemeralWire.test.js
 sidebar:
   order: 6
+# sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/ephemeral.rs names the pop's commit at delivery commitOnDelivery and still reads the old name the JS SDK sends; the page documents the JS SDK's option, which is unchanged. Nothing this page states changes.
 ---
 
 An ephemeral queue keeps its messages in memory and nowhere else. A push is a memory write and a
