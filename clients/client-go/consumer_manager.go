@@ -328,7 +328,13 @@ func (cm *ConsumerManager) worker(
 		// Process messages
 		var processErr error
 		if opts.Each {
-			// Process one at a time
+			// Process one at a time. A nack releases the failed message's
+			// partition and clamps that partition's cursor at it: the later
+			// messages of THAT partition will be redelivered, so handling them
+			// now would only produce duplicates and rejected acks. The other
+			// partitions of a multi-partition pop are still leased to this
+			// worker, so their messages are handled now, not after the lease.
+			nackedPartitions := make(map[string]bool)
 			for i, msg := range messages {
 				select {
 				case <-ctx.Done():
@@ -339,31 +345,34 @@ func (cm *ConsumerManager) worker(
 				default:
 				}
 
+				if nackedPartitions[msg.PartitionID] {
+					continue
+				}
+
 				var handledOK bool
 				handledOK, processErr = cm.processMessage(ctx, msg, handler, opts.AutoAck, opts.Group)
 				processedCount++
 
-				// A nack releases the lease and clamps the server cursor at the
-				// failed message: everything after it in this popped batch WILL
-				// be redelivered. Processing it now would only produce
-				// duplicates and rejected acks — abandon the rest of the batch.
-				//
 				// Under AutoAck(false) the failed message is still unsettled and
 				// its error stops the consumer below. Handing the handler the
 				// rest of the batch would let its acks commit the failed message
 				// (a completed ack moves the cursor past every earlier message of
 				// the batch), and the next success would overwrite processErr.
-				if !handledOK {
-					status := "batch-abandoned-after-nack"
-					if !opts.AutoAck {
-						status = "batch-abandoned-after-handler-error"
-					}
+				if !handledOK && !opts.AutoAck {
 					logDebug("ConsumerManager.worker", map[string]interface{}{
 						"workerId":  workerID,
-						"status":    status,
+						"status":    "batch-abandoned-after-handler-error",
 						"remaining": len(messages) - i - 1,
 					})
 					break
+				}
+				if !handledOK {
+					nackedPartitions[msg.PartitionID] = true
+					logDebug("ConsumerManager.worker", map[string]interface{}{
+						"workerId":    workerID,
+						"status":      "partition-abandoned-after-nack",
+						"partitionId": msg.PartitionID,
+					})
 				}
 
 				if opts.Limit > 0 && processedCount >= opts.Limit {

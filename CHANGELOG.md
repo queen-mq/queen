@@ -209,6 +209,14 @@ half a second, with nothing shown unless logging was on. A 4xx now stops the wor
 out of `Execute`, as a 403 does; a 5xx waits a second before the next pop, as a network error
 does.
 
+**Go client: a nack in `Each()` mode skips only its own partition.** A multi-partition pop claims
+several partitions under one lease, and a nack releases only the failed message's partition. With
+`AutoAck`, the loop dropped the whole rest of the pop after a nack, so the other partitions'
+messages stayed leased and came back only when the lease expired: live, with a 30 s lease, partition
+B was not handled before the run ended. It now skips only the later messages of the failed
+partition, which the broker redelivers, and handles the others at once. With `AutoAck(false)` a
+handler error still stops the consumer at that message.
+
 **Go client: `CommitOnDelivery()` is the pop's option, and `AutoAck()` no longer affects a pop.**
 Behaviour change. On a pop, the broker's `autoAck=true` moves the consumer group's cursor past the
 messages as it hands them out: no lease, nothing to ack, at-most-once. `AutoAck()` sent it from

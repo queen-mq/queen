@@ -99,6 +99,66 @@ func TestEachManualAckLastHandlerErrorIsReturned(t *testing.T) {
 	}
 }
 
+// twoPartitionPop is one multi-partition pop under one lease: tx-1 and tx-2
+// in partition A, tx-3 in partition B.
+func twoPartitionPop() cannedResponse {
+	msg := func(n int, partitionID, partition string) string {
+		return fmt.Sprintf(
+			`{"transactionId":"tx-%d","partitionId":"%s","queue":"each-scope","partition":"%s","leaseId":"lease-1","data":{"n":%d},"createdAt":"2026-10-06T10:00:00.000Z"}`,
+			n, partitionID, partition, n)
+	}
+	a, b := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	return okJSON(`{"leaseId":"lease-1","messages":[` +
+		strings.Join([]string{msg(1, a, "A"), msg(2, a, "A"), msg(3, b, "B")}, ",") + `]}`)
+}
+
+// A multi-partition pop claims several partitions under one lease, and a nack
+// releases only the failed message's partition, whose later messages come
+// back. The other partitions are still leased to this worker: their messages
+// are handled now, not after the lease expires.
+func TestEachNackSkipsOnlyItsOwnPartition(t *testing.T) {
+	srv := newCaptureServer(t, twoPartitionPop())
+	client := newWireClient(t, srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var handled []int
+	err := client.Queue("each-scope").
+		Batch(3).
+		Wait(false).
+		Limit(2).
+		Each().
+		Consume(ctx, func(ctx context.Context, msg *Message) error {
+			n := int(msg.Data["n"].(float64))
+			handled = append(handled, n)
+			if n == 1 {
+				return errors.New("poison")
+			}
+			return nil
+		}).
+		Execute(ctx)
+
+	if err != nil {
+		t.Errorf("Execute returned %v, want nil under AutoAck", err)
+	}
+	if got := fmt.Sprint(handled); got != "[1 3]" {
+		t.Errorf("handled %s, want [1 3]: tx-2 follows the nack in A, tx-3 is in B", got)
+	}
+	var settled []string
+	for _, r := range srv.requests() {
+		if strings.HasPrefix(r.Path, "/api/v1/ack") {
+			for _, tx := range []string{"tx-1", "tx-2", "tx-3"} {
+				if strings.Contains(string(r.Body), `"`+tx+`"`) {
+					settled = append(settled, tx)
+				}
+			}
+		}
+	}
+	if got := fmt.Sprint(settled); got != "[tx-1 tx-3]" {
+		t.Errorf("settled %s, want [tx-1 tx-3] (a nack, then an ack)", got)
+	}
+}
+
 // pops counts the pop requests a capture server received.
 func pops(srv *captureServer) int {
 	n := 0
