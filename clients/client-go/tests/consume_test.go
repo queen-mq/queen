@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -317,4 +318,63 @@ func TestConsumerIdleTimeout(t *testing.T) {
 	}
 
 	t.Logf("Consumer idle timeout working: %s (elapsed: %v)", queueName, elapsed)
+}
+
+// A multi-partition pop holds two partitions under one lease. The first message
+// handled fails once and is nacked, which releases only its own partition: that
+// partition comes back at once, while the other one keeps its lease and has to
+// be handled in the same pass. Before, the loop dropped the rest of the pop, so
+// the other partition waited for the 30 s lease and the run ended without it.
+func TestConsumerNackSkipsOnlyItsOwnPartition(t *testing.T) {
+	client := requireClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	queueName := generateQueueName("consumer-nack-scope")
+	if _, err := client.Queue(queueName).Config(queen.QueueConfig{LeaseTime: 30}).Create().Execute(ctx); err != nil {
+		t.Fatalf("Failed to create queue: %v", err)
+	}
+	for _, m := range []struct{ partition, id string }{{"A", "a1"}, {"A", "a2"}, {"B", "b1"}, {"B", "b2"}} {
+		payload := map[string]interface{}{"id": m.id}
+		if _, err := client.Queue(queueName).Partition(m.partition).Push(payload).Execute(ctx); err != nil {
+			t.Fatalf("Failed to push %s: %v", m.id, err)
+		}
+	}
+
+	var mu sync.Mutex
+	handled := map[string]int{}
+	failed := ""
+	err := client.Queue(queueName).
+		Group("go-nack-scope").
+		SubscriptionMode("all").
+		Partitions(2).
+		Batch(10).
+		Each().
+		Wait(false).
+		IdleMillis(1500).
+		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+			mu.Lock()
+			defer mu.Unlock()
+			id := msg.Data["id"].(string)
+			handled[id]++
+			if failed == "" {
+				failed = id
+				return fmt.Errorf("%s fails once", id)
+			}
+			return nil
+		}).
+		Execute(ctx)
+	if err != nil {
+		t.Fatalf("Consumer failed: %v", err)
+	}
+
+	for _, id := range []string{"a1", "a2", "b1", "b2"} {
+		want := 1
+		if id == failed {
+			want = 2
+		}
+		if handled[id] != want {
+			t.Errorf("%s handled %d time(s), want %d (failed once: %s); all: %v", id, handled[id], want, failed, handled)
+		}
+	}
 }
