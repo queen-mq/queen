@@ -49,6 +49,7 @@ async fn default_off_and_explicit_reporting_preserve_consumption() {
         let config = enabled.then(|| SupervisionConfig::new("billing-production"));
         let result = client
             .queue("orders")
+            .group("")
             .supervision(config)
             .auto_ack(false)
             .wait(false)
@@ -64,6 +65,7 @@ async fn default_off_and_explicit_reporting_preserve_consumption() {
         }
         let last = docs.last().unwrap();
         assert_eq!(last["state"], "stopped");
+        assert_eq!(last["pool_status"][0]["consumer_group"], "__QUEUE_MODE__");
         assert_eq!(last["pool_status"][0]["running"], 0);
         assert_eq!(last["pool_status"][0]["completed"], 1);
         assert_eq!(last["pool_status"][0]["busy"], 0);

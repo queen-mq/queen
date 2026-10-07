@@ -87,12 +87,13 @@ impl ConsumerSupervision {
             inner: builder.inner.clone(),
             group: config.group.clone(),
             id: id(),
-            queue: builder.queue.clone(),
-            namespace: builder.namespace.clone(),
-            task: builder.task.clone(),
+            queue: builder.queue.clone().filter(|v| !v.is_empty()),
+            namespace: builder.namespace.clone().filter(|v| !v.is_empty()),
+            task: builder.task.clone().filter(|v| !v.is_empty()),
             consumer_group: builder
                 .group
                 .clone()
+                .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "__QUEUE_MODE__".into()),
             desired: builder.concurrency,
             started: Instant::now(),

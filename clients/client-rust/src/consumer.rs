@@ -189,7 +189,9 @@ impl QueueBuilder {
                 let n = msgs.len() as u64;
                 let observation = ctx.shared.supervision.as_ref().map(|s| s.handler());
                 let outcome = handler(msgs.clone()).await;
-                if let Some(observation) = observation { observation.finish(outcome.is_ok()); }
+                if let Some(observation) = observation {
+                    observation.finish(outcome.is_ok());
+                }
                 ctx.settle_batch(&msgs, outcome).await;
                 ctx.bump_processed_by(n);
             }
@@ -248,7 +250,9 @@ impl QueueBuilder {
             }
         }
 
-        if let Some(publisher) = publisher { let _ = publisher.await; }
+        if let Some(publisher) = publisher {
+            let _ = publisher.await;
+        }
 
         if let Some(e) = first_error {
             return Err(e);
