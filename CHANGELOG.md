@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## 2.0.2
+## 2.0.2 - 2026-10-07
 
 **C++ client: `commit_on_delivery()` commits a pop at delivery.** The new
 `QueueBuilder::commit_on_delivery()` makes `pop()` and `pop_result()` send the broker's
@@ -53,6 +53,23 @@ before. The queue, partition, discovery and ephemeral pops read both names, conf
 both with a 400 that names both, and the OpenAPI document marks `autoAck` deprecated. The docs
 name only `commitOnDelivery`. A broker up to 2.0.1 reads only `autoAck`: it ignores
 `commitOnDelivery` and leases the batch.
+
+**Server: a page of message history reads only the appends that hold it.** A historical
+`GET /api/v1/messages` read each partition backwards from its live tail, 256 offsets at a time, and
+decoded every payload before it applied `to`, so a small page of old messages could read a large
+newer suffix, and a smaller `limit` did not bound the work. It now seeks the queue log's indexes,
+active and sealed, by timestamp and offset, ranks the candidates from their metadata, and reads
+only the appends that contain the page. The response fields, the status filters and the minute
+rounding of `to` are unchanged, and so is the storage format. Listing a tenant's partitions and
+cursors still costs what it did, so deep offsets and selective status filters can still be slow.
+
+**Dashboard: the Overview lists the queues that need you, and there is a Supervisors page.** Under
+the verdict, the open issues are a list you can search and filter (needs attention, a lag of 5
+minutes or more, no reader, pending increased, all queues), ten to a page. Selecting one opens a
+drawer beside the page with its pending and in-flight counts, the change between two readings, the
+groups behind and the next thing to check. The new Supervisors page shows the worker status that
+Laravel supervisors publish to the broker, and reads it again every 30 seconds like the other
+pages.
 
 **Python client: `admin.move_message_to_dlq()` and `admin.clear_queue()` are deprecated and
 raise.** They sent `POST /api/v1/messages/:partitionId/:transactionId/dlq` and
