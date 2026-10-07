@@ -23,7 +23,7 @@ class ConsumeCommand extends Command
         {--batch= : Messages per pop, default 1. Above 1, handle() receives a list of messages}
         {--partitions= : Partitions to claim per pop. Omit and the broker sizes it; --partitions=1 pins the legacy single-partition claim}
         {--no-autopilot : Restore the pre-1.2 client-side defaults (batch 1, partitions 1) and send no autopilot parameter}
-        {--auto-ack : Ack each message (or batch) when handle() returns. A handler that throws is nacked either way}
+        {--auto-ack : Ack each message (or batch) when handle() returns, and nack it when handle() throws}
         {--lease= : Lease of each pop in seconds. Default: retry_after in config/queen.php}
         {--subscription-mode= : Subscription mode}
         {--subscription-from= : Subscription start point}
@@ -301,10 +301,11 @@ class ConsumeCommand extends Command
     }
 
     /**
-     * Run the handler on one pop's messages, then settle them: a nack when it
-     * threw, with or without --auto-ack, so a failure spends a retry and a
-     * message that always fails reaches the dead-letter queue; an ack when it
-     * returned, with --auto-ack only.
+     * Run the handler on one pop's messages, then settle them with --auto-ack
+     * only: an ack when it returned, a nack when it threw. Without --auto-ack
+     * the handler settles its messages itself, failures included, as in the
+     * SDK consumers: a message whose handler threw comes back when its lease
+     * expires.
      *
      * @param list<array> $messages
      * @param list<string> $leases tracked by the renewer
@@ -322,7 +323,11 @@ class ConsumeCommand extends Command
             $handler->handle($payload);
         } catch (\Throwable $e) {
             $this->error(($asList ? 'Error processing batch: ' : 'Error processing message: ') . $e->getMessage());
-            $this->settle($consumer, $payload, count($messages), false, $e->getMessage(), $leases);
+            if ($autoAck) {
+                $this->settle($consumer, $payload, count($messages), false, $e->getMessage(), $leases);
+            } else {
+                $this->warn('Not nacked without --auto-ack: the broker hands the message out again after its lease.');
+            }
 
             return;
         }
