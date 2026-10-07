@@ -1662,6 +1662,11 @@ const msgs = await queen.queue('q').partition('p1').pop()
 // capped at 200 total messages. All partitions share one leaseId.
 // Each returned message carries its own partitionId / partition / leaseId.
 const msgs = await queen.queue('q').batch(200).partitions(50).pop()
+
+// Commit at delivery: the broker moves the group's cursor past the messages
+// as it hands them out. No lease, nothing to ack, at-most-once: a crash after
+// the pop loses them. pop() and popResult() only; consume() throws.
+const msgs = await queen.queue('q').group('g').commitOnDelivery().pop()
 ```
 
 ### Consume
@@ -1915,8 +1920,9 @@ await queen.close()
 ```javascript
 {
   batch: 1,
-  wait: false,                        // No long polling
-  autoAck: false                      // Manual ack required
+  wait: true,                         // Long polling; .wait(false) returns at once
+  autoAck: false,                     // consume()'s ack after the handler; no effect on pop()
+  commitOnDelivery: false             // Manual ack required; .commitOnDelivery() commits at delivery
 }
 ```
 

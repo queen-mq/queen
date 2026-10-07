@@ -26,12 +26,19 @@ cd /suite
 # `"conflation":true` (PLAN_CONFLATION §4). Neither needs a broker, and the
 # degrade case in particular can only be produced by a scripted server -- a live
 # broker in this repo always applies the flag.
+#
+# pop-unit pins the same two builders on the defaults they do NOT share
+# (autoAck and wait: pop() and consume() differ on both), and admin-unit pins
+# that the Admin methods with no 2.x route refuse before any request is sent,
+# which only a server that records every request can show.
 node --test test-v2/http-unit/retry429.test.js \
              test-v2/kv-unit/kvWire.test.js \
              test-v2/kv-unit/timerWire.test.js \
              test-v2/kv-unit/txnWire.test.js \
              test-v2/conflation-unit/conflationWire.test.js \
-             test-v2/runner-unit/fatalExit.test.js
+             test-v2/runner-unit/fatalExit.test.js \
+             test-v2/pop-unit/popDefaults.test.js \
+             test-v2/admin-unit/removedRoutes.test.js
 
 # No argument = human + stream in one process; run.js calls process.exit(fail?1:0).
 exec node test-v2/run.js

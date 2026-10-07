@@ -319,8 +319,8 @@ export class Queen {
    *     creates it, which is what makes thousands of short-lived req/reply
    *     inboxes cheap (§1.1).
    *   * delivery is at-least-once while the owning broker lives, at-most-once
-   *     with `autoAck` (§1.3) -- NOT "at most once" as a class. Consumers still
-   *     need idempotency.
+   *     with `commitOnDelivery` (§1.3) -- NOT "at most once" as a class.
+   *     Consumers still need idempotency.
    *   * consumption semantics are the pop's `group`, exactly as on durable
    *     queues (§1.5): same group competes, own group fans out, no group is
    *     queue mode. There is no queue-level mode to set.

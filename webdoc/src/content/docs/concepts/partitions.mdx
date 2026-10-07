@@ -17,6 +17,10 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-js/test-v2/docs.js
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): consume/pop.rs and the engine drop idle (group, partition) parts after QUEEN_CONSUME_IDLE_UNLOAD_S; maintenance.rs expires traces in bounded steps.
+# sourceOfTruth re-read 2026-10-06 (JS client fixes): QueueBuilder.js keeps pop()'s behaviour (it long-polls, never sends autoAck) and its defaults and comments now say so; consume() does not change. This page shows push() and .partitions(1), neither of which changes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (commitOnDelivery): QueueBuilder.js adds commitOnDelivery(), a pop() option that sends
+# autoAck=true, and consume() throws when it is set. This page shows push() and .partitions(1), neither of which
+# changes. Nothing this page states changes.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a

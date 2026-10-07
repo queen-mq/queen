@@ -34,6 +34,11 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-06 (prefork per pool): config/queen.php adds a pool's prefork key; nothing this
 # page states changes.
 # sourceOfTruth re-read 2026-10-06 (broker supervisor dashboard): config/queen.php changes remote-publication comments only; the PHP connection example and SDK capabilities are unchanged.
+# sourceOfTruth re-read 2026-10-06 (JS client fixes): clients/client-js/package.json only adds
+# test-v2/pop-unit and test-v2/admin-unit to test:unit; the package is still queen-mq 2.0.0. Nothing this
+# page states changes.
+# sourceOfTruth re-read 2026-10-06 (JS nack scope): ConsumerManager.js in each() mode now skips only the nacked
+# partition's later messages and handles the other partitions of the pop. Nothing this page states changes.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same

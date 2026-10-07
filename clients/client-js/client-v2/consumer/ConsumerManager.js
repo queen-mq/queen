@@ -211,20 +211,25 @@ export class ConsumerManager {
         try {
           // Process messages
           if (each) {
-            // Process one at a time
+            // Process one at a time. A nack releases the failed message's
+            // partition and clamps that partition's cursor at it: the later
+            // messages of THAT partition will be redelivered, so handling them
+            // now would only produce duplicates and rejected acks. The other
+            // partitions of a multi-partition pop are still leased to this
+            // worker, so their messages are handled now, not after the lease.
+            const nackedPartitions = new Set()
             for (const message of messages) {
               if (signal && signal.aborted) break
+
+              const partition = message.partitionId ?? message.partition
+              if (nackedPartitions.has(partition)) continue
 
               const ok = await this.#processMessage(message, handler, autoAck, group)
               processedCount++
 
-              // A nack releases the lease and clamps the server cursor at the
-              // failed message: everything after it in this popped batch WILL
-              // be redelivered. Processing it now would only produce duplicates
-              // and rejected acks — abandon the rest of the batch.
               if (!ok) {
-                logger.warn('ConsumerManager.worker', { workerId, status: 'batch-abandoned-after-nack', remaining: messages.length - messages.indexOf(message) - 1 })
-                break
+                nackedPartitions.add(partition)
+                logger.warn('ConsumerManager.worker', { workerId, status: 'partition-abandoned-after-nack', partition })
               }
 
               if (limit && processedCount >= limit) break

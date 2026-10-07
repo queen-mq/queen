@@ -140,6 +140,42 @@ request, since a consumer always leases its messages; `auto_ack()` stays the loo
 handler and never reaches the wire. The ephemeral pop builder gains `commit_on_delivery()` too, and
 its `auto_ack()` is a deprecated alias with the same effect.
 
+**JavaScript client: a nack in `each()` mode skips only its own partition.** A multi-partition
+pop claims several partitions under one lease, and a nack releases only the failed message's
+partition. The loop dropped the whole rest of the pop after a nack, so the other partitions'
+messages stayed leased and came back only when the lease expired: live, with a 6 s lease, the two
+messages of partition B waited 6 s after a message of partition A failed. It now skips only the
+later messages of the failed partition, which the broker redelivers, and handles the others at
+once.
+
+**JavaScript client: the pop defaults say what `pop()` does.** `POP_DEFAULTS` and the README said
+a pop returns at once and that `autoAck(true)` commits it at delivery. Neither was ever true: a pop
+long-polls for `timeoutMillis` unless `.wait(false)`, and `autoAck()` never reaches the broker,
+because it is the ack `consume()` sends after the handler. A pop commits at delivery only with the
+new `commitOnDelivery()`, below. `POP_DEFAULTS.wait` is now `true`, the README and the builder's
+comments say so, and tests pin both. No behaviour changes.
+
+**JavaScript client: `commitOnDelivery()` commits a pop at delivery.** The broker can move a
+consumer group's cursor past the messages as it hands them out, with no lease and nothing to ack,
+but this client could not ask for it: `autoAck(true)` on a pop never reached the broker.
+`queen.queue(q).group(g).commitOnDelivery().pop()`, and `popResult()`, now send `autoAck=true`, the
+parameter every 2.x broker reads, and nothing else; the messages come back with an empty `leaseId`.
+This is at-most-once: a crash after the pop loses the messages. `consume()` always leases, so it
+throws before any request when the builder has `commitOnDelivery()`. `autoAck()` stays the ack
+`consume()` sends after the handler and still never reaches the broker. The broker refuses
+`commitOnDelivery()` together with `conflation()` (400), and `pop()` raises that 400. On ephemeral
+queues, `queen.ephemeral.pop()` takes `commitOnDelivery: true`; its `autoAck` option, which meant
+the same, still works and is deprecated, and passing both throws.
+
+**JavaScript client: `admin.moveMessageToDLQ()` and `admin.clearQueue()` are deprecated and
+throw.** They sent `POST /api/v1/messages/:partitionId/:transactionId/dlq` and
+`DELETE /api/v1/queues/:name/clear`, routes the 2.x broker does not have, so every call failed
+with a 404 `no_such_route` and the message `not found`. Both now reject before any request and
+name the way that works. For a dead letter, ack the message with the `dlq` status,
+`queen.ack(message, 'dlq', { group })`, while its consumer group holds the lease. To skip what is
+queued, seek each consumer group to the end, `queen.admin.seekConsumerGroup(group, queue,
+{ toEnd: true })`; a pop without a group reads as the group `__QUEUE_MODE__`.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a
