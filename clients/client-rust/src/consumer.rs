@@ -94,6 +94,7 @@ const COMMIT_ON_DELIVERY_IN_CONSUME: &str =
     "commit_on_delivery is a pop option; consume always leases its messages";
 
 struct Shared {
+    supervision: Option<Arc<crate::supervision::ConsumerSupervision>>,
     processed: AtomicU64,
     acked: AtomicU64,
     nacked: AtomicU64,
@@ -140,7 +141,9 @@ impl QueueBuilder {
                     if nacked_partitions.contains(&msg.partition_id) {
                         continue;
                     }
+                    let observation = ctx.shared.supervision.as_ref().map(|s| s.handler());
                     let outcome = handler(msg.clone()).await;
+                    if let Some(observation) = observation { observation.finish(outcome.is_ok()); }
                     let ok = ctx.settle(&msg, outcome).await;
                     ctx.bump_processed();
                     // See the ordering note above. `settle` has logged
@@ -184,7 +187,9 @@ impl QueueBuilder {
             let handler = Arc::clone(&handler);
             async move {
                 let n = msgs.len() as u64;
+                let observation = ctx.shared.supervision.as_ref().map(|s| s.handler());
                 let outcome = handler(msgs.clone()).await;
+                if let Some(observation) = observation { observation.finish(outcome.is_ok()); }
                 ctx.settle_batch(&msgs, outcome).await;
                 ctx.bump_processed_by(n);
             }
@@ -206,7 +211,10 @@ impl QueueBuilder {
             ));
         }
 
+        let supervision = crate::supervision::ConsumerSupervision::new(self)?;
+        let publisher = supervision.as_ref().map(|s| s.start());
         let shared = Arc::new(Shared {
+            supervision,
             processed: AtomicU64::new(0),
             acked: AtomicU64::new(0),
             nacked: AtomicU64::new(0),
@@ -221,6 +229,7 @@ impl QueueBuilder {
             let process = process.clone();
             let cancel = self.cancel.clone();
             workers.push(tokio::spawn(async move {
+                let _guard = shared.supervision.as_ref().map(|s| s.worker());
                 worker(id, builder, shared, cancel, process).await
             }));
         }
@@ -238,6 +247,8 @@ impl QueueBuilder {
                 }
             }
         }
+
+        if let Some(publisher) = publisher { let _ = publisher.await; }
 
         if let Some(e) = first_error {
             return Err(e);
@@ -551,6 +562,7 @@ mod tests {
 
     fn shared() -> Arc<Shared> {
         Arc::new(Shared {
+            supervision: None,
             processed: AtomicU64::new(0),
             acked: AtomicU64::new(0),
             nacked: AtomicU64::new(0),
@@ -620,6 +632,7 @@ mod tests {
     #[test]
     fn the_first_stop_reason_wins() {
         let shared = Shared {
+            supervision: None,
             processed: AtomicU64::new(0),
             acked: AtomicU64::new(0),
             nacked: AtomicU64::new(0),

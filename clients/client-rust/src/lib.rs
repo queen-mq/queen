@@ -69,6 +69,7 @@ pub mod lb;
 pub mod queue;
 pub mod streams;
 pub mod timers;
+pub mod supervision;
 pub mod transaction;
 pub mod uuid;
 
@@ -86,6 +87,7 @@ pub use kv::{Kv, KvOutcome};
 pub use lb::Strategy;
 pub use queue::{PopOutcome, QueueBuilder};
 pub use timers::Timers;
+pub use supervision::SupervisionConfig;
 pub use transaction::TransactionBuilder;
 
 // Re-exported so callers do not need a direct dependency on the protocol crate
