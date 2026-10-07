@@ -49,7 +49,7 @@ else
 endif
 
 # Targets
-.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers conflation run-conflation buffer run-buffer ephemeral run-ephemeral autopilot run-autopilot unit run-unit clean help
+.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers conflation run-conflation buffer run-buffer ephemeral run-ephemeral autopilot run-autopilot consumer run-consumer unit run-unit clean help
 
 all: test
 
@@ -162,10 +162,25 @@ bin/test_autopilot: test_autopilot.cpp queen_client.hpp ../server/vendor/json.hp
 run-autopilot: bin/test_autopilot
 	./bin/test_autopilot
 
-# Every suite that needs no broker, in one command.
-unit: retry429 kvtimers conflation buffer ephemeral autopilot
+# Build the consume path contract suite: what ack() and renew() report from the
+# broker's 200 body, and what the consume loop sends and surfaces. Broker-free
+# like its siblings: the requests a consumer must NOT send, and how many it
+# sends, are only countable against a responder the test controls.
+consumer: bin/test_consumer
+	@echo "Consume path contract test suite built successfully!"
+	@echo "Run with: ./bin/test_consumer"
 
-run-unit: run-retry429 run-kvtimers run-conflation run-buffer run-ephemeral run-autopilot
+bin/test_consumer: test_consumer.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(INCLUDES) test_consumer.cpp -o bin/test_consumer $(LIBS)
+
+run-consumer: bin/test_consumer
+	./bin/test_consumer
+
+# Every suite that needs no broker, in one command.
+unit: retry429 kvtimers conflation buffer ephemeral autopilot consumer
+
+run-unit: run-retry429 run-kvtimers run-conflation run-buffer run-ephemeral run-autopilot run-consumer
 
 # Run tests (requires Queen server running)
 run-test: bin/test_client
@@ -227,6 +242,8 @@ help:
 	@echo "  make run-ephemeral - Build and run ephemeral wire tests (no server needed)"
 	@echo "  make autopilot    - Build pop autopilot wire contract tests"
 	@echo "  make run-autopilot - Build and run pop autopilot wire tests (no server needed)"
+	@echo "  make consumer     - Build consume path contract tests (ack/renew results, consume loop)"
+	@echo "  make run-consumer - Build and run consume path contract tests (no server needed)"
 	@echo "  make unit         - Build every suite that needs no broker"
 	@echo "  make run-unit     - Build and run every suite that needs no broker"
 	@echo "  make clean        - Remove build artifacts"

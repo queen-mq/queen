@@ -4,8 +4,8 @@ description: "What each of the six Queen SDKs implements, and the sixteen rows w
 ---
 
 Parity here is a claim about the surface, not about shared code: each client is written natively
-in its own idiom. These sixteen rows are that surface, read out of `clients/` on this tree. Six
-of them are full parity across all six clients; the other ten are where a client stops.
+in its own idiom. These sixteen rows are that surface, read out of `clients/` on this tree. Seven
+of them are full parity across all six clients; the other nine are where a client stops.
 
 | Capability | JavaScript | Python | Go | Rust | PHP | C++ |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -21,12 +21,12 @@ of them are full parity across all six clients; the other ten are where a client
 | `Admin` facade | yes | yes | yes | yes | yes | no |
 | `affinity` load-balancing strategy | yes | yes | yes | yes | yes | no |
 | Streams DSL over `/streams/v1/*` | yes | yes | yes | yes | no | no |
-| Lease renewal inside the consume loop | yes | yes | yes | yes | yes | no |
+| Lease renewal inside the consume loop | yes | yes | yes | yes | yes | yes |
 | Per-message `trace` helper | yes | yes | yes | no | yes | no |
 | `Host` override independent of the address dialled | yes | no | no | yes | no | no |
 | `pop` reports a failure instead of an empty result | no | no | yes | yes | yes | no |
 
-The ten divergent rows, with their conditions:
+The nine divergent rows, with their conditions:
 
 - **Key/value.** The seven operations are `get`, `getMany`, `getPrefix`, `put`, `putIfAbsent`,
   `delete` and `incr`. C++ wraps five of them: `getMany` and `getPrefix` have no method, and both
@@ -52,9 +52,6 @@ The ten divergent rows, with their conditions:
   from contending on the same partition claim.
 - **Streams.** The `Stream` builder, the four window kinds, gates and the `/streams/v1/*` runtime
   are in the JavaScript, Python, Go and Rust clients. PHP and C++ have none of it.
-- **Lease renewal.** In C++, `renew_lease()` sets a flag the consumer loop does not act on: the
-  worker carries an unimplemented placeholder where the timer would go. Call `client.renew(message)`
-  yourself before the lease expires.
 - **Per-message `trace`.** Where it exists it is attached by the consume loop, so a message
   returned by a manual `pop()` never carries it. Rust records a trace through
   `Admin::record_trace` instead of hanging a method off the message. C++ cannot hang one off a

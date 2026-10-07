@@ -5,6 +5,43 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**C++ client: `commit_on_delivery()` commits a pop at delivery.** The new
+`QueueBuilder::commit_on_delivery()` makes `pop()` and `pop_result()` send the broker's
+`autoAck=true`: the broker moves the consumer group's cursor past the messages as it hands them
+out, with no lease and nothing to ack, so the delivery is at-most-once. `auto_ack()` still decides
+only the ack after a `consume()` handler and has no effect on `pop()`. `consume()` always leases
+its messages, and with `commit_on_delivery()` it throws `std::invalid_argument` before any request.
+On the ephemeral pop, `EphemeralPopOptions::commit_on_delivery` is the new name of `auto_ack`, which
+still works and is deprecated.
+
+**C++ client: a handler that throws no longer loses a message.** With `auto_ack(false)` and
+`each()`, a handler exception was dropped without a log line and the loop went on with the rest of
+the pop: a handler that then acked a later message of the same partition moved the cursor past the
+failed one, and the failed message was lost. After a failure, the later messages of the same
+partition in that pop are no longer handled; they come back with the failed one. The other
+partitions of a multi-partition pop are still handled. The consumer still sends no nack under
+`auto_ack(false)`, by design: the failure is now logged, and the message comes back when its lease
+expires. With `auto_ack(true)` the nack now carries the exception's message as its error, capped at
+4096 bytes and with invalid UTF-8 replaced, so the text cannot stop the nack. A handler that throws
+something other than a `std::exception` is handled the same way; before, it ended the worker.
+
+**C++ client: `renew_lease()` renews.** The consume loop accepted the setting and never renewed.
+While the handler runs, it now renews the batch's lease every `interval_millis`, one request per
+lease, and stops after the ack or nack, as the JS, Go and Rust clients do.
+
+**C++ client: `consume()` throws a pop's 4xx and waits out a 5xx.** A 4xx on a pop other than a
+403 or a 429, such as a 400, ended the worker inside a pool task whose result nobody read, so
+`consume()` returned as if it had finished. It now throws that error once every worker has
+stopped, as it does for a 403. A 5xx that outlasted the retries ended the worker the same way; the
+loop now waits a second and polls again, as after a network fault, and a connection timeout now
+counts as a network fault. `pop()` still logs a failure and returns an empty result.
+
+**C++ client: `ack()` and `renew()` report what the broker refused.** `ack()` returned
+`success: true` for any HTTP 200 and `renew()` for any answer, but the broker answers 200 with
+`success: false` when it settled or extended nothing, for example under an expired or released
+lease. Both now read the body: `success` is false with an `error`, and `ack()` keeps the broker's
+answer in `result`.
+
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
 switch. One forking pool is enough to start the fork server, and both engines spawn the workers of

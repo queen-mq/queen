@@ -26,6 +26,12 @@ cd /src/clients/client-cpp
 # conflation, which drives raw HTTP with no SDK in the way.
 ./bin/test_conflation
 
+# Consume path contract: what ack() and renew() report from the broker's 200
+# body, and what the consume loop sends and surfaces. Broker-free because the
+# requests a consumer must NOT send, and how many it sends, are only countable
+# against a responder the test controls. The live half is in test_client.
+./bin/test_consumer
+
 # Broker URL is argv[1] (there is no env override); default would be localhost.
 # The KV/timer INTEGRATION tests inside this binary run unconditionally: every
 # broker carries both surfaces, so a failure there is a failure and not a

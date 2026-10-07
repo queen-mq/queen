@@ -1072,6 +1072,134 @@ inline int empty_poll_delay_millis(const AutopilotDecision& decision) {
                                                         : EMPTY_POLL_BACKOFF_MILLIS;
 }
 
+// ---------------------------------------------------------------------------
+// Ack and lease-renewal answers
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the broker's answer to POST /api/v1/ack or /api/v1/ack/batch. Both
+ * routes answer HTTP 200 with one item per acknowledgment, in request order:
+ *
+ *   [{index, transactionId, success, error, leaseReleased, dlq, noop}]
+ *
+ * A refused acknowledgment (its lease expired or was released, its message is
+ * already settled) is an item with success:false, still under a 200, so the
+ * per-item flag is the only signal that the broker settled anything. Returns
+ * {success, result[, error]}: `result` is the answer as it came, `error` names
+ * the first refusal. The same reading as the JS client's parseAckResults.
+ */
+inline json ack_outcome(const json& answer, size_t expected) {
+    json out = {{"success", true}, {"result", answer}};
+    auto fail = [&out](const std::string& error) {
+        out["success"] = false;
+        out["error"] = error;
+        return out;
+    };
+    auto error_of = [](const json& item) -> std::string {
+        return item.contains("error") && item["error"].is_string()
+            ? item["error"].get<std::string>() : std::string();
+    };
+
+    if (!answer.is_array()) {
+        // A top-level error envelope: the whole request was refused.
+        if (answer.is_object() && !error_of(answer).empty()) {
+            return fail(error_of(answer));
+        }
+        return fail("Unexpected ack response format: missing per-item result array");
+    }
+    // A short or misaligned answer fails loudly instead of being read against
+    // the wrong message.
+    if (answer.size() != expected) {
+        return fail("Ack response has " + std::to_string(answer.size()) +
+                    " results, expected " + std::to_string(expected));
+    }
+
+    size_t refused = 0;
+    std::string first_error;
+    for (const auto& item : answer) {
+        if (!item.is_object()) {
+            return fail("Unexpected ack result item: " + item.dump());
+        }
+        std::string error = error_of(item);
+        bool success = error.empty() &&
+            !(item.contains("success") && item["success"].is_boolean() &&
+              !item["success"].get<bool>());
+        if (!success && refused++ == 0) {
+            first_error = error.empty() ? "Acknowledgment rejected by server" : error;
+        }
+    }
+    if (refused == 0) {
+        return out;
+    }
+    if (refused == 1) {
+        return fail(first_error);
+    }
+    return fail(std::to_string(refused) + " of " + std::to_string(answer.size()) +
+                " acknowledgments rejected: " + first_error);
+}
+
+/**
+ * Read the broker's answer to POST /api/v1/lease/:leaseId/extend, which is
+ * HTTP 200 whether or not anything was renewed:
+ *
+ *   {leaseId, success, renewed, newExpiresAt, expiresAt, lease_expires_at}
+ *
+ * success:false (renewed 0) means the lease is gone -- expired, released by an
+ * ack or nack, or never there -- so nothing was extended, and its messages can
+ * already be on their way to another consumer. Returns {leaseId, success,
+ * newExpiresAt[, renewed][, error]}, the JS client's parseRenewResult reading.
+ */
+inline json renew_outcome(const json& answer, const std::string& lease_id) {
+    const json& item = (answer.is_array() && !answer.empty()) ? answer[0] : answer;
+    if (!item.is_object()) {
+        return {{"leaseId", lease_id}, {"success", false}, {"newExpiresAt", nullptr},
+                {"error", "Unexpected lease renewal response"}};
+    }
+
+    json expires = nullptr;
+    for (const char* key : {"newExpiresAt", "expiresAt", "lease_expires_at"}) {
+        if (item.contains(key) && !item[key].is_null()) {
+            expires = item[key];
+            break;
+        }
+    }
+    bool success = (item.contains("success") && item["success"].is_boolean())
+        ? item["success"].get<bool>() : !expires.is_null();
+
+    json out = {{"leaseId", lease_id}, {"success", success}, {"newExpiresAt", expires}};
+    if (item.contains("renewed") && item["renewed"].is_number()) {
+        out["renewed"] = item["renewed"];
+    }
+    if (!success) {
+        bool has_error = item.contains("error") && item["error"].is_string() &&
+                         !item["error"].get<std::string>().empty();
+        out["error"] = has_error
+            ? item["error"].get<std::string>()
+            : std::string("Lease not renewed: it expired, was released by an ack or nack, "
+                          "or does not exist");
+    }
+    return out;
+}
+
+/// The longest handler error a nack carries: a message and the head of a
+/// trace. The broker keeps it with the dead letter, once per message.
+inline constexpr size_t MAX_NACK_ERROR_BYTES = 4096;
+
+/**
+ * A handler's what() made safe to send as a nack's `error`: capped at
+ * MAX_NACK_ERROR_BYTES, and every byte that is not valid UTF-8 replaced by
+ * U+FFFD. nlohmann::json refuses to serialize invalid UTF-8 (type_error 316),
+ * so a raw what() carrying, say, a Latin-1 file name would make the nack's body
+ * unsendable and leave the message leased, which is what the nack is there to
+ * prevent. A cut through a multi-byte character is replaced the same way.
+ */
+inline std::string nack_error_text(const std::string& what) {
+    const std::string capped =
+        what.size() > MAX_NACK_ERROR_BYTES ? what.substr(0, MAX_NACK_ERROR_BYTES) : what;
+    return json::parse(json(capped).dump(-1, ' ', false, json::error_handler_t::replace))
+        .get<std::string>();
+}
+
 } // namespace util
 
 /**
@@ -1297,7 +1425,12 @@ struct EphemeralPopOptions {
     /// The WHOLE of the consumption semantics (§1.5): same group = competing
     /// consumers, own group = fan-out, empty = the groupless queue mode.
     std::string group;
-    /// Commit at delivery. At-most-once, and the only mode that is.
+    /// Commit at delivery: the broker moves the cursor past the messages as it
+    /// hands them out. No lease, nothing to ack, at-most-once, and the only
+    /// mode that is.
+    bool commit_on_delivery = false;
+    /// DEPRECATED: the old name of commit_on_delivery, kept so existing code
+    /// still compiles. Either one set to true commits at delivery.
     bool auto_ack = false;
 };
 
@@ -3042,11 +3175,12 @@ public:
 // history to have.
 //
 // DELIVERY IS NOT "AT MOST ONCE" (§1.3), and the docs must not say it is. The
-// class picks what can be LOST; the ack mode picks the guarantee. `auto_ack`
-// advances the cursor at delivery and is at-most-once. The default -- explicit
-// ack -- is at-least-once for as long as the owning broker incarnation lives:
-// an unacked message redelivers when its lease expires, with `attempts`
-// incremented, until retryLimit, after which it is DROPPED and counted.
+// class picks what can be LOST; the ack mode picks the guarantee.
+// `commit_on_delivery` (formerly `auto_ack`) advances the cursor at delivery
+// and is at-most-once. The default -- explicit ack -- is at-least-once for as
+// long as the owning broker incarnation lives: an unacked message redelivers
+// when its lease expires, with `attempts` incremented, until retryLimit, after
+// which it is DROPPED and counted.
 // Consumers still need idempotency, exactly as on durable queues.
 //
 // CONSUMPTION SEMANTICS COME FROM THE GROUP, EXACTLY AS ON THE DURABLE ENGINE
@@ -3234,7 +3368,7 @@ public:
         if (!options.group.empty()) {
             path << "&group=" << util::url_encode(options.group);
         }
-        if (options.auto_ack) {
+        if (options.commit_on_delivery || options.auto_ack) {
             path << "&autoAck=true";
         }
 
@@ -3423,7 +3557,32 @@ private:
         // Instead, we provide a separate trace function that takes the message
         // The user would call: queen.trace(message, trace_config)
     }
-    
+
+    /**
+     * Run the handler on one message or one batch, and say how it failed if it
+     * did. A handler can throw anything, not only a std::exception, and every
+     * throw is a failed message: none may escape into the worker, where it
+     * would end the loop with the message unsettled.
+     */
+    static std::optional<std::string> run_handler(const std::function<void(const json&)>& handler,
+                                                  const json& input) {
+        try {
+            handler(input);
+            return std::nullopt;
+        } catch (const std::exception& e) {
+            return std::string(e.what());
+        } catch (...) {
+            return std::string("handler threw a non-standard exception");
+        }
+    }
+
+    // Settle what a handler was given, with auto_ack: ack it after a success,
+    // nack it after a failure. Without auto_ack a failure is only logged.
+    // Defined after QueenClient, whose ack() they call.
+    void ack_handled(const json& messages, const ConsumeOptions& options, const char* where);
+    void handle_failure(const json& messages, const std::string& reason,
+                        const ConsumeOptions& options, const char* where);
+
 public:
     ConsumerManager(std::shared_ptr<HttpClient> http_client, QueenClient* queen,
                    int pool_size = std::thread::hardware_concurrency())
@@ -3466,6 +3625,7 @@ private:
     int limit_ = 0;
     int idle_millis_ = 0;
     bool auto_ack_ = true;
+    bool commit_on_delivery_ = false;
     bool wait_ = true;
     int timeout_millis_ = 30000;
     bool renew_lease_ = false;
@@ -3652,8 +3812,26 @@ public:
         return *this;
     }
     
+    /**
+     * Ack after the consume() handler returns: each message with each(),
+     * otherwise the batch. Client side and consume() only: it has no effect on
+     * pop(). With it, a handler that throws is nacked; without it, the failure
+     * is logged and nothing is sent.
+     */
     QueueBuilder& auto_ack(bool enabled) {
         auto_ack_ = enabled;
+        return *this;
+    }
+    
+    /**
+     * Commit at delivery on pop(): the broker moves the group's cursor past the
+     * messages as it hands them out. No lease, nothing to ack, at-most-once: a
+     * message lost after the pop is not delivered again. pop() and pop_result()
+     * only: consume() always leases its messages and throws
+     * std::invalid_argument. The broker refuses it with conflation() (a 400).
+     */
+    QueueBuilder& commit_on_delivery(bool enabled = true) {
+        commit_on_delivery_ = enabled;
         return *this;
     }
     
@@ -3694,9 +3872,10 @@ public:
      *
      * Composes with this client's auto_ack(), which defaults to true. The
      * combination §3.3 refuses is the broker-side `autoAck` query param, which
-     * commits at delivery with no lease -- this SDK never sends it. auto_ack()
-     * here means "ack after the handler returns", i.e. the leased at-least-once
-     * shape conflation is built on, so the §1.3 guarantee holds.
+     * commits at delivery with no lease -- this SDK sends it only for
+     * commit_on_delivery(), on pop(). auto_ack() here means "ack after the
+     * handler returns", i.e. the leased at-least-once shape conflation is built
+     * on, so the §1.3 guarantee holds.
      */
     QueueBuilder& conflation(bool enabled = true) {
         conflation_ = enabled;
@@ -3808,6 +3987,11 @@ private:
         // conflating group it would merely book a conflict.
         if (conflation_) {
             params << "&conflation=true";
+        }
+        // Commit at delivery: no lease, nothing to ack, at-most-once. `autoAck`
+        // is the name every 2.x broker reads.
+        if (commit_on_delivery_) {
+            params << "&autoAck=true";
         }
 
         try {
@@ -4098,7 +4282,8 @@ public:
             
             try {
                 json result = http_client_->post("/api/v1/ack/batch", request);
-                return {{"success", true}, {"result", result}};
+                // HTTP 200 also carries refusals: read the per-item flags.
+                return util::ack_outcome(result, acknowledgments.size());
             } catch (const std::exception& e) {
                 return {{"success", false}, {"error", e.what()}};
             }
@@ -4140,7 +4325,8 @@ public:
         
         try {
             json result = http_client_->post("/api/v1/ack", body);
-            return {{"success", true}, {"result", result}};
+            // HTTP 200 also carries a refusal: read the item's flag.
+            return util::ack_outcome(result, 1);
         } catch (const std::exception& e) {
             return {{"success", false}, {"error", e.what()}};
         }
@@ -4188,12 +4374,8 @@ public:
         for (const auto& lease_id : lease_ids) {
             try {
                 json result = http_client_->post("/api/v1/lease/" + lease_id + "/extend", json::object());
-                results.push_back({
-                    {"leaseId", lease_id},
-                    {"success", true},
-                    {"newExpiresAt", result.contains("newExpiresAt") ? result["newExpiresAt"] : 
-                                     result.contains("lease_expires_at") ? result["lease_expires_at"] : nullptr}
-                });
+                // Always HTTP 200: the body says whether anything was renewed.
+                results.push_back(util::renew_outcome(result, lease_id));
             } catch (const std::exception& e) {
                 results.push_back({
                     {"leaseId", lease_id},
@@ -4254,8 +4436,166 @@ public:
 };
 
 // ============================================================================
+// LeaseRenewal - keeps one popped batch's lease alive while it is handled
+// ============================================================================
+
+/**
+ * consume()'s renew_lease(): while a popped batch is handled, renew its lease
+ * every interval, as the JS (setInterval), Go (ticker) and Rust (spawned task)
+ * consumers do. One POST /api/v1/lease/:leaseId/extend per DISTINCT leaseId per
+ * tick: every message of a pop shares its leaseId, a multi-partition claim
+ * included, so a batch is one request and not one per message. The broker
+ * extends by its default (60 s), so the interval has to be shorter than that
+ * and than the queue's leaseTime for renewal to keep anything alive.
+ *
+ * Scoped: the destructor stops the timer and joins it, so renewal ends with the
+ * batch, after its ack or nack, however the processing block is left. A failed
+ * renewal is logged and never stops the consumer.
+ */
+class LeaseRenewal {
+private:
+    QueenClient* queen_;
+    json lease_ids_ = json::array();
+    std::chrono::milliseconds interval_;
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    bool stopped_ = false;
+    std::thread thread_;
+
+    // Runs on the renewal thread, so nothing may leave it: an exception that
+    // escapes a std::thread ends the process.
+    void renew_once() noexcept {
+        try {
+            json results = queen_->renew(lease_ids_);
+            for (const auto& result : results) {
+                if (result.value("success", false)) {
+                    continue;
+                }
+                std::string error = result.contains("error") && result["error"].is_string()
+                    ? result["error"].get<std::string>() : std::string("not renewed");
+                util::log_error("ConsumerManager.leaseRenewal",
+                                "lease " + result.value("leaseId", std::string()) + ": " + error);
+            }
+        } catch (const std::exception& e) {
+            util::log_error("ConsumerManager.leaseRenewal", e.what());
+        } catch (...) {
+            util::log_error("ConsumerManager.leaseRenewal", "renewal failed");
+        }
+    }
+
+public:
+    LeaseRenewal(QueenClient* queen, const json& messages, int interval_millis)
+        : queen_(queen), interval_(interval_millis) {
+        std::unordered_set<std::string> seen;
+        for (const auto& message : messages) {
+            // An autoAck delivery carries an empty leaseId: nothing to renew.
+            if (!message.is_object() || !message.contains("leaseId") ||
+                !message["leaseId"].is_string()) {
+                continue;
+            }
+            std::string lease_id = message["leaseId"].get<std::string>();
+            if (!lease_id.empty() && seen.insert(lease_id).second) {
+                lease_ids_.push_back(lease_id);
+            }
+        }
+        if (lease_ids_.empty() || interval_millis <= 0) {
+            return;
+        }
+        try {
+            thread_ = std::thread([this]() {
+                try {
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    while (!wake_.wait_for(lock, interval_, [this]() { return stopped_; })) {
+                        lock.unlock();
+                        renew_once();
+                        lock.lock();
+                    }
+                } catch (...) {
+                    // A failed lock or wait: stop renewing, never the process.
+                    util::log_error("ConsumerManager.leaseRenewal", "renewal stopped");
+                }
+            });
+        } catch (const std::exception& e) {
+            // No thread to renew with (std::system_error): handle the batch
+            // without renewal rather than stop the consumer over it.
+            util::log_error("ConsumerManager.leaseRenewal",
+                            std::string("renewal not started for this batch: ") + e.what());
+        }
+    }
+
+    ~LeaseRenewal() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopped_ = true;
+        }
+        wake_.notify_all();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    LeaseRenewal(const LeaseRenewal&) = delete;
+    LeaseRenewal& operator=(const LeaseRenewal&) = delete;
+};
+
+// ============================================================================
 // ConsumerManager Implementation (after QueenClient is defined)
 // ============================================================================
+
+inline void ConsumerManager::ack_handled(const json& messages, const ConsumeOptions& options,
+                                         const char* where) {
+    json context = options.group.empty() ? json::object() : json{{"group", options.group}};
+    try {
+        json result = queen_->ack(messages, true, context);
+        if (!result.value("success", false)) {
+            // The lease ran out under the handler, or the handler settled the
+            // message itself: the broker keeps or redelivers it, and says why.
+            util::log_error(where, "ack rejected: " + result.value("error", std::string()));
+        }
+    } catch (const std::exception& e) {
+        // A message this client cannot address (no partitionId) cannot be acked;
+        // its lease expires and the broker redelivers it. Not a reason to stop.
+        util::log_error(where, std::string("ack failed: ") + e.what());
+    }
+}
+
+/**
+ * A handler threw. With auto_ack, nack what it was given, with the error, and
+ * let the worker keep consuming: the nack spends the queue's retry budget, and
+ * the message is filed in the DLQ once retryLimit is spent.
+ *
+ * With auto_ack(false) the handler settles its messages itself, so nothing is
+ * sent, by design: the failure is logged, and the message comes back when its
+ * lease expires.
+ */
+inline void ConsumerManager::handle_failure(const json& messages, const std::string& raw_reason,
+                                            const ConsumeOptions& options, const char* where) {
+    // Capped and valid UTF-8, so the handler's message can never be what stops
+    // the nack from being sent.
+    const std::string reason = util::nack_error_text(raw_reason);
+    if (!options.auto_ack) {
+        util::log_error(where, "handler failed (auto_ack off, not nacked; the broker delivers it "
+                               "again when its lease expires): " + reason);
+        return;
+    }
+    util::log_error(where, "handler failed: " + reason);
+
+    json context = {{"error", reason}};
+    if (!options.group.empty()) {
+        context["group"] = options.group;
+    }
+    try {
+        json result = queen_->ack(messages, false, context);
+        if (!result.value("success", false)) {
+            // The lease ran out under the handler.
+            util::log_error(where, "nack rejected: " + result.value("error", std::string()));
+        }
+    } catch (const std::exception& e) {
+        // Not addressable (no partitionId): its lease expires and the broker
+        // redelivers it. Never a reason to stop the consumer.
+        util::log_error(where, std::string("nack failed: ") + e.what());
+    }
+}
 
 inline void ConsumerManager::start(std::function<void(const json&)> handler,
                                    const ConsumeOptions& options) {
@@ -4327,14 +4667,21 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
     std::string full_url = path + params.str();
     
     // Workers run inside packaged_tasks whose futures are only wait()ed on, so
-    // a thrown exception would be discarded. A terminal (403) response is
-    // recorded here instead and rethrown to the caller once every worker has
-    // stopped.
+    // a thrown exception would be discarded. An error that stops a worker (a
+    // 403, a conflation fault, any other 4xx on a pop) is recorded here instead
+    // and rethrown to the caller once every worker has stopped.
     struct TerminalError {
         std::mutex mutex;
         std::exception_ptr error;
     };
     auto terminal_error = std::make_shared<TerminalError>();
+    // Called from inside a catch block: keeps the first error of any worker.
+    auto record_current_error = [terminal_error]() {
+        std::lock_guard<std::mutex> lock(terminal_error->mutex);
+        if (!terminal_error->error) {
+            terminal_error->error = std::current_exception();
+        }
+    };
 
     // Names this consumer's target in a conflation warning, and keys the
     // once-per-(target, group) rule (§3.3). Computed once: it cannot change
@@ -4343,7 +4690,7 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
         util::pop_target_label(options.queue, options.namespace_name, options.task);
 
     // Worker function
-    auto worker = [this, handler, full_url, options, terminal_error,
+    auto worker = [this, handler, full_url, options, record_current_error,
                    conflation_target](int worker_id) {
         int processed_count = 0;
         auto last_message_time = std::chrono::steady_clock::now();
@@ -4407,47 +4754,61 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                 }
                 
                 last_message_time = std::chrono::steady_clock::now();
-                
-                // TODO: Set up lease renewal if enabled
-                
+
+                // renew_lease(): keep this batch's lease alive until it is
+                // settled. Scoped to this iteration, so the timer stops after
+                // the ack or nack below, however the block is left.
+                std::optional<LeaseRenewal> renewal;
+                if (options.renew_lease && options.renew_lease_interval_millis > 0) {
+                    renewal.emplace(queen_, messages, options.renew_lease_interval_millis);
+                }
+
                 // Process messages
                 if (options.each) {
+                    // After a failure, the later messages of the same partition
+                    // are not handled. With auto_ack, the nack released that
+                    // PARTITION's lease and left its cursor at the failed message
+                    // (server/src/rsm/consume/ack.rs): they are redelivered, and
+                    // an ack for one of them under this lease is refused. Without
+                    // auto_ack, an ack of a later message by the handler would
+                    // move the cursor past the failed one, which would be lost.
+                    // The other partitions of a multi-partition pop are handled.
+                    std::unordered_set<std::string> failed_partitions;
+                    size_t skipped = 0;
                     for (const auto& msg : messages) {
                         if (options.stop_signal && options.stop_signal->load()) break;
-                        
-                        try {
-                            handler(msg);
-                            if (options.auto_ack) {
-                                json context = options.group.empty() ? 
-                                    json::object() : json{{"group", options.group}};
-                                queen_->ack(msg, true, context);
-                            }
-                        } catch (const std::exception& e) {
-                            if (options.auto_ack) {
-                                json context = options.group.empty() ? 
-                                    json::object() : json{{"group", options.group}};
-                                queen_->ack(msg, false, context);
-                            }
+
+                        const std::string partition = msg.is_object() && msg.contains("partitionId")
+                            ? msg["partitionId"].dump() : std::string();
+                        if (failed_partitions.count(partition) > 0) {
+                            ++skipped;
+                            continue;
                         }
-                        
+
+                        auto failure = run_handler(handler, msg);
+                        if (failure) {
+                            handle_failure(msg, *failure, options, "ConsumerManager.processMessage");
+                            failed_partitions.insert(partition);
+                        } else if (options.auto_ack) {
+                            ack_handled(msg, options, "ConsumerManager.processMessage");
+                        }
                         processed_count++;
+
                         if (options.limit > 0 && processed_count >= options.limit) break;
+                    }
+                    if (skipped > 0) {
+                        util::log_warn("ConsumerManager.worker", std::string("Worker ") +
+                                      std::to_string(worker_id) + " left " +
+                                      std::to_string(skipped) + " message(s) behind a failed "
+                                      "message in their partition; the broker delivers them again");
                     }
                 } else {
                     // Process as batch
-                    try {
-                        handler(messages);
-                        if (options.auto_ack) {
-                            json context = options.group.empty() ? 
-                                json::object() : json{{"group", options.group}};
-                            queen_->ack(messages, true, context);
-                        }
-                    } catch (const std::exception& e) {
-                        if (options.auto_ack) {
-                            json context = options.group.empty() ? 
-                                json::object() : json{{"group", options.group}};
-                            queen_->ack(messages, false, context);
-                        }
+                    auto failure = run_handler(handler, messages);
+                    if (failure) {
+                        handle_failure(messages, *failure, options, "ConsumerManager.processBatch");
+                    } else if (options.auto_ack) {
+                        ack_handled(messages, options, "ConsumerManager.processBatch");
                     }
                     processed_count += messages.size();
                 }
@@ -4463,12 +4824,7 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                 // ended.
                 util::log_error("ConsumerManager.worker", std::string("Worker ") +
                               std::to_string(worker_id) + " stopping: " + e.what());
-                {
-                    std::lock_guard<std::mutex> lock(terminal_error->mutex);
-                    if (!terminal_error->error) {
-                        terminal_error->error = std::current_exception();
-                    }
-                }
+                record_current_error();
                 break;
             } catch (const HttpError& e) {
                 // 429 (rate limited): HttpClient already retries this internally
@@ -4495,17 +4851,31 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                     util::log_error("ConsumerManager.worker", std::string("Worker ") +
                                   std::to_string(worker_id) + " forbidden (code=" + e.code() +
                                   "): " + e.what());
-                    std::lock_guard<std::mutex> lock(terminal_error->mutex);
-                    if (!terminal_error->error) {
-                        terminal_error->error = std::current_exception();
-                    }
+                    record_current_error();
                     break;
                 }
 
+                // 5xx that HttpClient's own retries did not outlast: a broker
+                // restarting or electing a leader. Transient, like a network
+                // fault: wait and poll again. A 4xx below stops the worker.
+                if (e.status_code() >= 500) {
+                    util::log_warn("ConsumerManager.worker", std::string("Worker ") +
+                                  std::to_string(worker_id) + " pop failed (status=" +
+                                  std::to_string(e.status_code()) + "): " + e.what() +
+                                  ", retrying in 1000ms");
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    continue;
+                }
+
+                // Any other 4xx (a refused pop, e.g. a 400 for a request the
+                // broker will never serve): stop this worker and hand the error
+                // to the caller. A bare `throw;` here would end in the
+                // discarded future.
                 util::log_error("ConsumerManager.worker", std::string("Worker ") +
                               std::to_string(worker_id) + " error: " + e.what() +
                               " (status=" + std::to_string(e.status_code()) + ")");
-                throw;
+                record_current_error();
+                break;
             } catch (const std::exception& e) {
                 // Check if timeout error (expected for long polling)
                 std::string error_msg = e.what();
@@ -4513,17 +4883,21 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                     continue; // Retry on timeout
                 }
                 
-                // Network error - wait before retry
+                // Network error - wait before retry. "timed out" is httplib's
+                // connection timeout, a network fault like the other two.
                 if (error_msg.find("Connection refused") != std::string::npos ||
-                    error_msg.find("connect") != std::string::npos) {
+                    error_msg.find("connect") != std::string::npos ||
+                    error_msg.find("timed out") != std::string::npos) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     continue;
                 }
                 
-                // Other errors - rethrow
+                // Other errors: stop this worker and hand the error to the
+                // caller, as above.
                 util::log_error("ConsumerManager.worker", std::string("Worker ") + 
                               std::to_string(worker_id) + " error: " + e.what());
-                throw;
+                record_current_error();
+                break;
             }
         }
     };
@@ -4531,8 +4905,14 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
     // Start workers in thread pool
     std::vector<std::future<void>> futures;
     for (int i = 0; i < options.concurrency; ++i) {
-        futures.push_back(thread_pool_.future_from_push([worker, i]() {
-            worker(i);
+        // Whatever still escapes a worker is recorded too: the future below is
+        // only wait()ed on, so a throw left in it would never be seen.
+        futures.push_back(thread_pool_.future_from_push([worker, i, record_current_error]() {
+            try {
+                worker(i);
+            } catch (...) {
+                record_current_error();
+            }
         }));
     }
     
@@ -4552,6 +4932,11 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
 
 inline void QueueBuilder::consume(std::function<void(const json&)> handler,
                                   std::atomic<bool>* stop_signal) {
+    if (commit_on_delivery_) {
+        throw std::invalid_argument(
+            "commit_on_delivery() is a pop() option; consume() always leases its messages");
+    }
+
     ConsumeOptions options;
     options.queue = queue_name_;
     options.partition = partition_ != "Default" ? partition_ : "";

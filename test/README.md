@@ -21,7 +21,7 @@ database anywhere: every stack is broker(s) + a runner.
 | `go`   | `client-go/tests` + `streams_integration` | ✓ | ✓ | opt-in | — | Go 1.24, standalone module (`GOWORK=off`) |
 | `py`   | `client-py/tests` (pytest, incl. streams) | ✓ | ✓ | opt-in | — | Python 3.12 |
 | `cli`  | `queenctl` E2E (`client-cli/tests`) | ✓ | ✓ | opt-in | — | needs the Go **workspace** (local client-go) + `QUEEN_E2E=1` |
-| `cpp`  | `client-cpp/test_retry429` + `test_kv_timers` + `test_conflation` (broker-free) then `client-cpp/test_client` | ✓ | ✓ | opt-in | — | the kv/timer HTTP tests run unconditionally — a 404 from those routes is a bug |
+| `cpp`  | `client-cpp/test_retry429` + `test_kv_timers` + `test_conflation` + `test_consumer` (broker-free) then `client-cpp/test_client` | ✓ | ✓ | opt-in | — | the kv/timer HTTP tests run unconditionally — a 404 from those routes is a bug |
 | `laravel` | `client-php` unit suite, then the integration suite | ✓ | ✓ | opt-in | — | PHP 8.3 |
 | `rust-client` | `client-rust` (`cargo test`, strict: a skipped integration test fails) | ✓ | ✓ | opt-in | — | |
 | `rust` | in-process broker unit tests (`cargo test` on `server/`) | — | — | — | — | `unit` — no stack |

@@ -516,6 +516,32 @@ void test_pop_sends_an_explicit_timeout_whenever_it_waits() {
                 "a non-waiting pop sends neither wait nor timeout");
 }
 
+void test_pop_commits_at_delivery_under_either_name() {
+    // commit_on_delivery is the name; auto_ack is its deprecated alias. Either
+    // one, or both, is the same single autoAck=true, the name the broker reads.
+    CaptureServer server;
+    QueenClient client({server.url()}, fast_config());
+
+    EphemeralPopOptions named;
+    named.commit_on_delivery = true;
+    client.ephemeral().pop(QUEUE, named);
+    check_query(server.at(0).target, {{"queue", "inbox"}, {"autoAck", "true"}},
+                "commit_on_delivery sends autoAck=true and nothing else");
+
+    EphemeralPopOptions alias;
+    alias.auto_ack = true;
+    client.ephemeral().pop(QUEUE, alias);
+    check_query(server.at(1).target, {{"queue", "inbox"}, {"autoAck", "true"}},
+                "the deprecated auto_ack still commits at delivery");
+
+    EphemeralPopOptions both;
+    both.commit_on_delivery = true;
+    both.auto_ack = true;
+    client.ephemeral().pop(QUEUE, both);
+    check_equal(server.at(2).target, "/api/v1/ephemeral/pop?autoAck=true&queue=inbox",
+                "both names together send autoAck once");
+}
+
 void test_pop_returns_an_empty_array_on_a_timeout_and_on_a_bodiless_204() {
     CaptureServer timeout_server([](const httplib::Request&, httplib::Response& res) {
         res.status = 200;
@@ -922,6 +948,8 @@ int main() {
              test_pop_puts_every_declared_parameter_on_the_query_string);
     run_test("pop sends an explicit timeout whenever it waits",
              test_pop_sends_an_explicit_timeout_whenever_it_waits);
+    run_test("pop commits at delivery under either name",
+             test_pop_commits_at_delivery_under_either_name);
     run_test("pop returns an empty array on a timeout and on a 204",
              test_pop_returns_an_empty_array_on_a_timeout_and_on_a_bodiless_204);
     run_test("pop hands back the frames it was given",
