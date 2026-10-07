@@ -407,7 +407,7 @@ func (b *Broker) wildcardLoop(ctx context.Context, topic, group string,
 	batchSize int, h broker.Handler, stats *workload.StageCounters) {
 
 	for ctx.Err() == nil {
-		qb := b.q.Queue(topic).Group(group).Batch(batchSize).AutoAck(b.cfg.AutoAck)
+		qb := b.q.Queue(topic).Group(group).Batch(batchSize).CommitOnDelivery(b.cfg.AutoAck)
 		if b.cfg.PopPartitions > 1 {
 			qb = qb.Partitions(b.cfg.PopPartitions)
 		}

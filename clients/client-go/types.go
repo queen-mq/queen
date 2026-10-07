@@ -204,6 +204,7 @@ type ConsumeOptions struct {
 	Batch                   int
 	Limit                   int
 	IdleMillis              int
+	// AutoAck acks a message after the handler returns nil.
 	AutoAck                 bool
 	Wait                    bool
 	TimeoutMillis           int
@@ -275,6 +276,13 @@ type PopOptions struct {
 	Batch            int
 	Wait             bool
 	TimeoutMillis    int
+	// CommitOnDelivery commits the group's cursor as the messages are handed
+	// out: no lease, nothing to ack, at-most-once. See
+	// QueueBuilder.CommitOnDelivery.
+	CommitOnDelivery bool
+	// AutoAck is the old name of CommitOnDelivery for a pop.
+	//
+	// Deprecated: use CommitOnDelivery.
 	AutoAck          bool
 	ConsumerGroup    string
 	SubscriptionMode string

@@ -20,6 +20,7 @@ sourceOfTruth:
   - clients/client-cli/Makefile
   - clients/client-cli/.goreleaser.yaml
   - go.work
+# sourceOfTruth re-read 2026-10-06 (commitOnDelivery): tail.go's --auto-ack help now says the client acks each message after printing it, which is what this page already said. pop and ephemeral pop gain --commit-on-delivery, described below.
 ---
 
 `queenctl` is a single static binary over the HTTP API, built on the Go SDK. It is what we reach
@@ -113,6 +114,11 @@ EOF
 its group (`queenctl-tail` when you name none) and are delivered again when the lease expires.
 Without `--follow` it stops once it has printed `--batch` messages (100 when unset), which on a
 quiet queue can take a long time, so give it `-n` or `--idle-millis` there.
+
+`pop` prints leased messages: ack each one with `queenctl ack`, or it is delivered again when the
+lease expires. With `--commit-on-delivery` the broker moves the group's cursor past the messages
+as it hands them out, so there is no lease and nothing to ack. That is at-most-once delivery: a
+crash after the pop loses the messages. `ephemeral pop` takes the same flag.
 
 A `Queue` manifest is the whole configuration of its queue: `apply` sends `mode: "replace"`, so an
 option the manifest leaves out goes back to its default, and applying the same file twice

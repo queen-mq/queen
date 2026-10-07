@@ -76,6 +76,50 @@ missing `lease_renewal` that its workers did have, and the dashboard showed leas
 pools whose workers renewed. Both now start every queen connection from `config/queen.php`, as
 the workers do.
 
+**Go client: `Each()` with `AutoAck(false)` stops at the first handler error.** The loop handed
+the rest of the popped batch to the handler after a message failed and kept only the last
+message's error. When a later message succeeded, `Execute` returned nil, and if the handler had
+acked that later message, the ack moved the cursor past the failed one, so it was never delivered
+again and never reached the dead-letter queue. Now the first error stops the worker at that
+message, the rest of the batch does not reach the handler, and the error comes back out of
+`Execute`, as the transaction tutorial says. The loop still sends no nack under `AutoAck(false)`:
+the failed message comes back when its lease expires, which spends no retry, so nack it in the
+handler when it should count against the queue's `RetryLimit`.
+
+**Go client: `Renew()` reports a lease the broker did not extend.** `POST
+/api/v1/lease/:leaseId/extend` answers 200 with `success: false` and `renewed: 0` when the lease
+expired, was released by an ack or nack, or never existed, and `Renew()` reported every 200 as
+`Success: true`. It now reads `success` from the body and fills `Error` when it is false, as the
+JavaScript and Rust clients do.
+
+**Go client: a pop the broker refuses no longer loops.** The consume loop answered any error
+other than a network error, a 403 or a 429 by popping again at once: a token the broker refused
+(401) brought 14,546 pops in one second, and a conflating consumer without a group 2,937 pops in
+half a second, with nothing shown unless logging was on. A 4xx now stops the worker and comes back
+out of `Execute`, as a 403 does; a 5xx waits a second before the next pop, as a network error
+does.
+
+**Go client: `CommitOnDelivery()` is the pop's option, and `AutoAck()` no longer affects a pop.**
+Behaviour change. On a pop, the broker's `autoAck=true` moves the consumer group's cursor past the
+messages as it hands them out: no lease, nothing to ack, at-most-once. `AutoAck()` sent it from
+`Pop` and `PopResult`, while on `Consume` it is the ack the loop sends after the handler, which
+never reaches the wire. The pop now has its own option: `CommitOnDelivery(true)` sends
+`autoAck=true` from `Pop` and `PopResult`, and `AutoAck()` applies to `Consume` and `ConsumeBatch`
+only. A pop after `AutoAck(true)` is now leased, so it is at-least-once (a message can come again,
+none is lost) and you ack what it returns; call `CommitOnDelivery(true)` there to keep committing at
+delivery. `Consume` and `ConsumeBatch` refuse a builder with `CommitOnDelivery(true)`: `Execute`
+returns `ErrCommitOnDeliveryConsume` before any request. `EphemeralPopOptions` gains
+`CommitOnDelivery`, and its `AutoAck` stays as a deprecated alias with the same effect.
+
+**CLI: `queenctl pop --commit-on-delivery`.** The broker moves the group's cursor past the messages
+as it hands them out: no lease, nothing to ack, at-most-once. `ephemeral pop` takes the same flag.
+On both, `--auto-ack` is now a hidden, deprecated alias with the same effect, and using it prints a
+deprecation line on stderr. `tail --auto-ack` keeps its name, and its help now says what it does:
+the client acks each message after printing it (the help said "ack server-side"). `bench` still
+drains with pops that commit on delivery. Until a client-go release has `CommitOnDelivery`, queenctl
+calls `CommitOnDelivery` or `AutoAck`, whichever the client-go it is built with has, so the
+`go install` build (client-go v2.0.0) and the workspace build both send `autoAck=true`.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

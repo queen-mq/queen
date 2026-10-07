@@ -40,7 +40,7 @@ func TestSubscription_NewModeSkipsHistorical(t *testing.T) {
 	got := popN(t, q, 10,
 		"--cg", "ct-sub-new",
 		"--from-mode", "new",
-		"--auto-ack",
+		"--commit-on-delivery",
 		"--wait=false",
 		"--timeout", "200ms",
 	)
@@ -63,7 +63,7 @@ func TestSubscription_AllModeReturnsHistorical(t *testing.T) {
 	got := popN(t, q, 10,
 		"--cg", "ct-sub-all",
 		"--from-mode", "all",
-		"--auto-ack",
+		"--commit-on-delivery",
 		"--timeout", "5s",
 	)
 	if len(got) != 3 {
@@ -81,14 +81,14 @@ func TestSubscription_NewModeReturnsFutureMessages(t *testing.T) {
 	// First call to register the CG with subscriptionMode=new.
 	popN(t, q, 1,
 		"--cg", "ct-sub-future", "--from-mode", "new",
-		"--auto-ack", "--wait=false", "--timeout", "200ms",
+		"--commit-on-delivery", "--wait=false", "--timeout", "200ms",
 	)
 	time.Sleep(200 * time.Millisecond)
 	pushOne(t, q, "", map[string]any{"who": "future"})
 	got := popN(t, q, 10,
 		"--cg", "ct-sub-future",
 		"--from-mode", "new",
-		"--auto-ack",
+		"--commit-on-delivery",
 		"--timeout", "5s",
 	)
 	if len(got) != 1 {
@@ -112,7 +112,7 @@ func TestReplay_SeekToBeginning(t *testing.T) {
 	})
 	// Drain the CG once. --from-mode all because the group is created after
 	// the push and the broker now defaults new groups to 'new'.
-	got := popN(t, q, 10, "--cg", "ct-replay", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 10, "--cg", "ct-replay", "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	if len(got) != 3 {
 		t.Fatalf("setup drain: got %d, want 3", len(got))
 	}
@@ -120,7 +120,7 @@ func TestReplay_SeekToBeginning(t *testing.T) {
 	runOK(t, "replay", q, "--cg", "ct-replay", "--to", "beginning")
 	time.Sleep(200 * time.Millisecond)
 	// CG should now see the historical 3 again.
-	again := popN(t, q, 10, "--cg", "ct-replay", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	again := popN(t, q, 10, "--cg", "ct-replay", "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	if len(again) != 3 {
 		t.Errorf("after replay-to-beginning: got %d, want 3", len(again))
 	}
@@ -141,13 +141,13 @@ func TestReplay_SeekToTimestamp(t *testing.T) {
 	pushOne(t, q, "", map[string]any{"phase": "after"})
 
 	// Drain everything once.
-	got := popN(t, q, 10, "--cg", "ct-replay-ts", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 10, "--cg", "ct-replay-ts", "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	if len(got) != 4 {
 		t.Fatalf("setup drain: got %d, want 4", len(got))
 	}
 	runOK(t, "replay", q, "--cg", "ct-replay-ts", "--to", cutoff)
 	time.Sleep(200 * time.Millisecond)
-	post := popN(t, q, 10, "--cg", "ct-replay-ts", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	post := popN(t, q, 10, "--cg", "ct-replay-ts", "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	// Only messages with createdAt > cutoff should resurface. Allow some
 	// slack: the broker resolves timestamps at second granularity and the
 	// "before" messages may sit on the boundary, so accept 2 or 4.
@@ -172,7 +172,7 @@ func TestReplay_SeekToEndDrainsCG(t *testing.T) {
 	})
 	time.Sleep(300 * time.Millisecond)
 	// Drain via the same CG we will then seek to end.
-	popN(t, q, 10, "--cg", "ct-replay-end", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	popN(t, q, 10, "--cg", "ct-replay-end", "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	// Push more, then seek-to-end so they are skipped.
 	pushOne(t, q, "", map[string]any{"i": 4})
 	pushOne(t, q, "", map[string]any{"i": 5})
@@ -180,7 +180,7 @@ func TestReplay_SeekToEndDrainsCG(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	got := popN(t, q, 10,
 		"--cg", "ct-replay-end",
-		"--auto-ack", "--wait=false", "--timeout", "200ms")
+		"--commit-on-delivery", "--wait=false", "--timeout", "200ms")
 	if len(got) != 0 {
 		t.Errorf("seek-to-end should skip pending msgs, got %d", len(got))
 	}

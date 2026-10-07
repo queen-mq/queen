@@ -211,7 +211,21 @@ messages, err := client.Queue("my-queue").
 messages, err := client.Queue("my-queue").
     Group("my-group").
     Pop(ctx)
+
+// Pop that commits at delivery: no lease, nothing to ack
+messages, err := client.Queue("my-queue").
+    Group("my-group").
+    CommitOnDelivery(true).
+    Pop(ctx)
 ```
+
+A pop is leased: ack what it returns (see Acknowledge Messages), or the
+messages come back when the lease expires. With `CommitOnDelivery(true)` the
+broker moves the group's cursor past the messages as it hands them out: there
+is no lease and nothing to ack. That is at-most-once, because a crash after the
+pop loses the messages. It is an option of `Pop` and `PopResult`. A consumer
+always leases its messages, so `Consume(...).Execute` returns
+`queen.ErrCommitOnDeliveryConsume` before any request when the builder has it.
 
 ### Consume Messages
 
@@ -252,6 +266,14 @@ client.Queue("my-queue").
     Consume(ctx, handler).
     Execute(ctx)
 ```
+
+With `AutoAck(false)` the handler acks by itself and the loop sends no ack or
+nack. A handler error stops the worker that ran it, and `Execute` returns the
+error once every worker has stopped (at once with `Concurrency(1)`). Under
+`Each()` the worker stops at the failed message, and the rest of the popped
+batch does not reach the handler. The failed message comes back when its lease
+expires, which spends no retry: nack it in the handler
+(`client.Ack(ctx, msg, false, ...)`) when it should count against `RetryLimit`.
 
 ### Multi-Partition Pop (Drain Many Partitions Per Call)
 
@@ -429,6 +451,13 @@ client.Renew(ctx, messages)
 
 // Renew by lease ID
 client.Renew(ctx, "lease-id-123")
+
+// The broker answers 200 either way: read Success on each result. It is false,
+// with Error set, when the lease expired or an ack or nack released it.
+results, err := client.Renew(ctx, msg)
+if err == nil && !results[0].Success {
+    // The lease is gone: the message can already be with another consumer.
+}
 ```
 
 ## Transactions
@@ -687,6 +716,7 @@ go test ./tests/... -v
 | Partitions per pop | broker-chosen (autopilot); 1 with autopilot off |
 | Pop autopilot | on (`QUEEN_SDK_POP_AUTOPILOT=off` to disable) |
 | Auto-ack | true |
+| Commit on delivery (pop) | false |
 | Wait (long poll) | true (consume), false (pop) |
 | Buffer count | 100 |
 | Buffer time | 1 second |

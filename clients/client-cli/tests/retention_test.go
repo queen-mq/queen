@@ -69,7 +69,7 @@ func TestRetention_PendingMessagesAreCleanedUp(t *testing.T) {
 	// --from-mode all keeps the assertion meaningful: under the default
 	// 'new' mode this CG would read 0 whether or not retention swept.
 	got := popN(t, q, 100, "--cg", "ct-ret-pending", "--from-mode", "all",
-		"--auto-ack", "--wait=false", "--timeout", "200ms")
+		"--commit-on-delivery", "--wait=false", "--timeout", "200ms")
 	if len(got) != 0 {
 		t.Errorf("expected retention sweep to clear pending msgs, got %d back", len(got))
 	}
@@ -100,7 +100,7 @@ func TestRetention_CompletedMessagesAreCleanedUp(t *testing.T) {
 		items[i] = map[string]any{"i": i}
 	}
 	pushNDJSON(t, q, "", items)
-	got := popN(t, q, 20, "--cg", "ct-ret-comp", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 20, "--cg", "ct-ret-comp", "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	if len(got) != 20 {
 		t.Fatalf("setup drain: got %d, want 20", len(got))
 	}
@@ -112,7 +112,7 @@ func TestRetention_CompletedMessagesAreCleanedUp(t *testing.T) {
 	// above: under the default 'new' mode it would read 0 whether or not
 	// retention swept.
 	fresh := popN(t, q, 20, "--cg", "ct-ret-comp-fresh", "--from-mode", "all",
-		"--auto-ack", "--wait=false", "--timeout", "200ms")
+		"--commit-on-delivery", "--wait=false", "--timeout", "200ms")
 	if len(fresh) != 0 {
 		t.Errorf("expected completed-retention sweep to delete the drained msgs, a fresh group read %d back", len(fresh))
 	}
