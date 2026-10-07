@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use queen_protocol::{AckStatus, Message};
+use queen_protocol::{AckResult, AckStatus, Message};
 
 use crate::error::{Error, Result};
 use crate::queue::QueueBuilder;
@@ -88,6 +88,11 @@ pub enum StopReason {
     Ended,
 }
 
+/// What `consume` and `consume_batch` answer, before any request, for a builder
+/// with [`QueueBuilder::commit_on_delivery`].
+const COMMIT_ON_DELIVERY_IN_CONSUME: &str =
+    "commit_on_delivery is a pop option; consume always leases its messages";
+
 struct Shared {
     processed: AtomicU64,
     acked: AtomicU64,
@@ -101,7 +106,9 @@ impl QueueBuilder {
     ///
     /// The handler's error type only needs to be printable; a returned error
     /// nacks the message (when `auto_ack` is on, the default) and the reason is
-    /// recorded on the DLQ row if that nack exhausts the retry budget.
+    /// recorded on the DLQ row if that nack exhausts the retry budget. With
+    /// `auto_ack(false)` the loop sends nothing: a failed message comes back
+    /// when its lease expires.
     ///
     /// # Ordering after a nack
     ///
@@ -128,10 +135,11 @@ impl QueueBuilder {
                     let ok = ctx.settle(&msg, outcome).await;
                     ctx.bump_processed();
                     if !ok {
-                        // See the ordering note above.
+                        // See the ordering note above. `settle` has logged
+                        // whether a nack was sent and whether it landed.
                         tracing::warn!(
                             transaction_id = %msg.transaction_id,
-                            "nacked; abandoning the rest of this batch (it will be redelivered)"
+                            "handler failed; abandoning the rest of this batch (it will be redelivered)"
                         );
                         break;
                     }
@@ -172,6 +180,9 @@ impl QueueBuilder {
         F: Fn(Vec<Message>, WorkerCtx) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = ()> + Send,
     {
+        if self.commit_on_delivery {
+            return Err(Error::Invalid(COMMIT_ON_DELIVERY_IN_CONSUME.into()));
+        }
         if self.queue.is_none() && self.namespace.is_none() && self.task.is_none() {
             return Err(Error::Invalid(
                 "consume needs a queue, or a namespace/task to discover one".into(),
@@ -259,10 +270,10 @@ where
             }
         }
 
-        // Never take a broker-side auto-ack here: consume settles messages
-        // itself, and a server-side ack at delivery would lose the batch on a
-        // handler crash.
-        let popped = match builder.pop_result().await {
+        // Always a leased pop: consume settles messages itself, and a commit
+        // at delivery would lose the batch on a handler crash. `run` refuses a
+        // builder with commit_on_delivery before it gets here.
+        let popped = match builder.pop_once(false).await {
             Ok(m) => m,
             Err(e) => {
                 if e.is_terminal_refusal() {
@@ -373,59 +384,118 @@ impl WorkerCtx {
         self.shared.processed.fetch_add(n, Ordering::SeqCst);
     }
 
-    /// Ack or nack one message. Returns whether it was acked.
+    /// Ack or nack one message. Returns whether the handler succeeded.
+    ///
+    /// With `auto_ack(false)` nothing is sent: the handler settles its messages
+    /// itself, and one whose handler failed comes back when its lease expires.
+    ///
+    /// The broker refuses an ack with HTTP 200 and `success: false` on the
+    /// item, so the verdict is read and a refusal is logged. The counters still
+    /// record what the loop decided, not what the broker confirmed.
     async fn settle<E: std::fmt::Display>(
         &self,
         msg: &Message,
         outcome: std::result::Result<(), E>,
     ) -> bool {
+        let tx = &msg.transaction_id;
         if !self.builder.auto_ack {
+            if let Err(err) = &outcome {
+                tracing::warn!(
+                    transaction_id = %tx,
+                    reason = %err,
+                    "handler failed; not nacked, since auto_ack is off"
+                );
+            }
             return outcome.is_ok();
         }
         match outcome {
             Ok(()) => {
-                if let Err(e) = self
+                match self
                     .builder
                     .inner
                     .ack_one(msg, AckStatus::Completed, None)
                     .await
                 {
-                    tracing::error!(transaction_id = %msg.transaction_id, error = %e, "ack failed");
+                    Ok(r) if r.success => {}
+                    Ok(r) => tracing::error!(
+                        transaction_id = %tx,
+                        error = refusal(&r),
+                        "ack refused by the broker"
+                    ),
+                    Err(e) => tracing::error!(transaction_id = %tx, error = %e, "ack failed"),
                 }
                 self.shared.acked.fetch_add(1, Ordering::Relaxed);
                 true
             }
             Err(err) => {
                 let reason = err.to_string();
-                if let Err(e) = self
+                match self
                     .builder
                     .inner
                     .ack_one(msg, AckStatus::Failed, Some(reason.clone()))
                     .await
                 {
-                    tracing::error!(transaction_id = %msg.transaction_id, error = %e, "nack failed");
+                    Ok(r) if r.success => {
+                        tracing::warn!(transaction_id = %tx, reason, "message nacked")
+                    }
+                    Ok(r) => tracing::error!(
+                        transaction_id = %tx,
+                        reason,
+                        error = refusal(&r),
+                        "nack refused by the broker"
+                    ),
+                    Err(e) => {
+                        tracing::error!(transaction_id = %tx, reason, error = %e, "nack failed")
+                    }
                 }
-                tracing::warn!(transaction_id = %msg.transaction_id, reason, "message nacked");
                 self.shared.nacked.fetch_add(1, Ordering::Relaxed);
                 false
             }
         }
     }
 
+    /// Settle a whole batch with one request. The same rules as [`Self::settle`].
     async fn settle_batch<E: std::fmt::Display>(
         &self,
         msgs: &[Message],
         outcome: std::result::Result<(), E>,
     ) {
-        if !self.builder.auto_ack || msgs.is_empty() {
+        if msgs.is_empty() {
+            return;
+        }
+        if !self.builder.auto_ack {
+            if let Err(err) = &outcome {
+                tracing::warn!(
+                    count = msgs.len(),
+                    reason = %err,
+                    "batch handler failed; not nacked, since auto_ack is off"
+                );
+            }
             return;
         }
         let (status, reason) = match outcome {
             Ok(()) => (AckStatus::Completed, None),
             Err(e) => (AckStatus::Failed, Some(e.to_string())),
         };
-        if let Err(e) = self.builder.inner.ack_batch(msgs, status, reason).await {
-            tracing::error!(count = msgs.len(), error = %e, "batch ack failed");
+        let what = if status == AckStatus::Completed {
+            "batch ack"
+        } else {
+            "batch nack"
+        };
+        match self.builder.inner.ack_batch(msgs, status, reason).await {
+            Ok(results) => {
+                let refused: Vec<&AckResult> = results.iter().filter(|r| !r.success).collect();
+                if let Some(first) = refused.first() {
+                    let (count, error) = (refused.len(), refusal(first));
+                    tracing::error!(
+                        count,
+                        of = msgs.len(),
+                        error,
+                        "{what} refused by the broker"
+                    );
+                }
+            }
+            Err(e) => tracing::error!(count = msgs.len(), error = %e, "{what} failed"),
         }
         let n = msgs.len() as u64;
         if status == AckStatus::Completed {
@@ -434,6 +504,11 @@ impl WorkerCtx {
             self.shared.nacked.fetch_add(n, Ordering::Relaxed);
         }
     }
+}
+
+/// The broker's reason for refusing an ack item.
+fn refusal(r: &AckResult) -> &str {
+    r.error.as_deref().unwrap_or("no reason given")
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ mod support;
 use std::time::Duration;
 
 use queen_mq::{Config, Queen, Retry429, Strategy};
-use support::{FakeBroker, Reply};
+use support::{FakeBroker, Logs, Reply};
 
 /// A pop response with one message, as the broker renders it.
 fn one_message() -> String {
@@ -662,6 +662,231 @@ async fn the_consume_loop_backs_off_through_a_throttle_and_carries_on() {
 }
 
 // ===========================================================================
+// How the consume loop settles: the nack of a failed handler, and the verdict
+// the broker returns on an ack
+// ===========================================================================
+
+/// A pop response with two messages from one lease.
+fn two_messages() -> String {
+    r#"{"messages":[
+        {"id":"m1","transactionId":"t1","data":{"n":1},"createdAt":"2026-08-04T10:00:00.000Z",
+         "partitionId":"p1","partition":"one","leaseId":"L1","consumerGroup":"g"},
+        {"id":"m2","transactionId":"t2","data":{"n":2},"createdAt":"2026-08-04T10:00:00.000Z",
+         "partitionId":"p1","partition":"one","leaseId":"L1","consumerGroup":"g"}]}"#
+        .into()
+}
+
+/// The broker's answer to an ack of `txns`: all accepted, or all refused with
+/// `refused` as the error. A refusal is HTTP 200 with `success: false` on the
+/// item, which is how the broker answers an ack on an expired lease
+/// (server/src/rsm/facade/real.rs, "invalid or expired lease").
+fn ack_answer(txns: &[&str], refused: Option<&str>) -> String {
+    let items: Vec<serde_json::Value> = txns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            serde_json::json!({
+                "index": i,
+                "transactionId": t,
+                "success": refused.is_none(),
+                "error": refused,
+                "leaseReleased": refused.is_none(),
+                "dlq": false,
+                "noop": false,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(items).to_string()
+}
+
+/// A fake broker that hands out `pop` on every poll and answers every ack
+/// with `ack`.
+async fn consume_broker(pop: fn() -> String, ack: String) -> FakeBroker {
+    FakeBroker::start_with(move |_n, hit| {
+        if hit.route().starts_with("/api/v1/ack") {
+            return Reply::ok(ack.clone());
+        }
+        Reply::ok(pop())
+    })
+    .await
+}
+
+fn acks_on(broker: &FakeBroker, route: &str) -> Vec<serde_json::Value> {
+    broker
+        .hits()
+        .into_iter()
+        .filter(|h| h.route() == route)
+        .map(|h| h.json())
+        .collect()
+}
+
+// With `auto_ack(false)` the handler settles its own messages, and the loop
+// sends nothing, by design: a message whose handler failed comes back when its
+// lease expires. The loop used to log "nacked" all the same; the log now says
+// that nothing was nacked, with the handler's error.
+#[tokio::test]
+async fn a_handler_error_with_auto_ack_off_is_logged_and_not_nacked() {
+    let broker = consume_broker(one_message, ack_answer(&["t1"], None)).await;
+    let logs = Logs::capture();
+
+    let summary = client(&broker)
+        .queue("orders")
+        .partition("one")
+        .wait(false)
+        .auto_ack(false)
+        .limit(1)
+        .idle(Duration::from_secs(20))
+        .consume(|_msg| async { Err::<(), _>("card declined") })
+        .await
+        .expect("a failing handler does not stop the consumer");
+
+    assert!(
+        acks_on(&broker, "/api/v1/ack").is_empty(),
+        "auto_ack(false) sends no nack: {:?}",
+        broker.hits().iter().map(|h| h.route()).collect::<Vec<_>>()
+    );
+    assert_eq!((summary.acked, summary.nacked), (0, 0), "{summary:?}");
+    assert!(
+        !logs
+            .matching(tracing::Level::WARN, &["t1", "card declined", "not nacked"])
+            .is_empty(),
+        "the log must say the message was not nacked, with the reason: {:?}",
+        logs.lines()
+    );
+    assert!(
+        logs.matching(tracing::Level::WARN, &["message nacked"])
+            .is_empty(),
+        "nothing was nacked: {:?}",
+        logs.lines()
+    );
+}
+
+#[tokio::test]
+async fn a_failed_batch_with_auto_ack_off_is_logged_and_not_nacked() {
+    let broker = consume_broker(two_messages, ack_answer(&["t1", "t2"], None)).await;
+    let logs = Logs::capture();
+
+    let summary = client(&broker)
+        .queue("orders")
+        .partition("one")
+        .wait(false)
+        .auto_ack(false)
+        .limit(1)
+        .idle(Duration::from_secs(20))
+        .consume_batch(|_msgs| async { Err::<(), _>("ledger offline") })
+        .await
+        .expect("a failing handler does not stop the consumer");
+
+    assert!(
+        acks_on(&broker, "/api/v1/ack/batch").is_empty(),
+        "auto_ack(false) sends no nack: {:?}",
+        broker.hits().iter().map(|h| h.route()).collect::<Vec<_>>()
+    );
+    assert_eq!((summary.acked, summary.nacked), (0, 0), "{summary:?}");
+    assert!(
+        !logs
+            .matching(tracing::Level::WARN, &["ledger offline", "not nacked"])
+            .is_empty(),
+        "the batch handler's error went unreported: {:?}",
+        logs.lines()
+    );
+}
+
+// A refused ack is an HTTP 200, so nothing in the transport notices it: the
+// per-item `success` is the only signal (queen-protocol's ack.rs). The summary
+// keeps counting what the loop decided (consumer.rs pins that), so the log is
+// the only place a refusal can show.
+#[tokio::test]
+async fn a_refused_ack_in_the_consume_loop_is_logged() {
+    let broker = consume_broker(
+        one_message,
+        ack_answer(&["t1"], Some("invalid or expired lease")),
+    )
+    .await;
+    let logs = Logs::capture();
+
+    let summary = client(&broker)
+        .queue("orders")
+        .partition("one")
+        .wait(false)
+        .limit(1)
+        .idle(Duration::from_secs(20))
+        .consume(|_msg| async { Ok::<_, std::convert::Infallible>(()) })
+        .await
+        .expect("a refused ack does not stop the consumer");
+
+    assert_eq!(acks_on(&broker, "/api/v1/ack").len(), 1);
+    assert_eq!(summary.acked, 1, "{summary:?}");
+    assert!(
+        !logs
+            .matching(tracing::Level::ERROR, &["t1", "invalid or expired lease"])
+            .is_empty(),
+        "the broker refused the ack and the log says nothing: {:?}",
+        logs.lines()
+    );
+}
+
+#[tokio::test]
+async fn a_refused_batch_ack_in_the_consume_loop_is_logged() {
+    let broker = consume_broker(
+        two_messages,
+        ack_answer(&["t1", "t2"], Some("invalid or expired lease")),
+    )
+    .await;
+    let logs = Logs::capture();
+
+    let summary = client(&broker)
+        .queue("orders")
+        .partition("one")
+        .wait(false)
+        .limit(1)
+        .idle(Duration::from_secs(20))
+        .consume_batch(|_msgs| async { Ok::<_, std::convert::Infallible>(()) })
+        .await
+        .expect("a refused ack does not stop the consumer");
+
+    assert_eq!(acks_on(&broker, "/api/v1/ack/batch").len(), 1);
+    assert_eq!(summary.acked, 2, "{summary:?}");
+    assert!(
+        !logs
+            .matching(tracing::Level::ERROR, &["invalid or expired lease"])
+            .is_empty(),
+        "the broker refused the batch ack and the log says nothing: {:?}",
+        logs.lines()
+    );
+}
+
+#[tokio::test]
+async fn a_refused_nack_in_the_consume_loop_is_logged() {
+    let broker = consume_broker(
+        one_message,
+        ack_answer(&["t1"], Some("invalid or expired lease")),
+    )
+    .await;
+    let logs = Logs::capture();
+
+    let summary = client(&broker)
+        .queue("orders")
+        .partition("one")
+        .wait(false)
+        .limit(1)
+        .idle(Duration::from_secs(20))
+        .consume(|_msg| async { Err::<(), _>("card declined") })
+        .await
+        .expect("a refused nack does not stop the consumer");
+
+    assert_eq!(acks_on(&broker, "/api/v1/ack").len(), 1);
+    assert_eq!(summary.nacked, 1, "{summary:?}");
+    assert!(
+        !logs
+            .matching(tracing::Level::ERROR, &["t1", "invalid or expired lease"])
+            .is_empty(),
+        "the broker refused the nack and the log says nothing: {:?}",
+        logs.lines()
+    );
+}
+
+// ===========================================================================
 // Conflation — PLAN_CONFLATION §3.1 (the wire) and §4 (degrade loudly)
 //
 // The whole feature turns on one asymmetry: `conflation=true` is a query
@@ -981,4 +1206,86 @@ async fn a_group_that_stores_conflation_off_keeps_the_consumer_running() {
     );
 
     assert_eq!(summary.processed, 2);
+}
+
+// ===========================================================================
+// commit_on_delivery: the pop that commits as the broker hands messages out
+// ===========================================================================
+
+// On the wire a pop that commits on delivery is `autoAck=true`: the broker
+// moves the group's cursor past the messages as it hands them out, with no
+// lease and nothing to ack. Every other pop is leased and says nothing about
+// autoAck. `pop_auto_ack()` is the deprecated spelling and still sends it; the
+// consume loop's `auto_ack` never reaches a pop.
+#[tokio::test]
+#[allow(deprecated)]
+async fn a_pop_sends_auto_ack_only_when_it_commits_on_delivery() {
+    let broker = FakeBroker::start(vec![Reply::ok(r#"{"messages":[]}"#)]).await;
+    let q = client(&broker);
+    let base = || q.queue("orders").group("billing").wait(false);
+
+    base().commit_on_delivery(true).pop().await.unwrap();
+    base().commit_on_delivery(true).pop_result().await.unwrap();
+    base().pop_auto_ack().await.unwrap();
+    base().commit_on_delivery(false).pop().await.unwrap();
+    base().pop_result().await.unwrap();
+    base().auto_ack(true).pop().await.unwrap();
+
+    let sent: Vec<Option<String>> = broker
+        .hits()
+        .iter()
+        .map(|h| h.query("autoAck").map(str::to_string))
+        .collect();
+    let commit = Some("true".to_string());
+    assert_eq!(
+        sent,
+        vec![commit.clone(), commit.clone(), commit, None, None, None],
+        "autoAck per pop: commit_on_delivery(true).pop, commit_on_delivery(true).pop_result, \
+         pop_auto_ack, commit_on_delivery(false).pop, pop_result, auto_ack(true).pop"
+    );
+}
+
+// A consumer always leases its messages, so a builder that commits on delivery
+// is refused before a single request leaves.
+#[tokio::test]
+async fn consume_refuses_commit_on_delivery_before_any_request() {
+    let broker = FakeBroker::start(vec![Reply::ok(r#"{"messages":[]}"#)]).await;
+    let q = client(&broker);
+    let builder = || {
+        q.queue("orders")
+            .group("billing")
+            .commit_on_delivery(true)
+            .wait(false)
+            .idle(Duration::from_millis(300))
+    };
+
+    let single = builder()
+        .consume(|_msg| async { Ok::<_, std::convert::Infallible>(()) })
+        .await;
+    let batch = builder()
+        .consume_batch(|_msgs| async { Ok::<_, std::convert::Infallible>(()) })
+        .await;
+
+    for (name, out) in [("consume", single), ("consume_batch", batch)] {
+        let err = out.expect_err(&format!("{name} must refuse commit_on_delivery"));
+        assert!(
+            matches!(err, queen_mq::Error::Invalid(_)),
+            "{name}: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "commit_on_delivery is a pop option; consume always leases its messages",
+            "{name}"
+        );
+    }
+    assert_eq!(
+        broker.hit_count(),
+        0,
+        "the refusal must come before any request: {:?}",
+        broker
+            .hits()
+            .iter()
+            .map(|h| h.path.clone())
+            .collect::<Vec<_>>()
+    );
 }

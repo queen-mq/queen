@@ -66,6 +66,7 @@ pub struct QueueBuilder {
     pub(crate) limit: Option<u64>,
     pub(crate) idle: Option<Duration>,
     pub(crate) auto_ack: bool,
+    pub(crate) commit_on_delivery: bool,
     pub(crate) wait: bool,
     pub(crate) poll_timeout: Duration,
     pub(crate) renew_lease: Option<Duration>,
@@ -96,6 +97,7 @@ impl QueueBuilder {
             // Client-side auto-ack during consume; NOT the server-side
             // `autoAck` query parameter, which pop() controls separately.
             auto_ack: true,
+            commit_on_delivery: false,
             wait: true,
             poll_timeout: Duration::from_secs(30),
             renew_lease: None,
@@ -225,6 +227,24 @@ impl QueueBuilder {
         self
     }
 
+    /// Make [`Self::pop`] and [`Self::pop_result`] commit the group's cursor as
+    /// the broker hands the messages out: the pop takes no lease and there is
+    /// nothing to ack afterwards. That is at-most-once delivery, because a crash
+    /// after the pop loses the messages it returned. Off by default, and then a
+    /// pop is leased and you ack what it returns.
+    ///
+    /// On the wire it is `autoAck=true` on the pop request, which every 2.x
+    /// broker understands. The broker refuses it together with
+    /// [`Self::conflation`].
+    ///
+    /// It is a pop option. A consumer always leases its messages, so
+    /// [`Self::consume`] and [`Self::consume_batch`] return
+    /// [`Error::Invalid`] before any request for a builder that has it.
+    pub fn commit_on_delivery(mut self, enabled: bool) -> Self {
+        self.commit_on_delivery = enabled;
+        self
+    }
+
     /// Long-poll rather than returning empty. On by default.
     pub fn wait(mut self, enabled: bool) -> Self {
         self.wait = enabled;
@@ -283,8 +303,8 @@ impl QueueBuilder {
     /// consumer of that group. A later consumer declaring the opposite does not
     /// flip it; it keeps working under the stored policy and this client logs one
     /// warning per (queue, group). Requires a [`QueueBuilder::group`], and the
-    /// broker refuses it together with [`QueueBuilder::pop_auto_ack`] — auto-ack
-    /// commits at delivery with no lease, which would turn the guarantee below
+    /// broker refuses it together with [`QueueBuilder::commit_on_delivery`],
+    /// which commits at delivery with no lease and would turn the guarantee below
     /// into at-most-once on the one feature that exists to provide it.
     ///
     /// # The guarantee
@@ -429,7 +449,7 @@ impl QueueBuilder {
         ))
     }
 
-    pub(crate) fn pop_params(&self, auto_ack: bool) -> PopParams {
+    pub(crate) fn pop_params(&self, commit_on_delivery: bool) -> PopParams {
         // The whole emission rule for the two sizing knobs, in one place: which
         // of them travel, and what an unset one means. `to_pairs` then renders
         // it — unlike the other SDKs this client has a single param builder, so
@@ -440,7 +460,9 @@ impl QueueBuilder {
             batch: sizing.batch,
             partitions: sizing.partitions,
             autopilot: sizing.autopilot,
-            auto_ack: Some(auto_ack),
+            // `autoAck=true` is how the broker spells commit-on-delivery;
+            // `to_pairs` drops `Some(false)`, so a leased pop says nothing.
+            auto_ack: Some(commit_on_delivery),
             wait: Some(self.wait),
             timeout_millis: Some(self.poll_timeout.as_millis() as u64),
             lease_seconds: self.lease_seconds,
@@ -540,9 +562,9 @@ impl QueueBuilder {
     /// into "no messages" hides an outage as an idle queue. An *empty* claim
     /// returns `Ok` with no messages.
     ///
-    /// `auto_ack` here is the broker-side flag: the cursor commits at delivery
-    /// and no lease is taken, so a crash mid-handler loses the batch. Defaults
-    /// to off, matching every other SDK's `pop()`.
+    /// The messages are leased: ack what it returns, or they come back when the
+    /// lease expires. With [`Self::commit_on_delivery`] the cursor commits at
+    /// delivery instead and there is nothing to ack.
     ///
     /// # With [`QueueBuilder::conflation`] on
     ///
@@ -553,12 +575,13 @@ impl QueueBuilder {
     /// drops the parameter silently, so its absence in the response is the only
     /// evidence there is.
     pub async fn pop(&self) -> Result<Vec<Message>> {
-        Ok(self.pop_with_auto_ack(false).await?.messages)
+        Ok(self.pop_once(self.commit_on_delivery).await?.messages)
     }
 
     /// Claim messages and have the broker commit the cursor immediately.
+    #[deprecated(note = "use commit_on_delivery(true).pop()")]
     pub async fn pop_auto_ack(&self) -> Result<Vec<Message>> {
-        Ok(self.pop_with_auto_ack(true).await?.messages)
+        Ok(self.pop_once(true).await?.messages)
     }
 
     /// Claim messages and report what the broker chose for this pop.
@@ -578,12 +601,14 @@ impl QueueBuilder {
     /// # }
     /// ```
     pub async fn pop_result(&self) -> Result<PopOutcome> {
-        self.pop_with_auto_ack(false).await
+        self.pop_once(self.commit_on_delivery).await
     }
 
-    async fn pop_with_auto_ack(&self, auto_ack: bool) -> Result<PopOutcome> {
+    /// One pop round trip. `commit_on_delivery` is passed in rather than read
+    /// from the builder so the consume loop can always ask for a leased pop.
+    pub(crate) async fn pop_once(&self, commit_on_delivery: bool) -> Result<PopOutcome> {
         let path = self.pop_path()?;
-        let params = self.pop_params(auto_ack);
+        let params = self.pop_params(commit_on_delivery);
         let url = format!("{path}?{}", encode_pairs(&params.to_pairs()));
 
         let mut opts = Opts::affinity(self.affinity_key());
@@ -1014,20 +1039,20 @@ mod tests {
 
     // Rust is the one SDK where `pop()` and `consume()` share a parameter
     // builder — every other one has two copies and a standing comment about the
-    // bug that produced them. `pop_params` is called with `auto_ack` true from
-    // `pop_auto_ack` and false from both `pop()` and the consume loop, so both
-    // arms are asserted rather than assumed.
+    // bug that produced them. `pop_params` is called with `commit_on_delivery`
+    // true from a pop that commits on delivery and false from a leased pop and
+    // the consume loop, so both arms are asserted rather than assumed.
     #[test]
     fn conflation_reaches_the_query_from_both_pop_param_paths() {
-        for auto_ack in [false, true] {
+        for commit_on_delivery in [false, true] {
             let pairs = q("orders")
                 .group("workers")
                 .conflation(true)
-                .pop_params(auto_ack)
+                .pop_params(commit_on_delivery)
                 .to_pairs();
             assert!(
                 pairs.contains(&("conflation", "true".to_string())),
-                "auto_ack={auto_ack}: {pairs:?}"
+                "commit_on_delivery={commit_on_delivery}: {pairs:?}"
             );
         }
     }

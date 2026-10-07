@@ -41,7 +41,26 @@ async fn main() -> queen_mq::Result<()> {
 
 The handler's return value settles the message: `Ok` acks it, `Err` nacks it and records the
 reason on the DLQ row if that nack exhausts the retry budget. Turn that off with
-`.auto_ack(false)` and call `queen.ack(&msg)` yourself.
+`.auto_ack(false)` and call `queen.ack(&msg)` yourself. The loop then sends nothing: an `Err` is
+logged, not nacked, and the message comes back when its lease expires. The broker refuses an ack on
+an expired lease with HTTP 200 and `success: false`; the loop logs that refusal at error level and
+carries on. The `acked` and `nacked` counts in `ConsumeSummary` say what the loop decided, not what
+the broker accepted.
+
+A single `pop()` hands you leased messages: ack them with `queen.ack(&msg)`, or they come back
+when the lease expires. With `.commit_on_delivery(true)` the broker moves the group's cursor past
+the messages as it hands them out, so there is no lease and nothing to ack:
+
+```rust
+let msgs = queen.queue("orders").group("audit")
+    .commit_on_delivery(true)
+    .pop()
+    .await?;
+```
+
+That is at-most-once delivery, because a crash after the pop loses the messages. It is an option
+of `pop()` and `pop_result()`. A consumer always leases its messages, so `consume` and
+`consume_batch` return an error before any request when the builder has it.
 
 ## Sharing the protocol with the broker
 
@@ -184,7 +203,7 @@ It is a property of the **group**, not of the call: the value is persisted the f
 group registers on the queue, and from then on the stored value is what the broker applies to
 every consumer of that group. A later consumer declaring the opposite does not flip it — it
 keeps working under the stored policy, and this client logs one warning per (queue, group).
-Needs a `.group(..)`, and the broker refuses it together with `pop_auto_ack`.
+Needs a `.group(..)`, and the broker refuses it together with `.commit_on_delivery(true)`.
 
 The guarantee it buys: after the last push to a partition, at least one run of that partition's
 handler *starts* after that push committed. The broker never commits past an offset it did not

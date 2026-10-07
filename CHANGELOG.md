@@ -120,6 +120,26 @@ drains with pops that commit on delivery. Until a client-go release has `CommitO
 calls `CommitOnDelivery` or `AutoAck`, whichever the client-go it is built with has, so the
 `go install` build (client-go v2.0.0) and the workspace build both send `autoAck=true`.
 
+**Rust client: the consume loop logs a refused ack.** The broker refuses an ack, for example one
+sent after the lease expired, with HTTP 200 and `success: false` on the item. The loop read only the
+transport result, so a handler that outlived its lease had its ack refused without a trace.
+`consume()` and `consume_batch()` now read the verdict and log a refused ack or nack at error level,
+with the broker's reason and, for a batch, how many items it refused. The loop still carries on, and
+`ConsumeSummary` still counts what the loop decided, not what the broker accepted. Under
+`auto_ack(false)` the loop sends no nack for a handler that returns `Err`, by design, but it logged
+"nacked" all the same, and `consume_batch()` logged nothing. Both now log the handler's error as a
+warning that says the message was not nacked.
+
+**Rust client: `commit_on_delivery()` replaces `pop_auto_ack()`.** On a pop, the broker's
+`autoAck=true` moves the consumer group's cursor past the messages as it hands them out: no lease,
+nothing to ack, at-most-once. The builder now has an option for it, `commit_on_delivery(true)`,
+which `pop()` and `pop_result()` send; without it both stay leased, as before. `pop_auto_ack()` is
+deprecated in favour of `commit_on_delivery(true).pop()` and sends the same request. `consume()` and
+`consume_batch()` refuse a builder with `commit_on_delivery(true)` with `Error::Invalid` before any
+request, since a consumer always leases its messages; `auto_ack()` stays the loop's ack after the
+handler and never reaches the wire. The ephemeral pop builder gains `commit_on_delivery()` too, and
+its `auto_ack()` is a deprecated alias with the same effect.
+
 ## PHP client 2.2.0 - 2026-10-06
 
 **Laravel: `prefetch` `'auto'`.** Each worker sizes its next pop from how long its jobs take, so a

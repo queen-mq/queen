@@ -396,3 +396,95 @@ fn reason(status: u16) -> &'static str {
         _ => "Status",
     }
 }
+
+// ===========================================================================
+// Log capture
+// ===========================================================================
+
+/// One `tracing` event, flattened to its level and a `key=value` line.
+#[derive(Debug, Clone)]
+pub struct LogLine {
+    pub level: tracing::Level,
+    pub text: String,
+}
+
+/// Records every `tracing` event emitted on this thread while it lives.
+///
+/// Some outcomes reach the caller only through the log: the consume loop
+/// reports a refused ack there and carries on. A test of that report has to
+/// read the log, and the `Subscriber` trait is small enough that this needs no
+/// subscriber crate.
+///
+/// The subscriber is the thread's default, not the global one, so tests running
+/// in parallel do not see each other's events. That suits `#[tokio::test]`: its
+/// runtime is current-thread, so the consumer's spawned workers log on the
+/// test's own thread.
+pub struct Logs {
+    lines: Arc<Mutex<Vec<LogLine>>>,
+    _guard: tracing::subscriber::DefaultGuard,
+}
+
+impl Logs {
+    pub fn capture() -> Self {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let guard = tracing::subscriber::set_default(Sink(Arc::clone(&lines)));
+        Self {
+            lines,
+            _guard: guard,
+        }
+    }
+
+    pub fn lines(&self) -> Vec<LogLine> {
+        self.lines.lock().unwrap().clone()
+    }
+
+    /// The events at `level` whose line contains every one of `needles`.
+    pub fn matching(&self, level: tracing::Level, needles: &[&str]) -> Vec<LogLine> {
+        self.lines()
+            .into_iter()
+            .filter(|l| l.level == level && needles.iter().all(|n| l.text.contains(n)))
+            .collect()
+    }
+}
+
+struct Sink(Arc<Mutex<Vec<LogLine>>>);
+
+struct Fields<'a>(&'a mut String);
+
+impl tracing::field::Visit for Fields<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if !self.0.is_empty() {
+            self.0.push(' ');
+        }
+        self.0.push_str(&format!("{}={:?}", field.name(), value));
+    }
+}
+
+impl tracing::Subscriber for Sink {
+    /// The client's own events only: the HTTP stack's connection-pool trace
+    /// would drown every assertion message.
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.target().starts_with("queen_mq")
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut text = String::new();
+        event.record(&mut Fields(&mut text));
+        self.0.lock().unwrap().push(LogLine {
+            level: *event.metadata().level(),
+            text,
+        });
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
