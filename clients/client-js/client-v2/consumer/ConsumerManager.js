@@ -7,6 +7,20 @@ import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/confla
 import { popSizing, parseAutopilotDecision, emptyPollDelayMillis } from '../utils/autopilot.js'
 import { CONSUME_DEFAULTS } from '../utils/defaults.js'
 
+/** Wait `ms`, or less if the consumer is stopped meanwhile: the loop checks the signal next. */
+function pause(ms, signal) {
+  if (signal?.aborted) return Promise.resolve()
+  return new Promise(resolve => {
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
+}
+
 export class ConsumerManager {
   #httpClient
   #queen
@@ -184,7 +198,7 @@ export class ConsumerManager {
             // pop engaged autopilot and the broker had an opinion (it knows the
             // arrival rate on this queue and this client does not), otherwise
             // the historical 100ms.
-            await new Promise(resolve => setTimeout(resolve, emptyPollDelayMillis(parseAutopilotDecision(result))))
+            await pause(emptyPollDelayMillis(parseAutopilotDecision(result)), signal)
             continue
           }
         }
@@ -295,7 +309,7 @@ export class ConsumerManager {
             ? error.retryAfterSeconds * 1000
             : 1000
           logger.warn('ConsumerManager.worker', { workerId, status: 'rate-limited', code: error.code, retryAfterMs })
-          await new Promise(resolve => setTimeout(resolve, retryAfterMs))
+          await pause(retryAfterMs, signal)
           continue
         }
 
@@ -307,7 +321,7 @@ export class ConsumerManager {
         if (isNetworkError) {
           logger.warn('ConsumerManager.worker', { workerId, error: 'network', message: error.message })
           // Wait before retry
-          await new Promise(resolve => setTimeout(resolve, 1000))
+          await pause(1000, signal)
           continue
         }
 

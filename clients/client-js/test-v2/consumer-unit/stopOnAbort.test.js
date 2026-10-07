@@ -18,6 +18,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import { readFile } from 'node:fs/promises'
+import vm from 'node:vm'
 
 import { Queen } from '../../client-v2/index.js'
 import { HttpClient } from '../../client-v2/http/HttpClient.js'
@@ -325,6 +327,211 @@ describe('HttpClient — a response whose body is still being read', () => {
     } finally {
       await http.destroy()
       await server.stop()
+    }
+  })
+})
+
+describe('consume() — a pop response that has started arriving', () => {
+  it('is read to the end after a stop, and its message goes back with a retry ack', async () => {
+    // The broker granted the lease when it sent the headers: from then on the
+    // message is this consumer's to give back, which needs the body.
+    const message1 = message(1)
+    const body = JSON.stringify({ success: true, consumerGroup: GROUP, messages: [message1] })
+    let finish
+    const finished = new Promise(resolve => { finish = resolve })
+    let pops = 0
+    const acks = []
+    const server = createServer((req, res) => {
+      let raw = ''
+      req.on('data', chunk => { raw += chunk })
+      req.on('end', () => {
+        if (req.method === 'GET') {
+          pops++
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) })
+          res.write(body.slice(0, body.length / 2))
+          finished.then(() => { if (!res.destroyed) res.end(body.slice(body.length / 2)) })
+          return
+        }
+        const parsed = JSON.parse(raw)
+        const items = parsed.acknowledgments || [parsed]
+        acks.push(...items)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(items.map((a, i) => ({ index: i, transactionId: a.transactionId, success: true, error: null, leaseReleased: true }))))
+      })
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const url = `http://127.0.0.1:${server.address().port}`
+    const queen = new Queen({ url, handleSignals: false, retryAttempts: 1 })
+    const headers = onResponseHeaders(url)
+    try {
+      const stop = new AbortController()
+      const seen = []
+      const running = Promise.resolve(queen.queue('orders').group(GROUP).batch(1).each()
+        .consume(async (m) => { seen.push(m.transactionId) }, { signal: stop.signal }))
+      await headers.ready
+
+      stop.abort()
+      finish()
+
+      assert.equal(await settleWithin(running, 2000), 'resolved')
+      assert.deepEqual(seen, [], 'nothing is handed to the handler after the stop')
+      assert.equal(pops, 1)
+      assert.deepEqual(acks.map(a => `${a.transactionId}:${a.status}`), ['tx-1:retry'],
+        'the message in the half-read response is given back, not left to its lease')
+    } finally {
+      finish()
+      headers.restore()
+      await queen.close()
+      server.closeAllConnections()
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+})
+
+/** A server that answers every request with `status` (and Retry-After), counting them. */
+async function startRefusingServer(status, retryAfterSeconds = null) {
+  let hits = 0
+  let firstHit
+  const hit = new Promise(resolve => { firstHit = resolve })
+  const server = createServer((req, res) => {
+    hits++
+    const headers = { 'Content-Type': 'application/json' }
+    if (retryAfterSeconds != null) headers['Retry-After'] = String(retryAfterSeconds)
+    res.writeHead(status, headers)
+    res.end('{"error":"refused"}', () => firstHit())
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  return {
+    url: `http://127.0.0.1:${server.address().port}`,
+    hits: () => hits,
+    firstHit: hit,
+    async stop() {
+      server.closeAllConnections()
+      await new Promise(resolve => server.close(resolve))
+    }
+  }
+}
+
+/** A server that drops every connection without answering. */
+async function startDroppingServer() {
+  let hits = 0
+  let firstHit
+  const hit = new Promise(resolve => { firstHit = resolve })
+  const server = createServer((req) => { hits++; req.socket.destroy(); firstHit() })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  return {
+    url: `http://127.0.0.1:${server.address().port}`,
+    hits: () => hits,
+    firstHit: hit,
+    async stop() {
+      server.closeAllConnections()
+      await new Promise(resolve => server.close(resolve))
+    }
+  }
+}
+
+/** Aborts once the client is inside its wait, and measures how long stopping takes. */
+async function abortDuringWait(server, running, ac) {
+  await server.firstHit
+  await sleep(100) // the client has read the answer and is now waiting
+  const started = performance.now()
+  ac.abort()
+  const outcome = await settleWithin(running, 3000)
+  return { outcome, elapsed: performance.now() - started }
+}
+
+describe('a stop during a wait between attempts', () => {
+  it('HttpClient: a 429 backoff ends at once', async () => {
+    const server = await startRefusingServer(429, 2)
+    const http = new HttpClient({ baseUrl: server.url, retryAttempts: 1 })
+    try {
+      const ac = new AbortController()
+      const running = http.get('/api/v1/pop/queue/orders?wait=true', 10000, null, 'pop', ac.signal).then(() => null, e => { throw e })
+      const errorP = running.catch(e => e)
+      const { elapsed } = await abortDuringWait(server, running, ac)
+      const error = await errorP
+      assert.equal(error?.aborted, true)
+      assert.equal(server.hits(), 1, 'no attempt after the stop')
+      assert.ok(elapsed < 250, `stopping took ${Math.round(elapsed)} ms, not the 2 s Retry-After`)
+    } finally {
+      await http.destroy()
+      await server.stop()
+    }
+  })
+
+  it('HttpClient: the backoff before retrying a 5xx ends at once', async () => {
+    const server = await startRefusingServer(503)
+    const http = new HttpClient({ baseUrl: server.url, retryAttempts: 3, retryDelayMillis: 2000 })
+    try {
+      const ac = new AbortController()
+      const running = http.get('/status', 10000, null, null, ac.signal)
+      const errorP = running.catch(e => e)
+      const { elapsed } = await abortDuringWait(server, running, ac)
+      const error = await errorP
+      assert.equal(error?.aborted, true)
+      assert.equal(server.hits(), 1, 'no attempt after the stop')
+      assert.ok(elapsed < 250, `stopping took ${Math.round(elapsed)} ms, not the 2 s backoff`)
+    } finally {
+      await http.destroy()
+      await server.stop()
+    }
+  })
+
+  it('consume(): the pause after a 429 the client gave up retrying ends at once', async () => {
+    const server = await startRefusingServer(429, 2)
+    const queen = new Queen({ url: server.url, handleSignals: false, retryAttempts: 1, retry429: { maxAttempts: 1 } })
+    try {
+      const ac = new AbortController()
+      const running = Promise.resolve(queen.queue('orders').group(GROUP).consume(async () => {}, { signal: ac.signal }))
+      const { outcome, elapsed } = await abortDuringWait(server, running, ac)
+      assert.equal(outcome, 'resolved')
+      assert.ok(elapsed < 250, `stopping took ${Math.round(elapsed)} ms, not the 2 s Retry-After`)
+    } finally {
+      await queen.close()
+      await server.stop()
+    }
+  })
+
+  it('consume(): the pause after a network error ends at once', async () => {
+    const server = await startDroppingServer()
+    const queen = new Queen({ url: server.url, handleSignals: false, retryAttempts: 1 })
+    try {
+      const ac = new AbortController()
+      const running = Promise.resolve(queen.queue('orders').group(GROUP).consume(async () => {}, { signal: ac.signal }))
+      const { outcome, elapsed } = await abortDuringWait(server, running, ac)
+      assert.equal(outcome, 'resolved')
+      assert.ok(elapsed < 250, `stopping took ${Math.round(elapsed)} ms, not the 1 s pause`)
+    } finally {
+      await queen.close()
+      await server.stop()
+    }
+  })
+})
+
+describe('README — the "Stopping a consumer" example', () => {
+  it('starts consuming before the stop, not after it', async () => {
+    const broker = await startBroker()
+    const queen = new Queen({ url: broker.url, handleSignals: false })
+    const readme = await readFile(new URL('../../README.md', import.meta.url), 'utf8')
+    const section = readme.slice(readme.indexOf('**Stopping a consumer**'))
+    const snippet = section.match(/```javascript\n([\s\S]*?)```/)[1]
+    let shutdown
+    const context = vm.createContext({
+      queen, AbortController, Promise,
+      processTask: async () => {},
+      process: { once(event, fn) { assert.equal(event, 'SIGTERM'); shutdown = fn } }
+    })
+    try {
+      vm.runInContext(snippet, context)
+      await sleep(150)
+      const popsBeforeStop = broker.pops().length
+
+      await shutdown()
+
+      assert.equal(popsBeforeStop, 1, 'the example is consuming before SIGTERM')
+    } finally {
+      await queen.close().catch(() => {})
+      await broker.stop()
     }
   })
 })

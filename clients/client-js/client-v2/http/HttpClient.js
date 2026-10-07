@@ -16,6 +16,35 @@ function callerAborted(method, url) {
   return error
 }
 
+/**
+ * Wait `delay` ms before another attempt, unless the caller aborts first: then
+ * reject at once with the caller-aborted error instead of sitting out the wait.
+ */
+function waitBeforeRetry(delay, signal, method, url) {
+  if (signal?.aborted) return Promise.reject(callerAborted(method, url))
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(callerAborted(method, url))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, delay)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/** A pop answer carries leases: once it is arriving, it is read to the end. */
+function isPop(method, url) {
+  if (method !== 'GET') return false
+  try {
+    return new URL(url).pathname.startsWith('/api/v1/pop')
+  } catch {
+    return false
+  }
+}
+
 // --------------------------------------------------------------------------
 // Host-routed proxy support (queen_proxy selects the tenant cluster from the
 // first DNS label of the Host header -- proxy/src/cache.rs
@@ -242,7 +271,7 @@ export class HttpClient {
 
         const delay = this.#computeRetry429DelayMs(tries - 1, error.retryAfterSeconds, baseMs, capMs)
         logger.warn('HttpClient.retry429', { method, url, attempt: tries, retryKind: retryKind || 'default', nextDelayMs: delay, retryAfterSeconds: error.retryAfterSeconds ?? null, code: error.code ?? null })
-        await new Promise(resolve => setTimeout(resolve, delay))
+        await waitBeforeRetry(delay, signal, method, url)
       }
     }
   }
@@ -343,6 +372,10 @@ export class HttpClient {
 
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout)
+    // The caller's signal closes the request too: a long poll its consumer no
+    // longer wants must not stay open for the broker to hand it a message.
+    const abortFromCaller = () => controller.abort()
+    signal?.addEventListener('abort', abortFromCaller, { once: true })
 
     try {
       const headers = { 'Content-Type': 'application/json' }
@@ -353,9 +386,7 @@ export class HttpClient {
 
       const options = {
         method,
-        // The caller's signal closes the request too: a long poll its consumer
-        // no longer wants must not stay open for the broker to hand it a message.
-        signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+        signal: controller.signal,
         headers
       }
 
@@ -382,6 +413,14 @@ export class HttpClient {
       }
 
       const response = await fetch(requestUrl, options)
+
+      // The broker granted the leases of a pop when it sent these headers. From
+      // here the caller's abort no longer cuts the read: the body says which
+      // messages this consumer holds, and it needs them to give them back. The
+      // timeout still bounds the read.
+      if (response.ok && isPop(method, url)) {
+        signal?.removeEventListener('abort', abortFromCaller)
+      }
 
       logger.log('HttpClient.response', { method, url, status: response.status })
 
@@ -464,6 +503,7 @@ export class HttpClient {
       logger.error('HttpClient.request', { method, url, error: error.message })
       throw error
     } finally {
+      signal?.removeEventListener('abort', abortFromCaller)
       clearTimeout(timeoutId)
     }
   }
@@ -488,7 +528,7 @@ export class HttpClient {
         if (attempt < this.#retryAttempts - 1) {
           const delay = this.#retryDelayMillis * Math.pow(2, attempt)
           logger.warn('HttpClient.retry', { method, path, attempt: attempt + 1, delay, error: error.message })
-          await new Promise(resolve => setTimeout(resolve, delay))
+          await waitBeforeRetry(delay, signal, method, path)
         }
       }
     }

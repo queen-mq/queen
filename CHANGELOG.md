@@ -104,17 +104,24 @@ When the error's text said "timeout" or "connection", the loop read it as a long
 network fault instead: it polled again with the message still leased, and the error was lost. Such
 an error now stops the consumer like any other handler error.
 
-**JS client: stopping a consumer never strands a message.** Aborting the `signal` passed to
+**JS client: stopping a consumer no longer strands its messages.** Aborting the `signal` passed to
 `consume()` was checked only between polls. A long poll open at the abort stayed open for up to its
 timeout, and the broker could still hand it a message. `.each()` then dropped that message without
 settling it, so its partition stayed blocked until the lease expired, on every rolling restart. The
-abort now closes the poll in flight, and the broker hands nothing to a poll whose caller is gone.
-Under `.each()`, messages popped but not yet handed to the handler, and those popped beyond
+abort now closes the poll in flight, and the broker hands nothing to a poll whose caller is gone. A
+pop answer already arriving is read to the end, since the broker leased its messages when it sent
+it. Under `.each()`, messages popped but not yet handed to the handler, and those popped beyond
 `.limit()`, go back with a `retry` ack: the lease is released and no retry is charged. An aborted
 request is not a backend failure: it is not retried, does not fail over to another node and does not
-mark one unhealthy. A `wait(false)` consumer stopped during a pop now resolves instead of rejecting.
-Measured on a three-node 2.0.1 cluster, a consumer stopped as a message arrived: 40 of 40 messages
-waited out the lease before, none after.
+mark one unhealthy. A wait between attempts (429 backoff, retry after a 5xx or a network error) ends
+at once instead of running out. A `wait(false)` consumer stopped during a pop now resolves instead of
+rejecting. Two cases still fall back to the lease: an answer lost before its headers arrive, and a
+`retry` ack that cannot be delivered. Measured on a three-node 2.0.1 cluster, a consumer stopped as a
+message arrived: 40 of 40 messages waited out the lease before, none after.
+
+**JS client: the request timeout covers the response body.** A JSON response was read after the
+request's `try` block had ended, so the timeout was already cleared: a body that stalled midway hung
+with no timeout.
 
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
