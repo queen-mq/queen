@@ -16,6 +16,7 @@ sourceOfTruth:
   - server/src/rsm/facade/real.rs
   - server/src/rsm/facade/remote.rs
   - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/reads/messages.rs
   - server/src/rsm/facade/real/phase2/offsets.rs
   - server/src/proxy_embed.rs
   - proxy/src/auth.rs
@@ -31,8 +32,7 @@ layer over the routes on this page. We kept it that way on purpose, so that when
 wrong you can ask the broker directly, with the tools already on your machine.
 
 The page starts with what every route shares, then lists every route the broker registers, then
-documents the two surfaces that need more than a table row: reads by offset, and the control-plane
-API the embedded proxy adds.
+documents message browsing, reads by offset, and the control-plane API the embedded proxy adds.
 
 ## Base URL
 
@@ -152,6 +152,20 @@ that means during a quorum loss is on [recovery](/operate/recovery/).
 `POST /api/v1/ephemeral/_adopt` and `_leaving` are broker-to-broker hand-over calls: they also
 require the forward mark that only another node sets (and the cluster token when one is
 configured), and the proxy never lets a tenant reach them.
+
+## Message browsing
+
+`GET /api/v1/messages` lists messages newest first, filtered by `queue`, `partition`, `namespace`,
+`task` and `status`. `limit` defaults to 200 and is clamped to 1 through 1000; `offset` defaults to
+0. `from` is inclusive and defaults to one hour ago. `to` defaults to now and is rounded to the
+start of the next minute, which is exclusive: `to=2026-10-06T20:04:00Z` includes messages before
+`20:05:00Z`.
+
+The queue-log path uses timestamps and offsets in the indexes to select the page before reading
+payloads. A historical window therefore skips newer payloads, and an append containing only
+messages skipped by `offset` is not read. The request still gathers partition and cursor metadata;
+deep offsets and selective status filters can require more metadata work. The legacy segment
+path reads backwards in chunks and can scan payloads newer than `to`.
 
 ## Reads by offset
 

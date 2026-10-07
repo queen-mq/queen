@@ -16,6 +16,8 @@ use crate::rsm::store::keys;
 use crate::rsm::store::rows::{self, DlqRow, PartitionRow};
 use crate::rsm::store::{Keyspace, Reads, Store, TypedReads};
 
+mod messages;
+
 #[derive(Clone)]
 pub(super) struct Part {
     pub(super) pid: Pid,
@@ -60,14 +62,14 @@ struct MsgPart {
 }
 
 /// A message the list keeps, with its status.
-struct Picked {
+struct Picked<R = Record> {
     created_at_us: i64,
     offset: u64,
     cand: usize,
     status: &'static str,
     consumed_by: u64,
     total_groups: u64,
-    record: Record,
+    record: R,
 }
 
 /// A message's status as `list_messages_v1` (010 ≈860) derives it:
@@ -750,9 +752,9 @@ impl RaftFacade {
     /// partition's cursors ([`message_status`]), filtered by queue, partition,
     /// namespace, task and status, then paged by `limit`/`offset`.
     ///
-    /// Partitions are visited newest write first and each is read backwards
-    /// from its tail, so a page costs O(offset + limit) records plus one chunk
-    /// per partition it touches, never a scan of every log.
+    /// The queue-log path seeks the time window in its indexes, selects the
+    /// page from metadata and only then reads its payloads. The legacy segment
+    /// path walks backwards in chunks; it may scan a suffix newer than `to`.
     pub(super) async fn api_messages(
         &self,
         ctx: ReqCtx,
@@ -883,6 +885,22 @@ impl RaftFacade {
         let tenant = ctx.tenant.clone();
         let status_filter = status.clone();
         let (picked, cands) = tokio::task::spawn_blocking(move || {
+            if let Some(qlog) = qlog.as_ref() {
+                let picked = messages::indexed_page(
+                    qlog,
+                    &tenant,
+                    &cands,
+                    &messages::Window {
+                        from_us,
+                        to_us,
+                        now,
+                        status: status_filter.as_deref(),
+                        offset,
+                        limit,
+                    },
+                )?;
+                return Ok((picked, cands));
+            }
             // (created_at, offset, candidate, status, consumedBy, totalGroups, record),
             // kept sorted newest first and at most `need` long.
             let mut best: Vec<Picked> = Vec::new();
@@ -952,15 +970,13 @@ impl RaftFacade {
                     high = lo;
                 }
             }
-            Ok::<_, RsmError>((best, cands))
+            Ok::<_, RsmError>((best.into_iter().skip(offset).take(limit).collect(), cands))
         })
         .await
         .map_err(|e| RsmError::Internal(format!("message list walk: {e}")))??;
 
         let rows: Vec<Value> = picked
             .into_iter()
-            .skip(offset)
-            .take(limit)
             .map(|mut p| {
                 decrypt_record(&self.encryption, &mut p.record);
                 let c = &cands[p.cand];

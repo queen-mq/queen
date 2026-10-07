@@ -1890,6 +1890,25 @@ impl QLog {
         }
     }
 
+    /// The newest append before an offset and a timestamp (both exclusive),
+    /// from index metadata only. Active-first for duplicate bases, matching
+    /// the replay precedence of `locate_record`. Callers clip the
+    /// returned batch to their snapshot's retained and applied offset bounds.
+    pub fn record_before(&self, pid: u64, high: u64, before_us: i64) -> Option<index::Record> {
+        let mut best = self.active_index.record_before(pid, high, before_us);
+        for view in self.sealed.values().rev() {
+            if best.is_some_and(|r| r.end >= high) {
+                break; // it holds high - 1; no older file can improve it
+            }
+            if let Some(rec) = view.record_before(pid, high, before_us) {
+                if best.is_none_or(|b| rec.base_offset > b.base_offset) {
+                    best = Some(rec);
+                }
+            }
+        }
+        best
+    }
+
     /// Locate `(pid, offset)` returning the FULL index record (base offset, end,
     /// created_at and the node-local position) plus its file id — what the
     /// O(claimed) claim walk needs and [`QLog::locate`] drops. Active file first
