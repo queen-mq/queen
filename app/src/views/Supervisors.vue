@@ -1,7 +1,6 @@
 <template>
   <div class="view-container supervisors-page">
     <PageHead title="Supervisors" sub="Published worker status">
-      <template #switch><label class="supervisor-auto"><input v-model="autoRefresh" type="checkbox" /> Refresh every 30s</label></template>
       <template #actions>
         <span class="supervisor-stamp">{{ loading ? 'Reading…' : readAt ? `Read at ${time(readAt)}` : 'Not read yet' }}</span>
         <button class="btn" :disabled="loading" @click="refresh(true)">Refresh</button>
@@ -174,12 +173,11 @@ import { formatNumber } from '@/composables/useApi'
 import { readSupervisorPage, supervisorObservations, supervisorGroupPrefix } from '@/composables/supervisorStatus'
 import { describeVerdict, gatedVerdict } from '@/composables/useGatedVerdict'
 import { kvRefusalText } from '@/composables/useKvView'
-import { useRefresh } from '@/composables/useRefresh'
+import { useAutoRefresh } from '@/composables/useRefresh'
 import { useIdentity } from '@/stores/identity'
 import { routeSupport } from '@/stores/routeSupport'
 
 const { epoch } = useIdentity()
-const autoRefresh = ref(true)
 const namespace = ref('queen-supervisor'), sourceGroup = ref('')
 const namespaceDraft = ref(namespace.value), groupDraft = ref(''), sourceError = ref('')
 const entries = shallowRef([]), after = ref(null), readAt = ref(null), loading = ref(false), error = shallowRef(null), verdict = ref(null)
@@ -242,10 +240,9 @@ function applySource() {
 function checkAgain() { routeSupport.forget('kv'); verdict.value = null; refresh(true) }
 watch(epoch, () => { clearSource(); read() })
 onMounted(() => read())
-// Explicit refresh always works. Automatic reads use the shell's one ticker,
-// which is suspended while hidden, and stop after stable KV refusals.
-useRefresh(() => refresh())
-useRefresh(() => { if (autoRefresh.value) refresh() }, { auto: true })
+// The page's own Refresh button always reads. The shell's refresh and its one
+// ticker, which is suspended while hidden, stop after stable KV refusals.
+useAutoRefresh(() => refresh())
 onBeforeUnmount(() => { sequence++; controller?.abort(); drawer.value?.close() })
 const rows = computed(() => supervisorObservations(entries.value, readAt.value || Date.now(), Boolean(error.value)))
 const attention = computed(() => rows.value.filter(row => row.severity).length)
@@ -341,7 +338,6 @@ function onDrawerClick(event) { if (backdropDown && outside(event)) closeDrawer(
 
 <style scoped>
 .supervisor-stamp, .supervisor-note { color: var(--text-low); font-size: 12px; }
-.supervisor-auto { display: flex; align-items: center; gap: 7px; color: var(--text-mid); font-size: 12px; }
 .supervisor-note { line-height: 1.7; margin-top: 16px; }
 .supervisor-metrics { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--bd); border-radius: var(--r-card); background: var(--ink-2); margin-bottom: 24px; }
 .supervisor-metrics > div { padding: 20px 24px; }
