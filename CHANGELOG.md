@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 2.0.2
 
 **C++ client: `commit_on_delivery()` commits a pop at delivery.** The new
 `QueueBuilder::commit_on_delivery()` makes `pop()` and `pop_result()` send the broker's
