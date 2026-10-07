@@ -23,6 +23,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): QueueBuilder.js adds commitOnDelivery(), a pop() option that sends
 # autoAck=true, and consume() throws when it is set. This page uses consume() and .partitions(1) only. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-10-07 (JS consumer stop, #86): ConsumerManager.js closes the long poll and gives
+# back unstarted each() messages with a retry ack when consume() is stopped. Nothing this page states changes.
 ---
 
 Queen began as the broker of a hotel messaging product, so this is the application we know best.

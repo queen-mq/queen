@@ -30,6 +30,8 @@ sidebar:
 # autoAck=true, and consume() throws when it is set. This page uses consume() with autoAck(), which still never
 # reaches the broker. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): only message browsing changes; the DLQ list, retry and delivery behavior described here are unchanged.
+# sourceOfTruth re-read 2026-10-07 (JS consumer stop, #86): ConsumerManager.js closes the long poll and gives
+# back unstarted each() messages with a retry ack when consume() is stopped. Nothing this page states changes.
 ---
 
 Put every delivery in the partition of the endpoint it is for, let the broker's retry budget do the
