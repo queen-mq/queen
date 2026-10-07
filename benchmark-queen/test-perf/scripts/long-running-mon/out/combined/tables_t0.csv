@@ -1,7 +1,0 @@
-consumer_watermarks,1,0,0,0,1,0,0,177
-messages,61970,0,0,0,61970,0,1,62108
-messages_consumed,69,0,0,0,69,0,0,0
-partition_consumers,29,138,138,0,29,28,1,4351
-partition_lookup,29,296,296,0,29,17,2,817
-partitions,36,0,0,0,36,0,266,68039
-queues,0,1,1,0,0,1,532,5277

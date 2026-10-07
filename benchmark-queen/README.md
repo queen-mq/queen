@@ -1,19 +1,21 @@
 # Queen benchmarks
 
-Results from benchmarking [Queen MQ](https://github.com/queen-mq/queen) on a 32 vCPU / 62 GiB host with PostgreSQL.
+Archived benchmark sessions of Queen 2.x: the harness, the raw output and the results of each.
+The method and the rig are described at
+[queenmq.com/benchmarks/methodology](https://queenmq.com/benchmarks/methodology/).
 
-## Sessions
+| Folder | What it holds |
+|---|---|
+| [`2026-09-30-kafka-pulsar/`](./2026-09-30-kafka-pulsar/) | Kafka, Redpanda and Pulsar on Queen's 3-node rig: `SPEC.md`, the runbook, the `mqload` loaders, each system's install and configuration scripts, `report/report.py`, and the Kafka, Redpanda, Pulsar, transaction and Kafka-client runs |
+| [`2026-09-27-jepsen-archive/`](./2026-09-27-jepsen-archive/) | Jepsen P8 to P10: the campaign results, the Jepsen stores and the binaries they tested |
+| [`laravel-supervisors/`](./laravel-supervisors/) | The Laravel harness: Horizon on Redis against the Queen PHP and Rust supervisors |
+| [`2026-09-30-laravel-supervisor-features/`](./2026-09-30-laravel-supervisor-features/) | Prefork, fast scale-up, event-driven and coordinated replicas of the Laravel supervisor |
+| [`2026-10-01-laravel-horizon-raft/`](./2026-10-01-laravel-horizon-raft/) | Horizon against the Queen supervisor on the Raft broker |
+| [`2026-10-01-linux-vm-horizon-raft/`](./2026-10-01-linux-vm-horizon-raft/) | The same comparison on a dedicated Linux virtual machine |
+| [`2026-10-02-laravel-failure-matrix/`](./2026-10-02-laravel-failure-matrix/) | Failures, replicas, a soak and Laravel features |
+| [`2026-10-02-laravel-partition-stripes/`](./2026-10-02-laravel-partition-stripes/) | More partition stripes than one pop checks out |
+| [`2026-10-05-laravel-auto-prefetch/`](./2026-10-05-laravel-auto-prefetch/) | `prefetch` `'auto'` against a fixed prefetch |
+| [`2026-10-05-laravel-worker-memory/`](./2026-10-05-laravel-worker-memory/) | Where the memory of a Laravel worker goes |
+| [`2026-07-29-vm-campaign/goload/`](./2026-07-29-vm-campaign/goload/) | `goload`, the Go loader for Queen. The `mqload` loaders share its open-loop pacer, its histograms and its JSON payload |
 
-| Date | Image(s) | Tests | Summary |
-|---|---|---|---|
-| [`2026-04-25`](./2026-04-25/) | `0.14.0.alpha.3` | 14 h long-running production-load test | [long-running.md](./2026-04-25/long-running.md) |
-| [`2026-04-26`](./2026-04-26/) | `0.14.0.alpha.3` + `0.12.19` | 18 short benchmarks across 4 axes (partition, batch, queue, consumer group) + version comparison | [README.md](./2026-04-26/README.md) |
-| [`2026-04-26` (pipeline · ordered)](./2026-04-26/pipeline-queen.md) | `0.14.0.alpha.5` | 4-stage pipeline at 1 000 partitions (per-entity ordering), real `queen-mq` JS clients via pm2, 20-min run | [pipeline-queen.md](./2026-04-26/pipeline-queen.md) |
-| [`2026-04-26` (pipeline · throughput)](./2026-04-26/pipeline-queen-throughput.md) | `0.14.0.alpha.5` | Same 4-stage pipeline at 10 partitions, batch=1 000 (weak ordering, max throughput), 10-min run | [pipeline-queen-throughput.md](./2026-04-26/pipeline-queen-throughput.md) |
-
-## Quick navigation
-
-- **How to reproduce these benchmarks**: [`2026-04-26/HOW-TO-RUN.md`](./2026-04-26/HOW-TO-RUN.md)
-- **Throughput envelope**: Queen sustains ~100 k msg/s peak with batch=100 on a single node, ~28–39 k msg/s sustained at production-realistic batch=10. See [`2026-04-26/README.md`](./2026-04-26/README.md) for the full per-axis breakdown.
-- **Realistic end-to-end pipeline (ordered config, 1 000 partitions)**: 3 688 msg/s sustained through a 4-stage `producer → worker → q2 fan-out × 2` topology, **p99 = 1.02 s**, **99.96 % delivery completeness**, **0 duplicates**, 3 deadlocks (all absorbed by failover). See [`pipeline-queen.md`](./2026-04-26/pipeline-queen.md).
-- **Same pipeline, throughput-tuned config (10 partitions)**: **6 673 msg/s** (+81 %) end-to-end, p99 = 1.10 s, 9× tighter max latency (1.75 s), **3.2× lower Postgres CPU** thanks to bigger pop batches. See [`pipeline-queen-throughput.md`](./2026-04-26/pipeline-queen-throughput.md). Partition count is a continuous knob; the same engine subsumes Kafka-like (per-entity ordered) and RabbitMQ-like (competing consumers) workloads.
+Results of Queen 1.x, whose storage was PostgreSQL, are in the git history of this repository.

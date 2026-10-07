@@ -22,7 +22,7 @@ Queen MQ is a partitioned message queue broker that keeps its state in its own r
 - **Consumer Groups** - Kafka-style consumer groups for scalability
 - **Flexible Semantics** - Exactly-once, at-least-once, and at-most-once delivery
 - **Transactions** - Atomic operations across push and ack
-- **High Performance** — 104K msg/s push, 165K msg/s fan-out with consumer groups on a single 32-core node ([benchmarks](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-04-26))
+- **High Performance** — 1M msg/s in and out of one queue of 10M partitions on three nodes ([benchmarks](https://queenmq.com/benchmarks/))
 - **Subscription Modes** - Process from beginning, new messages only, or from timestamp
 - **Dead Letter Queue** - Automatic failure handling and monitoring
 - **Message Tracing** - Debug distributed workflows with trace timelines

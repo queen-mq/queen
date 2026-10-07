@@ -1,3 +1,0 @@
-CONTAINER ID   NAME          CPU %     MEM USAGE / LIMIT     MEM %     NET I/O          BLOCK I/O     PIDS
-cf3c35c3a118   rabbitmq      0.20%     187.8MiB / 62.79GiB   0.29%     5.3GB / 5.29GB   0B / 9.01GB   86
-6f171a5f2a4c   rabbit-perf   0.00%     0B / 0B               0.00%     0B / 0B          0B / 0B       0

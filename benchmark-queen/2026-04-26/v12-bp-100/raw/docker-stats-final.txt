@@ -1,3 +1,0 @@
-CONTAINER ID   NAME       CPU %     MEM USAGE / LIMIT     MEM %     NET I/O           BLOCK I/O        PIDS
-5f0d24078118   postgres   4.91%     37.81GiB / 62.79GiB   60.22%    11.7GB / 25.7GB   2.28GB / 366GB   306
-5c39f76f4ad6   queen      1.88%     63.34MiB / 62.79GiB   0.10%     32.4GB / 42.1GB   0B / 0B          51

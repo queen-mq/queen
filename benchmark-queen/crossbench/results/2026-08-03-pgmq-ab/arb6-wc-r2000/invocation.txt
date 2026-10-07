@@ -1,1 +1,0 @@
-queen:arbiter6 (strict marginal-throughput probe) | wc r2000
