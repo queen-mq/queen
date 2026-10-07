@@ -34,6 +34,7 @@ sourceOfTruth:
 # the abort, and the request timeout now covers the JSON body read. The JS client list says so.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-07 (optional client supervision): HttpClient.post accepts an optional AbortSignal for bounded status publication, using the existing abort/retry path; the error codes and normal request behavior described here are unchanged.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code

@@ -188,6 +188,21 @@ A pop takes its options in the query string. The SDKs expose the same ones as bu
 - A new group skips the backlog by default. Use `subscriptionMode('all')` to read what was pushed
   before it existed.
 
+## Optional JavaScript consumer supervision
+
+Add `.supervision({ group: 'billing-production' })` before `.consume(...)` to publish runtime
+observations to the dashboard's Supervisors page. Reporting is off by default; `.supervision(false)`
+disables it. The publication group identifies the application/deployment, separately from the
+consumer group. Each consume invocation has its own identity, including multiple invocations in
+one process.
+
+The report includes live consumer tasks, active handlers, completed and failed handler calls,
+and the oldest in-flight handler's age. A batch callback counts as one handler call. Completion
+is not proof of a successful acknowledgement, and a heartbeat does not prove forward progress.
+Reporting uses the existing authenticated KV API, with bounded publication time and TTLs;
+publication failures do not stop consumption. The client README lists the timings. This does not
+restart or scale processes, and manual `pop()` or stream runners do not activate the reporter.
+
 ## Next
 
 <CardGrid>

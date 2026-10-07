@@ -23,6 +23,7 @@ verifiedBy:
 # back unstarted each() messages with a retry ack when consume() is stopped. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-07 (optional client supervision): ConsumerManager adds off-by-default observations; this example keeps the same handler, ack/nack and partition behavior.
 ---
 
 Every product with an API ends up writing this one. Deliveries to one subscriber have to arrive in
