@@ -19,8 +19,9 @@ no DLQ, because none of those concepts has a referent when there is no history
 to have.
 
 DELIVERY IS NOT "AT MOST ONCE" (§1.3), and the docs must not say it is. The
-class picks what can be LOST; the ack mode picks the guarantee. ``auto_ack``
-advances the cursor at delivery and is at-most-once. The default -- explicit
+class picks what can be LOST; the ack mode picks the guarantee.
+``commit_on_delivery`` (formerly ``auto_ack``) advances the cursor at delivery
+and is at-most-once. The default -- explicit
 ack -- is at-least-once for as long as the owning broker incarnation lives: an
 unacked message redelivers when its lease expires, with ``attempts``
 incremented, until ``retryLimit``, after which it is DROPPED and counted (no
@@ -594,6 +595,7 @@ class Ephemeral:
         timeout: Optional[int] = None,
         timeout_millis: Optional[int] = None,
         group: Optional[str] = None,
+        commit_on_delivery: bool = False,
         auto_ack: bool = False,
     ) -> Dict[str, Any]:
         """Take up to ``batch`` messages. Answers ``{queue, messages}``, with
@@ -617,7 +619,10 @@ class Ephemeral:
 
         ``group`` is the whole of the consumption semantics (§1.5): same group =
         competing consumers, own group = fan-out, no group = queue mode.
-        ``auto_ack=True`` commits at delivery and is at-most-once.
+        ``commit_on_delivery=True`` commits at delivery: the broker moves the
+        cursor past the messages as it hands them out. No lease, nothing to ack,
+        at-most-once. ``auto_ack`` is its old name, deprecated and kept so
+        existing code still works: either one set to True commits at delivery.
         """
         _require_queue(queue)
         wait_millis = _resolve_timeout(timeout, timeout_millis)
@@ -634,7 +639,7 @@ class Ephemeral:
             params.append(("timeout", str(wait_millis)))
         if group is not None:
             params.append(("group", group))
-        if auto_ack:
+        if commit_on_delivery or auto_ack:
             params.append(("autoAck", "true"))
 
         logger.log(

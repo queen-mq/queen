@@ -268,6 +268,26 @@ single-partition behaviour.
 `.partitions(N)` only applies to **wildcard** pops; specifying
 `.partition('name')` ignores the cap.
 
+### Commit at Delivery
+
+`commit_on_delivery()` commits a `pop()` at delivery: the broker moves the
+consumer group's cursor past the messages as it hands them out. There is no
+lease and nothing to ack, so the delivery is at-most-once: a message that your
+code loses after the pop does not come back. It is a `pop()` option:
+`consume()` always leases its messages and raises `ValueError` when it is set.
+The broker refuses it together with `conflation()`.
+
+```python
+messages = await (queen.queue('metrics')
+                  .group('dashboard')
+                  .commit_on_delivery()
+                  .pop())  # already committed: do not ack these
+```
+
+The ephemeral pop has the same option:
+`await queen.ephemeral.pop('inbox', commit_on_delivery=True)`. Its old name,
+`auto_ack=True`, still works and is deprecated.
+
 ### Pop Autopilot (Let the Broker Size the Pop)
 
 Since 1.2, `batch` and `partitions` that you do **not** set are chosen by the
@@ -585,6 +605,13 @@ await queen.queue('q').concurrency(5).consume(single_handler)
 await queen.queue('q').group('my-group').consume(single_handler)
 ```
 
+`auto_ack(False)` leaves the ack of a handler that returns to you. A handler
+that raises then stops the consumer: `consume()` raises its error and sends no
+nack, so the message comes back when its lease expires. With `auto_ack` (the
+default), a handler that raises is nacked and the consumer goes on.
+`auto_ack()` has no effect on `pop()`: a pop commits at delivery only with
+`commit_on_delivery()`.
+
 ### Acknowledgment
 
 ```python
@@ -593,6 +620,10 @@ await queen.ack(message, False)  # Retry
 await queen.ack(message, False, {'error': 'reason'})
 await queen.ack([msg1, msg2], True)  # Batch ack
 ```
+
+The broker answers HTTP 200 even when it refuses an ack, for example under an
+expired lease. `success` is `False` then, with the broker's `error`; for a
+batch, each item's verdict is in `results`.
 
 ### Transactions
 
@@ -607,13 +638,16 @@ await (queen.transaction()
 ### Lease Renewal
 
 ```python
-await queen.renew(message)
-await queen.renew([msg1, msg2, msg3])
+res = await queen.renew(message)    # {leaseId, success, newExpiresAt, renewed}
+await queen.renew([msg1, msg2, msg3])  # one result per distinct lease
 
 async def handler(msg):
     ...
 await queen.queue('q').renew_lease(True, 60000).consume(handler)
 ```
+
+`success` is `False` when the broker extended nothing: the lease expired, was
+released by an ack or nack, or does not exist.
 
 ### Buffering
 
@@ -629,6 +663,11 @@ stats = queen.get_buffer_stats()
 dlq = await queen.queue('q').dlq().limit(10).get()
 dlq = await queen.queue('q').dlq('consumer-group').limit(10).get()
 ```
+
+To send a message to the DLQ yourself, ack it with the `dlq` status while you
+hold its lease: `await queen.ack(message, 'dlq', {'group': group})`.
+`admin.move_message_to_dlq()` and `admin.clear_queue()` raise
+`NotImplementedError`: the 2.x broker has no route for either.
 
 ### Shutdown
 

@@ -54,6 +54,56 @@ both with a 400 that names both, and the OpenAPI document marks `autoAck` deprec
 name only `commitOnDelivery`. A broker up to 2.0.1 reads only `autoAck`: it ignores
 `commitOnDelivery` and leases the batch.
 
+**Python client: `admin.move_message_to_dlq()` and `admin.clear_queue()` are deprecated and
+raise.** They sent `POST /api/v1/messages/:partitionId/:transactionId/dlq` and
+`DELETE /api/v1/queues/:name/clear`, routes the 2.x broker does not have, so every call failed
+with a 404 `no_such_route`. Both now raise `NotImplementedError` before any request and name the
+way that works. For a dead letter, ack the message with the `dlq` status,
+`await queen.ack(message, 'dlq', {'group': group})`, while its consumer group holds the lease. To
+skip what is queued, seek the consumer group to the end,
+`await queen.admin.seek_consumer_group(group, queue, {'toEnd': True})`; to drop the queue with its
+messages and configuration, `await queen.queue(name).delete()`.
+
+**Python client: `renew()` and the batch `ack()` read the broker's verdict.** The broker answers
+HTTP 200 whether or not it extended a lease or took an ack, and says which in the body. `renew()`
+reported `success: True` for every 200, and a batch `ack()` did the same for a refused ack, for
+example under an expired lease. `renew()` now reports `success: False`, with the broker's error,
+when it extended nothing: the lease expired, was released by an ack or nack, or does not exist. It
+also returns `renewed`, the count the broker extended. A batch `ack()` reports `success: False`
+when the broker refused any item, with each item's verdict in `results`.
+
+**Python client: `commit_on_delivery()` commits a pop at delivery.** The broker can move a
+consumer group's cursor past the messages as it hands them out, with no lease and nothing to ack,
+but this client could not ask for it: `auto_ack(True)` on a pop never reached the broker.
+`queen.queue(q).group(g).commit_on_delivery().pop()`, and `pop_result()`, now send `autoAck=true`,
+the parameter every 2.x broker reads; the messages come back with no `leaseId`. This is
+at-most-once: a crash after the pop loses the messages. `consume()` always leases, so it raises
+`ValueError` before any request when the builder has `commit_on_delivery()`. `auto_ack()` stays the
+ack `consume()` sends after the handler and still never reaches the broker. On ephemeral queues,
+`queen.ephemeral.pop()` takes `commit_on_delivery=True`; its `auto_ack` argument, which meant the
+same, still works and is deprecated. `POP_DEFAULTS` now says what a pop does: `wait` is `True`, as
+every pop has long-polled unless `.wait(False)`, and `auto_ack` is never sent. No other behaviour
+changes.
+
+**Python client: `pop()` raises the broker's 400 refusal of a conflating pop.** `pop()` returns
+an empty list when a pop fails, and did so for the broker's 400 refusal of a conflating pop too:
+one without a consumer group, or one with `commit_on_delivery()`. No retry can make either
+succeed, and an empty list reads as an empty queue, so a consumer that asked for last-value
+delivery never learned that it was not getting it. `pop()` and `pop_result()` now raise that 400,
+as the JavaScript client does. Every other failure still returns an empty list.
+
+**Python client: a nack in `each()` mode skips only its own partition.** A multi-partition pop
+claims several partitions under one lease, and a nack releases only the failed message's
+partition. The loop dropped the whole rest of the pop after a nack, so the other partitions'
+messages stayed leased and came back only when the lease expired. It now skips only the later
+messages of the failed partition, which the broker redelivers, and handles the others at once.
+
+**Python client: a handler error is never taken for a pop error.** With `auto_ack(False)`,
+`consume()` sends no nack for a handler that raises, by design, and the error stops the consumer.
+When the error's text said "timeout" or "connection", the loop read it as a long-poll timeout or a
+network fault instead: it polled again with the message still leased, and the error was lost. Such
+an error now stops the consumer like any other handler error.
+
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the
 switch. One forking pool is enough to start the fork server, and both engines spawn the workers of
