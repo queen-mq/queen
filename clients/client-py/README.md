@@ -808,3 +808,28 @@ Apache 2.0 - See [LICENSE](../LICENSE.md)
 - **Issues:** [GitHub Issues](https://github.com/queen-mq/queen/issues)
 - **LinkedIn:** [Smartness](https://www.linkedin.com/company/smartness-com/)
 
+
+### Optional consumer supervision
+
+```python
+await (client.queue("orders").group("billing")
+       .supervision({"group": "billing-production"})
+       .concurrency(4).each().consume(handler))
+```
+
+Supervision defaults to off. `.supervision(None)` or `.supervision(False)` disables
+it. The group identifies the application/deployment separately from the consumer
+group. Each consume invocation publishes a unique `queen.consumer.status/v1`
+instance to the broker's `queen-supervisor` KV namespace every 10 seconds, with a
+30-second heartbeat timeout and 60-second TTL, plus stopped status on orderly
+exit. The credential needs KV write access. A single asyncio publisher uses the
+existing transport and a two-second total deadline; failures do not change ACKs,
+lease renewal, handler exceptions or cancellation.
+
+The compatible Supervisors page shows actual live tasks, busy handlers,
+successful/failed handler calls, last completion and oldest in-flight duration.
+A batch is one call; cancelled handlers count as failed calls. Completion does
+not assert ACK success. No message payloads or error text are published.
+Event-loop starvation can stop heartbeats; a heartbeat does not prove progress.
+Reporting does not restart tasks/processes, autoscale or enable remote commands.
+Disabled reporting creates no background task or KV traffic.

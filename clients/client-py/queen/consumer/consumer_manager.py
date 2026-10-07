@@ -7,6 +7,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlencode
 
+from .supervision import Supervision
 from ..errors import ConflationUnsupportedError
 from ..utils import logger
 from ..utils.autopilot import (
@@ -113,8 +114,23 @@ class ConsumerManager:
             "conflation_scope": conflation_scope(queue, namespace, task),
         }
 
+        config = options.get("supervision")
+        supervision = Supervision(self._http_client, config, options) if config is not None and config is not False else None
+        if supervision:
+            handler = supervision.wrap(handler)
+            supervision.start()
+
+        async def observed_worker(i):
+            try:
+                return await self._worker(i, handler, path, base_params, worker_options)
+            finally:
+                supervision.running -= 1
+                if supervision.running == 0:
+                    await supervision.stop()
+
         workers = [
-            self._worker(i, handler, path, base_params, worker_options) for i in range(concurrency)
+            observed_worker(i) if supervision else self._worker(i, handler, path, base_params, worker_options)
+            for i in range(concurrency)
         ]
 
         logger.log("ConsumerManager.start", {"status": "workers-started", "count": concurrency})
