@@ -46,6 +46,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (connection defaults): SupervisorConfiguration and ApplicationSettings start
 # every queen connection from config/queen.php, as QueenConnector does and as the configuration page
 # already says; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-07 (no nack without --auto-ack): ConsumeCommand nacks a throw only with
+# --auto-ack. This page names queen:consume only for its --lease default and the lease renewal keys, which
+# do not change; nothing this page states changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. Since PHP client 2.1.0 the
