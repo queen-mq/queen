@@ -179,7 +179,10 @@ Consumers are internal tasks, not additional operating-system processes.
 
 Reporting is explicitly enabled by the application and defaults to off. A disabled
 reporter creates no timer, task, thread or KV traffic. The standard interval is 10
-seconds, heartbeat timeout 30 seconds and record TTL 60 seconds. A publication is
+seconds, heartbeat timeout 30 seconds and record TTL 60 seconds. Cooperative PHP
+uses a heartbeat timeout of `max(30, ceil(poll_timeout_ms / 1000) + 15)` seconds
+(capped at 86400) and a TTL of at least twice that, so a normal long poll fits
+inside its observation window. A publication is
 best effort, serialized, bounded, and independent of message acknowledgement.
 Publish a final `stopped` observation on orderly exit; after a crash, freshness and
 TTL establish that current state is unknown. Publication failure must not stop
