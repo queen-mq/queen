@@ -2,6 +2,8 @@
 //! `tests/pop_bounded.rs` (08050fed), against the engine.
 
 use super::tests::{mode, only, qcfg, H, T};
+use super::Served;
+use crate::rsm::batcher::Command;
 use crate::rsm::planner::AckStatus;
 use crate::rsm::store::Store;
 
@@ -547,4 +549,65 @@ fn an_autopilot_pop_takes_the_ready_partitions_up_to_64() {
         c.budget = 1000;
     });
     assert_eq!(rest.len(), 6);
+}
+
+// A pop's answer waits for the checkpoint that holds its lease. When nobody
+// can receive it any more (the facade gave up at its deadline, the client
+// left), the engine hands the leases back at once. No worker saw those
+// messages, so the next delivery is still the first: counting the dropped
+// claim as an attempt made a Laravel job with tries = 1 fail without running.
+#[test]
+fn a_claim_nobody_receives_is_released_without_counting_an_attempt() {
+    let mut h = H::new("pop-unanswered-engine");
+    h.push("q", "p0", &["a"]);
+    let mut c = h.pop_cmd("q", "g", "w1");
+    c.partition = Some("p0".to_string());
+    h.e.tick(h.now);
+    match h.e.serve(&Command::PopPinned(c), h.now) {
+        Served::Later(rx) => drop(rx),
+        Served::Now(r) => panic!("a claim's answer waits for its checkpoint: {r:?}"),
+        Served::NotMine => panic!("not the engine's"),
+    }
+    h.e.wait_loads();
+    h.checkpoint();
+
+    let again = only(h.pinned("q", "p0", "g", "w2"));
+    assert_eq!(again.start_offset, 0);
+    assert_eq!(again.delivery_attempt, 1, "nobody received the first claim");
+}
+
+// The facade's twin: a follower whose caller is gone, or a pop answered after
+// its deadline, hands each leased claim back with a Nack.
+#[test]
+fn a_claim_handed_back_by_a_nack_does_not_count_an_attempt() {
+    let mut h = H::new("pop-unanswered-nack");
+    h.push("q", "p0", &["a"]);
+    let first = only(h.pinned("q", "p0", "g", "w1"));
+    assert_eq!(first.delivery_attempt, 1);
+    let pid = h.pid_of("q", "p0");
+    h.nack(pid, "q", "g", &first.worker);
+
+    let again = only(h.pinned("q", "p0", "g", "w2"));
+    assert_eq!(again.start_offset, first.start_offset);
+    assert_eq!(again.delivery_attempt, 1, "nobody received the first claim");
+}
+
+// Handing back a dropped claim takes back only its own attempt: a real
+// redelivery before it still counts.
+#[test]
+fn a_dropped_redelivery_keeps_the_attempts_before_it() {
+    let mut h = H::new("pop-unanswered-redelivery");
+    h.push("q", "p0", &["a"]);
+    only(h.pinned_with("q", "p0", "g", "w1", |p| p.lease_seconds = 1));
+    h.advance(5_000_000);
+    let second = only(h.pinned("q", "p0", "g", "w2"));
+    assert_eq!(second.delivery_attempt, 2, "the expiry redelivered it");
+    let pid = h.pid_of("q", "p0");
+    h.nack(pid, "q", "g", &second.worker);
+
+    let third = only(h.pinned("q", "p0", "g", "w3"));
+    assert_eq!(
+        third.delivery_attempt, 2,
+        "the dropped claim is not an attempt"
+    );
 }

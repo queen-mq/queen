@@ -362,9 +362,11 @@ fn a_positional_nack_releases_the_lease_without_moving_the_cursor() {
     assert_eq!(r.committed, -1);
     assert!(r.lease_released);
     assert!(h.cursor(pid, "g").unwrap().worker.is_none());
-    // Redelivered from the same offset.
+    // Delivered again from the same offset. A Nack hands back a claim nobody
+    // received (the facade's release_claims is its only sender), so this is
+    // still the first delivery.
     let c = only(h.pinned("q", "p0", "g", "w2"));
-    assert_eq!((c.start_offset, c.delivery_attempt), (0, 2));
+    assert_eq!((c.start_offset, c.delivery_attempt), (0, 1));
 }
 
 #[test]

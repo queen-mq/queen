@@ -1580,7 +1580,8 @@ fn autopilot_echo(
 /// Map a non-`Done` [`Reply`] to the typed facade error.
 /// Hand back every lease a pop's answer granted that nobody will deliver:
 /// one `Nack` per leased claim — lease dropped, cursor unmoved, no retry
-/// charged — sent to the leader's engine in the background.
+/// charged and no delivery attempt counted — sent to the leader's engine in
+/// the background.
 fn release_claims(repl: &Arc<NodeReplicator<HeedStore>>, command: &Command, reply: &Reply) {
     let (tenant, queue, group) = match command {
         Command::PopWildcard(c) | Command::PopPinned(c) | Command::PopDiscover(c) => {

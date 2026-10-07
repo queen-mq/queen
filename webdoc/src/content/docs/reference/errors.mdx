@@ -32,6 +32,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-07 (JS consumer stop, #86): HttpClient.js takes the consumer's signal: an aborted
 # request is not retried or failed over and rejects with error.aborted, waits between attempts end on
 # the abort, and the request timeout now covers the JSON body read. The JS client list says so.
+# sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
+# delivery attempt of a claim nobody received; nothing this page states changes.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code

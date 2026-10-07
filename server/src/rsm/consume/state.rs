@@ -223,6 +223,19 @@ impl Cur {
     pub fn release(&mut self) {
         self.lease = None;
     }
+
+    /// Hand back a claim that no worker received: drop its lease and take back
+    /// the delivery attempt it counted. The claim left the attempt marker on
+    /// its first offset, so the next pop there would read as a redelivery; a
+    /// Laravel job with tries = 1 then failed without ever running. The
+    /// attempts before it (a lease that really expired) still count.
+    pub fn release_undelivered(&mut self) {
+        self.release();
+        self.attempt_count = self.attempt_count.saturating_sub(1);
+        if self.attempt_count == 0 {
+            self.attempt_offset = None;
+        }
+    }
 }
 
 /// One (partition, group) the engine holds.

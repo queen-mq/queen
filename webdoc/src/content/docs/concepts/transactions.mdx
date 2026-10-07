@@ -24,6 +24,8 @@ verifiedBy:
 # partition's later messages and handles the other partitions of the pop. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (JS consumer stop, #86): ConsumerManager.js closes the long poll and gives
 # back unstarted each() messages with a retry ack when consume() is stopped. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
+# delivery attempt of a claim nobody received; nothing this page states changes.
 ---
 
 A transaction is one call that writes one step. It acks what the worker took, pushes the next

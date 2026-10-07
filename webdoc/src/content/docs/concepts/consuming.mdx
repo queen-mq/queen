@@ -25,6 +25,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-07 (JS consumer stop, #86): ConsumerManager.js reads a pop answer that has
 # started arriving to the end before giving its messages back, and ends its pauses on a stop. The
 # paragraph on stopping consume says so.
+# sourceOfTruth re-read 2026-10-07 (unanswered pop): a claim nobody received is handed back at once
+# and takes back its delivery attempt; the lease paragraph says so.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers
@@ -82,7 +84,8 @@ for a queue a push created). A worker that needs longer renews it with
 `POST /api/v1/lease/:leaseId/extend` and `{"seconds": 60}` (in JS, `queen.renew(message)`, or
 `.renewLease(true, 10000)` on `consume`); a lease that has already expired cannot be renewed. When
 a lease expires, the partition is free again and its batch is delivered to the next pop, from the
-cursor, with `deliveryAttempt` one higher.
+cursor, with `deliveryAttempt` one higher. A pop whose answer nobody can receive, because its
+client left or it ran past its deadline, hands its leases back at once and counts no attempt.
 
 ## Ack, nack and the retry budget
 

@@ -29,6 +29,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): catalogue version 4 (traces on disk) is the first raise past 3, one-way; a learner joins a version-4 cluster only once its node answers.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/ephemeral.rs reads the pop's commit at delivery from commitOnDelivery or from autoAck, its deprecated alias. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (image platforms): compose.yaml no longer pins linux/amd64, because the images are published for linux/arm64 too. On an Apple-silicon laptop the three arm64 nodes of 2.0.2 passed their healthchecks 5.8 s after `docker compose up -d --wait`, in two runs; the page says six seconds.
+# sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
+# delivery attempt of a claim nobody received; nothing this page states changes.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They
