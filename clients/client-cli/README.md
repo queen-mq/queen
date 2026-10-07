@@ -259,6 +259,30 @@ Override defaults via env:
 | `QUEEN_LOAD_TOTAL` | `2000` | Bump to `100000` for parity with the JS load test |
 | `QUEEN_TEST_QUEUE_PREFIX` | `ct-e2e-<unix-ts>` | Override per-test queue prefix when sharing one broker |
 
+## Optional client supervision
+
+`tail` can appear in the Queen dashboard's Supervisors page. Reporting is off
+by default and requires the dashboard's `queen.consumer.status/v1` support:
+
+```bash
+queenctl tail orders --cg billing --follow --supervision-group billing-production
+```
+
+The supervision group identifies the application/deployment; it is separate
+from `--cg`. Each invocation gets its own identity. The Go SDK publishes worker
+counts, active handlers, successful/failed handler calls and the age of the
+oldest active handler through the authenticated KV API. Here a handler prints
+one NDJSON record; completion does not prove a downstream pipe processed it or
+that an acknowledgement succeeded. Heartbeat freshness does not prove progress.
+
+The reporter uses one background goroutine, a 10-second interval, a 30-second
+freshness window and 60-second TTLs. Each publication has a 2-second deadline.
+Failures do not stop tailing; an orderly exit publishes a stopped observation.
+Reports and diagnostics do not enter stdout, which remains NDJSON.
+There is no automatic restart or scaling of CLI processes. Other commands do
+not enable reporting, and omitting the flag adds no reporting goroutine or KV
+traffic. The existing token must have write access to `queen-supervisor` KV.
+
 ## License
 
 [Apache 2.0](LICENSE.md), same as the rest of Queen MQ.

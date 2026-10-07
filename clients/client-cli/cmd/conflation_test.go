@@ -164,7 +164,7 @@ func emptyPopBody(extraKeys string) string {
 // every later run in this process believing the operator typed it too.
 func resetConflationFlags() {
 	resetFlagChanged(popCmd, "max-partitions")
-	resetFlagChanged(tailCmd, "max-partitions")
+	resetFlagChanged(tailCmd, "max-partitions", "supervision-group")
 
 	popGroup, popPartition, popNamespace, popTask = "", "", "", ""
 	popLimit, popBatch, popMaxParts = 1, 0, 1
@@ -180,6 +180,7 @@ func resetConflationFlags() {
 	tailFromMode, tailFromAt = "", ""
 	tailTimeout = 0
 	tailConflation = false
+	tailSupervisionGroup = ""
 
 	gf = globalFlags{}
 }

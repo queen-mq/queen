@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	clierr "github.com/smartpricing/queen/clients/client-cli/v2/internal/errors"
@@ -14,19 +15,20 @@ import (
 )
 
 var (
-	tailGroup       string
-	tailPartition   string
-	tailFollow      bool
-	tailLimit       int
-	tailBatch       int
-	tailMaxParts    int
-	tailAutoAck     bool
-	tailFromMode    string
-	tailFromAt      string
-	tailIdleMillis  int
-	tailConcurrency int
-	tailTimeout     time.Duration
-	tailConflation  bool
+	tailGroup            string
+	tailPartition        string
+	tailFollow           bool
+	tailLimit            int
+	tailBatch            int
+	tailMaxParts         int
+	tailAutoAck          bool
+	tailFromMode         string
+	tailFromAt           string
+	tailIdleMillis       int
+	tailConcurrency      int
+	tailTimeout          time.Duration
+	tailConflation       bool
+	tailSupervisionGroup string
 )
 
 var tailCmd = &cobra.Command{
@@ -43,6 +45,10 @@ Use --cg to bind to a consumer group (otherwise an ephemeral CG named
 "queenctl-tail" is used). With --follow the command keeps long-polling
 until interrupted; without it, returns once one batch is fetched.
 
+--supervision-group publishes optional runtime observations to the Queen
+dashboard under an application/deployment name. Off by default; --cg still
+selects the consumer group. Status publications never appear on stdout.
+
 --conflation asks for last-value delivery: each round trip yields the newest
 message per partition and commits everything below it, so a tail of a queue
 with a 4M backlog prints the current state instead of replaying the history.
@@ -55,6 +61,10 @@ quietly replaying the backlog into whatever is downstream of the pipe.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		queueName := args[0]
+		if cmd.Flags().Changed("supervision-group") &&
+			(!regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`).MatchString(tailSupervisionGroup) || tailSupervisionGroup == "coordination") {
+			return clierr.Userf("--supervision-group requires an application/deployment name (letters, digits, dot, underscore or hyphen; start with a letter or digit; max 255; coordination is reserved)")
+		}
 		c, cleanup, err := newClient()
 		if err != nil {
 			return err
@@ -67,6 +77,9 @@ quietly replaying the backlog into whatever is downstream of the pipe.`,
 		}
 
 		qb := c.Q.Queue(queueName).Group(group)
+		if tailSupervisionGroup != "" {
+			qb = qb.Supervision(&queen.SupervisionConfig{Group: tailSupervisionGroup})
+		}
 		if tailPartition != "" {
 			qb = qb.Partition(tailPartition)
 		}
@@ -157,6 +170,7 @@ quietly replaying the backlog into whatever is downstream of the pipe.`,
 }
 
 func init() {
+	tailCmd.Flags().StringVar(&tailSupervisionGroup, "supervision-group", "", "publish consumer status for this application/deployment group (off by default)")
 	tailCmd.Flags().StringVar(&tailGroup, "cg", "", "consumer group (default: 'queenctl-tail')")
 	tailCmd.Flags().StringVar(&tailPartition, "partition", "", "single partition to tail (default: any)")
 	tailCmd.Flags().BoolVarP(&tailFollow, "follow", "f", false, "keep streaming after the queue drains")
