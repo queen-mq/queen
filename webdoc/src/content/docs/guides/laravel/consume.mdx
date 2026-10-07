@@ -31,6 +31,9 @@ sourceOfTruth:
 # what changed.
 # sourceOfTruth re-read 2026-10-06 (queen:consume idle clock): ConsumeCommand measures --idle-timeout in
 # nanoseconds and never stops before it has passed; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-07 (no nack without --auto-ack): ConsumeCommand nacks a throw only with
+# --auto-ack, as the SDK consumers do; without it, it prints the error and "Not nacked without
+# --auto-ack". The handler, ack and nack, and before-2.3.0 sections follow.
 ---
 
 `php artisan queen:consume` reads a Queen queue and passes each message to a class of yours. Use it
@@ -102,24 +105,28 @@ first pop, unless you pass `--subscription-mode=all`
   `deliveryAttempt` and the other keys are in the
   [PHP client reference](https://github.com/queen-mq/queen/blob/master/clients/client-php/REFERENCE.md#pop).
 - **Exceptions.** The command prints the exception's message as an error line, nacks the message
-  (or the list), then pops again. Laravel's exception handler does not see it.
+  (or the list) with `--auto-ack` only, then pops again. Laravel's exception handler does not see
+  it.
 
 ## Ack and nack
 
 | `handle()` | With `--auto-ack` | Without `--auto-ack` |
 | --- | --- | --- |
 | returns | the command acks the message | nothing is acked |
-| throws | the command nacks it | the command nacks it |
+| throws | the command nacks it | nothing is nacked |
 
-- **A nack spends a retry.** A message that always throws reaches the dead-letter queue once the
-  queue's retries are spent ([retry budget](/concepts/consuming/#ack-nack-and-the-retry-budget)).
-  The nack carries the exception's message as its error.
+- **A nack spends a retry.** With `--auto-ack`, a message that always throws reaches the
+  dead-letter queue once the queue's retries are spent
+  ([retry budget](/concepts/consuming/#ack-nack-and-the-retry-budget)). The nack carries the
+  exception's message as its error.
+- **Without `--auto-ack`, the handler settles.** A throw is printed, then
+  `Not nacked without --auto-ack`. The message comes back when its lease expires, which spends no
+  retry. Nack it in the handler when a failure must count, as the SDK consumers expect.
 - **Client-side.** `--auto-ack` is not the broker's `autoAck`. The command acks after `handle()`
   returns, so delivery stays at-least-once.
 - **One call per pop.** With `--batch`, one ack or nack covers the whole list.
 - **Refusals are printed.** A refused call prints one warning, for example
-  `Ack refused for 1 of 1 message: invalid or expired lease`. After a throw, the command does not
-  warn about messages that the handler had already acked itself.
+  `Ack refused for 1 of 1 message: invalid or expired lease`.
 
 Without `--auto-ack`, ack in the handler, with the group you passed:
 
@@ -227,8 +234,8 @@ Errors that leave the loop include:
 
 ## Before PHP client 2.3.0
 
-- **A throw was not nacked without `--auto-ack`.** The message came back after its lease, which
-  spends no retry, so a message that always failed never reached the dead-letter queue.
+- **The nack carried no error.** With `--auto-ack`, a throw was nacked without the exception's
+  message.
 - **No `--lease` and no renewal.** Every pop got the queue's own lease time.
 - **`--idle-timeout` had no effect.** The command ran until a signal or `--limit`.
 - **`--limit` counted only successes.** With `--batch` it could handle up to `--batch` minus 1

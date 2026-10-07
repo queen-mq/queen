@@ -43,12 +43,11 @@ interval, and returns whether the broker extended them; a long handler calls it 
 its work. A one-parameter handler is called as before. The loop's own renewal sends one request per
 lease instead of one per message.
 
-**Laravel: `queen:consume` nacks a failed handler, sets and renews its lease, and stops on
-`--idle-timeout`.** Behaviour change: a handler that throws is now nacked, with the exception's
-message as the error, also without `--auto-ack`. Before, the message came back only when its lease
-expired, which spends no retry, so a message that always failed never reached the dead-letter
-queue; now each failure spends a retry. `--auto-ack` decides only the ack after a `handle()` that
-returns. `--lease=SECONDS`, default `retry_after` (90), sets the lease of every pop; with
+**Laravel: `queen:consume` sets and renews its lease, and stops on `--idle-timeout`.** With
+`--auto-ack`, the nack of a handler that throws now carries the exception's message as its error.
+Without `--auto-ack` the command still sends no nack, as the SDK consumers do: it prints the error
+and `Not nacked without --auto-ack`, and the message comes back when its lease expires.
+`--lease=SECONDS`, default `retry_after` (90), sets the lease of every pop; with
 `lease_renewal` on in `config/queen.php` and `--auto-ack`, the command renews it while `handle()`
 runs, with the renewer `queue:work` uses, checks it before the ack or nack, and neither acks nor
 nacks a lease it can no longer vouch for. Without `--auto-ack` renewal stays off and the command

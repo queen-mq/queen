@@ -324,7 +324,7 @@ Everything not listed here works from 1.6.0 on.
 | 2.0.0 | 0.6.0 | every transaction ACK names its own lease; the dashboard's Jobs page works with a read-only token |
 | 2.1.0 | 0.7.0 | `config/queen.php` reads 20 environment variables instead of 95 ([upgrading](/guides/laravel/configuration/#upgrading-from-200)); `supervisor.lease_service` replaces `QUEEN_SUPERVISOR_LEASE_SERVICE`; with prefork, `queue:restart` runs the deployed code, and a fork server that is not safe to fork is not used |
 | 2.2.0 | 0.7.0 | `prefetch` `'auto'` sizes each pop from the jobs' runtime; the safe, balanced and fast profiles |
-| 2.3.0 | 0.8.0 | a pool's own `prefork` ([prefork for some pools only](/guides/laravel/supervisors/#prefork-for-some-pools-only)); `queen:consume` nacks a handler that throws, sets and renews its lease, and stops on `--idle-timeout` ([consume Queen messages](/guides/laravel/consume/)) |
+| 2.3.0 | 0.8.0 | a pool's own `prefork` ([prefork for some pools only](/guides/laravel/supervisors/#prefork-for-some-pools-only)); `queen:consume` sets and renews its lease, stops on `--idle-timeout`, and reports refused acks ([consume Queen messages](/guides/laravel/consume/)) |
 
 ## Limits
 
