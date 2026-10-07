@@ -25,6 +25,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0). Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-03 (cb0329f74): the Dockerfile's queenctl -X paths moved to the /v2 module path; the image and what it runs are unchanged. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the /health example shows 2.0.1 at cluster version 4, what a new node reports.
+# sourceOfTruth re-read 2026-10-07 (78970a242, 2.0.2): the /health example shows 2.0.2; nothing else this page states changes.
 ---
 
 You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the
@@ -42,7 +43,7 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
    ```
 
    ```json
-   {"status":"healthy","engine":"raft","version":"2.0.1","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4}}
+   {"status":"healthy","engine":"raft","version":"2.0.2","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4}}
    ```
 
    That is the whole installation. There is no database to start first, because the node keeps

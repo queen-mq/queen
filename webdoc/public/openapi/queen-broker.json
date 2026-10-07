@@ -165,8 +165,18 @@
             }
           },
           {
+            "name": "commitOnDelivery",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "autoAck",
             "in": "query",
+            "description": "Deprecated alias of `commitOnDelivery`.",
+            "deprecated": true,
             "required": false,
             "schema": {
               "type": "boolean"
@@ -316,8 +326,18 @@
             }
           },
           {
+            "name": "commitOnDelivery",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "autoAck",
             "in": "query",
+            "description": "Deprecated alias of `commitOnDelivery`.",
+            "deprecated": true,
             "required": false,
             "schema": {
               "type": "boolean"
@@ -460,8 +480,18 @@
             }
           },
           {
+            "name": "commitOnDelivery",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "autoAck",
             "in": "query",
+            "description": "Deprecated alias of `commitOnDelivery`.",
+            "deprecated": true,
             "required": false,
             "schema": {
               "type": "boolean"
@@ -1870,6 +1900,40 @@
           {
             "name": "group",
             "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "batch",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "commitOnDelivery",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "autoAck",
+            "in": "query",
+            "description": "Deprecated alias of `commitOnDelivery`.",
+            "deprecated": true,
             "required": false,
             "schema": {
               "type": "string"

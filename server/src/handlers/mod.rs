@@ -152,3 +152,15 @@ pub(crate) fn qbool(params: &HashMap<String, String>, key: &str, def: bool) -> b
         _ => def,
     }
 }
+
+/// A flag read under its name and under a deprecated alias of that name, the
+/// one released clients still send: true when either one is. The OpenAPI
+/// generator (webdoc/scripts/gen-openapi.mjs) publishes the alias as a
+/// deprecated parameter.
+pub(crate) fn qbool_or_alias(
+    params: &HashMap<String, String>,
+    key: &str,
+    deprecated_alias: &str,
+) -> bool {
+    qbool(params, key, false) || qbool(params, deprecated_alias, false)
+}

@@ -103,11 +103,30 @@ final class LaravelConsumeCommandTest extends TestCase
     // Ack and nack
     // ===========================
 
-    public function testAHandlerThatThrowsIsNackedWithoutAutoAck(): void
+    /**
+     * Without --auto-ack the handler settles its messages itself, failures
+     * included: the command sends no nack, as the SDK consumers do, and the
+     * message comes back when its lease expires.
+     */
+    public function testAHandlerThatThrowsIsNotNackedWithoutAutoAck(): void
     {
         $this->broker([[ConsumeBroker::message('tx-1')]]);
 
-        [$exit] = $this->consume(['--group' => 'ledger', '--limit' => 1], function (): void {
+        [$exit, $output] = $this->consume(['--group' => 'ledger', '--limit' => 1], function (): void {
+            throw new \RuntimeException('handler failed');
+        });
+
+        $this->assertSame(0, $exit);
+        $this->assertSame([], $this->broker->acks);
+        $this->assertStringContainsString('Error processing message: handler failed', $output);
+        $this->assertStringContainsString('Not nacked without --auto-ack', $output);
+    }
+
+    public function testAHandlerThatThrowsIsNackedWithAutoAck(): void
+    {
+        $this->broker([[ConsumeBroker::message('tx-1')]]);
+
+        [$exit] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--limit' => 1], function (): void {
             throw new \RuntimeException('handler failed');
         });
 
@@ -123,7 +142,7 @@ final class LaravelConsumeCommandTest extends TestCase
     {
         $this->broker([[ConsumeBroker::message('tx-1'), ConsumeBroker::message('tx-2')]]);
 
-        $this->consume(['--group' => 'ledger', '--batch' => 2, '--limit' => 2], function (): void {
+        $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--batch' => 2, '--limit' => 2], function (): void {
             throw new \RuntimeException('batch failed');
         });
 
@@ -177,7 +196,7 @@ final class LaravelConsumeCommandTest extends TestCase
     {
         $this->broker([[ConsumeBroker::message('tx-1')]], [ConsumeBroker::refused(1, 'queue is paused')]);
 
-        [, $output] = $this->consume(['--group' => 'ledger', '--limit' => 1], function (): void {
+        [, $output] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--limit' => 1], function (): void {
             throw new \RuntimeException('handler failed');
         });
 
@@ -194,7 +213,7 @@ final class LaravelConsumeCommandTest extends TestCase
             ],
         );
 
-        [, $output] = $this->consume(['--group' => 'ledger', '--limit' => 2], function (): void {
+        [, $output] = $this->consume(['--group' => 'ledger', '--auto-ack' => true, '--limit' => 2], function (): void {
             throw new \RuntimeException('acked, then failed');
         });
 

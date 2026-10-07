@@ -22,7 +22,7 @@ Queen MQ is a partitioned message queue broker that keeps its state in its own r
 - **Consumer Groups** - Kafka-style consumer groups for scalability
 - **Flexible Semantics** - Exactly-once, at-least-once, and at-most-once delivery
 - **Transactions** - Atomic operations across push and ack
-- **High Performance** — 104K msg/s push, 165K msg/s fan-out with consumer groups on a single 32-core node ([benchmarks](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-04-26))
+- **High Performance** — 1M msg/s in and out of one queue of 10M partitions on three nodes ([benchmarks](https://queenmq.com/benchmarks/))
 - **Subscription Modes** - Process from beginning, new messages only, or from timestamp
 - **Dead Letter Queue** - Automatic failure handling and monitoring
 - **Message Tracing** - Debug distributed workflows with trace timelines
@@ -192,8 +192,8 @@ Notes:
   the partition cap; either way it is clamped to 64, so a conflating pop returns
   at most 64 messages per round-trip whatever `batch` says.
 - Refused with 400 by the broker without a `.group(...)`, and together with
-  `.autoAck(true)` (auto-ack commits at delivery, which would turn the guarantee
-  above into at-most-once).
+  `.commitOnDelivery()` (a commit at delivery would turn the guarantee above
+  into at-most-once). `pop()` raises that 400 instead of returning `[]`.
 - Requires broker **>= 1.1.0**. An older broker ignores the flag and would
   quietly deliver the whole backlog, so the SDK raises
   `conflation was requested but this broker did not apply it` on the first
@@ -281,8 +281,9 @@ await queen.queue('tasks')
 
 **When the handler throws**, the consumer nacks what it was given (the message, or the whole batch)
 and keeps consuming. The broker redelivers it, and moves it to the dead letter queue once the queue's
-`retryLimit` is spent. With `.each()`, the rest of the popped batch is dropped after a nack: the
-broker redelivers it too.
+`retryLimit` is spent. With `.each()`, the later messages of the failed message's partition are
+skipped after a nack (the broker redelivers them too); the other partitions of the same pop are
+still handled.
 
 This is the same with `.autoAck(false)`. That setting hands the *success* path to your handler (it
 acks), not the failure path: a handler that threw never got to settle its messages. A message your
@@ -819,7 +820,19 @@ const msgs = await queen.queue('q').batch(10).pop()
 const msgs = await queen.queue('q').batch(10).wait(true).pop()
 const msgs = await queen.queue('q').batch(200).partitions(50).pop()  // multi-partition pop
 const { messages, autopilot } = await queen.queue('q').popResult()   // + what the broker chose
+const msgs = await queen.queue('q').group('g').commitOnDelivery().pop()  // committed at delivery, nothing to ack
 ```
+
+A pop long-polls, waiting up to `timeoutMillis` (30 s) for a message, unless you call
+`.wait(false)`. Its messages come back leased, and the ack is yours.
+
+`.commitOnDelivery()` changes that for `pop()` and `popResult()`. The broker moves the group's
+cursor past the messages as it hands them out: there is no lease (`leaseId` is empty) and nothing
+to ack. This is at-most-once delivery: a crash after the pop loses the messages. The broker
+refuses it together with `.conflation()` (400). `consume()` always leases its messages, so it
+throws before any request when the builder has `.commitOnDelivery()`.
+
+`.autoAck()` is `consume()`'s ack after your handler and has no effect on a pop.
 
 ### Consume
 
@@ -974,6 +987,18 @@ await queen.close()  // Flush buffers and close connections
 (the default) a knob you never set is not defaulted at all, it is delegated to
 the broker. These values are what comes back with `.autopilot(false)` or
 `QUEEN_SDK_POP_AUTOPILOT=off`.
+
+### Pop Defaults
+
+```javascript
+{
+  batch: 1,              // autopilot OFF only, as for consume
+  wait: true,            // long-polls; .wait(false) returns at once
+  timeoutMillis: 30000,  // the long-poll limit
+  autoAck: false,        // consume()'s ack after the handler; no effect on pop()
+  commitOnDelivery: false // leased; .commitOnDelivery() commits at delivery (at-most-once)
+}
+```
 
 ---
 

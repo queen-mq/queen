@@ -522,10 +522,10 @@ if (($result['reason'] ?? null) === 'kv_precondition') {
 A lost precondition is the expected outcome of a legitimate redelivery, so `commit()` returns that
 verdict instead of throwing. It belongs in an `if`, not in a `catch`, and not in your error metrics.
 
-The rest of the surface — buffered push, multi-partition pop, pop autopilot, conflation, the
-`KafkaConsumer`-style consumer, key/value state, timers, the DLQ, the admin API, tracing and
-wildcard consumption — is documented with every option in the
-[PHP client reference](REFERENCE.md).
+The rest of the surface — buffered push, multi-partition pop, pop autopilot, the pop that
+commits at delivery (`commitOnDelivery()`), conflation, the `KafkaConsumer`-style consumer,
+key/value state, timers, the DLQ, the admin API, tracing and wildcard consumption — is documented
+with every option in the [PHP client reference](REFERENCE.md).
 
 ---
 

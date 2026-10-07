@@ -361,3 +361,71 @@ export async function renewReportsAReleasedLease(client) {
                     released.success === false && released.newExpiresAt === null && typeof released.error === 'string'
     return { success, message: `live lease: ${JSON.stringify(live)}; after the ack: ${JSON.stringify(released)}` }
 }
+
+
+// autoAck() is consume()'s ack after the handler and never reaches the wire: a
+// pop after autoAck(true) is leased like any pop, and with a 1 s lease the
+// message comes back. The broker's at-most-once autoAck is commitOnDelivery().
+export async function popAutoAckStaysLeased(client) {
+    const queueName = 'test-queue-v2-pop-auto-ack'
+    const queue = await client.queue(queueName).config({ leaseTime: 1 }).create()
+    if (!queue.configured) {
+        return { success: false, message: 'Queue not created' }
+    }
+    await client.queue(queueName).push([{ data: { n: 1 } }])
+
+    const [message] = await client.queue(queueName).batch(1).wait(true).timeoutMillis(5000).autoAck(true).pop()
+    if (!message) {
+        return { success: false, message: 'Nothing popped' }
+    }
+    // Past the 1 s lease: a leased message is delivered again now.
+    await new Promise(resolve => setTimeout(resolve, 2500))
+    const again = await client.queue(queueName).batch(1).wait(true).timeoutMillis(3000).pop()
+
+    const success = typeof message.leaseId === 'string' && message.leaseId !== '' && again.length === 1
+    return { success, message: `leaseId ${JSON.stringify(message.leaseId)}, delivered again after the lease: ${again.length}` }
+}
+
+// commitOnDelivery() sends autoAck=true: the broker moves the group's cursor
+// past the message as it hands it out, so the pop has no lease and the message
+// does not come back after the 1 s lease of the queue.
+export async function popCommitOnDeliveryNotRedelivered(client) {
+    const queueName = 'test-queue-v2-pop-commit-on-delivery'
+    const queue = await client.queue(queueName).config({ leaseTime: 1 }).create()
+    if (!queue.configured) {
+        return { success: false, message: 'Queue not created' }
+    }
+    await client.queue(queueName).push([{ data: { n: 1 } }])
+
+    const [message] = await client.queue(queueName).batch(1).wait(true).timeoutMillis(5000).commitOnDelivery().pop()
+    if (!message) {
+        return { success: false, message: 'Nothing popped' }
+    }
+    // Past the 1 s lease: a leased message would be delivered again now.
+    await new Promise(resolve => setTimeout(resolve, 2500))
+    const again = await client.queue(queueName).batch(1).wait(true).timeoutMillis(1500).pop()
+
+    const success = !message.leaseId && again.length === 0
+    return { success, message: `leaseId ${JSON.stringify(message.leaseId)}, delivered again after the lease: ${again.length}` }
+}
+
+// pop() long-polls by default (POP_DEFAULTS.wait), and wait(false) returns at
+// once.
+export async function popLongPollsByDefault(client) {
+    const queueName = 'test-queue-v2-pop-wait-default'
+    const queue = await client.queue(queueName).create()
+    if (!queue.configured) {
+        return { success: false, message: 'Queue not created' }
+    }
+    let started = Date.now()
+    const waited = await client.queue(queueName).batch(1).timeoutMillis(1500).pop()
+    const waitedMillis = Date.now() - started
+    started = Date.now()
+    const atOnce = await client.queue(queueName).batch(1).wait(false).pop()
+    const atOnceMillis = Date.now() - started
+
+    return {
+        success: waited.length === 0 && waitedMillis >= 1000 && atOnce.length === 0 && atOnceMillis < 1000,
+        message: `empty pop: ${waitedMillis} ms by default (long poll of 1500 ms), ${atOnceMillis} ms with wait(false)`,
+    }
+}

@@ -157,6 +157,11 @@ class ConsumerManager:
         last_message_time = time.time() if idle_millis else None
 
         while True:
+            # True while a handler runs under auto_ack(False): then nothing in
+            # the processing block talks to the broker, so whatever it raises
+            # is the handler's error.
+            handler_owns_errors = False
+
             # Check abort signal
             if signal and signal.is_set():
                 logger.log(
@@ -251,32 +256,40 @@ class ConsumerManager:
                 if renew_lease and renew_lease_interval_millis:
                     renewal_task = self._setup_lease_renewal(messages, renew_lease_interval_millis)
 
+                handler_owns_errors = not auto_ack
                 try:
                     # Process messages
                     if each:
-                        # Process one at a time
-                        for idx, message in enumerate(messages):
+                        # Process one at a time. A nack releases the failed
+                        # message's partition and clamps that partition's
+                        # cursor at it: the later messages of THAT partition
+                        # will be redelivered, so handling them now would only
+                        # produce duplicates and rejected acks. The other
+                        # partitions of a multi-partition pop are still leased
+                        # to this worker, so their messages are handled now,
+                        # not after the lease.
+                        nacked_partitions = set()
+                        for message in messages:
                             if signal and signal.is_set():
                                 break
+
+                            partition = message.get("partitionId") or message.get("partition")
+                            if partition in nacked_partitions:
+                                continue
 
                             ok = await self._process_message(message, handler, auto_ack, group)
                             processed_count += 1
 
-                            # A nack releases the lease and clamps the server
-                            # cursor at the failed message: everything after it
-                            # in this popped batch WILL be redelivered.
-                            # Processing it now would only produce duplicates
-                            # and rejected acks — abandon the rest of the batch.
-                            if auto_ack and not ok:
+                            if not ok:
+                                nacked_partitions.add(partition)
                                 logger.warn(
                                     "ConsumerManager.worker",
                                     {
                                         "worker_id": worker_id,
-                                        "status": "batch-abandoned-after-nack",
-                                        "remaining": len(messages) - idx - 1,
+                                        "status": "partition-abandoned-after-nack",
+                                        "partition": partition,
                                     },
                                 )
-                                break
 
                             if limit and processed_count >= limit:
                                 break
@@ -321,6 +334,13 @@ class ConsumerManager:
                 )
                 raise
             except Exception as error:
+                # A handler error under auto_ack(False) is not nacked, by
+                # design, and stops the consumer. Its text can say "timeout"
+                # or "connection": it is still the handler's error, not the
+                # broker's, so the triage below never sees it.
+                if handler_owns_errors:
+                    raise
+
                 # Check if this is a timeout error (expected for long polling)
                 error_str = str(error)
                 is_timeout_error = "timeout" in error_str.lower() or "timed out" in error_str.lower()
@@ -396,8 +416,8 @@ class ConsumerManager:
         """Process single message.
 
         Returns True when the message was handled (and acked) successfully,
-        False when it was nacked — the caller must abandon the rest of the
-        popped batch (the nack released the lease server-side).
+        False when it was nacked — the caller skips the later messages of its
+        partition (the nack released that partition server-side).
         """
         try:
             await handler(message)

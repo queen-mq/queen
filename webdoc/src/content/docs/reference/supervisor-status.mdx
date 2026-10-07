@@ -1,0 +1,170 @@
+---
+title: Supervisor status contract
+description: "Publish supervisor instances into Queen KV: group identity, instance slots, versioned documents, heartbeat expiry, and compatibility across implementations."
+type: reference
+tier: operate
+sidebar:
+  order: 10
+sourceOfTruth:
+  - clients/client-php/src/Laravel/Supervisor/RemoteStatusDocument.php
+  - clients/client-php/src/Laravel/Supervisor/RemoteStatusPublisher.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
+  - clients/client-php/config/queen.php
+  - supervisor/src/remote_status.rs
+  - supervisor/src/main.rs
+  - supervisor/src/coordination.rs
+  - app/src/composables/supervisorStatus.js
+  - app/src/composables/supervisorQueueMetrics.js
+  - app/src/views/Supervisors.vue
+verifiedBy:
+  - clients/client-php/tests/RemoteStatusDocumentTest.php
+  - clients/client-php/tests/RemoteStatusPublisherTest.php
+  - app/test/supervisor-status.test.js
+  - app/test/supervisor-queue-metrics.test.js
+  - clients/client-php/tests/LaravelSupervisorCommandTest.php
+  - clients/client-php/tests/LaravelSupervisorTest.php
+# sourceOfTruth re-read 2026-10-07 (supervisors refresh): Supervisors.vue drops its refresh checkbox; how it reads and judges publications is unchanged. Nothing this page states changes.
+---
+
+The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.
+The contract is independent of the publisher's language. The current implementations are the PHP
+and Rust engines of the Laravel supervisor; both run PHP workers. Another client can implement a
+supervisor and publish the same contract without a new dashboard integration.
+
+## Identity and keys
+
+```text
+namespace: queen-supervisor
+
+pmsintool/<instance_id>/head
+pmsintool/<instance_id>/chunk/0000
+pmsintool/<instance_id>/chunk/0001
+
+pmsintool-staging/<instance_id>/head
+pmsintool-staging/<instance_id>/chunk/0000
+
+coordination/v1/<scope>/<instance_id>
+```
+
+| Part | Contract |
+| --- | --- |
+| Namespace | `queen-supervisor` by convention. Custom namespaces remain supported through the dashboard's Source setting. |
+| Group | The first segment, a stable application/deployment name. In Laravel this is `supervisor.remote_status.key`, whose default is a slug of `APP_NAME` and `APP_ENV`. |
+| Group syntax | 1–255 ASCII letters, digits, dots, underscores or hyphens; the first character is a letter or digit. Case-sensitive; lowercase is recommended. No slashes or automatic normalization. The exact name `coordination` is reserved. |
+| Instance | 16–128 lowercase hexadecimal characters. Generate an ID for each master process lifetime, unique among publishers in the group. Keep it for heartbeats; generate another after a restart. Hostname and PID are descriptive fields, not identity. |
+| Slot | `<group>/<instance_id>`. Each process writes only its own slot. Different engines may share a group, but must not reuse an instance ID. |
+
+The full identity is the acting tenant/cluster, namespace, group and instance ID. Give applications
+and environments that share a store distinct groups, such as `pmsintool-production` and
+`pmsintool-staging`. Replicas of the same deployment share the group. Groups with the same queue or
+pool names remain separate. Scan `pmsintool/`, including the slash, to avoid matching
+`pmsintool-staging/`; verify the decoded address belongs to that exact group as well.
+
+Grouping organizes observations. It does not isolate queue data or define a consumer group.
+Replica coordination uses the reserved `coordination/v1/` protocol: its scope depends on broker
+endpoints, consumer group and queue set, independently of the publication group. Changing the
+publication group therefore does not change autoscaling membership.
+
+## One publication
+
+The head value has this shape:
+
+```json
+{
+  "format": "queen.supervisor.remote-status/v1",
+  "write": "0123456789abcdef0123456789abcdef",
+  "chunks": 1,
+  "bytes": 1234
+}
+```
+
+`bytes` is the actual length of the UTF-8 JSON document, at most 1,048,576 bytes. Split it into
+chunks of at most 45,000 bytes, encode each as standard padded base64, and write its zero-based
+index as a four-digit suffix. There are at most 24 chunks. Each chunk value contains `write`,
+`index` and `data`; its `write` must match the head's new 32-character lowercase hexadecimal ID.
+
+Write the head and every chunk in one KV batch with the same TTL. Publish again before the
+heartbeat timeout. The current publishers default to the poll interval and a TTL of at least
+300 seconds or twice the heartbeat timeout, whichever is larger. Old chunks may remain until
+expiry; the current head and matching write IDs determine which chunks belong to the document.
+
+Read all parts of a slot from one KV listing response. Validate format, write IDs, indexes, byte
+length, UTF-8, schema and instance identity before displaying it. If a page ends partway through a
+slot, read that entire slot on the next page instead of assembling different snapshots. Missing
+parts, unknown versions and expired records cannot establish current worker health.
+
+## Status document
+
+The JSON inside the chunks declares `schema: "queen.supervisor.status/v1"`. Unknown extra fields
+may be ignored. Breaking changes require a new schema or transport format version; readers must
+not reinterpret an unsupported version as healthy.
+
+| Fields | Meaning |
+| --- | --- |
+| `instance_id`, `hostname`, `pid` | Process identity and host information. The instance ID must equal the slot's ID. |
+| `engine` | Implementation name, currently `php` or `rust`. This is an open string, not an enum or the workers' programming language. The broker dashboard accepts names up to 64 characters. |
+| `updated_at_epoch` | Heartbeat time in integer Unix seconds. |
+| `started_at_epoch`, `uptime_seconds` | Optional generation start in Unix seconds and non-negative integer uptime, measured with a monotonic clock at the heartbeat. Uptime is not extrapolated by the dashboard. |
+| `engine_version`, `client_version` | Optional implementation and client package versions, up to 64 characters. PHP uses the installed Composer package version for both; Rust uses its build version and the PHP package version exported by Laravel. Missing versions remain unknown. |
+| `state`, `paused`, `stopping` | Reported lifecycle state: `starting`, `running`, `paused`, `terminating` or `stopped`, with explicit booleans. |
+| `ready`, `capacity_satisfied` | Master readiness and whether the desired capacity is present. |
+| `configuration.heartbeat_timeout` | Positive number of seconds before the heartbeat is overdue. |
+| `configuration.process_limit` | Positive total process budget. The v1 dashboard supports up to 4,096 processes. |
+| `draining` | Total draining workers. |
+| `pool_status` | At most 256 pool observations, identified by the pair `supervisor` and `queue`. |
+| `process_budget` | `limit`, `used`, `available`, `active_worker_processes`, `draining_worker_processes`, `renewal_helpers_reserved`. |
+
+Each pool reports `running`, `desired`, `draining`, `depth`, `depth_available`, `ready`, `capacity_satisfied` and
+`healthy`. Restart evidence uses `restart_state` (`closed`, `backoff`, `open`, `probe`),
+`restart_failures` and optional `restart_in_seconds`. Optional `pids` and `replicas` add host
+and coordination detail. Budget evidence uses `process_cost_per_worker`, `reserved_processes`
+and `renewal_helpers_reserved`; a worker with no helper costs one process and reserves zero
+helpers.
+
+Readiness and target capacity are separate observations: a ready pool may still be scaling toward
+its target. Missing worker allocations are summed per pool; surplus workers in a different pool
+do not cancel a shortfall. Draining workers and renewal helpers occupy the shared process budget.
+
+Optional `configuration.supervisors` entries join to pool observations by `name` and an exact
+member of `queues`. Ambiguous names are not joined. The dashboard displays `connection`,
+`consumer_group`, `balance`, `strategy`, `min_processes`, `max_processes`, `timeout`, `retry_after`,
+`lease_renewal`, `tries` and `memory`. Min/max apply to the named pool across its configured queues;
+the queue row's running/desired counts describe that queue's allocation. Memory is a configured
+limit in MB, not measured RSS. Zero attempts means unlimited attempts.
+
+Counts are non-negative integers. The dashboard checks that the pool sums, draining total and
+process budget agree before diagnosing a lack of process headroom. Missing or inconsistent
+values remain unknown. Publishers must not invent zeroes or health flags for measurements they
+do not have. The broker dashboard renders a selected set of fields, not arbitrary configuration;
+publishers should still omit credentials from the document stored in KV.
+
+## Freshness and compatibility
+
+A recent heartbeat is a recent observation, not proof that a remote process is still alive. The
+broker dashboard compares its read time with `updated_at_epoch` and the reported heartbeat timeout,
+allowing five seconds of future clock skew. KV expiry takes precedence over a recent timestamp.
+An expired record may remain visible until the broker sweeps it; a swept record disappears.
+A failed read makes the previous result unconfirmed.
+
+The optional runtime metadata does not change the v1 schema. Updated Rust engines request the
+PHP client version with `QUEEN_SUPERVISOR_ENGINE_METADATA=1` during their internal
+`queen:supervisor-config --for-engine` export. PHP adds the optional field only for that request,
+preserving compatibility with older Rust engines that reject unknown configuration keys.
+
+Queue throughput, acknowledgement failures and sampled backlog are separate broker observations,
+not fields attributed to a supervisor instance. The pool drawer fetches them only on request, for
+one queue on the acting cluster. They cover all consumers of that queue. The supervisor's named
+connection may target another broker; a KV publication alone does not establish that mapping.
+
+Legacy `<key>/head` and `<key>/chunk/NNNN` publications remain readable. Earlier keys containing
+slashes are displayed under their complete legacy name, never merged into their first segment.
+The reserved coordination root is excluded. Duplicate legacy and per-instance copies of the same
+process are counted once within the same group.
+
+New PHP and Rust publications reject invalid group names before writing. This is a best-effort
+publication failure: it is logged without stopping local supervision. Rename an old nonconforming
+`remote_status.key` on the publishers and any Laravel dashboard readers when upgrading. Existing
+canonical names, including `pmsintool`, need no migration.
+
+The namespace holds a latest status copy, not worker logs, durable history or remote commands.
+Pause, continue and terminate remain host-local operations.

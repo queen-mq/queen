@@ -273,7 +273,7 @@ async def test_pop_puts_every_declared_parameter_on_the_query_string():
         wait=True,
         timeout=1500,
         group="workers",
-        auto_ack=True,
+        commit_on_delivery=True,
     )
     # The order is §3.1's, so a query read out of an access log is the query the
     # plan documents.
@@ -281,6 +281,25 @@ async def test_pop_puts_every_declared_parameter_on_the_query_string():
         "queue=inbox&partition=room-7&batch=10&wait=true&timeout=1500"
         "&group=workers&autoAck=true"
     )
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"commit_on_delivery": True},
+        {"auto_ack": True},
+        {"commit_on_delivery": True, "auto_ack": True},
+    ],
+    ids=["commit_on_delivery", "auto_ack (deprecated)", "both"],
+)
+async def test_pop_commits_at_delivery_under_either_name(options):
+    """commit_on_delivery is the name; auto_ack is its deprecated alias. Either
+    one, or both, sends autoAck=true once."""
+    client, server = make([popped(QUEUE)])
+    await client.ephemeral.pop(QUEUE, **options)
+    assert server.only.query["autoAck"] == ["true"]
     await client.close()
 
 

@@ -357,27 +357,42 @@ These setters apply to `pop()`, `popResult()`, `consume()` and, where noted, `ge
 | `subscriptionMode(string $mode)` | broker default | `'new'` or `'all'`, read on the group's first pop. |
 | `subscriptionFrom(string $from)` | none | `'now'` or an ISO timestamp, read on the group's first pop. |
 | `conflation(bool $enabled = true)` | off | Last-value delivery; see [Conflation](#conflation). |
-| `autoAck(bool $enabled)` | on for `consume()`, off for `pop()` | Who acks. See below. |
+| `autoAck(bool $enabled)` | on | Whether `consume()` acks after the handler. No effect on `pop()`. |
+| `commitOnDelivery(bool $enabled = true)` | off | `pop()`, `popResult()` and `popDetached()` only: commit at delivery; see [Commit at delivery](#commit-at-delivery). |
 
 `getConsumer()` reads `leaseSeconds`, `subscriptionMode`, `subscriptionFrom`, `partitions`,
-`conflation` and `autopilot`. It ignores the other setters in this table.
+`conflation` and `autopilot`. It ignores the other setters in this table, except
+`commitOnDelivery()`, which makes it throw.
 
 Keep a worker's own job timeout shorter than the lease. A job that outlives its lease is delivered
 again while it still runs.
 
-`autoAck` has one meaning for each read path:
+`autoAck()` is the ack that `consume()` sends:
 
 - On `consume()`, the client acks after the handler returns and nacks when the handler throws.
-  The pop that `consume()` sends never carries `autoAck`, so its messages stay leased until that
-  ack.
-- On `pop()`, `popResult()` and `popDetached()`, `autoAck(true)` sends `autoAck=true`. The broker
-  commits the messages at delivery and takes no lease, so there is nothing to ack. This is
-  at-most-once: a crash after the pop loses the messages.
-- A pop without `autoAck(true)` is leased, and you ack its messages yourself. `autoAck(false)`
-  sends nothing, because a leased pop is the broker default.
+  The messages stay leased until that ack.
+- It has no effect on `pop()`, `popResult()` and `popDetached()`. For a commit at delivery, see
+  [Commit at delivery](#commit-at-delivery).
 
 The broker semantics of these parameters are on
 [pop options](https://queenmq.com/concepts/consuming/#pop-options).
+
+### Commit at delivery
+
+A pop comes back leased unless the builder has `commitOnDelivery()`. With it, the broker moves the
+group's cursor past the messages as it hands them out: there is no lease, each message has an
+empty `leaseId`, and there is nothing to ack.
+
+```php
+$messages = $queen->queue('metrics')->group('dashboard')->commitOnDelivery()->pop();
+```
+
+- This is at-most-once delivery: a crash after the pop loses the messages.
+- It applies to `pop()`, `popResult()` and `popDetached()`. `consume()` and `getConsumer()` always
+  lease their messages, so they throw `LogicException` before any request when the builder has
+  `commitOnDelivery()`.
+- The broker refuses it together with `conflation()` and answers 400, which `pop()` throws as
+  `HttpException`.
 
 ## Consume
 
@@ -573,9 +588,8 @@ $queen->queue('recompute')
 - It is a property of the group, stored at the group's first registration. Later consumers of the
   group get the stored setting.
 - The client sends `conflation=true` only when it is on, never `false`.
-- The broker refuses conflation with a broker-side `autoAck` and answers 400. `pop()` sends
-  `autoAck` after `autoAck(true)`, so do not use the two together on `pop()`. The client-side ack
-  of `consume()` is compatible.
+- The broker refuses conflation together with `commitOnDelivery()` and answers 400. `consume()`,
+  which acks after the handler, is compatible.
 
 Every pop answer goes through `Support\ConflationGuard`:
 
@@ -966,7 +980,7 @@ $eph->ack('presence', $batch['messages'], ['group' => 'dashboard']);
 | `configure(string $queue, array $options = [])` | `maxBytes`, `maxLength`, `policy`, `ttlSeconds`, `leaseSeconds`, `retryLimit`, `windowBuffer` |
 | `push(string $queue, mixed $messages, array $opts = [])` | `partition`, `buffered` (`true` or buffer options) |
 | `flush(string $queue, ?string $partition = null)` | none |
-| `pop(string $queue, array $opts = [])` | `partition`, `batch`, `wait`, `timeout` or `timeoutMillis`, `group`, `autoAck` |
+| `pop(string $queue, array $opts = [])` | `partition`, `batch`, `wait`, `timeout` or `timeoutMillis`, `group`, `commitOnDelivery` |
 | `ack(string $queue, mixed $acks, array $opts = [])` | `group`, `status`, `error` |
 | `reset(string $queue)` | none |
 | `delete(string $queue)` | none |
@@ -983,8 +997,11 @@ $eph->ack('presence', $batch['messages'], ['group' => 'dashboard']);
   `partition`, `payload`, `attempts`. The `wait` timeout defaults to 30000 ms; passing both
   `timeout` and `timeoutMillis` throws.
 - The `group` decides consumption: one group is competing consumers, separate groups fan out, no
-  group is queue mode. `autoAck` is at-most-once; the default explicit ack redelivers an unacked
-  message until `retryLimit`.
+  group is queue mode. The default explicit ack redelivers an unacked message until `retryLimit`.
+- With `commitOnDelivery => true`, the broker moves the group's cursor past the messages as it
+  hands them out, with no lease and nothing to ack. This is at-most-once delivery. The option
+  `autoAck` is its deprecated old name and still works; passing both throws
+  `InvalidArgumentException`.
 - `ack()` takes a popped message, an id string, or a list. A status is `completed`, `failed`,
   `retry`, or `true`/`false`. Outcomes are `acked`, `redelivered`, `stale` or `unknown`.
 - A 404 from a broker without the ephemeral routes throws `EphemeralUnsupportedException`. A 404
@@ -1241,6 +1258,7 @@ Other exceptions:
 | `InvalidArgumentException` | Invalid config, KV or timer option, renewal seconds, or a transaction ack without ids. |
 | `RuntimeException` | A missing queue name, an empty or failed transaction, a full push buffer, a `failed` push item. |
 | `BadMethodCallException` | `Admin::clearQueue()`. |
+| `LogicException` | `consume()` or `getConsumer()` on a builder with `commitOnDelivery()`. |
 
 Calls that report instead of throwing:
 

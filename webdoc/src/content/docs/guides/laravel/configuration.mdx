@@ -30,6 +30,7 @@ sourceOfTruth:
   - supervisor/src/main.rs
   - clients/client-php/src/Laravel/Queue/LeaseRenewerFactory.php
   - clients/client-php/src/Laravel/Commands/ConsumeCommand.php
+# sourceOfTruth re-read 2026-10-06 (supervisor groups): remote_status.key names a validated group at publication time. DashboardRepository adds counts_available to distinguish reported counts from legacy fallbacks; configuration defaults and validation described here remain the same.
 # sourceOfTruth re-read 2026-10-06 (prefork per pool): the pool table adds prefork (null follows
 # supervisor.prefork) and the supervisor.prefork row says a pool's key wins.
 # sourceOfTruth re-read 2026-10-05 (env cut): config/queen.php reads 20 environment variables in PHP client 2.1.0, down from 95; the page leads with those 20, the area tables give each key and its default and name a variable only where the file reads one, supervisor.lease_service replaces QUEEN_SUPERVISOR_LEASE_SERVICE (read by the Rust master until the supervisor released with 2.1.0), remote_status.key defaults to a slug of APP_NAME and APP_ENV and is no longer required, a pool without queues or consumer_group takes the top-level ones, the switches paragraph follows the new file, QUEEN_SDK_POP_AUTOPILOT and the variables the supervisors set for their workers are named, and Upgrading from 2.0.0 maps every removed variable to its key.
@@ -42,6 +43,12 @@ sourceOfTruth:
 # of --lease, and these keys with --auto-ack, measured against --lease.
 # sourceOfTruth re-read 2026-10-06 (queen:consume idle clock): ConsumeCommand measures --idle-timeout in
 # nanoseconds and never stops before it has passed; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (connection defaults): SupervisorConfiguration and ApplicationSettings start
+# every queen connection from config/queen.php, as QueenConnector does and as the configuration page
+# already says; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-07 (no nack without --auto-ack): ConsumeCommand nacks a throw only with
+# --auto-ack. This page names queen:consume only for its --lease default and the lease renewal keys, which
+# do not change; nothing this page states changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. Since PHP client 2.1.0 the
@@ -254,7 +261,7 @@ ownership is checked before Laravel's row changes ([failed jobs](/guides/laravel
 | `supervisor.remote_status.enabled` | `false` | Also publish the status to the broker, for a dashboard on another host. Variable: `QUEEN_SUPERVISOR_REMOTE_STATUS`. |
 | `supervisor.remote_status.connection` | `queen` | The queue connection whose broker and write credential are used. |
 | `supervisor.remote_status.namespace` | `queen-supervisor` | The key/value namespace. |
-| `supervisor.remote_status.key` | a slug of `APP_NAME` and `APP_ENV`, such as `laravel-production` | The key the status goes under, one per application and environment on a broker. |
+| `supervisor.remote_status.key` | a slug of `APP_NAME` and `APP_ENV`, such as `laravel-production` | The publication group, one per application and environment on a broker; see the [group naming contract](/reference/supervisor-status/#identity-and-keys). |
 | `supervisor.remote_status.interval` | `null` | Time between two publishes, in seconds, shorter than `heartbeat_timeout`. When `null`: `poll_interval`. |
 | `supervisor.remote_status.ttl` | `null` | How long a published copy lives, in seconds, at most 86,400. When `null`: twice `heartbeat_timeout`, at least 300. |
 | `supervisor.prefork` | `false` | Boot Laravel once in a fork server and fork every worker from it; a pool's `prefork` wins. Variable: `QUEEN_SUPERVISOR_PREFORK`. |

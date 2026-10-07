@@ -191,7 +191,7 @@ func TestDLQ_ManualRequeueViaPushAndDelete(t *testing.T) {
 	// 2. delete the DLQ row.
 	runOK(t, "messages", "delete", pid, tx, "--yes")
 	// 3. the requeued message is back in the live queue.
-	got := popN(t, q, 1, "--cg", "ct-mreq-after", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 1, "--cg", "ct-mreq-after", "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	if len(got) != 1 {
 		t.Errorf("re-pushed message did not surface (popped %d)", len(got))
 	}

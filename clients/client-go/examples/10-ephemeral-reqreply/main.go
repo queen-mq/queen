@@ -201,7 +201,7 @@ func request(ctx context.Context, eph *queen.Ephemeral, n int, timeout time.Dura
 		TimeoutMillis: int(timeout / time.Millisecond),
 		// At-most-once, and exactly right here: the reply is consumed once, by
 		// the one caller waiting for it, and there is nothing to ack afterwards.
-		AutoAck: true,
+		CommitOnDelivery: true,
 	})
 	if err != nil {
 		return rpcReply{}, err
@@ -253,7 +253,7 @@ func bufferedCoda(ctx context.Context, q *queen.Queen, eph *queen.Ephemeral) {
 	fmt.Printf("  %d flush(es), %d message(s) still buffered\n", stats.FlushesPerformed, stats.TotalBufferedMessages)
 
 	batch, err := eph.Pop(ctx, presence, queen.EphemeralPopOptions{
-		Partition: "room-7", Batch: 25, AutoAck: true,
+		Partition: "room-7", Batch: 25, CommitOnDelivery: true,
 	})
 	if err != nil {
 		panic(err)

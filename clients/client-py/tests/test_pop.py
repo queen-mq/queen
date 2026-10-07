@@ -3,6 +3,8 @@ Pop operation tests
 """
 
 import asyncio
+import uuid
+
 import pytest
 
 
@@ -106,3 +108,22 @@ async def test_pop_with_ack_reconsume(client):
     res3 = await client.queue("test-queue-v2-pop-with-ack-reconsume").batch(10).wait(False).pop()
     assert len(res3) == 0, "Queue should be empty after acking all messages"
 
+
+@pytest.mark.asyncio
+async def test_pop_with_commit_on_delivery_is_committed_at_delivery(client):
+    """commit_on_delivery() on pop() sends autoAck=true: the broker commits the
+    message as it hands it out, with no lease to ack or to expire."""
+    # Unique: the fixed transactionId would dedupe on a second run.
+    name = f"test-queue-v2-pop-commit-on-delivery-{uuid.uuid4().hex[:8]}"
+    await client.queue(name).create()
+    await client.queue(name).push([{"data": {"message": "Hello"}, "transactionId": f"{name}-1"}])
+
+    res = await client.queue(name).batch(1).wait(True).commit_on_delivery().pop()
+    assert len(res) == 1
+    lease_id = res[0].get("leaseId")
+    assert not lease_id, f"a pop committed at delivery holds no lease: {lease_id!r}"
+
+    detail = await client.admin.get_message(res[0]["partitionId"], f"{name}-1")
+    (group,) = detail["consumerGroups"]
+    assert group["consumed"] is True, f"not committed at delivery: {group}"
+    assert group["leaseExpiresAt"] is None

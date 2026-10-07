@@ -1,5 +1,0 @@
-=== wait sample 1 1784785324 ===
-=== wait sample 2 1784785325 ===
-=== wait sample 3 1784785326 ===
-=== wait sample 4 1784785328 ===
-=== wait sample 5 1784785329 ===

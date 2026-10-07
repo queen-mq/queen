@@ -51,7 +51,8 @@ A complete C++ client implementation for Queen Message Queue has been created in
   - Configurable concurrency
   - Batch processing support
   - Auto-ack/manual-ack modes
-  - Lease renewal (structure in place)
+  - Lease renewal while the handler runs (`renew_lease()`)
+  - A handler that throws is nacked with auto-ack, logged without it
   - Idle timeout and message limits
 
 - **DLQBuilder** - Dead Letter Queue queries
@@ -169,6 +170,7 @@ client.queue("tasks").push({{{"data", {{"job", "test"}}}}});
 - [x] Manual ACK/NACK
 - [x] Batch ACK
 - [x] Lease renewal API
+- [x] Auto lease renewal in the consume loop
 - [x] DLQ queries
 - [x] Load balancing (round-robin & session)
 - [x] Failover support
@@ -184,7 +186,6 @@ client.queue("tasks").push({{{"data", {{"job", "test"}}}}});
 - [x] Logging support
 
 ### 🚧 Partially Implemented
-- [ ] Auto lease renewal (structure in place, needs background thread)
 - [ ] Message tracing (API structure ready, needs implementation)
 
 ### ℹ️ Not Implemented (Node.js specific)
@@ -316,11 +317,10 @@ The test suite covers:
 4. Integrate into your project
 
 ### Future Enhancements
-1. Auto lease renewal background thread
-2. Message tracing implementation
-3. Connection pooling for performance
-4. Compression support
-5. More examples (producer-consumer, pipelines)
+1. Message tracing implementation
+2. Connection pooling for performance
+3. Compression support
+4. More examples (producer-consumer, pipelines)
 
 ## Files Summary
 

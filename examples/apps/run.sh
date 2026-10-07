@@ -9,17 +9,21 @@
 #   examples/apps/run.sh                          # against http://localhost:6632
 #   QUEEN_URL=http://localhost:6642 examples/apps/run.sh
 #   QUEEN_URL=... examples/apps/run.sh js py       # a subset of the languages
+#   examples/apps/run.sh laravel                  # the Laravel examples only
 #
 # The rate limiter exists only where the client has a streaming SDK (js, py, go,
 # rust), and the deferred-work admission controller only in JavaScript. PHP, C++
 # and the plain HTTP client carry chat and webhooks; Python and HTTP also carry
 # exactly-once, and Python, Go and HTTP the saga. The Kafka bridge is in
 # examples/cross-protocol/ because it needs a node with the Kafka listener on.
+# `laravel` is a Laravel application, examples/apps/laravel, whose examples are
+# Artisan commands that start real workers and a supervisor (prefetch, prefork,
+# per-entity ordering, lease renewal).
 #
 # Needs, per language: node 24+, python 3.9+ with httpx, go 1.24+, rust 1.75+,
-# php 8.3+ with composer, a C++17 compiler with OpenSSL, and curl with jq. A
-# language whose toolchain is missing is skipped with a note instead of failing
-# the run.
+# php 8.3+ with composer (and the pcntl and posix extensions for laravel), a
+# C++17 compiler with OpenSSL, and curl with jq. A language whose toolchain is
+# missing is skipped with a note instead of failing the run.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,7 +31,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 export QUEEN_URL="${QUEEN_URL:-http://localhost:6632}"
 
 LANGS=("$@")
-[ ${#LANGS[@]} -eq 0 ] && LANGS=(js py go rust php cpp http)
+[ ${#LANGS[@]} -eq 0 ] && LANGS=(js py go rust php laravel cpp http)
 wanted() { for l in "${LANGS[@]}"; do [ "$l" = "$1" ] && return 0; done; return 1; }
 
 echo "broker: $QUEEN_URL"
@@ -45,6 +49,7 @@ apps_for() {
     py) printf 'chat webhooks rate_limiter exactly_once saga' ;;
     go) printf 'chat webhooks rate-limiter saga' ;;
     http) printf 'chat webhooks exactly-once saga' ;;
+    laravel) printf 'ordering prefetch prefork lease' ;;
   esac
   return 0
 }
@@ -142,6 +147,26 @@ if wanted php; then
     done
   else
     skip_lang "no php"
+  fi
+fi
+
+if wanted laravel; then
+  echo
+  echo "Laravel"
+  if ! command -v php >/dev/null || ! command -v composer >/dev/null; then
+    skip_lang "no php or no composer"
+  elif ! php -r 'exit(PHP_VERSION_ID >= 80300 && extension_loaded("pcntl") && extension_loaded("posix") ? 0 : 1);'; then
+    skip_lang "needs php 8.3+ with the pcntl and posix extensions"
+  else
+    # The application requires the PHP client through a path repository, as a
+    # copy: reinstalling it on every run makes the examples run the client of
+    # this checkout, not the one copied at the first install.
+    (cd "$HERE/laravel" \
+      && { [ -f vendor/autoload.php ] || composer install --quiet --no-interaction; } \
+      && composer reinstall queen-mq/php-client --quiet --no-interaction) || exit 1
+    for f in $(apps_for laravel); do
+      run "example:$f" env -C "$HERE/laravel" php artisan "example:$f"
+    done
   fi
 fi
 

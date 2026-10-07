@@ -32,12 +32,12 @@ use Queen\Http\Retry429Policy;
  * history to have.
  *
  * DELIVERY IS NOT "AT MOST ONCE" (§1.3), and the docs must not say it is. The
- * class picks what can be LOST; the ack mode picks the guarantee. `autoAck`
- * advances the cursor at delivery and is at-most-once. The default — explicit
- * ack — is at-least-once for as long as the owning broker incarnation lives: an
- * unacked message redelivers when its lease expires, with `attempts`
- * incremented, until `retryLimit`, after which it is DROPPED and counted.
- * Consumers still need idempotency, exactly as on durable queues.
+ * class picks what can be LOST; the ack mode picks the guarantee.
+ * `commitOnDelivery` advances the cursor at delivery and is at-most-once. The
+ * default — explicit ack — is at-least-once for as long as the owning broker
+ * incarnation lives: an unacked message redelivers when its lease expires,
+ * with `attempts` incremented, until `retryLimit`, after which it is DROPPED
+ * and counted. Consumers still need idempotency, exactly as on durable queues.
  *
  * CONSUMPTION SEMANTICS COME FROM THE GROUP, EXACTLY AS ON THE DURABLE ENGINE
  * (§1.5). There is no queue-level mode to choose:
@@ -274,7 +274,9 @@ class Ephemeral
      * acking somebody else's message.
      *
      * @param array $opts partition, batch, wait, timeout (alias timeoutMillis;
-     *   milliseconds, default 30000 when waiting), group, autoAck.
+     *   milliseconds, default 30000 when waiting), group, commitOnDelivery,
+     *   and autoAck, deprecated: the old name of commitOnDelivery, still read
+     *   with the same meaning. Pass one of the two, not both.
      *
      * `wait => true` is a real long poll, parked on a RAM gate with no database
      * behind it and no polling interval anywhere (§3.4) — the structural reason
@@ -283,7 +285,14 @@ class Ephemeral
      *
      * `group` is the whole of the consumption semantics (§1.5): same group =
      * competing consumers, own group = fan-out, no group = queue mode.
-     * `autoAck => true` commits at delivery and is at-most-once.
+     *
+     * `commitOnDelivery => true` commits at delivery: the broker moves the
+     * group's cursor past the messages as it hands them out, with no lease and
+     * nothing to ack. That is at-most-once: a crash after the pop loses them.
+     * It travels as `autoAck=true`, the parameter the broker reads.
+     *
+     * @throws \InvalidArgumentException when both timeout and timeoutMillis, or
+     *   both commitOnDelivery and autoAck, are given
      */
     public function pop(string $queue, array $opts = []): array
     {
@@ -293,6 +302,7 @@ class Ephemeral
         $group = $opts['group'] ?? null;
         $wait = ($opts['wait'] ?? false) === true;
         $timeoutMillis = $this->resolveTimeout($opts);
+        $commitOnDelivery = $this->resolveCommitOnDelivery($opts);
 
         $params = ['queue' => $queue];
         if ($partition !== null) {
@@ -310,7 +320,7 @@ class Ephemeral
         if ($group !== null) {
             $params['group'] = $group;
         }
-        if (($opts['autoAck'] ?? false) === true) {
+        if ($commitOnDelivery) {
             $params['autoAck'] = 'true';
         }
 
@@ -586,6 +596,25 @@ class Ephemeral
         }
 
         return $out;
+    }
+
+    /**
+     * The pop's commit at delivery, from `commitOnDelivery` or its deprecated
+     * alias `autoAck`. Both names at once are refused, as for the timeout: two
+     * values for one setting would need a rule nobody reads.
+     */
+    private function resolveCommitOnDelivery(array $opts): bool
+    {
+        $hasName = isset($opts['commitOnDelivery']);
+        $hasAlias = isset($opts['autoAck']);
+
+        if ($hasName && $hasAlias) {
+            throw new \InvalidArgumentException(
+                'ephemeral: pass either `commitOnDelivery` or its deprecated alias `autoAck`, not both'
+            );
+        }
+
+        return ($hasName ? $opts['commitOnDelivery'] : ($opts['autoAck'] ?? false)) === true;
     }
 
     /**

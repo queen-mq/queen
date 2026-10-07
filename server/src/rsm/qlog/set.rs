@@ -2334,6 +2334,20 @@ impl QLogReader {
         }
     }
 
+    /// Seek a message-list candidate using only the active/sealed indexes.
+    pub fn record_before(
+        &self,
+        queue_id: u64,
+        pid: u64,
+        high: u64,
+        before_us: i64,
+    ) -> Option<super::index::Record> {
+        self.log_for(queue_id, pid)?
+            .read()
+            .expect("qlog poisoned")
+            .record_before(pid, high, before_us)
+    }
+
     /// The O(claimed) forward claim walk of `pid` from `from_offset`, bounded to
     /// `committed_end` (the exactly-once invariant), for the dedup delivered set
     /// / resolve. The qlog twin of `segments::Reader::claim_frames`. A no-op when

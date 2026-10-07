@@ -330,6 +330,24 @@ for (const auto& msg : dlq["messages"]) {
 
 ### Lease Renewal
 
+In a consumer, `renew_lease(true, interval_millis)` renews the batch's lease
+every interval while the handler runs, and stops after the ack or nack. Every
+message of a pop shares one leaseId, so a batch is one renewal request per
+interval. The broker extends a lease by 60 seconds, so pick an interval shorter
+than that and than the queue's `lease_time`:
+
+```cpp
+client.queue("long-tasks")
+    .renew_lease(true, 30000)   // every 30 s while the handler runs
+    .consume([](const json& msg) {
+        process_large_file(msg["data"]);
+    });
+```
+
+After a manual `pop()`, renew the lease yourself. `renew()` answers
+`success: false` when the broker extended nothing: the lease expired or was
+released, and the message may already be with another consumer.
+
 ```cpp
 // Pop message
 auto messages = client.queue("long-tasks").pop();
@@ -340,7 +358,9 @@ std::thread processing_thread([&]() {
     // Renew lease every 30 seconds
     while (processing) {
         std::this_thread::sleep_for(std::chrono::seconds(30));
-        client.renew(msg);
+        if (!client.renew(msg)["success"].get<bool>()) {
+            break;  // the lease is gone: stop the work
+        }
     }
 });
 
@@ -438,6 +458,7 @@ make test
 # No broker needed: these serve their own responses in-process.
 # retry429  = the proxy contract (bearer token, 429 backoff, terminal 403)
 # kvtimers  = the KV/timer wire contract (exact JSON body, method and path)
+# consumer  = the consume path: ack()/renew() results and the consume loop
 make run-unit
 
 # Against a live broker (localhost:6632 by default)
@@ -530,6 +551,16 @@ client.queue("tasks")
 
 ### Manual ACK
 
+With `auto_ack` (the default), a handler that throws is nacked, with the
+exception's message as the error (capped at 4096 bytes, invalid UTF-8
+replaced), so the message spends one retry and reaches the DLQ once
+`retry_limit` is spent. `auto_ack(false)` hands settling to the handler,
+failures included: the consumer logs the exception and sends no nack, and the
+message comes back when its lease expires. Either way, with `each()` the
+consumer then skips the later messages of the same partition in that batch,
+which the broker delivers again. Messages of the other partitions of a
+multi-partition pop are still handled.
+
 ```cpp
 // Disable auto-ack for manual control
 client.queue("tasks")
@@ -543,6 +574,25 @@ client.queue("tasks")
         }
     });
 ```
+
+### Commit at Delivery
+
+`commit_on_delivery()` commits a `pop()` at delivery: the broker moves the
+consumer group's cursor past the messages as it hands them out. There is no
+lease and nothing to ack, so the delivery is at-most-once: a message that your
+code loses after the pop does not come back. It is a `pop()` option:
+`consume()` always leases its messages and throws `std::invalid_argument` when
+it is set. The broker refuses it together with `conflation()`.
+
+```cpp
+auto messages = client.queue("metrics")
+    .group("dashboard")
+    .commit_on_delivery()
+    .pop();  // already committed: do not ack these
+```
+
+The ephemeral pop has the same option, `EphemeralPopOptions::commit_on_delivery`.
+Its old name, `auto_ack`, still works and is deprecated.
 
 ## Logging
 
@@ -567,8 +617,8 @@ Output:
 - `QueenClient(urls, config)` - Create client with multiple servers
 - `queue(name)` - Get queue builder
 - `transaction()` - Create transaction builder
-- `ack(message, status, context)` - Acknowledge message(s)
-- `renew(message)` - Renew message lease
+- `ack(message, status, context)` - Acknowledge message(s). `success` is false when the broker refused any of them; its answer is in `result`
+- `renew(message)` - Renew message lease. `success` is false when the broker extended nothing
 - `flush_all_buffers(deadline_millis = -1)` - Flush all client-side buffers (retries failed batches; a deadline bounds that and throws `BufferFlushError` on expiry)
 - `get_buffer_stats()` - Get buffer statistics
 - `close()` - Graceful shutdown
@@ -597,9 +647,10 @@ Output:
 - `partitions(n)` - Pin the sweep width (unset = the broker sizes it)
 - `autopilot(enabled)` - Turn broker-side pop sizing off for this builder
 - `limit(count)` - Set message limit
-- `auto_ack(enabled)` - Enable/disable auto-ack
+- `auto_ack(enabled)` - Ack after the `consume()` handler returns. No effect on `pop()`. With it, a handler that throws is nacked; without it, the failure is only logged
+- `commit_on_delivery(enabled = true)` - `pop()` only: the broker moves the group's cursor past the messages as it hands them out. No lease, nothing to ack, at-most-once. See Commit at Delivery
 - `wait(enabled)` - Enable/disable long polling
-- `renew_lease(enabled, interval)` - Auto-renew leases
+- `renew_lease(enabled, interval)` - Renew the batch's lease every interval while the handler runs
 
 **Buffering:**
 - `buffer(options)` - Enable client-side buffering (bounded: blocks at `max_size`)
@@ -768,6 +819,17 @@ Two smaller gaps against client-js, for the same honesty:
   carrying `incr` anyway. The ETag saves bandwidth, never the round trip.
 
 ## Error Handling
+
+`consume()` throws the error that stopped a worker, after every worker has
+stopped: a 403, `ConflationUnsupportedError`, or any other 4xx on a pop (an
+`HttpError` with its status). A 5xx, a network fault or a timeout does not stop
+it: it waits a second and polls again. A handler exception never leaves
+`consume()`: the loop logs it, nacks the message under `auto_ack`, and goes on.
+`pop()` logs a failure and returns an empty result.
+
+`ack()` and `renew()` return `success: false` with an `error` when the broker
+settled or extended nothing. Both routes answer HTTP 200 in that case, so read
+`success`; for an ack, the per-message results stay in `result`.
 
 ```cpp
 try {

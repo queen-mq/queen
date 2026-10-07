@@ -341,6 +341,16 @@
         var scrollX = window.scrollX;
         var scrollY = window.scrollY;
 
+        // Keep an instance's process details open across heartbeat updates.
+        // Match the instance key rather than its position in the host list.
+        var openDetails = new Set();
+        currentMain.querySelectorAll('details[data-refresh-details][open]').forEach(function (detail) {
+            openDetails.add(detail.getAttribute('data-refresh-details'));
+        });
+        nextMain.querySelectorAll('details[data-refresh-details]').forEach(function (detail) {
+            detail.open = openDetails.has(detail.getAttribute('data-refresh-details'));
+        });
+
         currentHeader.replaceWith(document.importNode(nextHeader, true));
         var children = [];
         for (var i = 0; i < nextMain.childNodes.length; i++) {

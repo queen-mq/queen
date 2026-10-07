@@ -79,12 +79,14 @@ bytes of queue log per message, and the stubs brought it to 236
 
 A payload of at least 512 bytes is stored zstd-compressed at `QUEEN_RAFT_QLOG_ZSTD_LEVEL`
 (default 1; `0` turns it off), unless that saves less than a tenth. Compression is node-local: the
-replicated entry stays raw, two nodes may store the same record differently, and every read
+replicated entry stays raw, two nodes may store the same record differently, and each payload read
 decompresses at one point.
 
 The active file rolls at `QUEEN_RAFT_SEGMENT_BYTES` (64 MiB). A sealed file is immutable and gets a
 `.qidx` index beside it, while the active file's index lives in RAM; a stale or missing `.qidx` is
-rebuilt by scanning its file.
+rebuilt by scanning its file. Both indexes carry append timestamps and offset ranges, so message
+browsing can seek a historical window and select its page before reading payloads. Only appends
+containing a selected message need to be read and decompressed, once per append for that page.
 
 `QUEEN_QLOG_SHARDS=K`, set before the directory is created, maps every queue onto K shared logs
 (`queue id % K`), so one write fsyncs at most K files however many queues it spans. That is the

@@ -63,6 +63,10 @@ sourceOfTruth:
 # through the new LeaseRenewerFactory, with the same keys, checks and messages, and
 # QueenServiceProvider builds the container's client with clientConfig() and binds that factory.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (connection defaults): SupervisorConfiguration and ApplicationSettings start
+# every queen connection from config/queen.php, as QueenConnector does and as the configuration page
+# already says; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps the queue and status filters used by the dashboard links; depth, lag and analytics reads are unchanged.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the
@@ -384,13 +388,19 @@ other.
 | Key of `supervisor.remote_status` | Default | Meaning |
 | --- | --- | --- |
 | `enabled` (`QUEEN_SUPERVISOR_REMOTE_STATUS`) | `false` | publish the status document |
-| `key` | a slug of `APP_NAME` and `APP_ENV` | the key the documents go under |
+| `key` | a slug of `APP_NAME` and `APP_ENV` | the supervisor group the documents go under |
 | `connection` | `queen` | the queue connection whose broker and credentials are used |
 | `namespace` | `queen-supervisor` | the key/value namespace |
 | `interval` | `poll_interval` | seconds between publishes; a state change publishes at once |
 | `ttl` | twice `heartbeat_timeout`, at least 300 | how long a published copy lives |
 
-The Supervisors page then shows one card per instance: a live local supervisor first, then every
+The key is a group name: 1–255 ASCII letters, digits, dots, underscores or hyphens, starting
+with a letter or digit. Names are case-sensitive and cannot contain slashes; `coordination` is
+reserved. See the [publication contract](/reference/supervisor-status/) for identity, compatibility
+and requirements for other implementations. The broker dashboard's **Supervisors** page can also
+read these publications, grouped across applications, without a Laravel web host.
+
+The Laravel Supervisors page then shows one card per instance: a live local supervisor first, then every
 published one, live before stale, each with its host, PID and last heartbeat. The overview, the
 header and the notices add up workers, draining processes and the process budget over the live
 instances, and report ready or healthy only when every live instance is. A stopping or stopped

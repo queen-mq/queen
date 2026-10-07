@@ -163,7 +163,7 @@ func init() {
 	tailCmd.Flags().IntVarP(&tailLimit, "limit", "n", 0, "stop after N messages")
 	tailCmd.Flags().IntVar(&tailBatch, "batch", 0, "messages per long-poll round-trip (unset: the broker sizes it)")
 	tailCmd.Flags().IntVar(&tailMaxParts, "max-partitions", 1, "claim up to N partitions per pop; pass it to pin the sweep, leave it out and the broker sizes it")
-	tailCmd.Flags().BoolVar(&tailAutoAck, "auto-ack", false, "ack server-side as messages are emitted")
+	tailCmd.Flags().BoolVar(&tailAutoAck, "auto-ack", false, "ack each message after printing it (without it the printed messages stay leased)")
 	tailCmd.Flags().StringVar(&tailFromMode, "from", "", "subscription mode: all|new|new-only")
 	tailCmd.Flags().StringVar(&tailFromAt, "since", "", "subscription start: 'now', RFC3339, '5m ago'")
 	tailCmd.Flags().IntVar(&tailIdleMillis, "idle-millis", 0, "stop after N ms of no messages")

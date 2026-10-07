@@ -209,3 +209,72 @@ func TestPopBatch(t *testing.T) {
 
 	t.Logf("Pop batch working: %s (got %d messages)", queueName, len(messages))
 }
+
+// pushOneToNewQueue creates a queue holding one message and returns its name.
+func pushOneToNewQueue(ctx context.Context, t *testing.T, client *queen.Queen, prefix string) string {
+	t.Helper()
+	queueName := generateQueueName(prefix)
+	if _, err := client.Queue(queueName).Create().Execute(ctx); err != nil {
+		t.Fatalf("Failed to create queue: %v", err)
+	}
+	if _, err := client.Queue(queueName).Push(map[string]interface{}{"n": 1}).Execute(ctx); err != nil {
+		t.Fatalf("Failed to push message: %v", err)
+	}
+	return queueName
+}
+
+// CommitOnDelivery commits at delivery: the pop takes no lease, and the
+// message does not come back on the next pop.
+func TestPopCommitOnDeliveryTakesNoLease(t *testing.T) {
+	client := requireClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	queueName := pushOneToNewQueue(ctx, t, client, "pop-commit-on-delivery")
+
+	messages, err := client.Queue(queueName).Wait(false).CommitOnDelivery(true).Pop(ctx)
+	if err != nil {
+		t.Fatalf("Failed to pop: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 message, got %d", len(messages))
+	}
+	if messages[0].LeaseID != "" {
+		t.Errorf("A pop that commits on delivery must take no lease, got leaseId %q", messages[0].LeaseID)
+	}
+
+	again, err := client.Queue(queueName).Wait(false).Pop(ctx)
+	if err != nil {
+		t.Fatalf("Failed to pop again: %v", err)
+	}
+	if len(again) != 0 {
+		t.Errorf("The message was committed at delivery, yet the next pop returned %d", len(again))
+	}
+}
+
+// AutoAck is the consume loop's ack, so a pop after AutoAck(true) is leased:
+// it carries a lease, and only an ack commits it.
+func TestPopAfterAutoAckIsLeased(t *testing.T) {
+	client := requireClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	queueName := pushOneToNewQueue(ctx, t, client, "pop-autoack-leased")
+
+	messages, err := client.Queue(queueName).Wait(false).AutoAck(true).Pop(ctx)
+	if err != nil {
+		t.Fatalf("Failed to pop: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 message, got %d", len(messages))
+	}
+	if messages[0].LeaseID == "" {
+		t.Fatalf("AutoAck must not reach a pop: the pop took no lease, so it committed at delivery")
+	}
+
+	acks, err := client.Ack(ctx, messages[0], true, queen.AckOptions{})
+	if err != nil {
+		t.Fatalf("Failed to ack: %v", err)
+	}
+	if len(acks) != 1 || !acks[0].Success {
+		t.Errorf("Expected the ack of the leased message to succeed, got %+v", acks)
+	}
+}

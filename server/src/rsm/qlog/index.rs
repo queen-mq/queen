@@ -350,6 +350,18 @@ impl View {
         (lo..hi).map(|i| self.record(i)).collect()
     }
 
+    /// The newest append before both exclusive bounds. Timestamps increase
+    /// with offsets within a partition, so a historical listing can seek in
+    /// the index without reading any of the newer payloads.
+    pub fn record_before(&self, pid: u64, high: u64, before_us: i64) -> Option<Record> {
+        let at = self.partition_point(|r| {
+            r.pid < pid || (r.pid == pid && r.base_offset < high && r.created_at_us < before_us)
+        });
+        at.checked_sub(1)
+            .map(|i| self.record(i))
+            .filter(|r| r.pid == pid)
+    }
+
     /// PLAN_RAFT_DRAIN_FIX P3.1: the records of `pid` overlapping the inclusive
     /// offset band `[lo, hi]` (`base <= hi && end > lo`), ascending. Binary search
     /// to the record at or below `lo` (it may straddle it), then a forward walk
@@ -495,6 +507,30 @@ impl ActiveIndex {
             .map(|(_, r)| *r)
             .filter(|r| r.holds(pid, offset))
             .map(|r| (file_id, r))
+    }
+
+    /// The active-index twin of [`View::record_before`]. The common tail
+    /// lookup is one BTree seek. A historical lookup bisects the offset range;
+    /// predecessor probes also work across gaps without walking the suffix.
+    pub fn record_before(&self, pid: u64, high: u64, before_us: i64) -> Option<Record> {
+        self.file_id?;
+        let last = *self.recs.range((pid, 0)..(pid, high)).next_back()?.1;
+        if last.created_at_us < before_us {
+            return Some(last);
+        }
+        let mut lo = 0;
+        let mut hi = last.base_offset;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match self.recs.range((pid, 0)..=(pid, mid)).next_back() {
+                Some((_, r)) if r.created_at_us >= before_us => hi = r.base_offset,
+                _ => lo = mid + 1,
+            }
+        }
+        self.recs
+            .range((pid, 0)..(pid, lo))
+            .next_back()
+            .map(|(_, r)| *r)
     }
 
     /// The active file's records of `pid`, ascending by base offset, whose

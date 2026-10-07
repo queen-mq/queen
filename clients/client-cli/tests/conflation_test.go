@@ -68,7 +68,7 @@ func TestConflation_MixedGroupsOnOneQueue(t *testing.T) {
 	}
 
 	audit := popN(t, q, 50, "--cg", cflGroup(t, "audit"), "--from-mode", "all",
-		"--auto-ack", "--timeout", "5s")
+		"--commit-on-delivery", "--timeout", "5s")
 	if len(audit) != 20 {
 		t.Errorf("non-conflating group got %d messages, want all 20", len(audit))
 	}
@@ -89,7 +89,7 @@ func TestConflation_StoredPolicySurvivesAConsumerThatForgetsTheFlag(t *testing.T
 		t.Fatalf("first (registering) pop got %d, want 1", len(first))
 	}
 	// Release the lease so the next pop of the same group can claim the
-	// partition; --auto-ack is refused alongside conflation by design (§3.3).
+	// partition; --commit-on-delivery is refused alongside conflation by design (§3.3).
 	runOK(t, "ack", first[0].TransactionID,
 		"--partition-id", first[0].PartitionID,
 		"--lease-id", first[0].LeaseID,
@@ -115,7 +115,7 @@ func TestConflation_DeclarationConflictWarnsAndKeepsWorking(t *testing.T) {
 	createQueue(t, q)
 	pushNDJSON(t, q, "p0", cflPayloads(5))
 
-	plain := popN(t, q, 50, "--cg", cg, "--from-mode", "all", "--auto-ack", "--timeout", "5s")
+	plain := popN(t, q, 50, "--cg", cg, "--from-mode", "all", "--commit-on-delivery", "--timeout", "5s")
 	if len(plain) != 5 {
 		t.Fatalf("registering pop got %d, want all 5", len(plain))
 	}
@@ -188,19 +188,19 @@ func TestConflation_DepthSeparatesLogDepthFromWorkDepth(t *testing.T) {
 	}
 }
 
-// TestConflation_RefusedWithAutoAck and _WithoutConsumerGroup pin the two
-// combinations §3.3 rejects outright. Both are consumer bugs whose silent form
-// is unfixable in production — auto-ack commits at delivery, which turns the
+// TestConflation_RefusedWithCommitOnDelivery and _WithoutConsumerGroup pin the
+// two combinations §3.3 rejects outright. Both are consumer bugs whose silent
+// form is unfixable in production — a pop that commits on delivery, which turns the
 // whole point of conflation ("the newest state is definitely processed") into
 // at-most-once, and queue mode has no group identity to hang a policy on.
-func TestConflation_RefusedWithAutoAck(t *testing.T) {
+func TestConflation_RefusedWithCommitOnDelivery(t *testing.T) {
 	q := uniqueQueue(t, "cfl-autoack")
 	createQueue(t, q)
 
 	stdout, stderr, code := run("pop", q, "--cg", cflGroup(t, "autoack"),
-		"--conflation", "--auto-ack", "--wait=false", "--timeout", "2s")
+		"--conflation", "--commit-on-delivery", "--wait=false", "--timeout", "2s")
 	if code == 0 || code == 4 {
-		t.Fatalf("conflation + --auto-ack must be refused, got exit %d\nstdout: %s", code, stdout)
+		t.Fatalf("conflation + --commit-on-delivery must be refused, got exit %d\nstdout: %s", code, stdout)
 	}
 	if !strings.Contains(strings.ToLower(stderr), "autoack") {
 		t.Errorf("refusal does not name the reason:\n%s", stderr)

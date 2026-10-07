@@ -61,6 +61,10 @@ sourceOfTruth:
 # links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
 # moved; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the trace routes read the on-disk trace store and refuse a key over 511 bytes (400 name_too_long). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (connection defaults): SupervisorConfiguration and ApplicationSettings start
+# every queen connection from config/queen.php, as QueenConnector does and as the configuration page
+# already says; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (indexed message browsing): only message browsing changes; supervisor depth reads, scaling and coordination are unchanged.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
@@ -401,7 +405,16 @@ pool runs at least as many workers as it wants, with a healthy restart circuit. 
 for a moment during a normal scale-up, which is why it is separate from readiness. In
 `status --json`, each entry of `pool_status` carries `capacity_satisfied`, so a scale-up that lags
 shows there without making readiness flap. Status also records the host name, which is how the
-dashboard tells published instances apart.
+dashboard tells published instances apart. Updated publishers also record the generation's start,
+monotonic uptime at the heartbeat, engine version and installed client version when available.
+These fields are optional, so earlier publishers remain readable. The Rust engine requests client
+metadata during its internal configuration export; ordinary exports retain the older shape.
+
+With [remote status enabled](/guides/laravel/dashboard/#a-supervisor-on-another-host), the broker's
+[Supervisors page](/operate/monitoring/#published-supervisors) lists each instance under its
+publication group and opens its queue/pool details in a drawer. The
+[status contract](/reference/supervisor-status/) defines the group and instance keys. Controls
+still run on the supervisor's host.
 
 Pause drains the current workers and starts none until `continue`; it never leaves a PHP process
 suspended while it holds prefetched jobs. Terminate sends SIGTERM to every worker and, after

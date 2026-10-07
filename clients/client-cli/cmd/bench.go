@@ -124,7 +124,7 @@ through the dashboard or 'queenctl queue describe queenctl-bench'. Run
 			if benchSkipPop {
 				fmt.Fprintf(stdout(), "queue %q has %d pending messages.\n", benchQueue, benchTotal)
 			} else {
-				fmt.Fprintf(stdout(), "queue %q drained (messages were popped + auto-acked).\n", benchQueue)
+				fmt.Fprintf(stdout(), "queue %q drained (messages were popped and committed on delivery).\n", benchQueue)
 			}
 			fmt.Fprintf(stdout(), "  inspect:  queenctl queue describe %s\n", benchQueue)
 			fmt.Fprintf(stdout(), "  cleanup:  queenctl queue delete %s --yes\n", benchQueue)
@@ -192,14 +192,14 @@ func pushBench(ctx context.Context, q *queen.Queen, queueName string, payload ma
 	return nil
 }
 
-// popBench drains the queue using direct Pop calls with SERVER-side
-// autoAck. We deliberately avoid Consume(...) here: the SDK's Consume
-// auto-ack is a CLIENT-side ack call after the handler returns, and the
+// popBench drains the queue using direct Pop calls that commit on delivery.
+// We deliberately avoid Consume(...) here: Consume leases its messages and
+// acks each batch with a separate call after the handler returns, and the
 // natural "stop when N messages received" pattern (cancel a context from
-// inside the handler) cancels the in-flight ack alongside the pop, so the
-// last batch never gets acknowledged. Direct pop with ?autoAck=true makes
-// the broker mark the message consumed-by-CG atomically with the pop and
-// removes any client-side ack race entirely.
+// inside the handler) cancels that in-flight ack alongside the pop, so the
+// last batch never gets acknowledged. A pop that commits on delivery makes
+// the broker move the group's cursor past the messages as it hands them out,
+// which removes any client-side ack race entirely.
 //
 // Returns: per-message residency times, number of UNIQUE messages drained,
 // any unrecoverable error.
@@ -227,14 +227,14 @@ func popBench(ctx context.Context, q *queen.Queen, queueName string) ([]time.Dur
 				if popCtx.Err() != nil {
 					return
 				}
-				msgs, perr := q.Queue(queueName).
+				qb := q.Queue(queueName).
 					Group("queenctl-bench").
 					// bench pushes first and drains afterwards, so it must ask for
 					// the backlog explicitly: the broker's default subscription
 					// mode is "new", which would seed this group at the tail and
 					// report zero consumed.
-					SubscriptionMode(queen.SubscriptionModeAll).
-					AutoAck(true).
+					SubscriptionMode(queen.SubscriptionModeAll)
+				msgs, perr := withCommitOnDelivery(qb, true).
 					Batch(benchBatch).
 					Wait(true).
 					TimeoutMillis(2_000).

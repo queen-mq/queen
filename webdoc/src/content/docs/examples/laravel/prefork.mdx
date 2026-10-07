@@ -1,0 +1,144 @@
+---
+title: What prefork changes
+description: "php artisan queen:supervise with prefork on and two pools: the process tree, a forked worker's private memory against a spawned one's, the jobs each pool ran, a new fork server at queue:restart, and a stop that leaves no process behind."
+type: example
+tier: use
+sidebar:
+  order: 4
+sourceOfTruth:
+  - examples/apps/laravel/app/Console/Commands/Examples/PreforkExample.php
+  - examples/apps/laravel/app/Jobs/RecordWorker.php
+  - examples/apps/laravel/app/Examples/Processes.php
+  - examples/apps/laravel/config/queen.php
+  - clients/client-php/src/Laravel/Supervisor/PhpSupervisor.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServer.php
+  - clients/client-php/src/Laravel/Supervisor/Prefork/ForkServerClient.php
+  - clients/client-php/src/Laravel/Supervisor/worker_launcher.php
+verifiedBy:
+  - examples/apps/laravel/app/Console/Commands/Examples/PreforkExample.php
+---
+
+With prefork, the supervisor boots Laravel once in a fork server and forks the workers from it. A
+forked worker is the fork server's child, and in this run on Linux it held 4.6 MiB of memory of its
+own where a spawned worker held 29 MiB. A pool with `'prefork' => false` keeps spawned workers
+beside the forked ones.
+
+## Run it
+
+```bash
+php artisan example:prefork   # in examples/apps/laravel
+```
+
+The command starts `php artisan queen:supervise`, the PHP engine, with `QUEEN_SUPERVISOR_PREFORK`
+set for that process only. What it printed on Linux (PHP 8.3.35 in Docker, the command-line
+opcache off) against a 2.0.1 node:
+
+```text
+broker http://localhost:6632
+
+started php artisan queen:supervise (pid 204) with prefork on
+
+  pid     parent  resident   role
+  204     201      49.0 MiB  master: queen:supervise
+  205     204      44.4 MiB  fork server
+  206     205      36.8 MiB  forked worker, pool default
+  207     205      36.8 MiB  forked worker, pool default
+  211     204      46.8 MiB  spawned worker, pool isolated
+  213     204      46.8 MiB  spawned worker, pool isolated
+  ok: the pool `default` has 2 workers forked by the fork server
+  ok: the pool `isolated` has 2 workers spawned by the master
+
+  memory           resident   proportional   private
+  forked worker    36.8 MiB    13.9 MiB        4.6 MiB
+  spawned worker   46.8 MiB    32.1 MiB       29.0 MiB
+  ok: a forked worker's private memory is under half its resident set
+  ok: a forked worker has less private memory than a spawned one
+
+4 jobs to each pool
+  default   ran on 206 and 207, children of 205 (the fork server)
+  ok: the forked workers ran the jobs of default
+  isolated  ran on 211 and 213, children of 204 (the master)
+  ok: the spawned workers ran the jobs of isolated
+
+php artisan queue:restart
+
+  pid     parent  resident   role
+  204     201      49.0 MiB  master: queen:supervise
+  218     204      44.4 MiB  fork server
+  219     218      37.1 MiB  forked worker, pool default
+  220     218      37.1 MiB  forked worker, pool default
+  221     204      46.8 MiB  spawned worker, pool isolated
+  224     204      46.8 MiB  spawned worker, pool isolated
+  ok: queue:restart brought a new fork server, pid 218
+  ok: the workers forked since then are its children
+  ok: the old fork server, pid 205, exited with its workers
+
+php artisan queen:supervisor terminate
+  the master exited after 0.8 s
+  ok: no process of the tree is left
+
+PASS: 10 checks
+```
+
+On macOS the run passes 8 checks: the memory table and its two checks are replaced by a note,
+because macOS has no `/proc/<pid>/smaps_rollup` to split a resident set into shared and private
+memory.
+
+- **The tree.** The two pools run under one master. The forked workers' parent is the fork server;
+  the spawned workers' parent is the master.
+- **Resident is not what a worker costs.** The forked worker shows 36.8 MiB resident, but 4.6 MiB
+  of it is its own: the rest is shared with other processes, above all the fork server's booted
+  Laravel. The spawned worker owns 29.0 of its 46.8 MiB.
+- **A deploy.** After `queue:restart`, every worker was replaced, and the new forked workers are
+  children of a new fork server.
+
+## The program
+
+The job records its worker's pid and that worker's parent:
+
+<Render file="snippets/app-laravel-prefork-job" />
+
+The two pools, in `config/queen.php`:
+
+<Render file="snippets/app-laravel-supervisor-config" />
+
+The command starts the supervisor, reads the process tree (from `/proc` on Linux, from `ps` on
+macOS), and checks each step:
+
+<Render file="snippets/app-laravel-prefork" />
+
+## How it works
+
+- **The fork server.** With prefork on for at least one pool, the master starts `php artisan
+  queen:fork-server`. It boots Laravel once, opens no connection, and forks a worker each time the
+  master asks ([prefork](/guides/laravel/concepts/#prefork)).
+- **A forked worker is an ordinary worker.** It runs `queue:work` with the arguments a spawned one
+  gets, and the fork server sets its process title, so `ps` shows it as `queue:work`. It leads its
+  own session, so the master drains and signals it directly.
+- **The pool's own `prefork` wins.** `isolated` has `'prefork' => false`, so the master spawns its
+  workers through `worker_launcher.php`, which `exec`s `queue:work` with the same pid
+  ([prefork for some pools only](/guides/laravel/supervisors/#prefork-for-some-pools-only)).
+- **Why the private memory is small.** `fork()` shares the fork server's booted Laravel
+  copy-on-write; a worker copies only the pages it writes
+  ([why a forked worker is smaller](/guides/laravel/concepts/#why-a-forked-worker-is-smaller-when-it-is-still-php)).
+- **queue:restart.** A forked worker that stops for the restart signal leaves an exit marker, the
+  master boots a new fork server, and the old one closes when its last worker is gone
+  ([how a forked worker talks to its master](/guides/laravel/concepts/#how-a-forked-worker-talks-to-its-master)).
+- **terminate.** The master sends SIGTERM to every worker, waits for them, closes the fork server
+  and exits.
+
+## Limits
+
+- **Opcache was off.** With `opcache.enable_cli=1` the forked workers also share the compiled
+  code, and the benchmark measured 1.7 MiB of private memory per worker instead of 6.2
+  ([opcache and preload](/guides/laravel/supervisors/#opcache-and-preload)).
+- **A job's memory is private.** The workers were measured before they ran a job. What a job
+  allocates lands on its worker, forked or not.
+- **The memory check is Linux-only.** On macOS the program prints the resident sets and says so.
+
+## Next
+
+[Prefork workers](/guides/laravel/supervisors/#prefork-workers) turns it on in production, and
+[when not to use it](/guides/laravel/supervisors/#when-not-to-use-prefork) lists the boots it
+does not suit.

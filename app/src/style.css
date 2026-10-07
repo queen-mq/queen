@@ -141,6 +141,8 @@
 
     --font-mono: 'JetBrains Mono', ui-monospace, monospace;
     --ease: cubic-bezier(.2, .7, .2, 1);
+    --drawer-duration: 300ms;
+    --drawer-ease: cubic-bezier(.2, .7, .2, 1);
     color-scheme: dark;
   }
 
@@ -329,7 +331,7 @@
     position: fixed; left: 0; top: 0; bottom: 0;
     width: 264px; z-index: 45;
     transform: translateX(-100%);
-    transition: transform .25s var(--ease);
+    transition: transform var(--drawer-duration) var(--drawer-ease);
     background: var(--rail);
   }
   .sidebar-slot .sidebar.sidebar-mobile-open { transform: translateX(0); }
@@ -1747,3 +1749,36 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--text-hi); }
   font-size: 13px; color: var(--text-hi);
 }
 .detail-list li:first-child { border-top: 0; }
+
+/* One motion language for detail drawers and mobile navigation. Vue keeps
+   departing panels mounted; native dialogs close after the same animation. */
+.drawer-slide-enter-active,
+.drawer-slide-leave-active {
+  transition: transform var(--drawer-duration) var(--drawer-ease);
+}
+.drawer-slide-enter-from,
+.drawer-slide-leave-to { transform: translateX(100%); }
+.drawer-slide-leave-active,
+.drawer-panel[data-drawer-motion="leave"] { pointer-events: none; }
+.drawer-scrim-enter-active,
+.drawer-scrim-leave-active {
+  transition: opacity var(--drawer-duration) var(--drawer-ease);
+}
+.drawer-scrim-enter-from,
+.drawer-scrim-leave-to { opacity: 0; }
+.drawer-panel[data-drawer-motion="enter"][open] {
+  animation: drawer-slide-in var(--drawer-duration) var(--drawer-ease) both;
+}
+.drawer-panel[data-drawer-motion="leave"][open] {
+  animation: drawer-slide-out var(--drawer-duration) var(--drawer-ease) both;
+}
+.drawer-panel[data-drawer-motion="enter"]::backdrop {
+  animation: drawer-scrim-in var(--drawer-duration) var(--drawer-ease) both;
+}
+.drawer-panel[data-drawer-motion="leave"]::backdrop {
+  animation: drawer-scrim-out var(--drawer-duration) var(--drawer-ease) both;
+}
+@keyframes drawer-slide-in { from { transform: translateX(100%); } to { transform: translateX(0); } }
+@keyframes drawer-slide-out { from { transform: var(--drawer-leave-from, translateX(0)); } to { transform: translateX(100%); } }
+@keyframes drawer-scrim-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes drawer-scrim-out { from { opacity: var(--drawer-scrim-from, 1); } to { opacity: 0; } }

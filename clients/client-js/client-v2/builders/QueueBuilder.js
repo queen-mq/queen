@@ -24,6 +24,12 @@ import * as logger from '../utils/logger.js'
 // this client cannot read is not a message it can report as stored.
 const ACCEPTED_PUSH_STATUSES = new Set(['queued', 'buffered'])
 
+// What consume() throws when the builder carries commitOnDelivery(): the loop
+// always pops leased and acks after the handler, so it cannot honour a commit
+// at delivery, and silently leasing would not be what the caller asked for.
+const COMMIT_ON_DELIVERY_NOT_FOR_CONSUME =
+  'commitOnDelivery() is a pop() option; consume() always leases its messages'
+
 export class QueueBuilder {
   #queen
   #httpClient
@@ -45,8 +51,14 @@ export class QueueBuilder {
   #batch = null
   #limit = CONSUME_DEFAULTS.limit
   #idleMillis = CONSUME_DEFAULTS.idleMillis
-  #autoAck = CONSUME_DEFAULTS.autoAck
-  #wait = CONSUME_DEFAULTS.wait
+  // autoAck and wait hold the USER's value, and null means the setter was never
+  // called: consume() applies CONSUME_DEFAULTS and pop() POP_DEFAULTS at
+  // emission time. autoAck is consume()'s alone; pop() never sends it.
+  #autoAck = null
+  #wait = null
+  // The pop's own option for the broker's commit at delivery: pop() and
+  // popResult() send it as autoAck=true, and consume() refuses it.
+  #commitOnDelivery = POP_DEFAULTS.commitOnDelivery
   #timeoutMillis = CONSUME_DEFAULTS.timeoutMillis
   #renewLease = CONSUME_DEFAULTS.renewLease
   #renewLeaseIntervalMillis = CONSUME_DEFAULTS.renewLeaseIntervalMillis
@@ -301,6 +313,12 @@ export class QueueBuilder {
     return this
   }
 
+  /**
+   * consume(): ack each message after the handler returns (default true; the
+   * client acks, nothing is sent with the pop). No effect on pop(): it never
+   * reaches the wire. For the broker's at-most-once commit at delivery on a
+   * pop, use commitOnDelivery().
+   */
   autoAck(enabled) {
     this.#autoAck = enabled
     return this
@@ -344,8 +362,9 @@ export class QueueBuilder {
    * that does not echo the flag rather than draining it silently.
    *
    * Refused by the broker (400) when combined with queue mode (no consumer
-   * group) or with autoAck, which commits at delivery and would turn the
-   * "the newest state is definitely processed" guarantee into at-most-once.
+   * group) or with commitOnDelivery(), which commits at delivery and would
+   * turn the "the newest state is definitely processed" guarantee into
+   * at-most-once. pop() raises that 400 instead of returning [].
    */
   conflation(enabled = true) {
     this.#conflation = !!enabled
@@ -362,6 +381,10 @@ export class QueueBuilder {
   // ===========================
 
   consume(handler, options = {}) {
+    if (this.#commitOnDelivery) {
+      throw new Error(COMMIT_ON_DELIVERY_NOT_FOR_CONSUME)
+    }
+
     const consumeOptions = {
       queue: this.#queueName,
       partition: this.#partition !== 'Default' ? this.#partition : null,
@@ -372,8 +395,8 @@ export class QueueBuilder {
       batch: this.#batch,
       limit: this.#limit,
       idleMillis: this.#idleMillis,
-      autoAck: this.#autoAck,
-      wait: this.#wait,
+      autoAck: this.#autoAck ?? CONSUME_DEFAULTS.autoAck,
+      wait: this.#wait ?? CONSUME_DEFAULTS.wait,
       timeoutMillis: this.#timeoutMillis,
       renewLease: this.#renewLease,
       renewLeaseIntervalMillis: this.#renewLeaseIntervalMillis,
@@ -397,6 +420,10 @@ export class QueueBuilder {
   // Pop Methods
   // ===========================
 
+  /**
+   * Long-poll: wait up to timeoutMillis for a message instead of returning
+   * empty at once. Default true for both pop() and consume().
+   */
   wait(enabled) {
     this.#wait = enabled
     return this
@@ -413,6 +440,24 @@ export class QueueBuilder {
    */
   timeoutMillis(millis) {
     this.#timeoutMillis = Math.max(1, millis)
+    return this
+  }
+
+  /**
+   * Commit the messages of pop() and popResult() at delivery.
+   *
+   * The broker moves the consumer group's cursor past the messages as it hands
+   * them out: no lease, nothing to ack (the messages come back with an empty
+   * leaseId). That is at-most-once: a crash after the pop loses them. The
+   * request carries autoAck=true, the parameter every 2.x broker reads.
+   *
+   * A pop option only: consume() always leases its messages, so it throws
+   * when this is set. The broker refuses it together with conflation() (400).
+   *
+   * @param {boolean} [enabled=true]
+   */
+  commitOnDelivery(enabled = true) {
+    this.#commitOnDelivery = !!enabled
     return this
   }
 
@@ -437,14 +482,16 @@ export class QueueBuilder {
   }
 
   async #popWithDecision() {
-    logger.log('QueueBuilder.pop', { queue: this.#queueName, partition: this.#partition, namespace: this.#namespace, task: this.#task, batch: this.#batch, wait: this.#wait, group: this.#group })
+    // For pop(), use POP defaults (not CONSUME defaults) for what the caller
+    // did not set. autoAck() is consume()'s ack after the handler and never
+    // reaches the wire; the broker's at-most-once autoAck travels only from
+    // commitOnDelivery(). Without it a pop comes back leased.
+    const effectiveWait = this.#wait ?? POP_DEFAULTS.wait
+
+    logger.log('QueueBuilder.pop', { queue: this.#queueName, partition: this.#partition, namespace: this.#namespace, task: this.#task, batch: this.#batch, wait: effectiveWait, group: this.#group })
     
     try {
       const path = this.#buildPopPath()
-      
-      // For pop(), use POP defaults (not CONSUME defaults)
-      // Override autoAck to false unless explicitly set
-      const effectiveAutoAck = this.#autoAck !== CONSUME_DEFAULTS.autoAck ? this.#autoAck : POP_DEFAULTS.autoAck
       
       // Batch, partitions and with them the autopilot flag. The RULE for which
       // of the three travel lives in one place (utils/autopilot.js) because
@@ -458,17 +505,18 @@ export class QueueBuilder {
         autopilot: this.#autopilotEnabled()
       })
 
-      // Build params with correct autoAck for pop
       const params = new URLSearchParams()
       if (sizing.autopilot) params.append('autopilot', 'true')
       if (sizing.batch !== null) params.append('batch', sizing.batch)
-      params.append('wait', this.#wait.toString())
+      params.append('wait', effectiveWait.toString())
       params.append('timeout', this.#timeoutMillis.toString())
 
       if (this.#group) params.append('consumerGroup', this.#group)
       if (this.#namespace) params.append('namespace', this.#namespace)
       if (this.#task) params.append('task', this.#task)
-      if (effectiveAutoAck) params.append('autoAck', 'true')
+      // Sent only when true, where earlier SDKs placed it: an absent autoAck
+      // is the broker's leased default.
+      if (this.#commitOnDelivery) params.append('autoAck', 'true')
       if (this.#subscriptionMode) params.append('subscriptionMode', this.#subscriptionMode)
       if (this.#subscriptionFrom) params.append('subscriptionFrom', this.#subscriptionFrom)
       if (sizing.partitions !== null) params.append('partitions', sizing.partitions)
@@ -483,7 +531,7 @@ export class QueueBuilder {
 
       // wait=true is a long-poll: on 429 it should back off and keep waiting
       // rather than give up after a handful of tries (retryKind: 'pop').
-      const result = await this.#httpClient.get(`${path}?${params}`, this.#timeoutMillis + 5000, affinityKey, this.#wait ? 'pop' : null)
+      const result = await this.#httpClient.get(`${path}?${params}`, this.#timeoutMillis + 5000, affinityKey, effectiveWait ? 'pop' : null)
 
       // Degrade-loudly (PLAN_CONFLATION §4), BEFORE the empty-response return:
       // an old broker's empty pop is a bodiless 204 (result === null), and that
@@ -517,8 +565,8 @@ export class QueueBuilder {
       // messages right now"; for a declared conflation it would mean "your
       // last-value policy is not in force and you will never be told", which is
       // the silent failure the feature is not allowed to have (§4). Both the
-      // missing-echo error and the broker's 400 refusals (queue mode / autoAck)
-      // are permanent config faults, so they raise.
+      // missing-echo error and the broker's 400 refusals (queue mode /
+      // commitOnDelivery) are permanent config faults, so they raise.
       if (error.code === CONFLATION_UNSUPPORTED || (this.#conflation && error.status === 400)) {
         logger.error('QueueBuilder.pop', { error: error.message, status: error.status, code: error.code, conflation: true })
         throw error
@@ -550,17 +598,18 @@ export class QueueBuilder {
 
   // NOTE: a second, DEAD copy of the pop parameter builder lived here and was
   // deleted with the kv/timers work (PLAN_KV_TIMERS.md §10.4). pop() builds its
-  // own params inline, above, because it has to override autoAck with the POP
-  // defaults; the dead copy did not. Anyone adding a parameter by looking for
-  // the method whose name says "build pop params" would have added it to the
-  // copy nobody calls: the pop would keep working and the parameter would
-  // simply never arrive, which reads as a server-side mystery and not as a
-  // client bug.
+  // own params inline, above, because it uses the POP defaults and carries
+  // commitOnDelivery, which consume() refuses. Anyone adding a parameter by
+  // looking for the method whose name says "build pop params" would have added
+  // it to the copy nobody calls: the pop would keep working and the parameter
+  // would simply never arrive, which reads as a server-side mystery and not as
+  // a client bug.
   //
   // The pair that is still live and MUST be kept in sync is pop()'s inline
   // params above and ConsumerManager#buildParams: every pop query parameter
   // (subscriptionMode, subscriptionFrom, partitions, conflation, ...) has to be
-  // appended in BOTH, because pop() and consume() share no builder.
+  // appended in BOTH, because pop() and consume() share no builder. The one
+  // exception is commitOnDelivery's autoAck=true: consume() throws instead.
 
   // ===========================
   // Buffer Management Methods

@@ -305,12 +305,7 @@ func (q *Queen) Renew(ctx context.Context, messages interface{}) ([]RenewRespons
 			resp.Success = false
 			resp.Error = err.Error()
 		} else {
-			resp.Success = true
-			if expiresAt, ok := result["newExpiresAt"].(string); ok {
-				if t, err := time.Parse(time.RFC3339, expiresAt); err == nil {
-					resp.NewExpiresAt = t
-				}
-			}
+			resp = parseRenewResponse(result, leaseID)
 		}
 		responses = append(responses, resp)
 
@@ -321,6 +316,36 @@ func (q *Queen) Renew(ctx context.Context, messages interface{}) ([]RenewRespons
 	}
 
 	return responses, nil
+}
+
+// parseRenewResponse reads one POST /api/v1/lease/:leaseId/extend answer. The
+// broker answers HTTP 200 whether or not it extended anything, so the body is
+// the only signal:
+//
+//	{"leaseId":"...","success":true,"renewed":1,"newExpiresAt":"...",...}
+//	{"leaseId":"...","success":false,"renewed":0,"newExpiresAt":null,...}
+//
+// success:false means the lease is gone (expired, released by an ack or nack,
+// or never existed): nothing was extended, and the messages it covered can
+// already be on their way to another consumer. A body without success:true
+// (an empty body included) is not a renewal either.
+func parseRenewResponse(result map[string]interface{}, leaseID string) RenewResponse {
+	resp := RenewResponse{LeaseID: leaseID}
+	resp.Success, _ = result["success"].(bool)
+	if !resp.Success {
+		if errMsg, ok := result["error"].(string); ok && errMsg != "" {
+			resp.Error = errMsg
+		} else {
+			resp.Error = "lease not renewed: it expired, was released by an ack or nack, or does not exist"
+		}
+		return resp
+	}
+	if expiresAt, ok := result["newExpiresAt"].(string); ok {
+		if t, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+			resp.NewExpiresAt = t
+		}
+	}
+	return resp
 }
 
 // FlushAllBuffers flushes all message buffers.

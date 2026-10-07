@@ -22,6 +22,14 @@ verifiedBy:
 sidebar:
   order: 4
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the consumption engine drops a whole-queue group's idle parts and loads them back on the next append, and a new partition's first message reaches every group; the trace routes read the on-disk trace store and refuse a key over 511 bytes (400 name_too_long); /api/v1/raft/members reports anonBytes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (JS client fixes): QueueBuilder.js keeps pop()'s behaviour (it long-polls, never sends autoAck) and its defaults and comments now say so; consume() does not change. This page uses consume() only. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (JS client fixes): Admin.js now rejects clearQueue() and moveMessageToDLQ() before any request, since the 2.x broker has neither route. This page uses admin.retryMessage() and queen.ack(msg, 'dlq', ...), which do not change. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (JS nack scope): ConsumerManager.js in each() mode now skips only the nacked
+# partition's later messages and handles the other partitions of the pop. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (commitOnDelivery): QueueBuilder.js adds commitOnDelivery(), a pop() option that sends
+# autoAck=true, and consume() throws when it is set. This page uses consume() with autoAck(), which still never
+# reaches the broker. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (indexed message browsing): only message browsing changes; the DLQ list, retry and delivery behavior described here are unchanged.
 ---
 
 Put every delivery in the partition of the endpoint it is for, let the broker's retry budget do the

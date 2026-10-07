@@ -133,10 +133,12 @@ return [
         'telemetry_ttl' => 300,
         // Also publish the status document to the broker's key/value store,
         // so a dashboard served by another host or pod (Kubernetes web pods,
-        // a separate web server) can show this supervisor. PHP engine only
-        // (php artisan queen:supervise). Read-only: pause, continue and
-        // terminate stay with the supervisor's own host. The key must be
-        // unique per application and environment on the broker; the default
+        // a separate web server) can show this supervisor. Both PHP and Rust
+        // engines publish it. Read-only: pause, continue and terminate stay
+        // with the supervisor's own host. The key is a case-sensitive group:
+        // 1-255 letters, digits, dots, underscores or hyphens, starting with a
+        // letter or digit. No slashes; "coordination" is reserved. Use one
+        // group per application and environment on the broker; the default
         // is the application name and environment, such as
         // laravel-production. A null interval publishes at most once per
         // poll_interval; a null TTL keeps the document for twice the

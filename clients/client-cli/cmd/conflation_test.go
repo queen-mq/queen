@@ -168,7 +168,7 @@ func resetConflationFlags() {
 
 	popGroup, popPartition, popNamespace, popTask = "", "", "", ""
 	popLimit, popBatch, popMaxParts = 1, 0, 1
-	popAutoAck, popWait = false, true
+	popCommitOnDelivery, popAutoAck, popWait = false, false, true
 	popTimeout = 10 * time.Second
 	popSubMode, popSubFrom = "", ""
 	popConflation = false

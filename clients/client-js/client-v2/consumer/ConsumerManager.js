@@ -214,25 +214,34 @@ export class ConsumerManager {
         try {
           // Process messages
           if (each) {
-            // Process one at a time
+            // Process one at a time. A nack releases the failed message's
+            // partition and clamps that partition's cursor at it: the later
+            // messages of THAT partition will be redelivered, so handling them
+            // now would only produce duplicates and rejected acks. The other
+            // partitions of a multi-partition pop are still leased to this
+            // worker, so their messages are handled now, not after the lease.
+            const nackedPartitions = new Set()
             for (const [i, message] of messages.entries()) {
               // Stopped, or the limit reached, with messages still in hand:
-              // give them back rather than leave them leased.
+              // give them back rather than leave them leased. Those of a
+              // nacked partition were already given back by the nack.
               if ((signal && signal.aborted) || (limit && processedCount >= limit)) {
-                await this.#releaseUnstarted(messages.slice(i), group, signal && signal.aborted ? 'aborted' : 'limit-reached')
+                const unstarted = messages.slice(i).filter(m => !nackedPartitions.has(m.partitionId ?? m.partition))
+                if (unstarted.length > 0) {
+                  await this.#releaseUnstarted(unstarted, group, signal && signal.aborted ? 'aborted' : 'limit-reached')
+                }
                 break
               }
+
+              const partition = message.partitionId ?? message.partition
+              if (nackedPartitions.has(partition)) continue
 
               const ok = await this.#processMessage(message, handler, autoAck, group)
               processedCount++
 
-              // A nack releases the lease and clamps the server cursor at the
-              // failed message: everything after it in this popped batch WILL
-              // be redelivered. Processing it now would only produce duplicates
-              // and rejected acks — abandon the rest of the batch.
               if (!ok) {
-                logger.warn('ConsumerManager.worker', { workerId, status: 'batch-abandoned-after-nack', remaining: messages.length - messages.indexOf(message) - 1 })
-                break
+                nackedPartitions.add(partition)
+                logger.warn('ConsumerManager.worker', { workerId, status: 'partition-abandoned-after-nack', partition })
               }
             }
           } else {

@@ -16,8 +16,8 @@ use Queen\Support\KvOp;
  * status document may reach the 1 MiB status-file ceiling, so the document is
  * split across keys that share the slot's prefix:
  *
- *   <key>/<instance>/head        {format, write, chunks, bytes}
- *   <key>/<instance>/chunk/0000  {write, index, data}   data: base64 of a document slice
+ *   <group>/<instance>/head        {format, write, chunks, bytes}
+ *   <group>/<instance>/chunk/0000  {write, index, data}   data: base64 of a document slice
  *   ...
  *
  * The writer puts the head and every chunk in ONE batch call, which the broker
@@ -230,10 +230,17 @@ final class RemoteStatusDocument
     /**
      * The key one supervisor instance publishes under.
      *
-     * @throws \InvalidArgumentException when the id is not one an engine generates
+     * The configured key is a single, case-sensitive group segment. Reject a
+     * path or the reserved coordination root before issuing any writes. This
+     * check belongs to publication, whose failure never stops local workers.
+     *
+     * @throws \InvalidArgumentException when the group or instance id is invalid
      */
     public static function instanceKey(string $key, mixed $instanceId): string
     {
+        if ($key === 'coordination' || preg_match('/\A[A-Za-z0-9][A-Za-z0-9._-]{0,254}\z/D', $key) !== 1) {
+            throw new \InvalidArgumentException('remote_status.key must be one supervisor group: 1-255 letters, digits, dots, underscores or hyphens, starting with a letter or digit; coordination is reserved');
+        }
         if (!is_string($instanceId) || preg_match(self::INSTANCE_PATTERN, $instanceId) !== 1) {
             throw new \InvalidArgumentException('the status document has no valid instance_id');
         }

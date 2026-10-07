@@ -68,6 +68,7 @@ class QueueBuilder:
         self._limit = CONSUME_DEFAULTS["limit"]
         self._idle_millis = CONSUME_DEFAULTS["idle_millis"]
         self._auto_ack = CONSUME_DEFAULTS["auto_ack"]
+        self._commit_on_delivery = False
         self._wait = CONSUME_DEFAULTS["wait"]
         self._timeout_millis = CONSUME_DEFAULTS["timeout_millis"]
         self._renew_lease = CONSUME_DEFAULTS["renew_lease"]
@@ -307,8 +308,25 @@ class QueueBuilder:
         return self
 
     def auto_ack(self, enabled: bool) -> "QueueBuilder":
-        """Set auto-ack"""
+        """
+        Ack after the consume() handler returns (default True): each message
+        with each(), otherwise the batch. Client side and consume() only: it has
+        no effect on pop().
+        """
         self._auto_ack = enabled
+        return self
+
+    def commit_on_delivery(self, enabled: bool = True) -> "QueueBuilder":
+        """
+        Commit at delivery on pop(): the broker moves the consumer group's
+        cursor past the messages as it hands them out. No lease, nothing to
+        ack, at-most-once: a message lost after the pop is not delivered again.
+
+        pop() and pop_result() only: consume() always leases its messages and
+        raises ValueError. The broker refuses it together with conflation()
+        (a 400).
+        """
+        self._commit_on_delivery = bool(enabled)
         return self
 
     def renew_lease(self, enabled: bool, interval_millis: Optional[int] = None) -> "QueueBuilder":
@@ -349,7 +367,7 @@ class QueueBuilder:
         draining the backlog message by message (§4).
 
         Applies to both consume() and pop(); needs a consumer group, and is
-        refused by the broker together with server-side autoAck.
+        refused by the broker together with commit_on_delivery().
         """
         self._conflation = bool(enabled)
         return self
@@ -378,7 +396,15 @@ class QueueBuilder:
 
         Returns:
             ConsumeBuilder for chaining
+
+        Raises:
+            ValueError: commit_on_delivery() is set, which is a pop() option
         """
+        if self._commit_on_delivery:
+            raise ValueError(
+                "commit_on_delivery() is a pop() option; consume() always leases its messages"
+            )
+
         consume_options = {
             "queue": self._queue_name,
             "partition": self._partition if self._partition != "Default" else None,
@@ -454,14 +480,6 @@ class QueueBuilder:
         try:
             path = self._build_pop_path()
 
-            # For pop(), use POP defaults (not CONSUME defaults)
-            # Override autoAck to false unless explicitly set
-            effective_auto_ack = (
-                self._auto_ack
-                if self._auto_ack != CONSUME_DEFAULTS["auto_ack"]
-                else POP_DEFAULTS["auto_ack"]
-            )
-
             # Batch, partitions and with them the autopilot flag. The RULE for
             # which of the three travel lives in one place
             # (utils/autopilot.py) because consume() builds its query string
@@ -475,7 +493,6 @@ class QueueBuilder:
                 autopilot=self._autopilot_enabled(),
             )
 
-            # Build params with correct autoAck for pop
             params: Dict[str, str] = {}
             if sizing.autopilot:
                 params["autopilot"] = "true"
@@ -490,7 +507,9 @@ class QueueBuilder:
                 params["namespace"] = self._namespace
             if self._task:
                 params["task"] = self._task
-            if effective_auto_ack:
+            # Commit at delivery: no lease, nothing to ack, at-most-once.
+            # `autoAck` is the name every 2.x broker reads.
+            if self._commit_on_delivery:
                 params["autoAck"] = "true"
             if self._subscription_mode:
                 params["subscriptionMode"] = self._subscription_mode
@@ -548,13 +567,23 @@ class QueueBuilder:
             # policy it asked for.
             raise
         except Exception as error:
+            status_code = getattr(getattr(error, "response", None), "status_code", None)
+            # The broker's 400 refusals of a conflating pop (no consumer group,
+            # or commit_on_delivery() as well) are permanent config faults: []
+            # would read as "no messages right now" on every call, the silent
+            # version §4 rules out. Raised, as in the JS client.
+            if self._conflation and status_code == 400:
+                logger.error(
+                    "QueueBuilder.pop",
+                    {"error": str(error), "status_code": status_code, "conflation": True},
+                )
+                raise
             # Return empty array on error instead of throwing. This also
             # covers a 429 whose retry_429 policy was exhausted (bounded
             # pop, or an explicit max_attempts override) and a terminal 403
             # (e.g. cluster_suspended) -- both are logged with their status
             # code/`.code` rather than raising, matching this method's
             # existing swallow-to-[] contract.
-            status_code = getattr(getattr(error, "response", None), "status_code", None)
             logger.error(
                 "QueueBuilder.pop",
                 {"error": str(error), "status_code": status_code, "code": getattr(error, "code", None)},

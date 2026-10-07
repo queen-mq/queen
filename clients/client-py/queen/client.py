@@ -33,6 +33,50 @@ from .utils.validation import validate_url, validate_urls
 CLOSE_FLUSH_TIMEOUT_SECONDS = 30.0
 
 
+def _parse_renew_result(result: Any, lease_id: str) -> Dict[str, Any]:
+    """
+    One lease's renewal outcome, read from the broker's body.
+
+    POST /api/v1/lease/:leaseId/extend answers HTTP 200 whether or not anything
+    was renewed, so `success` in the body is the only signal:
+      2.x brokers: {leaseId, success, renewed, newExpiresAt, expiresAt, lease_expires_at}
+    success false means the lease is gone (expired, released by an ack or nack,
+    or never existed): nothing was extended, and the messages it covered can
+    already be on their way to another consumer. Mirrors parseRenewResult in the
+    JS client.
+    """
+    item = result[0] if isinstance(result, list) and result else result
+    if not isinstance(item, dict):
+        return {
+            "leaseId": lease_id,
+            "success": False,
+            "newExpiresAt": None,
+            "error": "Unexpected lease renewal response",
+        }
+    new_expires_at = (
+        item.get("newExpiresAt") or item.get("expiresAt") or item.get("lease_expires_at")
+    )
+    success = (
+        item["success"] if isinstance(item.get("success"), bool) else new_expires_at is not None
+    )
+    outcome: Dict[str, Any] = {
+        "leaseId": lease_id,
+        "success": success,
+        "newExpiresAt": new_expires_at,
+    }
+    renewed = item.get("renewed")
+    if isinstance(renewed, int) and not isinstance(renewed, bool):
+        outcome["renewed"] = renewed
+    if not success:
+        error = item.get("error")
+        outcome["error"] = (
+            error
+            if isinstance(error, str) and error
+            else "Lease not renewed: it expired, was released by an ack or nack, or does not exist"
+        )
+    return outcome
+
+
 class Queen:
     """Queen Message Queue Client - Version 2"""
 
@@ -394,7 +438,9 @@ class Queen:
             context: Optional context (e.g., {'group': 'consumer-group'})
 
         Returns:
-            Acknowledgment response
+            Acknowledgment response. success is False when the broker refused
+            the acknowledgment, or any of a list (each item's verdict is in
+            "results"): the broker answers 200 either way.
         """
         is_batch = isinstance(message, list)
         ctx = context or {}
@@ -485,6 +531,40 @@ class Queen:
                     logger.error("Queen.ack", {"type": "batch", "error": result["error"]})
                     return {"success": False, "error": result["error"]}
 
+                # The broker answers 200 with one item per acknowledgment, and
+                # a refused item (an invalid or expired lease, say) carries
+                # success: false and its error. The per-item flag is the only
+                # signal that the broker took the ack.
+                if isinstance(result, list):
+                    failed = [
+                        item
+                        for item in result
+                        if not isinstance(item, dict)
+                        or item.get("success") is False
+                        or item.get("error")
+                    ]
+                    if failed:
+                        first = failed[0]
+                        first_error = (
+                            first.get("error") if isinstance(first, dict) else None
+                        ) or "Acknowledgment rejected by server"
+                        error = (
+                            first_error
+                            if len(failed) == 1
+                            else f"{len(failed)} of {len(result)} acknowledgments rejected: "
+                            f"{first_error}"
+                        )
+                        logger.error(
+                            "Queen.ack",
+                            {
+                                "type": "batch",
+                                "error": error,
+                                "failed": len(failed),
+                                "count": len(result),
+                            },
+                        )
+                        return {"success": False, "error": error, "results": result}
+
                 logger.log("Queen.ack", {"type": "batch", "success": True, "count": len(acknowledgments)})
                 # Return the array of results
                 return {"success": True, "results": result} if result else {"success": True}
@@ -559,7 +639,10 @@ class Queen:
             message_or_lease_id: Lease ID, message, or list of messages
 
         Returns:
-            Renewal response or list of responses
+            One result per distinct lease, {leaseId, success, newExpiresAt,
+            renewed, error}, or a list of them when given a list. success is
+            False when the broker extended nothing: the lease expired, was
+            released by an ack or nack, or does not exist.
         """
         lease_ids: List[str] = []
 
@@ -591,14 +674,15 @@ class Queen:
         for lease_id in lease_ids:
             try:
                 result = await self._http_client.post(f"/api/v1/lease/{lease_id}/extend", {})
-                results.append(
-                    {
-                        "leaseId": lease_id,
-                        "success": True,
-                        "newExpiresAt": result.get("newExpiresAt") or result.get("lease_expires_at"),
-                    }
-                )
-                logger.log("Queen.renew", {"lease_id": lease_id, "success": True})
+                outcome = _parse_renew_result(result, lease_id)
+                results.append(outcome)
+                if outcome["success"]:
+                    logger.log(
+                        "Queen.renew",
+                        {"lease_id": lease_id, "success": True, "renewed": outcome.get("renewed")},
+                    )
+                else:
+                    logger.error("Queen.renew", {"lease_id": lease_id, "error": outcome["error"]})
             except Exception as error:
                 results.append({"leaseId": lease_id, "success": False, "error": str(error)})
                 logger.error("Queen.renew", {"lease_id": lease_id, "error": str(error)})

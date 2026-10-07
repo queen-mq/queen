@@ -117,9 +117,9 @@ int main() {
         // The acknowledgement is what commits consumption. It moves the cursor
         // past the message and releases the lease. A rejected ack still arrives
         // as HTTP 200 with success: false on the item, so the per-item flag is
-        // the only proof the broker took it. The C++ ack() wraps the broker's
-        // reply: the outer "success" only says the call did not throw, and the
-        // per-item verdict is inside "result".
+        // the only proof the broker took it. The C++ ack() reads it: the outer
+        // "success" is false when the broker refused the item, and the broker's
+        // own reply is inside "result".
         json ack = client.ack(message, true);
         check(ack["success"] == true && ack["result"].is_array() &&
                   !ack["result"].empty() && ack["result"][0]["success"] == true,

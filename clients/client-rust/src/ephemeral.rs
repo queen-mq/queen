@@ -18,8 +18,8 @@
 //! # Delivery is not "at most once"
 //!
 //! The class picks what can be LOST; the ack mode picks the guarantee (§1.3).
-//! [`EphemeralPopBuilder::auto_ack`] advances the cursor at delivery and is
-//! at-most-once. The default — explicit ack — is at-least-once for as long as
+//! [`EphemeralPopBuilder::commit_on_delivery`] advances the cursor at delivery
+//! and is at-most-once. The default — explicit ack — is at-least-once for as long as
 //! the owning broker incarnation lives: an unacked message redelivers when its
 //! lease expires, with `attempts` incremented, until the queue's `retryLimit`,
 //! after which it is dropped and counted. Consumers still need idempotency,
@@ -327,7 +327,7 @@ impl Ephemeral {
                 queen_protocol::EPHEMERAL_DEFAULT_WAIT_TIMEOUT_MILLIS,
             ),
             group: None,
-            auto_ack: false,
+            commit_on_delivery: false,
         }
     }
 
@@ -548,7 +548,7 @@ pub struct EphemeralPopBuilder {
     wait: bool,
     poll_timeout: Duration,
     group: Option<String>,
-    auto_ack: bool,
+    commit_on_delivery: bool,
 }
 
 impl EphemeralPopBuilder {
@@ -591,9 +591,16 @@ impl EphemeralPopBuilder {
 
     /// Commit at delivery. At-most-once, and no lease bookkeeping at all —
     /// there is nothing to ack afterwards.
-    pub fn auto_ack(mut self, enabled: bool) -> Self {
-        self.auto_ack = enabled;
+    pub fn commit_on_delivery(mut self, enabled: bool) -> Self {
+        self.commit_on_delivery = enabled;
         self
+    }
+
+    /// The old name of [`EphemeralPopBuilder::commit_on_delivery`], with the
+    /// same effect.
+    #[deprecated(note = "use commit_on_delivery()")]
+    pub fn auto_ack(self, enabled: bool) -> Self {
+        self.commit_on_delivery(enabled)
     }
 
     /// Send it.
@@ -611,7 +618,7 @@ impl EphemeralPopBuilder {
             wait: self.wait.then_some(true),
             timeout_millis: Some(self.poll_timeout.as_millis() as u64),
             group: self.group.clone(),
-            auto_ack: self.auto_ack.then_some(true),
+            auto_ack: self.commit_on_delivery.then_some(true),
         };
         let url = format!(
             "/api/v1/ephemeral/pop?{}",

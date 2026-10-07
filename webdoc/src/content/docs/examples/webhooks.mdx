@@ -17,6 +17,8 @@ verifiedBy:
   - examples/apps/php/webhooks.php
   - examples/apps/cpp/webhooks.cpp
   - examples/apps/http/webhooks.sh
+# sourceOfTruth re-read 2026-10-06 (JS nack scope): ConsumerManager.js in each() mode now skips only the nacked
+# partition's later messages and handles the other partitions of the pop. The paragraph on .partitions(1) says so.
 ---
 
 Every product with an API ends up writing this one. Deliveries to one subscriber have to arrive in
@@ -142,10 +144,12 @@ endpoint's next delivery goes out. The retries live in the broker, so they survi
 crashing halfway, which a retry loop inside the handler would not.
 
 `.partitions(1)` keeps one endpoint per pop. After a failed delivery the JavaScript client skips the
-rest of that pop, because the failure released the endpoint's lease and those deliveries will come
-back; if the same pop had also carried other endpoints' deliveries, they would wait for their lease
-to run out. We checked that it matters: without `.partitions(1)` and with the dead endpoint first in
-the queue, the healthy endpoints received nothing before the program gave up.
+endpoint's later deliveries in that pop, because the failure released the endpoint's lease and they
+will come back; it still sends the other endpoints' deliveries of the same pop. Older JavaScript
+clients skipped the whole rest of the pop, so the other endpoints' deliveries waited for their lease
+to run out: without `.partitions(1)` and with the dead endpoint first in the queue, the healthy
+endpoints received nothing before the program gave up. `.partitions(1)` avoids that with any
+version.
 
 [Deliver webhooks](/guides/webhooks/) goes further into the pattern: re-queueing dead letters once
 an endpoint is fixed, skipping the budget for a permanent error, and putting a pause between

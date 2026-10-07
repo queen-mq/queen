@@ -135,6 +135,16 @@ const routes = [
     }
   },
   {
+    path: '/supervisors',
+    name: 'Supervisors',
+    component: () => import('@/views/Supervisors.vue'),
+    meta: {
+      title: 'Supervisors', subtitle: 'Published supervisor status and worker pool health',
+      requires: 'read', scope: 'tenant',
+      nav: { group: 'Observability', icon: 'system', order: 6 },
+    }
+  },
+  {
     path: '/analytics',
     name: 'Analytics',
     component: () => import('@/views/Analytics.vue'),

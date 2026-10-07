@@ -32,7 +32,7 @@ use axum::response::Response;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
-use super::{json, qbool, qint, AppState};
+use super::{json, qbool, qbool_or_alias, qint, AppState};
 use crate::ephemeral::{self, AckOutcome, AckStatus, Refusal, Route};
 use crate::switches::{decide_ephemeral, Origin, Surface};
 use crate::tenant::Tenant;
@@ -594,7 +594,10 @@ pub async fn handle_ephemeral_push(
 // pop
 // ===========================================================================
 
-/// `GET /api/v1/ephemeral/pop` — `?queue&partition&batch&wait&timeout&group&autoAck`.
+/// `GET /api/v1/ephemeral/pop` —
+/// `?queue&partition&batch&wait&timeout&group&commitOnDelivery`, with `autoAck`
+/// accepted as the deprecated alias of `commitOnDelivery` (either one true
+/// commits at delivery, with no lease).
 ///
 /// 200 `{queue, messages:[{id, partition, payload, attempts}]}`, with an EMPTY
 /// array on timeout rather than a 204: the durable pop's 204 exists because its
@@ -639,7 +642,9 @@ pub async fn handle_ephemeral_pop(
     }
     let batch = qint(&q, "batch", 1).clamp(1, MAX_BATCH as i32) as usize;
     let wait = qbool(&q, "wait", false);
-    let auto_ack = qbool(&q, "autoAck", false);
+    // At-most-once: the cursor moves as the messages leave, with no lease.
+    // `autoAck` is the deprecated alias the released SDKs still send.
+    let commit_on_delivery = qbool_or_alias(&q, "commitOnDelivery", "autoAck");
     let timeout_ms = q
         .get("timeout")
         .and_then(|v| v.parse::<i64>().ok())
@@ -724,7 +729,7 @@ pub async fn handle_ephemeral_pop(
             partition,
             group,
             batch - held.len(),
-            auto_ack,
+            commit_on_delivery,
             now,
         );
         if !got.is_empty() {

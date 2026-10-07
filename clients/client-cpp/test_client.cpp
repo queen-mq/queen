@@ -1119,6 +1119,214 @@ bool test_transaction_acks_two_live_leases(const std::string& server_url) {
 }
 
 // ============================================================================
+// SETTLEMENT TESTS
+// ============================================================================
+// What the broker does with the consume loop's acks, nacks and renewals. The
+// exact requests are pinned without a broker in test_consumer.cpp; these show
+// the effect on a real queue.
+
+std::string unique_queue(const std::string& prefix) {
+    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return prefix + std::to_string(timestamp);
+}
+
+// auto_ack(false) leaves settling to the handler, failures included: the
+// consumer sends no nack. With retryLimit 1, a nack would bring the message
+// back at once and file it in the DLQ on its second failure; the lease here
+// outlasts the run, so the message is handled once and no dead letter appears.
+bool test_consumer_does_not_nack_without_auto_ack(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-no-nack-");
+    DropQueuesOnExit drop{client, {queue}};
+
+    QueueConfig config;
+    config.retry_limit = 1;
+    client.queue(queue).config(config).create();
+    client.queue(queue).push({{{"data", {{"poison", true}}}}});
+
+    std::atomic<int> attempts{0};
+    client.queue(queue).group("cpp-no-nack").subscription_mode("all").batch(1).each()
+        .auto_ack(false).wait(false).idle_millis(1500)
+        .consume([&](const json&) {
+            attempts++;
+            throw std::runtime_error("poison");
+        });
+
+    json dlq = client.queue(queue).dlq("cpp-no-nack").limit(10).get();
+    if (attempts.load() != 1 || dlq.value("total", 0) != 0) {
+        std::cerr << "expected 1 attempt and no dead letter, got " << attempts.load()
+                  << " attempt(s) and " << dlq.dump() << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// In a multi-partition pop a nack releases ONE partition. The later message of
+// the failed partition comes back and is handled once; the other partition
+// keeps its lease, is handled in the same pass, and never comes back.
+bool test_consumer_nack_leaves_the_other_partitions_alone(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-nack-partitions-");
+    DropQueuesOnExit drop{client, {queue}};
+
+    client.queue(queue).create();
+    client.queue(queue).partition("A").push({{{"data", {{"id", "a1"}}}}, {{"data", {{"id", "a2"}}}}});
+    client.queue(queue).partition("B").push({{{"data", {{"id", "b1"}}}}, {{"data", {{"id", "b2"}}}}});
+
+    std::map<std::string, int> handled;
+    client.queue(queue).group("cpp-nack-partitions").subscription_mode("all")
+        .partitions(2).batch(10).each().wait(false).idle_millis(1500)
+        .consume([&](const json& msg) {
+            std::string id = msg["data"]["id"].get<std::string>();
+            // a1 fails on its first delivery only.
+            if (++handled[id] == 1 && id == "a1") {
+                throw std::runtime_error("a1 fails once");
+            }
+        });
+
+    json leftovers = client.queue(queue).group("cpp-nack-partitions").batch(10).wait(false).pop();
+    std::map<std::string, int> expected = {{"a1", 2}, {"a2", 1}, {"b1", 1}, {"b2", 1}};
+    if (handled != expected || !leftovers.empty()) {
+        std::cerr << "expected a1 twice and every other message once, got "
+                  << json(handled).dump() << ", left over " << leftovers.dump() << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// renew_lease() keeps a 2 s lease alive through a 4.5 s handler: no other
+// consumer of the group can take the message meanwhile, and the ack that
+// follows the handler is accepted.
+bool test_consumer_renews_the_lease_while_the_handler_runs(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-renew-");
+    DropQueuesOnExit drop{client, {queue}};
+
+    QueueConfig config;
+    config.lease_time = 2;
+    client.queue(queue).config(config).create();
+    client.queue(queue).push({{{"data", {{"slow", true}}}}});
+
+    std::atomic<bool> stolen{false};
+    client.queue(queue).group("cpp-renew").subscription_mode("all").batch(1)
+        .wait(false).limit(1).renew_lease(true, 500)
+        .consume([&](const json&) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            json other = client.queue(queue).group("cpp-renew").batch(1).wait(false).pop();
+            stolen = !other.empty();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        });
+
+    json after = client.queue(queue).group("cpp-renew").batch(1).wait(false).pop();
+    if (stolen.load() || !after.empty()) {
+        std::cerr << "the lease lapsed under the handler: stolen=" << stolen.load()
+                  << ", redelivered after the ack=" << after.dump() << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// ack() and renew() say when the broker settled or extended nothing, which it
+// answers with HTTP 200 and success:false in the body.
+bool test_ack_and_renew_report_a_broker_refusal(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-refusal-");
+    DropQueuesOnExit drop{client, {queue}};
+
+    client.queue(queue).create();
+    client.queue(queue).push({{{"data", {{"n", 1}}}}});
+    json popped = client.queue(queue).group("cpp-refusal").subscription_mode("all")
+        .batch(1).wait(false).pop();
+    if (popped.size() != 1) {
+        std::cerr << "expected one message, got " << popped.dump() << std::endl;
+        return false;
+    }
+    json msg = popped[0];
+    json group = {{"group", "cpp-refusal"}};
+
+    json unknown_lease = client.renew("00000000-0000-0000-0000-000000000000");
+    json live_lease = client.renew(msg);
+    json wrong_lease = msg;
+    wrong_lease["leaseId"] = "00000000-0000-0000-0000-000000000000";
+    json refused = client.ack(wrong_lease, true, group);
+    json accepted = client.ack(msg, true, group);
+
+    bool ok = unknown_lease.value("success", true) == false &&
+              live_lease.value("success", false) &&
+              refused.value("success", true) == false &&
+              accepted.value("success", false);
+    if (!ok) {
+        std::cerr << "renew unknown=" << unknown_lease.dump() << " renew live="
+                  << live_lease.dump() << " ack wrong lease=" << refused.dump()
+                  << " ack=" << accepted.dump() << std::endl;
+    }
+    return ok;
+}
+
+// A pop the broker refuses (here conflation without a consumer group, a 400)
+// leaves consume() as an exception instead of a silent return.
+bool test_consumer_surfaces_a_refused_pop(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-refused-pop-");
+    DropQueuesOnExit drop{client, {queue}};
+    client.queue(queue).create();
+
+    int status = 0;
+    try {
+        client.queue(queue).conflation().wait(false).idle_millis(1000)
+            .consume([](const json&) {});
+    } catch (const HttpError& e) {
+        status = e.status_code();
+    }
+    if (status != 400) {
+        std::cerr << "consume() should rethrow the broker's 400, got status " << status
+                  << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// commit_on_delivery() commits at delivery: the message comes without a lease
+// and does not come back after the queue's lease time. A second group pops the
+// same message without it, and its message does come back, which shows that
+// the wait was long enough for a lease to run out.
+bool test_pop_commit_on_delivery(const std::string& server_url) {
+    QueenClient client(server_url);
+    std::string queue = unique_queue("test-queue-cpp-commit-on-delivery-");
+    DropQueuesOnExit drop{client, {queue}};
+
+    QueueConfig config;
+    config.lease_time = 1;
+    client.queue(queue).config(config).create();
+    client.queue(queue).push({{{"data", {{"n", 1}}}}});
+
+    json committed = client.queue(queue).group("cpp-commit").subscription_mode("all")
+        .commit_on_delivery().batch(1).wait(false).pop();
+    json leased = client.queue(queue).group("cpp-leased").subscription_mode("all")
+        .batch(1).wait(false).pop();
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    json committed_again = client.queue(queue).group("cpp-commit").batch(1).wait(false).pop();
+    json leased_again = client.queue(queue).group("cpp-leased").batch(1).wait(true).pop();
+
+    auto lease_of = [](const json& messages) {
+        const json& msg = messages[0];
+        return msg.contains("leaseId") && msg["leaseId"].is_string()
+                   ? msg["leaseId"].get<std::string>() : std::string();
+    };
+    bool ok = committed.size() == 1 && lease_of(committed).empty() &&
+              leased.size() == 1 && !lease_of(leased).empty() &&
+              committed_again.empty() && leased_again.size() == 1;
+    if (!ok) {
+        std::cerr << "committed=" << committed.dump() << " leased=" << leased.dump()
+                  << " committed again=" << committed_again.dump()
+                  << " leased again=" << leased_again.dump() << std::endl;
+    }
+    return ok;
+}
+
+// ============================================================================
 // DLQ TEST
 // ============================================================================
 
@@ -1774,6 +1982,21 @@ int main(int argc, char** argv) {
                     [&]() { return test_transaction_refuses_an_ack_under_an_expired_lease(server_url); });
     runner.run_test("Transaction ACKs two live leases",
                     [&]() { return test_transaction_acks_two_live_leases(server_url); });
+
+    // SETTLEMENT TESTS
+    std::cout << YELLOW << "\n=== SETTLEMENT TESTS ===" << RESET << "\n" << std::endl;
+    runner.run_test("Consumer does not nack without auto_ack",
+                    [&]() { return test_consumer_does_not_nack_without_auto_ack(server_url); });
+    runner.run_test("Consumer nack leaves the other partitions alone",
+                    [&]() { return test_consumer_nack_leaves_the_other_partitions_alone(server_url); });
+    runner.run_test("Consumer renews the lease while the handler runs",
+                    [&]() { return test_consumer_renews_the_lease_while_the_handler_runs(server_url); });
+    runner.run_test("ACK and renew report a broker refusal",
+                    [&]() { return test_ack_and_renew_report_a_broker_refusal(server_url); });
+    runner.run_test("Consumer surfaces a refused pop",
+                    [&]() { return test_consumer_surfaces_a_refused_pop(server_url); });
+    runner.run_test("Pop with commit_on_delivery commits at delivery",
+                    [&]() { return test_pop_commit_on_delivery(server_url); });
     
     // DLQ TEST
     std::cout << YELLOW << "\n=== DLQ TESTS ===" << RESET << "\n" << std::endl;

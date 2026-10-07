@@ -40,12 +40,17 @@ sourceOfTruth:
 # links /guides/laravel/, the comments say what forked workers share, composer.json's docs link
 # moved; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the trace routes read the on-disk trace store and refuse a key over 511 bytes (400 name_too_long). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (pool diagnostics): DashboardRepository adds counts_available to distinguish reported counts from legacy fallbacks. The process-health, controls and multi-host comparisons here still hold.
 # sourceOfTruth re-read 2026-10-06 (prefork per pool): SupervisorConfiguration and main.rs let a pool spawn while
 # the others fork; the comparison still holds, so nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (queen:consume fixes): QueenConnector builds its lease renewer
 # through the new LeaseRenewerFactory, with the same keys, checks and messages, and
 # QueenServiceProvider builds the container's client with clientConfig() and binds that factory.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (connection defaults): SupervisorConfiguration and ApplicationSettings start
+# every queen connection from config/queen.php, as QueenConnector does and as the configuration page
+# already says; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps its response and status filters; the documented Laravel dashboard and broker capabilities are unchanged.
 ---
 
 Horizon and Queen both run ordinary Laravel jobs and both supervise their workers, on different

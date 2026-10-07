@@ -57,12 +57,12 @@ var ConsumeDefaults = ConsumeOptions{
 // PopDefaults contains default values for pop operations. As with
 // ConsumeDefaults, Batch and MaxPartitions here are the autopilot-off values.
 var PopDefaults = PopOptions{
-	Batch:         1,     // One message (autopilot off only)
-	Wait:          false, // No long polling (immediate return)
-	TimeoutMillis: 30000, // 30 seconds if wait=true
-	AutoAck:       false, // Server-side auto-ack (false = manual ack required)
-	MaxPartitions: 1,     // v4 multi-partition pop cap (autopilot off only)
-	Conflation:    false, // Last-value delivery off (group policy, opt-in)
+	Batch:            1,     // One message (autopilot off only)
+	Wait:             false, // No long polling (immediate return)
+	TimeoutMillis:    30000, // 30 seconds if wait=true
+	CommitOnDelivery: false, // Leased pop: the caller acks what it returns
+	MaxPartitions:    1,     // v4 multi-partition pop cap (autopilot off only)
+	Conflation:       false, // Last-value delivery off (group policy, opt-in)
 }
 
 // BufferDefaults contains default values for buffer configuration.

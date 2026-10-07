@@ -101,15 +101,26 @@ export class Admin {
   }
 
   /**
-   * Clear all messages from a queue
+   * @deprecated The 2.x broker has no route that clears a queue, so this
+   *             always rejects, before any request. Seek each consumer group
+   *             to the end instead.
+   *
+   * The old DELETE /api/v1/queues/:name/clear answers 404 no_such_route on
+   * 2.x. A seek to the end moves one group's cursor past every queued message
+   * (and releases its live leases); the group of a pop without one is
+   * '__QUEUE_MODE__'. Deleting the queue is not a clear: it removes the queue
+   * itself, with its configuration.
    * @param {string} name - Queue name
-   * @param {string} [partition] - Optional partition to clear
-   * @returns {Promise<object>}
+   * @param {string} [partition] - Ignored
+   * @returns {Promise<never>}
    */
   async clearQueue(name, partition = null) {
     logger.log('Admin.clearQueue', { name, partition })
-    const queryString = partition ? `?partition=${encodeURIComponent(partition)}` : ''
-    return this.#httpClient.delete(`/api/v1/queues/${encodeURIComponent(name)}/clear${queryString}`)
+    throw new Error(
+      'Queen 2.x has no route that clears a queue. Move each consumer group past what is queued ' +
+      `with queen.admin.seekConsumerGroup(group, '${name}', { toEnd: true }); ` +
+      "a pop without a group reads as the group '__QUEUE_MODE__'."
+    )
   }
 
   /**
@@ -172,14 +183,25 @@ export class Admin {
   }
 
   /**
-   * Move a message to the Dead Letter Queue
+   * @deprecated The 2.x broker has no route that moves a message to the DLQ
+   *             by its address, so this always rejects, before any request.
+   *             Ack the leased message with the `dlq` status instead.
+   *
+   * The old POST /api/v1/messages/:partitionId/:transactionId/dlq answers 404
+   * no_such_route on 2.x. The broker files a dead letter when the consumer
+   * group acks the message with the `dlq` status while it holds the lease (an
+   * address alone cannot name the lease), or when a `failed` ack spends the
+   * queue's last retry.
    * @param {string} partitionId - Partition ID
    * @param {string} transactionId - Transaction ID
-   * @returns {Promise<object>}
+   * @returns {Promise<never>}
    */
   async moveMessageToDLQ(partitionId, transactionId) {
     logger.log('Admin.moveMessageToDLQ', { partitionId, transactionId })
-    return this.#httpClient.post(`/api/v1/messages/${partitionId}/${transactionId}/dlq`, {})
+    throw new Error(
+      'Queen 2.x has no route that moves a message to the DLQ by its address. Pop the message for ' +
+      "its consumer group and call queen.ack(message, 'dlq', { group }) while you hold its lease."
+    )
   }
 
   // ===========================

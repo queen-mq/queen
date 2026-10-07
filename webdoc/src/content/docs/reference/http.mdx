@@ -16,12 +16,14 @@ sourceOfTruth:
   - server/src/rsm/facade/real.rs
   - server/src/rsm/facade/remote.rs
   - server/src/rsm/facade/real/phase2/reads.rs
+  - server/src/rsm/facade/real/phase2/reads/messages.rs
   - server/src/rsm/facade/real/phase2/offsets.rs
   - server/src/proxy_embed.rs
   - proxy/src/auth.rs
   - proxy/src/app.rs
   - proxy/src/cp.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*; the trace routes read the on-disk trace store and refuse a key over 511 bytes (400 name_too_long). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/data.rs and handlers/ephemeral.rs name the pop's commit at delivery commitOnDelivery; the parameter example names it, and the OpenAPI document lists it on every pop route, with the old name marked deprecated.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no
@@ -30,8 +32,7 @@ layer over the routes on this page. We kept it that way on purpose, so that when
 wrong you can ask the broker directly, with the tools already on your machine.
 
 The page starts with what every route shares, then lists every route the broker registers, then
-documents the two surfaces that need more than a table row: reads by offset, and the control-plane
-API the embedded proxy adds.
+documents message browsing, reads by offset, and the control-plane API the embedded proxy adds.
 
 ## Base URL
 
@@ -71,7 +72,7 @@ and when a forwarded call cannot reach the leader it is 503 `retry`, both with `
   an empty pop, which is `204 No Content` with no body.
 - A message `payload` is any JSON value.
 - Query parameters are camelCase, like the body fields: `consumerGroup`, `subscriptionMode`,
-  `leaseSeconds`, `autoAck`.
+  `leaseSeconds`, `commitOnDelivery`.
 
 ## Authentication
 
@@ -151,6 +152,20 @@ that means during a quorum loss is on [recovery](/operate/recovery/).
 `POST /api/v1/ephemeral/_adopt` and `_leaving` are broker-to-broker hand-over calls: they also
 require the forward mark that only another node sets (and the cluster token when one is
 configured), and the proxy never lets a tenant reach them.
+
+## Message browsing
+
+`GET /api/v1/messages` lists messages newest first, filtered by `queue`, `partition`, `namespace`,
+`task` and `status`. `limit` defaults to 200 and is clamped to 1 through 1000; `offset` defaults to
+0. `from` is inclusive and defaults to one hour ago. `to` defaults to now and is rounded to the
+start of the next minute, which is exclusive: `to=2026-10-06T20:04:00Z` includes messages before
+`20:05:00Z`.
+
+The queue-log path uses timestamps and offsets in the indexes to select the page before reading
+payloads. A historical window therefore skips newer payloads, and an append containing only
+messages skipped by `offset` is not read. The request still gathers partition and cursor metadata;
+deep offsets and selective status filters can require more metadata work. The legacy segment
+path reads backwards in chunks and can scan payloads newer than `to`.
 
 ## Reads by offset
 

@@ -201,11 +201,34 @@ describe('ephemeral wire — pop', () => {
 
   it('pop puts every declared parameter on the query string, in order', async () => {
     await withEphemeral([popped(QUEUE, [])], async (eph, hits) => {
-      await eph.pop(QUEUE, { partition: 'room-7', batch: 10, wait: true, timeout: 2000, group: 'workers', autoAck: true })
+      await eph.pop(QUEUE, { partition: 'room-7', batch: 10, wait: true, timeout: 2000, group: 'workers', commitOnDelivery: true })
       assert.equal(
         hits[0].url,
         `/api/v1/ephemeral/pop?queue=${QUEUE}&partition=room-7&batch=10&wait=true&timeout=2000&group=workers&autoAck=true`
       )
+    })
+  })
+
+  it('pop sends `commitOnDelivery` as autoAck=true, and nothing for false', async () => {
+    await withEphemeral([popped(QUEUE, []), popped(QUEUE, [])], async (eph, hits) => {
+      await eph.pop(QUEUE, { commitOnDelivery: true })
+      assert.equal(hits[0].url, `/api/v1/ephemeral/pop?queue=${QUEUE}&autoAck=true`)
+
+      await eph.pop(QUEUE, { commitOnDelivery: false })
+      assert.equal(hits[1].url, `/api/v1/ephemeral/pop?queue=${QUEUE}`)
+    })
+  })
+
+  it('pop still reads the deprecated `autoAck` as `commitOnDelivery`, and refuses both spellings', async () => {
+    await withEphemeral([popped(QUEUE, [])], async (eph, hits) => {
+      await eph.pop(QUEUE, { group: 'workers', autoAck: true })
+      assert.equal(hits[0].url, `/api/v1/ephemeral/pop?queue=${QUEUE}&group=workers&autoAck=true`)
+
+      await assert.rejects(
+        () => eph.pop(QUEUE, { commitOnDelivery: true, autoAck: true }),
+        /pass either `commitOnDelivery` or its deprecated alias `autoAck`, not both/
+      )
+      assert.equal(hits.length, 1)
     })
   })
 

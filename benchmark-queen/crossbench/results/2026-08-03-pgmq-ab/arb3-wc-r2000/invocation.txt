@@ -1,1 +1,0 @@
-queen:arbiter3 (law v3: shrink only on oldest-age) | wc r2000

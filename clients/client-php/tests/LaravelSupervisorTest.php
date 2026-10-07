@@ -79,6 +79,24 @@ class LaravelSupervisorTest extends TestCase
         $this->assertSame(120, $config['supervisors']['orders']['retry_after']);
     }
 
+    public function testAnotherQueenConnectionStartsFromConfigQueenLikeItsWorkers(): void
+    {
+        // QueenConnector starts every queen connection from config/queen.php,
+        // so the supervisor checks the settings its workers will run with.
+        $config = SupervisorConfiguration::resolve([
+            'retry_after' => 300,
+            'lease_renewal' => true,
+            'supervisor' => [
+                'supervisors' => ['reports' => ['connection' => 'queen-auto', 'timeout' => 30]],
+            ],
+        ], '/app', queueConnections: [
+            'queen-auto' => ['driver' => 'queen', 'prefetch' => 'auto'],
+        ]);
+
+        $this->assertSame(300, $config['supervisors']['reports']['retry_after']);
+        $this->assertTrue($config['supervisors']['reports']['lease_renewal']);
+    }
+
     public function testReadOnlyBearerTokenReplacesAWorkerAuthorizationHeader(): void
     {
         $config = SupervisorConfiguration::resolve([
@@ -273,6 +291,18 @@ class LaravelSupervisorTest extends TestCase
         $state = new SupervisorState($directory);
         $lock = $state->acquireLock();
         $state->writeStatus(['engine' => 'php', 'state' => 'running', 'pools' => [], 'pool_status' => []]);
+        $first = json_decode(file_get_contents($directory . '/status.json'), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertGreaterThan(0, $first['started_at_epoch']);
+        $this->assertLessThanOrEqual($first['updated_at_epoch'], $first['started_at_epoch']);
+        $this->assertIsInt($first['uptime_seconds']);
+        $this->assertGreaterThanOrEqual(0, $first['uptime_seconds']);
+        $this->assertSame(\Queen\Laravel\Supervisor\SupervisorMetadata::clientVersion(), $first['client_version']);
+        $this->assertSame($first['client_version'], $first['engine_version']);
+        $state->writeStatus(['engine' => 'php', 'state' => 'paused', 'pools' => [], 'pool_status' => []]);
+        $next = json_decode(file_get_contents($directory . '/status.json'), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame($first['started_at_epoch'], $next['started_at_epoch']);
+        $this->assertSame($first['instance_id'], $next['instance_id']);
+        $this->assertGreaterThanOrEqual($first['uptime_seconds'], $next['uptime_seconds']);
         $instanceId = $state->instanceId();
         $state->request('pause', $instanceId);
         $command = $state->command(null, $instanceId);
