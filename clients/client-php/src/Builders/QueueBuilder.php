@@ -54,6 +54,7 @@ class QueueBuilder
     private bool $consumeConflation;
     /** Per-builder override: null = the client default (on unless the env turned it off). */
     private ?bool $consumeAutopilot = null;
+    private ?array $consumeSupervision = null;
 
     // Buffer options
     private ?array $bufferOptions = null;
@@ -212,6 +213,13 @@ class QueueBuilder
     public function group(string $name): static
     {
         $this->group = $name;
+        return $this;
+    }
+
+    /** Opt-in observations for consume()->execute(); null (default) disables them. */
+    public function supervision(?array $config = null): static
+    {
+        $this->consumeSupervision = $config;
         return $this;
     }
 
@@ -644,6 +652,7 @@ class QueueBuilder
             'task' => $this->task,
             'group' => $this->group,
             'concurrency' => $this->consumeConcurrency,
+            'supervision' => $this->consumeSupervision,
             'batch' => $this->consumeBatch,
             'limit' => $this->consumeLimit,
             'idleMillis' => $this->consumeIdleMillis,

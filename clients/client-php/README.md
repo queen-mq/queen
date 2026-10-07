@@ -565,3 +565,41 @@ vendor/bin/phpunit
 ```
 
 Apache-2.0. See [LICENSE.md](LICENSE.md).
+
+### Optional standalone consumer supervision
+
+```php
+$queen->queue('orders')->group('billing')
+    ->supervision(['group' => 'billing-production'])
+    ->concurrency(4)->each()
+    ->consume(function (array $message): void { /* process message */ })
+    ->execute();
+```
+
+This opt-in reporter covers fluent `consume()->execute()`. It defaults to null/off;
+`->supervision(null)` disables it. It is separate from Laravel's existing process
+supervisor and its `remote_status` option (also off by default). `pop()` and the
+manual `getConsumer()` API do not instrument application callbacks.
+
+The group names the application/deployment independently of the consumer group.
+Each invocation publishes a unique `queen.consumer.status/v1` instance into the
+broker's `queen-supervisor` KV namespace. The credential needs KV write access.
+Publishing uses the existing authenticated transport, one attempt with a
+two-second HTTP timeout, and no retry/failover sleep. Failures do not alter
+handler exceptions, ACKs or lease behavior. No payloads or error text are stored.
+
+PHP publication is **cooperative**: at most once per 10 seconds when the loop
+regains control, plus initial, first-handler and final stopped observations.
+Calling a handler's existing `$renew` callback also gives the reporter a
+checkpoint. A long synchronous handler, retry sleep or blocked poll can prevent
+heartbeats; the dashboard then reports unknown freshness. With the default
+30-second poll, heartbeat timeout is 45 seconds and TTL is 90 seconds. The timeout
+is `max(30, ceil(poll_timeout_ms / 1000) + 15)` seconds (capped at 86400); TTL is at
+least twice that and at least 60 seconds.
+
+The compatible Supervisors page shows live cooperative pollers, busy handlers,
+successful/failed handler calls, last completion and oldest in-flight duration.
+A batch callback counts once; completion does not imply ACK success. These are
+not separate processes. Reporting adds no background process, does not restart
+workers, autoscale or enable remote commands. With reporting off there is no
+additional KV traffic.
