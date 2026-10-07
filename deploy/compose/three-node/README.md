@@ -16,8 +16,8 @@ Node N answers on `localhost:N6632` (16632, 26632, 36632), API and dashboard ali
 does not collide with a single node on 6632. The ports are bound to 127.0.0.1 because the broker
 port has no authentication of its own, and the raft port (7400) is not published at all.
 
-The images are published for linux/amd64 only. On Apple silicon Docker runs them under
-emulation, which is slower and fine for a trial.
+The images are published for linux/amd64 and linux/arm64, so the cluster runs natively on Apple
+silicon as well.
 
 ## Stop the leader
 

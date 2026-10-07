@@ -9,7 +9,7 @@ configured on the broker (`PUT /api/v1/connectors/:name`), not in app code.
 
 These rules describe Queen 2.0 (broker {{broker}}).
 Code from older posts, 1.x docs or Kafka habits is likely wrong here.
-Run `ghcr.io/queen-mq/queen:{{broker}}`: the `latest` tag is still 1.6, which needs PostgreSQL.
+Run `ghcr.io/queen-mq/queen:{{broker}}`, published for linux/amd64 and linux/arm64; `latest` is the current release.
 
 ## Model the app
 

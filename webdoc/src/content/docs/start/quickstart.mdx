@@ -26,6 +26,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-03 (cb0329f74): the Dockerfile's queenctl -X paths moved to the /v2 module path; the image and what it runs are unchanged. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the /health example shows 2.0.1 at cluster version 4, what a new node reports.
 # sourceOfTruth re-read 2026-10-07 (78970a242, 2.0.2): the /health example shows 2.0.2; nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-07 (image tags): ghcr.io/queen-mq/queen is published for linux/amd64 and linux/arm64 (2.0.0, 2.0.1 and 2.0.2 all are) and latest is the current release, 2.0.2, so the command no longer names a platform. Run on an Apple-silicon Mac: the arm64 image answers /health as 2.0.2.
 ---
 
 You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the
@@ -37,7 +38,7 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
 1. **Start a node.**
 
    ```bash
-   docker run -d --name queen --platform linux/amd64 -p 6632:6632 \
+   docker run -d --name queen -p 6632:6632 \
      -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
    curl -s http://localhost:6632/health
    ```
@@ -49,10 +50,9 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
    That is the whole installation. There is no database to start first, because the node keeps
    everything in a log on its own disk, under `/var/lib/queen/raft`, and the volume keeps that
    directory when the container is replaced. A single node is a raft group of one, so it reports
-   itself as the leader. The images are published for amd64 only, which is why the command
-   names the platform: on an Apple Silicon Mac, Docker runs the image under emulation, slower but
-   fine for this. Use the version tag, because `latest` still points at 1.6, which needs
-   PostgreSQL.
+   itself as the leader. The image is published for linux/amd64 and linux/arm64, so Docker pulls
+   the one built for your machine, an Apple Silicon Mac included. `latest` is the current release
+   and moves with each one, so on anything you keep, pin the version tag instead.
 
    If `curl` prints nothing, the node is still starting, and `docker logs queen` says what it is
    doing. The dashboard is on the same port, at `http://localhost:6632`.

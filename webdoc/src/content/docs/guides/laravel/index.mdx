@@ -68,7 +68,7 @@ a protocol written by the Queen team.
    ([quickstart](/start/quickstart/)):
 
    ```bash
-   docker run -d --name queen --platform linux/amd64 -p 6632:6632 \
+   docker run -d --name queen -p 6632:6632 \
      -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
    ```
 
