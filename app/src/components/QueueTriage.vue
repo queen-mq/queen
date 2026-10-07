@@ -44,6 +44,7 @@
         </button>
       </li>
     </ul>
+    <slot name="rules" />
   </section>
 
   <Teleport to="body">

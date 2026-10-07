@@ -23,6 +23,65 @@
 
     <!--
       ========================================================================
+      The answer first: a verdict, the sentence behind it, what needs you,
+      and the partitions drawn as a sunflower. Every rule the verdict uses is
+      printed under the list — nothing here is decided out of sight. Selecting
+      an issue opens its evidence in a drawer, keeping this overview in place.
+      ========================================================================
+    -->
+    <section class="hero" aria-labelledby="dash-headline">
+      <div class="hero-left">
+        <div>
+          <span class="hero-status">
+            <span class="g" :class="statusGlyph" aria-hidden="true" />{{ statusWord }}
+          </span>
+          <h2 id="dash-headline" class="hero-title">{{ headline }}</h2>
+          <p class="hero-sum">
+            <template v-if="pushNow !== null">{{ formatNumber(queues.length) }} {{ queues.length === 1 ? 'queue takes' : 'queues take' }} in <b>{{ fmtMsgRate(pushNow) }}</b> and deliver <b>{{ fmtMsgRate(popNow) }}</b> to {{ formatNumber(consumers.length) }} consumer {{ consumers.length === 1 ? 'group' : 'groups' }}.</template>
+            <template v-else>No traffic samples in the last {{ selectedRange }}.</template>
+            <template v-if="pendingNow !== null"> The latest overview reports <b>{{ formatNumber(pendingNow) }} pending</b>, excluding in-flight work.</template>
+            <template v-if="lagMaxSeconds !== null"> The oldest message has waited <b>{{ fmtLagSeconds(lagMaxSeconds) }}</b>.</template>
+            <template v-if="ackAttempts > 0">{{ ' ' }}<b>{{ ackFailPct }}</b> of acks failed in this window.</template>
+          </p>
+        </div>
+
+        <QueueTriage
+          :key="epoch" :queues="queues" :groups="consumers"
+          :sample-at="queuesQ.lastUpdated.value" :groups-at="consumersQ.lastUpdated.value"
+          :queues-error="queuesFailed ? queuesErrorText : ''"
+          :groups-error="consumersFailed ? consumersErrorText : ''"
+          :tenant-issues="issues.filter(i => i.tenant)"
+          :tenant-error="opsError ? describeApiError(opsError) : ''"
+        >
+          <template #rules>
+            <details class="issues-rules">
+              <summary>How this is decided</summary>
+              <p>
+                Worked out in the browser from <code>GET /api/v1/resources/queues</code>,
+                <code>GET /api/v1/consumer-groups</code> and this window's
+                <code>queue-ops</code>. A queue needs you when a consumer group on it is
+                more than 1 minute behind (5 minutes: failing), or when it holds
+                messages and no consumer group reads it — a group that has never
+                consumed does not count as a reader. Ack failures count when their
+                share of the window's acks crosses the product's threshold. The
+                sidebar, Queues and Consumer groups use the same rule.
+              </p>
+            </details>
+          </template>
+        </QueueTriage>
+      </div>
+
+      <div class="card flower-card">
+        <div class="card-header">
+          <h3>Partitions</h3>
+          <span class="muted">{{ queuesFailed ? '—' : `${formatNumber(totalPartitions)} across ${formatNumber(queues.length)} queues` }}</span>
+        </div>
+        <PartitionSunflower :queues="sunflowerQueues" :partitions="sunflowerPartitions" :loading="loadingQueues" :error="queuesQ.error.value" />
+      </div>
+    </section>
+
+    <!--
+      ========================================================================
       Right now — point-in-time counts, as of the last good fetch. The range
       above does not bound these.
       ========================================================================
@@ -131,48 +190,6 @@
         @select="selectMetric('errors')"
       />
     </div>
-
-    <!--
-      ========================================================================
-      Problems follow the metrics. Selecting one opens its evidence in a
-      drawer, keeping this overview and its charts in place.
-      ========================================================================
-    -->
-    <section class="hero" aria-labelledby="dash-headline">
-      <div class="hero-left">
-        <div>
-          <span class="hero-status">
-            <span class="g" :class="statusGlyph" aria-hidden="true" />{{ statusWord }}
-          </span>
-          <h2 id="dash-headline" class="hero-title">{{ headline }}</h2>
-          <p class="hero-sum">
-            <template v-if="pushNow !== null">{{ formatNumber(queues.length) }} {{ queues.length === 1 ? 'queue takes' : 'queues take' }} in <b>{{ fmtMsgRate(pushNow) }}</b> and deliver <b>{{ fmtMsgRate(popNow) }}</b> to {{ formatNumber(consumers.length) }} consumer {{ consumers.length === 1 ? 'group' : 'groups' }}.</template>
-            <template v-else>No traffic samples in the last {{ selectedRange }}.</template>
-            <template v-if="pendingNow !== null"> The latest overview reports <b>{{ formatNumber(pendingNow) }} pending</b>, excluding in-flight work.</template>
-            <template v-if="lagMaxSeconds !== null"> The oldest message has waited <b>{{ fmtLagSeconds(lagMaxSeconds) }}</b>.</template>
-            <template v-if="ackAttempts > 0">{{ ' ' }}<b>{{ ackFailPct }}</b> of acks failed in this window.</template>
-          </p>
-        </div>
-
-      </div>
-
-      <details class="card flower-card" @toggle="showPartitions = $event.target.open">
-        <summary class="card-header">
-          <h3>Partitions</h3>
-          <span class="muted">{{ queuesFailed ? '—' : `${formatNumber(totalPartitions)} across ${formatNumber(queues.length)} queues` }}</span>
-        </summary>
-        <PartitionSunflower v-if="showPartitions" :queues="sunflowerQueues" :partitions="sunflowerPartitions" :loading="loadingQueues" :error="queuesQ.error.value" />
-      </details>
-    </section>
-
-    <QueueTriage
-      :key="epoch" :queues="queues" :groups="consumers"
-      :sample-at="queuesQ.lastUpdated.value" :groups-at="consumersQ.lastUpdated.value"
-      :queues-error="queuesFailed ? queuesErrorText : ''"
-      :groups-error="consumersFailed ? consumersErrorText : ''"
-      :tenant-issues="issues.filter(i => i.tenant)"
-      :tenant-error="opsError ? describeApiError(opsError) : ''"
-    />
 
     <!-- The chart the tiles hand their series to. -->
     <section class="card focus" aria-labelledby="focus-title">
@@ -500,7 +517,6 @@ import QueueTriage from '@/components/QueueTriage.vue'
 // The scope strip states all three slugs, so it is built from identity and
 // never from a fetch — it must survive a failed load and an empty tenant.
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug, epoch } = useIdentity()
-const showPartitions = ref(false)
 
 // ---------------------------------------------------------------------------
 // Range. Quick ranges only — this view has no Custom mode, so there is no
@@ -1373,13 +1389,6 @@ onMounted(fetchAll)
 </script>
 
 <style scoped>
-.hero { align-items: start; }
-.flower-card { display: block; }
-.flower-card > summary { cursor: pointer; min-height: 58px; }
-.flower-card > summary::before { content: '▸'; color: var(--text-low); }
-.flower-card[open] > summary::before { content: '▾'; }
-.hero-title { font-size: 22px; }
-.hero-sum { max-width: 80ch; }
 /* ---------------------------------------------------------------------------
    Page layout lives in style.css (OVERVIEW); what is here is the two ranked
    lists at the bottom and the value fragments the tiles' slots render.
