@@ -1,5 +1,7 @@
 // Language-independent contract, currently published by RemoteStatusDocument.php
 // and supervisor/src/remote_status.rs. Decode a slot from ONE KV page only.
+import { consumerObservation } from './consumerStatus.js'
+
 export const STATUS_FORMAT = 'queen.supervisor.remote-status/v1'
 export const validSupervisorGroup = group => typeof group === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(group) && group !== 'coordination'
 export const supervisorGroupPrefix = group => {
@@ -53,7 +55,7 @@ export function decodeSupervisorSlot(rows, address) {
     }
     if (offset !== head.bytes) return unavailable('Incomplete status document')
     const document = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
-    if (!object(document) || document.schema !== 'queen.supervisor.status/v1' || typeof document.instance_id !== 'string' || !ID.test(document.instance_id)
+    if (!object(document) || !['queen.supervisor.status/v1', 'queen.consumer.status/v1'].includes(document.schema) || typeof document.instance_id !== 'string' || !ID.test(document.instance_id)
       || (address.instance && address.instance !== document.instance_id) || !Array.isArray(document.pool_status)
       || document.pool_status.length > 256 || !object(document.configuration)) return unavailable('Invalid supervisor identity or schema')
     return { ...address, document, expired, reason: null }
@@ -194,6 +196,7 @@ export function supervisorObservation(entry, now = Date.now(), unconfirmed = fal
     readiness: null, capacity: null, pid: null, startedAt: null, uptime: null, engineVersion: null, clientVersion: null,
     hostname: null, engine: null, state: null, updatedAt: null, age: null, timeout: null, fresh: false, severity: 'warn', priority: 4 }
   if (!entry.document) return { ...base, label: 'Status unavailable', next: entry.reason }
+  if (entry.document.schema === 'queen.consumer.status/v1') return consumerObservation(entry, base, now, unconfirmed)
   const raw = entry.document, config = raw.configuration
   const limit = integer(config.process_limit, 4096) || null
   const timeout = integer(config.heartbeat_timeout, 86_400) || null
