@@ -49,6 +49,12 @@
 //! "applied index 4 promises 128 rows, the store holds 96". The kill therefore
 //! lands where a torn store would show.
 //!
+//! The demonstration was repeated when the parent's clock moved from the
+//! child's first commit to its first durable point (see `KILL_AFTER`). With a
+//! child making the applied index durable one durable commit before its
+//! entry's rows, 31 of 40 runs failed at a reopen, most often with "applied
+//! index 192 promises 6144 rows, the store holds 6112".
+//!
 //! The child is this same test binary, re-executed with one test selected,
 //! [`CRASH_DIR_ENV`] set and [`CRASH_MODE_ENV`] naming what it should do.
 //! Without those variables [`crash_child_writer`] returns at once, so an
@@ -81,8 +87,9 @@ const DURABLE_EVERY: u64 = 64;
 /// killed. Only a bound on the data a run can leave behind: every kill delay
 /// below is far shorter than the time this takes.
 const MAX_ENTRIES_PER_RUN: u64 = 40_000;
-/// How long the parent lets the child commit before the kill. Three values, so
-/// the SIGKILL lands at three different points of the write path.
+/// How long the parent lets the child go on committing after its first durable
+/// point of the round, before the kill. Three values, so the SIGKILL lands at
+/// three different points of the write path.
 const KILL_AFTER: [Duration; 3] = [
     Duration::from_millis(40),
     Duration::from_millis(110),
@@ -126,6 +133,7 @@ fn crash_child_writer() {
 
     let mut e = from;
     let stop_at = from + MAX_ENTRIES_PER_RUN;
+    let mut announced = false;
     while e < stop_at {
         e += 1;
         for i in 0..ROWS {
@@ -144,7 +152,8 @@ fn crash_child_writer() {
 
         // `midtxn` needs a durable point BELOW its plain commit: Phase C
         // persists nothing else, so that is what a kill must reopen at.
-        if e % DURABLE_EVERY == 0 || (mode == "midtxn" && e == from + 2) {
+        let durable = e % DURABLE_EVERY == 0 || (mode == "midtxn" && e == from + 2);
+        if durable {
             w.set_meta_u64(crate::rsm::store::meta::DURABLE_INDEX, e)
                 .expect("child: durable index");
             w.durable_commit().expect("child: durable commit");
@@ -152,9 +161,19 @@ fn crash_child_writer() {
             w.commit().expect("child: commit");
         }
         if e == from + 1 {
-            // The parent starts its clock here: from now on the child is
-            // inside the commit loop, which is where the kill must land.
+            // From now on the child is inside the commit loop, which is where
+            // the kill must land.
             say("WRITING");
+        }
+        if durable && !announced {
+            // The parent starts its clock here, at the first durable point of
+            // this run. How long that point takes depends on the machine (64
+            // entries, then a checkpoint and its sync), and a kill that lands
+            // before it reopens the store where the run began, which tests
+            // nothing: a clock started at WRITING did exactly that on a loaded
+            // runner, 40 ms in.
+            say(&format!("DURABLE {e}"));
+            announced = true;
         }
     }
     say(&format!("EXHAUSTED {e}"));
@@ -206,18 +225,30 @@ impl Writer {
 
     /// Wait for a line containing `marker`, up to 60 s.
     fn wait_for(&self, marker: &str) -> bool {
+        self.wait_for_line(marker).is_some()
+    }
+
+    /// Wait for a line containing `marker`, up to 60 s, and hand it back.
+    fn wait_for_line(&self, marker: &str) -> Option<String> {
         let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
             match self.lines.recv_timeout(Duration::from_secs(5)) {
                 // libtest's own progress line has no newline yet, so the
                 // child's first marker can share a line with it.
-                Ok(line) if line.contains(marker) => return true,
+                Ok(line) if line.contains(marker) => return Some(line),
                 Ok(_) => continue,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
             }
         }
-        false
+        None
+    }
+
+    /// Wait for the child to announce its first durable point of this run, up
+    /// to 60 s: the entry that point stands at.
+    fn wait_for_durable(&self) -> Option<u64> {
+        let line = self.wait_for_line("DURABLE ")?;
+        line.split("DURABLE ").nth(1)?.trim().parse().ok()
     }
 
     /// Did the child say it had run out of entries before we killed it? If so
@@ -312,6 +343,9 @@ fn a_store_killed_while_committing_reopens_whole() {
             w.wait_for("WRITING"),
             "round {round}: the child never reached its commit loop"
         );
+        let announced = w
+            .wait_for_durable()
+            .unwrap_or_else(|| panic!("round {round}: the child never reached a durable point"));
         std::thread::sleep(*delay);
         let still_writing = !w.exhausted();
         w.kill();
@@ -335,13 +369,22 @@ fn a_store_killed_while_committing_reopens_whole() {
             prev.durable,
             now.durable
         );
+        // The child had finished this durable point before the clock started,
+        // so the kill cannot take it back: a reopen below it is a durable
+        // commit that returned and did not hold.
+        assert!(
+            now.applied >= announced,
+            "round {round}: the child announced a durable point at {announced}, \
+             the store reopened at {}",
+            now.applied
+        );
         assert!(
             now.applied > prev.applied,
             "round {round}: the child reached no durable point, so nothing was tested"
         );
         println!(
-            "round {round}: killed {:?} into the commit loop; reopened at applied={} \
-             (durable={}, rows={}), at the durable point",
+            "round {round}: killed {:?} after the durable point at {announced}; reopened at \
+             applied={} (durable={}, rows={}), at the durable point",
             delay, now.applied, now.durable, now.rows,
         );
         prev = now;
