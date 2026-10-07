@@ -3,6 +3,7 @@
  */
 
 import * as logger from '../utils/logger.js'
+import { Supervision } from './Supervision.js'
 import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/conflation.js'
 import { popSizing, parseAutopilotDecision, emptyPollDelayMillis } from '../utils/autopilot.js'
 import { CONSUME_DEFAULTS } from '../utils/defaults.js'
@@ -92,9 +93,13 @@ export class ConsumerManager {
     // Generate affinity key for consistent routing to same backend
     const affinityKey = this.#getAffinityKey(queue, partition, namespace, task, group)
 
+    const supervision = options.supervision ? new Supervision(this.#httpClient, options.supervision, options) : null
+    if (supervision) handler = supervision.wrap(handler)
+
     // Start workers
     const workers = []
     for (let i = 0; i < concurrency; i++) {
+      if (supervision) supervision.running++
       workers.push(this.#worker(i, handler, path, baseParams, {
         batch,
         limit,
@@ -113,9 +118,12 @@ export class ConsumerManager {
         // the pop target to key the once-per-(queue,group) conflict warning.
         conflation,
         conflationCtx: { queue, namespace, task, group }
+      }).finally(async () => {
+        if (supervision && --supervision.running === 0) await supervision.stop()
       }))
     }
 
+    supervision?.start()
     logger.log('ConsumerManager.start', { status: 'workers-started', count: concurrency })
 
     // Wait for all workers to complete

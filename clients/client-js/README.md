@@ -1079,3 +1079,25 @@ const messages: Message<OrderData>[] = await queen.queue('orders').pop()
 ## License
 
 Apache 2.0 - See [LICENSE.md](../LICENSE.md)
+
+### Optional consumer supervision
+
+```js
+await queen.queue('orders').group('billing')
+  .supervision({ group: 'billing-production' })
+  .concurrency(4).each().consume(async message => { /* process message */ })
+```
+
+Supervision defaults to off; `.supervision(false)` disables it. The group names
+an application/deployment in the dashboard, independently of the consumer group.
+Each consume invocation publishes its own instance into the broker's
+`queen-supervisor` KV namespace every 10 seconds (30-second heartbeat timeout,
+60-second TTL), plus a final stopped observation. The credential needs KV write
+access. Publication is serialized and best effort with a two-second deadline.
+
+The Supervisors page supporting `queen.consumer.status/v1` shows live async
+consumer loops, busy handlers, successful/failed handler calls and progress times.
+A batch is one handler call; completion does not imply ACK success. No payloads or
+error text are published. Event-loop starvation can stop heartbeats. Reporting
+does not restart processes or tasks, change ACK/lease policies, or enable remote
+control. With reporting off there is no additional timer or network traffic.
