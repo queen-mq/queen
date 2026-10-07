@@ -27,6 +27,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the /health example shows 2.0.1 at cluster version 4, what a new node reports.
 # sourceOfTruth re-read 2026-10-07 (78970a242, 2.0.2): the /health example shows 2.0.2; nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-07 (image tags): ghcr.io/queen-mq/queen is published for linux/amd64 and linux/arm64 (2.0.0, 2.0.1 and 2.0.2 all are) and latest is the current release, 2.0.2, so the command no longer names a platform. Run on an Apple-silicon Mac: the arm64 image answers /health as 2.0.2.
+# sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
+# delivery attempt of a claim nobody received; nothing this page states changes.
 ---
 
 You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the

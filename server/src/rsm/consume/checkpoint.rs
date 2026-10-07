@@ -176,7 +176,7 @@ impl Engine {
             if !holds || p.reserved.is_some() {
                 continue;
             }
-            p.cur.release();
+            p.cur.release_undelivered();
             super::pop::touch(p, &mut sh.dirty, *pid, *gid);
             sh.unindex_lease(worker, *pid, *gid);
             if super::pop::arm(sh, *gid, *pid, now, grace) {

@@ -935,6 +935,8 @@ impl Engine {
     }
 
     /// Release a worker's lease on a `(pid, group)` without moving the cursor.
+    /// The facade sends it for a claim nobody received (`release_claims` in
+    /// facade/real.rs), so the attempt that claim counted is taken back too.
     pub(crate) fn nack_cmd(
         &self,
         c: &NackCommand,
@@ -978,7 +980,11 @@ impl Engine {
             }
             let had = p.cur.lease.is_some();
             let mut cur = p.cur.clone();
-            cur.release();
+            if had && !c.worker.is_empty() {
+                cur.release_undelivered();
+            } else {
+                cur.release();
+            }
             let res = AckResult {
                 pid: c.pid,
                 committed: cur.committed,

@@ -18,6 +18,8 @@ sourceOfTruth:
   - clients/client-js/client-v2/builders/TransactionBuilder.js
 # sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0); the requiredLeases paragraph now says so.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
+# delivery attempt of a claim nobody received; nothing this page states changes.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step

@@ -3,6 +3,19 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Server: a pop that nobody receives no longer counts a delivery attempt.** A pop's answer waits for
+the checkpoint that holds its lease. When that takes longer than the margin the broker keeps before
+the request's deadline, or the client leaves, nobody receives the answer, and the broker hands the
+leases back at once. It left the delivery attempt counted all the same, so the next consumer got
+the message as a redelivery. With `deliveryAttempt` 2 on its first real delivery, a Laravel job
+with `tries = 1` failed with "attempted too many times" without ever running. In a 23-hour run of
+4.1 million jobs at 50 jobs/s, 4 jobs failed that way, each about 0.4 s after its push, while every
+message went out to a worker once; checkpoint writes reached 0.45 s against a 250 ms margin. Handing
+back an unreceived claim now also takes back its attempt, on the leader's engine and through the
+`Nack` a follower sends. A lease that really expired still counts.
+
 ## JS client 2.0.3 - 2026-10-07
 
 **JS client: stopping a consumer no longer strands its messages.** Aborting the `signal` passed to
