@@ -48,6 +48,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): queen_client.hpp adds commit_on_delivery() to the
 # queue pop and to the ephemeral pop, where auto_ack stays as a deprecated alias. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-06 (commitOnDelivery): embedded/mod.rs hands the protocol's auto_ack to the pop handlers as commitOnDelivery; the embedded API and its
+# snippets are unchanged, and nothing this page states changes.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same

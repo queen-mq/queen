@@ -119,8 +119,7 @@ first pop, unless you pass `--subscription-mode=all`
 - **A nack spends a retry.** A message that always throws reaches the dead-letter queue once the
   queue's retries are spent ([retry budget](/concepts/consuming/#ack-nack-and-the-retry-budget)).
   The nack carries the exception's message as its error.
-- **Client-side.** `--auto-ack` is not the broker's `autoAck`. The command acks after `handle()`
-  returns, so delivery stays at-least-once.
+- **Client-side.** The command acks after `handle()` returns, so delivery stays at-least-once.
 - **One call per pop.** With `--batch`, one ack or nack covers the whole list.
 - **Refusals are printed.** A refused call prints one warning, for example
   `Ack refused for 1 of 1 message: invalid or expired lease`. After a throw, the command does not

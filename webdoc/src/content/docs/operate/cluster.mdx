@@ -27,6 +27,7 @@ sourceOfTruth:
 verifiedBy:
   - deploy/compose/three-node/compose.yaml
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): catalogue version 4 (traces on disk) is the first raise past 3, one-way; a learner joins a version-4 cluster only once its node answers.
+# sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/ephemeral.rs reads the pop's commit at delivery from commitOnDelivery or from autoAck, its deprecated alias. Nothing this page states changes.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They

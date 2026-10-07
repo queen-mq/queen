@@ -32,6 +32,16 @@ pub async fn handle_push(
 pub struct PopParams {
     batch: Option<i32>,
     partitions: Option<i32>,
+    // Commit at delivery: the broker moves the group's cursor past the messages
+    // as it hands them out, with no lease and nothing to ack (at-most-once).
+    // The documented name; read together with `autoAck` by `commit_on_delivery`.
+    #[serde(rename = "commitOnDelivery")]
+    commit_on_delivery: Option<bool>,
+    // The same switch under its first name, which the released Go and Rust SDKs
+    // and the CLI send. Not a serde `alias`, which would refuse a request
+    // carrying both names as a duplicate field. The doc comment below is what
+    // webdoc/scripts/gen-openapi.mjs publishes, as a deprecated parameter.
+    /// Deprecated alias of `commitOnDelivery`.
     #[serde(rename = "autoAck")]
     auto_ack: Option<bool>,
     wait: Option<bool>,
@@ -78,6 +88,13 @@ pub struct PopParams {
     autopilot: Option<bool>,
 }
 
+impl PopParams {
+    /// Whether this pop commits at delivery (see [`commit_on_delivery`]).
+    pub(crate) fn commits_on_delivery(&self) -> bool {
+        commit_on_delivery(self.commit_on_delivery, self.auto_ack)
+    }
+}
+
 /// §3.3 items 2 and 4 — group-setting-wins, LOUDLY: the counters and a
 /// rate-limited line, never a per-request log line (a mismatched fleet would turn
 /// that into a flood — the `POOL_SAT` idiom in obs.rs). The third channel, the
@@ -117,6 +134,14 @@ pub(crate) fn note_conflation_conflict(
     }
 }
 
+/// Whether a pop commits at delivery: `commitOnDelivery`, or `autoAck`, its
+/// deprecated alias, set to true. Either one is enough, so a request that sends
+/// both names is never refused, and a released client that sends only `autoAck`
+/// keeps the behaviour it had.
+fn commit_on_delivery(named: Option<bool>, alias: Option<bool>) -> bool {
+    named == Some(true) || alias == Some(true)
+}
+
 /// §3.3 — the two refused combinations, rejected at the handler with a 400 that
 /// names the reason. This is the one place conflation REJECTS rather than warns,
 /// because both are consumer bugs whose silent form is unfixable in production.
@@ -124,7 +149,7 @@ pub(crate) fn note_conflation_conflict(
 fn conflation_refusal(
     requested: Option<bool>,
     has_group: bool,
-    auto_ack: bool,
+    commit_on_delivery: bool,
 ) -> Option<Response> {
     if requested != Some(true) {
         return None;
@@ -137,13 +162,13 @@ fn conflation_refusal(
                 .to_string(),
         ));
     }
-    if auto_ack {
+    if commit_on_delivery {
         return Some(json(
             StatusCode::BAD_REQUEST,
-            "{\"success\":false,\"error\":\"conflation cannot be combined with autoAck: auto-ack \
-             commits at delivery with no lease, so a failed handler loses the tail and the \
-             at-least-once guarantee conflation exists to provide degrades to \
-             at-most-once\",\"messages\":[]}"
+            "{\"success\":false,\"error\":\"conflation cannot be combined with commitOnDelivery \
+             (or its deprecated alias autoAck): a commit at delivery takes no lease, so a failed \
+             handler loses the tail and the at-least-once guarantee conflation exists to \
+             provide degrades to at-most-once\",\"messages\":[]}"
                 .to_string(),
         ));
     }
@@ -157,8 +182,8 @@ pub async fn handle_pop(
     Query(p): Query<PopParams>,
 ) -> Response {
     let batch = p.batch.unwrap_or(200);
-    let auto_ack = p.auto_ack.unwrap_or(false);
-    if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
+    let commit = p.commits_on_delivery();
+    if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), commit) {
         return r;
     }
     let from = p.subscription_from.as_deref();
@@ -173,7 +198,7 @@ pub async fn handle_pop(
         queue,
         p.consumer_group.clone(),
         batch,
-        auto_ack,
+        commit,
         p.wait.unwrap_or(false),
         p.timeout.unwrap_or(st.pop_default_timeout_ms),
         crate::rsm::facade::PopOptions {
@@ -213,8 +238,8 @@ pub async fn handle_pop_partition(
     Query(p): Query<PopParams>,
 ) -> Response {
     let batch = p.batch.unwrap_or(200);
-    let auto_ack = p.auto_ack.unwrap_or(false);
-    if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
+    let commit = p.commits_on_delivery();
+    if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), commit) {
         return r;
     }
     let from = p.subscription_from.as_deref();
@@ -225,7 +250,7 @@ pub async fn handle_pop_partition(
         partition,
         p.consumer_group.clone(),
         batch,
-        auto_ack,
+        commit,
         p.wait.unwrap_or(false),
         p.timeout.unwrap_or(st.pop_default_timeout_ms),
         crate::rsm::facade::PopOptions {
@@ -257,6 +282,10 @@ pub async fn handle_pop_partition(
 pub struct PopDiscoverParams {
     batch: Option<i32>,
     partitions: Option<i32>,
+    // Commit at delivery, and its deprecated alias: as on `PopParams`.
+    #[serde(rename = "commitOnDelivery")]
+    commit_on_delivery: Option<bool>,
+    /// Deprecated alias of `commitOnDelivery`.
     #[serde(rename = "autoAck")]
     auto_ack: Option<bool>,
     wait: Option<bool>,
@@ -276,6 +305,13 @@ pub struct PopDiscoverParams {
     // PLAN_CONFLATION §3.1 — same query parameter as the queue-scoped routes.
     #[serde(rename = "conflation")]
     conflation: Option<bool>,
+}
+
+impl PopDiscoverParams {
+    /// Whether this pop commits at delivery (see [`commit_on_delivery`]).
+    pub(crate) fn commits_on_delivery(&self) -> bool {
+        commit_on_delivery(self.commit_on_delivery, self.auto_ack)
+    }
 }
 
 // GET /api/v1/pop?namespace=&task=&consumerGroup=... — namespace/task discovery
@@ -300,8 +336,8 @@ pub async fn handle_pop_discover(
         );
     }
     let batch = p.batch.unwrap_or(200);
-    let auto_ack = p.auto_ack.unwrap_or(false);
-    if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
+    let commit = p.commits_on_delivery();
+    if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), commit) {
         return r;
     }
     let from = p.subscription_from.as_deref();
@@ -313,7 +349,7 @@ pub async fn handle_pop_discover(
         p.task.clone().unwrap_or_default(),
         p.consumer_group.clone(),
         batch,
-        auto_ack,
+        commit,
         p.wait.unwrap_or(false),
         p.timeout.unwrap_or(st.pop_default_timeout_ms),
         crate::rsm::facade::PopOptions {
@@ -402,3 +438,7 @@ pub async fn handle_transaction(
     let producer_sub = authed.0.filter(|s| !s.is_empty());
     crate::handlers::raft::dispatch_transaction(&st, tenant.as_str(), producer_sub, body).await
 }
+
+#[cfg(test)]
+#[path = "../tests_unit/pop_commit_on_delivery.rs"]
+mod pop_commit_on_delivery_tests;

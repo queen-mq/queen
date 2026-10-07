@@ -867,8 +867,11 @@ fn pop_params<T: serde::de::DeserializeOwned>(
     if let Some(v) = p.partitions {
         m.insert("partitions".into(), v.into());
     }
+    // The protocol type keeps its `auto_ack` field (the Rust client renders it as
+    // `autoAck`), but this map is read only by the handler's own params structs,
+    // which take the documented name, so it is sent under that name.
     if let Some(v) = p.auto_ack {
-        m.insert("autoAck".into(), v.into());
+        m.insert("commitOnDelivery".into(), v.into());
     }
     if let Some(v) = p.wait {
         m.insert("wait".into(), v.into());
@@ -992,5 +995,35 @@ mod tests {
         };
         let plain: serde_json::Value = pop_params(&off, None, None).unwrap();
         assert!(plain.get("conflation").is_none(), "{plain}");
+    }
+
+    /// The protocol's `auto_ack` reaches every pop route as the handler's
+    /// commit at delivery, under the documented name `commitOnDelivery`. A
+    /// misspelt key is not an error (the params structs ignore unknown keys), so
+    /// the assertion is on what the handler reads, not only on the map.
+    #[test]
+    fn pop_params_forward_commit_on_delivery_to_every_route() {
+        let p = qp::PopParams {
+            auto_ack: Some(true),
+            ..Default::default()
+        };
+        let map: serde_json::Value = pop_params(&p, None, None).unwrap();
+        assert_eq!(map["commitOnDelivery"], serde_json::json!(true), "{map}");
+        assert!(map.get("autoAck").is_none(), "{map}");
+        let queue_scoped: crate::handlers::PopParams = pop_params(&p, None, None).unwrap();
+        assert!(queue_scoped.commits_on_delivery());
+        let discovery: crate::handlers::PopDiscoverParams =
+            pop_params(&p, Some("billing"), None).unwrap();
+        assert!(discovery.commits_on_delivery());
+
+        // `Some(false)` and absent both lease.
+        for auto_ack in [Some(false), None] {
+            let p = qp::PopParams {
+                auto_ack,
+                ..Default::default()
+            };
+            let h: crate::handlers::PopParams = pop_params(&p, None, None).unwrap();
+            assert!(!h.commits_on_delivery(), "{auto_ack:?}");
+        }
     }
 }

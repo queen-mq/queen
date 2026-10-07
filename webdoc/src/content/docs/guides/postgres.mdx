@@ -88,7 +88,7 @@ per row, each in the partition named after the row's primary key. Read them as a
 would. A new consumer group starts at the end of a queue unless it asks for `subscriptionMode=all`:
 
 ```bash
-curl -s 'localhost:6632/api/v1/pop/queue/orders?batch=10&partitions=10&consumerGroup=reader&subscriptionMode=all&autoAck=true' \
+curl -s 'localhost:6632/api/v1/pop/queue/orders?batch=10&partitions=10&consumerGroup=reader&subscriptionMode=all&commitOnDelivery=true' \
   | jq -c '.messages[] | {partition, data}'
 ```
 
@@ -108,7 +108,7 @@ INSERT INTO orders (id, customer, status, total) VALUES (3, '{"name": "Grace", "
 DELETE FROM orders WHERE id = 2;
 COMMIT;
 SQL
-curl -s 'localhost:6632/api/v1/pop/queue/orders?batch=10&partitions=10&consumerGroup=reader&autoAck=true' \
+curl -s 'localhost:6632/api/v1/pop/queue/orders?batch=10&partitions=10&consumerGroup=reader&commitOnDelivery=true' \
   | jq -c '.messages[] | {partition, transactionId, data}'
 ```
 
