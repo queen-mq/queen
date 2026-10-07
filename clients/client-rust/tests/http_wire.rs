@@ -10,6 +10,7 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use queen_mq::{Config, Queen, Retry429, Strategy};
@@ -718,6 +719,81 @@ fn acks_on(broker: &FakeBroker, route: &str) -> Vec<serde_json::Value> {
         .filter(|h| h.route() == route)
         .map(|h| h.json())
         .collect()
+}
+
+// One multi-partition pop under one lease: t1 and t2 in p1, t3 in p2.
+fn two_partitions() -> String {
+    r#"{"messages":[
+        {"id":"m1","transactionId":"t1","data":{"n":1},"createdAt":"2026-08-04T10:00:00.000Z",
+         "partitionId":"p1","partition":"one","leaseId":"L1","consumerGroup":"g"},
+        {"id":"m2","transactionId":"t2","data":{"n":2},"createdAt":"2026-08-04T10:00:00.000Z",
+         "partitionId":"p1","partition":"one","leaseId":"L1","consumerGroup":"g"},
+        {"id":"m3","transactionId":"t3","data":{"n":3},"createdAt":"2026-08-04T10:00:00.000Z",
+         "partitionId":"p2","partition":"two","leaseId":"L1","consumerGroup":"g"}]}"#
+        .into()
+}
+
+// A nack releases only the failed message's partition, whose later messages
+// come back. The other partitions of the pop are still leased to this worker:
+// their messages are handled now, not after the lease expires.
+#[tokio::test]
+async fn a_nack_skips_only_the_rest_of_its_own_partition() {
+    let broker = FakeBroker::start_with(|_n, hit| {
+        if hit.route().starts_with("/api/v1/ack") {
+            let tx = hit.json()["transactionId"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+            return Reply::ok(ack_answer(&[tx.as_str()], None));
+        }
+        Reply::ok(two_partitions())
+    })
+    .await;
+
+    let handled = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&handled);
+    let summary = client(&broker)
+        .queue("orders")
+        .group("g")
+        .wait(false)
+        .limit(2)
+        .idle(Duration::from_secs(20))
+        .consume(move |msg| {
+            let seen = Arc::clone(&seen);
+            async move {
+                seen.lock().unwrap().push(msg.transaction_id.clone());
+                if msg.transaction_id == "t1" {
+                    Err("t1 fails")
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .expect("a failing handler does not stop the consumer");
+
+    assert_eq!(
+        *handled.lock().unwrap(),
+        vec!["t1".to_owned(), "t3".to_owned()],
+        "t2 follows the nack in p1 and comes back; t3 is in p2 and is handled now"
+    );
+    let settled: Vec<(String, String)> = acks_on(&broker, "/api/v1/ack")
+        .iter()
+        .map(|a| {
+            (
+                a["transactionId"].as_str().unwrap_or("").to_owned(),
+                a["status"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        settled,
+        vec![
+            ("t1".to_owned(), "failed".to_owned()),
+            ("t3".to_owned(), "completed".to_owned())
+        ]
+    );
+    assert_eq!((summary.acked, summary.nacked), (1, 1), "{summary:?}");
 }
 
 // With `auto_ack(false)` the handler settles its own messages, and the loop

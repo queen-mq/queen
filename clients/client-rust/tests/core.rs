@@ -1241,6 +1241,72 @@ async fn a_failing_handler_nacks_and_the_message_comes_back() {
     drop_queue(&q, &queue).await;
 }
 
+// A multi-partition pop holds two partitions under one lease. The first
+// message handled fails once and is nacked, which releases only its own
+// partition: that partition comes back at once, while the other keeps its lease
+// and has to be handled in the same pass. Before, the loop dropped the rest of
+// the pop, so the other partition waited for the 30 s lease and the run ended
+// without it.
+#[tokio::test]
+async fn a_nack_skips_only_its_own_partition() {
+    let q = broker!();
+    let queue = unique("consume-nack-scope");
+    create_queue(
+        &q,
+        &queue,
+        QueueOptions {
+            lease_time: Some(30),
+            ..Default::default()
+        },
+    )
+    .await;
+    for (partition, id) in [("A", "a1"), ("A", "a2"), ("B", "b1"), ("B", "b2")] {
+        q.queue(&queue)
+            .partition(partition)
+            .push(serde_json::json!({ "id": id }))
+            .await
+            .unwrap();
+    }
+
+    let handled: Arc<Mutex<std::collections::HashMap<String, u32>>> = Arc::default();
+    let failed: Arc<Mutex<Option<String>>> = Arc::default();
+    let (seen, first) = (Arc::clone(&handled), Arc::clone(&failed));
+    q.queue(&queue)
+        .group("g-nack-scope")
+        .subscription_mode(SubscriptionMode::All)
+        .partitions(2)
+        .batch(10)
+        .wait(false)
+        .idle(Duration::from_millis(1500))
+        .consume(move |msg| {
+            let id = msg.data["id"].as_str().unwrap_or("").to_owned();
+            *seen.lock().unwrap().entry(id.clone()).or_default() += 1;
+            let mut first = first.lock().unwrap();
+            let outcome = if first.is_none() {
+                *first = Some(id.clone());
+                Err(format!("{id} fails once"))
+            } else {
+                Ok(())
+            };
+            async move { outcome }
+        })
+        .await
+        .unwrap();
+
+    let failed = failed.lock().unwrap().clone().unwrap_or_default();
+    let handled = handled.lock().unwrap().clone();
+    for id in ["a1", "a2", "b1", "b2"] {
+        let want = if id == failed { 2 } else { 1 };
+        assert_eq!(
+            handled.get(id).copied().unwrap_or(0),
+            want,
+            "{id} (failed once: {failed}); all: {handled:?}"
+        );
+    }
+
+    drop_queue(&q, &queue).await;
+}
+
 #[tokio::test]
 async fn auto_ack_off_leaves_the_message_claimed() {
     let q = broker!();

@@ -112,11 +112,16 @@ impl QueueBuilder {
     ///
     /// # Ordering after a nack
     ///
-    /// A nack releases the lease and clamps the group's cursor at the failed
-    /// message, so everything after it in the same claimed batch *will* be
-    /// redelivered. This loop therefore abandons the rest of the batch after a
-    /// nack rather than processing messages whose acks the broker would reject
-    /// anyway.
+    /// A nack releases the failed message's *partition* and clamps that
+    /// partition's cursor at it, so its later messages in the same claimed
+    /// batch *will* be redelivered. The loop skips them rather than processing
+    /// messages whose acks the broker would reject anyway. The other partitions
+    /// of a multi-partition pop are still leased to this worker, so their
+    /// messages are handled now, not after the lease expires.
+    ///
+    /// With `auto_ack(false)` nothing is nacked, and the loop abandons the rest
+    /// of the batch after a failure: the handler's ack of a later message could
+    /// otherwise commit the failed one.
     pub async fn consume<F, Fut, E>(&self, handler: F) -> Result<ConsumeSummary>
     where
         F: Fn(Message) -> Fut + Send + Sync + 'static,
@@ -127,21 +132,33 @@ impl QueueBuilder {
         self.run(move |msgs, ctx| {
             let handler = Arc::clone(&handler);
             async move {
+                let mut nacked_partitions = std::collections::HashSet::new();
                 for msg in msgs {
                     if ctx.should_stop() {
                         break;
                     }
+                    if nacked_partitions.contains(&msg.partition_id) {
+                        continue;
+                    }
                     let outcome = handler(msg.clone()).await;
                     let ok = ctx.settle(&msg, outcome).await;
                     ctx.bump_processed();
-                    if !ok {
-                        // See the ordering note above. `settle` has logged
-                        // whether a nack was sent and whether it landed.
+                    // See the ordering note above. `settle` has logged
+                    // whether a nack was sent and whether it landed.
+                    if !ok && !ctx.auto_ack() {
                         tracing::warn!(
                             transaction_id = %msg.transaction_id,
                             "handler failed; abandoning the rest of this batch (it will be redelivered)"
                         );
                         break;
+                    }
+                    if !ok {
+                        tracing::warn!(
+                            transaction_id = %msg.transaction_id,
+                            partition_id = %msg.partition_id,
+                            "handler failed; skipping the rest of its partition in this batch (it will be redelivered)"
+                        );
+                        nacked_partitions.insert(msg.partition_id.clone());
                     }
                     if ctx.limit_reached() {
                         break;
@@ -365,6 +382,10 @@ pub struct WorkerCtx {
 }
 
 impl WorkerCtx {
+    fn auto_ack(&self) -> bool {
+        self.builder.auto_ack
+    }
+
     fn should_stop(&self) -> bool {
         self.shared.stop.load(Ordering::SeqCst)
             || self.cancel.as_ref().is_some_and(|c| c.is_cancelled())
