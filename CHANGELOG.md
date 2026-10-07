@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## JS client 2.0.3 - 2026-10-07
 
 **JS client: stopping a consumer no longer strands its messages.** Aborting the `signal` passed to
 `consume()` was checked only between polls. A long poll open at the abort stayed open for up to its

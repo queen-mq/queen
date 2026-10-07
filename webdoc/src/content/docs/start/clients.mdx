@@ -56,6 +56,8 @@ verifiedBy:
 # are tagged on the release commit, so the versions sentence now says every SDK but PHP is 2.0.2.
 # sourceOfTruth re-read 2026-10-07 (JS consumer stop, #86): package.json only registers a new unit test;
 # Node.js 24 and the failover sentence still hold. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-07 (JS client 2.0.3): package.json is 2.0.3, the release that carries #86; the
+# other SDKs and the broker stay 2.0.2. The versions sentence says so.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same
@@ -202,9 +204,9 @@ See [Laravel](/guides/laravel/).
 </TabItem>
 </Tabs>
 
-Every SDK is 2.0.2 except the PHP client, which has its own version line. All of them talk to any
-2.0 broker (the broker is at 2.0.2). The Go client's module path ends in `/v2`, as Go requires for a
-major version above 1.
+The JavaScript client is 2.0.3 and the Python, Go, Rust and C++ clients are 2.0.2; the PHP client
+has its own version line. All of them talk to any 2.0 broker (the broker is at 2.0.2). The Go
+client's module path ends in `/v2`, as Go requires for a major version above 1.
 
 ## curl is a client
 
