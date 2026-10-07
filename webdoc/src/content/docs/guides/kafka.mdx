@@ -36,7 +36,7 @@ an application over one service at a time.
 ## Try it
 
 ```bash
-docker run -d --name queen --platform linux/amd64 -p 6632:6632 -p 9092:9092 \
+docker run -d --name queen -p 6632:6632 -p 9092:9092 \
   -v queen-data:/var/lib/queen/raft \
   -e QUEEN_KAFKA_EMBEDDED=true \
   -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 \

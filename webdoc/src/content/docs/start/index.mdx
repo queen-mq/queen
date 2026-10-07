@@ -23,7 +23,8 @@ digest: >-
   one entry with no coordinator. Clients speak HTTP and JSON (SDKs for JavaScript, Python, Go,
   Rust, C++ and PHP), and Kafka clients can connect to a wire-protocol facade built into the
   broker. PostgreSQL tables stream in and out through built-in connectors, and an S3 sink writes
-  queues to a bucket as JSONL or Parquet. Apache 2.0; the image is ghcr.io/queen-mq/queen:latest, built for linux/amd64.
+  queues to a bucket as JSONL or Parquet. Apache 2.0; the image is ghcr.io/queen-mq/queen:latest,
+  built for linux/amd64 and linux/arm64.
 ---
 
 **A message queue is the smallest thing Queen MQ does.**
@@ -131,7 +132,6 @@ guarantees cover is on [guarantees](/concepts/guarantees/).
   the partition.
 - Ephemeral queues lose what a node held when it crashes, because their contents are not in the
   log.
-- The image is `ghcr.io/queen-mq/queen:latest`, built for linux/amd64 only.
 
 ## Next
 

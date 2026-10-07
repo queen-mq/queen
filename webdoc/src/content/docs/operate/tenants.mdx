@@ -43,7 +43,7 @@ QUEEN_KEY="qk_live_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
 ```
 
 ```bash
-docker run -d --name queen --platform linux/amd64 -p 6711:6711 -p 127.0.0.1:6632:6632 \
+docker run -d --name queen -p 6711:6711 -p 127.0.0.1:6632:6632 \
   -v queen-data:/var/lib/queen/raft \
   -e QUEEN_PROXY_EMBEDDED=true \
   -e QUEEN_PROXY_PORT=6711 \

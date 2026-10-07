@@ -26,7 +26,7 @@ partition named `"3"`, so both kinds of client read and write the same messages.
 The node needs its Kafka listener on:
 
 ```bash
-docker run --platform linux/amd64 -d --name queen -p 6632:6632 -p 9092:9092 \
+docker run -d --name queen -p 6632:6632 -p 9092:9092 \
   -e QUEEN_KAFKA_EMBEDDED=true \
   -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 \
   ghcr.io/queen-mq/queen:latest

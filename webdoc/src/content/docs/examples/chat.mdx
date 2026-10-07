@@ -37,7 +37,7 @@ each of those claims against a running node.
 ## Run it
 
 ```bash
-docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+docker run -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
 npm install queen-mq
 node chat.mjs     # the JavaScript tab below, saved as chat.mjs
 ```

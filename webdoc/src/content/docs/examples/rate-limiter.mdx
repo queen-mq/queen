@@ -30,7 +30,7 @@ the quota and puts the rest on a timer that brings them back when the window ope
 ## Run them
 
 ```bash
-docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+docker run -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
 npm install queen-mq
 node rate-limiter.mjs     # the counter, saved from the first set of tabs below
 node deferred-work.mjs    # the admission controller, saved from the second

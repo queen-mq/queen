@@ -57,7 +57,7 @@ docker run --rm --network queen-s3 -e MC_HOST_m=http://queen:queen-secret-key@mi
 Then the broker, with the sink pointed at that bucket:
 
 ```bash
-docker run -d --name queen --network queen-s3 --platform linux/amd64 -p 6632:6632 \
+docker run -d --name queen --network queen-s3 -p 6632:6632 \
   -v queen-data:/var/lib/queen/raft \
   -e QUEEN_S3_EMBEDDED=true \
   -e QUEEN_S3_QUEUES=orders \

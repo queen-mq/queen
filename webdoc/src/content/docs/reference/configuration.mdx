@@ -41,7 +41,7 @@ restart the node. A single node needs none of them to run, and a cluster needs a
 default, with the value the code applies when you don't.
 
 ```bash
-docker run --platform linux/amd64 -p 6632:6632 -v queen-data:/var/lib/queen/raft \
+docker run -p 6632:6632 -v queen-data:/var/lib/queen/raft \
   -e QUEEN_KV_MAX_VALUE_BYTES=262144 -e LOG_LEVEL=info \
   ghcr.io/queen-mq/queen:latest
 ```

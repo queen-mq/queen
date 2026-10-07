@@ -3,7 +3,28 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## 2.0.2
+## Unreleased
+
+**JS client: stopping a consumer no longer strands its messages.** Aborting the `signal` passed to
+`consume()` was checked only between polls. A long poll open at the abort stayed open for up to its
+timeout, and the broker could still hand it a message. `.each()` then dropped that message without
+settling it, so its partition stayed blocked until the lease expired, on every rolling restart. The
+abort now closes the poll in flight, and the broker hands nothing to a poll whose caller is gone. A
+pop answer already arriving is read to the end, since the broker leased its messages when it sent
+it. Under `.each()`, messages popped but not yet handed to the handler, and those popped beyond
+`.limit()`, go back with a `retry` ack: the lease is released and no retry is charged. An aborted
+request is not a backend failure: it is not retried, does not fail over to another node and does not
+mark one unhealthy. A wait between attempts (429 backoff, retry after a 5xx or a network error) ends
+at once instead of running out. A `wait(false)` consumer stopped during a pop now resolves instead of
+rejecting. Two cases still fall back to the lease: an answer lost before its headers arrive, and a
+`retry` ack that cannot be delivered. Measured on a three-node 2.0.1 cluster, a consumer stopped as a
+message arrived: 40 of 40 messages waited out the lease before, none after.
+
+**JS client: the request timeout covers the response body.** A JSON response was read after the
+request's `try` block had ended, so the timeout was already cleared: a body that stalled midway hung
+with no timeout.
+
+## 2.0.2 - 2026-10-07
 
 **C++ client: `commit_on_delivery()` commits a pop at delivery.** The new
 `QueueBuilder::commit_on_delivery()` makes `pop()` and `pop_result()` send the broker's
@@ -54,6 +75,23 @@ both with a 400 that names both, and the OpenAPI document marks `autoAck` deprec
 name only `commitOnDelivery`. A broker up to 2.0.1 reads only `autoAck`: it ignores
 `commitOnDelivery` and leases the batch.
 
+**Server: a page of message history reads only the appends that hold it.** A historical
+`GET /api/v1/messages` read each partition backwards from its live tail, 256 offsets at a time, and
+decoded every payload before it applied `to`, so a small page of old messages could read a large
+newer suffix, and a smaller `limit` did not bound the work. It now seeks the queue log's indexes,
+active and sealed, by timestamp and offset, ranks the candidates from their metadata, and reads
+only the appends that contain the page. The response fields, the status filters and the minute
+rounding of `to` are unchanged, and so is the storage format. Listing a tenant's partitions and
+cursors still costs what it did, so deep offsets and selective status filters can still be slow.
+
+**Dashboard: the Overview lists the queues that need you, and there is a Supervisors page.** Under
+the verdict, the open issues are a list you can search and filter (needs attention, a lag of 5
+minutes or more, no reader, pending increased, all queues), ten to a page. Selecting one opens a
+drawer beside the page with its pending and in-flight counts, the change between two readings, the
+groups behind and the next thing to check. The new Supervisors page shows the worker status that
+Laravel supervisors publish to the broker, and reads it again every 30 seconds like the other
+pages.
+
 **Python client: `admin.move_message_to_dlq()` and `admin.clear_queue()` are deprecated and
 raise.** They sent `POST /api/v1/messages/:partitionId/:transactionId/dlq` and
 `DELETE /api/v1/queues/:name/clear`, routes the 2.x broker does not have, so every call failed
@@ -103,25 +141,6 @@ messages of the failed partition, which the broker redelivers, and handles the o
 When the error's text said "timeout" or "connection", the loop read it as a long-poll timeout or a
 network fault instead: it polled again with the message still leased, and the error was lost. Such
 an error now stops the consumer like any other handler error.
-
-**JS client: stopping a consumer no longer strands its messages.** Aborting the `signal` passed to
-`consume()` was checked only between polls. A long poll open at the abort stayed open for up to its
-timeout, and the broker could still hand it a message. `.each()` then dropped that message without
-settling it, so its partition stayed blocked until the lease expired, on every rolling restart. The
-abort now closes the poll in flight, and the broker hands nothing to a poll whose caller is gone. A
-pop answer already arriving is read to the end, since the broker leased its messages when it sent
-it. Under `.each()`, messages popped but not yet handed to the handler, and those popped beyond
-`.limit()`, go back with a `retry` ack: the lease is released and no retry is charged. An aborted
-request is not a backend failure: it is not retried, does not fail over to another node and does not
-mark one unhealthy. A wait between attempts (429 backoff, retry after a 5xx or a network error) ends
-at once instead of running out. A `wait(false)` consumer stopped during a pop now resolves instead of
-rejecting. Two cases still fall back to the lease: an answer lost before its headers arrive, and a
-`retry` ack that cannot be delivered. Measured on a three-node 2.0.1 cluster, a consumer stopped as a
-message arrived: 40 of 40 messages waited out the lease before, none after.
-
-**JS client: the request timeout covers the response body.** A JSON response was read after the
-request's `try` block had ended, so the timeout was already cleared: a body that stalled midway hung
-with no timeout.
 
 **Laravel and supervisor 0.8.0: prefork per pool.** A pool's own `prefork` key wins over
 `supervisor.prefork`: `false` spawns that pool's workers, `true` forks them, `null` follows the

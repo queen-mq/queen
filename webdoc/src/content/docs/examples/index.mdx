@@ -88,7 +88,7 @@ Start a node, save the JavaScript version of a program from its page, install th
 it:
 
 ```bash
-docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+docker run -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
 npm install queen-mq
 node chat.mjs
 ```

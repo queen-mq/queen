@@ -30,7 +30,7 @@ cancel on purpose, to show what the compensating side must do when a cancel come
 ## Run it
 
 ```bash
-docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+docker run -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
 npm install queen-mq
 node saga.mjs     # the JavaScript tab below, saved as saga.mjs
 ```

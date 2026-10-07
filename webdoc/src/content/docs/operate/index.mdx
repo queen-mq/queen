@@ -48,7 +48,7 @@ five times.
 <TabItem label="Docker">
 
 ```bash
-docker run --platform linux/amd64 -d --name queen -p 6632:6632 \
+docker run -d --name queen -p 6632:6632 \
   -v queen-data:/var/lib/queen/raft \
   ghcr.io/queen-mq/queen:latest
 ```
@@ -151,7 +151,7 @@ Stop the node with SIGTERM and start the new image on the same directory:
 
 ```bash
 docker stop -t 60 queen && docker rm queen
-docker run --platform linux/amd64 -d --name queen -p 6632:6632 -v queen-data:/var/lib/queen/raft \
+docker run -d --name queen -p 6632:6632 -v queen-data:/var/lib/queen/raft \
   ghcr.io/queen-mq/queen:<new-version>
 ```
 

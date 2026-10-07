@@ -34,7 +34,7 @@ checks all four properties.
 ## Run it
 
 ```bash
-docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+docker run -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
 npm install queen-mq
 node webhooks.mjs     # the JavaScript tab below, saved as webhooks.mjs
 ```

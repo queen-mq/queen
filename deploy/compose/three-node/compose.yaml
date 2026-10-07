@@ -15,9 +15,6 @@ name: queen-cluster
 x-node: &node
   # QUEEN_VERSION in .env picks another release (README.md: rolling upgrade).
   image: ghcr.io/queen-mq/queen:${QUEEN_VERSION:-latest}
-  # The images are published for linux/amd64 only. On an arm64 machine
-  # (Apple silicon) Docker runs them under emulation: slower, fine for a trial.
-  platform: linux/amd64
   # A node that was away long enough to need a snapshot exits with code 75 to
   # load it at start; the restart policy brings it back.
   restart: unless-stopped

@@ -50,7 +50,7 @@ You need Docker for the broker, PHP 8.3 or later with the `pcntl` and `posix` ex
 Composer.
 
 ```bash
-docker run --platform linux/amd64 -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
+docker run -d --name queen -p 6632:6632 ghcr.io/queen-mq/queen:latest
 git clone https://github.com/queen-mq/queen
 cd queen/examples/apps/laravel
 composer install

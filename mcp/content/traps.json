@@ -1,19 +1,5 @@
 [
   {
-    "id": "latest-tag-is-1x",
-    "title": "The `latest` image is still Queen 1.6, and the 2.0 betas are published for amd64 only",
-    "applies": [
-      "all"
-    ],
-    "severity": "breaks",
-    "symptom": "A container started from ghcr.io/queen-mq/queen:latest wants PostgreSQL and speaks the 1.x API; on an Apple Silicon Mac Docker warns that the image platform does not match the host.",
-    "cause": "`latest` still points at 1.6. The 2.0 betas carry version tags and exist for linux/amd64 only.",
-    "fix": "Pin the version tag and name the platform: `docker run -d --name queen --platform linux/amd64 -p 6632:6632 -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:{{broker}}`. On Apple Silicon it runs under emulation, slower but fine for development.",
-    "source": [
-      "https://queenmq.com/start/quickstart/"
-    ]
-  },
-  {
     "id": "new-group-starts-at-tail",
     "title": "A new consumer group starts at the tail and never sees messages pushed before its first pop",
     "applies": [

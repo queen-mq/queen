@@ -28,6 +28,7 @@ verifiedBy:
   - deploy/compose/three-node/compose.yaml
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): catalogue version 4 (traces on disk) is the first raise past 3, one-way; a learner joins a version-4 cluster only once its node answers.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/ephemeral.rs reads the pop's commit at delivery from commitOnDelivery or from autoAck, its deprecated alias. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-07 (image platforms): compose.yaml no longer pins linux/amd64, because the images are published for linux/arm64 too. On an Apple-silicon laptop the three arm64 nodes of 2.0.2 passed their healthchecks 5.8 s after `docker compose up -d --wait`, in two runs; the page says six seconds.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They
@@ -57,9 +58,8 @@ queen-3 leader
 ```
 
 The three nodes read the same peer list on empty volumes, voted, and node 3 won. `--wait` returns
-once every node's healthcheck passes, which on an Apple-silicon laptop, running the amd64 image
-under emulation, took eight seconds. Now push through node 1, a follower, pop through node 2 and
-ack through node 3:
+once every node's healthcheck passes, which took six seconds on an Apple-silicon laptop. Now push
+through node 1, a follower, pop through node 2 and ack through node 3:
 
 ```bash
 curl -s -X POST localhost:16632/api/v1/push -H 'content-type: application/json' -d '{
@@ -136,9 +136,6 @@ name: queen-cluster
 x-node: &node
   # QUEEN_VERSION in .env picks another release (README.md: rolling upgrade).
   image: ghcr.io/queen-mq/queen:${QUEEN_VERSION:-latest}
-  # The images are published for linux/amd64 only. On an arm64 machine
-  # (Apple silicon) Docker runs them under emulation: slower, fine for a trial.
-  platform: linux/amd64
   # A node that was away long enough to need a snapshot exits with code 75 to
   # load it at start; the restart policy brings it back.
   restart: unless-stopped
