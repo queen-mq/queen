@@ -238,6 +238,14 @@ drains with pops that commit on delivery. Until a client-go release has `CommitO
 calls `CommitOnDelivery` or `AutoAck`, whichever the client-go it is built with has, so the
 `go install` build (client-go v2.0.0) and the workspace build both send `autoAck=true`.
 
+**Rust client: a nack in `consume()` skips only its own partition.** A multi-partition pop claims
+several partitions under one lease, and a nack releases only the failed message's partition. With
+`auto_ack` on, the loop dropped the whole rest of the pop after a nack, so the other partitions'
+messages stayed leased and came back only when the lease expired: live, with a 30 s lease,
+partition B was not handled before the run ended. It now skips only the later messages of the failed
+partition, which the broker redelivers, and handles the others at once. With `auto_ack(false)` the
+loop still abandons the rest of the pop after a failure.
+
 **Rust client: the consume loop logs a refused ack.** The broker refuses an ack, for example one
 sent after the lease expired, with HTTP 200 and `success: false` on the item. The loop read only the
 transport result, so a handler that outlived its lease had its ack refused without a trace.
