@@ -1,0 +1,39 @@
+diff --git a/benchmark-queen/laravel-supervisors/app/app/Console/Commands/BenchmarkDispatchCommand.php b/benchmark-queen/laravel-supervisors/app/app/Console/Commands/BenchmarkDispatchCommand.php
+index 1e7824bb..6ec43b26 100644
+--- a/benchmark-queen/laravel-supervisors/app/app/Console/Commands/BenchmarkDispatchCommand.php
++++ b/benchmark-queen/laravel-supervisors/app/app/Console/Commands/BenchmarkDispatchCommand.php
+@@ -36,7 +36,7 @@ final class BenchmarkDispatchCommand extends Command
+         $runId = is_string($runId) && $runId !== '' ? $runId : (string) Str::uuid();
+         $this->identifier($runId, 'run-id');
+ 
+-        $jobs = $this->integerOption('jobs', 1, 1_000_000);
++        $jobs = $this->integerOption('jobs', 1, 10_000_000);
+         $sleepMs = $this->integerOption('sleep-ms', 0, 60_000);
+         $cpuIterations = $this->integerOption('cpu-iterations', 0, 10_000_000);
+         $connection = $this->stringOption('connection', (string) config('benchmark.connection'));
+diff --git a/benchmark-queen/laravel-supervisors/app/app/Console/Commands/BenchmarkResultsCommand.php b/benchmark-queen/laravel-supervisors/app/app/Console/Commands/BenchmarkResultsCommand.php
+index b05aed66..ee7d3347 100644
+--- a/benchmark-queen/laravel-supervisors/app/app/Console/Commands/BenchmarkResultsCommand.php
++++ b/benchmark-queen/laravel-supervisors/app/app/Console/Commands/BenchmarkResultsCommand.php
+@@ -25,7 +25,7 @@ final class BenchmarkResultsCommand extends Command
+             throw new InvalidArgumentException('run-id has an invalid format.');
+         }
+ 
+-        $expected = $this->integerOption('expected', 0, 1_000_000);
++        $expected = $this->integerOption('expected', 0, 10_000_000);
+         $waitSeconds = $this->integerOption('wait', 0, 86_400);
+         $pollMs = $this->integerOption('poll-ms', 10, 60_000);
+         $deadline = hrtime(true) + ($waitSeconds * 1_000_000_000);
+diff --git a/benchmark-queen/laravel-supervisors/scripts/run.sh b/benchmark-queen/laravel-supervisors/scripts/run.sh
+index 1072ca7f..b4a91aa5 100755
+--- a/benchmark-queen/laravel-supervisors/scripts/run.sh
++++ b/benchmark-queen/laravel-supervisors/scripts/run.sh
+@@ -1495,7 +1495,7 @@ run_lane() {
+     set +e
+     # The check reads every result line: 600,000 of them pass PHP's default
+     # 128 MiB, as the failure matrix's own reports do.
+-    producer php -d memory_limit=1G artisan bench:results --no-ansi "$run_id" \
++    producer php -d memory_limit=-1 artisan bench:results --no-ansi "$run_id" \
+         --expected="$JOBS" --wait="$WAIT_TIMEOUT" --poll-ms=500 \
+         >"${CURRENT_HOST_RUN}/result-check.json" \
+         2>"${CURRENT_HOST_RUN}/result-check.stderr.log"

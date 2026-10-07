@@ -135,7 +135,8 @@ about 9,400 per worker. Medians per minute:
 | 20 | 37.1 | 10.1 | 682.2 |
 
 Over 20 minutes the forked workers copied about 7 MiB more of the shared
-pages between them, 0.1 MiB each. The containers grew by about 350 MiB on both
+pages between them, 0.1 MiB each. The same lane ran for 23 hours on
+2026-10-06: [`../2026-10-06-laravel-worker-memory-24h`](../2026-10-06-laravel-worker-memory-24h). The containers grew by about 350 MiB on both
 engines, all of it page cache (`inactive_file`) for the result files.
 
 ### Boot against fork

@@ -31,6 +31,7 @@ data and a README.
 | 2026-10-02 | `2.0.0-beta.3` | 64, 128 and 256 partition stripes, 36 runs | [2026-10-02-laravel-partition-stripes](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-02-laravel-partition-stripes) |
 | 2026-10-05 | `2.0.0-beta.3` | worker memory: prefork and the opcache apart, jobs that allocate, 20 minutes of work, 38 runs | [2026-10-05-laravel-worker-memory](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-05-laravel-worker-memory) |
 | 2026-10-05 | `2.0.0-beta.3` | the safe, balanced and fast profiles, `prefetch` `'auto'`, 100 runs | [2026-10-05-laravel-auto-prefetch](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-05-laravel-auto-prefetch) |
+| 2026-10-06 | `2.0.0-beta.3` | 64 forked workers for 23 hours, 4.1 million jobs, one run | [2026-10-06-laravel-worker-memory-24h](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-06-laravel-worker-memory-24h) |
 
 Every run used the Laravel 12 application in `benchmark-queen/laravel-supervisors` and its job
 `App\Jobs\BenchmarkJob`, which sleeps 10 ms unless a lane says otherwise, on PHP 8.3. Horizon ran on Redis 7.4 with its append-only file. Whenever both stacks ran, Redis
@@ -172,6 +173,15 @@ Over 20 minutes at 500 jobs/s of the job that holds 8 MiB, about 9,400 jobs per 
 memory of a worker stayed at 37.1 MiB for Horizon and 10.1 MiB for a forked one; the 64 forked
 workers copied 7 MiB more of their shared pages in all, 0.1 MiB each.
 
+Over 23 hours at 50 jobs/s of the same job, about 64,000 jobs per worker, with the PHP client 2.3.0
+and no worker restarted, the median forked worker went from 9.66 to 10.04 MiB of private memory and
+stayed there; the largest never passed 11.3 MiB. The step is about 0.35 MiB, once per worker: 51 of
+the 64 had taken it by the end of the dispatch. The application's anonymous memory went from 638 to
+658 MiB ([the 23-hour run](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-10-06-laravel-worker-memory-24h)).
+Four of the 4.1 million jobs failed without running, with `tries` 1: the broker counted a delivery
+that no worker received, and the next worker got the job as its second attempt. The broker fix
+takes that attempt back ([#95](https://github.com/queen-mq/queen/pull/95)).
+
 Against Horizon with the opcache off, forked workers with the opcache saved 27 MiB per worker with
 either job, the booted framework, and the ratio fell from 8.7 to 3.3. A real application's jobs
 allocate more than the benchmark's, so expect the saving per worker, not the ratio. The saving is
@@ -180,8 +190,9 @@ providers boots bigger, and forking saves more per worker.
 
 Over the 15-minute soak, at 16 workers, the application's processes stayed flat for both engines:
 529 MiB of proportional set size for Horizon and 81 MiB for Queen, supervisor and workers together. Redis grew from 67 to 611 MiB with Horizon's job records; the
-broker grew from 59 to 117 MiB, plus the page cache of its log. Whether the broker levels off
-after that was not measured.
+broker grew from 59 to 117 MiB, plus the page cache of its log. In the 23-hour worker run, with
+retention off, the broker's anonymous memory grew with the messages it kept, from 59 to 741 MiB
+for 4.1 million of them, about 175 bytes each, and stopped growing when the dispatch ended.
 
 ## Delivery profiles and prefetch auto
 
@@ -430,8 +441,9 @@ run and the scripts, is `benchmark-queen/2026-10-02-laravel-partition-stripes/`.
 - One virtual machine's disk set the fsync cost and with it every absolute number. Another server
   moves them.
 - The longest soak with a verdict lasted 45 minutes; a 2.5-hour soak of the release candidate ran
-  to its end, but its report failed, so it has none. Whether the broker's memory levels off past
-  the 15-minute soak, and how workers behave over days, was not measured.
+  to its end, but its report failed, so it has none. Forked workers ran for 23 hours, once, with
+  Queen only; longer runs, Horizon over the same time and a broker with retention on over hours
+  were not measured.
 - The benchmark job is tiny, and the job that holds 8 MiB is one way to allocate. Real jobs keep
   more private memory per worker, which prefork does not share, and pull the throughput ratios
   towards one as the job itself dominates.
