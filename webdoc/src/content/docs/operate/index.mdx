@@ -33,6 +33,7 @@ digest: >-
 # sourceOfTruth re-read 2026-10-03 (cb0329f74): the Dockerfile's queenctl -X paths moved to the /v2 module path; the image and what it runs are unchanged. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the /health example shows 2.0.1 at cluster version 4 (a new node starts there); the test stack gained the QUEEN_TEST_IDLE_UNLOAD_S knob, nothing this page states.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/ephemeral.rs reads the pop's commit at delivery from commitOnDelivery or from autoAck, its deprecated alias. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-07 (78970a242, 2.0.2): the /health example shows 2.0.2; nothing else this page states changes.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its
@@ -85,7 +86,7 @@ curl -s localhost:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.1","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4}}
+{"status":"healthy","engine":"raft","version":"2.0.2","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4}}
 ```
 
 The dashboard is at `http://localhost:6632/`, and the image carries the CLI, so
