@@ -115,6 +115,14 @@ its group (`queenctl-tail` when you name none) and are delivered again when the 
 Without `--follow` it stops once it has printed `--batch` messages (100 when unset), which on a
 quiet queue can take a long time, so give it `-n` or `--idle-millis` there.
 
+To include a tail invocation in the dashboard's Supervisors page, pass
+`--supervision-group billing-production`. This optional application/deployment name is separate
+from `--cg`; reporting is off by default. The Go reporter publishes live consumer counts and
+handler progress through KV. Each completed handler means a message was printed, not that a
+pipe's downstream consumer processed it or an acknowledgement succeeded. Publication failures
+do not stop tailing, and status stays out of stdout. See the client README for heartbeat and
+expiry details. This option does not restart or scale CLI processes.
+
 `pop` prints leased messages: ack each one with `queenctl ack`, or it is delivered again when the
 lease expires. With `--commit-on-delivery` the broker moves the group's cursor past the messages
 as it hands them out, so there is no lease and nothing to ack. That is at-most-once delivery: a
