@@ -35,10 +35,13 @@ class QueueBuilder
     private ?int $consumeBatch = null;
     private ?int $consumeLimit;
     private ?int $consumeIdleMillis;
-    // null means autoAck() was never called. The two read paths have opposite
-    // defaults (consume() acks client-side, pop() stays leased), so the setter's
-    // value cannot stand in for "unset" without swallowing autoAck(true) on pop.
+    // null means autoAck() was never called; consume() applies its default.
+    // pop() never reads it: autoAck() never reaches the wire.
     private ?bool $consumeAutoAck = null;
+    // The pop's own option for the broker's commit at delivery: pop(),
+    // popResult() and popDetached() send it as autoAck=true; consume() and
+    // getConsumer() refuse it.
+    private bool $commitOnDelivery = false;
     private bool $consumeWait;
     private int $consumeTimeoutMillis;
     private ?int $consumeLeaseSeconds = null;
@@ -296,14 +299,11 @@ class QueueBuilder
     }
 
     /**
-     * Two meanings, one per read path.
-     *
      * consume(): the loop acks after the handler and nacks when it throws. On
      * unless autoAck(false); the pop it sends stays leased either way.
      *
-     * pop(): autoAck(true) asks the broker to commit the messages at delivery,
-     * with no lease and nothing to ack. That is at-most-once: a crash after the
-     * pop loses them. Without it a pop is leased and you ack it yourself.
+     * No effect on pop(): it never reaches the wire. For the broker's
+     * at-most-once commit at delivery on a pop, use commitOnDelivery().
      */
     public function autoAck(bool $enabled): static
     {
@@ -376,8 +376,8 @@ class QueueBuilder
      *    reads every message on the same queue.
      *  - It needs a group(). Queue mode is a shared cursor with no group
      *    identity to hang a policy on, and the broker answers 400.
-     *  - It cannot be combined with autoAck(true), which the broker also
-     *    refuses: auto-ack commits at delivery with no lease, so a crashed
+     *  - It cannot be combined with commitOnDelivery(), which the broker also
+     *    refuses with a 400: a commit at delivery takes no lease, so a crashed
      *    handler would lose the newest state — the one thing conflation exists
      *    to guarantee gets processed.
      *
@@ -403,6 +403,8 @@ class QueueBuilder
 
     public function consume(\Closure $handler): ConsumeBuilder
     {
+        $this->refuseCommitOnDelivery('consume()');
+
         return new ConsumeBuilder($this->httpClient, $this->queen, $handler, $this->buildConsumeOptions());
     }
 
@@ -412,12 +414,32 @@ class QueueBuilder
 
     public function getConsumer(): HighLevelConsumer
     {
+        $this->refuseCommitOnDelivery('getConsumer()');
+
         return new HighLevelConsumer($this->httpClient, $this->queen, $this->buildConsumeOptions());
     }
 
     // ===========================
     // Pop
     // ===========================
+
+    /**
+     * Commit the messages of pop(), popResult() and popDetached() at delivery.
+     *
+     * The broker moves the consumer group's cursor past the messages as it
+     * hands them out: no lease, nothing to ack (the messages come back with an
+     * empty leaseId). That is at-most-once: a crash after the pop loses them.
+     * The request carries autoAck=true, the parameter every 2.x broker reads.
+     *
+     * A pop option only. consume() and getConsumer() always lease, so they
+     * throw a LogicException when this is set. The broker refuses it together
+     * with conflation() (400).
+     */
+    public function commitOnDelivery(bool $enabled = true): static
+    {
+        $this->commitOnDelivery = $enabled;
+        return $this;
+    }
 
     public function pop(): array
     {
@@ -443,9 +465,6 @@ class QueueBuilder
     private function popRequestPath(): string
     {
         $path = $this->buildPopPath();
-
-        // Pop uses POP_DEFAULTS for autoAck unless the caller set it.
-        $effectiveAutoAck = $this->consumeAutoAck ?? Defaults::POP_DEFAULTS['autoAck'];
 
         // Batch, partitions and with them the autopilot flag. The RULE for which
         // of the three travel lives in one place (Support\PopAutopilot) because
@@ -482,7 +501,9 @@ class QueueBuilder
         if ($this->task !== null) {
             $params['task'] = $this->task;
         }
-        if ($effectiveAutoAck) {
+        // Sent only when true, where earlier SDKs placed it: an absent autoAck
+        // is the broker's leased default.
+        if ($this->commitOnDelivery) {
             $params['autoAck'] = 'true';
         }
         if ($this->consumeSubscriptionMode !== null) {
@@ -496,8 +517,7 @@ class QueueBuilder
         if ($sizing['partitions'] !== null) {
             $params['partitions'] = $sizing['partitions'];
         }
-        // Only ever sent when true, the rule autoAck follows above: the broker
-        // treats presence as opt-in, and an explicit conflation=false would read
+        // Only ever sent when true: the broker treats presence as opt-in, and an explicit conflation=false would read
         // as a DISAGREEMENT with a group whose stored policy is true.
         if ($this->consumeConflation) {
             $params['conflation'] = 'true';
@@ -603,6 +623,17 @@ class QueueBuilder
     // ===========================
     // Private helpers
     // ===========================
+
+    /**
+     * The read loops pop leased and cannot honour a commit at delivery; leasing
+     * silently would not be what the caller asked for.
+     */
+    private function refuseCommitOnDelivery(string $loop): void
+    {
+        if ($this->commitOnDelivery) {
+            throw new \LogicException("commitOnDelivery() is a pop() option; {$loop} always leases its messages");
+        }
+    }
 
     private function buildConsumeOptions(): array
     {

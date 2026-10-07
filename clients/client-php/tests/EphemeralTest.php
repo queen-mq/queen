@@ -263,13 +263,50 @@ class EphemeralTest extends TestCase
             'wait' => true,
             'timeout' => 1500,
             'group' => 'workers',
-            'autoAck' => true,
+            'commitOnDelivery' => true,
         ]);
 
         $this->assertSame(
             'queue=inbox&partition=room-7&batch=10&wait=true&timeout=1500&group=workers&autoAck=true',
             $handler->requests[0]->getUri()->getQuery()
         );
+    }
+
+    /**
+     * The commit at delivery travels as autoAck=true, the parameter the broker
+     * reads, and false sends nothing: the leased pop is the broker default.
+     */
+    public function testPopSendsCommitOnDeliveryAsAutoAck(): void
+    {
+        $handler = new PlanHandler([$this->popped([]), $this->popped([])]);
+        $eph = $this->queen($handler)->ephemeral();
+
+        $eph->pop(self::QUEUE, ['commitOnDelivery' => true]);
+        $this->assertSame('queue=inbox&autoAck=true', $handler->requests[0]->getUri()->getQuery());
+
+        $eph->pop(self::QUEUE, ['commitOnDelivery' => false]);
+        $this->assertSame('queue=inbox', $handler->requests[1]->getUri()->getQuery());
+    }
+
+    /** The old option name still works, and both names at once are refused. */
+    public function testPopReadsTheDeprecatedAutoAckAndRefusesBothSpellings(): void
+    {
+        $handler = new PlanHandler([$this->popped([])]);
+        $eph = $this->queen($handler)->ephemeral();
+
+        $eph->pop(self::QUEUE, ['group' => 'workers', 'autoAck' => true]);
+        $this->assertSame('queue=inbox&group=workers&autoAck=true', $handler->requests[0]->getUri()->getQuery());
+
+        try {
+            $eph->pop(self::QUEUE, ['commitOnDelivery' => true, 'autoAck' => true]);
+            $this->fail('both spellings must be refused');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString(
+                'pass either `commitOnDelivery` or its deprecated alias `autoAck`, not both',
+                $e->getMessage()
+            );
+        }
+        $this->assertCount(1, $handler->requests);
     }
 
     /**
