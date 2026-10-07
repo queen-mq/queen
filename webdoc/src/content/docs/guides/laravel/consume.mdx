@@ -39,6 +39,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-07 (no nack without --auto-ack): ConsumeCommand nacks a throw only with
 # --auto-ack, as the SDK consumers do; without it, it prints the error and "Not nacked without
 # --auto-ack". The handler, ack and nack, and before-2.3.0 sections follow.
+# sourceOfTruth re-read 2026-10-07 (optional client supervision): QueueBuilder adds opt-in
+# observations for consume()->execute(). This command uses getConsumer(), so its options,
+# handler behavior, renewal and exit semantics described here are unchanged.
 ---
 
 `php artisan queen:consume` reads a Queen queue and passes each message to a class of yours. Use it
