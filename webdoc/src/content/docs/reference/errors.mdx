@@ -29,6 +29,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0). Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from disk; consume/mod.rs drops idle parts. A trace key over 511 bytes is refused by the trace route with a plain 400 (see limits); no code this page lists changes.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/data.rs and handlers/ephemeral.rs read the pop's commit at delivery from commitOnDelivery or from autoAck, its deprecated alias; the conflation refusal is still a 400 and now names both. No code or status this page lists changes.
+# sourceOfTruth re-read 2026-10-07 (JS consumer stop, #86): HttpClient.js takes the consumer's signal: an aborted
+# request is not retried or failed over and rejects with error.aborted, waits between attempts end on
+# the abort, and the request timeout now covers the JSON body read. The JS client list says so.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code
@@ -202,6 +205,9 @@ See [cluster](/operate/cluster/).
   `outcome_unknown` included.
 - It retries a 429 in place after `Retry-After`, up to 10 attempts, and without limit for a
   long-poll pop.
+- A request its caller aborted (a `consume()` being stopped) is neither retried nor sent to another
+  URL, and does not mark its node unhealthy: it rejects with `error.aborted` set, and a wait between
+  attempts ends there.
 - Any other 4xx is thrown at once, with `error.status` and `error.code` from the body.
 - A transaction rolled back by a lost `required` precondition is returned from `commit()`; every
   other rollback is thrown with `error.reason` set.

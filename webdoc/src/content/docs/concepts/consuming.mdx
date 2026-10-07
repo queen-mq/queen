@@ -22,6 +22,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-06 (JS nack scope): ConsumerManager.js in each() mode now skips only the nacked
 # partition's later messages and handles the other partitions of the pop. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/data.rs names the pop's commit at delivery commitOnDelivery on the queue, partition and discovery routes, and the conflation refusal names it. Pop options document commitOnDelivery on its own: the cursor moves at delivery, no lease, nothing to ack, at-most-once, refused with conflation.
+# sourceOfTruth re-read 2026-10-07 (JS consumer stop, #86): ConsumerManager.js reads a pop answer that has
+# started arriving to the end before giving its messages back, and ends its pauses on a stop. The
+# paragraph on stopping consume says so.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers
@@ -36,7 +39,11 @@ and nacks it (`failed`) when the handler throws, and keeps consuming either way.
 acks inside a [transaction](/concepts/transactions/), turn the automatic ack off with
 `.autoAck(false)`. A handler that throws is still nacked for whatever it had not acked, so its
 partition comes back at once instead of waiting out the lease, and `.onError()` on `consume` hands
-that failure to your own code instead (queen-mq 2.0; the 1.x SDK stopped the loop there). `pop`
+that failure to your own code instead (queen-mq 2.0; the 1.x SDK stopped the loop there).
+Stopping `consume`, by aborting the `signal` passed as `consume(handler, { signal })`, closes its
+long poll at once (an answer already arriving is read to the end), and under `.each()` it gives
+back the messages it popped but did not start with a `retry` ack, so a rolling restart no longer
+leaves partitions waiting out their leases. `pop`
 hands you the leased messages and leaves the ack to you:
 
 <Render file="snippets/js-pop" />

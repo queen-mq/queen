@@ -325,6 +325,36 @@ await queen.queue('tasks')
 Earlier versions stopped the consumer on a throw under `.autoAck(false)`: `consume()` rejected after
 the first failure, and the message stayed leased until its lease expired.
 
+**Stopping a consumer** (a graceful shutdown) is aborting its `signal`. The handler call in progress
+finishes, with its ack, and `consume()` resolves. Nothing is left leased:
+
+- The long poll in flight is closed at once. The broker hands nothing to a poll whose caller is gone,
+  so a message that arrives during the shutdown goes to another consumer straight away.
+- A pop answer that has already started arriving is read to the end: the broker leased its messages
+  when it sent it, and the body says which ones they are.
+- With `.each()`, messages already popped but not yet handed to the handler go back with a `retry`
+  ack. The broker releases their lease and redelivers them first, in order, without charging a
+  retry. The same happens to messages popped beyond `.limit()`.
+- A wait between attempts (a 429 backoff, a retry after a 5xx or a network error) ends at once.
+
+```javascript
+const stop = new AbortController()
+// consume() starts when awaited: Promise.resolve() starts it now and keeps the
+// promise that settles once the consumer has stopped.
+const consuming = Promise.resolve(queen.queue('tasks').group('workers').each()
+  .consume(async (message) => { await processTask(message.data) }, { signal: stop.signal }))
+
+process.once('SIGTERM', async () => {
+  stop.abort()
+  await consuming      // the message in the handler is finished and acked
+  await queen.close()
+})
+```
+
+Earlier versions checked the signal only between polls. A poll open at the abort stayed open for up
+to its timeout, and `.each()` dropped what it brought back without settling it, so its partition
+waited out the whole lease.
+
 ### Pop Messages (On-Demand Processing)
 
 ```javascript

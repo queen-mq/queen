@@ -7,6 +7,20 @@ import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/confla
 import { popSizing, parseAutopilotDecision, emptyPollDelayMillis } from '../utils/autopilot.js'
 import { CONSUME_DEFAULTS } from '../utils/defaults.js'
 
+/** Wait `ms`, or less if the consumer is stopped meanwhile: the loop checks the signal next. */
+function pause(ms, signal) {
+  if (signal?.aborted) return Promise.resolve()
+  return new Promise(resolve => {
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
+}
+
 export class ConsumerManager {
   #httpClient
   #queen
@@ -160,7 +174,10 @@ export class ConsumerManager {
         // a long-poll: mark it 'pop' so a 429 backs off and keeps waiting
         // instead of giving up after the bounded push-like attempt budget.
         const clientTimeout = wait ? timeoutMillis + 5000 : timeoutMillis
-        const result = await this.#httpClient.get(`${path}?${baseParams}`, clientTimeout, affinityKey, wait ? 'pop' : null)
+        // The signal closes the poll as well: a broker hands nothing to a poll
+        // whose caller is gone, so a stopped consumer is never given a message
+        // it would only sit on until the lease expires.
+        const result = await this.#httpClient.get(`${path}?${baseParams}`, clientTimeout, affinityKey, wait ? 'pop' : null, signal)
 
         // Degrade-loudly (PLAN_CONFLATION §4). Checked BEFORE the empty-response
         // branch on purpose: a pre-1.1.0 broker answers an empty pop with a
@@ -181,7 +198,7 @@ export class ConsumerManager {
             // pop engaged autopilot and the broker had an opinion (it knows the
             // arrival rate on this queue and this client does not), otherwise
             // the historical 100ms.
-            await new Promise(resolve => setTimeout(resolve, emptyPollDelayMillis(parseAutopilotDecision(result))))
+            await pause(emptyPollDelayMillis(parseAutopilotDecision(result)), signal)
             continue
           }
         }
@@ -218,8 +235,17 @@ export class ConsumerManager {
             // partitions of a multi-partition pop are still leased to this
             // worker, so their messages are handled now, not after the lease.
             const nackedPartitions = new Set()
-            for (const message of messages) {
-              if (signal && signal.aborted) break
+            for (const [i, message] of messages.entries()) {
+              // Stopped, or the limit reached, with messages still in hand:
+              // give them back rather than leave them leased. Those of a
+              // nacked partition were already given back by the nack.
+              if ((signal && signal.aborted) || (limit && processedCount >= limit)) {
+                const unstarted = messages.slice(i).filter(m => !nackedPartitions.has(m.partitionId ?? m.partition))
+                if (unstarted.length > 0) {
+                  await this.#releaseUnstarted(unstarted, group, signal && signal.aborted ? 'aborted' : 'limit-reached')
+                }
+                break
+              }
 
               const partition = message.partitionId ?? message.partition
               if (nackedPartitions.has(partition)) continue
@@ -231,8 +257,6 @@ export class ConsumerManager {
                 nackedPartitions.add(partition)
                 logger.warn('ConsumerManager.worker', { workerId, status: 'partition-abandoned-after-nack', partition })
               }
-
-              if (limit && processedCount >= limit) break
             }
           } else {
             // Process as batch
@@ -249,6 +273,13 @@ export class ConsumerManager {
         }
 
       } catch (error) {
+        // Stopped while a poll was open: the poll was closed, nothing was
+        // taken, the worker is done. Not an error, whatever the wait mode.
+        if (error.aborted || (signal && signal.aborted)) {
+          logger.log('ConsumerManager.worker', { workerId, status: 'aborted', processedCount })
+          break
+        }
+
         // Conflation faults are terminal and are classified FIRST, ahead of the
         // message-substring heuristics below: a consumer that asked for
         // last-value delivery and is not getting it must stop, not retry
@@ -278,7 +309,7 @@ export class ConsumerManager {
             ? error.retryAfterSeconds * 1000
             : 1000
           logger.warn('ConsumerManager.worker', { workerId, status: 'rate-limited', code: error.code, retryAfterMs })
-          await new Promise(resolve => setTimeout(resolve, retryAfterMs))
+          await pause(retryAfterMs, signal)
           continue
         }
 
@@ -290,7 +321,7 @@ export class ConsumerManager {
         if (isNetworkError) {
           logger.warn('ConsumerManager.worker', { workerId, error: 'network', message: error.message })
           // Wait before retry
-          await new Promise(resolve => setTimeout(resolve, 1000))
+          await pause(1000, signal)
           continue
         }
 
@@ -337,6 +368,26 @@ export class ConsumerManager {
       }
     }
     return true
+  }
+
+  /**
+   * Hand back messages this worker holds but will not process (it was stopped,
+   * or reached its limit): a `retry` ack releases their lease, the broker
+   * redelivers them first, in order, and charges no retry. Best effort -- a
+   * release that fails leaves the message to its lease, as before.
+   */
+  async #releaseUnstarted(messages, group, reason) {
+    const subject = { count: messages.length, transactionIds: messages.map(m => m.transactionId) }
+    try {
+      const res = await this.#queen.ack(messages, 'retry', group ? { group } : {})
+      if (res && res.success === false) {
+        logger.warn('ConsumerManager.release', { ...subject, reason, status: 'release-rejected', error: res.error })
+      } else {
+        logger.log('ConsumerManager.release', { ...subject, reason, status: 'released' })
+      }
+    } catch (error) {
+      logger.warn('ConsumerManager.release', { ...subject, reason, status: 'release-failed', error: error.message })
+    }
   }
 
   async #processBatch(messages, handler, autoAck, group) {
