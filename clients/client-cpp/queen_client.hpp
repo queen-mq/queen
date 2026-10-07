@@ -64,6 +64,12 @@
 #include <regex>
 #include <future>
 #include <csignal>
+#include <algorithm>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 // JSON library (nlohmann)
 #include <json.hpp>
@@ -164,7 +170,11 @@ struct QueueConfig {
     }
 };
 
+// Missing configuration is off: no reporter thread or KV traffic.
+struct SupervisionConfig { std::string group; };
+
 struct ConsumeOptions {
+    std::optional<SupervisionConfig> supervision;
     std::string queue;
     std::string partition;
     std::string namespace_name;
@@ -1810,16 +1820,20 @@ private:
     
     HttpResponse execute_request(const std::string& url, const std::string& method,
                                  const std::string& path, const json& body = nullptr,
-                                 int request_timeout_millis = 0) {
+                                 int request_timeout_millis = 0, bool observation = false) {
         try {
             auto [scheme, host, port] = util::parse_url(url);
             
             int timeout_sec = (request_timeout_millis > 0 ? request_timeout_millis : timeout_millis_) / 1000;
             
-            httplib::Client client(host, port);
+            // The observation path preserves the configured HTTPS scheme.
+            auto transport = observation ? std::make_unique<httplib::Client>(url)
+                                         : std::make_unique<httplib::Client>(host, port);
+            auto& client = *transport;
             client.set_connection_timeout(timeout_sec);
             client.set_read_timeout(timeout_sec);
             client.set_write_timeout(timeout_sec);
+            if (observation) client.set_max_timeout(2000);
             
             httplib::Headers headers = {
                 {"Content-Type", "application/json"}
@@ -2086,6 +2100,13 @@ public:
         return json::parse(response.body);
     }
     
+    // One best-effort publication; never inherit unbounded 429/failover retries.
+    json post_observation(const std::string& path, const json& body) {
+        auto response = execute_request(get_url(), "POST", path, body, 2000, true);
+        if (!response.success) throw_response_error(response);
+        return json::parse(response.body);
+    }
+
     json post(const std::string& path, const json& body = nullptr, int request_timeout_millis = 0,
               RetryKind retry_kind = RetryKind::Default) {
         auto response = request_with_failover("POST", path, body, request_timeout_millis, retry_kind);
@@ -2485,6 +2506,114 @@ public:
         if (!has_first_message_) return 0;
         return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
             Clock::now() - first_message_time_).count());
+    }
+};
+
+// One optional observer per consume invocation. A reporter owns no worker process.
+class ConsumerSupervision {
+    using Clock = std::chrono::steady_clock;
+    std::shared_ptr<HttpClient> http_;
+    ConsumeOptions options_;
+    std::string id_;
+    Clock::time_point started_ = Clock::now();
+    int64_t started_epoch_;
+    mutable std::mutex mutex_;
+    std::condition_variable wake_;
+    std::thread publisher_;
+    bool stopped_ = false;
+    int running_ = 0;
+    uint64_t sequence_ = 0, completed_ = 0, failed_ = 0;
+    json last_ = nullptr;
+    std::map<uint64_t, Clock::time_point> active_;
+    static int64_t epoch() {
+        return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+    static std::string identifier() {
+        auto value = util::generate_uuid_v7();
+        value.erase(std::remove(value.begin(), value.end(), '-'), value.end());
+        return value;
+    }
+    static json scope(const std::string& value) { return value.empty() ? json(nullptr) : json(value); }
+    void publish(const char* state) {
+        const auto raw = document(state).dump();
+        if (raw.size() > 45000) throw std::runtime_error("consumer status exceeds one chunk");
+        const auto write = identifier(), slot = options_.supervision->group + "/" + id_;
+        json operations = json::array({
+            {{"op","put"},{"ns","queen-supervisor"},{"key",slot+"/head"},{"ttlSeconds",60},
+                {"value",{{"format","queen.supervisor.remote-status/v1"},{"write",write},{"chunks",1},{"bytes",raw.size()}}}},
+            {{"op","put"},{"ns","queen-supervisor"},{"key",slot+"/chunk/0000"},{"ttlSeconds",60},
+                {"value",{{"write",write},{"index",0},{"data",util::base64_encode(raw)}}}}
+        });
+        auto response = http_->post_observation("/api/v1/kv", {{"operations",operations}});
+        if (!response.contains("results") || !response["results"].is_array() || response["results"].size() != 2)
+            throw std::runtime_error("consumer status publication was not applied");
+        for (const auto& result : response["results"]) if (result.value("applied", false) != true)
+            throw std::runtime_error("consumer status publication was not applied");
+    }
+    void run() noexcept {
+        bool failing = false;
+        auto send = [&](const char* state) {
+            try { publish(state); failing = false; }
+            catch (...) {
+                if (!failing) { try { util::log_error("Consumer.supervision", "Status publication failed; consumption continues"); } catch (...) {} }
+                failing = true;
+            }
+        };
+        send("running");
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (!wake_.wait_for(lock, std::chrono::seconds(10), [&] { return stopped_; })) {
+            lock.unlock(); send("running"); lock.lock();
+        }
+        lock.unlock(); send("stopped");
+    }
+public:
+    ConsumerSupervision(std::shared_ptr<HttpClient> http, const ConsumeOptions& options)
+        : http_(std::move(http)), options_(options), id_(identifier()), started_epoch_(epoch()) {
+        const auto& group = options_.supervision->group;
+        if (!std::regex_match(group, std::regex("[A-Za-z0-9][A-Za-z0-9._-]{0,254}")) || group == "coordination")
+            throw std::invalid_argument("supervision group must be a valid application/deployment name");
+        if (options_.concurrency < 1 || options_.concurrency > 4096)
+            throw std::invalid_argument("supervision requires concurrency between 1 and 4096");
+    }
+    ~ConsumerSupervision() { stop(); }
+    void start() { publisher_ = std::thread([this] { run(); }); }
+    void stop() {
+        { std::lock_guard<std::mutex> lock(mutex_); stopped_ = true; }
+        wake_.notify_one();
+        if (publisher_.joinable()) publisher_.join();
+    }
+    void worker_started() { std::lock_guard<std::mutex> lock(mutex_); ++running_; }
+    void worker_exited() { std::lock_guard<std::mutex> lock(mutex_); --running_; }
+    uint64_t begin_handler() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto id = sequence_++; active_[id] = Clock::now(); return id;
+    }
+    void end_handler(uint64_t id, bool success) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        active_.erase(id); last_ = epoch(); if (success) ++completed_; else ++failed_;
+    }
+    json document(const char* state) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        json oldest = nullptr;
+        for (const auto& entry : active_) {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(Clock::now()-entry.second).count();
+            if (oldest.is_null() || age > oldest.get<int64_t>()) oldest = age;
+        }
+        const char* host = std::getenv("HOSTNAME");
+        if (!host) host = std::getenv("COMPUTERNAME");
+#ifdef _WIN32
+        const auto pid = _getpid();
+#else
+        const auto pid = getpid();
+#endif
+        return {{"schema","queen.consumer.status/v1"},{"instance_id",id_},{"engine","cpp"},{"execution_model","threads"},
+            {"hostname",host ? json(host) : json(nullptr)},{"pid",pid},{"state",state},{"updated_at_epoch",epoch()},
+            {"started_at_epoch",started_epoch_},{"uptime_seconds",std::chrono::duration_cast<std::chrono::seconds>(Clock::now()-started_).count()},
+            {"configuration",{{"heartbeat_timeout",30}}},
+            {"pool_status",json::array({{{"name","consumer"},{"queue",scope(options_.queue)},{"namespace",scope(options_.namespace_name)},
+                {"task",scope(options_.task)},{"consumer_group",options_.group.empty() ? "__QUEUE_MODE__" : options_.group},
+                {"desired",options_.concurrency},{"running",running_},{"busy",active_.size()},{"completed",completed_},{"failed",failed_},
+                {"last_completed_at_epoch",last_},{"oldest_inflight_seconds",oldest}}})}};
     }
 };
 
@@ -3620,6 +3749,7 @@ private:
     // client-side defaults are applied at emission time (util::pop_sizing), not
     // here, because filling them in here would erase the difference between
     // "never called batch()" and "called batch(1)".
+    std::optional<SupervisionConfig> supervision_;
     int concurrency_ = 1;
     int batch_ = 0;
     int limit_ = 0;
@@ -3754,6 +3884,11 @@ public:
         return *this;
     }
     
+    QueueBuilder& supervision(std::optional<SupervisionConfig> config = std::nullopt) {
+        supervision_ = std::move(config);
+        return *this;
+    }
+
     QueueBuilder& concurrency(int count) {
         concurrency_ = std::max(1, count);
         return *this;
@@ -4689,9 +4824,27 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
     const std::string conflation_target =
         util::pop_target_label(options.queue, options.namespace_name, options.task);
 
+    std::shared_ptr<ConsumerSupervision> supervision;
+    if (options.supervision) {
+        supervision = std::make_shared<ConsumerSupervision>(http_client_, options);
+        auto original = handler;
+        handler = [supervision, original](const json& input) {
+            auto id = supervision->begin_handler();
+            try { original(input); }
+            catch (...) { supervision->end_handler(id, false); throw; }
+            supervision->end_handler(id, true);
+        };
+        supervision->start();
+    }
+
     // Worker function
     auto worker = [this, handler, full_url, options, record_current_error,
-                   conflation_target](int worker_id) {
+                   conflation_target, supervision](int worker_id) {
+        struct Observation {
+            std::shared_ptr<ConsumerSupervision> reporter;
+            explicit Observation(std::shared_ptr<ConsumerSupervision> r) : reporter(std::move(r)) { if (reporter) reporter->worker_started(); }
+            ~Observation() { if (reporter) reporter->worker_exited(); }
+        } observation(supervision);
         int processed_count = 0;
         auto last_message_time = std::chrono::steady_clock::now();
         
@@ -4921,6 +5074,8 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
         future.wait();
     }
 
+    if (supervision) supervision->stop();
+
     if (terminal_error->error) {
         std::rethrow_exception(terminal_error->error);
     }
@@ -4938,6 +5093,7 @@ inline void QueueBuilder::consume(std::function<void(const json&)> handler,
     }
 
     ConsumeOptions options;
+    options.supervision = supervision_;
     options.queue = queue_name_;
     options.partition = partition_ != "Default" ? partition_ : "";
     options.namespace_name = namespace_;
