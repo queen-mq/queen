@@ -247,3 +247,84 @@ describe('consume() — aborting the signal never strands a message', () => {
     }
   })
 })
+
+/**
+ * A server that sends the headers and half a JSON body, then stalls. Each
+ * request is counted; `closeAll` ends the stalled bodies.
+ */
+async function startStallingServer() {
+  let hits = 0
+  const open = []
+  const server = createServer((req, res) => {
+    hits++
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.write('{"value":')
+    open.push(res)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  return {
+    url: `http://127.0.0.1:${server.address().port}`,
+    hits: () => hits,
+    async stop() {
+      for (const res of open) if (!res.destroyed) res.destroy()
+      server.closeAllConnections()
+      await new Promise(resolve => server.close(resolve))
+    }
+  }
+}
+
+/** Resolves once fetch has handed back the response headers for a URL with `prefix`. */
+function onResponseHeaders(prefix) {
+  const original = globalThis.fetch
+  let ready
+  const promise = new Promise(resolve => { ready = resolve })
+  globalThis.fetch = async (...args) => {
+    const response = await original(...args)
+    if (String(args[0]).startsWith(prefix)) setImmediate(ready)
+    return response
+  }
+  return { ready: promise, restore() { globalThis.fetch = original } }
+}
+
+describe('HttpClient — a response whose body is still being read', () => {
+  it('an abort during the body read is a caller abort: no node is marked unhealthy', async () => {
+    const a = await startStallingServer()
+    const b = await startStallingServer()
+    const lb = new LoadBalancer([a.url, b.url], 'affinity')
+    const http = new HttpClient({ loadBalancer: lb, enableFailover: true, retryAttempts: 1 })
+    const headers = onResponseHeaders('http://127.0.0.1:')
+    try {
+      const ac = new AbortController()
+      const settled = http.get('/status', 10000, 'key', null, ac.signal).then(() => null, e => e)
+      await headers.ready
+
+      ac.abort()
+
+      const error = await settled
+      assert.equal(error?.aborted, true, 'the rejection says the caller aborted it')
+      assert.equal(a.hits() + b.hits(), 1, 'no other node was tried')
+      for (const [url, status] of lb.getHealthStatus()) {
+        assert.equal(status.healthy, true, `${url} is still healthy`)
+      }
+    } finally {
+      headers.restore()
+      await http.destroy()
+      await a.stop()
+      await b.stop()
+    }
+  })
+
+  it('the request timeout also bounds the body read', async () => {
+    const server = await startStallingServer()
+    const http = new HttpClient({ baseUrl: server.url, retryAttempts: 1 })
+    try {
+      const started = Date.now()
+      const outcome = await settleWithin(http.get('/status', 300), 3000)
+      assert.match(outcome, /^rejected: Request timeout/, 'a stalled body ends as a timeout, not a hang')
+      assert.ok(Date.now() - started < 2000)
+    } finally {
+      await http.destroy()
+      await server.stop()
+    }
+  })
+})

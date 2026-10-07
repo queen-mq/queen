@@ -437,7 +437,10 @@ export class HttpClient {
         }
       }
 
-      return response.json()
+      // Awaited here, not returned: the body is still being read, and both the
+      // timeout (cleared in `finally`) and the abort classification below must
+      // cover that read too.
+      return await response.json()
 
     } catch (error) {
       if (signal?.aborted) {
