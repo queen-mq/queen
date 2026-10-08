@@ -45,6 +45,18 @@
 //! `Append` payload as the queue logs hold it, compressed or raw. The source
 //! sends what it reads, with no encode and no codec; [`full_entry`] rebuilds
 //! the planned entry on the standby.
+//!
+//! # The seed
+//!
+//! A second call, made once in a seeded standby's life ([`super::seed`]): "your
+//! snapshot". The standby says who it is ([`SeedRequest`]), the answer is the
+//! snapshot stream a follower of the source receives, and the node that sends
+//! it keeps its log from the snapshot's position for that reader until the
+//! standby's first read takes the hold over.
+//!
+//! ```json
+//! {"reader":"standby-5e1f09c2"}
+//! ```
 
 use std::io;
 
@@ -92,6 +104,17 @@ pub struct Request {
     /// tells the others this way, so any of them can take over the reads.
     #[serde(rename = "holdOnly", default, skip_serializing_if = "std::ops::Not::not")]
     pub hold_only: bool,
+}
+
+/// The seed's call ([`SNAPSHOT_PATH`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SeedRequest {
+    /// Who asks: the name the seeded standby will read under
+    /// ([`Request::reader`]). The node that sends the snapshot holds its log
+    /// for that name from the snapshot's position on. Empty (or no body at
+    /// all): nobody reads after this snapshot, and nothing is held.
+    #[serde(default)]
+    pub reader: String,
 }
 
 /// One application entry of the source's log.

@@ -286,8 +286,15 @@ async fn a_standby_fed_the_mirrored_entries_holds_the_sources_state() {
         .read(|r| Cursor::read(r))
         .expect("read the cursor");
     assert_eq!(cursor.position, Position::START);
-    let first = standby_entry(&cursor, request_id(1), "test://source", Position::START, 0)
-        .expect("the standby entry");
+    let first = standby_entry(
+        &cursor,
+        request_id(1),
+        "5e1f09c2",
+        "test://source",
+        Position::START,
+        0,
+    )
+    .expect("the standby entry");
     standby
         .propose(Bytes::from(encode_entry(&first).expect("encode")), deadline())
         .await

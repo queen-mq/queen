@@ -22,6 +22,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): batcher_link.rs warns, at most once every 5 s, when a promotion reaches a paused driver with no leader to send it to, when one reaches a driver whose link role is unread, and when link entries wait 2 s unplanned (the line is on the monitoring page). Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a standby's leader changes): batcher_link.rs stops the engine saying standby once a node no longer leads, so a node that led the standby no longer answers 503 `standby` after the cluster was promoted under another leader; facade/real/phase2/link.rs gains a test-only door to the leader's intake. The page says a standby refuses writes and a promoted cluster serves them, which every node now does; nothing it states changes.
 # sourceOfTruth re-read 2026-10-08 (a promotion's queue): batcher_link.rs answers, at a promotion, what the link had queued behind it: a source entry `not_standby`, a second promotion done. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a seed's hold): raft/link.rs leaves a seeded standby's first hold on the node that sends its snapshot (the call names the standby, wire.rs); seed.rs draws the standby's id before that call, and batcher_link.rs and mirror.rs write it into the standby entry. The seeded section says what a seed needs from its source, and Watch it, the section on the source's log and two settings rows follow; nothing else this page states changes.
 ---
 
 Three replicas protect you from losing a machine, and a [backup](/operate/recovery-backups/)
@@ -154,6 +155,19 @@ and never seeds again, and a node whose directory holds data, or whose peers alr
 cluster, does not seed at all: a node you empty later rejoins its own cluster like any other. So
 `QUEEN_LINK_SEED` can stay set too.
 
+The source node that sends the snapshot keeps its log from the snapshot's position for the
+standby, from the moment it is asked. The standby shows in that node's [`readers`](#watch-it)
+while node 1 is still downloading. The node keeps that log for the whole download and for
+`QUEEN_LINK_HOLD_S` after its last byte, an hour by default. That is the time node 1 has to start
+on the snapshot and read the source for the first time. If it starts later, or if that source
+node's data volume is [too full to keep its log](#the-source-keeps-its-log-for-the-standby) for a
+standby, the entries after the snapshot may be purged before the standby asks for them. It then
+ends `halted` and needs a new seed.
+
+The source's other nodes hear of the standby only at that first read, and keep nothing for it
+before. If they have purged past the snapshot's position by then, the node that sent the snapshot
+is the only one that can serve the standby until it has read past what they purged.
+
 ## Watch it
 
 `GET /api/v1/system/link` (an admin route) answers on every node of both clusters. On the
@@ -188,10 +202,10 @@ standby's leader:
 ```
 
 `position` is the last entry of the source's log the standby holds, and `id` is the name the
-standby drew for itself when it became one. In `follower`, `source` is the node being read,
-`sourceApplied` is how far that node had got when it last answered, and `lagEntries` is what was
-left to read then. The follower runs on the standby's leader only (the other nodes show `idle`),
-and its `state` is one of:
+standby drew for itself when it became one, or when it took its seed. In `follower`, `source` is
+the node being read, `sourceApplied` is how far that node had got when it last answered, and
+`lagEntries` is what was left to read then. The follower runs on the standby's leader only (the
+other nodes show `idle`), and its `state` is one of:
 
 | State | Meaning |
 |---|---|
@@ -280,12 +294,15 @@ A cluster purges its log once every follower has it. A standby is not a follower
 the source keeps the entries after the standby's position for it. The standby reads one node and
 tells the others where it is every few seconds, so all of them keep the same entries and any of
 them can take over the reads. A node writes what it keeps for whom to its data directory, so it
-still knows after a restart.
+still knows after a restart. A [seeded standby](#a-seeded-standby-for-a-source-with-a-history)
+has read nothing yet when its snapshot is made, so the node that sends the snapshot starts keeping
+its log for it then.
 
 That costs the source disk while a standby is behind, and the source's own writes come first. A
 node stops keeping its log for a standby when:
 
-- the standby has been silent for `QUEEN_LINK_HOLD_S` (an hour by default)
+- the standby has been silent for `QUEEN_LINK_HOLD_S` (an hour by default). A standby that took a
+  seed and never started is silent from the end of its download
 - the node's data volume is `QUEEN_LINK_HOLD_DISK_PCT` full (80 by default, the same as
   `QUEEN_RAFT_DISK_LOW_PCT`). The node then purges as if nobody read it, well before it would
   refuse writes, and says so in its log and with `"holding": false`
@@ -303,7 +320,7 @@ On every node of the standby:
 | `QUEEN_LINK_SOURCE_TOKEN` | unset | The source's `QUEEN_LINK_TOKEN` |
 | `QUEEN_LINK_STANDBY` | `false` | An empty cluster becomes a standby at its first election. Ignored by a cluster that holds entries of its own |
 | `QUEEN_LINK_SEED` | unset | The id of the one node that takes its first state from the source's snapshot. The same value on every node |
-| `QUEEN_LINK_NAME` | `standby-<id>` | What the source calls this standby. Each standby draws an id when it becomes one, so two standbys of one source never share a name unless you give them one |
+| `QUEEN_LINK_NAME` | `standby-<id>` | What the source calls this standby. Each standby draws an id when it becomes one, or when it takes its seed, so two standbys of one source never share a name unless you give them one |
 | `QUEEN_LINK_PIPELINE` | `64` | How many replayed entries may be on their way to commit at once. It is deeper than `QUEEN_RAFT_PIPELINE` so a standby that fell behind catches up faster than the source writes |
 
 On every node of the source:
@@ -311,7 +328,7 @@ On every node of the source:
 | Variable | Default | What it does |
 |---|---|---|
 | `QUEEN_LINK_TOKEN` | unset | The secret a standby presents to read this node. Unset, the node serves no standby |
-| `QUEEN_LINK_HOLD_S` | `3600` | How long a standby that stopped reading still keeps this node's log from being purged |
+| `QUEEN_LINK_HOLD_S` | `3600` | How long a standby that stopped reading, or that took its seed here and has not read yet, still keeps this node's log from being purged |
 | `QUEEN_LINK_HOLD_DISK_PCT` | `QUEEN_RAFT_DISK_LOW_PCT` (80) | How full the data volume may be while the node still keeps its log for a standby. 100 means never give it up |
 
 ## Limits
