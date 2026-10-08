@@ -1132,6 +1132,10 @@ impl Replicator for Told {
         self.node.applied_term_at(index)
     }
 
+    fn drop_unlogged(&self) {
+        self.node.drop_unlogged()
+    }
+
     async fn transfer_leadership(
         &self,
         to: Option<NodeId>,
