@@ -2548,7 +2548,10 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
         // A standby plans nothing of its own: a command is answered at once,
         // whoever sent it — a client, a follower, the engine's ticker, a
-        // subsystem of this node ([`link_mode`]).
+        // subsystem of this node ([`link_mode`]). Not while this node is
+        // paused: what it will lead is not read yet, so the command waits
+        // below for the election's outcome and is answered when the node
+        // begins to lead ([`RunState::refuse_queued`]).
         if !self.paused {
             if let Some(refusal) = self.link_refusal() {
                 let _ = sub.reply.send(Reply::Refused(refusal));
@@ -2732,6 +2735,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// Whether the cycle being finished may launch the next one before its own
     /// entry is proposed ([`RunState::prefetch`]): what [`Self::can_plan`] asks,
     /// with that entry counted in flight, and commands waiting.
+    ///
+    /// On an ordinary cluster only. The cycle launched early is an ordinary
+    /// one, and a standby plans the link's entries and nothing else: one that
+    /// finished a link cycle with a client's command in its queue planned it
+    /// here, and held an entry of its own, stamped with its own clock, that
+    /// its source never logged. Every node refused the next entry it replayed
+    /// (I5) and stopped for good (Jepsen `fo-crash-lz-kill`, 2026-10-08).
     fn can_prefetch(&self) -> bool {
         *PIPELINED_PLANNING
             && self.prefetch.is_none()
@@ -2740,6 +2750,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             && !self.closing
             && self.holding_until.is_none()
             && self.quiescing.is_none()
+            && self.link_due().is_none()
             && self.uncommitted() + 1 < self.cfg.pipeline
             && self.unresolved() + 1 < self.cfg.pipeline + *COMMIT_LAG_MAX
             && self.queued() > 0
@@ -2752,7 +2763,14 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// sweep, maintenance, scanner) run in cycles that launch on their own,
     /// because the maintenance walk judges committed state alone and would
     /// plan the previous cycle's watermarks again.
+    ///
+    /// An ordinary cycle, so on an ordinary cluster only, whoever asks: a
+    /// standby's cycles are the link's ([`Self::launch_link`]), and nothing
+    /// is drained here while the cluster's place in a link is not read.
     fn launch(&mut self, extra: Option<(u64, Arc<Entry>)>, steps: bool) -> Option<Launched> {
+        if self.link_due().is_some() {
+            return None;
+        }
         let batch = self.drain_batch();
         let expire = steps && self.expire_due && !self.closing;
         let kv_sweep = steps && self.kv_sweep_due && !self.closing;

@@ -17,6 +17,12 @@
 //!   FOLLOWERS the standby serves the messages the source's consumers had not
 //!   acknowledged — not the ones they had, and not the partition one of them
 //!   still holds a lease on.
+//! - [`a_standby_plans_nothing_its_clients_sent_while_it_had_no_leader`]: the
+//!   standby's leader stops while the standby's own clients keep sending and
+//!   the source keeps writing. The node that wins the election plans nothing
+//!   of what reached it meanwhile: every entry of the standby's log is still
+//!   the link's, it goes on following, and once promoted it serves the
+//!   source's messages and none of its own clients'.
 //! - [`a_standby_is_seeded_from_a_source_with_a_history`]: a source that
 //!   purged the start of its log seeds the standby's first node with its
 //!   snapshot; the other two join it; a standby it cannot serve holds none of
@@ -26,7 +32,7 @@
 //!   token serves no link.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,12 +40,14 @@ use serde_json::Value;
 
 use crate::rsm::apply::state_digest;
 use crate::rsm::batcher::BatcherConfig;
+use crate::rsm::effect::Effect;
+use crate::rsm::entry::Entry;
 use crate::rsm::facade::real::RaftFacade;
 use crate::rsm::facade::{
     ApiReq, Deadline, PopReq, PushReq, ReqCtx, Rsm, RsmBuildCtx, RsmError,
 };
 use crate::rsm::link::driver::{http_fetch, LinkConfig, LinkSetup};
-use crate::rsm::link::wire::{Answer, Request};
+use crate::rsm::link::wire::{full_entry, Answer, Request};
 use crate::rsm::replicator::raft::{ClusterConfig, RaftOpts};
 use crate::rsm::replicator::Replicator;
 use crate::rsm::store::Store;
@@ -265,6 +273,26 @@ async fn push(node: &RaftFacade, n: u64) -> Result<(), RsmError> {
     Ok(())
 }
 
+/// One push to `orders` by a client that gives up after `budget`: message
+/// `n`, on one of the same four partitions. The answer's body, if it was
+/// taken.
+async fn push_within(node: &RaftFacade, n: u64, budget: Duration) -> Result<String, RsmError> {
+    let raw = format!(
+        r#"{{"items":[{{"queue":"orders","partition":"p{}","payload":{{"n":{n}}},"transactionId":"t{n}"}}]}}"#,
+        n % 4
+    );
+    let ctx = ReqCtx::new(crate::config::DEFAULT_TENANT, Deadline::after(budget));
+    let out = node
+        .push(
+            ctx,
+            PushReq {
+                raw: raw.into_bytes(),
+            },
+        )
+        .await?;
+    Ok(out.body)
+}
+
 /// One pop of `orders` in queue mode. The messages' `n`, acknowledged or not.
 async fn pop(node: &RaftFacade, auto_ack: bool) -> Result<(Vec<u64>, Value), RsmError> {
     let out = node
@@ -384,6 +412,25 @@ fn requests_follow(source: &RaftFacade, standby: &RaftFacade) -> bool {
         request_rows(&standby.store_for_test(), &[]),
     );
     rs.iter().all(|row| rb.contains(row)) && rb.len() <= rs.len() + 2
+}
+
+/// Every application entry `node` has applied, with its index, as its own
+/// log holds them (read the way a standby of this node would read it).
+fn applied_entries(node: &RaftFacade) -> Vec<(u64, Entry)> {
+    let log = node.repl_for_test().link_source().expect("a cluster node");
+    let (mut after, mut after_term, mut out) = (0, 0, Vec::new());
+    loop {
+        match log.read(after, after_term, 8 << 20).expect("read the log") {
+            Answer::Entries { entries, .. } if entries.is_empty() => return out,
+            Answer::Entries { entries, .. } => {
+                for e in entries {
+                    (after, after_term) = (e.index, e.term);
+                    out.push((e.index, full_entry(&e.stored).expect("rebuild the entry")));
+                }
+            }
+            other => panic!("a node did not serve its own log: {other:?}"),
+        }
+    }
 }
 
 /// Wait until the standby holds what the source holds: its leader's follower
@@ -649,6 +696,226 @@ async fn a_standby_cluster_follows_its_source_and_is_promoted() {
     for n in 100..103 {
         push(&source[0], n).await.expect("the source still serves");
     }
+
+    close(standby).await;
+    close(source).await;
+    for d in src_dirs.into_iter().chain(sb_dirs) {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// A standby's leader stops while the standby's own clients keep sending (a
+/// standby answers them `standby` and they retry, as the docs tell them to)
+/// and the source keeps writing.
+///
+/// A command that reaches a node while no leader is known waits in its
+/// driver for the election's outcome, because the node may win and plan it.
+/// A follower forwards to the new leader the moment raft names it, which is
+/// before that node has applied the first entry of its term (I13) and so
+/// before its driver knows what it leads: the commands of the other node's
+/// clients wait there. The node that wins a STANDBY's election plans none of
+/// them. Every entry of the standby's log is still the link's, the standby
+/// goes on following, and once promoted it serves the source's messages,
+/// each once, and not one of its own clients'.
+///
+/// It used to plan what had waited, in the cycle its first link cycle
+/// launched early: an entry of its own, stamped with its own clock, ahead of
+/// the source entries it had still to replay. Every node refused the next of
+/// those (I5: its stamp was behind) and stopped for good, long before anyone
+/// asked for a promotion (Jepsen `fo-crash-lz-kill`, 2026-10-08).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_standby_plans_nothing_its_clients_sent_while_it_had_no_leader() {
+    let _one = serial().await;
+    log_init();
+
+    let src_dirs: Vec<PathBuf> = (0..3).map(|_| scratch("election-source")).collect();
+    let src_ports = free_ports(3);
+    let source = open_cluster(&src_dirs, &src_ports, Some(TOKEN), LinkSetup::default).await;
+    let sb_dirs: Vec<PathBuf> = (0..3).map(|_| scratch("election-standby")).collect();
+    let sb_ports = free_ports(3);
+    let sources = raft_addrs(&src_ports);
+    let setup = move || LinkSetup {
+        source: Some(LinkConfig {
+            sources: sources.clone(),
+            token: Some(TOKEN.to_string()),
+            name: None,
+        }),
+        standby: true,
+        seed: None,
+        fetch: None,
+    };
+    let mut standby = open_cluster(&sb_dirs, &sb_ports, None, &setup).await;
+    for n in 0..20 {
+        push(&source[n as usize % 3], n).await.expect("push");
+    }
+    converge(&source, &standby, "before the standby's leader stops").await;
+
+    // The source's clients go on writing: what they write while the standby
+    // has no leader is what its next leader replays first.
+    let writing = Arc::new(AtomicBool::new(true));
+    let writer = tokio::spawn({
+        let (source, writing) = (source.clone(), writing.clone());
+        async move {
+            let mut n = 20;
+            while writing.load(Ordering::Relaxed) {
+                push(&source[n as usize % 3], n)
+                    .await
+                    .expect("push to the source");
+                n += 1;
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            n
+        }
+    });
+
+    // The standby's own clients, on the two nodes that will be left: each
+    // sends a write, gives up on it after 10 ms and sends the next, sooner
+    // when it got no answer than when it was told `standby`.
+    const CLIENTS: usize = 16;
+    let b = leader_of(&standby).await;
+    let stopped = standby.remove(b);
+    let sending = Arc::new(AtomicBool::new(true));
+    let refused = Arc::new(AtomicU64::new(0));
+    let taken = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let mut clients = Vec::new();
+    for (i, node) in standby.iter().enumerate() {
+        for c in 0..CLIENTS {
+            let (node, sending, refused, taken) = (
+                node.clone(),
+                sending.clone(),
+                refused.clone(),
+                taken.clone(),
+            );
+            clients.push(tokio::spawn(async move {
+                let mut n = 1_000_000 * (1 + (i * CLIENTS + c) as u64);
+                while sending.load(Ordering::Relaxed) {
+                    let wait = match push_within(&node, n, Duration::from_millis(10)).await {
+                        Ok(body) => {
+                            taken.lock().expect("taken").push(body);
+                            5
+                        }
+                        Err(RsmError::Standby) => {
+                            refused.fetch_add(1, Ordering::Relaxed);
+                            5
+                        }
+                        Err(_) => 1,
+                    };
+                    n += 1;
+                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                }
+            }));
+        }
+    }
+    let taken = move || taken.lock().expect("taken").clone();
+    wait_for("the standby refuses its clients' writes", || {
+        refused.load(Ordering::Relaxed) > 0
+    })
+    .await;
+
+    // The standby's leader stops, and one of the other two wins.
+    close(vec![stopped]).await;
+    let w = leader_of(&standby).await;
+    // It replays what the source wrote meanwhile, and its clients still send.
+    let mark = source[leader_of(&source).await].health().applied;
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        assert!(
+            taken().is_empty(),
+            "a standby took a client's write: {:?}",
+            taken()
+        );
+        for node in &standby {
+            assert_ne!(
+                node.health().role,
+                "stopped",
+                "a node of the standby refused an entry of its log and stopped"
+            );
+        }
+        let status = link_status(&standby[w]).await;
+        if status["position"]["index"].as_u64() >= Some(mark) {
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "the standby's new leader did not replay up to source entry {mark}: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    sending.store(false, Ordering::Relaxed);
+    for client in clients {
+        client.await.expect("a client of the standby");
+    }
+    writing.store(false, Ordering::Relaxed);
+    let mut written = writer.await.expect("the source's clients");
+    assert!(
+        taken().is_empty(),
+        "a standby took a client's write: {:?}",
+        taken()
+    );
+
+    // The standby still follows: it holds what its source holds, and every
+    // entry of its log is the link's — the entry that made it a standby, and
+    // the source's entries, each with the position it brings.
+    converge(&source, &standby, "after the standby's leader stopped").await;
+    for node in &standby {
+        for (index, entry) in applied_entries(node) {
+            assert!(
+                entry.effects.iter().any(
+                    |e| matches!(e, Effect::FlagSet { key, .. } if crate::rsm::link::is_link_flag(key))
+                ),
+                "entry {index} of the standby's log is not the link's: {entry:?}"
+            );
+        }
+    }
+
+    // The node that stopped comes back and follows with the others.
+    let (d, c, link) = (
+        sb_dirs[b].clone(),
+        cluster_config(&sb_ports, b as u64 + 1, None),
+        setup(),
+    );
+    let back = tokio::task::spawn_blocking(move || open_node(&d, c, link))
+        .await
+        .expect("reopen the stopped node");
+    standby.insert(b, Arc::new(back));
+    for n in written..written + 10 {
+        push(&source[n as usize % 3], n).await.expect("push");
+    }
+    written += 10;
+    converge(&source, &standby, "after the stopped node came back").await;
+
+    // Promoted, it serves what the source's clients wrote, each message once.
+    // Nothing its own clients sent while it was a standby was kept for now.
+    let b = leader_of(&standby).await;
+    let (status, promoted) = api(&standby[b], "POST", "/api/v1/system/link/promote").await;
+    assert_eq!((status, promoted["role"].as_str()), (200, Some("promoted")));
+    let mut served: Vec<u64> = Vec::new();
+    let end = Instant::now() + Duration::from_secs(30);
+    while served.len() < written as usize {
+        let (ns, _) = pop(&standby[b], true).await.expect("pop");
+        served.extend(ns);
+        assert!(
+            Instant::now() < end,
+            "the promoted cluster served {} of {written} messages",
+            served.len()
+        );
+    }
+    // And what is left, if anything, on each of the four partitions.
+    for _ in 0..4 {
+        let (more, _) = pop(&standby[b], true).await.expect("pop");
+        served.extend(more);
+    }
+    served.sort_unstable();
+    let own: Vec<u64> = served.iter().copied().filter(|n| *n >= written).collect();
+    assert!(
+        own.is_empty(),
+        "the promoted cluster serves what its own clients sent while it was a standby: {own:?}"
+    );
+    assert_eq!(
+        served,
+        (0..written).collect::<Vec<u64>>(),
+        "the source's messages, each once"
+    );
 
     close(standby).await;
     close(source).await;

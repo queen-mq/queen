@@ -18,6 +18,7 @@ verifiedBy:
   - server/src/rsm/tests/link.rs
   - server/src/rsm/tests/link_cluster.rs
 # sourceOfTruth re-read 2026-10-08 (promotion's answer): batcher_link.rs answers a promotion once the leader's driver plans as an ordinary leader and its engine serves, a step after the promotion's entry applies, and facade/real/phase2/link.rs says so. Promote, step 2, now says when the route answers; nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a standby's election): batcher_link.rs answers a client's command that waited out the standby's own election with the standby refusal when the node that wins begins to lead (it stayed queued, and the first replayed entry had it planned). "Refuses writes" now says what such a write is answered; nothing else this page states changes.
 ---
 
 Three replicas protect you from losing a machine, and a [backup](/operate/recovery-backups/)
@@ -55,7 +56,7 @@ While it is a standby, the cluster:
 | | |
 |---|---|
 | Answers reads | The dashboard, `GET` routes and `/metrics/prometheus` work on every node and show the source's state |
-| Refuses writes | Push, pop, ack, transactions, KV writes and timers answer `503` with `"code": "standby"` and `Retry-After: 1`, on every node. A client that keeps retrying is served the moment the standby is promoted |
+| Refuses writes | Push, pop, ack, transactions, KV writes and timers answer `503` with `"code": "standby"` and `Retry-After: 1`, on every node. A write that arrives while the standby elects a leader of its own waits for the election, as on any cluster, and then gets the same answer. A client that keeps retrying is served the moment the standby is promoted |
 | Runs nothing of its own | No retention, no timer fires, no expiry: the source ran them, and what they did arrives as entries. Connectors and the S3 sink work under a lease, which is a write, so on a standby they never start |
 
 ## What a promotion can lose

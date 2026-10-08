@@ -1,7 +1,8 @@
 //! The driver while its cluster is part of a link ([`crate::rsm::link`]).
 //!
 //! A STANDBY's driver plans nothing of its own. Its client queue stays empty
-//! ([`RunState::enqueue`] answers every command with the standby refusal), its
+//! ([`RunState::enqueue`] answers every command with the standby refusal, and
+//! [`RunState::refuse_queued`] the ones that waited out the election), its
 //! leader steps do not run — no request-id expiry, no KV sweep, no timer fire,
 //! no retention, no cluster-version raise: the source's leader ran them, and
 //! what they did arrives as entries — and the consumption engine is never told
@@ -401,12 +402,31 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         self.adopt_link(mode);
     }
 
-    /// Take `mode` as the cluster's place in a link, and tell the engine
-    /// whether the cluster takes client commands at all.
+    /// Take `mode` as the cluster's place in a link, tell the engine whether
+    /// the cluster takes client commands at all, and answer the commands that
+    /// waited for this node to lead when it does not.
     pub(super) fn adopt_link(&mut self, mode: LinkMode) {
         self.link = mode;
         if let Some(e) = &self.engine {
             e.set_standby(matches!(self.link, LinkMode::Standby(_)));
+        }
+        self.refuse_queued();
+    }
+
+    /// Answer every command in the queue what a command is answered on a
+    /// cluster that is not an ordinary one ([`Self::link_refusal`]); nothing
+    /// on an ordinary cluster. A command that arrives while this node is
+    /// paused with no leader known (an election) is queued, because the node
+    /// may win and plan it. One that wins a standby's election plans nothing
+    /// of its own: the command is refused as it would have been a moment
+    /// later, not kept until a promotion that may be hours away, and never
+    /// planned ([`RunState::can_prefetch`]).
+    pub(super) fn refuse_queued(&mut self) {
+        let Some(refusal) = self.link_refusal() else {
+            return;
+        };
+        while let Some(sub) = self.lane.pop_front().or_else(|| self.queue.pop_front()) {
+            let _ = sub.reply.send(Reply::Refused(refusal.clone()));
         }
     }
 

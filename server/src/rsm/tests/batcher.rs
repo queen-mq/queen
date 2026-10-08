@@ -29,7 +29,9 @@ use std::time::{Duration, Instant};
 use crate::rsm::apply::{
     self, state_digest, Applier, Committed as ApplyCommitted, NoNotify, SystemClock,
 };
-use crate::rsm::batcher::{Batcher, BatcherConfig, Command, CommandTx, Reply, Submission};
+use crate::rsm::batcher::{
+    Batcher, BatcherConfig, Command, CommandTx, LinkBoot, Reply, Submission,
+};
 use crate::rsm::effect::Effect;
 use crate::rsm::entry::{decode_entry, Outcome, PushVerdict};
 use crate::rsm::planner::{EffectsCommand, PushCommand};
@@ -536,6 +538,75 @@ async fn step_down_with_four_in_flight_leaves_committed_state_equal_to_the_log()
     let _ = std::fs::remove_dir_all(&apply_dir);
 
     fx.close().await;
+}
+
+/// A command that arrives while no leader is known waits for the election:
+/// this node may win it, and plans it then. A node that wins a STANDBY's
+/// election plans the link's entries and nothing else, so what waited is
+/// answered as any client command is on a standby, and is never planned.
+///
+/// It used to be planned, by the cycle a link cycle launches early
+/// (`RunState::can_prefetch` did not look at the link): the standby then held
+/// an entry of its own, stamped with its own clock, that its source never
+/// logged. Every node refused the next entry it replayed (I5: its clock was
+/// behind) and stopped for good, 67 s before anyone asked for a promotion
+/// (Jepsen `fo-crash-lz-kill` and `fo-repro-primaries-1`, 2026-10-08: the
+/// standby's leader died, its clients kept retrying, another node won).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_command_that_waited_out_an_election_is_refused_by_the_standby_that_wins() {
+    let dir = scratch("standby-queued");
+    let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+    let fake = Arc::new(FakeReplicator::new(1));
+    // No leader known: an election.
+    fake.step_down(None);
+    let (link, link_rx) = tokio::sync::mpsc::channel(8);
+    let (tx, handle) = Batcher::new(store.clone(), fake.clone(), small_pipeline(4, 1_000))
+        .with_link(link_rx, Some(LinkBoot::empty("test://source")))
+        .spawn();
+
+    // A client's push arrives and waits for the election's outcome.
+    let (sub, mut rx) = Submission::new(push(1, "q", "p0", &["a"]));
+    tx.send(sub).await.expect("send");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "the push waits while no leader is known"
+    );
+
+    // This node wins, and the cluster it leads is a standby.
+    fake.set_role(Role::Leader { term: 2 });
+    let reply = tokio::time::timeout(Duration::from_secs(5), &mut rx)
+        .await
+        .expect("the push is answered once the node leads")
+        .expect("reply");
+    match reply {
+        Reply::Refused(r) => {
+            assert_eq!(r.code, crate::rsm::link::STANDBY_CODE, "{r:?}");
+            assert!(r.retryable, "{r:?}");
+        }
+        other => panic!("a standby planned or kept a client's push: {other:?}"),
+    }
+
+    // What the standby logged is the entry that makes it one: nothing of the
+    // client's, then or a moment later.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let proposals = fake.proposals();
+    assert!(!proposals.is_empty(), "the standby entry was logged");
+    for bytes in &proposals {
+        let entry = decode_entry(bytes).expect("decode");
+        assert!(
+            !entry
+                .effects
+                .iter()
+                .any(|e| matches!(e, Effect::Append { .. })),
+            "a standby logged a client's push: {entry:?}"
+        );
+    }
+
+    drop(tx);
+    drop(link);
+    let _ = handle.await;
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// I6: a retry with the same request id returns the recorded outcome and plans
