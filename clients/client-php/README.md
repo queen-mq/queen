@@ -603,3 +603,32 @@ A batch callback counts once; completion does not imply ACK success. These are
 not separate processes. Reporting adds no background process, does not restart
 workers, autoscale or enable remote commands. With reporting off there is no
 additional KV traffic.
+
+#### Match supervision to the consumer lifetime
+
+Each fluent `consume()->execute()` execution gets a new instance ID and fresh
+counters, even when it reuses the client, builder, queue, hostname and publication
+group. A normal exit caused by `->limit(...)` or `->idleMillis(...)` publishes
+`stopped` with zero running workers. Repeated short executions can show many
+stopped instances for a PHP process whose outer loop is still running. Compare
+instance IDs and application logs before diagnosing it.
+
+The final observation uses the same poll-dependent TTL described above: 90
+seconds with the default 30-second poll, rather than the 60-second TTL used by
+the other SDKs. Expired records can remain visible until the broker sweeps them.
+Publication remains cooperative; a long handler can prevent heartbeats even
+while the process is alive.
+
+For a persistent standalone consumer, enable supervision on one execution and
+omit limits that deliberately end it. Let the consumer finish under its existing
+shutdown policy before closing the client. Several executions in one process
+have separate instances and concurrency budgets. Laravel workers continue to
+use their existing process supervisor and its remote status contract.
+
+If an application-owned scheduler rotates queues through short executions, keep
+per-call supervision off when you need the scheduler's lifetime status. Publish
+the [consumer status contract](https://queenmq.com/reference/supervisor-status/#reporting-an-application-owned-scheduler)
+with one ID per scheduler lifetime, stable worker pool names and counters across
+turns. The fluent supervision option does not share a reporter or override its
+instance ID. Preserve limits used for fairness, the shared worker budget and
+existing ACK/NACK, lease renewal and cancellation behavior.

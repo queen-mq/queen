@@ -20,6 +20,16 @@ sourceOfTruth:
   - clients/client-js/client-v2/consumer/ConsumerManager.js
   - clients/client-js/client-v2/consumer/Supervision.js
   - clients/client-js/client-v2/builders/QueueBuilder.js
+  - clients/client-py/queen/consumer/consumer_manager.py
+  - clients/client-py/queen/consumer/supervision.py
+  - clients/client-go/consumer_manager.go
+  - clients/client-go/supervision.go
+  - clients/client-rust/src/consumer.rs
+  - clients/client-rust/src/supervision.rs
+  - clients/client-cpp/queen_client.hpp
+  - clients/client-php/src/Consumer/ConsumerManager.php
+  - clients/client-php/src/Consumer/Supervision.php
+  - clients/client-cli/cmd/tail.go
 verifiedBy:
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
@@ -28,13 +38,21 @@ verifiedBy:
   - clients/client-php/tests/LaravelSupervisorCommandTest.php
   - clients/client-php/tests/LaravelSupervisorTest.php
   - clients/client-js/test-v2/consumer-unit/supervision.test.js
+  - clients/client-py/tests/client_unit/test_supervision.py
+  - clients/client-go/supervision_test.go
+  - clients/client-rust/tests/supervision_wire.rs
+  - clients/client-cpp/test_consumer.cpp
+  - clients/client-php/tests/ConsumerSupervisionTest.php
+  - clients/client-cli/cmd/supervision_test.go
 # sourceOfTruth re-read 2026-10-07 (supervisors refresh): Supervisors.vue drops its refresh checkbox; how it reads and judges publications is unchanged. Nothing this page states changes.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.
-The contract is independent of the publisher's language. The current implementations are the PHP
-and Rust engines of the Laravel supervisor; both run PHP workers. Another client can implement a
-supervisor and publish the same contract without a new dashboard integration.
+The publication envelope is independent of the publisher's language. The PHP and Rust engines
+of the Laravel process supervisor use `queen.supervisor.status/v1`; all six SDKs and queenctl
+use the [consumer document](#optional-sdk-consumer-supervision), `queen.consumer.status/v1`.
+An application-owned scheduler can publish the consumer contract without a new dashboard
+integration.
 
 ## Identity and keys
 
@@ -56,8 +74,8 @@ coordination/v1/<scope>/<instance_id>
 | Namespace | `queen-supervisor` by convention. Custom namespaces remain supported through the dashboard's Source setting. |
 | Group | The first segment, a stable application/deployment name. In Laravel this is `supervisor.remote_status.key`, whose default is a slug of `APP_NAME` and `APP_ENV`. |
 | Group syntax | 1–255 ASCII letters, digits, dots, underscores or hyphens; the first character is a letter or digit. Case-sensitive; lowercase is recommended. No slashes or automatic normalization. The exact name `coordination` is reserved. |
-| Instance | 16–128 lowercase hexadecimal characters. Generate an ID for each master process lifetime, unique among publishers in the group. Keep it for heartbeats; generate another after a restart. Hostname and PID are descriptive fields, not identity. |
-| Slot | `<group>/<instance_id>`. Each process writes only its own slot. Different engines may share a group, but must not reuse an instance ID. |
+| Instance | 16–128 lowercase hexadecimal characters. Generate an ID for each observed runtime lifetime: a master process, executed SDK consume loop or application-owned scheduler. Keep it for heartbeats; generate another when that runtime starts again. Hostname and PID are descriptive fields, not identity. |
+| Slot | `<group>/<instance_id>`. Each publisher writes only its own slot. Different engines may share a group, but must not reuse an instance ID. |
 
 The full identity is the acting tenant/cluster, namespace, group and instance ID. Give applications
 and environments that share a store distinct groups, such as `pmsintool-production` and
@@ -182,12 +200,15 @@ schema: `queen.consumer.status/v1`. A consumer instance identifies one invocatio
 of a consume loop; multiple loops in one process have different instance IDs.
 Consumers are internal tasks, not additional operating-system processes.
 
-In JavaScript, the reporter is created for each `consume()` call. Reusing a
-client, builder, queue or publication group does not preserve its identity or
-counters. A normal exit from `.limit(...)` or `.idleMillis(...)` ends that
-instance and publishes `stopped` with zero running workers. Repeated short calls
-therefore leave multiple recent stopped observations for the same hostname.
-The SDK does not aggregate them into process or pod liveness.
+This lifetime applies to all six SDKs: an awaited JavaScript or Python consume
+execution, Go `Consume(...).Execute(...)`, Rust `consume()` or `consume_batch()`,
+C++ `consume()`, and PHP fluent `consume()->execute()`. `queenctl tail` uses one
+instance per command invocation. Reusing a client, builder, queue or publication
+group does not preserve identity or counters. A normal exit from a message or
+idle limit ends that instance and publishes `stopped` with zero running workers.
+Repeated short executions therefore leave multiple recent stopped observations
+for the same hostname. SDK reporters do not aggregate them into process or pod
+liveness. See [client APIs and timing differences](/start/clients/#consumer-supervision).
 
 Reporting is explicitly enabled by the application and defaults to off. A disabled
 reporter creates no timer, task, thread or KV traffic. The standard interval is 10
@@ -259,9 +280,11 @@ error text, credentials or arbitrary client configuration belong in these record
 
 A scheduler may own persistent worker slots while using short SDK consume calls
 to rotate between queues. To observe that runtime, implement a publisher of
-`queen.consumer.status/v1` with the scheduler's lifetime. The JavaScript SDK
-does not expose a shared reporter or an instance-ID override; its `.supervision()`
-option continues to describe individual consume calls.
+`queen.consumer.status/v1` with the scheduler's lifetime. The SDK fluent
+supervision options do not expose a shared reporter or an instance-ID override;
+they describe individual consume executions. The same applies to a shell loop
+that repeatedly starts `queenctl tail`: omit `--supervision-group` on its short
+commands when publishing the outer scheduler's lifetime instead.
 
 Generate one unique instance ID when the scheduler starts and keep it for every
 heartbeat and its final status. Replicas share a publication group but use

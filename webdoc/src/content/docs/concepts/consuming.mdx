@@ -18,9 +18,25 @@ sourceOfTruth:
   - clients/client-js/client-v2/consumer/ConsumerManager.js
   - clients/client-js/client-v2/consumer/Supervision.js
   - clients/client-js/client-v2/builders/QueueBuilder.js
+  - clients/client-py/queen/consumer/consumer_manager.py
+  - clients/client-py/queen/consumer/supervision.py
+  - clients/client-go/consumer_manager.go
+  - clients/client-go/supervision.go
+  - clients/client-rust/src/consumer.rs
+  - clients/client-rust/src/supervision.rs
+  - clients/client-cpp/queen_client.hpp
+  - clients/client-php/src/Consumer/ConsumerManager.php
+  - clients/client-php/src/Consumer/Supervision.php
+  - clients/client-cli/cmd/tail.go
 verifiedBy:
   - clients/client-js/test-v2/docs.js
   - clients/client-js/test-v2/consumer-unit/supervision.test.js
+  - clients/client-py/tests/client_unit/test_supervision.py
+  - clients/client-go/supervision_test.go
+  - clients/client-rust/tests/supervision_wire.rs
+  - clients/client-cpp/test_consumer.cpp
+  - clients/client-php/tests/ConsumerSupervisionTest.php
+  - clients/client-cli/cmd/supervision_test.go
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the consumption engine drops a whole-queue group's idle parts and loads them back on the next append, and a new partition's first message reaches every group; the consumption engine drops a whole-queue group's idle parts and loads them back on the next append; facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*; /api/v1/raft/members reports anonBytes. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (JS nack scope): ConsumerManager.js in each() mode now skips only the nacked
 # partition's later messages and handles the other partitions of the pop. Nothing this page states changes.
@@ -191,46 +207,50 @@ A pop takes its options in the query string. The SDKs expose the same ones as bu
 - A new group skips the backlog by default. Use `subscriptionMode('all')` to read what was pushed
   before it existed.
 
-## Optional JavaScript consumer supervision
+## Optional SDK consumer supervision
 
-Add `.supervision({ group: 'billing-production' })` before `.consume(...)` to publish runtime
-observations to the dashboard's Supervisors page. Reporting is off by default; `.supervision(false)`
-disables it. The publication group identifies the application/deployment, separately from the
-consumer group. Each consume invocation has its own identity, including multiple invocations in
-one process.
+All six SDKs can publish runtime observations to the dashboard's Supervisors page. Enable
+[supervision for your client](/start/clients/#consumer-supervision); reporting is off by default.
+The publication group identifies the application/deployment, separately from the consumer group.
+Each executed consume loop has its own identity, including multiple executions in one process.
+`queenctl tail --supervision-group` uses the Go reporter for one tail invocation.
 
 The report includes live consumer tasks, active handlers, completed and failed handler calls,
 and the oldest in-flight handler's age. A batch callback counts as one handler call. Completion
 is not proof of a successful acknowledgement, and a heartbeat does not prove forward progress.
 Reporting uses the existing authenticated KV API, with bounded publication time and TTLs;
-publication failures do not stop consumption. The client README lists the timings. This does not
+publication failures do not stop consumption. The client READMEs list their timings. This does not
 restart or scale processes, and manual `pop()` or stream runners do not activate the reporter.
 
 ### Persistent consumers and short scheduler turns
 
-The reporter lives for one `consume()` invocation, not for the `Queen` client or process.
-For a persistent consumer, enable supervision on the call and let it keep polling. Pass an
-`AbortSignal` to `consume(handler, { signal })`; on shutdown, abort it, await the consume promise
-to drain active handlers, then close the client.
+The reporter lives for one executed consume loop, not for the client object or process.
+For a persistent consumer, enable supervision on that execution and let it keep polling.
+Use the SDK's shutdown mechanism and wait for the consume execution to finish before closing
+the client. For the CLI, use one `tail --follow` invocation without stopping limits.
 
 Each new call gets a new instance ID and starts its counters from zero, even with the same
 client, queue, hostname and publication group. A call that finishes normally because of
-`.limit(...)` or `.idleMillis(...)` reports `stopped`, just as an aborted call does. Its final
-observation has zero running workers and a 60-second TTL from its publication. An expired record
-can remain visible until the broker sweeps it.
+message or idle limits reports `stopped` when its workers exit, just as an orderly shutdown does.
+Its final observation has zero running workers and the reporter's TTL from its publication:
+60 seconds for JavaScript, Python, Go, Rust, C++ and queenctl. PHP uses a poll-dependent TTL,
+90 seconds with the default 30-second poll. An expired record can remain visible until the
+broker sweeps it. PHP publication is cooperative, so a blocked handler or poll can delay it.
 
 For example, an application that rotates between queues with repeated
-`.limit(1).idleMillis(1000).consume(handler)` calls can show dozens of recent `stopped` instances for
+JavaScript `.limit(1).idleMillis(1000).consume(handler)` calls can show dozens of recent `stopped` instances for
 one pod while its outer worker loop continues. Those cards describe finished calls. They do not
 establish that the pod stopped or that processing failed; compare instance IDs and application
 logs. A fixed publication group collects these observations but does not merge their identities.
 
 If the application owns persistent worker slots that move between queues, leave supervision off
 on the short calls and [publish the scheduler's status](/reference/supervisor-status/#reporting-an-application-owned-scheduler)
-with one ID for its lifetime. The JavaScript API has no shared reporter or instance-ID option.
-Keep the scheduler's limits and worker budget: removing `.limit(1)` may let one queue occupy a
-slot indefinitely and prevent the intended rotation. Several persistent consume calls instead
-produce several instances in one process, each with its own concurrency budget.
+with one ID for its lifetime. The SDK fluent supervision options have no shared reporter or
+instance-ID override. Keep the scheduler's limits and worker budget: removing a per-turn
+message limit may let one queue occupy a slot indefinitely and prevent the intended rotation.
+Several persistent consume executions instead produce several instances in one process,
+each with its own concurrency budget. The same lifetime rule applies to a shell loop that
+repeatedly starts limited `queenctl tail` commands.
 
 ## Next
 
