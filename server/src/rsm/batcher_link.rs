@@ -730,6 +730,10 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// the consumption engine serves from the cursor rows as they are — their
     /// leases live on, as across any leader change.
     ///
+    /// What the link sent before the promotion's entry was proposed, and no
+    /// cycle took, is answered here: a promoted cluster plans no link entry,
+    /// and the standby's follower awaits the answer of each entry it sent.
+    ///
     /// Whoever asked for the promotion is answered here, last: the command
     /// they send next is planned by this driver or served by the engine.
     pub(super) fn check_promotion(&mut self) {
@@ -763,6 +767,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             if let Some(term) = self.planning_term {
                 e.on_leader(term, self.next_index - 1);
             }
+        }
+        // What is still queued for the link: each is answered what it would
+        // be had it arrived now, a source entry refused and a second
+        // promotion done. Left there, they waited for this node to stop
+        // leading ([`Self::fail_link`]).
+        for sub in std::mem::take(&mut self.link_queue) {
+            self.on_link(sub);
         }
         for reply in asked {
             let _ = reply.send(Reply::Done {

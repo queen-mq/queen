@@ -32,6 +32,10 @@
 //!   the promoted cluster took is answered as taken — and a command that
 //!   reached a node while a standby elected it is refused once the node
 //!   leads, and planned neither then nor at the promotion.
+//! - **behind a promotion**
+//!   ([`what_the_link_queued_behind_a_promotion_is_answered`]): what the link
+//!   had queued when the promotion's entry was proposed is answered once the
+//!   cluster is promoted.
 //! - **the follower** ([`the_follower_follows_its_source_and_says_why_when_it_cannot`]):
 //!   the task of [`crate::rsm::link::driver`] against a source it reads
 //!   in-process — it follows, leaves its hold on the source's log, and reports
@@ -1528,6 +1532,128 @@ async fn a_command_that_waited_out_a_standbys_election_is_never_planned() {
     a.shut().await;
     let _ = std::fs::remove_dir_all(da);
     b.end(engine, told).await;
+}
+
+/// The waker of a reply the driver gives (see [`AtTheAnswer`]): at that
+/// instant, on the driver's own task and before it does anything else, the
+/// link's channel is handed `send`. The driver takes them all in its next
+/// look at the link, with no cycle in between.
+struct ThenTheLink {
+    link: LinkTx,
+    send: std::sync::Mutex<Vec<LinkSubmission>>,
+    /// Whether the link's channel took every one.
+    sent: AtomicBool,
+    answered: tokio::sync::Notify,
+}
+
+impl std::task::Wake for ThenTheLink {
+    fn wake(self: Arc<Self>) {
+        let mut all = true;
+        for sub in self.send.lock().expect("send").drain(..) {
+            all &= self.link.try_send(sub).is_ok();
+        }
+        self.sent.store(all, Ordering::SeqCst);
+        self.answered.notify_one();
+    }
+}
+
+/// What the link sent behind a promotion is answered at the promotion.
+///
+/// A submission that reaches the driver before the promotion's entry is
+/// proposed is queued for a cycle. A promoted cluster plans no link entry, so
+/// what was still queued then waited for the node to stop leading: the
+/// standby's follower, which awaits each of its entries' answers, stayed
+/// parked on a promoted cluster (read in the code, 2026-10-08). Each is
+/// answered what it would be had it arrived then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_the_link_queued_behind_a_promotion_is_answered() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    let mut a = Cluster::open(scratch("behind-source"));
+    a.start_with(quiet_cfg(), None);
+    push_created(&a.command(push(1, "q", "p0", &["a"])).await);
+    push_created(&a.command(push(2, "q", "p1", &["b"])).await);
+    a.stop().await;
+    let entries = source_entries(&a, Position::START);
+    assert_eq!(entries.len(), 2, "the two pushes");
+    let mirror = |prev: u64, e: &(u64, u64, Arc<Entry>)| LinkOp::Mirror {
+        prev,
+        index: e.0,
+        term: e.1,
+        entry: e.2.clone(),
+    };
+
+    let mut b = Cluster::open(scratch("behind-standby"));
+    b.start_with(quiet_cfg(), Some(LinkBoot::empty("test://source")));
+    done(b.link(mirror(0, &entries[0])).await, "the first entry");
+
+    // A promotion, the source's next entry and a second promotion reach the
+    // driver in one look: sent at the instant it answers a client's push,
+    // which it does between two looks at the link.
+    let (promote, promoted) = LinkSubmission::new(LinkOp::Promote);
+    let (next, mirrored) = LinkSubmission::new(mirror(entries[0].0, &entries[1]));
+    let (again, promoted_again) = LinkSubmission::new(LinkOp::Promote);
+    let probe = Arc::new(ThenTheLink {
+        link: b.driver().link.clone(),
+        send: std::sync::Mutex::new(vec![promote, next, again]),
+        sent: AtomicBool::new(false),
+        answered: tokio::sync::Notify::new(),
+    });
+    let waker = Waker::from(probe.clone());
+    let (write, refusal) = Submission::new(push(100, "q", "p9", &["z"]));
+    // Outside the runtime's poll budget, which wakes a waker too: nothing but
+    // the answer wakes the probe.
+    let mut refusal = tokio::task::unconstrained(refusal);
+    assert!(
+        Pin::new(&mut refusal)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending(),
+        "nothing was sent yet"
+    );
+    b.driver().tx.send(write).await.expect("send command");
+    tokio::time::timeout(Duration::from_secs(30), probe.answered.notified())
+        .await
+        .expect("the push was never answered");
+    let Poll::Ready(reply) = Pin::new(&mut refusal).poll(&mut Context::from_waker(&waker)) else {
+        panic!("woken without an answer");
+    };
+    refused(
+        reply.expect("await reply"),
+        link::STANDBY_CODE,
+        true,
+        "a client write on a standby",
+    );
+    assert!(
+        probe.sent.load(Ordering::SeqCst),
+        "the link's channel took the three"
+    );
+
+    let answer = |what: &'static str, rx: tokio::sync::oneshot::Receiver<Reply>| async move {
+        tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .unwrap_or_else(|_| panic!("{what}: not answered within 30 s"))
+            .expect("await link reply")
+    };
+    done(answer("the promotion", promoted).await, "the promotion");
+    refused(
+        answer("a source entry queued behind the promotion", mirrored).await,
+        NOT_STANDBY_CODE,
+        false,
+        "a source entry queued behind the promotion",
+    );
+    done(
+        answer("a promotion queued behind the promotion", promoted_again).await,
+        "a promotion queued behind the promotion",
+    );
+
+    drop((waker, probe));
+    let (da, db) = (a.dir.clone(), b.dir.clone());
+    a.shut().await;
+    b.shut().await;
+    let _ = std::fs::remove_dir_all(da);
+    let _ = std::fs::remove_dir_all(db);
 }
 
 // ---------------------------------------------------------------------------
