@@ -1,5 +1,5 @@
 ---
-title: S3 sink
+title: "S3 sink: mirror queues to JSONL or Parquet"
 description: "Mirror queues into an S3-compatible bucket as JSONL or Parquet from inside the broker: a MinIO setup to try, how one writer per queue lands every record exactly once, the object layout, a bucket per tenant through the control plane, every setting, and the lag to watch."
 type: how-to
 tier: use
@@ -29,6 +29,7 @@ verifiedBy:
   - connectors/queen-s3/tests/driver_shutdown.rs
   - connectors/queen-s3/tests/parquet_envelope.rs
 sidebar:
+  label: "S3 sink"
   order: 7.9
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): trace expiry runs in bounded steps. Nothing this page states changes.
 ---

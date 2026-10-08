@@ -461,12 +461,12 @@
 /deploy/postgres/                            /operate/                      301
 /deploy/sqs                                  /operate/                      301
 /deploy/sqs/                                 /operate/                      301
-/deploy/s3                                   /operate/                      301
-/deploy/s3/                                  /operate/                      301
+/deploy/s3                                   /guides/s3/                    301
+/deploy/s3/                                  /guides/s3/                    301
 /reference/sqs                               /reference/                    301
 /reference/sqs/                              /reference/                    301
-/reference/s3                                /reference/                    301
-/reference/s3/                               /reference/                    301
+/reference/s3                                /guides/s3/                    301
+/reference/s3/                               /guides/s3/                    301
 /reference/security/postgres-tls             /operate/security/             301
 /reference/security/postgres-tls/            /operate/security/             301
 /internals/hotlist                           /internals/                    301

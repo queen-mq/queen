@@ -37,6 +37,7 @@ on:
       - "clients/client-php/**"
       - "supervisor/**"
       - "README.md"
+      - "CHANGELOG.md"
       - "examples/**"
       - ".github/workflows/docs.yml"
   pull_request:
@@ -56,6 +57,7 @@ on:
       - "clients/client-php/**"
       - "supervisor/**"
       - "README.md"
+      - "CHANGELOG.md"
       - "examples/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -126,6 +128,12 @@ jobs:
 
       - name: Markdown structure
         run: pnpm check:markdown
+
+      # Breadcrumb links, unique titles, sitemap dates, noindex on the source
+      # twins, security headers, and every inline script's hash in the CSP:
+      # a missing hash blocks the script in the browser and fails nothing else.
+      - name: Search surface and headers
+        run: pnpm check:seo
 
       - name: LLM brief
         run: pnpm check:brief

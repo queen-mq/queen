@@ -39,7 +39,7 @@ export const prerender = true;
 const url = (path: string) => (config.site ? new URL(path, config.site).href : path);
 
 /** The page's `<h1>`, verbatim. */
-export const HOME_HEADLINE = hero.headline;
+export const HOME_HEADLINE = `${hero.headline} ${hero.subline}`;
 
 /** One line describing the page, for the index and corpus rows that list it. */
 export const HOME_SUMMARY = SUMMARY;

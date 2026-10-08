@@ -1,6 +1,6 @@
 {
     "name": "queen-mq/php-client",
-    "description": "Queen MQ client library for PHP with optional Laravel integration",
+    "description": "Queen MQ client for PHP and a Laravel queue driver: jobs in order per customer, workers that follow the backlog, an alternative to Horizon and Redis",
     "type": "library",
     "license": "Apache-2.0",
     "homepage": "https://queenmq.com",

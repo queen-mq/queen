@@ -8,6 +8,38 @@
 # the click lands.
 #
 # The paths below match what `pnpm build` actually emits into dist/.
+# `scripts/check-seo.mjs` parses this file and asserts it against dist/.
+
+# Security headers, on every response. None were sent before.
+#
+# HSTS has no `includeSubDomains` and no `preload`: other hosts under
+# queenmq.com may not serve HTTPS, and preload is close to irreversible. It
+# only takes effect once a browser has reached the site over HTTPS; the
+# HTTP -> HTTPS redirect itself is the zone's "Always Use HTTPS" setting, not
+# something a static-asset Worker can answer.
+#
+# The CSP allows nothing from another origin: every script, style, font and
+# image is served from here, and the only requests a page makes (prefetch,
+# "Copy page", the Pagefind index) are same-origin.
+#   script-src   No 'unsafe-inline'. The three inline scripts the build emits
+#                are allowed by hash: the theme bootstrap (every page), the
+#                desktop sidebar's group state (docs pages) and the homepage
+#                header's scroll state. Change one and its hash changes;
+#                check-seo.mjs fails the build with the new hash to put here.
+#                'wasm-unsafe-eval' is for Pagefind, which compiles its search
+#                index reader from WebAssembly in a worker.
+#   style-src    'unsafe-inline' because pages carry `style=""` attributes
+#                (headings, figures) and Mermaid writes inline styles.
+#   font-src     data: because the header stylesheet inlines a small woff2.
+#   frame-ancestors 'none' and X-Frame-Options: DENY say the same thing to new
+#                and old browsers: no page here is meant to be framed.
+/*
+  Strict-Transport-Security: max-age=31536000
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-dqcmwrHMBG7uo7u3L4cMDzwG8wr8naMTg+aYi2R8MSQ=' 'sha256-WLkmCQrDNilcsSDm7EAuRm/E0DqN0suNkO/hh57hMco=' 'sha256-CPDS92rsGe0EmMcU8ohRhwg22wRrXo/Ym51cJHCsVEk='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests
 
 # Content-hashed by the bundler: the filename changes when the bytes change,
 # so the response never has to be revalidated.
@@ -29,6 +61,9 @@
 /pagefind/*
   Cache-Control: public, max-age=604800
 
+/screenshots/*
+  Cache-Control: public, max-age=604800
+
 # Every page has a markdown twin at `<page>/index.md`. The twins carry the same
 # text as the HTML and cannot declare a canonical of their own, so left
 # indexable they double the crawlable surface with pure duplicates.
@@ -47,6 +82,15 @@
   X-Robots-Tag: noindex
 
 /*/index.md
+  X-Robots-Tag: noindex
+
+# The same for the authored-source twins at `<page>/index.mdx`
+# (src/pages/[...slug]/index.mdx.ts), which the `.md` twins link to. They were
+# missed when the two rules above were written and stayed indexable.
+/*.mdx
+  X-Robots-Tag: noindex
+
+/*/index.mdx
   X-Robots-Tag: noindex
 
 /404

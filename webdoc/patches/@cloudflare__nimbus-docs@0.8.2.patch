@@ -1,0 +1,27 @@
+diff --git a/src/components/NimbusHead.astro b/src/components/NimbusHead.astro
+index b55b9cbfdceee677d9e907d4e9a2d0eadea6147d..a78f5c42f7025534e4fa2b1f39fca858f4ea9d10 100644
+--- a/src/components/NimbusHead.astro
++++ b/src/components/NimbusHead.astro
+@@ -178,7 +178,13 @@ const structuredData = canonical
+   ? JSON.stringify({
+       "@context": "https://schema.org",
+       "@type": isHomePage ? "WebSite" : "WebPage",
+-      name: fullTitle,
++      // A WebSite node names the site, not the page: search engines take its
++      // `name` as the site name shown beside results. The page title (with
++      // the " | <site>" suffix) stays on <title> and og:title.
++      // The same @id as the site-wide WebSite node in astro.config.ts, so the
++      // two merge into one site instead of reading as two.
++      ...(isHomePage && Astro.site ? { "@id": new URL("/#website", Astro.site).href } : {}),
++      name: isHomePage ? config.title : fullTitle,
+       ...(resolvedDescription ? { description: resolvedDescription } : {}),
+       url: canonical,
+       inLanguage: lang,
+@@ -187,6 +193,7 @@ const structuredData = canonical
+         ? {}
+         : {
+             isPartOf: {
++              ...(Astro.site ? { "@id": new URL("/#website", Astro.site).href } : {}),
+               "@type": "WebSite",
+               name: config.title,
+               url: Astro.site ? new URL("/", Astro.site).href : config.site,

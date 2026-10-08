@@ -1,9 +1,10 @@
 ---
-title: Clients
+title: "Client SDKs: install and connect"
 description: "The six SDKs, curl, queenctl and the broker embedded in a Rust program: how to install and connect each, and where they differ."
 type: reference
 tier: use
 sidebar:
+  label: "Clients"
   order: 3
 sourceOfTruth:
   - clients/client-js/package.json
@@ -88,6 +89,8 @@ verifiedBy:
 # sentence says so.
 # sourceOfTruth re-read 2026-10-08 (2.0.4): server/Cargo.toml moves the broker to 2.0.4 and no client is
 # released with it. The versions sentence says so.
+# sourceOfTruth re-read 2026-10-08 (composer description): composer.json's description names the Laravel
+# queue driver; the package name and the requirements this page states are unchanged.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same

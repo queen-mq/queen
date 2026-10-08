@@ -1,9 +1,10 @@
 ---
-title: Storage
+title: "Storage engine: write-ahead log and LMDB"
 description: "What a node keeps on disk: queue log files that are the write-ahead log, a store held in RAM and checkpointed to LMDB, the recovery rules, the damage a node refuses to boot on, and reclaim."
 type: concept
 tier: internals
 sidebar:
+  label: "Storage"
   order: 3
 sourceOfTruth:
   - server/src/rsm/qlog/mod.rs

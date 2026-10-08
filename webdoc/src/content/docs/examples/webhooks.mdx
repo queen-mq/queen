@@ -1,9 +1,10 @@
 ---
-title: Webhook sender
+title: "Webhook sender example, one partition per endpoint"
 description: "A webhook sender with one partition per endpoint: deliveries arrive in order, a dead endpoint slows nobody else down, retries are the broker's, and what never succeeds waits in the dead-letter queue with its error."
 type: example
 tier: use
 sidebar:
+  label: "Webhook sender"
   order: 3
 sourceOfTruth:
   - examples/apps/js/webhooks.mjs
