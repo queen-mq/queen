@@ -18,7 +18,7 @@
     
     <!-- Theme initialization (prevent flash) -->
     <!-- Same resolution as src/composables/useTheme.js resolveTheme(): stored
-         choice wins, else the OS but only when it asks for LIGHT, else dark.
+         Light/Dark wins; System (or no stored choice) follows the OS, else dark.
          It runs here, before any bundle, so the first painted frame is already
          the right scheme — on every SPA route, including hard reloads of pages
          that pull no chart chunk (e.g. /messages). Keep in sync with
@@ -26,11 +26,14 @@
     <script>
       (function () {
         var t = 'dark';
-        try {
-          var stored = localStorage.getItem('queen-theme');
-          if (stored === 'light' || stored === 'dark') t = stored;
-          else if (window.matchMedia('(prefers-color-scheme: light)').matches) t = 'light';
-        } catch (e) { /* storage or matchMedia unavailable: stay dark */ }
+        var stored;
+        try { stored = localStorage.getItem('queen-theme'); } catch (e) { /* use system */ }
+        if (stored === 'light' || stored === 'dark') t = stored;
+        else {
+          try {
+            if (window.matchMedia('(prefers-color-scheme: light)').matches) t = 'light';
+          } catch (e) { /* matchMedia unavailable: stay dark */ }
+        }
         var root = document.documentElement;
         root.classList.toggle('light', t === 'light');
         root.classList.toggle('dark', t !== 'light');

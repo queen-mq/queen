@@ -188,7 +188,7 @@ async function render() {
 		document.documentElement.getAttribute("data-mode") !== "dark";
 	const fontFamily = getFontFamily();
 	const pageBg = getPageBackground();
-	const accent = getThemeColor("--nb-primary", isLight ? "#ff4801" : "#ff6524");
+	const accent = getThemeColor("--nb-primary-text", isLight ? "#806000" : "#fcc620");
 
 	const lightThemeVars = {
 		fontFamily,

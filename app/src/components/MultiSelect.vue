@@ -170,5 +170,5 @@ onUnmounted(() => document.removeEventListener('click', handleClickOutside, true
 .ms-action { font-size: 11px; color: var(--text-low); cursor: pointer; border: none; background: none; padding: 2px 0; font-family: inherit; transition: color .1s; }
 .ms-action:hover { color: var(--text-hi); }
 .ms-action-primary { color: var(--text-hi); font-weight: 500; }
-.ms-action-primary:hover { color: var(--accent-dim); }
+.ms-action-primary:hover { color: var(--accent-text); }
 </style>

@@ -28,12 +28,12 @@ const { title, description, href, class: className, ...attrs } = Astro.props;
   {...attrs}
 >
   <div class="min-w-0">
-    <h3 class="m-0 text-base font-semibold leading-snug text-foreground transition-colors group-hover:text-primary">{title}</h3>
+    <h3 class="m-0 text-base font-semibold leading-snug text-foreground transition-colors group-hover:text-primary-text">{title}</h3>
     {description && <p class="mt-1 text-sm leading-normal text-muted-foreground">{description}</p>}
   </div>
   <Icon
     name="ph:caret-right"
-    class="shrink-0 w-4 h-4 text-muted-foreground transition-all group-hover:translate-x-0.5 group-hover:text-primary"
+    class="shrink-0 w-4 h-4 text-muted-foreground transition-all group-hover:translate-x-0.5 group-hover:text-primary-text"
     is:inline
   />
 </a>

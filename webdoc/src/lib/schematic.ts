@@ -15,7 +15,7 @@ export const TOKEN = {
   surface: "var(--nb-muted)",
   border: "var(--nb-border)",
   borderStrong: "var(--nb-border-strong)",
-  primary: "var(--nb-primary)",
+  primary: "var(--nb-primary-text)",
   /** Requests in flight and the broker. */
   info: "var(--nb-info)",
   infoBg: "var(--nb-info-muted)",

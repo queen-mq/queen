@@ -57,19 +57,19 @@ const showSections = sections.length >= 2;
       <a href="/" class="group flex items-center" aria-label={config.title}>
         {/*
           The small logo, in colour, inlined (assets/wordmark.py writes
-          src/assets/): the petals keep their red and the letters take the
+          src/assets/): the petals use the brand yellow and the letters take the
           text colour of the theme. The home page shows the wordmark with
           "message queue" under it; every other page has the room for the q
           alone. The logo with its contours is for larger sizes: the README.
         */}
         {currentSlug === "/" ? (
           <span
-            class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[34px] [&>svg]:w-auto"
+            class="block shrink-0 text-foreground [&>svg>path:first-child]:fill-brand [&>svg]:block [&>svg]:h-[34px] [&>svg]:w-auto"
             set:html={wordmark}
           />
         ) : (
           <span
-            class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[28px] [&>svg]:w-auto"
+            class="block shrink-0 text-foreground [&>svg>path:first-child]:fill-brand [&>svg]:block [&>svg]:h-[28px] [&>svg]:w-auto"
             set:html={mark}
           />
         )}

@@ -14,11 +14,8 @@
   </button>
 
   <aside class="sidebar" :class="{ 'sidebar-mobile-open': mobileOpen, rail }">
-    <!-- Brand. As tall as the top bar, so the two share a baseline; no rule
-         under it. The mark is the badge: the q that is the sunflower, cut out
-         of a disc (assets/wordmark.py writes it). It is in one colour, a
-         little quieter than the name: nothing in this column is coloured
-         unless it is a state. The name beside it is plain interface type. -->
+    <!-- The sunflower badge uses the logo yellow; the wordmark follows the
+         theme's text colour. Both align with the top bar. -->
     <div class="brand">
       <span class="brand-mark" aria-hidden="true" v-html="mark" />
       <template v-if="!rail">
