@@ -1,6 +1,7 @@
 (ns jepsen.queen.synthetic-test
-  "Synthetic histories for the checkers of W3-W6: one clean history each, and
-  one per anomaly the checker must flag. Run with `lein test` (no cluster)."
+  "Synthetic histories for the checkers of W3-W6 and W11: one clean history
+  each, and one per anomaly the checker must flag. Run with `lein test` (no
+  cluster)."
   (:require [clojure.test :refer :all]
             [jepsen [checker :as checker]
                     [history :as h]
@@ -11,6 +12,7 @@
                           [nemesis :as qn]]
             [jepsen.queen.workload [dedup :as dedup]
                                    [elle :as elle]
+                                   [locks :as locks]
                                    [pipeline :as pipeline]
                                    [register :as register]]))
 
@@ -279,6 +281,205 @@
     (let [r (w6 (w6-history {:recs (assoc-in w6-recs [0 :n] 1)}))]
       (is (false? (:valid? r)))
       (is (= 1 (count (:stored-n-not-queued r)))))))
+
+;; ---------------------------------------------------------------------------
+;; W11: locks and semaphores
+
+(defn w11
+  "Runs the locks checker. One second between ops, because check 6 compares
+  completion times with lifetimes in seconds."
+  ([ops] (w11 1 {} ops))
+  ([limit test ops]
+   (let [r (checker/check (locks/checker limit) (merge test-map test)
+                          (h/history (map-indexed (fn [i op] (assoc op :time (* 1000000000 i)))
+                                                  ops))
+                          {})]
+     (println (pr-str r))
+     r)))
+
+(defn acq
+  "An acquire of lock l by owner o (process p), answered with `token`."
+  [p l o token & kvs]
+  [(inv p :acquire l)
+   (with {:process p, :type :ok, :f :acquire, :value l, :owner o, :ttl 2
+          :token token, :slot 0, :already? false}
+         kvs)])
+
+(defn step
+  [p l o token id type & kvs]
+  [(inv p :step l)
+   (with {:process p, :type type, :f :step, :value l, :owner o, :token token, :slot 0, :id id}
+         kvs)])
+
+(defn renew
+  [p l o from token & kvs]
+  [(inv p :renew l)
+   (with {:process p, :type :ok, :f :renew, :value l, :owner o, :from from, :token token
+          :slot 0, :ttl 2}
+         kvs)])
+
+(defn release
+  [p l o token type]
+  [(inv p :release l)
+   {:process p, :type type, :f :release, :value l, :owner o, :token token, :slot 0}])
+
+(defn rec [l token o id offset & kvs]
+  (with {:l l, :slot 0, :token token, :owner o, :id id, :offset offset} kvs))
+
+(def w11-records
+  {0 [(rec 0 10 "A" "s1" 0) (rec 0 11 "A" "s2" 1) (rec 0 20 "B" "s3" 2)]
+   1 [(rec 1 30 "D" "s5" 0)]})
+
+(defn w11-history
+  "A holds lock 0 (token 10), steps, renews (11), steps, releases; B is
+  refused while A holds, then takes it (20) and steps; C's step with a token
+  that is no longer the lock's rolls back; a get shows B; on lock 1, D's
+  acquire is unknown and its retry is answered `already`. Options replace
+  parts."
+  [{:keys [b-token get-token records extra]}]
+  (flat
+    [(acq 0 0 "A" 10)
+     (step 0 0 "A" 10 "s1" :ok)
+     (renew 0 0 "A" 10 11)
+     (step 0 0 "A" 11 "s2" :ok)
+     [(inv 1 :acquire 0)
+      {:process 1, :type :fail, :f :acquire, :value 0, :owner "B", :ttl 2
+       :error [:not-acquired "held"]}]
+     (release 0 0 "A" 11 :ok)
+     (acq 1 0 "B" (or b-token 20))
+     (step 1 0 "B" (or b-token 20) "s3" :ok)
+     (step 2 0 "C" 11 "s4" :fail :error [:rolled-back "kv_precondition" "version" 20])
+     [(inv 2 :step 0) {:process 2, :type :fail, :f :step, :value 0, :error [:not-held]}]
+     [(inv 3 :get 0)
+      {:process 3, :type :ok, :f :get, :value 0
+       :holders [{:slot 0, :owner "B", :token (or get-token b-token 20)}]}]
+     [(inv 4 :acquire 1)
+      {:process 4, :type :info, :f :acquire, :value 1, :owner "D", :ttl 2
+       :error [:acquire :timeout nil]}]
+     (acq 4 1 "D" 30 :already? true)
+     (step 4 1 "D" 30 "s5" :ok)
+     (or extra [])
+     [(inv 0 :final-read nil) (ok 0 :final-read (or records w11-records))]]))
+
+(deftest w11-locks
+  (testing "clean"
+    (let [r (w11 (w11-history {}))]
+      (is (true? (:valid? r)))
+      (is (= 1 (:takeovers r)))
+      (is (= 1 (:steps-fenced r)))
+      (is (= 4 (:records r)))
+      (is (true? (:early-judged? r)))))
+  (testing "fencing: a replaced holder's record lands after the new holder's"
+    (let [r (w11 (w11-history {:records (assoc w11-records 0
+                                               [(rec 0 10 "A" "s1" 0) (rec 0 20 "B" "s3" 1)
+                                                (rec 0 11 "A" "s2" 2)])}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (:token-went-back-count r)))))
+  (testing "one token, two owners"
+    (let [r (w11 (w11-history {:records (assoc w11-records 0
+                                               [(rec 0 10 "A" "s1" 0) (rec 0 10 "B" "s2" 1)
+                                                (rec 0 20 "B" "s3" 2)])}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:two-owners r))))))
+  (testing "a record carries a token its owner was never answered"
+    (let [r (w11 (w11-history {:records (assoc-in w11-records [0 2 :token] 99)}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:token-from-nowhere r))))))
+  (testing "phantom: the record of a step whose guard lost"
+    (let [r (w11 (w11-history {:records (update w11-records 0 conj (rec 0 11 "C" "s4" 3))}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (:phantom-count r)))))
+  (testing "phantom: a record no step wrote"
+    (let [r (w11 (w11-history {:records (assoc-in w11-records [0 2 :id] "zzz")}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (:phantom-count r)))
+      (is (= ["s3"] (map :id (:ok-step-missing r))))))
+  (testing "a later grant with a lower token"
+    (let [r (w11 (w11-history {:b-token 9
+                               :records (assoc-in w11-records [0 2 :token] 9)}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:token-not-rising r))))))
+  (testing "one token granted twice"
+    (let [r (w11 (w11-history {:b-token 11
+                               :records (assoc-in w11-records [0 2 :token] 11)}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:token-granted-twice r))))))
+  (testing "`already` for an owner that never had the permit"
+    (let [r (w11 (w11-history {:extra (acq 5 1 "E" 30 :already? true)}))]
+      (is (false? (:valid? r)))
+      (is (= ["E"] (map :owner (:already-from-nowhere r))))))
+  (testing "a get shows a token older than one already granted"
+    (let [r (w11 (w11-history {:get-token 11}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:stale-gets r))))))
+  (testing "a lock answers a slot it does not have"
+    (let [r (w11 (w11-history {:extra (acq 5 2 "E" 40 :slot 1)}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:slot-out-of-range r))))))
+  (testing "nothing committed under a guard shows nothing"
+    (is (= :unknown (:valid? (w11 [(inv 0 :final-read nil) (ok 0 :final-read {0 [], 1 []})]))))
+    (is (= :unknown (:valid? (w11 (flat (acq 0 0 "A" 10))))))))
+
+(defn w11-takeover
+  "A takes lock 0 for `ttl` seconds; `between` happens; B takes it and steps.
+  One second per op, so B's acquire completes a few seconds after A's began."
+  [ttl between]
+  (flat
+    [(acq 0 0 "A" 10 :ttl ttl)
+     between
+     (acq 1 0 "B" 20)
+     (step 1 0 "B" 20 "s1" :ok)
+     [(inv 1 :final-read nil) (ok 1 :final-read {0 [(rec 0 20 "B" "s1" 0)]})]]))
+
+(deftest w11-exclusive-leases
+  (testing "taken over after the lease ended"
+    (is (true? (:valid? (w11 (w11-takeover 2 []))))))
+  (testing "taken over while the lease cannot have ended"
+    (let [r (w11 (w11-takeover 30 []))]
+      (is (false? (:valid? r)))
+      (is (= 1 (:taken-early-count r)))
+      (is (= {:holder "A", :taken-by "B"}
+             (select-keys (first (:taken-early r)) [:holder :taken-by])))))
+  (testing "the holder released first"
+    (is (true? (:valid? (w11 (w11-takeover 30 (release 0 0 "A" 10 :ok))))))
+    (is (true? (:valid? (w11 (w11-takeover 30 (release 0 0 "A" 10 :info)))))))
+  (testing "a release that was refused released nothing"
+    (is (false? (:valid? (w11 (w11-takeover 30 (release 0 0 "A" 10 :fail)))))))
+  (testing "the holder's state is unknown: a renew that may have shortened the lease"
+    (is (true? (:valid? (w11 (w11-takeover
+                               30
+                               [(inv 0 :renew 0)
+                                {:process 0, :type :info, :f :renew, :value 0, :owner "A"
+                                 :from 10, :slot 0, :ttl 2}]))))))
+  (testing "not judged under clock faults"
+    (let [r (w11 1 {:faults #{:clock}} (w11-takeover 30 []))]
+      (is (true? (:valid? r)))
+      (is (false? (:early-judged? r))))))
+
+(deftest w11b-semaphore
+  (let [history (fn [records]
+                  (flat
+                    [(acq 0 0 "A" 10)
+                     (acq 1 0 "B" 12 :slot 1)
+                     (step 0 0 "A" 10 "s1" :ok)
+                     (step 1 0 "B" 12 "s2" :ok :slot 1)
+                     (step 0 0 "A" 10 "s3" :ok)
+                     [(inv 2 :get 0)
+                      {:process 2, :type :ok, :f :get, :value 0
+                       :holders [{:slot 0, :owner "A", :token 10}
+                                 {:slot 1, :owner "B", :token 12}]}]
+                     [(inv 0 :final-read nil) (ok 0 :final-read {0 records})]]))
+        clean   [(rec 0 10 "A" "s1" 0) (rec 0 12 "B" "s2" 1 :slot 1) (rec 0 10 "A" "s3" 2)]]
+    (testing "clean: two slots interleave on one resource, each with its own tokens"
+      (let [r (w11 2 {} (history clean))]
+        (is (true? (:valid? r)))
+        (is (= 0 (:gets-with-an-owner-in-two-slots r)))))
+    (testing "the same records on a lock are a slot it does not have"
+      (is (false? (:valid? (w11 1 {} (history clean))))))
+    (testing "fencing is per slot"
+      (let [r (w11 2 {} (history (conj clean (rec 0 11 "B" "s2" 3 :slot 1))))]
+        (is (false? (:valid? r)))
+        (is (= 1 (:token-went-back-count r)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Nemeses that need no cluster to check
