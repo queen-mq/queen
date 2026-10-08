@@ -35,6 +35,7 @@ sourceOfTruth:
 # and the KV table names `check` (planner/kv.rs, handlers/kv.rs: a write for the rate, needs cluster
 # version 5). handlers/raft.rs registers the route; facade/mod.rs and facade/real.rs carry the refusal
 # below version 5. No existing limit or default changes.
+# sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only. No limit or default changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling

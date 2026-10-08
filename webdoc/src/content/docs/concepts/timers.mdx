@@ -19,6 +19,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the batcher gains a standby mode, in which no timer fires (the source's fires arrive as entries), and a stopping driver no longer waits on an entry that timed out; timers on an ordinary cluster are as described. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (locks): auth.rs makes /api/v1/locks read-write; the timer levels are as
 # they were. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only; timers are as they were. Nothing this page states changes.
 ---
 
 A timer schedules a message for later. When it fires, the broker pushes the message into a real
