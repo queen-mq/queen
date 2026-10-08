@@ -583,6 +583,13 @@ fn digest_and_close(store: Arc<HeedStore>) -> apply::StateDigest {
 /// (measured 2026-09-23). A step that finds a full limit's worth past the
 /// cutoff now runs again in the next cycle, so a backlog of 2.5 limits clears
 /// after ONE tick, before the next.
+///
+/// Two drivers run over the one store, one after the other. The first never
+/// ticks: it only logs the backlog, and takes the time the machine needs. The
+/// second is the driver under test, started once the store holds every
+/// outcome, so its tick clock starts with the backlog whole. One driver doing
+/// both raced its own first tick, which the pushes had to beat: on a loaded
+/// runner they took 3.5 s of a 3 s tick.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_request_id_expiry_backlog_clears_after_one_tick() {
     let dir = scratch("expire-backlog");
@@ -597,10 +604,17 @@ async fn a_request_id_expiry_backlog_clears_after_one_tick() {
         request_expire_every_ms: tick.as_millis() as u64,
         ..BatcherConfig::default()
     };
-    let started = Instant::now();
-    let batcher = Batcher::new(store.clone(), repl.clone(), bcfg);
-    let (tx, handle) = batcher.spawn();
 
+    // The backlog, logged by a driver whose expiry never ticks. Its pushes are
+    // only the setup: on a starved disk one of them can wait past the usual
+    // propose deadline, which would answer it `Retry`.
+    let quiet = BatcherConfig {
+        propose_ms: 60_000,
+        request_expire_every_ms: 3_600_000,
+        ..bcfg.clone()
+    };
+    let pushing = Instant::now();
+    let (tx, handle) = Batcher::new(store.clone(), repl.clone(), quiet).spawn();
     let limit = apply::REQUEST_EXPIRE_LIMIT;
     let n = limit * 5 / 2;
     let mut replies = Vec::with_capacity(n);
@@ -614,6 +628,9 @@ async fn a_request_id_expiry_backlog_clears_after_one_tick() {
         let reply = rx.await.expect("await reply");
         let _ = done(&reply);
     }
+    drop(tx);
+    handle.await.expect("the first driver stops");
+    settle(&store, repl.applied_index()).await;
     let logged = |store: &HeedStore| {
         store
             .read(|r| {
@@ -626,25 +643,38 @@ async fn a_request_id_expiry_backlog_clears_after_one_tick() {
             })
             .expect("read")
     };
-    assert!(
-        started.elapsed() < tick,
-        "the pushes must land before the first tick (took {:?})",
-        started.elapsed()
-    );
-    assert!(logged(&store) >= n, "every push logged its outcome");
-
-    // After the first tick and before the second, the whole backlog is gone
-    // (one step per tick would still hold n - limit = 1.5 limits).
-    let deadline = started + tick * 2 - Duration::from_millis(300);
     let mut left = logged(&store);
-    while left >= limit && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        left = logged(&store);
+    assert!(left >= n, "every push logged its outcome");
+    println!("backlog: {n} outcomes logged in {:?}", pushing.elapsed());
+
+    // The driver under test. It arms its tick as it starts, and a tick is
+    // never early: the first comes a whole period after `armed` or later, the
+    // second a whole period after the first.
+    let armed = Instant::now();
+    let (tx, handle) = Batcher::new(store.clone(), repl.clone(), bcfg).spawn();
+    let second_tick = armed + tick * 2;
+
+    // A count read before `second_tick` is therefore the work of one tick at
+    // most, and there one step per tick would still hold n - limit = 1.5
+    // limits. Nothing moves before the first tick.
+    tokio::time::sleep(tick).await;
+    loop {
+        let count = logged(&store);
+        let read = Instant::now();
+        assert!(
+            read < second_tick,
+            "{left} outcomes left before the second tick: the expiry did not keep up"
+        );
+        left = count;
+        if left < limit {
+            println!(
+                "backlog: {left} outcomes left {:?} after the first tick",
+                read.saturating_duration_since(armed + tick)
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(
-        left < limit,
-        "{left} outcomes left before the second tick: the expiry did not keep up"
-    );
 
     drop(tx);
     let _ = handle.await;
