@@ -338,7 +338,14 @@ final class PreforkTest extends TestCase
     private function waitUntil(\Closure $condition): void
     {
         $deadline = microtime(true) + 10;
-        while (!$condition()) {
+        while (true) {
+            // is_file() and filesize() answer from PHP's stat cache: a second
+            // look at a report first seen empty, as file_put_contents() leaves
+            // it before it writes, would repeat the first until the deadline.
+            clearstatcache();
+            if ($condition()) {
+                return;
+            }
             if (microtime(true) > $deadline) {
                 $this->fail('Timed out.');
             }
