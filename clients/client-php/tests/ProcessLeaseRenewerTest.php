@@ -458,7 +458,14 @@ class ProcessLeaseRenewerTest extends TestCase
     private function waitUntil(callable $done, string $what): void
     {
         $deadline = microtime(true) + 5;
-        while (!$done()) {
+        while (true) {
+            // is_dir() and its kin answer from PHP's stat cache: a second
+            // look at a path another process has since removed would repeat
+            // the first until the deadline.
+            clearstatcache();
+            if ($done()) {
+                return;
+            }
             $this->assertLessThan($deadline, microtime(true), "Timed out waiting for {$what}.");
             usleep(20_000);
         }
