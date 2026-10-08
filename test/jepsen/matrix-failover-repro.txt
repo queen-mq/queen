@@ -1,0 +1,17 @@
+# W12 failover, a narrower matrix: a crash of the source while a partition
+# isolates the leaders. On 2026-10-08 `fo-crash-part` could not promote its
+# standby for 120 s: the standby's leader had been cut off from every other
+# node for 2.7 s when the source was killed, the network was healed, all three
+# nodes of the standby were up, and every promotion request ended "the request
+# deadline elapsed". These tests cut the leaders off every few seconds, so the
+# failover often begins inside such a cut; a promotion that needs more than
+# one request records what each node answered and what each showed.
+#
+#   cd /root/jepsen-failover && NODES=n1,n2,n3,n4,n5,n6 RUNS=/root/runs-failover-repro \
+#     BIN=/root/bin/queen ./run-campaign.sh matrix-failover-repro.txt
+fo-repro-primaries-1    --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-primaries-2    --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-primaries-3    --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-one-1          --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets one --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-one-2          --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets one --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-planned-1      --workload failover --standby-nodes 3 --failover planned --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200

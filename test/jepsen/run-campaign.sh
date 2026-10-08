@@ -6,13 +6,17 @@
 #
 #   RUNS=/root/runs-p8 BIN=/root/bin/queen-X ./run-campaign.sh matrix.txt
 #
+# NODES names the test nodes (default n1 to n5). A matrix whose tests take
+# --standby-nodes needs more of them: NODES=n1,n2,n3,n4,n5,n6.
+#
 # Writes its pid to $RUNS/campaign.pid while it runs.
 set -u
 cd "$(dirname "$0")"
 RUNS=${RUNS:-/root/runs}
 BIN=${BIN:?set BIN to the queen binary}
 LIMIT=${LIMIT:-2400}
-COMMON="--nodes n1,n2,n3,n4,n5 --username root --ssh-private-key /root/.ssh/id_ed25519 --bin $BIN --concurrency 2n"
+NODES=${NODES:-n1,n2,n3,n4,n5}
+COMMON="--nodes $NODES --username root --ssh-private-key /root/.ssh/id_ed25519 --bin $BIN --concurrency 2n"
 mkdir -p "$RUNS"
 echo $$ > "$RUNS/campaign.pid"
 echo "$(date -u +%FT%TZ) campaign $1 on $BIN" >> "$RUNS/PROGRESS.txt"

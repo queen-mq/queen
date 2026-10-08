@@ -17,6 +17,7 @@
             [jepsen.queen.workload [dedup :as dedup]
                                    [dlq :as dlq]
                                    [elle :as elle]
+                                   [failover :as failover]
                                    [locks :as locks]
                                    [log :as log]
                                    [pipeline :as pipeline]
@@ -40,7 +41,8 @@
    :streams  streams/workload     ; W9
    :timers   timers/workload      ; W10
    :locks    locks/workload       ; W11
-   :semaphore locks/semaphore-workload}) ; W11b
+   :semaphore locks/semaphore-workload   ; W11b
+   :failover failover/workload})  ; W12, needs --standby-nodes
 
 (def all-faults
   #{:pause :kill :partition :clock :pause-kill :part-kill :bridge :leader-deaf
@@ -161,8 +163,13 @@
                                :when (map? st)]
                            [node st]))
             judged (filter (comp :initialized val) views)
-            sets   (distinct (map (comp set :voters val) judged))]
-        {:valid?          (<= (count sets) 1)
+            ; With --standby-nodes there are two clusters, and each agrees
+            ; with itself.
+            sets   (->> judged
+                        (group-by (fn [[node _]] (db/standby? test node)))
+                        vals
+                        (map (fn [views] (distinct (map (comp set :voters val) views)))))]
+        {:valid?          (every? #(<= (count %) 1) sets)
          :voters          (into (sorted-map)
                                 (map (fn [[n st]] [n (vec (sort (:voters st)))]) views))
          :not-initialized (vec (keep (fn [[n st]] (when-not (:initialized st) n)) views))
@@ -180,6 +187,8 @@
        (when (some #{:kill :pause :clock} (:nemesis opts))
          (str "_t=" (->> (:db-targets opts) (map name) (str/join ","))))
        (when (:txn-sends? opts) "_txn")
+       (when (pos? (long (:standby-nodes opts 0)))
+         (str "_standby=" (:standby-nodes opts) "_" (name (:failover opts))))
        (when (= :leader (:kv-route opts)) "_kv-leader")
        (when-not (:kv-lift opts) "_kv-default-limits")
        (when (some #{:corrupt} (:nemesis opts))
@@ -201,7 +210,13 @@
 (defn queen-test
   "A test map from parsed CLI options."
   [opts]
-  (let [workload ((workloads (:workload opts))
+  (let [standby  (long (:standby-nodes opts 0))
+        _        (when (and (= :failover (:workload opts))
+                            (not (< 0 standby (count (:nodes opts)))))
+                   (throw (ex-info (str "--workload failover needs --standby-nodes between 1 and "
+                                        (dec (count (:nodes opts))))
+                                   {:standby-nodes standby, :nodes (:nodes opts)})))
+        workload ((workloads (:workload opts))
                   (assoc opts :sub-via #{:assign}))
         db       (db/db)
         nopts    {:db        db
@@ -245,7 +260,11 @@
                      (conj (qn/graceful-restart-package nopts))
 
                      (contains? (:faults nopts) :membership)
-                     (conj (qn/membership-package nopts))))
+                     (conj (qn/membership-package nopts))
+
+                     ; A workload's own nemesis steps (W12: the failover).
+                     (:nemesis-package workload)
+                     (conj (:nemesis-package workload))))
         fg       (:final-generator workload)]
     (merge tests/noop-test
            opts
@@ -258,6 +277,8 @@
             :txn?        false
             :ww-deps     true
             :raft-token  (str (random-uuid))
+            ; --standby-nodes: what a standby presents to read its source.
+            :link-token  (str (random-uuid))
             ; The workload's own node settings (the KV workloads lift the KV
             ; rate ladder, unless --no-kv-lift), then --env on top.
             :extra-env   (merge (when (:kv-lift opts) (:db-env workload))
@@ -456,7 +477,24 @@
     :default 3
     :parse-fn parse-long]
 
-   ["-w" "--workload NAME" "Workload: log (W1), queue (W2), register (W3), counter (W3b), claim (W3c), elle (W4), pipeline (W5), dedup (W6), dlq (W7), retention (W8), streams (W9), timers (W10), locks (W11), semaphore (W11b)."
+   [nil "--standby-nodes N" "The last N nodes are a cluster of their own, a standby of the cluster the other nodes form. The failover workload needs it."
+    :default 0
+    :parse-fn parse-long
+    :validate [#(<= 0 %) "0 or more"]]
+
+   [nil "--failover MODE" "failover workload: crash (the source's nodes are killed, then the standby is promoted), crash-behind (the same after 10 s in which the standby could not read its source, so the promotion loses writes) or planned (the source's clients stop, the standby reads everything, the source is stopped, the standby is promoted)."
+    :default :crash
+    :parse-fn keyword
+    :validate [#{:crash :crash-behind :planned} "crash, crash-behind or planned"]]
+
+   [nil "--failover-at SECONDS" "failover workload: when the failover begins (default: half the time limit)."
+    :parse-fn read-string]
+
+   [nil "--w12-partitions N" "failover workload: partitions of the test queue."
+    :default 8
+    :parse-fn parse-long]
+
+   ["-w" "--workload NAME" "Workload: log (W1), queue (W2), register (W3), counter (W3b), claim (W3c), elle (W4), pipeline (W5), dedup (W6), dlq (W7), retention (W8), streams (W9), timers (W10), locks (W11), semaphore (W11b), failover (W12)."
     :default :log
     :parse-fn keyword
     :validate [workloads (cli/one-of workloads)]]])

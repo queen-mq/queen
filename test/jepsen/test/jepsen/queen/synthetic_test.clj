@@ -4,14 +4,18 @@
   cluster)."
   (:require [clojure.test :refer :all]
             [jepsen [checker :as checker]
+                    [generator :as gen]
                     [history :as h]
                     [independent :as independent]
                     [nemesis :as n]
                     [util :as util]]
             [jepsen.queen [membership :as qm]
                           [nemesis :as qn]]
+            [jepsen.generator.context :as gctx]
+            [jepsen.queen [db :as qdb]]
             [jepsen.queen.workload [dedup :as dedup]
                                    [elle :as elle]
+                                   [failover :as failover]
                                    [locks :as locks]
                                    [pipeline :as pipeline]
                                    [register :as register]]))
@@ -480,6 +484,193 @@
       (let [r (w11 2 {} (history (conj clean (rec 0 11 "B" "s2" 3 :slot 1))))]
         (is (false? (:valid? r)))
         (is (= 1 (:token-went-back-count r)))))))
+
+;; ---------------------------------------------------------------------------
+;; W12: a standby is promoted
+
+(defn w12
+  ([ops] (w12 {} ops))
+  ([test ops]
+   (let [r (checker/check (failover/checker)
+                          (merge test-map {:w12-partitions 2, :failover :crash} test)
+                          (hist ops) {})]
+     (println (pr-str r))
+     r)))
+
+(defn snd
+  "A send of `pairs` by process p, a thread of `cluster`, answered `type`."
+  [p cluster pairs type & kvs]
+  [(inv p :send pairs)
+   (with {:process p, :type type, :f :send, :value pairs, :cluster cluster
+          :node (name cluster)}
+         kvs)])
+
+(defn nem
+  "A nemesis op and its answer."
+  [f answer]
+  [{:process :nemesis, :type :info, :f f, :value nil}
+   {:process :nemesis, :type :info, :f f, :value answer}])
+
+(defn fin
+  [p cluster logs]
+  [(inv p :final-read nil)
+   {:process p, :type :ok, :f :final-read, :value logs, :cluster cluster
+    :node (name cluster), :gaps {}}])
+
+(defn w12-history
+  "The source takes 1, 3 and 4 on partition 0 and 2 on partition 1; a standby
+  node refuses 100 and reads the source's first record; the source dies with
+  4 not yet read; the promoted cluster takes 101 and 102. `over` replaces
+  steps by name."
+  [over]
+  (let [steps (merge
+                {:s1      (snd 0 :source [[0 1]] :ok :offsets {1 0})
+                 :s2      (snd 0 :source [[1 2]] :ok :offsets {2 0})
+                 :probe   (snd 1 :standby [[0 100]] :fail :error [:standby])
+                 :read    [(inv 1 :read nil)
+                           {:process 1, :type :ok, :f :read, :value {0 [[0 1]]}
+                            :cluster :standby, :node "standby"}]
+                 :s3      (snd 0 :source [[0 3]] :ok :offsets {3 1})
+                 :s4      (snd 0 :source [[0 4]] :ok :offsets {4 2})
+                 :stop    (nem :stop-source {:killed {}})
+                 :promote (nem :promote {:promoted? true, :position 7})
+                 :o1      (snd 1 :standby [[0 101]] :ok :offsets {101 2})
+                 :o2      (snd 1 :standby [[1 102]] :ok :offsets {102 1})
+                 :p       (fin 1 :standby {0 [1 3 101], 1 [2 102]})
+                 :s       (fin 0 :source {0 [1 3 4], 1 [2]})}
+                over)]
+    (flat (map steps [:s1 :s2 :probe :read :s3 :s4 :stop :promote :o1 :o2 :p :s]))))
+
+(deftest w12-failover
+  (testing "clean: a prefix of the source, then the promoted cluster's own writes"
+    (let [r (w12 (w12-history {}))]
+      (is (true? (:valid? r)))
+      (is (= 1 (:lost-count r)))
+      (is (= 3 (:replayed r)))
+      (is (= {0 2, 1 1} (:replayed-per-partition r)))
+      (is (= 2 (:own-acked r)))
+      (is (= 1 (:standby-refusals r)))
+      (is (= 0 (:standby-refusals-after-promote r)))))
+  (testing "a standby that answers a send before its promotion"
+    (let [r (w12 (w12-history {:probe (snd 1 :standby [[0 100]] :ok :offsets {100 9})}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:standby-wrote-early r))))))
+  (testing "the promoted cluster has the source's records in another order"
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [3 1 101], 1 [2 102]})}))]
+      (is (false? (:valid? r)))
+      (is (= 2 (:diverged-count r)))))
+  (testing "a record the source never had"
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [1 3 101 999], 1 [2 102]})}))]
+      (is (false? (:valid? r)))
+      (is (= :never-sent (:why (first (:phantom r)))))))
+  (testing "a record twice"
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [1 3 101 101], 1 [2 102]})}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:duplicate r))))))
+  (testing "an acknowledged send is missing while a send invoked after it is there"
+    ; 2 was answered before 3 was sent, and 3 is in the promoted cluster.
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [1 3 101], 1 [102]})
+                               :o2 (snd 1 :standby [[1 102]] :ok :offsets {102 0})}))]
+      (is (false? (:valid? r)))
+      (is (= [2] (map :value (:lost-before-a-survivor r))))))
+  (testing "the last moment may be lost: nothing sent after 4 survived"
+    (is (empty? (:lost-before-a-survivor (w12 (w12-history {}))))))
+  (testing "a refused send that is there"
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [1 3 100 101], 1 [2 102]})
+                               :o1 (snd 1 :standby [[0 101]] :ok :offsets {101 3})}))]
+      (is (false? (:valid? r)))
+      (is (= [100] (map :v (:refused-but-present r))))))
+  (testing "a send the promoted cluster acknowledged and does not hold"
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [1 3 101], 1 [2]})}))]
+      (is (false? (:valid? r)))
+      (is (= [102] (map :v (:own-lost r))))))
+  (testing "a send acknowledged at another offset than it has"
+    (let [r (w12 (w12-history {:o1 (snd 1 :standby [[0 101]] :ok :offsets {101 5})}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:ack-offset-mismatch r))))))
+  (testing "a standby's read before the promotion that the source does not confirm"
+    (let [r (w12 (w12-history {:read [(inv 1 :read nil)
+                                      {:process 1, :type :ok, :f :read, :value {0 [[0 3]]}
+                                       :cluster :standby, :node "standby"}]}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:standby-read-diverged r))))))
+  (testing "a transaction of the source that arrived in part"
+    (let [txn (snd 0 :source [[0 3] [1 5]] :ok)
+          r   (w12 (w12-history {:s3 txn
+                                 :s  (fin 0 :source {0 [1 3 4], 1 [2 5]})}))]
+      (is (false? (:valid? r)))
+      (is (= [3] (:present (first (:torn-transaction r)))))))
+  (testing "a whole transaction is fine"
+    (let [txn (snd 0 :source [[0 3] [1 5]] :ok)
+          r   (w12 (w12-history {:s3 txn
+                                 :o2 (snd 1 :standby [[1 102]] :ok :offsets {102 2})
+                                 :p  (fin 1 :standby {0 [1 3 101], 1 [2 5 102]})
+                                 :s  (fin 0 :source {0 [1 3 4], 1 [2 5]})}))]
+      (is (true? (:valid? r)))))
+  (testing "planned: nothing may be lost"
+    (let [planned {:failover :planned}
+          await   (nem :await-standby {:caught-up? true})
+          lossy   (w12 planned (w12-history {:stop (into await (nem :stop-source {}))}))
+          whole   (w12 planned (w12-history {:stop (into await (nem :stop-source {}))
+                                             :o1 (snd 1 :standby [[0 101]] :ok :offsets {101 3})
+                                             :p  (fin 1 :standby {0 [1 3 4 101], 1 [2 102]})}))
+          behind  (w12 planned (w12-history {:stop (into (nem :await-standby {:caught-up? false})
+                                                         (nem :stop-source {}))}))]
+      (is (false? (:valid? lossy)))
+      (is (= 1 (:planned-lost-count lossy)))
+      (is (true? (:valid? whole)))
+      (is (= 0 (:lost-count whole)))
+      ; The standby never caught up: the switch was not the planned one.
+      (is (= :unknown (:valid? behind)))))
+  (testing "a node of the promoted cluster that is behind is fine; one that differs is not"
+    (let [behind (w12 (w12-history {:p (into (fin 1 :standby {0 [1 3 101], 1 [2 102]})
+                                             (fin 2 :standby {0 [1 3], 1 [2 102]}))}))
+          split  (w12 (w12-history {:p (into (fin 1 :standby {0 [1 3 101], 1 [2 102]})
+                                             (fin 2 :standby {0 [1 101], 1 [2 102]}))}))]
+      (is (true? (:valid? behind)))
+      (is (false? (:valid? split)))
+      (is (= 1 (:first-difference (first (:nodes-of-one-cluster-disagree split)))))))
+  (testing "nothing to judge"
+    (is (= :unknown (:valid? (w12 (w12-history {:promote (nem :promote {:promoted? false})})))))
+    (is (= :unknown (:valid? (w12 (w12-history {:s []})))))
+    (is (= :unknown (:valid? (w12 (w12-history {:p []})))))))
+
+(deftest w12-offline
+  (testing "the last nodes are the standby, each cluster with ids from 1"
+    (let [test {:nodes ["n1" "n2" "n3" "n4" "n5"], :standby-nodes 2}]
+      (is (= ["n1" "n2" "n3"] (qdb/source-nodes test)))
+      (is (= ["n4" "n5"] (qdb/standby-nodes test)))
+      (is (= [1 2 3 1 2] (map #(qdb/node-id test %) (:nodes test))))
+      (is (qdb/standby? test "n5"))
+      (is (not (qdb/standby? test "n3")))))
+  (testing "without a standby every node is in the one cluster"
+    (let [test {:nodes ["n1" "n2" "n3"]}]
+      (is (= ["n1" "n2" "n3"] (qdb/source-nodes test)))
+      (is (empty? (qdb/standby-nodes test)))
+      (is (= [1 2 3] (map #(qdb/node-id test %) (:nodes test))))))
+  (testing "the failover's steps, the first at its own time"
+    (let [steps (fn [mode] (:generator (failover/package (atom {}) {:mode mode, :at 150})))]
+      (is (= [:stop-source :heal-standby :promote] (map :f (steps :crash))))
+      (is (= [:cut-link :stop-source :heal-standby :promote] (map :f (steps :crash-behind))))
+      (is (= [:heal-all :quiesce :await-standby :stop-source :promote]
+             (map :f (steps :planned))))
+      (is (= 150000000000 (:time (first (steps :crash)))))
+      (is (every? nil? (map :time (rest (steps :planned)))))))
+  (testing "the first step is held until its time, and other faults go first until then"
+    (let [test  {:concurrency 2, :nodes ["n1" "n2"]}
+          ctx   (gctx/context test)
+          steps (:generator (failover/package (atom {}) {:mode :crash, :at 150}))
+          both  (gen/nemesis (gen/any (repeat {:type :info, :f :kill, :value :one}) steps))
+          [alone _]  (gen/op (gen/nemesis steps) test ctx)
+          [before _] (gen/op both test ctx)
+          [after _]  (gen/op both test (assoc ctx :time 151000000000))]
+      (is (= [:stop-source 150000000000 :nemesis] ((juxt :f :time :process) alone)))
+      (is (= [:kill 0] ((juxt :f :time) before)))
+      (is (= [:stop-source 150000000000] ((juxt :f :time) after)))))
+  (testing "the failover nemesis offers its ops"
+    (is (= #{:heal-all :heal-standby :cut-link :quiesce :await-standby :stop-source
+             :promote :start-source}
+           (n/fs (failover/nemesis (atom {})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Nemeses that need no cluster to check

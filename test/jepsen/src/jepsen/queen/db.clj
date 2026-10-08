@@ -33,20 +33,68 @@
 (def wrapper-pid-file (str dir "/wrapper.pid"))
 (def raft-port        7400)
 
-(defn node-id
-  "Raft node ids are 1-based positions in the test's node list."
+;; ---------------------------------------------------------------------------
+;; Two clusters in one test (--standby-nodes N): the last N nodes of the node
+;; list are a cluster of their own, a STANDBY of the cluster the other nodes
+;; form (the SOURCE). Each has its own raft group, node ids from 1 and raft
+;; token. Without the option every node is in the one cluster, as before.
+
+(defn standby-nodes
+  "The nodes of the standby cluster, or none."
+  [test]
+  (vec (take-last (long (:standby-nodes test 0)) (:nodes test))))
+
+(defn source-nodes
+  "The nodes of the source: every node, without --standby-nodes."
+  [test]
+  (vec (drop-last (long (:standby-nodes test 0)) (:nodes test))))
+
+(defn standby?
   [test node]
-  (inc (.indexOf ^java.util.List (vec (:nodes test)) node)))
+  (boolean (some #{node} (standby-nodes test))))
+
+(defn cluster-nodes
+  "The nodes of `node`'s own cluster."
+  [test node]
+  (if (standby? test node) (standby-nodes test) (source-nodes test)))
+
+(defn node-id
+  "Raft node ids are 1-based positions in the node's own cluster."
+  [test node]
+  (inc (.indexOf ^java.util.List (cluster-nodes test node) node)))
 
 (defn peers
-  "QUEEN_RAFT_PEERS: id=raft_addr/http_addr for every node, private IPs."
-  [test]
-  (->> (:nodes test)
+  "QUEEN_RAFT_PEERS: id=raft_addr/http_addr for every node of `node`'s
+  cluster, private IPs."
+  [test node]
+  (->> (cluster-nodes test node)
        (map (fn [n]
               (let [ip (cn/ip n)]
                 (str (node-id test n) "=" ip ":" raft-port "/" ip ":"
                      qh/http-port))))
        (str/join ",")))
+
+(defn raft-token
+  "QUEEN_RAFT_TOKEN of `node`'s cluster: the two clusters do not share one."
+  [test node]
+  (cond-> (:raft-token test)
+    (standby? test node) (str "-standby")))
+
+(defn link-env
+  "What the cluster link adds (rsm/link): the source's nodes serve a standby
+  that presents the link token; the standby's nodes name every raft address
+  of the source and become a standby at their first election."
+  [test node]
+  (cond
+    (empty? (standby-nodes test)) {}
+    (standby? test node)
+    {"QUEEN_LINK_SOURCE"       (->> (source-nodes test)
+                                    (map #(str (cn/ip %) ":" raft-port))
+                                    (str/join ","))
+     "QUEEN_LINK_SOURCE_TOKEN" (:link-token test)
+     "QUEEN_LINK_STANDBY"      "true"}
+    :else
+    {"QUEEN_LINK_TOKEN" (:link-token test)}))
 
 (defn env
   "The node's environment: the benchmark harness's (qc.sh) plus test knobs."
@@ -57,9 +105,9 @@
         "QUEEN_STORAGE"                 "raft"
         "QUEEN_RAFT_REPLICATOR"         "openraft"
         "QUEEN_RAFT_NODE_ID"            (node-id test node)
-        "QUEEN_RAFT_PEERS"              (peers test)
+        "QUEEN_RAFT_PEERS"              (peers test node)
         "QUEEN_RAFT_LISTEN"             (str ip ":" raft-port)
-        "QUEEN_RAFT_TOKEN"              (:raft-token test)
+        "QUEEN_RAFT_TOKEN"              (raft-token test node)
         "QUEEN_RAFT_DIR"                data-dir
         "QUEEN_RAFT_DEDUP_INDEX"        (:dedup-index test)
         "QUEEN_RAFT_CLIENT_OFFLOAD"     (if (:offload test) "1" "0")
@@ -73,6 +121,7 @@
         ; The push deadline (handlers/raft.rs deadline_for); the client's
         ; socket timeout is longer, so most outcomes are known.
         "POP_DEFAULT_TIMEOUT_MS"        (:server-timeout-ms test))
+      (link-env test node)
       (:extra-env test)
       ; --slow-fsync-nodes: a slow disk on these nodes only (a test knob of
       ; the queue-log syncer), so they apply entries well before their fsync.
@@ -227,7 +276,7 @@
       (str "#!/usr/bin/env bash\n"
            "# Written by jepsen.queen.db: this node's raft view, while it answers.\n"
            "while true; do\n"
-           "  if curl -s -m 2 -X POST -H 'x-queen-raft-token: " (:raft-token test) "'"
+           "  if curl -s -m 2 -X POST -H 'x-queen-raft-token: " (raft-token test node) "'"
            " -o " state-file ".tmp -w '%{http_code}'"
            " http://" (cn/ip node) ":" raft-port "/raft/v1/state | grep -q '^200$'; then\n"
            "    mv -f " state-file ".tmp " state-file "\n"
@@ -324,6 +373,44 @@
         {:timeout 60000, :retry-interval 1000, :log-interval 10000,
          :log-message (str "configuring " q)}))))
 
+(defn link-status
+  "GET /api/v1/system/link of a node: the parsed body on 200, else nil."
+  [http node timeout-ms]
+  (try (let [r (qh/request! http :get (str (qh/base-url node) "/api/v1/system/link")
+                            nil timeout-ms)]
+         (when (and (= 200 (:status r)) (map? (:body r)))
+           (:body r)))
+       (catch clojure.lang.ExceptionInfo _ nil)))
+
+(defn standby-leader-status
+  "The link status of the standby's leader, as [node status], or nil when no
+  node of the standby says it leads."
+  [http test]
+  (->> (standby-nodes test)
+       (util/real-pmap (fn [n] [n (link-status http n 2000)]))
+       (filter (fn [[_ st]] (true? (:leader st))))
+       first))
+
+(defn await-following!
+  "Waits until the standby's leader reads the source and has nothing left to
+  read. Returns its status; throws after timeout-ms."
+  [test timeout-ms]
+  (let [http (qh/client)]
+    (util/await-fn
+      (fn []
+        (let [[node st] (standby-leader-status http test)
+              f         (:follower st)]
+          (when-not (and (= "standby" (:role st))
+                         (= "following" (:state f))
+                         (= 0 (:lagEntries f)))
+            (throw (ex-info "the standby does not follow yet" {:node node, :status st})))
+          (info "the standby follows its source:" node (select-keys f [:source :scanned :sourceApplied]))
+          st))
+      {:timeout        timeout-ms
+       :retry-interval 500
+       :log-interval   10000
+       :log-message    "waiting for the standby to follow its source"})))
+
 (defn disable-ntp!
   "The clock nemesis needs the node's clock left alone: on Ubuntu 24.04
   jepsen's maybe-disable-ntp! probes the wrong unit, so do it explicitly."
@@ -359,8 +446,14 @@
     (await-healthy! node 120000)
     (start-state-loop! test node)
     (jepsen/synchronize test)
+    ; The first node is always a node of the source: a standby takes no
+    ; write, and gets the queues from the source's log.
     (when (= node (jepsen/primary test))
       (configure-queues! test node))
+    (jepsen/synchronize test)
+    ; --standby-nodes: the test begins on a standby that reads its source.
+    (when (= node (first (standby-nodes test)))
+      (await-following! test 120000))
     (jepsen/synchronize test)
     (when (:disk-hog test)
       (start-disk-hog! test)))
