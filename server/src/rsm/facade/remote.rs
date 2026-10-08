@@ -142,6 +142,7 @@ pub(super) fn decode_reply(b: &[u8]) -> Result<(Reply, u64), RsmError> {
             "storage_full" => RsmError::StorageFull,
             "timeout" => RsmError::Timeout,
             "outcome_unknown" => RsmError::InDoubt,
+            crate::rsm::link::STANDBY_CODE => RsmError::Standby,
             "no_leader" => RsmError::NoLeader,
             "retry" => RsmError::Retry { leader_hint: None },
             _ => RsmError::Internal(format!("leader: {message}")),

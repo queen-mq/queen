@@ -56,14 +56,19 @@ pub struct ClusterConfig {
     /// process spread their leaders over the nodes, [`ClusterConfig::for_group`]).
     /// `None`: whoever wins the election leads.
     pub preferred_leader: Option<NodeId>,
+    /// `QUEEN_LINK_TOKEN`: the secret a standby cluster presents to read this
+    /// node's log (`x-queen-link-token`, [`super::link`]). It is NOT the
+    /// cluster's own token: a standby holds this one and can read, and
+    /// nothing more. `None`: this node serves no link.
+    pub link_token: Option<String>,
 }
 
 pub const TOKEN_HEADER: &str = "x-queen-raft-token";
 
 impl ClusterConfig {
     /// `QUEEN_RAFT_NODE_ID` (default 1), `QUEEN_RAFT_PEERS`, `QUEEN_RAFT_LISTEN`,
-    /// `QUEEN_RAFT_TOKEN`. `Ok(None)` when `QUEEN_RAFT_PEERS` is unset or
-    /// empty: a single voter.
+    /// `QUEEN_RAFT_TOKEN`, `QUEEN_LINK_TOKEN`. `Ok(None)` when
+    /// `QUEEN_RAFT_PEERS` is unset or empty: a single voter.
     pub fn from_env() -> Result<Option<ClusterConfig>, String> {
         let peers = std::env::var("QUEEN_RAFT_PEERS").unwrap_or_default();
         if peers.trim().is_empty() {
@@ -74,7 +79,12 @@ impl ClusterConfig {
         let token = std::env::var("QUEEN_RAFT_TOKEN")
             .ok()
             .filter(|t| !t.trim().is_empty());
-        ClusterConfig::parse(node_id, &peers, listen.as_deref(), token).map(Some)
+        let mut cluster = ClusterConfig::parse(node_id, &peers, listen.as_deref(), token)?;
+        cluster.link_token = std::env::var("QUEEN_LINK_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        Ok(Some(cluster))
     }
 
     /// Parse `id=raft/http,...` for node `node_id`.
@@ -128,6 +138,7 @@ impl ClusterConfig {
             members,
             token,
             preferred_leader: None,
+            link_token: None,
         })
     }
 
@@ -150,6 +161,7 @@ impl ClusterConfig {
             members,
             token: self.token.clone(),
             preferred_leader: (ids.len() > 1).then(|| ids[group % ids.len()]),
+            link_token: self.link_token.clone(),
         })
     }
 }

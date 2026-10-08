@@ -103,6 +103,14 @@ use crate::rsm::store::{Reads, Store, TypedReads};
 #[path = "batcher_lanes.rs"]
 mod lanes;
 
+/// The driver while its cluster is a standby ([`crate::rsm::link`]).
+#[path = "batcher_link.rs"]
+mod link_mode;
+pub use link_mode::{
+    LinkBoot, LinkOp, LinkSubmission, LinkTx, DIVERGED_CODE, MEMBER_BEHIND_CODE, NOT_STANDBY_CODE,
+    OUT_OF_SEQUENCE_CODE,
+};
+
 /// How often the driver polls the applied index while it holds the pipeline on
 /// a [`ProposeError::Timeout`] (I3). Node-local timing, never state.
 const HOLD_POLL_MS: u64 = 2;
@@ -121,6 +129,14 @@ pub struct BatcherConfig {
     /// ~100 cycles/s: with each cycle at the 4 MiB drain cap, just 1M msg/s,
     /// and the queue never drained after the first retention wave (2026-09-29).
     pub pipeline: usize,
+    /// `QUEEN_LINK_PIPELINE` (default 64): the same bound while this cluster
+    /// is a standby ([`crate::rsm::link`]). A standby's leader replays its
+    /// source's entries one for one, so with the source's own depth it could
+    /// commit them exactly as fast as the source does and never faster — a
+    /// standby that fell behind stayed behind for as long as the source was
+    /// busy. A replayed entry is planned on nothing in flight (no overlay to
+    /// fold it into), so the depth costs only the memory of the entries.
+    pub link_pipeline: usize,
     /// `QUEEN_RAFT_BATCH_MAX_CMDS` (§5.1).
     pub batch_max_cmds: usize,
     /// `QUEEN_RAFT_BATCH_MAX_BYTES` (§5.1): the estimated size at which the
@@ -233,6 +249,7 @@ impl Default for BatcherConfig {
     fn default() -> BatcherConfig {
         BatcherConfig {
             pipeline: 8,
+            link_pipeline: 64,
             batch_max_cmds: crate::rsm::entry::BATCH_MAX_CMDS_DEFAULT,
             batch_max_bytes: crate::rsm::entry::BATCH_MAX_BYTES_DEFAULT,
             propose_ms: 5000,
@@ -322,6 +339,7 @@ impl BatcherConfig {
         let d = BatcherConfig::default();
         BatcherConfig {
             pipeline: num("QUEEN_RAFT_PIPELINE", d.pipeline as u64) as usize,
+            link_pipeline: num("QUEEN_LINK_PIPELINE", d.link_pipeline as u64) as usize,
             batch_max_cmds: num("QUEEN_RAFT_BATCH_MAX_CMDS", d.batch_max_cmds as u64) as usize,
             batch_max_bytes: num("QUEEN_RAFT_BATCH_MAX_BYTES", d.batch_max_bytes as u64) as usize,
             propose_ms: num("QUEEN_RAFT_PROPOSE_MS", d.propose_ms),
@@ -1089,6 +1107,10 @@ pub(crate) struct PlanOutput {
     /// read in its own read transaction: `entry` must not carry a
     /// `kinds_version` above it ([`RunState::finish`]).
     pub(crate) cluster_version: u32,
+    /// `Some`: a link cycle's entry ([`link_mode`]), and what the driver notes
+    /// once it has handed it to the replicator. `None` for every cycle the
+    /// planner plans.
+    pub(crate) link: Option<link_mode::LinkPlanned>,
 }
 
 /// The leader-loop step that fires due timers (WP-2.3): plan it against the
@@ -1588,6 +1610,7 @@ pub(crate) fn plan_cycle_blocking<S: Store>(
             maintained,
             maintenance_more,
             cluster_version,
+            link: None,
         })
     })
 }
@@ -1662,6 +1685,11 @@ pub struct Batcher<S: Store, R: Replicator> {
     /// transaction's entry lands; it serves any consumption command that
     /// still reaches this driver. `None`: no engine (driver tests).
     engine: Option<Arc<crate::rsm::consume::Engine>>,
+    /// The cluster link's submissions ([`link_mode`]), when the node has a
+    /// link.
+    link_rx: Option<mpsc::Receiver<LinkSubmission>>,
+    /// What makes this cluster a standby at its first leadership.
+    link_boot: Option<LinkBoot>,
 }
 
 /// `QUEEN_RAFT_ANSWER_AT_COMMIT` (default on): free pipeline slots and answer
@@ -1764,6 +1792,8 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             qlog_reader: None,
             quiesce_rx: None,
             engine: None,
+            link_rx: None,
+            link_boot: None,
         }
     }
 
@@ -1771,6 +1801,20 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
     /// entries ([`QuiesceReq`]).
     pub fn with_quiesce(mut self, rx: mpsc::UnboundedReceiver<QuiesceReq>) -> Batcher<S, R> {
         self.quiesce_rx = Some(rx);
+        self
+    }
+
+    /// Hand the driver a cluster link's submissions, and what makes this
+    /// cluster a standby at its first leadership, if anything
+    /// ([`link_mode`]). A driver without the channel still honours a standby
+    /// role in committed state: it refuses every command.
+    pub fn with_link(
+        mut self,
+        rx: mpsc::Receiver<LinkSubmission>,
+        boot: Option<LinkBoot>,
+    ) -> Batcher<S, R> {
+        self.link_rx = Some(rx);
+        self.link_boot = boot;
         self
     }
 
@@ -1807,8 +1851,17 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         // not from the driver's first poll — a command sent the moment the
         // facade opened would be answered `Retry` in between.
         let role = *self.repl.watch_role().borrow();
-        let told = match (role, &self.engine) {
-            (Role::Leader { term }, Some(e)) => {
+        // The cluster's place in a link, read with the role: a standby's
+        // engine is never told it leads ([`link_mode`]).
+        let link0 = match role {
+            Role::Leader { term } => Some((
+                term,
+                link_mode::read_mode(&*self.store, self.link_boot.as_ref()),
+            )),
+            _ => None,
+        };
+        let told = match (role, &self.engine, &link0) {
+            (Role::Leader { term }, Some(e), Some((_, link_mode::LinkMode::Primary { .. }))) => {
                 e.on_leader(term, self.repl.metrics().last_log_index);
                 Some(term)
             }
@@ -1817,12 +1870,20 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         // W1: the driver is core. It is a task on the caller's runtime, not a
         // named thread, so the `core` wrapper (not the thread name) is what
         // makes a panic in it abort instead of silently wedging every write.
-        let handle = tokio::spawn(crate::obs::panic_policy::core(self.run(cmd_rx, told)));
+        let handle = tokio::spawn(crate::obs::panic_policy::core(
+            self.run(cmd_rx, told, link0),
+        ));
         (cmd_tx, handle)
     }
 
     /// The driver. `told`: the term the engine was told it leads at spawn.
-    async fn run(self, cmd_rx: mpsc::Receiver<Submission>, told: Option<u64>) {
+    /// `link0`: the link state read at spawn, with the term it was read in.
+    async fn run(
+        self,
+        cmd_rx: mpsc::Receiver<Submission>,
+        told: Option<u64>,
+        link0: Option<(u64, link_mode::LinkMode)>,
+    ) {
         let (result_tx, result_rx) = mpsc::unbounded_channel();
         let mut expire =
             tokio::time::interval(Duration::from_millis(self.cfg.request_expire_every_ms));
@@ -1953,13 +2014,23 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             realign_at: None,
             clock_anchor: None,
             version_raise: None,
+            link_rx: self.link_rx,
+            link_boot: self.link_boot,
+            link: link_mode::LinkMode::Unknown,
+            link_queue: VecDeque::new(),
         };
-        if role.is_leader() {
+        if let Role::Leader { term } = role {
             st.begin_term_clock();
+            // The link state read at spawn, unless the term changed since.
+            match link0 {
+                Some((t0, mode)) if t0 == term => st.adopt_link(mode),
+                _ => st.load_link(),
+            }
             // Leading from the start: the engine serves this term (it was
-            // told at spawn, unless the term changed since).
-            if let (Role::Leader { term }, Some(e)) = (role, &st.engine) {
-                if told != Some(term) {
+            // told at spawn, unless the term changed since) — on an ordinary
+            // cluster.
+            if let Some(e) = &st.engine {
+                if told != Some(term) && st.link_primary() {
                     e.on_leader(term, st.repl.metrics().last_log_index);
                 }
             }
@@ -1977,6 +2048,11 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             while let Ok(more) = st.cmd_rx.try_recv() {
                 st.enqueue(more);
             }
+            // The cluster link ([`link_mode`]): a link state still to read, a
+            // promotion that has applied, and what the link sent.
+            st.sync_link();
+            st.check_promotion();
+            st.take_link();
             st.sync_scan();
             // A cycle launched early by the last one is always finished, even
             // when nothing else is left to plan (it may have drained the queue).
@@ -1988,6 +2064,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 while let Ok(more) = st.cmd_rx.try_recv() {
                     st.enqueue(more);
                 }
+                st.take_link();
             }
             if st.should_exit() {
                 break;
@@ -2054,12 +2131,22 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                     st.raise_cluster_version();
                 }
                 _ = tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)),
-                    if st.holding_until.is_some() || st.realign_at.is_some() || st.quiescing.is_some() =>
+                    if st.holding_until.is_some()
+                        || st.realign_at.is_some()
+                        || st.quiescing.is_some()
+                        || st.link_promoting() =>
                 {
                     st.note_wake("hold");
                     st.check_hold();
                 }
-                maybe = st.cmd_rx.recv() => {
+                Some(sub) = recv_link(&mut st.link_rx) => {
+                    st.note_wake("link");
+                    st.on_link(sub);
+                }
+                // Not once it closed: a closed channel answers at once, every
+                // time, and the driver would spin on it while it waits for
+                // what is in flight.
+                maybe = st.cmd_rx.recv(), if !st.closing => {
                     st.note_wake("arrival");
                     match maybe {
                         Some(sub) => {
@@ -2266,6 +2353,21 @@ struct RunState<S: Store, R: Replicator> {
     /// The `ClusterVersionSet` this driver proposed and whose answer it has
     /// not seen ([`RunState::raise_cluster_version`]): one at a time.
     version_raise: Option<(u32, oneshot::Receiver<Reply>)>,
+    /// The cluster link ([`link_mode`]): its channel, the boot directive, what
+    /// this driver knows of the cluster's place in a link, and the submissions
+    /// waiting for a cycle.
+    link_rx: Option<mpsc::Receiver<LinkSubmission>>,
+    link_boot: Option<LinkBoot>,
+    link: link_mode::LinkMode,
+    link_queue: VecDeque<LinkSubmission>,
+}
+
+/// The next link submission, or never when the node has no link.
+async fn recv_link(rx: &mut Option<mpsc::Receiver<LinkSubmission>>) -> Option<LinkSubmission> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// The next [`QuiesceReq`], or never when no channel was handed in.
@@ -2421,9 +2523,37 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// leadership away, a local command that passed the role check a moment
     /// before the step-down).
     fn enqueue(&mut self, sub: Submission) {
+        // The cluster link's own ([`link_mode`]): a promotion is asked for by
+        // a command, so that a follower forwards it like any write, and is
+        // never planned as one; and nothing else may write the link's rows.
+        if let Command::Effects(c) = &sub.command {
+            if crate::rsm::link::is_promote_command(c) {
+                self.on_link(LinkSubmission {
+                    op: LinkOp::Promote,
+                    reply: sub.reply,
+                });
+                return;
+            }
+            if crate::rsm::link::writes_link_rows(c) {
+                let _ = sub.reply.send(Reply::Refused(Refusal::client(
+                    "link_rows",
+                    "the cluster link's rows are written by the link alone",
+                )));
+                return;
+            }
+        }
         if let Some(hint) = self.bounce_hint() {
             let _ = sub.reply.send(Reply::Retry { hint });
             return;
+        }
+        // A standby plans nothing of its own: a command is answered at once,
+        // whoever sent it — a client, a follower, the engine's ticker, a
+        // subsystem of this node ([`link_mode`]).
+        if !self.paused {
+            if let Some(refusal) = self.link_refusal() {
+                let _ = sub.reply.send(Reply::Refused(refusal));
+                return;
+            }
         }
         // Consumption is the engine's, served before the driver
         // (`facade::intake`). One that still reaches it (a path that submits
@@ -2471,27 +2601,57 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     }
 
     fn can_plan(&self) -> bool {
+        // A standby replays through a pipeline of its own depth
+        // ([`BatcherConfig::link_pipeline`]).
+        let depth = match self.link_due() {
+            Some(_) => self.cfg.link_pipeline,
+            None => self.cfg.pipeline,
+        };
         !self.stopped
             && !self.paused
             && self.holding_until.is_none()
             && self.quiescing.is_none()
-            && self.uncommitted() < self.cfg.pipeline
-            && self.unresolved() < self.cfg.pipeline + *COMMIT_LAG_MAX
-            && (self.queued() > 0
-                || ((self.expire_due
-                    || self.kv_sweep_due
-                    || self.timers_due
-                    || self.maintenance_due
-                    || self.scan_due)
-                    && !self.closing))
+            && self.uncommitted() < depth
+            && self.unresolved() < depth + *COMMIT_LAG_MAX
+            && match self.link_due() {
+                // A standby: the link's entries, and nothing else.
+                Some(due) => due,
+                None => {
+                    self.queued() > 0
+                        || ((self.expire_due
+                            || self.kv_sweep_due
+                            || self.timers_due
+                            || self.maintenance_due
+                            || self.scan_due)
+                            && !self.closing)
+                }
+            }
     }
 
+    /// A closing driver (its command channel closed: the node is stopping)
+    /// leaves once nobody waits on an entry in flight and nothing queued can
+    /// still be planned.
+    ///
+    /// An entry that timed out has answered its waiters `Retry` (I3). It is
+    /// kept in flight so that nothing is planned over it, and this driver
+    /// plans nothing more: waiting for it to apply would wait for a quorum
+    /// that may never come back — the last node of a cluster to stop, leading
+    /// with an entry in its log, never stopped. What is still queued behind
+    /// such an entry, or on a node that does not lead, is answered `Retry` on
+    /// the way out ([`Self::fail_all`]).
     fn should_exit(&self) -> bool {
-        self.stopped
-            || (self.closing
-                && self.queued() == 0
-                && self.unresolved() == 0
-                && self.holding_until.is_none())
+        if self.stopped {
+            return true;
+        }
+        if !self.closing {
+            return false;
+        }
+        let answered = self
+            .inflight
+            .iter()
+            .all(|e| e.resolved.is_some() || e.timed_out);
+        let plans = !self.paused && self.holding_until.is_none() && self.quiescing.is_none();
+        answered && (self.queued() == 0 || !plans)
     }
 
     /// Drain up to the caps (§5.1) into one batch, leaving the rest queued.
@@ -2554,6 +2714,14 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     async fn plan_cycle(&mut self) {
         let launched = match self.prefetch.take() {
             Some(l) => Some(l),
+            // A standby's cycle is one link entry ([`link_mode`]).
+            None if self.link_due().is_some() => {
+                if let Some(l) = self.launch_link() {
+                    self.finish(l).await;
+                }
+                self.link_settle();
+                return;
+            }
             None => self.launch(None, true),
         };
         if let Some(l) = launched {
@@ -2968,9 +3136,14 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         // Drop the in-flight entries the committed read now reflects (§7.2).
         self.drop_landed(out.store_applied);
 
+        // A link cycle's entry ([`link_mode`]): noted once it is proposed.
+        let link_planned = out.link;
+
         // D20: the engine writes under the cluster version this cycle read,
         // which every later cycle's read is at least (it never goes down).
-        if let Some(e) = &self.engine {
+        // Not a link cycle's: its version counts entries still in flight, and
+        // a standby's engine writes nothing.
+        if let (Some(e), None) = (&self.engine, &link_planned) {
             e.note_cluster_version(out.cluster_version);
         }
         // D20: never an entry above the cluster version. Every writer of a
@@ -3155,6 +3328,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     .record_dur(started.elapsed());
             }
             self.propose(seq, index, entry, waiters, bytes);
+            if let Some(planned) = link_planned {
+                self.link_proposed(planned, index);
+            }
         } else {
             debug_assert!(waiters.is_empty(), "no entry but waiters were attached");
         }
@@ -3445,6 +3621,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         self.quiescing = None;
         // The pipeline is gone, and with it every entry the kept overlay holds.
         self.invalidate_kept();
+        // The cluster link: its queue is answered, and its state is read
+        // again by whoever leads next ([`link_mode`]).
+        self.lose_link(hint);
     }
 
     /// The role watch changed.
@@ -3473,11 +3652,17 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     // is guaranteed to hold complete. A single-node
                     // LocalReplicator never regains, so this is inert in phase 1.
                     self.front.reset();
+                    // Everything logged before this term is applied: the
+                    // cluster's place in a link is what the store says now.
+                    self.load_link();
                     // The consumption engine serves from now on, in this term:
                     // it starts from the committed cursor rows (their leases
-                    // live on) after its failover pause.
+                    // live on) after its failover pause. Not a standby's: it
+                    // serves once the cluster is promoted.
                     if let Some(e) = &self.engine {
-                        e.on_leader(term, self.next_index - 1);
+                        if self.link_primary() {
+                            e.on_leader(term, self.next_index - 1);
+                        }
                     }
                     // KEEP_OVERLAY: and plan from state rebuilt under the new term.
                     self.invalidate_kept();
@@ -3524,8 +3709,11 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 self.next_index = self.repl.metrics().last_log_index + 1;
                 self.front.reset();
                 self.invalidate_kept();
+                self.load_link();
                 if let Some(e) = &self.engine {
-                    e.on_leader(term, self.next_index - 1);
+                    if self.link_primary() {
+                        e.on_leader(term, self.next_index - 1);
+                    }
                 }
             }
         }
@@ -3656,6 +3844,11 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         if self.paused || self.stopped || self.closing || self.quiescing.is_some() {
             return;
         }
+        // A standby's cluster version follows its source's: the raises arrive
+        // as entries ([`link_mode`]).
+        if !self.link_primary() {
+            return;
+        }
         let Some(floor) = self.repl.kinds_floor() else {
             return;
         };
@@ -3686,7 +3879,11 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// Background retention walks only while this node plans as leader.
     fn sync_scan(&self) {
         if let Some(scan) = &self.scan {
-            scan.set_leading(!self.paused && !self.stopped && !self.closing);
+            // An ordinary cluster's leader only: a standby's retention is its
+            // source's, replayed.
+            scan.set_leading(
+                !self.paused && !self.stopped && !self.closing && self.link_primary(),
+            );
         }
     }
 
@@ -3829,6 +4026,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         while let Some(sub) = self.lane.pop_front().or_else(|| self.queue.pop_front()) {
             let _ = sub.reply.send(Reply::Retry { hint });
         }
+        self.fail_link(hint);
     }
 }
 

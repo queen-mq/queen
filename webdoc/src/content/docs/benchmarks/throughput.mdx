@@ -9,6 +9,7 @@ sourceOfTruth:
   - server/src/rsm/consume/mod.rs
   - server/src/rsm/facade/groups.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): QUEEN_CONSUME_IDLE_UNLOAD_S (600 s) drops idle parts from the leader's memory. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the consumption engine gains a standby flag and serves nothing while its cluster is a standby; on an ordinary cluster it serves as measured. Nothing this page states changes.
 ---
 
 Two hundred partitions in one queue is the shape that suits a broker with a log per partition

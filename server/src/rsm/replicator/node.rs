@@ -186,6 +186,16 @@ impl<S: Store + 'static> NodeReplicator<S> {
         }
     }
 
+    /// This node's log as a standby cluster reads it
+    /// ([`super::raft::link::LinkSource`]); `None` for the local replicator,
+    /// which no standby can reach.
+    pub fn link_source(&self) -> Option<super::raft::link::LinkSource> {
+        match self {
+            NodeReplicator::Local(_) => None,
+            NodeReplicator::Raft(r) => Some(r.link_source()),
+        }
+    }
+
     pub fn reader(&self) -> segments::Reader {
         match self {
             NodeReplicator::Local(r) => r.reader(),

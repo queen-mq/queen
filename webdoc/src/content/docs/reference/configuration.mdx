@@ -16,6 +16,8 @@ sourceOfTruth:
   - server/src/rsm/facade/real.rs
   - server/src/rsm/replicator/raft/mod.rs
   - server/src/rsm/replicator/raft/forward.rs
+  - server/src/rsm/replicator/raft/link.rs
+  - server/src/rsm/link/driver.rs
   - server/src/rsm/qlog/codec.rs
   - server/src/rsm/qlog/set.rs
   - server/src/rsm/segments/mod.rs
@@ -33,6 +35,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): the added QLog index read introduces no setting and changes no configuration default.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): nine QUEEN_LINK_* variables join the generated table (batcher.rs reads QUEEN_LINK_PIPELINE, raft/link.rs and link/driver.rs the others, both now among this page's sources), with a pointer to the page that explains them. The engine tuning tables are as described.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no
@@ -115,6 +118,12 @@ on by default turns off only with `0`, `false`, `off` or `no`.
 | `QUEEN_RAFT_FWD_STREAMS` | `4` (1 to 64) | Long-lived streams a follower forwards prepared commands over. |
 | `QUEEN_RAFT_CLUSTER_VERSION_MS` | `1000` | How often the leader compares the cluster's data format version with what every member reads, and raises it once all read the new one. A raise is one-way: older builds refuse the data from then on. `0` never raises it, which keeps a rollback open while a new release bakes. |
 | `QUEEN_EPHEMERAL_MEMBER_TTL_MS` | `4000` (at least 200) | A member the leader has not heard from for this long owns no ephemeral partition. |
+
+### Standby cluster
+
+The nine `QUEEN_LINK_*` variables in the table above set up a
+[standby cluster](/operate/standby/#settings) and what its source keeps for it. That page says
+what each one does. A cluster with none of them set is neither a standby nor read by one.
 
 ### Apply and storage
 

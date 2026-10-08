@@ -1,0 +1,327 @@
+---
+title: Standby cluster
+description: "Keep a second Queen cluster that replays the first one's log and take over on it when the first is lost: what a standby holds, how to start one empty or from a seed, how to watch it, how to promote it, and what a promotion can lose."
+type: how-to
+tier: operate
+sidebar:
+  order: 9
+sourceOfTruth:
+  - server/src/rsm/link/mod.rs
+  - server/src/rsm/link/mirror.rs
+  - server/src/rsm/link/driver.rs
+  - server/src/rsm/link/seed.rs
+  - server/src/rsm/link/wire.rs
+  - server/src/rsm/batcher_link.rs
+  - server/src/rsm/replicator/raft/link.rs
+  - server/src/rsm/facade/real/phase2/link.rs
+verifiedBy:
+  - server/src/rsm/tests/link.rs
+  - server/src/rsm/tests/link_cluster.rs
+---
+
+Three replicas protect you from losing a machine, and a [backup](/operate/recovery-backups/)
+protects you from a mistake. Neither helps on the day the whole cluster is gone: the zone, the
+Kubernetes cluster it runs in, or a quorum of its disks. A standby is a second cluster, on other
+machines, that replays everything the first one commits and is a moment behind it. When the first
+is lost you promote the standby, point your clients at it, and they carry on from the messages,
+cursors, leases and keys the first cluster had.
+
+The two clusters are called the **source** and the **standby**. Each is a whole cluster with its
+own raft group, its own leader and its own node list. The source does not know the standby exists
+beyond answering its reads, and never waits for it.
+
+## What a standby holds
+
+A standby's leader reads the source's committed log entries and proposes each one into its own
+log, unchanged. An entry carries everything a step did, so the standby ends up with the same
+state, built the same way a follower of the source builds it:
+
+- every message, and which ones each consumer group has acknowledged
+- the leases consumers hold, with their expiry
+- KV rows and their versions, timers, and the dedup window
+- queues, partitions and their settings, tenants, connector documents
+
+What it does not hold is what never was in the log: ephemeral queues, each node's own metrics
+history, and the environment. Give the standby the same `QUEEN_ENCRYPTION_KEY` and the same JWT
+settings as the source, or it will hold payloads it cannot open and reject the tokens your clients
+carry.
+
+A standby is not a second line of defence against mistakes. A deleted queue is an entry like any
+other and is replayed a moment later. That is what backups are for.
+
+While it is a standby, the cluster:
+
+| | |
+|---|---|
+| Answers reads | The dashboard, `GET` routes and `/metrics/prometheus` work on every node and show the source's state |
+| Refuses writes | Push, pop, ack, transactions, KV writes and timers answer `503` with `"code": "standby"` and `Retry-After: 1`, on every node. A client that keeps retrying is served the moment the standby is promoted |
+| Runs nothing of its own | No retention, no timer fires, no expiry: the source ran them, and what they did arrives as entries. Connectors and the S3 sink work under a lease, which is a write, so on a standby they never start |
+
+## What a promotion can lose
+
+Replication is asynchronous. The source answers a write once its own quorum has it, and the
+standby reads it a moment later. If the source dies inside that moment, the write is on no
+machine you still have. How long the moment is shows on the standby as
+[`queen_link_lag_seconds`](#watch-it): on an idle or lightly loaded pair it is the network round
+trip, and it grows only when the standby cannot commit as fast as the source does.
+
+<Aside title="How this was measured">
+On 2026-10-08, with a source and a standby of one node each on one laptop, sharing its disk and
+its cores with the load generator. The source took about 200,000 messages a second (250 bytes
+each, 2.8 million in total) and the standby stayed within 0.25 seconds of it throughout, with
+nothing left to read the moment the load stopped. Both then held 2,830,000 pending messages. Two
+clusters on separate machines have not been measured yet.
+</Aside>
+
+So a promotion after a crash of the source loses at most the writes of that last moment, and
+nothing older. Everything the standby did replay is exactly what the source had: the standby
+never holds half an entry, and never an entry the source did not commit.
+
+A planned switch loses nothing, because you can wait for the moment to be zero. The steps are
+under [Promote](#promote).
+
+## Start a standby
+
+### On the source
+
+Set a link token on every node of the source and restart them one at a time:
+
+```bash
+QUEEN_LINK_TOKEN=<a long random secret>
+```
+
+A node with a link token answers a standby on its raft port (7400 by convention) under
+`/link/v1/`. The token lets a standby read the log and the snapshot, and nothing else: it is not
+the cluster's `QUEEN_RAFT_TOKEN` and cannot vote or append. A node without one answers `404` on
+those routes. The standby's nodes must be able to reach the raft port of the source's nodes. That
+port speaks plain HTTP, so carry it over a private network, a VPN or a mesh between the two
+sites.
+
+### An empty standby, for a young source
+
+A new cluster keeps its whole log for a while. If the source still has the start of its log, an
+empty standby can replay it from the beginning. Start every node of the standby on an empty
+directory with its own [cluster settings](/operate/cluster/#in-production) plus:
+
+```bash
+QUEEN_LINK_SOURCE=queen-0.queen-headless:7400,queen-1.queen-headless:7400,queen-2.queen-headless:7400
+QUEEN_LINK_SOURCE_TOKEN=<the source's QUEEN_LINK_TOKEN>
+QUEEN_LINK_STANDBY=true
+```
+
+`QUEEN_LINK_SOURCE` names the raft address of every node of the source. The standby reads one of
+them and moves to another when that one stops answering or falls behind. `QUEEN_LINK_STANDBY`
+makes an empty cluster a standby at its first election. It does nothing on a cluster that already
+holds entries of its own or was promoted, so it can stay set for good.
+
+### A seeded standby, for a source with a history
+
+A source that has run for a while has purged the start of its log, and an empty standby would be
+told so (`"state": "halted"`, "needs a new seed"). Such a standby starts from the source's
+snapshot instead. Start every node of the standby on an empty directory with the source and its
+token as above, and name the one node that takes the seed:
+
+```bash
+QUEEN_LINK_SOURCE=queen-0.queen-headless:7400,queen-1.queen-headless:7400,queen-2.queen-headless:7400
+QUEEN_LINK_SOURCE_TOKEN=<the source's QUEEN_LINK_TOKEN>
+QUEEN_LINK_SEED=1
+```
+
+Node 1 downloads a snapshot from a node of the source, boots on it as the only voter of a new
+cluster, and is a standby at the snapshot's position from its first moment. The other nodes see
+that they are not the seed and wait to be added. Add them the way you add a node to any cluster,
+on node 1:
+
+```bash
+curl -X POST http://standby-0:6632/api/v1/system/raft/membership/learners \
+  -H 'content-type: application/json' \
+  -d '{"id": 2, "raft": "standby-1.standby-headless:7400", "http": "standby-1.standby-headless:6632"}'
+curl -X POST http://standby-0:6632/api/v1/system/raft/membership/learners \
+  -H 'content-type: application/json' \
+  -d '{"id": 3, "raft": "standby-2.standby-headless:7400", "http": "standby-2.standby-headless:6632"}'
+# Each one receives node 1's snapshot and restarts once to load it. Then:
+curl -X POST http://standby-0:6632/api/v1/system/raft/membership/promote \
+  -H 'content-type: application/json' -d '{"ids": [2, 3]}'
+```
+
+The seed is taken once. A seeded node keeps a record of it (`link.seed` in its data directory)
+and never seeds again, and a node whose directory holds data, or whose peers already hold a
+cluster, does not seed at all: a node you empty later rejoins its own cluster like any other. So
+`QUEEN_LINK_SEED` can stay set too.
+
+## Watch it
+
+`GET /api/v1/system/link` (an admin route) answers on every node of both clusters. On the
+standby's leader:
+
+```json
+{
+  "role": "standby",
+  "leader": true,
+  "id": "2a340216",
+  "name": "standby-2a340216",
+  "source": "queen-0.queen-headless:7400,queen-1.queen-headless:7400,queen-2.queen-headless:7400",
+  "sinceUs": 1791467186467710,
+  "position": { "index": 18, "term": 1, "nowUs": 1791467212792429 },
+  "configuredSource": [
+    "queen-0.queen-headless:7400",
+    "queen-1.queen-headless:7400",
+    "queen-2.queen-headless:7400"
+  ],
+  "follower": {
+    "state": "following",
+    "source": "queen-0.queen-headless:7400",
+    "scanned": 18,
+    "sourceApplied": 18,
+    "lagEntries": 0,
+    "lagMs": 0,
+    "lastAnswerMs": 1026,
+    "entries": 16,
+    "error": null
+  }
+}
+```
+
+`position` is the last entry of the source's log the standby holds, and `id` is the name the
+standby drew for itself when it became one. In `follower`, `source` is the node being read,
+`sourceApplied` is how far that node had got when it last answered, and `lagEntries` is what was
+left to read then. The follower runs on the standby's leader only (the other nodes show `idle`),
+and its `state` is one of:
+
+| State | Meaning |
+|---|---|
+| `following` | Reading the source and replaying it |
+| `waiting` | Held up by something that passes, named in `error`: the source does not answer, or it runs a newer release than a node of the standby. It retries by itself |
+| `halted` | Stopped by something that does not pass, named in `error`: the source purged the entries after the standby's position, or the two logs are not one. The standby needs a new seed |
+| `idle` | Nothing to do: this node does not lead, or the cluster is not a standby |
+
+On a node of the source the same route lists who reads it:
+
+```json
+{
+  "role": "primary",
+  "leader": true,
+  "readers": [{ "name": "standby-2a340216", "after": 18, "idleMs": 597 }],
+  "holding": true
+}
+```
+
+`/health` carries the same block under `raft.link`, and these series are worth an alert. The
+follower's series are reported by the standby's leader, so take the cluster's maximum.
+
+| Series | Alert when |
+|---|---|
+| `queen_link_follower_state{state="halted"}` | 1 on any node: the standby stopped for good and needs a new seed |
+| `queen_link_follower_state{state="following"}` | 0 on every node for a minute: nobody replays |
+| `queen_link_last_answer_seconds` | Above 30: the source stopped answering. The lag series cannot grow while it does, because they are what the source last said |
+| `queen_link_lag_seconds` | Above what you accept to lose |
+| `queen_link_holding` (on the source) | 0: the source's disk is too full to keep its log for the standby |
+
+## Promote
+
+A promotion turns the standby into an ordinary cluster for good. Nothing tells the source. If the
+source still takes writes when you promote, you have two clusters that both serve, each with
+writes the other lacks, and no way to merge them. **Make sure the source is stopped or cut off
+from its clients first.**
+
+After a crash of the source:
+
+1. Confirm the source is down, or stop what is left of it.
+2. Promote, on any node of the standby:
+
+   ```bash
+   curl -X POST http://standby-0:6632/api/v1/system/link/promote
+   ```
+
+   It answers once that node has applied the promotion, with `"role": "promoted"` and the
+   `position` the standby had reached: the source's entries after that index are not in this
+   cluster.
+3. Point your clients at the standby. Those that kept retrying the `503` are served at once.
+
+For a planned switch, with nothing lost:
+
+1. Stop the source's clients, or let its writes drain.
+2. Wait until the standby has everything: `lagEntries` is 0 on the standby's leader, and on the
+   source `readers[].after` has stopped moving.
+3. Stop the source.
+4. Promote, and point your clients at the standby.
+
+After the promotion the cluster behaves the way the source would have after a leader change:
+
+- Messages no consumer had acknowledged are delivered.
+- A lease a consumer of the source held lives on until it expires, and its messages are then
+  delivered again. A consumer that reconnects to the promoted cluster inside the lease can still
+  acknowledge them.
+- A write you send again is judged by what it carries, as it would be on the source: a pushed
+  `transactionId` that is already in the dedup window is a duplicate, an ack is fenced by its
+  lease, and a `required` or `once` marker still holds. If the source's first attempt never
+  reached the standby, the retry is applied as new.
+- Timers, retention and expiry run again, from this cluster's own clock. Connectors and the S3
+  sink take their leases within one lease period.
+
+A promoted cluster stays promoted. Its `QUEEN_LINK_*` settings can remain: none of them makes it a
+standby again.
+
+### Going back
+
+The old source cannot rejoin as it is. It holds writes the promoted cluster never saw (the last
+moment), and the promoted cluster holds writes it never saw. To have a standby again, empty the
+old source's data directories and start it as a [seeded standby](#a-seeded-standby-for-a-source-with-a-history)
+of the cluster that now serves. Switching back is then one more planned switch.
+
+## The source keeps its log for the standby
+
+A cluster purges its log once every follower has it. A standby is not a follower, so each node of
+the source keeps the entries after the standby's position for it. The standby reads one node and
+tells the others where it is every few seconds, so all of them keep the same entries and any of
+them can take over the reads. A node writes what it keeps for whom to its data directory, so it
+still knows after a restart.
+
+That costs the source disk while a standby is behind, and the source's own writes come first. A
+node stops keeping its log for a standby when:
+
+- the standby has been silent for `QUEEN_LINK_HOLD_S` (an hour by default)
+- the node's data volume is `QUEEN_LINK_HOLD_DISK_PCT` full (80 by default, the same as
+  `QUEEN_RAFT_DISK_LOW_PCT`). The node then purges as if nobody read it, well before it would
+  refuse writes, and says so in its log and with `"holding": false`
+
+A standby whose entries were purged on every node of the source halts with "needs a new seed".
+Empty its data directories and start it again as a seeded standby.
+
+## Settings
+
+On every node of the standby:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `QUEEN_LINK_SOURCE` | unset | The raft address (`host:port`) of every node of the source, comma separated. Unset, the cluster follows nobody |
+| `QUEEN_LINK_SOURCE_TOKEN` | unset | The source's `QUEEN_LINK_TOKEN` |
+| `QUEEN_LINK_STANDBY` | `false` | An empty cluster becomes a standby at its first election. Ignored by a cluster that holds entries of its own |
+| `QUEEN_LINK_SEED` | unset | The id of the one node that takes its first state from the source's snapshot. The same value on every node |
+| `QUEEN_LINK_NAME` | `standby-<id>` | What the source calls this standby. Each standby draws an id when it becomes one, so two standbys of one source never share a name unless you give them one |
+| `QUEEN_LINK_PIPELINE` | `64` | How many replayed entries may be on their way to commit at once. It is deeper than `QUEEN_RAFT_PIPELINE` so a standby that fell behind catches up faster than the source writes |
+
+On every node of the source:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `QUEEN_LINK_TOKEN` | unset | The secret a standby presents to read this node. Unset, the node serves no standby |
+| `QUEEN_LINK_HOLD_S` | `3600` | How long a standby that stopped reading still keeps this node's log from being purged |
+| `QUEEN_LINK_HOLD_DISK_PCT` | `QUEEN_RAFT_DISK_LOW_PCT` (80) | How full the data volume may be while the node still keeps its log for a standby. 100 means never give it up |
+
+## Limits
+
+- **Cluster mode on both sides.** The link is served on the raft port, which only a node started
+  with `QUEEN_RAFT_REPLICATOR=openraft` opens. A source of one node therefore runs as a cluster of
+  one voter, and so does a standby of one node.
+- **One raft group.** A standby replays one log, so both clusters run with `QUEEN_RAFT_GROUPS=1`,
+  the default.
+- **Asynchronous.** There is no mode in which the source waits for the standby.
+- **No encryption of its own.** The link shares the raft port, which is plain HTTP.
+- **Upgrade the standby first.** A source that starts writing a newer entry format than a node of
+  the standby reads makes the standby wait (`"state": "waiting"`, with the reason in `error`)
+  until every node of the standby runs the newer release. Nothing is lost while it waits, but the
+  lag grows.
+- **A standby's embedded Kafka facade** started in cluster mode logs one warning a minute that it
+  cannot renew its registry row. It renews it within a heartbeat of the promotion and takes over
+  the source's broker ids.

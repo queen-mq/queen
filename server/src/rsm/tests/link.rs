@@ -1,0 +1,1083 @@
+//! The cluster link (`rsm/link`): a standby that replays a source's entries.
+//!
+//! What this file proves:
+//!
+//! - **mirrored entries, same state**
+//!   ([`a_standby_fed_the_mirrored_entries_holds_the_sources_state`]): a
+//!   second cluster that is proposed the source's entries through
+//!   [`mirror_entry`] holds every replicated keyspace byte-equal to the
+//!   source's, except the log positions (see [`comparable`]) and the link's
+//!   own flags, and its position names the last source entry.
+//! - **the whole path, through the drivers**
+//!   ([`a_standby_replays_its_source_restarts_and_is_promoted`]): what a
+//!   source's batcher logged — pushes with a duplicate, a cursor checkpoint,
+//!   KV writes, a timer and its fire, the leader's own steps — is read back
+//!   from the source's queue logs ([`LinkSource::read`]), rebuilt
+//!   ([`full_entry`]) and replayed by a standby's batcher, which refuses its
+//!   own clients meanwhile; the standby resumes from its position after a
+//!   restart; and a promotion makes it an ordinary cluster.
+//! - **the driver's refusals** ([`a_standby_refuses_what_does_not_follow_it`]):
+//!   an entry out of sequence, an entry that does not continue the standby's
+//!   state, and a link command on a cluster that is not a standby.
+//! - **the follower** ([`the_follower_follows_its_source_and_says_why_when_it_cannot`]):
+//!   the task of [`crate::rsm::link::driver`] against a source it reads
+//!   in-process — it follows, leaves its hold on the source's log, and reports
+//!   a source that does not answer, one that is behind the standby, one that
+//!   purged what the standby needs and one whose log is another log, each for
+//!   what it is; and it goes on when the source does.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use bytes::Bytes;
+use serde_json::json;
+
+use crate::rsm::apply::{self, state_digest, StateDigest, SystemClock};
+use crate::rsm::batcher::{
+    Batcher, BatcherConfig, Command, CommandTx, LinkBoot, LinkOp, LinkSubmission, LinkTx, Reply,
+    Submission, DIVERGED_CODE, NOT_STANDBY_CODE, OUT_OF_SEQUENCE_CODE,
+};
+use crate::rsm::effect::Effect;
+use crate::rsm::entry::{decode_entry, encode_entry, Entry, Outcome, PushVerdict};
+use crate::rsm::link::mirror::{mirror_entry, standby_entry};
+use crate::rsm::link::wire::{full_entry, Answer};
+use crate::rsm::link::{self, Cursor, Position, Role};
+use crate::rsm::planner::kv::{parse_ops, KvCommand};
+use crate::rsm::planner::timers::{parse_timer_ops, TimersCommand};
+use crate::rsm::planner::{EffectsCommand, PushCommand};
+use crate::rsm::replicator::local::{NoWaker, OpenConfig};
+use crate::rsm::replicator::log::{Fsync, LogOptions};
+use crate::rsm::replicator::raft::RaftReplicator;
+use crate::rsm::replicator::{AppliedAt, Replicator};
+use crate::rsm::store::{HeedStore, Keyspace, Reads, Store, TypedReads};
+
+use super::apply::{cfg, seg_opts, store_opts, Workload, QUEUE, TENANT};
+use super::planner_harness::{cursor_row, item, qcfg, rid};
+
+static SEQ: AtomicU64 = AtomicU64::new(0);
+
+const SEED: u64 = 0x0_11A0_7000_0001;
+
+fn scratch(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "queen-rsm-link-{tag}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+fn repl_config(dir: &Path) -> OpenConfig {
+    OpenConfig {
+        node_id: 1,
+        log_dir: dir.join("log"),
+        log_opts: LogOptions {
+            segment_bytes: 64 << 10,
+            fsync: Fsync::Off,
+        },
+        seg_root: dir.join("seg"),
+        seg_opts: seg_opts(),
+        apply_cfg: apply::ApplyConfig {
+            qlog: true,
+            ..cfg()
+        },
+        apply_channel_capacity: 64,
+        replay_deadline: Duration::from_secs(30),
+        writer_pipeline: false,
+    }
+}
+
+fn open_raft(dir: &Path) -> RaftReplicator<HeedStore> {
+    let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+    RaftReplicator::open(
+        store,
+        repl_config(dir),
+        Arc::new(NoWaker),
+        Arc::new(SystemClock),
+    )
+    .expect("open the openraft replicator")
+}
+
+fn deadline() -> Instant {
+    Instant::now() + Duration::from_secs(30)
+}
+
+fn request_id(n: u64) -> [u8; 16] {
+    let mut id = [0xEE; 16];
+    id[..8].copy_from_slice(&n.to_le_bytes());
+    id
+}
+
+/// What a source and its standby must agree on, keyspace by keyspace: every
+/// replicated one but `meta` (the applied index and term, and each cluster's
+/// own membership notes), `groups` (`reg_index`, the index of the entry that
+/// registered the group), `flags` (the standby holds the link's rows) and the
+/// two request-id keyspaces (the standby's own entries are commands too, and
+/// record their ids). [`group_rows`], [`flags_without_the_link`] and
+/// [`request_rows`] check the rest of those.
+pub(super) fn comparable(d: &StateDigest) -> Vec<(&'static str, u128, u64)> {
+    d.per_keyspace
+        .iter()
+        .filter(|(name, _, _)| {
+            !matches!(
+                *name,
+                "meta" | "groups" | "flags" | "request_ids" | "request_expiry"
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+/// The rows of the two request-id keyspaces, without those of `own` (the
+/// request ids of the entries a standby built itself). Both keys end with the
+/// id.
+pub(super) fn request_rows(store: &HeedStore, own: &[[u8; 16]]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    store
+        .read(|r| {
+            let mut out = Vec::new();
+            for ks in [Keyspace::RequestIds, Keyspace::RequestExpiry] {
+                r.scan_raw(ks, &[], &[], usize::MAX, &mut |k, v| {
+                    if !own.iter().any(|id| k.ends_with(id)) {
+                        out.push((k.to_vec(), v.to_vec()));
+                    }
+                    true
+                })?;
+            }
+            Ok(out)
+        })
+        .expect("read request ids")
+}
+
+/// Every row of the counters keyspace.
+pub(super) fn counter_rows(store: &HeedStore) -> Vec<(Vec<u8>, Vec<u8>)> {
+    store
+        .read(|r| {
+            let mut out = Vec::new();
+            r.scan_raw(Keyspace::Counters, &[], &[], usize::MAX, &mut |k, v| {
+                out.push((k.to_vec(), v.to_vec()));
+                true
+            })?;
+            Ok(out)
+        })
+        .expect("read the counters")
+}
+
+/// The workload's group rows with the log position set aside.
+fn group_rows(store: &HeedStore) -> Vec<String> {
+    use crate::rsm::store::TypedReads;
+    store
+        .read(|r| {
+            let mut out = Vec::new();
+            for g in ["g1", "g2"] {
+                let row = r.group(TENANT, QUEUE, g)?;
+                out.push(format!("{g}: {:?}", row.map(|r| (r.meta, r.reg_effect))));
+            }
+            Ok(out)
+        })
+        .expect("read group rows")
+}
+
+/// Every flag row that is not the link's.
+pub(super) fn flags_without_the_link(store: &HeedStore) -> Vec<(Vec<u8>, Vec<u8>)> {
+    // A flag's key starts with its name.
+    let link_prefix = link::FLAG_PREFIX.as_bytes();
+    store
+        .read(|r| {
+            let mut out = Vec::new();
+            r.scan_raw(Keyspace::Flags, &[], &[], usize::MAX, &mut |k, v| {
+                if !k.starts_with(link_prefix) {
+                    out.push((k.to_vec(), v.to_vec()));
+                }
+                true
+            })?;
+            Ok(out)
+        })
+        .expect("read flags")
+}
+
+struct Closed {
+    digest: StateDigest,
+    groups: Vec<String>,
+    flags: Vec<(Vec<u8>, Vec<u8>)>,
+    requests: Vec<(Vec<u8>, Vec<u8>)>,
+    role: Role,
+    position: Position,
+}
+
+/// Shut a node down and read what the comparisons need. `own`: the request
+/// ids of the entries the node built itself (a standby's), see
+/// [`request_rows`].
+fn close(repl: RaftReplicator<HeedStore>, own: &[[u8; 16]]) -> Closed {
+    let (_stats, store) = repl.shutdown().expect("shutdown");
+    let groups = group_rows(&store);
+    let flags = flags_without_the_link(&store);
+    let requests = request_rows(&store, own);
+    let (role, position) = store
+        .read(|r| Ok((link::read_role(r)?, link::read_position(r)?)))
+        .expect("read the link rows");
+    let store = Arc::try_unwrap(store).unwrap_or_else(|_| panic!("the store is still shared"));
+    let digest = store
+        .read(|r| Ok(state_digest(r).expect("digest")))
+        .expect("read");
+    store.close();
+    Closed {
+        digest,
+        groups,
+        flags,
+        requests,
+        role,
+        position,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_standby_fed_the_mirrored_entries_holds_the_sources_state() {
+    const N: u64 = 400;
+    let mut w = Workload::new(SEED);
+    let entries: Vec<Bytes> = (0..N)
+        .map(|_| Bytes::from(encode_entry(&w.next().entry).expect("encode")))
+        .collect();
+
+    // The source: an ordinary cluster. Where each entry landed is what a
+    // standby is told.
+    let dir_a = scratch("mirror-source");
+    let source = open_raft(&dir_a);
+    let mut landed: Vec<(AppliedAt, Bytes)> = Vec::with_capacity(entries.len());
+    for e in entries {
+        let at = source.propose(e.clone(), deadline()).await.expect("propose");
+        landed.push((at, e));
+    }
+    let last = landed.last().expect("entries").0;
+
+    // The standby: its first entry makes it one, then every source entry goes
+    // through `mirror_entry`, each admitted by the cursor first.
+    let dir_b = scratch("mirror-standby");
+    let standby = open_raft(&dir_b);
+    let mut cursor = standby
+        .store_for_test()
+        .read(|r| Cursor::read(r))
+        .expect("read the cursor");
+    assert_eq!(cursor.position, Position::START);
+    let first = standby_entry(&cursor, request_id(1), "test://source", Position::START, 0)
+        .expect("the standby entry");
+    standby
+        .propose(Bytes::from(encode_entry(&first).expect("encode")), deadline())
+        .await
+        .expect("become a standby");
+
+    let mut prev = 0;
+    for (at, bytes) in &landed {
+        let src = decode_entry(bytes).expect("decode");
+        cursor
+            .admit(prev, at.index, &src)
+            .unwrap_or_else(|why| panic!("source entry {} was not admitted: {why}", at.index));
+        let mirrored = mirror_entry(&src, at.index, at.term).expect("mirror");
+        standby
+            .propose(Bytes::from(encode_entry(&mirrored).expect("encode")), deadline())
+            .await
+            .expect("propose the mirrored entry");
+        cursor.advance(at.index, at.term, &src);
+        prev = at.index;
+    }
+    // The cursor the driver kept is the one committed state holds.
+    let committed = standby
+        .store_for_test()
+        .read(|r| Cursor::read(r))
+        .expect("read the cursor");
+    assert_eq!(cursor, committed, "the kept cursor drifted from the state");
+
+    let a = close(source, &[]);
+    let b = close(standby, &[request_id(1)]);
+
+    assert_eq!(
+        comparable(&b.digest),
+        comparable(&a.digest),
+        "the standby built different replicated state from the source's entries"
+    );
+    assert_eq!(b.groups, a.groups, "the group rows differ beyond their log position");
+    assert_eq!(b.flags, a.flags, "the flags differ beyond the link's own");
+    assert_eq!(
+        b.requests.len(),
+        a.requests.len(),
+        "the standby records the source's request ids and its own entry's, no other"
+    );
+    assert!(b.requests == a.requests, "the request-id rows differ");
+    assert_eq!(a.role, Role::Primary, "the source knows nothing of the link");
+    assert!(b.role.is_standby(), "the standby's role row says so");
+    assert_eq!(
+        (b.position.index, b.position.term),
+        (last.index, last.term),
+        "the standby's position is the last source entry"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+}
+
+// ---------------------------------------------------------------------------
+// Through the drivers
+// ---------------------------------------------------------------------------
+
+/// The batcher's knobs: the leader's own steps run often, so a source logs
+/// them and a standby is seen not to.
+fn driver_cfg() -> BatcherConfig {
+    BatcherConfig {
+        pipeline: 4,
+        request_expire_every_ms: 40,
+        timer_tick_ms: 20,
+        cluster_version_every_ms: 50,
+        ..BatcherConfig::default()
+    }
+}
+
+/// A cluster of one node: its store and replicator, and its driver while one
+/// runs.
+struct Cluster {
+    dir: PathBuf,
+    store: Arc<HeedStore>,
+    repl: Arc<RaftReplicator<HeedStore>>,
+    driver: Option<Driver>,
+}
+
+struct Driver {
+    tx: CommandTx,
+    link: LinkTx,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Cluster {
+    fn open(dir: PathBuf) -> Cluster {
+        let repl = Arc::new(open_raft(&dir));
+        Cluster {
+            store: repl.store_for_test(),
+            repl,
+            driver: None,
+            dir,
+        }
+    }
+
+    /// Start a driver; `boot` is what makes the cluster a standby.
+    fn start(&mut self, boot: Option<LinkBoot>) {
+        self.start_with(driver_cfg(), boot);
+    }
+
+    fn start_with(&mut self, cfg: BatcherConfig, boot: Option<LinkBoot>) {
+        let (link, link_rx) = tokio::sync::mpsc::channel(64);
+        let (tx, handle) = Batcher::new(self.store.clone(), self.repl.clone(), cfg)
+            .with_link(link_rx, boot)
+            .spawn();
+        self.driver = Some(Driver { tx, link, handle });
+    }
+
+    /// Stop the driver: nothing more is logged until the next one.
+    async fn stop(&mut self) {
+        if let Some(d) = self.driver.take() {
+            drop(d.tx);
+            drop(d.link);
+            d.handle.await.expect("driver join");
+        }
+    }
+
+    fn driver(&self) -> &Driver {
+        self.driver.as_ref().expect("a running driver")
+    }
+
+    async fn command(&self, command: Command) -> Reply {
+        let (sub, rx) = Submission::new(command);
+        self.driver().tx.send(sub).await.expect("send command");
+        rx.await.expect("await reply")
+    }
+
+    async fn link(&self, op: LinkOp) -> Reply {
+        let (sub, rx) = LinkSubmission::new(op);
+        self.driver().link.send(sub).await.expect("send link op");
+        rx.await.expect("await link reply")
+    }
+
+    /// Stop the node and open it again from its directory.
+    async fn restart(self) -> Cluster {
+        let dir = self.dir.clone();
+        self.shut().await;
+        Cluster::open(dir)
+    }
+
+    /// Stop the node for good (its directory stays).
+    async fn shut(mut self) {
+        self.stop().await;
+        let Cluster { store, repl, .. } = self;
+        drop(store);
+        let end = Instant::now() + Duration::from_secs(10);
+        let mut repl = repl;
+        let repl = loop {
+            match Arc::try_unwrap(repl) {
+                Ok(r) => break r,
+                Err(still) => {
+                    assert!(Instant::now() < end, "the replicator is still shared");
+                    repl = still;
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        };
+        let (_stats, store) = tokio::task::block_in_place(|| repl.shutdown()).expect("shutdown");
+        Arc::try_unwrap(store)
+            .unwrap_or_else(|_| panic!("the store is still shared"))
+            .close();
+    }
+}
+
+fn push(id: u64, queue: &str, partition: &str, txns: &[&str]) -> Command {
+    Command::Push(PushCommand {
+        request_id: rid(id),
+        tenant: TENANT.to_string(),
+        queue: queue.to_string(),
+        partition: partition.to_string(),
+        items: txns.iter().map(|t| item(t)).collect(),
+        create_cfg: qcfg(),
+    })
+}
+
+/// A consumption-engine checkpoint: `group` has acked each `(pid, committed)`.
+fn checkpoint(id: u64, group: &str, cursors: &[(u64, i64)]) -> Command {
+    Command::Effects(EffectsCommand {
+        request_id: rid(id),
+        tenant: TENANT.to_string(),
+        effects: cursors
+            .iter()
+            .map(|(pid, committed)| Effect::CursorSet {
+                pid: *pid,
+                group: group.to_string(),
+                row: cursor_row(*committed),
+            })
+            .collect(),
+    })
+}
+
+fn kv_put(id: u64, key: &str, value: i64) -> Command {
+    let op = json!({"op":"put","ns":"n","key":key,"value":{"v":value},"forever":true});
+    Command::Kv(KvCommand {
+        request_id: rid(id),
+        tenant: TENANT.to_string(),
+        ops: parse_ops(
+            &[op],
+            TENANT,
+            false,
+            511,
+            crate::rsm::planner::kv::MAX_VALUE_BYTES_DEFAULT,
+        )
+        .expect("kv op"),
+    })
+}
+
+/// A timer due at once: the leader's fire step pushes its message.
+fn timer_now(id: u64, key: &str) -> Command {
+    let op = json!({
+        "op":"schedule","queue":"qt","timerKey":key,
+        "delayMs": 0, "txn": format!("timer-{key}"), "payload": "e30=",
+    });
+    Command::Timers(TimersCommand {
+        request_id: rid(id),
+        tenant: TENANT.to_string(),
+        ops: parse_timer_ops(&[op], Some("svc")).expect("timer op"),
+    })
+}
+
+/// The `(pid, offset)` of a push's first item, which must have been created.
+fn push_created(reply: &Reply) -> (u64, u64) {
+    match reply {
+        Reply::Done {
+            outcome: Outcome::Push(p),
+            ..
+        } => match &p.items[0] {
+            PushVerdict::Created { pid, offset, .. } => (*pid, *offset),
+            other => panic!("expected Created, got {other:?}"),
+        },
+        other => panic!("expected a push outcome, got {other:?}"),
+    }
+}
+
+fn done(reply: Reply, what: &str) {
+    assert!(
+        matches!(reply, Reply::Done { .. }),
+        "{what}: expected Done, got {reply:?}"
+    );
+}
+
+fn refused(reply: Reply, code: &str, retryable: bool, what: &str) {
+    match reply {
+        Reply::Refused(r) => {
+            assert_eq!(r.code, code, "{what}: {}", r.message);
+            assert_eq!(r.retryable, retryable, "{what}: {}", r.message);
+        }
+        other => panic!("{what}: expected a refusal `{code}`, got {other:?}"),
+    }
+}
+
+/// The application entries `src` has applied after `after`, as a standby
+/// receives them: read from the queue logs and rebuilt.
+fn source_entries(src: &Cluster, after: Position) -> Vec<(u64, u64, Arc<Entry>)> {
+    match src
+        .repl
+        .link_source()
+        .read(after.index, after.term, 1 << 20)
+        .expect("read the source")
+    {
+        Answer::Entries { entries, .. } => entries
+            .iter()
+            .map(|e| {
+                (
+                    e.index,
+                    e.term,
+                    Arc::new(full_entry(&e.stored).expect("rebuild the entry")),
+                )
+            })
+            .collect(),
+        other => panic!("the source did not serve its entries: {other:?}"),
+    }
+}
+
+/// Replay on `dst` everything `src` has applied past `dst`'s position, a
+/// batch in the pipeline at a time. Returns how many entries went over.
+async fn replicate(src: &Cluster, dst: &Cluster) -> usize {
+    let mut n = 0;
+    loop {
+        let at = dst
+            .store
+            .read(|r| link::read_position(r))
+            .expect("read the position");
+        let entries = source_entries(src, at);
+        if entries.is_empty() {
+            return n;
+        }
+        let mut prev = at.index;
+        let mut replies = Vec::with_capacity(entries.len());
+        for (index, term, entry) in entries {
+            let (sub, rx) = LinkSubmission::new(LinkOp::Mirror {
+                prev,
+                index,
+                term,
+                entry,
+            });
+            dst.driver().link.send(sub).await.expect("send link op");
+            replies.push((index, rx));
+            prev = index;
+        }
+        for (index, rx) in replies {
+            done(
+                rx.await.expect("await link reply"),
+                &format!("source entry {index}"),
+            );
+            n += 1;
+        }
+        // An entry is answered once it is committed; what the next round and
+        // the caller read is the store, a moment later.
+        let end = Instant::now() + Duration::from_secs(10);
+        while dst
+            .store
+            .read(|r| link::read_position(r))
+            .expect("read the position")
+            .index
+            < prev
+        {
+            assert!(Instant::now() < end, "source entry {prev} never applied");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+}
+
+/// The standby `b` holds what its source `a` holds. Both are at rest.
+fn assert_same(a: &Cluster, b: &Cluster, when: &str) {
+    let digest = |c: &Cluster| {
+        c.store
+            .read(|r| Ok(state_digest(r).expect("digest")))
+            .expect("read")
+    };
+    // An applied entry's counters reach the store at apply's next commit, a
+    // few milliseconds after its rows: wait for that, not for ever.
+    let end = Instant::now() + Duration::from_secs(5);
+    while comparable(&digest(b)) != comparable(&digest(a)) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if comparable(&digest(b)) != comparable(&digest(a)) {
+        // Say which counters, before the digests: the keyspace every effect
+        // touches, and so the first to show an entry applied another way.
+        let (ca, cb) = (counter_rows(&a.store), counter_rows(&b.store));
+        let only = |x: &[(Vec<u8>, Vec<u8>)], y: &[(Vec<u8>, Vec<u8>)]| -> Vec<String> {
+            x.iter()
+                .filter(|row| !y.contains(row))
+                .map(|(k, v)| format!("{k:?}={v:?}"))
+                .collect()
+        };
+        eprintln!(
+            "{when}: counters only on the source: {:#?}\ncounters only on the standby: {:#?}",
+            only(&ca, &cb),
+            only(&cb, &ca)
+        );
+    }
+    assert_eq!(
+        comparable(&digest(b)),
+        comparable(&digest(a)),
+        "{when}: the standby's replicated state differs from its source's"
+    );
+    assert_eq!(
+        flags_without_the_link(&b.store),
+        flags_without_the_link(&a.store),
+        "{when}: the flags differ beyond the link's own"
+    );
+    // The source's request ids, row for row, and at most the two rows of the
+    // standby's own entry (until an expiry step of the source retires them).
+    let (ra, rb) = (request_rows(&a.store, &[]), request_rows(&b.store, &[]));
+    assert!(
+        ra.iter().all(|row| rb.contains(row)),
+        "{when}: a request-id row of the source is not on the standby"
+    );
+    assert!(
+        rb.len() <= ra.len() + 2,
+        "{when}: the standby holds request ids of its own ({} against {})",
+        rb.len(),
+        ra.len()
+    );
+    // What apply gates the source's next entry on.
+    let meta = |c: &Cluster| {
+        c.store
+            .read(|r| {
+                Ok((
+                    r.last_now_us()?,
+                    r.next_pid()?,
+                    r.kv_version_next()?,
+                    r.cluster_version()?,
+                ))
+            })
+            .expect("read meta")
+    };
+    assert_eq!(
+        meta(b),
+        meta(a),
+        "{when}: the stamp, the bases or the cluster version differ"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_standby_replays_its_source_restarts_and_is_promoted() {
+    let boot = || Some(LinkBoot::empty("test://source"));
+
+    // The source: an ordinary cluster, its batcher planning client commands
+    // and its own steps.
+    let mut a = Cluster::open(scratch("drivers-source"));
+    a.start(None);
+    let (pid0, _) = push_created(&a.command(push(1, "q", "p0", &["a", "b", "c"])).await);
+    push_created(&a.command(push(2, "q", "p1", &["d"])).await);
+    // "a" again: a duplicate, answered from the dedup window.
+    done(a.command(push(3, "q", "p0", &["a", "e"])).await, "a push");
+    done(
+        a.command(checkpoint(4, "g", &[(pid0, 1)])).await,
+        "a checkpoint",
+    );
+    done(a.command(kv_put(5, "k1", 1)).await, "a KV put");
+    done(a.command(kv_put(6, "k2", 2)).await, "a KV put");
+    done(a.command(timer_now(7, "t1")).await, "a timer");
+    // The leader's own steps log too: the timer's fire, a request-id expiry.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    a.stop().await;
+
+    // The standby: an empty cluster told to be one.
+    let mut b = Cluster::open(scratch("drivers-standby"));
+    b.start(boot());
+    refused(
+        b.command(push(100, "q", "p9", &["z"])).await,
+        link::STANDBY_CODE,
+        true,
+        "a client write on a standby",
+    );
+    let n1 = replicate(&a, &b).await;
+    assert!(n1 >= 7, "the source's commands and steps went over ({n1})");
+    assert_same(&a, &b, "after the first replay");
+    assert!(
+        b.store
+            .read(|r| link::read_role(r))
+            .expect("role")
+            .is_standby(),
+        "the standby entry wrote the role row"
+    );
+
+    // Left alone, a standby logs nothing: none of its leader's steps runs.
+    let idle = b.repl.applied_index();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        b.repl.applied_index(),
+        idle,
+        "an idle standby wrote entries of its own"
+    );
+
+    // More on the source while the standby restarts.
+    a.start(None);
+    push_created(&a.command(push(8, "q", "p2", &["f", "g"])).await);
+    done(a.command(kv_put(9, "k1", 3)).await, "a KV put");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    a.stop().await;
+    let mut b = b.restart().await;
+    b.start(boot());
+    refused(
+        b.command(push(101, "q", "p9", &["z"])).await,
+        link::STANDBY_CODE,
+        true,
+        "a client write on a restarted standby",
+    );
+    let n2 = replicate(&a, &b).await;
+    assert!(n2 >= 2, "the standby resumed from its position ({n2})");
+    assert_same(&a, &b, "after the restart");
+    let last = b
+        .store
+        .read(|r| link::read_position(r))
+        .expect("position");
+    assert!(last.index > 0 && last.now_us > 0);
+
+    // Promotion: an ordinary cluster from that entry on.
+    done(b.link(LinkOp::Promote).await, "the promotion");
+    let next_offset = a
+        .store
+        .read(|r| r.partition(pid0))
+        .expect("read the partition")
+        .expect("the source's partition")
+        .last_offset
+        + 1;
+    let (pid, offset) = push_created(&b.command(push(200, "q", "p0", &["after"])).await);
+    assert_eq!(
+        (pid, offset as i64),
+        (pid0, next_offset),
+        "the promoted cluster continues the source's partition"
+    );
+    match b.store.read(|r| link::read_role(r)).expect("role") {
+        Role::Promoted(doc) => assert_eq!(
+            doc.position.map(|p| p.index),
+            Some(last.index),
+            "the role row names the last source entry applied"
+        ),
+        other => panic!("expected a promoted role, got {other:?}"),
+    }
+    let entry = source_entries(&a, Position::START).remove(0);
+    refused(
+        b.link(LinkOp::Mirror {
+            prev: last.index,
+            index: last.index + 1,
+            term: entry.1,
+            entry: entry.2,
+        })
+        .await,
+        NOT_STANDBY_CODE,
+        false,
+        "a source entry on a promoted cluster",
+    );
+    done(b.link(LinkOp::Promote).await, "a second promotion");
+
+    let (da, db) = (a.dir.clone(), b.dir.clone());
+    a.shut().await;
+    b.shut().await;
+    let _ = std::fs::remove_dir_all(da);
+    let _ = std::fs::remove_dir_all(db);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_standby_refuses_what_does_not_follow_it() {
+    // A source that logs its clients' commands and nothing of its own, so its
+    // first two entries are the two pushes.
+    let quiet = || BatcherConfig {
+        pipeline: 4,
+        request_expire_every_ms: 3_600_000,
+        ..BatcherConfig::default()
+    };
+    let mut a = Cluster::open(scratch("refusals-source"));
+    a.start_with(quiet(), None);
+    push_created(&a.command(push(1, "q", "p0", &["a"])).await);
+    push_created(&a.command(push(2, "q", "p1", &["b"])).await);
+    a.stop().await;
+    let entries = source_entries(&a, Position::START);
+    assert_eq!(entries.len(), 2, "the two pushes");
+    let (first, second) = (entries[0].clone(), entries[1].clone());
+
+    let mut b = Cluster::open(scratch("refusals-standby"));
+    b.start(Some(LinkBoot::empty("test://source")));
+    let mirror = |prev: u64, e: &(u64, u64, Arc<Entry>)| LinkOp::Mirror {
+        prev,
+        index: e.0,
+        term: e.1,
+        entry: e.2.clone(),
+    };
+
+    // Not the entry after the standby's position.
+    refused(
+        b.link(mirror(first.0, &second)).await,
+        OUT_OF_SEQUENCE_CODE,
+        true,
+        "an entry sent ahead of its turn",
+    );
+    // In sequence by its numbers, but planned on a state the standby does
+    // not hold: the first entry created the queue and its partition.
+    refused(
+        b.link(mirror(0, &second)).await,
+        DIVERGED_CODE,
+        false,
+        "an entry that does not continue the standby's state",
+    );
+    // Neither refusal moved anything.
+    done(b.link(mirror(0, &first)).await, "the first entry");
+    done(b.link(mirror(first.0, &second)).await, "the second entry");
+    // A duplicate is out of sequence, never applied twice.
+    refused(
+        b.link(mirror(first.0, &second)).await,
+        OUT_OF_SEQUENCE_CODE,
+        true,
+        "an entry sent twice",
+    );
+    assert_same(&a, &b, "after the refusals");
+
+    // Its own log is no source: the entry that made this cluster a standby
+    // comes back only from this cluster itself (a source configured to be
+    // the standby's own address), and replaying it would never end.
+    let own = source_entries(&b, Position::START).remove(0);
+    refused(
+        b.link(LinkOp::Mirror {
+            prev: second.0,
+            index: second.0 + 1,
+            term: own.1,
+            entry: own.2.clone(),
+        })
+        .await,
+        DIVERGED_CODE,
+        false,
+        "the standby's own standby entry",
+    );
+    assert_same(&a, &b, "after its own entry was refused");
+
+    // An ordinary cluster takes no link command.
+    a.start_with(quiet(), None);
+    refused(
+        a.link(mirror(0, &first)).await,
+        NOT_STANDBY_CODE,
+        false,
+        "a source entry on a cluster that is not a standby",
+    );
+    refused(
+        a.link(LinkOp::Promote).await,
+        NOT_STANDBY_CODE,
+        false,
+        "a promotion of a cluster that was never a standby",
+    );
+
+    let (da, db) = (a.dir.clone(), b.dir.clone());
+    a.shut().await;
+    b.shut().await;
+    let _ = std::fs::remove_dir_all(da);
+    let _ = std::fs::remove_dir_all(db);
+}
+
+// ---------------------------------------------------------------------------
+// The follower
+// ---------------------------------------------------------------------------
+
+/// What the scripted source answers its next reads.
+#[derive(Clone, Debug)]
+enum Script {
+    /// What the source really holds.
+    Real,
+    /// No answer at all.
+    Unreachable,
+    /// A node that has applied nothing.
+    Behind,
+    /// The standby's position is below the purge point.
+    Purged,
+    /// Another entry than the standby's at its position.
+    Mismatch,
+}
+
+async fn status_is(
+    follower: &crate::rsm::link::driver::Follower,
+    what: &str,
+    want: impl Fn(&crate::rsm::link::driver::Status) -> bool,
+) -> crate::rsm::link::driver::Status {
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let s = follower.status();
+        if want(&s) {
+            return s;
+        }
+        assert!(Instant::now() < end, "{what}: the follower is at {s:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_follower_follows_its_source_and_says_why_when_it_cannot() {
+    use crate::rsm::link::driver::{self, Fetch, LinkConfig, State};
+    use crate::rsm::link::wire::Answer;
+
+    let quiet = || BatcherConfig {
+        pipeline: 4,
+        request_expire_every_ms: 3_600_000,
+        ..BatcherConfig::default()
+    };
+    let mut a = Cluster::open(scratch("follower-source"));
+    a.start_with(quiet(), None);
+    push_created(&a.command(push(1, "q", "p0", &["a", "b"])).await);
+    push_created(&a.command(push(2, "q", "p1", &["c"])).await);
+
+    let mut b = Cluster::open(scratch("follower-standby"));
+    b.start(Some(LinkBoot::empty("test://source")));
+
+    // The source, read in this process: what it serves a standby over HTTP,
+    // or what the script says instead.
+    let script = Arc::new(std::sync::Mutex::new(Script::Real));
+    // Every call: the node asked, and whether it was only told the position.
+    let asked: Arc<std::sync::Mutex<Vec<(String, bool)>>> = Arc::default();
+    let fetch: Fetch = {
+        let (script, asked, source) = (script.clone(), asked.clone(), a.repl.link_source());
+        Arc::new(move |addr: String, req: crate::rsm::link::wire::Request| {
+            let script = script.lock().expect("script").clone();
+            asked.lock().expect("asked").push((addr, req.hold_only));
+            let source = source.clone();
+            Box::pin(async move {
+                // The two addresses are one node here: what the other node is
+                // told must not move the hold the reads leave on this one.
+                if req.hold_only {
+                    return Ok(Answer::Entries {
+                        entries: Vec::new(),
+                        upto: req.after,
+                        applied: 0,
+                        purged: 0,
+                    });
+                }
+                match script {
+                    Script::Real => {
+                        let bytes = source.serve(req).await.map_err(|e| e.to_string())?;
+                        Answer::decode(&bytes).map_err(|e| e.to_string())
+                    }
+                    Script::Unreachable => Err("connection refused".to_string()),
+                    Script::Behind => Ok(Answer::Entries {
+                        entries: Vec::new(),
+                        upto: 0,
+                        applied: 0,
+                        purged: 0,
+                    }),
+                    Script::Purged => Ok(Answer::Purged {
+                        purged: req.after + 100,
+                        applied: req.after + 200,
+                    }),
+                    Script::Mismatch => Ok(Answer::Mismatch {
+                        index: req.after,
+                        source_term: Some(req.after_term + 5),
+                        applied: req.after + 200,
+                        purged: 0,
+                    }),
+                }
+            })
+        })
+    };
+    let follower = driver::spawn(
+        LinkConfig {
+            sources: vec!["one:7400".into(), "two:7400".into()],
+            token: None,
+            name: Some("the-standby".into()),
+        },
+        Arc::downgrade(&b.store),
+        b.repl.watch_role(),
+        b.driver().link.clone(),
+        fetch,
+    );
+    let set = |s: Script| *script.lock().expect("script") = s;
+    let following =
+        |s: &driver::Status| s.state == State::Following && s.lag_entries() == 0 && s.entries >= 2;
+
+    // It follows, and the source knows who reads it and how far it got.
+    let s = status_is(&follower, "the first entries", following).await;
+    assert_eq!(s.error, None);
+    assert_same(&a, &b, "after the follower caught up");
+    let readers = a.repl.link_source().readers();
+    assert_eq!(readers.len(), 1, "{readers:?}");
+    assert_eq!(readers[0].name, "the-standby");
+    assert_eq!(readers[0].after, s.position.index, "its hold is at its position");
+    // One node is read; the other is only told where the standby is, so it
+    // keeps the entries after that too.
+    status_is(&follower, "the other node is told the position", |_| {
+        let asked = asked.lock().expect("asked");
+        asked.contains(&("one:7400".to_string(), false))
+            && asked.contains(&("two:7400".to_string(), true))
+    })
+    .await;
+    {
+        let asked = asked.lock().expect("asked");
+        assert!(
+            !asked.contains(&("two:7400".to_string(), false)),
+            "a node that answers is not left for another: {asked:?}"
+        );
+    }
+
+    // And goes on following: what the source logs next arrives by itself.
+    push_created(&a.command(push(3, "q", "p2", &["d"])).await);
+    status_is(&follower, "a later entry", |s| following(s) && s.entries >= 3).await;
+    assert_same(&a, &b, "after a later entry");
+
+    // A source that does not answer: it waits, and tries the other node.
+    asked.lock().expect("asked").clear();
+    set(Script::Unreachable);
+    let s = status_is(&follower, "an unreachable source", |s| {
+        s.state == State::Waiting
+    })
+    .await;
+    assert!(
+        s.error.as_deref().is_some_and(|e| e.contains("refused")),
+        "{s:?}"
+    );
+    status_is(&follower, "both nodes are tried", |_| {
+        let asked = asked.lock().expect("asked");
+        let read = |node: &str| asked.iter().any(|(a, hold_only)| a == node && !hold_only);
+        read("one:7400") && read("two:7400")
+    })
+    .await;
+
+    // Nodes that are behind the standby: once every one of them has said so.
+    set(Script::Behind);
+    let s = status_is(&follower, "a source behind the standby", |s| {
+        s.error.as_deref().is_some_and(|e| e.contains("as far as"))
+    })
+    .await;
+    assert_eq!(s.state, State::Waiting, "{s:?}");
+
+    // What does not pass: the standby needs a new seed, and says which way.
+    set(Script::Purged);
+    let s = status_is(&follower, "a purged source", |s| {
+        s.state == State::Halted && s.error.as_deref().is_some_and(|e| e.contains("purged"))
+    })
+    .await;
+    assert!(s.error.unwrap().contains("needs a new seed"));
+    set(Script::Mismatch);
+    status_is(&follower, "another log", |s| {
+        s.state == State::Halted
+            && s.error
+                .as_deref()
+                .is_some_and(|e| e.contains("followed another log"))
+    })
+    .await;
+    // Nothing was applied through any of it.
+    assert_same(&a, &b, "after the refusals of the source");
+
+    // The source is itself again: so is the follower, with no restart.
+    set(Script::Real);
+    push_created(&a.command(push(4, "q", "p3", &["e"])).await);
+    status_is(&follower, "after the source came back", |s| {
+        following(s) && s.entries >= 4
+    })
+    .await;
+    assert_same(&a, &b, "after the source came back");
+
+    // Stopped, it lets go of the store and the channel.
+    follower.stop();
+    drop(follower);
+    let (da, db) = (a.dir.clone(), b.dir.clone());
+    a.shut().await;
+    b.shut().await;
+    let _ = std::fs::remove_dir_all(da);
+    let _ = std::fs::remove_dir_all(db);
+}

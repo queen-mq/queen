@@ -79,6 +79,8 @@ fn opts(kinds: Option<u32>) -> RaftOpts {
         apply_skip: Vec::new(),
         promote_max_lag: 1000,
         kinds,
+        link_hold: Duration::from_secs(3600),
+        link_hold_disk_pct: 100.0,
     }
 }
 

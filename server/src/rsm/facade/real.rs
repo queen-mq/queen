@@ -371,7 +371,17 @@ pub struct RaftFacade {
     /// What this node last heard of the leader's commit index (a follower:
     /// `/health`'s catch-up lag, [`RaftFacade::catch_up_lag_ms`]).
     leader_commit: Arc<LeaderCommit>,
+    /// The cluster link ([`crate::rsm::link`]): the follower of this node's
+    /// source, when one is configured (it acts only where the node leads a
+    /// standby), and where that source is.
+    link_follower: Option<Arc<crate::rsm::link::driver::Follower>>,
+    link_source: Option<crate::rsm::link::driver::LinkConfig>,
 }
+
+/// How many source entries a standby's follower may have handed to the
+/// batcher and not yet seen planned: the follower waits past it, so a source
+/// read faster than the standby commits holds no more than this in memory.
+const LINK_QUEUE_DEPTH: usize = 64;
 
 /// The leader's commit index as a follower last read it, every second
 /// ([`spawn_leader_commit_probe`]).
@@ -573,6 +583,13 @@ impl RaftFacade {
         self.repl.clone()
     }
 
+    /// The node's store, for a test that compares what two nodes hold. Drop
+    /// it before [`RaftFacade::shutdown`], which takes the last reference.
+    #[cfg(test)]
+    pub(crate) fn store_for_test(&self) -> Arc<HeedStore> {
+        self.store.clone()
+    }
+
     /// `(meta.last_now_us, meta.max_created_at_us)` as this node has applied
     /// them: what `safeTime` is built from, read straight from the store.
     #[cfg(test)]
@@ -675,7 +692,7 @@ impl RaftFacade {
             // keep host disk fullness and concurrent local GC out of them.
             batcher.maintenance_every_ms = 0;
         }
-        RaftFacade::open_inner(ctx, batcher, !cfg!(test), 0, false, None)
+        RaftFacade::open_inner(ctx, batcher, !cfg!(test), 0, false, None, None)
     }
 
     /// Raft group `group` of several in this process (`QUEEN_RAFT_GROUPS`,
@@ -683,7 +700,31 @@ impl RaftFacade {
     /// group 0 keeps `<dir>`) and its own Raft addresses
     /// ([`crate::rsm::replicator::raft::ClusterConfig::for_group`]).
     pub fn open_group(ctx: &RsmBuildCtx, group: usize) -> Result<RaftFacade, String> {
-        RaftFacade::open_inner(ctx, BatcherConfig::from_env(), true, group, true, None)
+        RaftFacade::open_inner(
+            ctx,
+            BatcherConfig::from_env(),
+            true,
+            group,
+            true,
+            None,
+            None,
+        )
+    }
+
+    /// A node with its part in a cluster link given instead of read from the
+    /// environment, and optionally an openraft cluster node's configuration:
+    /// the link tests' seam.
+    #[cfg(test)]
+    pub(crate) fn open_link_node_for_test(
+        ctx: &RsmBuildCtx,
+        batcher_cfg: BatcherConfig,
+        node: Option<(
+            crate::rsm::replicator::raft::ClusterConfig,
+            crate::rsm::replicator::raft::RaftOpts,
+        )>,
+        link: crate::rsm::link::driver::LinkSetup,
+    ) -> Result<RaftFacade, String> {
+        RaftFacade::open_inner(ctx, batcher_cfg, false, 0, false, node, Some(link))
     }
 
     /// A node of an openraft cluster, with the cluster configuration and the
@@ -696,14 +737,22 @@ impl RaftFacade {
         cluster: crate::rsm::replicator::raft::ClusterConfig,
         opts: crate::rsm::replicator::raft::RaftOpts,
     ) -> Result<RaftFacade, String> {
-        RaftFacade::open_inner(ctx, batcher_cfg, false, 0, false, Some((cluster, opts)))
+        RaftFacade::open_inner(
+            ctx,
+            batcher_cfg,
+            false,
+            0,
+            false,
+            Some((cluster, opts)),
+            None,
+        )
     }
 
     /// [`RaftFacade::open`] with an explicit batcher configuration instead of
     /// the environment's — the tests' seam (a fast timer tick, the injected
     /// fire failure), never the boot path's.
     pub fn open_with(ctx: &RsmBuildCtx, batcher_cfg: BatcherConfig) -> Result<RaftFacade, String> {
-        RaftFacade::open_inner(ctx, batcher_cfg, false, 0, false, None)
+        RaftFacade::open_inner(ctx, batcher_cfg, false, 0, false, None, None)
     }
 
     /// `multi_group`: one of several Raft groups in this process
@@ -714,6 +763,8 @@ impl RaftFacade {
     /// heal (every node led by the same member again), for nothing to spread.
     /// `node`: the openraft cluster node to run instead of what the
     /// environment says (a test's, [`RaftFacade::open_cluster_node_for_test`]).
+    /// `link`: the node's part in a cluster link instead of what the
+    /// environment says (a test's, [`RaftFacade::open_link_node_for_test`]).
     fn open_inner(
         ctx: &RsmBuildCtx,
         mut batcher_cfg: BatcherConfig,
@@ -724,9 +775,22 @@ impl RaftFacade {
             crate::rsm::replicator::raft::ClusterConfig,
             crate::rsm::replicator::raft::RaftOpts,
         )>,
+        link: Option<crate::rsm::link::driver::LinkSetup>,
     ) -> Result<RaftFacade, String> {
         if ctx.data_dir.trim().is_empty() {
             return Err("QUEEN_RAFT_DIR is required in raft mode (§11.1)".into());
+        }
+        // The cluster link (`crate::rsm::link`): the source this cluster
+        // follows while it is a standby, and whether an empty one starts as a
+        // standby. A standby replays ONE log.
+        let link = match link {
+            Some(l) => l,
+            None => crate::rsm::link::driver::LinkSetup::from_env()?,
+        };
+        if multi_group && link.source.is_some() {
+            return Err(
+                "QUEEN_LINK_SOURCE needs QUEEN_RAFT_GROUPS=1: a standby replays one log".into(),
+            );
         }
         let dir = match group {
             0 => PathBuf::from(&ctx.data_dir),
@@ -766,6 +830,53 @@ impl RaftFacade {
         };
         let node_id = cluster.as_ref().map_or(NODE_ID, |c| c.node_id);
         let ocfg = OpenConfig::new(node_id, dir.clone());
+        // A standby is a cluster, of one node or more: how its nodes get what
+        // its leader replays, its seed, and everything the link was tested
+        // with are the openraft replicator's. (A source is one by
+        // construction: the link is served on the Raft RPC port.)
+        if link.source.is_some() && kind != ReplicatorKind::Raft {
+            return Err(
+                "QUEEN_LINK_SOURCE needs QUEEN_RAFT_REPLICATOR=openraft: a standby runs the \
+                 cluster replicator, with QUEEN_RAFT_PEERS naming its one node or its several"
+                    .into(),
+            );
+        }
+        // A standby's seed (`crate::rsm::link::seed`). The node it names
+        // takes the source's snapshot as its first state — once, while its
+        // directory holds no data and no node of its cluster holds any: a
+        // node emptied under a cluster that lives on joins that cluster, it
+        // never seeds itself into a second one. Every other node, while it is
+        // fresh, waits to be added to the seeded one instead of founding a
+        // cluster from `QUEEN_RAFT_PEERS`.
+        let mut raft_opts = raft_opts;
+        if let (Some(seed_node), Some(source)) = (link.seed, &link.source) {
+            let seeds = seed_node == node_id
+                && cluster
+                    .as_ref()
+                    .and_then(crate::rsm::replicator::raft::peer_holding_state)
+                    .is_none();
+            if seeds {
+                let me = cluster
+                    .as_ref()
+                    .and_then(|c| c.members.get(&node_id).cloned())
+                    .unwrap_or_default();
+                // Taken now, or not for a reason the seed has logged (it was
+                // taken before; the directory holds data): either way the
+                // node boots with what its directory holds.
+                let _taken = crate::rsm::link::seed::take_blocking(&dir, node_id, me, source)
+                    .map_err(|e| format!("seed {}: {e}", dir.display()))?;
+            } else {
+                let mut o = match raft_opts.take() {
+                    Some(o) => o,
+                    None => crate::rsm::replicator::raft::RaftOpts::from_env(
+                        storage_pressure_enabled,
+                    )
+                    .map_err(|e| e.to_string())?,
+                };
+                o.join = true;
+                raft_opts = Some(o);
+            }
+        }
         if kind == ReplicatorKind::Raft {
             // A snapshot received before the last exit replaces the store and
             // the queue logs now, before either is opened.
@@ -782,6 +893,16 @@ impl RaftFacade {
         );
         // On every node: the damage it looks for is this node's own.
         crate::rsm::scrub::spawn(&store, crate::rsm::scrub::Config::from_env());
+
+        // What makes this cluster a standby the first time one of its nodes
+        // leads: a seed taken here (read now, before anything writes to the
+        // seeded store), else `QUEEN_LINK_STANDBY` on an empty cluster.
+        let link_boot = match crate::rsm::link::seed::boot(&dir, &*store)
+            .map_err(|e| format!("read the seed of {}: {e}", dir.display()))?
+        {
+            Some(boot) => Some(boot),
+            None => link.boot(),
+        };
 
         // The consumption engine: one per facade (a node runs one per raft
         // group, and the tests many per process). Apply reaches it through the
@@ -905,15 +1026,37 @@ impl RaftFacade {
                 g.wake_one(tenant, queue, Some(group))
             }));
         }
+        // The cluster link's channel: every driver has one, so a cluster that
+        // is a standby by its own state can be promoted whatever this node's
+        // configuration says today.
+        let (link_tx, link_rx) = tokio::sync::mpsc::channel(LINK_QUEUE_DEPTH);
         let batcher = Batcher::new(store.clone(), repl.clone(), batcher_cfg)
             .with_reader(reader.clone())
             .with_qlog_reader(qlog_reader.clone())
             .with_quiesce(quiesce_rx)
-            .with_engine(engine.clone());
+            .with_engine(engine.clone())
+            .with_link(link_rx, link_boot);
         let (cmd_tx, batcher_join) = batcher.spawn();
         // The engine's checkpoints and clock (every node: only a leader's
         // engine has anything to checkpoint).
         super::intake::spawn_ticker(engine.clone(), &cmd_tx);
+        // The follower of this cluster's source (every node of a cluster with
+        // one: it acts only where the node leads a standby). Weak on the
+        // store: the facade's shutdown takes it back by value.
+        let link_follower = link.source.clone().map(|cfg| {
+            let fetch = link
+                .fetch
+                .clone()
+                .unwrap_or_else(|| crate::rsm::link::driver::http_fetch(cfg.token.clone()));
+            crate::rsm::link::driver::spawn(
+                cfg,
+                Arc::downgrade(&store),
+                repl.watch_role(),
+                link_tx.clone(),
+                fetch,
+            )
+        });
+        drop(link_tx);
         if let NodeReplicator::Raft(r) = &*repl {
             r.set_quiesce_hook(crate::rsm::batcher::quiesce_hook(quiesce_tx));
         }
@@ -1012,6 +1155,8 @@ impl RaftFacade {
             disk_high_pct: ctx.disk_high_pct,
             disk_low_pct: ctx.disk_low_pct,
             leader_commit,
+            link_follower,
+            link_source: link.source,
         })
     }
 
@@ -1047,7 +1192,13 @@ impl RaftFacade {
             offload: _,
             pop_floor: _,
             leader_commit: _,
+            link_follower,
+            link_source: _,
         } = self;
+        // The source's follower first: it feeds the batcher's link channel.
+        if let Some(f) = link_follower {
+            f.stop();
+        }
         drop(cmd_tx); // the batcher sees a closed channel, drains, and exits
         let _ = batcher_join.await; // its Arc<repl>/Arc<store> drop here
         drop(engine); // it holds the store too (its ticker's and the replicator's go with them)
@@ -1648,6 +1799,9 @@ fn reply_error(reply: Reply) -> RsmError {
         // The engine lost its lead while this command's change was on its
         // way to the log: the outcome is unknown, as after a lost reply.
         Reply::Refused(r) if r.code == crate::rsm::consume::IN_DOUBT => RsmError::InDoubt,
+        // A standby's answer to every client write: named, so the client
+        // reads why it is told to retry.
+        Reply::Refused(r) if r.code == crate::rsm::link::STANDBY_CODE => RsmError::Standby,
         Reply::Refused(r) => {
             if r.retryable {
                 RsmError::Retry { leader_hint: None }
@@ -2204,6 +2358,11 @@ impl RaftFacade {
                 .ok_or_else(|| {
                     RsmError::Internal("transaction got a non-transaction outcome".into())
                 })?,
+            // A standby takes no transaction: the client retries it, whole,
+            // rather than reading a failed one.
+            Reply::Refused(r) if r.code == crate::rsm::link::STANDBY_CODE => {
+                return Err(RsmError::Standby)
+            }
             Reply::Refused(r) => return Ok(fail(&r.code, &r.message)),
             other => return Err(reply_error(other)),
         };
@@ -3105,6 +3264,9 @@ async fn collect_push(
                 return Err(RsmError::Retry {
                     leader_hint: hint.map(|n| n.to_string()),
                 })
+            }
+            Reply::Refused(refusal) if refusal.code == crate::rsm::link::STANDBY_CODE => {
+                return Err(RsmError::Standby);
             }
             Reply::Refused(refusal) if refusal.retryable => {
                 tracing::debug!(
@@ -5120,6 +5282,7 @@ impl Rsm for RaftFacade {
             "queen_consume_parts_total{{kind=\"loaded\"}} {}\nqueen_consume_parts_total{{kind=\"unloaded\"}} {}\n",
             es.loaded_total, es.unloaded_total
         ));
+        out.push_str(&self.link_prometheus());
         out
     }
 
@@ -5342,6 +5505,7 @@ impl Rsm for RaftFacade {
             apply: self.repl.apply_status(),
             cluster_version: Some(self.cluster_version()),
             kinds: Some(self.repl.kinds()),
+            link: self.link_health(),
         }
     }
 

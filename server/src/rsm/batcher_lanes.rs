@@ -2419,6 +2419,7 @@ pub(crate) fn plan_cycle_lanes<S: Store + 'static>(
         maintained,
         maintenance_more,
         cluster_version,
+        link: None,
     })
 }
 

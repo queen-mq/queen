@@ -25,6 +25,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): QUEEN_CONSUME_IDLE_UNLOAD_S (600 s) drops idle parts from the leader's memory. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the engine serves nothing on a standby and
+# the log store gains what a seed and a standby's reads need. A standby answers 503 `standby`
+# with nothing applied, and is asynchronous and untested by Jepsen: one sentence and one limit.
 ---
 
 We test Queen with Jepsen, on five nodes, under kill -9, network partitions, process pauses, clock
@@ -86,7 +89,8 @@ you to run.
   lease or an ack you were told about.
 - A 503 means the outcome is not known: the entry may still commit (`retry`, `timeout`, `no_leader`
   on a transaction; `outcome_unknown` on an ack). Retry with the same ids, and
-  [dedup](/concepts/dedup/) makes the retry safe.
+  [dedup](/concepts/dedup/) makes the retry safe. The one 503 after which nothing was applied is
+  `standby`, the answer of a [standby cluster](/operate/standby/), which takes no writes at all.
 
 <Figure id="concepts/write-durability" />
 
@@ -108,6 +112,9 @@ you to run.
   `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other.
 - Losing a majority of the disks for good can lose acked data. Raft survives the failure of a
   minority, and no more.
+- A [standby cluster](/operate/standby/) replays this one a moment later, and the cluster does not
+  wait for it. Promoting the standby after the cluster is lost gives up the acked writes the
+  standby had not read yet. No Jepsen campaign has run against a standby.
 - A node cut off from the majority keeps answering `/health` with 200 while every write it takes
   times out with a 503 after 30 seconds, so check that a cluster can commit with a write, not with
   `/health`.

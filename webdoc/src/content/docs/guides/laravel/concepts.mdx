@@ -70,6 +70,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (broker supervisor dashboard): config/queen.php changes remote-publication comments only; queue, lease, scaling and shutdown defaults remain as described.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the facade can open a node as a member of a standby cluster, which answers 503 `standby` until it is promoted; the connection and the supervisor are as described. Nothing this page states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,

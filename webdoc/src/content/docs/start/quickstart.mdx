@@ -32,6 +32,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (8c6239d23): the Dockerfile compiles the broker in three layers (dependencies,
 # path crates, broker) instead of over cache mounts; the image and what it runs are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): /health gains a `link` block only on a cluster that is part of a standby pair, which the example's node is not. Nothing this page states changes.
 ---
 
 You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the

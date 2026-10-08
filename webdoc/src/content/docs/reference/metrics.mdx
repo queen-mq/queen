@@ -9,6 +9,7 @@ sourceOfTruth:
   - server/src/metrics.rs
   - server/src/rsm/timing.rs
   - server/src/rsm/facade/real.rs
+  - server/src/rsm/facade/real/phase2/link.rs
   - server/src/rsm/admit.rs
   - server/src/rsm/replicator/raft/forward.rs
   - server/src/rsm/facade/groups.rs
@@ -19,6 +20,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the facade appends the queen_link_* families (facade/real/phase2/link.rs, now among this page's sources), which the generated table lists under Standby cluster; they exist only on a cluster that is part of a link.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node

@@ -57,6 +57,7 @@ digest: >-
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): the added QLog index read leaves replay, recovery and durability behavior unchanged.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): a cluster may have a standby to promote: the "every disk is gone" row and a card say so. The procedures, the health fields they read and the purge hold for followers are as described.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and
@@ -211,7 +212,7 @@ still said `healthy`. A node that will not start names the reason in its last `F
 | Every node `stopped`, `/health` 503 with `apply.failure.class` `deterministic` | A poisoned entry: a bug that apply refuses on every node | [Skip it](#a-poisoned-entry-stops-every-node) |
 | A majority of the nodes is down, their disks intact | A lost quorum, for now | [Bring them back](#a-majority-is-down-the-disks-are-fine) |
 | A majority of the disks is gone for good, or a majority of the voters came back empty | A lost majority | [Force-recover one survivor](#a-majority-of-the-disks-is-gone-for-good) |
-| Every disk is gone | Everything | [Restore a backup](/operate/recovery-backups/#restore-a-cluster) |
+| Every disk is gone | Everything | [Promote the standby](/operate/standby/#promote) if you run one: it holds everything but the last moment. Otherwise [restore a backup](/operate/recovery-backups/#restore-a-cluster) |
 | Nodes disagree about the voters or the `clusterId`, or two of them lead | Two clusters | [Split brain](#two-clusters) |
 | The membership lists addresses that no longer resolve, and no node reaches another | Renamed hosts, namespace or service | [Peer addresses](#the-peer-addresses-changed) |
 | The membership shows `joint`, and changes answer `409 in_flight` | A membership change stopped half-way | [Finish it](#a-membership-change-stopped-half-way) |
@@ -561,5 +562,6 @@ the details and the fixes we have in mind are in `test/recovery/FINDINGS.md`.
 
 <CardGrid>
   <LinkCard title="Backups and restore" href="/operate/recovery-backups/" description="What to copy, how to copy it while a node runs, and how to bring back one node or a whole cluster." />
+  <LinkCard title="Standby cluster" href="/operate/standby/" description="A second cluster that replays the first one's log, to take over on when the whole first one is lost." />
   <LinkCard title="Run a cluster" href="/operate/cluster/" description="How replication, quorum and membership work, and what each failure costs." />
 </CardGrid>

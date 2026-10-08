@@ -29,6 +29,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-07 (78970a242, 2.0.2): both /health examples show 2.0.2; nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): /health gains `raft.link`, the exposition
+# gains the queen_link_* families, and two log lines name a standby that stopped and a source
+# that gave up its log; a row or a pointer for each, to operate/standby.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -113,6 +116,7 @@ commit index, which it reads every second. A node that restarted far behind ther
 | `apply.failure` | The entry that stopped apply on this node: its index, term, digest, class and error. `null` while apply runs. Cluster nodes only |
 | `apply.skipped` | Entries an operator told the node to step over |
 | `clusterVersion`, `kinds` | The data format the cluster writes, and the highest this build reads |
+| `link` | Only on a cluster that is a [standby](/operate/standby/#watch-it), was one, or is read by one: its role, its position in the source's log, and who reads this node |
 
 With several raft groups, the node is ready only when every group is.
 
@@ -146,6 +150,10 @@ replicated log as a push, leaves nothing behind once it expires, and on a health
 `200` in a few tens of milliseconds. Recovery has the
 [procedures](/operate/recovery/) for the states this catches.
 
+A [standby cluster](/operate/standby/) answers this probe `503` with `"code": "standby"` for as
+long as it is one, which is what it should do. Probe its link instead, with the series on that
+page.
+
 ## Metrics
 
 `GET /metrics/prometheus` is the Prometheus text format, public on port 6632; the reference lists
@@ -166,6 +174,7 @@ the families in [metrics](/reference/metrics/). These are the series worth an al
 | Ephemeral memory nears its ceiling (`503` above it) | `queen_ephemeral_bytes` against `QUEEN_EPHEMERAL_MAX_BYTES` (256 MiB) |
 | Ephemeral messages are dropped | `rate(queen_ephemeral_dropped_total[5m])` by `cause`: `bounds`, `ttl` or `retry` |
 | An ephemeral hand-over failed | `increase(queen_ephemeral_wipes_total[15m]) > 0` |
+| A standby stopped replaying its source, or fell behind | The `queen_link_*` series, with the thresholds under [standby](/operate/standby/#watch-it) |
 
 Pop lag is measured per process from deliveries, so a consumer that stopped popping altogether
 shows no lag at all; watch the dead letters and the dashboard's pending counts as well. With
@@ -190,6 +199,8 @@ with `QUEEN_LOG_JSON=true`. `LOG_LEVEL` and `RUST_LOG` take the full filter synt
 | `raft: the process exits to load a received snapshot` (ERROR, `rsm`) | Exit code 75 after a long absence. Normal once, trouble when it repeats |
 | `core panic: aborting` or `poisoned lock: aborting` (ERROR, `panic`, `fatal=true`) | The process aborts and replays from its durable state on restart |
 | `hand-over failed; the partition's contents are dropped` (WARN, `ephemeral`) | Ephemeral messages were lost while a partition moved |
+| `rsm link: the standby stopped following its source` (ERROR, `rsm`) | A [standby](/operate/standby/) can no longer replay (`why=` says which way) and needs a new seed |
+| `rsm link: this node's data volume is too full to keep its log for a standby` (ERROR, `rsm`) | A source node purges without regard for its standby, which may then need a new seed |
 | `QUEEN_ENCRYPTION_KEY must be 64 hex chars; encryption DISABLED` (WARN, `encryption`) | Queues flagged for encryption are being stored in plaintext |
 
 ## Limits
