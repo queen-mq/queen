@@ -18,7 +18,11 @@ type TransactionBuilder struct {
 	operations     []Operation
 	requiredLeases map[string]bool
 	kv             []KVOp
-	timers         []TimerOp
+	// Lock handles whose permit this bundle commits under. Kept as handles,
+	// not as ops: the token is read when Commit sends, because a lock's own
+	// renewal changes it.
+	guards []*Lock
+	timers []TimerOp
 }
 
 // NewTransactionBuilder creates a new TransactionBuilder.
@@ -101,6 +105,26 @@ func (tb *TransactionBuilder) KV(ops ...KVOp) *TransactionBuilder {
 	return tb
 }
 
+// Guard makes this bundle commit only while lock is held.
+//
+// The guard is a check of the permit's row at the lock's token, Required: the
+// broker judges it in the same log entry as the acks, pushes, keys and timers
+// beside it. A holder that was paused past its lifetime and replaced commits
+// NOTHING -- which the lock by itself cannot promise, since nobody stops an
+// expired holder from running.
+//
+// The token is read when Commit sends, and the lock's own background renewal
+// moves it. A guard that lost to that renewal is sent again with the new token;
+// one that lost to another holder is the verdict, returned like any lost KV
+// precondition (IsKVPrecondition), and the handle then reports the lock lost.
+//
+// Commit fails with ErrLockNotHeld when the handle holds nothing: a step that
+// asked for a guard must not go out without one.
+func (tb *TransactionBuilder) Guard(lock *Lock) *TransactionBuilder {
+	tb.guards = append(tb.guards, lock)
+	return tb
+}
+
 // Timers adds timer operations to the transaction: schedule, reschedule and
 // cancel, built with ScheduleTimerOp, RescheduleTimerOp and CancelTimerOp.
 //
@@ -128,7 +152,7 @@ func (tb *TransactionBuilder) Timers(ops ...TimerOp) *TransactionBuilder {
 // The failing response is still handed back alongside the error, so the reason
 // stays readable without unwrapping.
 func (tb *TransactionBuilder) Commit(ctx context.Context) (*TransactionResponse, error) {
-	if len(tb.operations) == 0 && len(tb.kv) == 0 && len(tb.timers) == 0 {
+	if len(tb.operations) == 0 && len(tb.kv) == 0 && len(tb.timers) == 0 && len(tb.guards) == 0 {
 		return nil, fmt.Errorf("transaction has no operations")
 	}
 	if err := validateKVOps(tb.kv); err != nil {
@@ -149,48 +173,99 @@ func (tb *TransactionBuilder) Commit(ctx context.Context) (*TransactionResponse,
 		leases = append(leases, lease)
 	}
 
-	// Build request
-	req := transactionRequest{
-		Operations:     tb.operations,
-		RequiredLeases: leases,
-		KV:             tb.kv,
-		Timers:         tb.timers,
+	// Where the kv rider starts in the flat result space: one slot per pushed
+	// item and one per ack come first.
+	opsFlat := 0
+	for _, op := range tb.operations {
+		if op.Type == "push" {
+			opsFlat += len(op.Items)
+		} else {
+			opsFlat++
+		}
 	}
 
-	// Make request. The RAW path, not Post: this answer carries a KV `version`,
-	// which is a BIGINT, and map[string]interface{} would round it through a
-	// float64 (§10.4).
-	body, err := tb.httpClient.PostRaw(ctx, "/api/v1/transaction", req)
-	if err != nil {
-		// A 4xx from this endpoint still carries the transaction failure shape
-		// (a rider refused by the operator's runtime kill switch answers 403 with
-		// `reason:"kv_disabled"` or `"timers_disabled"`, deliberately permanent
-		// where the standalone route would say 503). Hand it back beside the
-		// error so the caller can branch on the reason rather than on prose.
-		return failedTransactionFrom(err), fmt.Errorf("transaction commit failed: %w", surfaceError(err))
-	}
+	// A bundle is sent again in ONE case: its guard lost to the lock's own
+	// background renewal, which moved the token between the moment the body was
+	// built and the moment the broker judged it. The row still names this
+	// owner, so the lock is held; nothing committed (a lost required
+	// precondition rolls the whole bundle back), so sending it again with the
+	// new token is the same step, not a second one.
+	for attempt := 0; ; attempt++ {
+		// The guards go first in kv: guard i is op i of the rider.
+		kv := tb.kv
+		if len(tb.guards) > 0 {
+			kv = make([]KVOp, 0, len(tb.guards)+len(tb.kv))
+			for _, lock := range tb.guards {
+				lock.settled()
+				guard, err := lock.Guard()
+				if err != nil {
+					return nil, err
+				}
+				kv = append(kv, guard)
+			}
+			kv = append(kv, tb.kv...)
+		}
+		req := transactionRequest{
+			Operations:     tb.operations,
+			RequiredLeases: leases,
+			KV:             kv,
+			Timers:         tb.timers,
+		}
 
-	response, err := parseTransactionResponse(body)
-	if err != nil {
-		return nil, err
-	}
+		// Make request. The RAW path, not Post: this answer carries a KV
+		// `version`, which is a BIGINT, and map[string]interface{} would round
+		// it through a float64 (§10.4).
+		body, err := tb.httpClient.PostRaw(ctx, "/api/v1/transaction", req)
+		if err != nil {
+			// A 4xx from this endpoint still carries the transaction failure
+			// shape (a rider refused by the operator's runtime kill switch
+			// answers 403 with `reason:"kv_disabled"` or `"timers_disabled"`,
+			// deliberately permanent where the standalone route would say 503).
+			// Hand it back beside the error so the caller can branch on the
+			// reason rather than on prose.
+			return failedTransactionFrom(err), fmt.Errorf("transaction commit failed: %w", surfaceError(err))
+		}
 
-	logInfo("TransactionBuilder.Commit", map[string]interface{}{
-		"operations": len(tb.operations),
-		"leases":     len(leases),
-		"kv":         len(tb.kv),
-		"timers":     len(tb.timers),
-		"success":    response.Success,
-		"reason":     response.Reason,
-	})
+		response, err := parseTransactionResponse(body)
+		if err != nil {
+			return nil, err
+		}
 
-	if !response.Success {
-		if response.IsKVPrecondition() {
+		logInfo("TransactionBuilder.Commit", map[string]interface{}{
+			"operations": len(tb.operations),
+			"leases":     len(leases),
+			"kv":         len(kv),
+			"timers":     len(tb.timers),
+			"success":    response.Success,
+			"reason":     response.Reason,
+		})
+
+		if response.Success {
 			return response, nil
 		}
-		return response, fmt.Errorf("transaction failed (%s): %s", response.Reason, response.Error)
+		if !response.IsKVPrecondition() {
+			return response, fmt.Errorf("transaction failed (%s): %s", response.Reason, response.Error)
+		}
+		at := response.FailedIndex - opsFlat
+		if at < 0 || at >= len(tb.guards) {
+			return response, nil
+		}
+		lock := tb.guards[at]
+		var holder struct {
+			Owner string `json:"owner"`
+		}
+		_ = json.Unmarshal(response.Value, &holder)
+		ownRenewal := response.KVReason == KVReasonVersion && holder.Owner == lock.Owner()
+		if !ownRenewal {
+			// Expired, released, or another holder's: the lock is gone.
+			lock.markLost("guard")
+			return response, nil
+		}
+		lock.settled()
+		if attempt >= 3 || !lock.Held() {
+			return response, nil
+		}
 	}
-	return response, nil
 }
 
 // failedTransactionFrom reads the transaction failure shape out of an HTTP-level

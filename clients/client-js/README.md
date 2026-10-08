@@ -636,6 +636,49 @@ Otherwise the lanes do not serialise it for you: use `incr`, or carry `expect`.
 **`putIfAbsent` plus a TTL is not a distributed lock.** A lock that expires is not revoked: the old
 holder keeps working, it simply no longer has the row. Carry your `version` as `expect` on every
 later write so a lapsed holder fails with `reason: 'version'` instead of overwriting the new one.
+`queen.lock()` below is that, done for you.
+
+**`check` asserts a version and writes nothing.** `kv.check(ns, key, { expect })` holds while the
+key is at that version (`expect: 0`: while it is absent). With `required: true` in a transaction
+it gates the commit on a key the transaction does not write.
+
+### Locks and semaphores
+
+A lock is a lease: one holder at a time, for a lifetime the holder renews, with a token that
+fences a holder that outlived it. `queen.semaphore(name, n, opts)` is the same with `n` permits.
+
+```javascript
+const lock = queen.lock('daily-report', { ttl: '30s' })
+if (!(await lock.acquire({ wait: '5s' }))) return   // somebody else holds it
+
+try {
+  await queen.transaction()
+    .guard(lock)                                    // commits only while the lock is ours
+    .queue('reports').push([{ data: report }])
+    .commit()
+} finally {
+  await lock.release()
+}
+
+// Or: acquire, run, release.
+const { acquired, value } = await queen.lock('sync:crm', { ttl: '1m' }).run(() => sync())
+```
+
+**It expires, and nobody tells the holder.** A paused or partitioned process carries on past its
+lifetime while somebody else acquires. `.guard(lock)` is what keeps its work out: the transaction
+rolls back with `reason: 'kv_precondition'` (returned from `commit()`, not thrown) when the lock is
+no longer this handle's. Outside Queen, fence with `lock.token`, which only rises on a lock.
+
+**The handle renews in the background**, every third of the lifetime (`autoRenew: false` to do it
+yourself with `lock.renew()`), and says when the lock is gone: `lock.signal` aborts and
+`lock.onLost(fn)` runs. Nothing stops your code: pass `lock.signal` to what the work awaits.
+
+**The token changes at every renew.** Read `lock.token` and `lock.guard()` when you use them; do
+not keep a copy across an `await`.
+
+`queen.locks` is the wire, with no state kept: `acquire`, `renew`, `release`, `get(name)` (who
+holds it, since when, until when) and `batch` for several locks in one call. `queen.close()`
+releases the locks its handles still hold.
 
 ### Timers
 

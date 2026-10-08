@@ -3,6 +3,7 @@
 namespace Queen\Builders;
 
 use Queen\Http\HttpClient;
+use Queen\Lock;
 use Queen\Support\KvOp;
 use Queen\Support\TimerOp;
 use Queen\Support\Uuid;
@@ -14,6 +15,14 @@ class TransactionBuilder
     private array $requiredLeases = [];
     private array $kvOperations = [];
     private array $timerOperations = [];
+    /**
+     * Lock handles whose permit this bundle commits under. Kept as handles,
+     * not as operations: the token is read when commit() sends, because a
+     * renew between here and there changes it.
+     *
+     * @var Lock[]
+     */
+    private array $guards = [];
 
     public function __construct(HttpClient $httpClient)
     {
@@ -125,6 +134,40 @@ class TransactionBuilder
     }
 
     /**
+     * Commit this bundle only while $lock is held.
+     *
+     *     $lock = $queen->lock('daily-report', ['ttlSeconds' => 30]);
+     *     if (!$lock->acquire()) {
+     *         return;
+     *     }
+     *     $result = $queen->transaction()
+     *         ->guard($lock)
+     *         ->queue('reports')->push([['data' => $report]])
+     *         ->commit();
+     *     if (($result['reason'] ?? null) === 'kv_precondition') {
+     *         // The lock is somebody else's now. Nothing was pushed.
+     *     }
+     *
+     * The guard is a `check` of the permit's row at the lock's token,
+     * required: the broker judges it in the same log entry as the acks,
+     * pushes, keys and timers beside it. A holder that was paused past its
+     * lifetime and replaced commits NOTHING — which the lock by itself cannot
+     * promise, since nobody stops an expired holder from running.
+     *
+     * The token is read when commit() sends. A guard that loses is the
+     * verdict, returned like any lost required precondition, and the handle
+     * then holds nothing.
+     *
+     * commit() throws LockNotHeldException when the handle holds nothing: a
+     * step that asked for a guard must not go out without one.
+     */
+    public function guard(Lock $lock): static
+    {
+        $this->guards[] = $lock;
+        return $this;
+    }
+
+    /**
      * Timers scheduled or cancelled WITH this bundle, in one transaction.
      *
      * The saga shape this exists for: ack the message, push the next step, and
@@ -138,6 +181,29 @@ class TransactionBuilder
     public function timers(string $queueName): TransactionTimerBuilder
     {
         return new TransactionTimerBuilder($this, $queueName);
+    }
+
+    /**
+     * The lock whose guard is the precondition a rolled-back bundle names, if
+     * it is one of this bundle's. `failedIndex` is in the FLAT space of
+     * `results`: every pushed item and every ack first, then the `kv` rider,
+     * whose first operations are the guards.
+     */
+    private function failedGuard(array $result): ?Lock
+    {
+        $index = $result['failedIndex'] ?? null;
+        if ($this->guards === [] || !is_int($index)) {
+            return null;
+        }
+
+        $flatOperations = 0;
+        foreach ($this->operations as $operation) {
+            $flatOperations += ($operation['type'] ?? null) === 'push'
+                ? count($operation['items'] ?? [])
+                : 1;
+        }
+
+        return $this->guards[$index - $flatOperations] ?? null;
     }
 
     /**
@@ -219,7 +285,8 @@ class TransactionBuilder
      */
     public function commit(): array
     {
-        if (empty($this->operations) && empty($this->kvOperations) && empty($this->timerOperations)) {
+        if (empty($this->operations) && empty($this->kvOperations) && empty($this->timerOperations)
+            && empty($this->guards)) {
             throw new \RuntimeException('Transaction has no operations to commit');
         }
 
@@ -230,9 +297,15 @@ class TransactionBuilder
 
         // TOP-LEVEL arrays, never elements of `operations`, and OMITTED when
         // empty, never sent as null or []: a bundle with no riders is
-        // byte-for-byte the bundle this client has always sent.
-        if ($this->kvOperations !== []) {
-            $body['kv'] = array_values($this->kvOperations);
+        // byte-for-byte the bundle this client has always sent. The guards go
+        // first: guard i is op i of the rider. Lock::guard() throws for a
+        // handle that holds nothing, before anything is sent.
+        $kv = array_merge(
+            array_map(static fn(Lock $lock): array => $lock->guard(), $this->guards),
+            array_values($this->kvOperations)
+        );
+        if ($kv !== []) {
+            $body['kv'] = $kv;
         }
         if ($this->timerOperations !== []) {
             $body['timers'] = array_values($this->timerOperations);
@@ -242,6 +315,12 @@ class TransactionBuilder
 
         if (!($result['success'] ?? false)) {
             if (($result['reason'] ?? null) === 'kv_precondition') {
+                // The guard of one of this bundle's locks: the permit expired,
+                // was released, or is somebody else's. The handle says so.
+                $lock = $this->failedGuard($result);
+                if ($lock !== null) {
+                    $lock->markLost();
+                }
                 return $result;
             }
 
@@ -306,6 +385,17 @@ class TransactionKvBuilder
     public function incr(string $key, int|float $delta, array $opts = []): TransactionBuilder
     {
         $this->parent->addKvOperation(KvOp::incr($this->namespace, $key, $delta, $opts));
+        return $this->parent;
+    }
+
+    /**
+     * A precondition on a key the bundle does not write: `expect` is the
+     * version it must be at, or 0 for a key that must not exist. With
+     * `required: true` it is the bundle's gate; without, only a look.
+     */
+    public function check(string $key, array $opts = []): TransactionBuilder
+    {
+        $this->parent->addKvOperation(KvOp::check($this->namespace, $key, $opts));
         return $this->parent;
     }
 }

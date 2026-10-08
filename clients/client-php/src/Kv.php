@@ -138,6 +138,28 @@ class Kv
         return $this->single(KvOp::incr($ns, $key, $delta, $opts));
     }
 
+    /**
+     * Is the key still at version `expect`? Writes nothing.
+     *
+     * `expect: 0` asks the opposite: the key must not exist. `applied` is "the
+     * precondition held"; when it did not, `reason` (version | absent |
+     * exists), `value` and `version` are what a reader would see.
+     *
+     * On its own it is a linearizable look. Where it earns its place is beside
+     * writes, with `required: true`: in batch(), or in a transaction's
+     * `->kv($ns)->check(...)`, it makes everything else commit only if a key
+     * the call does not write is unchanged — which is how a step is tied to a
+     * lock ($queen->lock()).
+     *
+     * Needs a broker at cluster version 5, the first with this operation.
+     *
+     * @param array $opts expect (required), required.
+     */
+    public function check(string $ns, string $key, array $opts = []): array
+    {
+        return $this->single(KvOp::check($ns, $key, $opts));
+    }
+
     // ===========================
     // Batch
     // ===========================

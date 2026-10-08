@@ -25,7 +25,8 @@ COPY clients/client-cpp ./clients/client-cpp
 
 # make test = compile bin/test_client only (it does not run the binary).
 # `unit` builds the broker-free suites: retry429 (the proxy contract --
-# bearer/429/403), kvtimers (the KV/timer wire contract), conflation
+# bearer/429/403), kvtimers (the KV/timer wire contract), locks (the lock and
+# semaphore wire contract; its live half runs from the entrypoint), conflation
 # (PLAN_CONFLATION.md §4 -- the flag on both param builders, the degrade-loudly
 # error against a pre-1.1.0 broker, the once-per-group conflict warning),
 # consumer (the consume path: ack/renew results and the consume loop), and the

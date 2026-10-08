@@ -87,6 +87,22 @@ class TimerError(QueenHttpError):
     """A refusal from the timer surface."""
 
 
+class LockError(QueenHttpError):
+    """A refusal from the locks surface: the CALL did not happen (a bad
+    request, a rate limit, a broker that could not be reached).
+
+    Never raised for a lock somebody else holds, or for a token that is no
+    longer the row's: those are verdicts, answered as fields with HTTP 200.
+    """
+
+
+class LockNotHeldError(QueenError):
+    """Something needed a held lock and the handle holds none: a guard was
+    asked of it, or ``async with`` could not acquire it."""
+
+    code = "LOCK_NOT_HELD"
+
+
 class EphemeralError(QueenHttpError):
     """A refusal from the ephemeral surface (EPHEMERAL_QUEUES.md §3.1, §4).
 

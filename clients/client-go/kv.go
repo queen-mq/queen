@@ -326,6 +326,38 @@ func KVDeleteOp(ns, key string, opts ...KVWriteOptions) KVOp {
 	return KVOp{Op: "delete", Ns: ns, Key: key}.withWriteOptions(opts)
 }
 
+// KVCheckOp is a precondition that writes nothing: the key is at version, or
+// -- version 0 -- is not there. It takes no expiry.
+//
+// With KVWriteOptions{Required: true} it is the gate of a whole batch or
+// transaction on a key that call does not write, which is how a step is tied
+// to a lock (Lock.Guard builds exactly this op). Without Required it is a
+// look: its verdict is reported and nothing else is held back.
+//
+// The version is an argument and not KVWriteOptions.Expect, because here it is
+// mandatory: a check without one says nothing, and the broker refuses it.
+// Needs a broker at cluster version 5, the first with this operation.
+func KVCheckOp(ns, key string, version int64, opts ...KVWriteOptions) KVOp {
+	op := KVOp{Op: "check", Ns: ns, Key: key}
+	if len(opts) > 1 {
+		op.err = errors.New("queen: pass at most one KVWriteOptions")
+		return op
+	}
+	if len(opts) == 1 {
+		if opts[0].Expect != nil && *opts[0].Expect != version {
+			op.err = errors.New("queen: a check's version is its expect; KVWriteOptions.Expect says another")
+			return op
+		}
+		op.Required = opts[0].Required
+	}
+	if version < 0 {
+		op.err = errors.New("queen: a check's version is 0 (the key must not exist) or above")
+		return op
+	}
+	op.Expect = Expect(version)
+	return op
+}
+
 // KVIncrOp adds delta to a numeric key, creating it when absent.
 //
 // The TTL is CREATE-ONLY: a live key keeps the expiry it has. If incr extended
@@ -405,14 +437,16 @@ type KVPage struct {
 // the CURRENT ones even when the write did not apply, so the loser of a race
 // needs no second round trip.
 //
-// VERSION IS AN OPAQUE TOKEN, NOT A COUNTER, AND NOT ORDERED. It comes from a
-// global sequence rather than a per-key counter, so that a key which expired,
-// was pruned and was recreated cannot re-issue a version an old holder is still
-// carrying. That sequence is cached per backend connection, so two writes of the
-// same key through different pooled connections can come back as 2022 and then
-// 21: what is guaranteed is that a version is never REUSED, never that it grows.
+// VERSION IS A TOKEN, NOT A COUNTER. It comes from one sequence for the whole
+// store rather than a per-key counter, so a key that expired, was pruned and
+// was recreated cannot re-issue a version an old holder is still carrying, and
+// two versions of one key are rarely consecutive.
 //
-// Test it with == and !=, pass it back as Expect, and never with < or >.
+// What is guaranteed, since the broker with locks (cluster version 5): a
+// version is never REUSED, and ON ONE KEY A LATER WRITE HAS A HIGHER ONE --
+// which is what makes it a fencing token for that key. Between two different
+// keys the order means nothing. Pass it back as Expect; compare with < and >
+// only two versions of the same key.
 type KVWrite struct {
 	Applied bool
 	Reason  string
@@ -873,6 +907,22 @@ func (kv *KV) Delete(ctx context.Context, ns, key string, opts ...KVWriteOptions
 		return KVWrite{}, fmt.Errorf("queen: kv delete response: %w", err)
 	}
 	return r.Write(), nil
+}
+
+// Check asks whether the key is still at version (0: whether it is absent),
+// and writes nothing. Applied is "the precondition held"; when it did not,
+// Reason, Value and Version are what a reader would see.
+//
+// On its own it is a linearizable look. Where it earns its place is beside
+// writes, as KVCheckOp(..., KVWriteOptions{Required: true}) in Batch or in a
+// transaction's KV rider: everything else then commits only if a key the call
+// does not write is unchanged.
+func (kv *KV) Check(ctx context.Context, ns, key string, version int64, opts ...KVWriteOptions) (KVWrite, error) {
+	res, err := kv.batch(ctx, []KVOp{KVCheckOp(ns, key, version, opts...)})
+	if err != nil {
+		return KVWrite{}, err
+	}
+	return res[0].Write(), nil
 }
 
 // Incr adds delta to a numeric key. It goes through POST /api/v1/kv, which is

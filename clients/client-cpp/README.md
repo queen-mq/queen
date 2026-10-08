@@ -458,6 +458,7 @@ make test
 # No broker needed: these serve their own responses in-process.
 # retry429  = the proxy contract (bearer token, 429 backoff, terminal 403)
 # kvtimers  = the KV/timer wire contract (exact JSON body, method and path)
+# locks     = the lock and semaphore wire contract; ./bin/test_locks <url> adds a live half
 # consumer  = the consume path: ack()/renew() results and the consume loop
 make run-unit
 
@@ -792,6 +793,49 @@ client.timers().cancel("compensation", "saga-1", out["txn"]);
   timer may have fired five milliseconds before your cancel arrived.
 - Billing follows the promise: a schedule counts one message, a reschedule
   counts another, a cancel counts zero and is not refunded.
+
+### Locks and semaphores
+
+A lock is a lease: one holder at a time, for a lifetime the holder renews, with a
+token that fences a holder that outlived it. `client.semaphore(name, n, ttl_seconds)`
+is the same with `n` permits.
+
+```cpp
+queen::Lock lock = client.lock("daily-report", 30);   // 30 s
+if (!lock.acquire(5000)) {            // up to 5 s for our turn
+    return;                            // somebody else holds it
+}
+for (const auto& page : pages) {
+    if (!lock.keep_alive()) break;     // renews when a third of the lifetime has passed
+    import_page(page);
+}
+json res = client.transaction()
+    .guard(lock)                       // commits only while the lock is ours
+    .queue("reports").push({json{{"data", report}}})
+    .commit();
+lock.release();
+```
+
+It is a lease, not a mutex: it expires, and nobody tells the holder. A paused or
+partitioned process carries on past its lifetime while somebody else acquires, so
+the lock alone never makes two holders impossible. The guard is what keeps the
+old holder's work out: a guarded transaction rolls back with `kv_precondition`
+once the lock is no longer this handle's. Outside Queen, fence with the token,
+which only rises on a lock. The token changes at every renew, so read it when you
+use it.
+
+**This client has no background renewal.** A handle that never calls
+`keep_alive()` (or `renew()`) holds the lock for one lifetime only. Call
+`keep_alive()` at a checkpoint inside the work loop: it sends nothing until a third
+of the lifetime has passed, and returns `false` once the lock is gone. A lost guard
+is returned by `commit()` (`success: false`, `reason: "kv_precondition"`); committing
+a guard with a lock that is not held throws `LockNotHeldError` before anything is
+sent. The transaction keeps a pointer to the `Lock`, which must outlive the
+`commit()`.
+
+`client.locks()` is the wire, with no state kept: `acquire`, `renew`, `release`,
+`get(name)` and `batch`. `client.kv(ns).check(key, version)` is the precondition on
+its own.
 
 ### What this client does not have
 

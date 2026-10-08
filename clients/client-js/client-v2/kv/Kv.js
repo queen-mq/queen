@@ -152,6 +152,21 @@ export const kvOp = {
     if (opts.min !== undefined) base.min = opts.min
     if (opts.max !== undefined) base.max = opts.max
     return { base: withRequired(base, opts), expiry: opts }
+  },
+
+  check(ns, key, opts = {}) {
+    requireName(ns, 'ns')
+    requireName(key, 'key')
+    // A check IS its expect. One without says nothing, and the broker's
+    // `applied:true` to it would read as a guard that held.
+    if (!('expect' in opts)) {
+      throw new Error(
+        'kv: check needs `expect` — the version the key must be at, or 0 for a key that must not exist'
+      )
+    }
+    const base = { op: 'check', ns, key }
+    // No expiry: it writes nothing.
+    return { base: withRequired(withExpect(base, opts), opts), expiry: null }
   }
 }
 
@@ -406,6 +421,32 @@ export class Kv {
     const res = await this.#write(kvOp.incr(ns, key, delta, opts))
     assertSafeNumber(res.value, `the counter at ${key}`)
     return res
+  }
+
+  /**
+   * Is the key still at this version? Writes nothing.
+   *
+   *     const r = await kv.check('orders', '9137', { expect: row.version })
+   *     if (!r.applied) console.log(r.reason, r.value)   // somebody wrote since
+   *
+   * `expect: 0` asks the opposite: the key must not exist. A WriteResult like
+   * every write's, `applied` being "the precondition held"; when it did not,
+   * `reason` (`version`, `absent` or `exists`), `value` and `version` are what
+   * a reader would see.
+   *
+   * On its own it is a linearizable look. Where it earns its place is beside
+   * writes, with `required: true`: in a batch, or in a transaction's
+   * `.kv.check(...)`, it makes everything else commit only if a key the call
+   * does not write is unchanged — which is how a step is tied to a lock
+   * (`queen.lock`).
+   *
+   * Needs a broker at cluster version 5, the first with this operation. While
+   * a cluster is being upgraded to it the call answers 503
+   * `kv_check_needs_cluster_version_5`; an older broker answers 400
+   * `kv_unknown_op`.
+   */
+  async check(ns, key, opts = {}) {
+    return this.#write(kvOp.check(ns, key, opts))
   }
 
   /**
