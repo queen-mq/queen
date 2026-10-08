@@ -52,25 +52,23 @@
       </div>
       <div v-else-if="!filtered.length && !error" class="supervisor-empty">No loaded instances match these filters.</div>
       <div v-else class="supervisor-overviews">
-        <section v-for="group in pageGroups" :key="group.name" class="supervisor-overview-group" :aria-label="`Group ${group.name}`">
-          <div class="supervisor-group"><h4>{{ group.name }}</h4><span>{{ groupCounts.get(group.name) }} loaded instances</span></div>
-          <ul class="supervisor-cards">
-            <li v-for="row in group.rows" :key="row.slot">
-              <button class="supervisor-card" aria-haspopup="dialog" aria-controls="supervisor-drawer" :aria-expanded="selectedSlot === row.slot" @click="selectedSlot = row.slot">
-                <span class="supervisor-card-head"><strong>{{ row.hostname || row.group }}</strong><span v-if="row.engine" class="supervisor-engine">{{ row.engine.toUpperCase() }}</span></span>
-                <span class="supervisor-instance">{{ row.instance ? `Instance …${row.instance.slice(-8)}` : 'Instance unavailable' }} · {{ row.state || 'unknown state' }}</span>
-                <span class="supervisor-finding" :class="row.severity"><span class="g" :class="row.severity || 'idle'" aria-hidden="true" />{{ row.label }}</span>
-                <span class="supervisor-card-metrics">
-                  <span><small>Queues</small><strong>{{ number(row.queueCount) }}</strong><small>{{ number(row.poolCount) }} pools</small></span>
-                  <span><small>Workers</small><strong>{{ number(row.workers) }} <span>/ {{ number(row.desired) }}</span></strong><small>running / desired</small></span>
-                  <span><small>Pools needing attention</small><strong :class="row.affectedPools ? 'warn' : ''">{{ number(row.affectedPools) }}</strong><small>{{ row.affectedPools === null ? 'Health unconfirmed' : 'From this heartbeat' }}</small></span>
-                </span>
-                <span class="supervisor-card-capacity"><span>{{ number(row.missingWorkers) }} below target</span><span v-if="row.consumer">{{ row.executionModel }} · shared process</span><template v-else><span>{{ number(row.draining) }} draining</span><span>{{ number(row.budget?.available ?? null) }} process slots free</span></template></span>
-                <span class="supervisor-card-foot"><span>{{ row.age === null ? 'Heartbeat unavailable' : `Heartbeat ${ageLabel(row.age)}` }}</span><span class="supervisor-open" aria-hidden="true">View details →</span></span>
-              </button>
-            </li>
-          </ul>
-        </section>
+        <ul class="supervisor-cards">
+          <li v-for="row in pageRows" :key="row.slot" class="supervisor-card-item">
+            <div class="supervisor-group"><h4>{{ row.group }}</h4><span>{{ groupCounts.get(row.group) }} loaded {{ groupCounts.get(row.group) === 1 ? 'instance' : 'instances' }}</span></div>
+            <button class="supervisor-card" aria-haspopup="dialog" aria-controls="supervisor-drawer" :aria-expanded="selectedSlot === row.slot" @click="selectedSlot = row.slot">
+              <span class="supervisor-card-head"><strong>{{ row.hostname || row.group }}</strong><span v-if="row.engine" class="supervisor-engine">{{ row.engine.toUpperCase() }}</span></span>
+              <span class="supervisor-instance">{{ row.instance ? `Instance …${row.instance.slice(-8)}` : 'Instance unavailable' }} · {{ row.state || 'unknown state' }}</span>
+              <span class="supervisor-finding" :class="row.severity"><span class="g" :class="row.severity || 'idle'" aria-hidden="true" />{{ row.label }}</span>
+              <span class="supervisor-card-metrics">
+                <span><small>Queues</small><strong>{{ number(row.queueCount) }}</strong><small>{{ number(row.poolCount) }} pools</small></span>
+                <span><small>Workers</small><strong>{{ number(row.workers) }} <span>/ {{ number(row.desired) }}</span></strong><small>running / desired</small></span>
+                <span><small>Pools needing attention</small><strong :class="row.affectedPools ? 'warn' : ''">{{ number(row.affectedPools) }}</strong><small>{{ row.affectedPools === null ? 'Health unconfirmed' : 'From this heartbeat' }}</small></span>
+              </span>
+              <span class="supervisor-card-capacity"><span>{{ number(row.missingWorkers) }} below target</span><span v-if="row.consumer">{{ row.executionModel }} · shared process</span><template v-else><span>{{ number(row.draining) }} draining</span><span>{{ number(row.budget?.available ?? null) }} process slots free</span></template></span>
+              <span class="supervisor-card-foot"><span>{{ row.age === null ? 'Heartbeat unavailable' : `Heartbeat ${ageLabel(row.age)}` }}</span><span class="supervisor-open" aria-hidden="true">View details →</span></span>
+            </button>
+          </li>
+        </ul>
       </div>
       <div v-if="pages > 1 || after" class="supervisor-pagination">
         <span>{{ formatNumber(filtered.length) }} matching loaded instances</span>
@@ -280,14 +278,7 @@ const filtered = computed(() => rows.value.filter(row => {
 }).sort((a, b) => groupOrder.value.get(a.group) - groupOrder.value.get(b.group) || b.priority - a.priority || a.slot.localeCompare(b.slot)))
 const pages = computed(() => Math.max(1, Math.ceil(filtered.value.length / 10)))
 const pageRows = computed(() => filtered.value.slice((page.value - 1) * 10, page.value * 10))
-const pageGroups = computed(() => {
-  const result = []
-  for (const row of pageRows.value) {
-    if (result.at(-1)?.name !== row.group) result.push({ name: row.group, rows: [] })
-    result.at(-1).rows.push(row)
-  }
-  return result
-})
+
 watch([search, filter, groupFilter], () => { page.value = 1 })
 watch(pages, n => { page.value = Math.min(page.value, n) })
 const errorTitle = computed(() => verdict.value === 'transient' ? 'Cannot read supervisor publications' : describeVerdict(verdict.value, 'Supervisor discovery').title)
@@ -370,16 +361,17 @@ function onDrawerClick(event) { if (backdropDown && outside(event)) closeDrawer(
 .supervisor-empty { padding: 30px 24px; color: var(--text-mid); font-size: 13px; line-height: 1.7; }
 .supervisor-empty h3 { color: var(--text-hi); font-size: 17px; margin: 0 0 10px; }
 .supervisor-command { display: inline-block; background: var(--ink-3); border: 1px solid var(--bd); border-radius: var(--r-control); padding: 12px 16px; margin: 8px 0; overflow-wrap: anywhere; }
-.supervisor-overviews { padding: 0 18px 20px; }
-.supervisor-group { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 20px 0 12px; color: var(--text-mid); font-size: 12px; overflow-wrap: anywhere; }
+.supervisor-overviews { padding: 20px 18px; }
+.supervisor-group { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 0 0 12px; color: var(--text-mid); font-size: 12px; overflow-wrap: anywhere; }
 .supervisor-group h4 { margin: 0; font-size: 13px; font-weight: 600; }
 .supervisor-group span { color: var(--text-low); }
 .supervisor-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); list-style: none; gap: 14px; padding: 0; margin: 0; }
-.supervisor-card { display: block; width: 100%; height: 100%; padding: 20px; color: var(--text-hi); border: 1px solid var(--bd); border-radius: var(--r-card); text-align: left; background: var(--ink-2); font: inherit; cursor: pointer; transition: background .15s, border-color .15s; }
+.supervisor-card-item { display: flex; flex-direction: column; min-width: 0; }
+.supervisor-card { display: block; flex: 1; width: 100%; padding: 20px; color: var(--text-hi); border: 1px solid var(--bd); border-radius: var(--r-card); text-align: left; background: var(--ink-2); font: inherit; cursor: pointer; transition: background .15s, border-color .15s; }
 .supervisor-card:hover, .supervisor-card[aria-expanded="true"] { background: var(--ink-3); border-color: var(--text-low); }
 .supervisor-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .supervisor-card-head > strong { font-size: 17px; font-weight: 550; min-width: 0; overflow-wrap: anywhere; }
-.supervisor-engine { color: var(--text-low); border: 1px solid var(--bd); border-radius: 4px; padding: 3px 6px; font-size: 10px; overflow-wrap: anywhere; max-width: 40%; }
+.supervisor-engine { color: var(--text-low); border: 1px solid var(--bd); border-radius: 4px; padding: 3px 6px; font-size: 10px; flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
 .supervisor-instance { display: block; margin-top: 6px; font-size: 11px; color: var(--text-low); }
 .supervisor-finding { display: flex; align-items: center; gap: 8px; margin-top: 20px; font-size: 12px; }
 .supervisor-card-metrics { display: grid; grid-template-columns: .8fr 1fr 1.2fr; gap: 12px; margin-top: 20px; }
@@ -461,7 +453,7 @@ function onDrawerClick(event) { if (backdropDown && outside(event)) closeDrawer(
   .supervisor-metrics > div:nth-child(n+3), .supervisor-evidence > div:nth-child(n+3) { border-top: 1px solid var(--bd); }
   .supervisor-search { flex-basis: 100%; max-width: none; }
   .supervisor-tools > span { display: none; }
-  .supervisor-overviews { padding: 0 12px 12px; }
+  .supervisor-overviews { padding: 16px 12px 12px; }
   .supervisor-card { padding: 16px; }
   .supervisor-card-metrics { gap: 8px; grid-template-columns: .75fr 1fr 1.25fr; }
   .supervisor-card-metrics strong { font-size: 23px; }

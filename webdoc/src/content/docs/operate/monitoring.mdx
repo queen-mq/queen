@@ -56,6 +56,9 @@ the same dashboard sits behind the console login: admins also get Members and AP
 **Supervisors** reads the acting cluster's `queen-supervisor` KV namespace. It groups instances by
 publication group and shows an overview card for each: distinct queues, pools, reported workers
 against the target, pools needing attention and heartbeat age. Groups with issues come first.
+Cards from all groups share a two-column grid on wide screens
+and stack on narrow screens; each card keeps its publication group and loaded instance count
+above it.
 Click a card to open the instance's drawer, then search and filter its queue/pool table, ten rows
 per page. The drawer separates readiness from target capacity and shows worker shortfall,
 draining, process headroom, master PID, versions and uptime at the heartbeat when published.
