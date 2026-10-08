@@ -2,6 +2,7 @@
 import { Code } from "astro:components";
 import BaseLayout from "../layouts/BaseLayout.astro";
 import Header from "../components/Header.astro";
+import QueenScene from "../components/QueenScene.astro";
 import Figure from "../components/Figure.astro";
 import { config } from "virtual:nimbus/config";
 import {
@@ -100,23 +101,10 @@ const card =
           </div>
         </div>
 
-        <div class="relative aspect-[4/5] w-full sm:mx-auto sm:mb-12 sm:max-w-xl sm:overflow-hidden sm:rounded-xl lg:mx-0 lg:mb-0 lg:aspect-auto lg:max-w-none lg:rounded-none">
-          <img
-            src="/queen-scene-on-light.svg"
-            alt=""
-            width="1200"
-            height="1536"
-            class="hero-scene-light absolute inset-0 h-full w-full object-cover"
-            style="object-position: 48% 50%;"
-          />
-          <img
-            src="/queen-scene-on-dark.svg"
-            alt=""
-            width="1200"
-            height="1536"
-            class="hero-scene-dark absolute inset-0 h-full w-full object-cover"
-            style="object-position: 48% 50%;"
-          />
+        <div class="relative aspect-[4/5] min-h-[44rem] w-full sm:mx-auto sm:mb-12 sm:max-w-xl sm:overflow-hidden sm:rounded-xl lg:mx-0 lg:mb-0 lg:aspect-auto lg:min-h-0 lg:max-w-none lg:rounded-none">
+          <div class="absolute inset-0">
+            <QueenScene />
+          </div>
         </div>
       </section>
 
@@ -381,17 +369,14 @@ const card =
     /* the wrapper scrolls; a second scroller here showed an empty track */
     overflow: visible !important;
   }
-  /* The hero scene and the dashboard screenshot exist once per theme.
+  /* The dashboard screenshot exists once per theme.
      BaseLayout stamps data-mode="dark" on <html> for the dark theme only. */
-  .hero-scene-dark,
   .home-shot-dark {
     display: none;
   }
-  :global(:root[data-mode="dark"]) .hero-scene-light,
   :global(:root[data-mode="dark"]) .home-shot-light {
     display: none;
   }
-  :global(:root[data-mode="dark"]) .hero-scene-dark,
   :global(:root[data-mode="dark"]) .home-shot-dark {
     display: block;
   }
