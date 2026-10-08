@@ -16,6 +16,34 @@ message went out to a worker once; checkpoint writes reached 0.45 s against a 25
 back an unreceived claim now also takes back its attempt, on the leader's engine and through the
 `Nack` a follower sends. A lease that really expired still counts.
 
+**Clients: a consumer can report to the dashboard, off by default.** Every SDK's consumer builder
+takes a supervision option that names a group for the dashboard: `.supervision({ group })` in
+JavaScript, `Supervision(&queen.SupervisionConfig{...})` in Go, `supervision(...)` in the Python,
+Rust, C++ and PHP clients. Each consume call then writes an observation to the broker's
+`queen-supervisor` KV namespace every 10 seconds, and a last one when it stops: its execution model,
+its live loops against the configured concurrency, the handlers running, the handler calls completed
+and failed, and the age of the oldest handler still running. No payload and no error text is
+published. Publishing is best effort and bounded, and it needs a credential that can write KV. It only
+observes: it restarts nothing, scales nothing and changes no ack or lease, and with the option off
+there is no timer and no request. The PHP client publishes at its cooperative checkpoints, so a long
+synchronous handler leaves its last observation stale. In the JavaScript client 2.0.4, the Python, Go,
+Rust and C++ clients 2.0.3 and the PHP client 2.3.1.
+
+**CLI: `queenctl tail --supervision-group`.** `tail` reports the same way when the flag names a
+group, one identity for each invocation.
+
+**Dashboard: the Supervisors page shows the consumers that report.** Beside the process supervisors
+it lists each reporting consumer with its execution model (async tasks, goroutines, threads or
+cooperative loops), its live loops against the configured concurrency, its busy handlers, its
+completed and failed handler calls, its last completion and the age of its oldest handler in flight.
+A completed handler does not prove its ack succeeded, and a fresh heartbeat does not prove progress; a
+stale or inconsistent report stays unconfirmed. Process budgets and readiness stay with the process
+supervisors.
+
+**Dashboard, sign-in page and docs: a new logo.** The q that is a sunflower replaces the sunflower and
+the bee: as a badge beside the word "queen" in the dashboard, as the wordmark on the sign-in page and
+in the README, and as the tab icon. The sign-in page now takes the dashboard's light or dark scheme.
+
 ## JS client 2.0.3 - 2026-10-07
 
 **JS client: stopping a consumer no longer strands its messages.** Aborting the `signal` passed to

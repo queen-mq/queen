@@ -42,6 +42,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-07 (optional client supervision): QueueBuilder adds opt-in
 # observations for consume()->execute(). This command uses getConsumer(), so its options,
 # handler behavior, renewal and exit semantics described here are unchanged.
+# sourceOfTruth re-read 2026-10-08 (PHP client 2.3.1): 2.3.0 is released, so the page no longer says it
+# is not. Nothing else this page states changes.
 ---
 
 `php artisan queen:consume` reads a Queen queue and passes each message to a class of yours. Use it
@@ -50,7 +52,7 @@ for messages that other services push to Queen. Laravel jobs keep going through 
 
 The command connects with the settings of `config/queen.php`, as the queue connection does
 (`QUEEN_URL`, `QUEEN_BEARER_TOKEN`). The service provider registers it for the console only. This
-page describes PHP client 2.3.0, not released yet; [before 2.3.0](#before-php-client-230) lists
+page describes PHP client 2.3.0 and later; [before 2.3.0](#before-php-client-230) lists
 what differs in earlier releases.
 
 ## Try it

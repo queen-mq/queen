@@ -61,6 +61,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-07 (optional client supervision): package.json only adds the supervision unit test to test:unit; the package version, installation and runtime requirement described here are unchanged.
 # sourceOfTruth re-read 2026-10-08 (2.0.3): server/Cargo.toml moves the broker to 2.0.3 and no client is
 # released with it. The versions sentence says so.
+# sourceOfTruth re-read 2026-10-08 (clients 2.0.4 and 2.0.3): package.json is 2.0.4, pyproject.toml and
+# client-rust/Cargo.toml are 2.0.3, and the Go and C++ SDKs take 2.0.3 from their tags. The versions
+# sentence says so.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same
@@ -210,7 +213,7 @@ See [Laravel](/guides/laravel/).
 </TabItem>
 </Tabs>
 
-The JavaScript client is 2.0.3 and the Python, Go, Rust and C++ clients are 2.0.2; the PHP client
+The JavaScript client is 2.0.4 and the Python, Go, Rust and C++ clients are 2.0.3; the PHP client
 has its own version line. All of them talk to any 2.0 broker (the broker is at 2.0.3). The Go
 client's module path ends in `/v2`, as Go requires for a major version above 1.
 
