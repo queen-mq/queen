@@ -13,6 +13,7 @@ sourceOfTruth:
   - test/jepsen/src/jepsen/queen/workload/pipeline.clj
   - test/jepsen/src/jepsen/queen/workload/dlq.clj
   - test/jepsen/src/jepsen/queen/workload/timers.clj
+  - test/jepsen/src/jepsen/queen/workload/locks.clj
   - test/jepsen/run-campaign.sh
 ---
 
@@ -20,9 +21,9 @@ A million messages a second is worth nothing if one of them can go missing. We c
 Jepsen: five nodes, clients driving the native API as hard as they can, a nemesis that kills,
 pauses, partitions, skews clocks and cuts power, and checkers that read the whole history
 afterwards looking for a message lost, delivered twice, acked twice or seen out of order. The
-latest full campaign, on 2.0.0-beta.3, ran 65 tests and all 65 came back valid. That is evidence,
-not proof. Jepsen finds bugs and cannot show there are none, and further down is every bug it found
-in Queen 2.0.
+latest full campaign, on 2.0.0-beta.3, ran 65 tests and all 65 came back valid, and locks had 41
+tests of their own on 2026-10-08, all valid. That is evidence, not proof. Jepsen finds bugs and
+cannot show there are none, and further down is every bug it found in Queen 2.0.
 
 ## How a test runs
 
@@ -61,6 +62,7 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | W8 `retention` | W2 with completed messages deleted 2 s after their push | a message deleted before its ack |
 | W9 `streams` | stream cycles: pop a batch, read the partition's state, one cycle that acks it, writes output and updates the state | a batch counted twice or never, state that disagrees with the output |
 | W10 `timers` | schedule, reschedule and cancel timers, and consume what fires | a timer that fires twice or early, a cancelled timer that fires, fires and cancels that do not add up to the timers created |
+| W11 `locks`, W11b `semaphore` | take a lock, or one permit of a semaphore, for 2 to 4 seconds; commit transactions that carry its guard and push to the partition it protects; renew it, release it and read its holders. No client watches a clock, so each goes on using a token whose lease ran out | a guarded transaction that commits after its permit moved on, a token with two owners, a record of a transaction that rolled back, a grant whose token is not above the one before it, a permit handed to another owner before its lease could have ended |
 
 ## The faults
 
@@ -86,12 +88,24 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | P16 to P24 | 2026-09-30 and 10-01 | the builds that became 2.0.0-beta.1 | 78 | 74 valid; the other 4 were the dead-letter payload bug below |
 | P26 | 2026-10-01 | 2.0.0-beta.3, `bff9f76d` | 65: queue, pipeline, KV register, counter and claim, log, Elle and timers, under kills, pauses, partitions, clock faults, restarts, membership changes, bridges, a deaf leader and power loss | 65 valid |
 | Kafka-facade build | 2026-10-02 | the code of 2.0.0-beta.5, before a fix inside the facade | 65 | 64 valid, 1 unknown |
+| 2.0.1 | 2026-10-05 | 2.0.1, `bc1b5bfb6` | 19: queue, pipeline, dead letters, log, dedup and KV register under kills, pauses, partitions, restarts, a deaf leader and power loss, the queue and the pipeline on 2,000 and 1,000 partitions whose idle consumer state leaves the leader's memory after a second | 19 valid |
+| Locks | 2026-10-08 | `2287397a3`: 2.0.3 with locks, the KV `check` op and cluster version 5 | 41: W11 and W11b (29, three of them without faults), then KV register, counter and claim, Elle and the pipeline again (12), under kills, pauses, partitions, clock faults, restarts, membership changes, bridges, a deaf leader and power loss, and with kills, pauses, partitions and clock faults in one test | 41 valid |
 
 The unknown is W9 under bridge partitions. After the last heal, a follower's pops kept timing out
 for about 90 seconds although it had caught up, so the final reads did not finish within the
 test's time limit and the checker had no end state to judge. It is a liveness problem, and it is
 open. P8 to P10 are archived with every history in
 `benchmark-queen/2026-09-27-jepsen-archive/`.
+
+The locks campaign counted what the fence did. In its 29 lock and semaphore tests 373,312 guarded
+transactions committed, permits changed hands 18,456 times, and the guard refused 3,245
+transactions that carried a token its permit no longer had. No token went back, and no record came
+from a transaction that rolled back. One thing the checker reports and does not judge: under clock
+strobes, one semaphore test read the same owner in two slots 51 times, 12 pairs of permits in all.
+In the one traced, the owner's permit looked expired while a clock was ahead, its next acquire was
+given another slot, and the first permit was live again a moment later. No semaphore gave out more
+permits than its limit. Every test's verdict and counts are in
+`benchmark-queen/2026-10-08-jepsen-locks/`.
 
 ## What the tests found
 
@@ -121,9 +135,10 @@ checker knows, and every campaign ran one raft group with one tenant over the na
 several raft groups, several tenants, the Kafka facade and the embedded proxy were not part of any.
 Lease exclusivity across a leader change needs the nodes' clocks within
 `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. Losing a majority of the disks for good can
-lose acknowledged writes, since raft survives the loss of a minority. And the current release,
-2.0.0-beta.6, has had no campaign of its own: its broker is that of 2.0.0-beta.3 plus the beta.5
-Kafka-facade work, which ran the 65-test campaign above.
+lose acknowledged writes, since raft survives the loss of a minority. And the full campaign last
+ran on the code of 2.0.0-beta.5: 2.0.1 and the locks build each ran the tests of what they
+changed. The locks build was tested before it was merged with 2.0.4 and the standby cluster, and
+no campaign has run against a standby.
 
 What each API guarantees, written for the developer using it, is on
 [guarantees](/concepts/guarantees/).

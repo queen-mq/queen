@@ -207,10 +207,12 @@ hang on: a cron job, a singleton, a pool of N.
   moves to format version 5 by itself once they all are, and until then a call that carries a
   `check` answers 503 with `kv_check_needs_cluster_version_5`. Acquire, renew and release work
   before that.
-- Locks are [Jepsen-tested](/concepts/guarantees/) (W11, on 2026-10-08): under kill, partition,
+- Locks are [Jepsen-tested](/benchmarks/jepsen/) (W11, on 2026-10-08): under kill, partition,
   pause, restart, power loss, membership changes and clock jumps, no guarded commit of a replaced
-  holder got through, and no lock was handed over before its lease could have ended. That is what
-  was tested: not that only one client believes it holds the lock, which a lease cannot promise.
+  holder got through. With the nodes' clocks left alone, no lock was handed over before its lease
+  could have ended; under clock jumps that is not judged, since a jump changes how long a lease
+  lasts. That is what was tested: not that only one client believes it holds the lock, which a
+  lease cannot promise.
 
 ## Next
 
