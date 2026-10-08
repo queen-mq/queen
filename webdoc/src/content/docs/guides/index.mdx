@@ -18,7 +18,7 @@ digest: >-
   window state and sink push as one entry. Ephemeral queues keep messages in memory only: every
   node of a cluster serves every partition through one owner per (queue, partition), a graceful
   stop (SIGTERM) hands the contents to the next owner, and a crash loses what the crashed node
-  held; behind the proxy they are tenant-safe on a single node only in 2.0.0-beta.6. Kafka
+  held. Kafka
   clients connect through the Kafka wire protocol built into the broker
   (QUEEN_KAFKA_EMBEDDED=true), where a topic is a queue; Laravel uses the PHP client as a queue
   connection.

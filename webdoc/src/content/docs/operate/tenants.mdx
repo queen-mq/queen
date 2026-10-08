@@ -322,11 +322,10 @@ Rate buckets and parked-pop gauges live in each node's memory, so behind a load 
 nodes a cluster can reach three times its plan's rate. The storage quota is read from the broker's
 own measurement, which every node shares.
 
-Ephemeral queues behind the proxy are safe on a single node only, for now. In a cluster, an
-ephemeral request that the receiving node forwards to the partition's owner does not keep its
-tenant and lands in the broker's default tenant; durable queues are isolated as described above.
-Separately, an ephemeral hand-over to a node that is still restarting can drop that partition's
-messages, which we have seen during rolling restarts ([ephemeral queues](/guides/ephemeral/)).
+In a cluster, an ephemeral request that the receiving node forwards to the partition's owner keeps
+its tenant when every node has the same `QUEEN_RAFT_TOKEN`; without it, the owner refuses the
+request (403 `tenant_unverified`) rather than store it in the default tenant. Durable queues are
+isolated as described above ([ephemeral queues](/guides/ephemeral/)).
 
 The proxy does not isolate tenants from the people who run it. A live operator, and anyone who
 holds `QUEEN_PROXY_CP_TOKEN`, can act on every cluster, and the broker port behind the proxy

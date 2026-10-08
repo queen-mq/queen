@@ -342,10 +342,10 @@ through node 1. When node 3 came back, nodes 1 and 2 shipped 13 partitions back 
 
 The messages live in one node's memory, so a crash (kill -9, OOM, a lost host) loses what that node
 owned. Of six messages spread over the cluster, a SIGKILL of node 3 left the two that node 2 owned.
-Two issues are still open in 2.0.0-beta.6. A hand-over to a node that is still restarting can drop
-the partition's messages, which we have seen during rolling restarts. And through the
-[proxy](/operate/tenants/), a request forwarded to the owning node does not keep its tenant, so
-ephemeral queues behind the proxy are safe on a single node only, for now.
+Since 2.0.0 a restarting node takes partitions only once its listener answers, and a hand-over
+that does not land is tried again for up to 30 seconds. Through the [proxy](/operate/tenants/), a
+request forwarded to the owning node keeps its tenant, which the owner trusts only with the cluster
+token, so every node needs the same `QUEEN_RAFT_TOKEN`.
 
 ## In production
 
@@ -464,8 +464,7 @@ wrong), and [Backups and restore](/operate/recovery-backups/) covers snapshots o
 - The raft port is plain HTTP with a shared token: keep it on a private network.
 - Peer addresses are fixed at the first boot. Changing them on a live cluster is a forced recovery.
 - Ephemeral messages live in their owner's memory: a crash loses that node's share, and a hand-over
-  to a node that is still restarting can drop a partition's messages. Behind the proxy they are
-  safe on a single node only (2.0.0-beta.6).
+  that has not landed after 30 seconds is dropped.
 - One leader orders every write of a group. Adding nodes to a group adds no write throughput.
 
 [Kubernetes](/operate/kubernetes/) turns this cluster into a StatefulSet, and

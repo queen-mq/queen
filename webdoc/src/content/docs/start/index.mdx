@@ -101,7 +101,7 @@ tenant's writes. A cluster can run several raft groups (`QUEEN_RAFT_GROUPS`), ea
 leader, so tenants spread their load over the nodes. See [cluster](/operate/cluster/).
 
 You talk to it in JSON over HTTP, so curl is a complete client, or through the SDKs for JavaScript,
-Python, Go, Rust, C++ and PHP, the last with a Laravel queue driver. Existing Kafka producers and
+Python, Go, Rust, C++ and PHP, the last with a [Laravel queue driver](/guides/laravel/). Existing Kafka producers and
 consumers can connect, unchanged, to a Kafka wire-protocol facade that runs inside the same process
 once you turn it on, PostgreSQL tables stream in and out through built-in connectors, and an S3
 sink writes queues to a bucket. The binary serves the dashboard and Prometheus metrics too, and, when you
@@ -117,8 +117,9 @@ pushed and consumed 1,000,000 messages a second through one queue at every parti
 tried, from 200 to ten million, with an end-to-end p99 between 103 and 163 ms. An exactly-once step
 of 10 messages committed in 3 ms at the median, and one raft group topped out between 7,000 and
 9,000 such transactions a second (2026-10-01, with Kafka, Redpanda and Pulsar measured on the same
-machines). The latest Jepsen campaign, on 2.0.0-beta.3, ran 65 tests under kill -9, partitions,
-pauses, clock jumps and power loss, and all 65 were valid. Every number, with its conditions and
+machines). The latest full Jepsen campaign, on 2.0.0-beta.3, ran 65 tests under kill -9,
+partitions, pauses, clock jumps and power loss, and all 65 were valid; a later run on the
+Kafka-facade build had 64 valid and 1 the checker could not judge ([Jepsen](/benchmarks/jepsen/)). Every number, with its conditions and
 the places where other systems did better, is on [benchmarks](/benchmarks/), and what the
 guarantees cover is on [guarantees](/concepts/guarantees/).
 

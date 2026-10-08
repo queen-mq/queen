@@ -168,7 +168,7 @@ in that same commit, so it exists exactly when the order is waiting for a paymen
 
 ## A full program
 
-The booking saga below runs the same pattern with three states (`held`, `confirmed`, `expired`),
+The booking saga below ([the saga example](/examples/saga/)) runs the same pattern with three states (`held`, `confirmed`, `expired`),
 end to end, in the examples suite. Its timer fires into a separate `expiries` queue, so its
 compensator reads the state again before it acts, which is the check the order above gets for free
 by firing into the entity's own partition.
@@ -218,7 +218,7 @@ redelivery. Emit it as an event and handle it with a marker, as in
 [charge a card once](/guides/exactly-once/).
 
 The state is one KV value, 64 KiB by default (`QUEEN_KV_MAX_VALUE_BYTES`). `POST /api/v1/timers`
-refuses a timer more than 90 days out (`QUEEN_TIMERS_MAX_HORIZON_S`), but in 2.0.0-beta.6 a timer
+refuses a timer more than 90 days out (`QUEEN_TIMERS_MAX_HORIZON_S`), but as of 2.0.4 a timer
 scheduled inside a transaction is not checked against that horizon, so keep your own delays
 sensible.
 

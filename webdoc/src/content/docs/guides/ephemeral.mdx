@@ -165,16 +165,16 @@ the Jepsen runs. There are no transactions, no dead-letter queue, no replay and 
 `subscriptionMode`, and an ephemeral push cannot ride a `/transaction`. When a message is part of
 a step that has to commit, use a durable queue.
 
-A hand-over to a node that is still starting up can drop the partition's contents. We have seen it
-in rolling restarts and it is an open issue. A dropped hand-over is never silent: the sending node
+A hand-over to a node that is still starting up waits until its listener answers, and is tried
+again for up to 30 seconds, each time to the partition's owner of the moment; one that has not
+landed by then is dropped. A dropped hand-over is never silent: the sending node
 logs `hand-over failed; the partition's contents are dropped` and counts it in
 `queen_ephemeral_wipes_total`, although a node that drops on its way out takes that counter with
 it, so alert on the log line.
 
-Behind the [proxy](/operate/tenants/), ephemeral queues are safe on a single node only, for now.
-In a cluster, a request the receiving node forwards to the partition's owner does not keep its
-tenant and lands in the broker's default tenant. It is a bug we are fixing, and durable queues are
-not affected.
+Behind the [proxy](/operate/tenants/), a request the receiving node forwards to the partition's
+owner keeps its tenant. The owner trusts that tenant only with the cluster token: set the same
+`QUEEN_RAFT_TOKEN` on every node, or the owner refuses the request with 403 `tenant_unverified`.
 
 With the broker's own JWT authentication on (`JWT_ENABLED=true`), the nodes' hand-over calls are
 refused with `401`, so every move drops the contents it carries. Requests that clients send through

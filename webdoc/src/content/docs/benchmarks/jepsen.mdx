@@ -122,9 +122,9 @@ checker knows, and every campaign ran one raft group with one tenant over the na
 several raft groups, several tenants, the Kafka facade and the embedded proxy were not part of any.
 Lease exclusivity across a leader change needs the nodes' clocks within
 `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. Losing a majority of the disks for good can
-lose acknowledged writes, since raft survives the loss of a minority. And the current release,
-2.0.0-beta.6, has had no campaign of its own: its broker is that of 2.0.0-beta.3 plus the beta.5
-Kafka-facade work, which ran the 65-test campaign above.
+lose acknowledged writes, since raft survives the loss of a minority. And no release since 2.0.0
+(2026-10-03) has had a campaign of its own: the campaigns above ran on pre-release builds, the
+latest on the code of 2.0.0-beta.5.
 
 What each API guarantees, written for the developer using it, is on
 [guarantees](/concepts/guarantees/).

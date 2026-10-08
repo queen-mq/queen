@@ -230,6 +230,9 @@ server, a failure lane killed a worker with SIGKILL during a 4 s job: on Horizon
 engines the killed job ran again, and all 8 jobs completed once
 ([benchmark](/benchmarks/laravel/#failures-replicas-a-soak-and-laravel-features)).
 
+The [lease example](/examples/laravel/lease/) runs an 8-second job on a 6-second lease, with and
+without renewal.
+
 ## Delayed jobs and `release()`
 
 A delayed dispatch becomes a broker [timer](/concepts/timers/): the broker keeps the job outside the

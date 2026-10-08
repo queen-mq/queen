@@ -164,11 +164,11 @@ inside your network; that port must not face the internet. Plans and limits are 
 | `QUEEN_PROXY_SHARED_HOSTS` | empty | Hostnames that front many clusters, where the cluster comes from the credential, not the `Host`. |
 | `QUEEN_PROXY_DEFAULT_CLUSTER` | unset | Development only: the cluster a `Host` that names none falls back to. |
 | `QUEEN_PROXY_DEV_INSECURE` | `false` | Development only: skip authentication. |
-| `QUEEN_PROXY_MAX_BODY_BYTES` | `16777216` (16 MiB) | Request body cap on the data plane. |
+| `QUEEN_PROXY_MAX_BODY_BYTES` | `16777216` (16 MiB) | The largest body the proxy reads on the routes it buffers: push, transaction, `/configure`, DLQ replay, the streams cycle, KV batches and ephemeral push. A larger body gets 413 `payload_too_large`. Other routes go to the broker, where `QUEEN_MAX_BODY_BYTES` applies. |
 | `QUEEN_PROXY_MAX_BATCH_ITEMS` | `10000` | Items per push when the plan sets no `max_batch_items`. |
 | `QUEEN_PROXY_UPSTREAM_TIMEOUT_MS` | `35000` | How long a call to the broker may take. |
 | `QUEEN_PROXY_UPSTREAM_CONNECT_TIMEOUT_MS` | `5000` | Connect timeout to the broker. |
-| `QUEEN_PROXY_LONGPOLL_MAX_MS` | `90000` | The longest a long-poll pop may wait through the proxy, whatever it asks for. |
+| `QUEEN_PROXY_LONGPOLL_MAX_MS` | `90000` | How long the proxy waits for a long-poll pop at most, plus `QUEEN_PROXY_LONGPOLL_MARGIN_MS`; the broker's own wait is not shortened ([limits](/reference/limits/#pop-and-long-poll)). |
 | `QUEEN_PROXY_LONGPOLL_MARGIN_MS` | `10000` | Time the proxy gives a long-poll pop beyond its own timeout before it gives up on the broker. |
 | `QUEEN_PROXY_JWT_SECRET` | unset | HS256 secret for session tokens. |
 | `QUEEN_PROXY_JWT_ED25519_PEM`, `QUEEN_PROXY_JWT_ED25519_PUB_PEM` | unset | Ed25519 signing key, and a public key for a node that only verifies. |
@@ -213,7 +213,7 @@ default, because a fleet of producers behind one NAT would otherwise be throttle
 | Variable | Default | Effect |
 |---|---|---|
 | `QUEEN_EDGE_MAX_CONNS` | `20000` | Accepted connections beyond this are closed at once. |
-| `QUEEN_EDGE_MAX_BODY_BYTES` | `67108864` (64 MiB) | Body cap on the data plane. |
+| `QUEEN_EDGE_MAX_BODY_BYTES` | `67108864` (64 MiB) | The limit for proxy handlers that read their body through an extractor. The data-plane routes and `/api/cp` read their bodies themselves, so the caps that apply to them are `QUEEN_PROXY_MAX_BODY_BYTES`, `QUEEN_MAX_BODY_BYTES` and 1 MiB on `/api/cp`. |
 | `QUEEN_EDGE_WEB_MAX_BODY_BYTES` | `1048576` (1 MiB) | Body cap on sign-in, the console and the operator API. |
 | `QUEEN_EDGE_RPS_PER_IP`, `QUEEN_EDGE_BURST_PER_IP` | `0` (off); burst twice the rate | Per-IP rate limit on the data plane. |
 | `QUEEN_EDGE_WEB_RPS_PER_IP`, `QUEEN_EDGE_WEB_BURST_PER_IP` | `20`, `60` | Per-IP rate limit on the web routes. |

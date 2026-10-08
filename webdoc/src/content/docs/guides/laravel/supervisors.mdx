@@ -485,6 +485,9 @@ change to `config/queen.php` still needs the master restarted (`php artisan quee
 terminate`, then your process manager starts it again), as it does without prefork. Prefork needs
 PHP client 1.7.0 (supervisor 0.4.0); the restart and the checks above need PHP client 2.1.0.
 
+The [prefork example](/examples/laravel/prefork/) prints the process tree and each worker's private
+memory, forked and spawned.
+
 ### Prefork for some pools only
 
 A pool's own `prefork` wins over the switch (PHP client 2.3.0, supervisor 0.8.0). Turn it off for the

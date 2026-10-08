@@ -255,7 +255,7 @@ several pods, the facades present themselves to clients as one Kafka cluster: ea
 integer `QUEEN_KAFKA_NODE_ID` from 1 to 64, derived from the pod name in a small wrapper because it
 does not take `ordinal`, and a `QUEEN_TOKEN` shared by all of them. In this cluster mode the facade
 refuses Kafka transactions (a transaction lives in one node's memory), so run Flink exactly-once or
-transactional producers against a single node for now. See [Kafka](/guides/kafka/) and its
+transactional producers against a single node. See [Kafka](/guides/kafka/) and its
 [ceilings](/reference/kafka/#ceilings).
 
 ## Limits
@@ -269,10 +269,10 @@ at once left a cluster that could not commit while every pod reported Ready (`F1
 `test/recovery/FINDINGS.md`); [recovery](/operate/recovery/) has the procedure that brings such a
 cluster back.
 
-Two ephemeral-queue issues are open in 2.0.0-beta.6. A hand-over to a pod that is still starting
-can drop that partition's messages, which we have seen during rolling restarts. And with the proxy
-on, an ephemeral request forwarded to the owning pod does not keep its tenant, so ephemeral queues
-behind the proxy are safe on a single node only, for now ([ephemeral queues](/guides/ephemeral/)).
+A hand-over of an ephemeral partition to a pod that is still starting waits for its listener, and
+gives up after 30 seconds. With the proxy on, a request forwarded to the owning pod keeps its tenant,
+which the owner trusts only with the same `QUEEN_RAFT_TOKEN` on every pod
+([ephemeral queues](/guides/ephemeral/)).
 
 Port 7400 belongs to the pods. Keep it off the client Service and close it to everything else with
 a NetworkPolicy ([security](/operate/security/)).

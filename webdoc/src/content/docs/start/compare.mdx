@@ -18,7 +18,8 @@ there are millions of entities, and what one commit covers when a service handle
 answers are a [partition per entity](/concepts/partitions/), created by its first message, and one
 [transaction](/concepts/transactions/) that writes
 the ack, the state, the next events and the timers as one entry. Every system below answers
-differently, and each is better than Queen at something, which each section says.
+differently, and each is better than Queen at something, which each section says. Laravel teams
+that run Horizon on Redis have their own comparison: [Queen or Horizon](/guides/laravel/queen-vs-horizon/).
 
 ## Kafka
 
@@ -54,8 +55,9 @@ makes it the fairest comparison in our runs. A cluster runs brokers, BookKeeper 
 metadata store (ZooKeeper, in our runs).
 
 Pulsar is better at latency and CPU at 200 and at 10,000 partitions, where it beat Queen in our
-runs, and at transaction throughput. With 10 messages per transaction, Pulsar reached 17,600
-transactions a second over 1,800 partitions; Queen's best was 8,900, in one raft group. Pulsar's
+runs, and at transaction throughput. With 10 messages per transaction, Pulsar sustained 14,400
+transactions a second over 900 partitions (17,600 over 1,800, while falling behind); Queen's best
+was 8,900, in one raft group. Pulsar's
 transactions cover messages and acks, so your application's state still lives in another system,
 and at 50,000 partitions Pulsar could not keep up with the load Queen carried.
 
@@ -159,7 +161,9 @@ Pulsar to 2,000,000 (higher rates were not run); Queen kept up at 1,000,000, and
 offered it took everything in but delivered about 1,340,000. With 10 messages per transaction on
 200 partitions at 9,000 messages a second, a Queen commit took 3 ms at p50 and 4 ms at p99,
 Kafka's 12 and 34 ms, Pulsar's 22 and 32 ms. These runs measure the brokers; your shape
-decides which of them matters. The full set, Redpanda included, is on [benchmarks](/benchmarks/).
+decides which of them matters. The full set, Redpanda included, is on [benchmarks](/benchmarks/):
+[partition count](/benchmarks/partitions/), [throughput](/benchmarks/throughput/) and
+[transactions](/benchmarks/transactions/).
 
 ## Summary
 

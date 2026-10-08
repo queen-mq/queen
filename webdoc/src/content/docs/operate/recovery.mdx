@@ -1,6 +1,6 @@
 ---
 title: "Recovery from node and cluster failures"
-description: "What breaks in a single node or a cluster of three or five, how to tell which case you are in, and the commands that bring it back. Every procedure here was rehearsed under load."
+description: "What breaks in a single node or a cluster of three or five, how to tell which case you are in, and the commands that bring it back. Every procedure here was rehearsed under load, on 2.0.0 pre-release builds (2026-10-01 and 10-02)."
 type: how-to
 tier: operate
 sidebar:
@@ -426,7 +426,7 @@ machine or zone, leaving the survivor Pending: all three happened on k3s. A pod 
 variable is in the template refuses to start with `QUEEN_RAFT_FORCE_RECOVER=2, but this node is 1:
 it names the ONE surviving node`, which is expected, since it gets rebuilt in step 3.
 
-One trap is still open in beta.6, found while rehearsing a restore on 2026-10-02. A node that ran a
+One trap is still open as of 2.0.4, found while rehearsing a restore on 2026-10-02. A node that ran a
 forced recovery once keeps a marker, `raft/force_recovered.json`, and refuses a second one with the
 same `already recovered` message, even when a new disaster makes the second one right. When you are
 sure, move that file aside on the survivor and start it again with the variable. Nothing else reads
@@ -489,9 +489,9 @@ and a SIGKILL before the end is a crash. Ephemeral queues are where that shows. 
 stopped with SIGTERM logged `ephemeral rings handed over rings=4 delivered=4 lost=0`, and all 60
 test messages could still be popped. Sixty more, pushed while it was down, were all there after it
 came back and took its partitions back. A kill -9 of another node left 20 of 60, because the
-messages a node owns live only in its memory. One issue is open in beta.6: a hand-over to a node
-that is still restarting can drop a partition's messages, which we have seen in production rolling
-restarts. Each loss logs `hand-over failed; the partition's contents are dropped` (WARN) and counts
+messages a node owns live only in its memory. Since 2.0.0 a hand-over to a node that is
+still restarting waits for its listener and is tried again for up to 30 seconds; one that has not
+landed by then is dropped. Each loss logs `hand-over failed; the partition's contents are dropped` (WARN) and counts
 in `queen_ephemeral_wipes_total`.
 
 ## Rarer cases
@@ -541,8 +541,8 @@ and every change had completed first.
 
 ## Known gaps
 
-The rehearsals found most of these. They are open in 2.0.0-beta.6: we checked each one against
-the code, and reproduced the first three on beta.6. The procedures above work around every one;
+The rehearsals found most of these. They are open as of 2.0.4: we checked each one against
+the code of 2.0.4, and reproduced the first three on 2.0.0-beta.6. The procedures above work around every one;
 the details and the fixes we have in mind are in `test/recovery/FINDINGS.md`.
 
 | Gap | What it means for you |
@@ -558,7 +558,7 @@ the details and the fixes we have in mind are in `test/recovery/FINDINGS.md`.
 | A wrong `QUEEN_ENCRYPTION_KEY` serves the ciphertext envelope with no error (F10) | Keep the key, backed up apart from the data |
 | A node that force-recovered once refuses a second forced recovery | Move `raft/force_recovered.json` aside first |
 | On a single node, the apply-failure line suggests `QUEEN_RAFT_APPLY_SKIP`, which only cluster nodes read | A single node needs a fixed release or a backup |
-| A hand-over of ephemeral partitions to a node that is still restarting can drop their messages | Watch the WARN line and `queen_ephemeral_wipes_total` |
+| A hand-over of ephemeral partitions that cannot land within 30 seconds drops their messages | Watch the WARN line and `queen_ephemeral_wipes_total` |
 
 <CardGrid>
   <LinkCard title="Backups and restore" href="/operate/recovery-backups/" description="What to copy, how to copy it while a node runs, and how to bring back one node or a whole cluster." />

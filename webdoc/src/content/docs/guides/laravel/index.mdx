@@ -63,9 +63,10 @@ running the workers, which Horizon's master does. Your job classes stay ordinary
 majority of nodes) before `dispatch()` returns, an ordered lane per entity when you want one, and
 workers that do more with less. In our runs of 2026-10-01 on one 16-vCPU Linux server, with every
 write fsynced on both sides, 32 workers completed 2,753 jobs/s of 10 ms jobs against 1,124 for
-Horizon, and an application with 64 forked workers fit in 183 MiB against 1,892. Prefork saves
-the booted framework, about 27 MiB per worker, while the memory a job allocates stays the same on
-both ([benchmark](/benchmarks/laravel/)). These results are diagnostic: each comes from one host, with
+Horizon, and an application with 64 forked workers fit in 183 MiB against 1,892
+([memory](/benchmarks/laravel/#memory)). Prefork saves the booted framework, about 27 MiB per
+worker, while the memory a job allocates stays the same on both
+([where the difference comes from](/benchmarks/laravel/#where-the-difference-comes-from)). These results are diagnostic: each comes from one host, with
 a protocol written by the Queen team. If you run Horizon today,
 [Queen or Horizon](/guides/laravel/queen-vs-horizon/) compares the two stacks, and
 [migrate from Horizon](/guides/laravel/migrate-from-horizon/) moves a running application step by step.
@@ -169,7 +170,8 @@ final class RebuildCustomer implements ShouldQueue, QueenPartitionable
 Every `RebuildCustomer` of one customer now runs in dispatch order, one at a time, and customers
 never wait for each other. You need no lock or version column for it, because the broker leases a
 partition to one worker at a time, and the partition is created by the first job that names it
-([how it works](/guides/laravel/concepts/#queues-and-stripes)).
+([how it works](/guides/laravel/concepts/#queues-and-stripes)). The
+[ordering example](/examples/laravel/ordering/) runs it on four workers and checks the order.
 
 ## Choose a delivery profile
 
@@ -352,10 +354,6 @@ Run one supervisor master per application and consumer group, unless every repli
 coordination: the state directory's lock only excludes a second master on the same host. The
 supervisors and the dashboard are previews and run on Unix only. The Rust engine's Linux builds are
 static and their release qualification is still pending, and there is no Windows build.
-
-In 2.0.0-beta.6 the broker's depth read does not decode a percent-encoded queue name, so a queue
-named with a space, a colon or a slash looks empty to the supervisor, which then never scales it
-up. Keep queue names to letters, digits, `-`, `_` and `.`.
 
 Horizon still does some things Queen does not: silenced jobs, job lists, batches in its dashboard,
 Slack and SMS alert routes, per-supervisor controls, and clearing a queue.

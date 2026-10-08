@@ -47,7 +47,7 @@ curl -s http://localhost:6632/health
 |---|---|---|
 | `PORT` | `6632` | The HTTP port. |
 | `QUEEN_BIND_ADDR` | `0.0.0.0` | The address the listener binds. |
-| `QUEEN_MAX_BODY_BYTES` | `67108864` (64 MiB) | A larger request body is refused with 413 before it is parsed. |
+| `QUEEN_MAX_BODY_BYTES` | `67108864` (64 MiB) | A larger request body is refused with 413 before it is parsed. This 413 is plain text, not the JSON `{error, code}` body. |
 
 The broker's own listener is plain HTTP. TLS is served by the proxy built into the same binary
 (`QUEEN_PROXY_EMBEDDED=true`), from `QUEEN_TLS_CERT` and `QUEEN_TLS_KEY`, two PEM file paths that
@@ -102,8 +102,9 @@ the role names themselves are settings (`JWT_ROLE_ADMIN` and its siblings):
 
 Write-only is deliberately not a step on a ladder: a producer token can push into a queue it can
 never read. A missing or invalid token answers 401, a valid one with too little access 403. The
-paths in `JWT_SKIP_PATHS` (default `/health,/metrics/prometheus,/metrics,/`) skip authentication;
-an entry ending in `/` skips the paths under it as well.
+paths in `JWT_SKIP_PATHS` (default `/health,/metrics/prometheus,/metrics,/`) skip authentication.
+An entry longer than `/` that ends in `/` skips the paths under it as well; `/` alone matches only
+the root path, so the default does not open the API.
 
 ### Tenancy header
 

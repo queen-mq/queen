@@ -172,7 +172,7 @@ limits are on [tenants](/operate/tenants/).
 | `feature_gated` | 403 | The route is not in the plan. |
 | `route_blocked` | 404 | A broker route that is not served to tenants. |
 | `cluster_unknown` | 421 | The `Host` names no cluster. |
-| `payload_too_large` | 413 | The body is over the edge limit, an item's payload over the plan's `max_payload_bytes`, or a push over `max_batch_items`. |
+| `payload_too_large` | 413 | The body is over the proxy's body cap (`QUEEN_PROXY_MAX_BODY_BYTES`, 16 MiB), an item's payload over the plan's `max_payload_bytes`, or a push over `max_batch_items`. |
 | `bad_gateway`, `upstream_timeout` | 502, 504 | The broker did not answer. |
 
 ### Control-plane codes
