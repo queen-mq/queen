@@ -191,6 +191,7 @@ type BufferConfig struct {
 
 // ConsumeOptions contains options for consuming messages.
 type ConsumeOptions struct {
+	Supervision *SupervisionConfig
 	Queue                   string
 	Partition               string
 	Namespace               string

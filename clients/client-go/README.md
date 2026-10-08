@@ -726,3 +726,27 @@ go test ./tests/... -v
 ## License
 
 Apache-2.0
+
+### Optional consumer supervision
+
+```go
+err := client.Queue("orders").Group("billing").
+    Supervision(&queen.SupervisionConfig{Group: "billing-production"}).
+    Concurrency(4).Each().Consume(ctx, handler).Execute(ctx)
+```
+
+Supervision defaults to nil/off. `Supervision(nil)` disables it. The publication
+group identifies the application/deployment, separately from the consumer group.
+Each consume invocation publishes a unique `queen.consumer.status/v1` instance to
+`queen-supervisor` KV every 10 seconds, with a 30-second heartbeat timeout and
+60-second TTL, plus stopped status on orderly exit. The credential needs KV write
+access. Publications use the existing authenticated transport, run serially in a
+background goroutine, and have a two-second total deadline. Failures do not change
+consumption, cancellation, ACKs or lease renewal.
+
+The compatible Supervisors dashboard shows live goroutines, busy handlers,
+successful/failed handler calls, last completion and oldest in-flight duration.
+Batch handlers count as one call; completion does not assert ACK success. No
+payloads or error text are published. A heartbeat does not prove handler progress.
+Reporting does not restart tasks/processes, autoscale, or allow remote commands.
+Disabled reporting creates no background goroutine or KV traffic.

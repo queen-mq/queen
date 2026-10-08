@@ -67,6 +67,28 @@ func (cm *ConsumerManager) startWorkers(ctx context.Context, opts ConsumeOptions
 		"each":          opts.Each,
 	})
 
+	// The nil path creates no reporter goroutine or network traffic.
+	supervision, err := newConsumerSupervision(cm.httpClient, opts)
+	if err != nil {
+		return err
+	}
+	if supervision != nil {
+		original := handler
+		handler = func(ctx context.Context, messages []*Message) error {
+			if isBatch {
+				return supervision.invoke(ctx, original, messages)
+			}
+			for _, message := range messages {
+				if err := supervision.invoke(ctx, original, []*Message{message}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		go supervision.run()
+		defer supervision.finish()
+	}
+
 	// Start workers
 	var wg sync.WaitGroup
 	errChan := make(chan error, opts.Concurrency)
@@ -75,6 +97,9 @@ func (cm *ConsumerManager) startWorkers(ctx context.Context, opts ConsumeOptions
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
+			if supervision != nil {
+				defer supervision.workerExited()
+			}
 			err := cm.worker(ctx, workerID, handler, isBatch, path, baseParams, affinityKey, opts)
 			if err != nil && err != context.Canceled {
 				errChan <- err

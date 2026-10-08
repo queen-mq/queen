@@ -9,8 +9,9 @@ import (
 
 // QueueBuilder provides a fluent API for queue operations.
 type QueueBuilder struct {
-	queen     *Queen
-	queueName string
+	supervision *SupervisionConfig
+	queen       *Queen
+	queueName   string
 
 	// Configuration
 	namespace        string
@@ -94,6 +95,17 @@ func (qb *QueueBuilder) Buffer(config BufferConfig) *QueueBuilder {
 // Group sets the consumer group for consume/pop operations.
 func (qb *QueueBuilder) Group(name string) *QueueBuilder {
 	qb.consumerGroup = name
+	return qb
+}
+
+// Supervision enables optional dashboard reporting. Pass nil to disable it.
+func (qb *QueueBuilder) Supervision(config *SupervisionConfig) *QueueBuilder {
+	if config == nil {
+		qb.supervision = nil
+	} else {
+		copy := *config
+		qb.supervision = &copy
+	}
 	return qb
 }
 
@@ -378,8 +390,8 @@ func (qb *QueueBuilder) PopResult(ctx context.Context) (PopResult, error) {
 	messages := parseMessages(result)
 
 	logDebug("QueueBuilder.Pop", map[string]interface{}{
-		"queue":   qb.queueName,
-		"count":   len(messages),
+		"queue": qb.queueName,
+		"count": len(messages),
 	})
 
 	return PopResult{Messages: messages, Autopilot: parseAutopilotDecision(result)}, nil
@@ -494,24 +506,25 @@ func (qb *QueueBuilder) getConsumeOptions() ConsumeOptions {
 	autopilot := qb.autopilotEnabled()
 
 	opts := ConsumeOptions{
-		Queue:            qb.queueName,
-		Partition:        qb.partition,
-		Namespace:        qb.namespace,
-		Task:             qb.task,
-		Group:            qb.consumerGroup,
-		Concurrency:      qb.concurrency,
-		Batch:            qb.batch,
-		Limit:            qb.limit,
-		IdleMillis:       qb.idleMillis,
-		TimeoutMillis:    qb.timeoutMillis,
-		RenewLease:       qb.renewLease,
+		Supervision:              qb.supervision,
+		Queue:                    qb.queueName,
+		Partition:                qb.partition,
+		Namespace:                qb.namespace,
+		Task:                     qb.task,
+		Group:                    qb.consumerGroup,
+		Concurrency:              qb.concurrency,
+		Batch:                    qb.batch,
+		Limit:                    qb.limit,
+		IdleMillis:               qb.idleMillis,
+		TimeoutMillis:            qb.timeoutMillis,
+		RenewLease:               qb.renewLease,
 		RenewLeaseIntervalMillis: qb.renewLeaseMillis,
-		SubscriptionMode: qb.subscriptionMode,
-		SubscriptionFrom: qb.subscriptionFrom,
-		Each:             qb.each,
-		MaxPartitions:    qb.maxPartitions,
-		Conflation:       qb.conflation,
-		Autopilot:        &autopilot,
+		SubscriptionMode:         qb.subscriptionMode,
+		SubscriptionFrom:         qb.subscriptionFrom,
+		Each:                     qb.each,
+		MaxPartitions:            qb.maxPartitions,
+		Conflation:               qb.conflation,
+		Autopilot:                &autopilot,
 	}
 
 	// Apply defaults
