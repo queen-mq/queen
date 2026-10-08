@@ -168,3 +168,77 @@ canonical names, including `pmsintool`, need no migration.
 
 The namespace holds a latest status copy, not worker logs, durable history or remote commands.
 Pause, continue and terminate remain host-local operations.
+
+## Optional SDK consumer supervision
+
+SDK consumer reporters use the same KV namespace, group syntax, instance slots,
+atomic head/chunk publication and expiry rules above, with a separate document
+schema: `queen.consumer.status/v1`. A consumer instance identifies one invocation
+of a consume loop; multiple loops in one process have different instance IDs.
+Consumers are internal tasks, not additional operating-system processes.
+
+Reporting is explicitly enabled by the application and defaults to off. A disabled
+reporter creates no timer, task, thread or KV traffic. The standard interval is 10
+seconds, heartbeat timeout 30 seconds and record TTL 60 seconds. Cooperative PHP
+uses a heartbeat timeout of `max(30, ceil(poll_timeout_ms / 1000) + 15)` seconds
+(capped at 86400) and a TTL of at least twice that, so a normal long poll fits
+inside its observation window. A publication is
+best effort, serialized, bounded, and independent of message acknowledgement.
+Publish a final `stopped` observation on orderly exit; after a crash, freshness and
+TTL establish that current state is unknown. Publication failure must not stop
+consumption or silently change its ACK, retry, cancellation or lease policy.
+
+```json
+{
+  "schema": "queen.consumer.status/v1",
+  "instance_id": "0123456789abcdef0123456789abcdef",
+  "engine": "go",
+  "execution_model": "goroutines",
+  "hostname": "billing-1",
+  "pid": 123,
+  "state": "running",
+  "updated_at_epoch": 1800000000,
+  "started_at_epoch": 1799999900,
+  "uptime_seconds": 100,
+  "configuration": { "heartbeat_timeout": 30 },
+  "pool_status": [{
+    "name": "consumer",
+    "queue": "orders",
+    "namespace": null,
+    "task": null,
+    "consumer_group": "billing",
+    "desired": 4,
+    "running": 4,
+    "busy": 1,
+    "completed": 12,
+    "failed": 2,
+    "last_completed_at_epoch": 1799999995,
+    "oldest_inflight_seconds": 20
+  }]
+}
+```
+
+`execution_model` is `async-tasks`, `goroutines`, `threads` or `cooperative`.
+`state` is `starting`, `running`, `stopping` or `stopped`. Engine names identify the
+publisher, not a process supervisor. `desired` is configured concurrency;
+`running` counts loops that have not exited; `busy` counts active handler calls.
+A publisher must observe exits rather than repeat the configured count forever.
+
+`completed` and `failed` count successful and failed **handler calls** since this
+consumer invocation began. A batch counts as one call. These are not ACK counters,
+and an application callback that handles an error may return successfully.
+`last_completed_at_epoch` records the last returned or failed handler, or `null`
+when none has finished. `oldest_inflight_seconds` is elapsed monotonic time for
+the oldest active handler, or `null` when none is active. Counters and durations
+are non-negative integers. Timestamps use whole Unix seconds. The standard pool
+name is `consumer`; queue may be `null` for a namespace/task selector. Queue-mode
+consumers use `__QUEUE_MODE__` as their consumer group.
+
+The dashboard keeps process budgets and restart diagnostics exclusive to process
+supervisors. Consumer heartbeats do not assert broker readiness, ACK success or
+handler progress. Event-loop starvation can stop asynchronous publication; a
+cooperative publisher only reports when the consumer regains control, and may
+become overdue during a long handler or network wait. Operators must compare
+progress and in-flight age, and inspect application logs. SDK reporting does not
+provide remote commands, process restart or autoscaling. No message payloads,
+error text, credentials or arbitrary client configuration belong in these records.

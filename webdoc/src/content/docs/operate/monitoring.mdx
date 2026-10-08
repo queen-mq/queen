@@ -23,6 +23,7 @@ sourceOfTruth:
   - app/src/router/index.js
   - app/src/views/Supervisors.vue
   - app/src/composables/supervisorStatus.js
+  - app/src/composables/consumerStatus.js
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): health examples now show 2.0.1 at cluster version 4; the memory row names anonBytes and container_memory_rss, plus rows for the engine parts and the trace store gauges.
 # sourceOfTruth re-read 2026-10-07 (supervisors refresh): Supervisors.vue drops its "Refresh every 30s" checkbox and always follows the dashboard's 30-second ticker, which is what this page says. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (78970a242, 2.0.2): both /health examples show 2.0.2; nothing else this page states changes.
@@ -72,7 +73,15 @@ visible, re-reads the loaded pages. Worker totals use recent heartbeats; queue d
 summed across replicas. A stale heartbeat or failed read leaves current health unconfirmed.
 
 Laravel's PHP and Rust supervisor engines can [publish remote status](/guides/laravel/dashboard/#a-supervisor-on-another-host).
-Other implementations can adopt the same [supervisor status contract](/reference/supervisor-status/).
+Clients can opt into the [consumer status contract](/reference/supervisor-status/#optional-sdk-consumer-supervision).
+Those observations share this page, with the execution model shown per instance: async tasks,
+goroutines, threads or cooperative loops. Consumer rows show live loops against configured
+concurrency, active handlers, completed and failed handler calls, and the oldest in-flight
+handler's age. A completed handler does not prove its acknowledgement succeeded, and a fresh
+heartbeat does not prove progress. Consumer observations do not provide process headroom,
+worker restarts, autoscaling or broker readiness. Reporting is off by default in each client;
+its README describes how to enable it. PHP publishes at cooperative checkpoints, so a long
+synchronous handler can leave its last observation stale.
 The broker view reads published observations; host-local controls and worker logs stay on the
 supervisor's host.
 

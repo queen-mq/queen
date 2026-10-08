@@ -21,7 +21,7 @@
         <label>Group <span class="muted">optional</span><input v-model="groupDraft" class="input" placeholder="e.g. pmsintool" maxlength="255" /></label>
         <button class="btn" type="submit">Read source</button>
         <p v-if="sourceError" class="warn" role="alert">{{ sourceError }}</p>
-        <p>Reads the acting cluster’s KV store. A group matches exactly; leave it empty to discover all groups. Laravel publishers set it through <code>remote_status.key</code>.</p>
+        <p>Reads the acting cluster’s KV store. A group matches exactly; leave it empty to discover all groups. Laravel publishers set it through <code>remote_status.key</code>; SDK consumers use their supervision group.</p>
       </form>
     </details>
 
@@ -47,7 +47,7 @@
         <h3>No published supervisors in this source</h3>
         <p>Enable remote status on the application hosts, then restart the supervisor with the updated configuration.</p>
         <code class="supervisor-command">QUEEN_SUPERVISOR_REMOTE_STATUS=true</code>
-        <p>Laravel’s PHP and Rust engines already publish this format. Other implementations can use the same versioned contract. Check that the publisher connects to this cluster and uses the namespace above.</p>
+        <p>Enable optional client supervision to publish SDK consumers here. It is off by default. Check that the publisher connects to this cluster and uses the namespace above.</p>
         <p>Publications expire after their configured TTL. An empty list does not establish that no supervisors are running.</p>
       </div>
       <div v-else-if="!filtered.length && !error" class="supervisor-empty">No loaded instances match these filters.</div>
@@ -65,7 +65,7 @@
                   <span><small>Workers</small><strong>{{ number(row.workers) }} <span>/ {{ number(row.desired) }}</span></strong><small>running / desired</small></span>
                   <span><small>Pools needing attention</small><strong :class="row.affectedPools ? 'warn' : ''">{{ number(row.affectedPools) }}</strong><small>{{ row.affectedPools === null ? 'Health unconfirmed' : 'From this heartbeat' }}</small></span>
                 </span>
-                <span class="supervisor-card-capacity"><span>{{ number(row.missingWorkers) }} below target</span><span>{{ number(row.draining) }} draining</span><span>{{ number(row.budget?.available ?? null) }} process slots free</span></span>
+                <span class="supervisor-card-capacity"><span>{{ number(row.missingWorkers) }} below target</span><span v-if="row.consumer">{{ row.executionModel }} · shared process</span><template v-else><span>{{ number(row.draining) }} draining</span><span>{{ number(row.budget?.available ?? null) }} process slots free</span></template></span>
                 <span class="supervisor-card-foot"><span>{{ row.age === null ? 'Heartbeat unavailable' : `Heartbeat ${ageLabel(row.age)}` }}</span><span class="supervisor-open" aria-hidden="true">View details →</span></span>
               </button>
             </li>
@@ -91,15 +91,15 @@
             <h2>{{ selected.hostname || selected.group }}</h2>
             <p class="supervisor-app">{{ selected.group }} · {{ selected.engine?.toUpperCase() || 'Unknown engine' }} · {{ selected.instance ? `Instance …${selected.instance.slice(-8)}` : 'Instance unavailable' }}</p>
             <p class="supervisor-detail-status" :class="selected.severity"><span class="g" :class="selected.severity || 'idle'" aria-hidden="true" />{{ selected.label }}</p>
-            <p class="supervisor-readiness"><span>{{ stateLabel(selected.readiness, 'Ready', 'Not ready', 'Readiness unconfirmed') }}</span><span>{{ stateLabel(selected.capacity, 'Target reached', 'Below target', 'Capacity unconfirmed') }}</span></p>
+            <p v-if="!selected.consumer" class="supervisor-readiness"><span>{{ stateLabel(selected.readiness, 'Ready', 'Not ready', 'Readiness unconfirmed') }}</span><span>{{ stateLabel(selected.capacity, 'Target reached', 'Below target', 'Capacity unconfirmed') }}</span></p>
             <dl class="supervisor-evidence">
               <div><dt>Queues</dt><dd>{{ number(selected.queueCount) }}</dd><small>{{ number(selected.poolCount) }} pools</small></div>
-              <div><dt>Running / desired</dt><dd>{{ number(selected.workers) }} / {{ number(selected.desired) }}</dd><small>{{ number(selected.missingWorkers) }} below target · {{ number(selected.draining) }} draining</small></div>
+              <div><dt>Running / desired</dt><dd>{{ number(selected.workers) }} / {{ number(selected.desired) }}</dd><small>{{ number(selected.missingWorkers) }} below target<template v-if="!selected.consumer"> · {{ number(selected.draining) }} draining</template></small></div>
               <div><dt>Pools needing attention</dt><dd :class="selected.affectedPools ? 'warn' : ''">{{ number(selected.affectedPools) }}</dd><small>{{ selected.affectedPools === null ? 'Health unconfirmed' : 'From this heartbeat' }}</small></div>
-              <div><dt>Process budget</dt><dd>{{ selected.budget ? `${selected.budget.used} / ${selected.budget.limit}` : '—' }}</dd><small v-if="selected.budget">{{ selected.budget.available }} available · {{ selected.budget.helpers }} renewal helpers</small><small v-else>Not reported or inconsistent</small></div>
+              <div v-if="selected.consumer"><dt>Execution model</dt><dd>{{ selected.executionModel }}</dd><small>Consumer tasks share a process</small></div><div v-else><dt>Process budget</dt><dd>{{ selected.budget ? `${selected.budget.used} / ${selected.budget.limit}` : '—' }}</dd><small v-if="selected.budget">{{ selected.budget.available }} available · {{ selected.budget.helpers }} renewal helpers</small><small v-else>Not reported or inconsistent</small></div>
             </dl>
             <p class="supervisor-heartbeat">Last heartbeat {{ selected.updatedAt ? time(selected.updatedAt) : 'unavailable' }} · {{ ageLabel(selected.age) }} · timeout {{ selected.timeout ? `${selected.timeout}s` : 'unavailable' }}</p>
-            <dl class="supervisor-runtime"><div><dt>Engine version</dt><dd>{{ selected.engineVersion || 'Not reported' }}</dd></div><div><dt>Client version</dt><dd>{{ selected.clientVersion || 'Not reported' }}</dd></div><div><dt>Master PID</dt><dd>{{ number(selected.pid) }}</dd></div><div><dt>Uptime at heartbeat</dt><dd>{{ uptimeLabel(selected.uptime) }}</dd></div></dl>
+            <dl class="supervisor-runtime"><div><dt>Engine version</dt><dd>{{ selected.engineVersion || 'Not reported' }}</dd></div><div><dt>Client version</dt><dd>{{ selected.clientVersion || 'Not reported' }}</dd></div><div><dt>{{ selected.consumer ? 'Process PID' : 'Master PID' }}</dt><dd>{{ number(selected.pid) }}</dd></div><div><dt>Uptime at heartbeat</dt><dd>{{ uptimeLabel(selected.uptime) }}</dd></div></dl>
             <p v-if="selected.startedAt" class="supervisor-heartbeat">Instance started {{ new Date(selected.startedAt).toLocaleString() }}</p>
             <div class="supervisor-next"><span>Next check</span><p>{{ selected.next }}</p></div>
             <p v-if="!selected.fresh" class="supervisor-last-values">Last reported values. Current worker health is unconfirmed.</p>
@@ -112,20 +112,28 @@
               </div>
               <div class="supervisor-pool-table-wrap">
                 <table class="supervisor-pool-table">
-                  <thead><tr><th scope="col">Queue / pool</th><th scope="col">Finding</th><th scope="col">Workers <small>running / desired</small></th><th scope="col">Pending</th><th scope="col">Draining</th></tr></thead>
+                  <thead><tr><th scope="col">Queue / pool</th><th scope="col">Finding</th><th scope="col">Workers <small>running / desired</small></th><th scope="col">{{ selected.consumer ? 'Busy' : 'Pending' }}</th><th scope="col">{{ selected.consumer ? 'Handler failures' : 'Draining' }}</th></tr></thead>
                   <tbody>
                     <template v-for="pool in shownPools" :key="poolKey(pool)">
                       <tr :class="{ 'pool-expanded': expandedPool === poolKey(pool) }">
                         <th scope="row"><button class="supervisor-pool-toggle" :aria-expanded="expandedPool === poolKey(pool)" :aria-controls="expandedPool === poolKey(pool) ? 'supervisor-pool-detail' : undefined" @click="expandedPool = expandedPool === poolKey(pool) ? null : poolKey(pool)"><span aria-hidden="true">{{ expandedPool === poolKey(pool) ? '▾' : '▸' }}</span><span>{{ pool.queue }}<small>{{ pool.name }}</small></span></button></th>
                         <td><span v-if="canDiagnosePools" class="supervisor-pool-finding" :class="pool.severity">{{ pool.label }}</span><span v-else class="muted">{{ selected.state === 'running' ? 'Unconfirmed' : 'Last reported' }}</span></td>
-                        <td class="supervisor-pool-count">{{ number(pool.running) }} / {{ number(pool.desired) }}</td><td class="supervisor-pool-count">{{ number(pool.depth) }}</td><td class="supervisor-pool-count">{{ number(pool.draining) }}</td>
+                        <td class="supervisor-pool-count">{{ number(pool.running) }} / {{ number(pool.desired) }}</td><td class="supervisor-pool-count">{{ number(selected.consumer ? pool.busy : pool.depth) }}</td><td class="supervisor-pool-count">{{ number(selected.consumer ? pool.failed : pool.draining) }}</td>
                       </tr>
                       <tr v-if="expandedPool === poolKey(pool)" id="supervisor-pool-detail" class="supervisor-pool-detail"><td colspan="5">
-                        <p class="supervisor-readiness"><span>{{ canDiagnosePools ? stateLabel(pool.readiness, 'Ready', 'Not ready', 'Readiness not reported') : 'Readiness unconfirmed' }}</span><span>{{ canDiagnosePools ? stateLabel(pool.capacity, 'Target reached', 'Below target', 'Capacity not reported') : 'Capacity unconfirmed' }}</span></p>
+                        <p v-if="!selected.consumer" class="supervisor-readiness"><span>{{ canDiagnosePools ? stateLabel(pool.readiness, 'Ready', 'Not ready', 'Readiness not reported') : 'Readiness unconfirmed' }}</span><span>{{ canDiagnosePools ? stateLabel(pool.capacity, 'Target reached', 'Below target', 'Capacity not reported') : 'Capacity unconfirmed' }}</span></p>
                         <p v-if="canDiagnosePools" class="supervisor-pool-next">{{ pool.next }}</p>
                         <p v-else class="supervisor-pool-next">Values from the last publication. Current pool health is unconfirmed.</p>
                         <p v-if="pool.failures" class="supervisor-restarts">{{ pool.failures }} restart failures<template v-if="pool.retryIn !== null"> · retry in {{ pool.retryIn }}s at publication</template></p>
-                        <dl class="supervisor-pool-settings">
+                        <dl v-if="selected.consumer" class="supervisor-pool-settings">
+                          <div><dt>Consumer group</dt><dd>{{ pool.configuration.consumerGroup }}</dd></div>
+                          <div><dt>Successful handler calls</dt><dd>{{ number(pool.completed) }}</dd></div>
+                          <div><dt>Failed handler calls</dt><dd>{{ number(pool.failed) }}</dd></div>
+                          <div><dt>Last handler finished</dt><dd>{{ pool.lastCompleted ? time(pool.lastCompleted) : 'No completion reported' }}</dd></div>
+                          <div><dt>Oldest in-flight handler</dt><dd>{{ seconds(pool.oldest) }}</dd></div>
+                        </dl>
+                        <p v-if="selected.consumer" class="supervisor-pool-next">Counts are handler calls, including batch calls, since this consumer started. They do not confirm acknowledgements. A busy handler may be slow or blocked. Process restarts remain the application's responsibility.</p>
+                        <dl v-else class="supervisor-pool-settings">
                           <div><dt>Consumer group</dt><dd>{{ pool.configuration?.consumerGroup || 'Not reported' }}</dd></div>
                           <div><dt>Connection</dt><dd>{{ pool.configuration?.connection || 'Not reported' }}</dd></div>
                           <div><dt>Coordinated replicas</dt><dd>{{ number(pool.replicas) }}</dd></div>
@@ -139,10 +147,10 @@
                           <div><dt>Attempts</dt><dd>{{ pool.configuration?.tries === 0 ? 'Unlimited' : number(pool.configuration?.tries ?? null) }}</dd></div>
                           <div><dt>Memory limit per worker</dt><dd>{{ pool.configuration?.memoryLimit ? `${formatNumber(pool.configuration.memoryLimit)} MB` : 'Not reported' }}</dd></div>
                         </dl>
-                        <p class="supervisor-pool-next">Pool limits apply to {{ pool.name }} across its configured queues. Running / desired is this queue’s allocation.</p>
-                        <SupervisorQueueContext :queue="pool.queue" />
+                        <p v-if="!selected.consumer" class="supervisor-pool-next">Pool limits apply to {{ pool.name }} across its configured queues. Running / desired is this queue’s allocation.</p>
+                        <SupervisorQueueContext v-if="!selected.consumer || pool.queueName" :queue="pool.queue" />
                         <details v-if="pool.pids.length" class="supervisor-pids"><summary>Reported worker PIDs ({{ pool.pids.length }})</summary><p class="font-mono">{{ pool.pids.join(', ') }}</p></details>
-                        <p v-else class="supervisor-pool-next">No worker PIDs reported in this heartbeat.</p>
+                        <p v-else-if="!selected.consumer" class="supervisor-pool-next">No worker PIDs reported in this heartbeat.</p>
                       </td></tr>
                     </template>
                     <tr v-if="!shownPools.length"><td colspan="5" class="supervisor-pools-empty">{{ selected.pools.length ? 'No pools match these filters.' : 'No valid pool telemetry is available.' }}</td></tr>

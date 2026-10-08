@@ -27,6 +27,53 @@ function wire(doc, slot = SLOT, chunkSize = 45_000) {
 const decode = rows => decodeSupervisorSlot(rows, supervisorPart(`${SLOT}/head`))
 const observe = (overrides = {}, unconfirmed = false) => supervisorObservation(decode(wire(document(overrides))), NOW * 1000, unconfirmed)
 
+const consumer = (overrides = {}) => ({ schema: 'queen.consumer.status/v1', instance_id: ID, engine: 'go',
+  hostname: 'worker-1', pid: 42, execution_model: 'goroutines', state: 'running', updated_at_epoch: NOW - 5,
+  started_at_epoch: NOW - 100, uptime_seconds: 95, configuration: { heartbeat_timeout: 30 },
+  pool_status: [{ name: 'consumer', queue: 'orders', namespace: null, task: null, consumer_group: 'billing',
+    running: 4, desired: 4, busy: 1, completed: 12, failed: 2, last_completed_at_epoch: NOW - 10, oldest_inflight_seconds: 20 }], ...overrides })
+const observeConsumer = (raw = consumer(), unconfirmed = false) => supervisorObservation(decode(wire(raw)), NOW * 1000, unconfirmed)
+
+test('consumer tasks report progress without inventing process budgets or broker readiness', () => {
+  for (const engine of ['js', 'go', 'python', 'rust', 'cpp', 'php', 'cli']) {
+    const row = observeConsumer(consumer({ engine }))
+    assert.equal(row.label, 'Consumers running')
+    assert.equal(row.consumer, true)
+    assert.equal(row.workers, 4)
+    assert.equal(row.budget, null)
+    assert.equal(row.readiness, null)
+    assert.equal(row.pools[0].busy, 1)
+    assert.equal(row.pools[0].failed, 2)
+    assert.equal(row.pools[0].oldest, 20)
+  }
+})
+
+test('consumer loss, stale heartbeats and malformed counts never appear healthy', () => {
+  const raw = consumer()
+  raw.pool_status[0].running = 3
+  assert.equal(observeConsumer(raw).label, 'Consumer capacity reduced')
+  raw.pool_status[0].busy = 4
+  assert.equal(observeConsumer(raw).label, 'Incomplete telemetry')
+  assert.equal(observeConsumer(consumer({ updated_at_epoch: NOW - 31 })).label, 'Heartbeat overdue')
+  assert.equal(observeConsumer(consumer(), true).fresh, false)
+  assert.equal(observeConsumer(consumer({ state: 'stopped' })).label, 'Stopped')
+  assert.equal(observeConsumer(consumer({ pool_status: [] })).label, 'Incomplete telemetry')
+  const rows = wire(consumer()); rows[0].expired = true
+  assert.equal(supervisorObservation(decode(rows), NOW * 1000).label, 'Publication expired')
+})
+
+test('consumer batch counters and scope remain separate from queue metrics and secrets', () => {
+  const raw = consumer({ credentials: 'secret' })
+  raw.pool_status[0].queue = null
+  raw.pool_status[0].namespace = 'invoices'
+  raw.pool_status[0].task = 'send'
+  const row = observeConsumer(raw)
+  assert.equal(row.queueCount, 0)
+  assert.equal(row.pools[0].queue, 'invoices / send')
+  assert.equal(row.pools[0].queueName, null)
+  assert.equal(JSON.stringify(row).includes('secret'), false)
+})
+
 test('PHP and Rust status documents decode, including UTF-8 split between chunks', () => {
   for (const engine of ['php', 'rust']) {
     const raw = document({ engine, hostname: 'worker-à-東京', padding: 'à'.repeat(30_000) })
