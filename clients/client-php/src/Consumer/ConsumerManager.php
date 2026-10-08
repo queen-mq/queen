@@ -16,6 +16,7 @@ class ConsumerManager
 {
     private HttpClient $httpClient;
     private Queen $queen;
+    private ?Supervision $supervision = null;
     /** Whether the handler takes a second argument, the lease renewal call. */
     private bool $handlerTakesRenew = false;
 
@@ -27,6 +28,8 @@ class ConsumerManager
 
     public function start(\Closure $handler, array $options): void
     {
+        $this->supervision = isset($options['supervision'])
+            ? new Supervision($this->httpClient, $options['supervision'], $options) : null;
         $this->handlerTakesRenew = self::takesRenew($handler);
         $queue = $options['queue'] ?? null;
         $partition = $options['partition'] ?? null;
@@ -95,6 +98,8 @@ class ConsumerManager
         }
 
         try {
+            $this->supervision?->setRunning($concurrency);
+            $this->supervision?->publish(force: true);
             if ($concurrency <= 1) {
                 $this->worker(
                     $handler, $path, $baseParams, $batch, $limit, $idleMillis,
@@ -109,6 +114,7 @@ class ConsumerManager
                 );
             }
         } finally {
+            $this->supervision?->stop();
             // Restore previous signal handlers
             if (function_exists('pcntl_signal')) {
                 if ($prevSigint !== null) {
@@ -177,6 +183,9 @@ class ConsumerManager
                 }
                 $activeWorkers[] = $w;
             }
+
+            $this->supervision?->setRunning(count($activeWorkers));
+            $this->supervision?->publish();
 
             if (empty($activeWorkers)) {
                 break; // All workers done
@@ -356,6 +365,7 @@ class ConsumerManager
             }
 
             try {
+                $this->supervision?->publish();
                 $clientTimeout = $wait ? $timeoutMillis + 5000 : $timeoutMillis;
                 // wait=true is a long-poll: mark it so a 429 backs off and keeps
                 // waiting instead of giving up after the bounded push-like budget.
@@ -464,7 +474,11 @@ class ConsumerManager
     ): void
     {
         try {
-            $this->handlerTakesRenew ? $handler($message, $renew) : $handler($message);
+            if ($this->supervision !== null) {
+                $this->supervision->invoke(fn() => $this->handlerTakesRenew ? $handler($message, $renew) : $handler($message));
+            } else {
+                $this->handlerTakesRenew ? $handler($message, $renew) : $handler($message);
+            }
 
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
@@ -496,7 +510,11 @@ class ConsumerManager
     ): void
     {
         try {
-            $this->handlerTakesRenew ? $handler($messages, $renew) : $handler($messages);
+            if ($this->supervision !== null) {
+                $this->supervision->invoke(fn() => $this->handlerTakesRenew ? $handler($messages, $renew) : $handler($messages));
+            } else {
+                $this->handlerTakesRenew ? $handler($messages, $renew) : $handler($messages);
+            }
 
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
@@ -541,6 +559,7 @@ class ConsumerManager
     private function renewer(array $messages, ?int &$leaseRenewalTime, ?int $intervalMillis): \Closure
     {
         return function () use ($messages, &$leaseRenewalTime, $intervalMillis): bool {
+            $this->supervision?->publish();
             if ($leaseRenewalTime !== null && $intervalMillis !== null) {
                 if ($this->nowMillis() < $leaseRenewalTime) {
                     return false;
