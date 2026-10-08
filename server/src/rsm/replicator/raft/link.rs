@@ -27,6 +27,14 @@
 //! standby still needs and can take the reads over; and a node writes its
 //! holds to `raft/link_holds.json`, so it still knows them after a restart.
 //!
+//! A standby that starts from a SEED has read nothing when its snapshot is
+//! made, and reads for the first time only once its node has staged the
+//! snapshot, started on it and logged its standby entry. Its first hold is
+//! therefore left by the seed itself ([`LinkSource::seed`]): the node that
+//! sends the snapshot holds its log from the snapshot's position, under the
+//! name the standby will read with, and the first read moves that hold like
+//! any other.
+//!
 //! A hold costs the source disk, and the source's own writes come first. A
 //! hold ends when:
 //!
@@ -50,6 +58,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use openraft::EntryPayload;
 
 use super::log_store::{write_atomic, LogStore};
+use super::snapshot::{stream_checkpoint, Held, SendCtx};
 use super::types::{rsm_index, term_of};
 use super::Shared;
 use crate::rsm::link::wire::{Answer, Request, SourceEntry, MAX_BYTES_DEFAULT, WAIT_MS_MAX};
@@ -152,7 +161,15 @@ pub(crate) struct Holds {
     saved: Mutex<Option<Instant>>,
     /// One writer of the file at a time.
     writing: Mutex<()>,
+    /// A test's hand on the next seed ([`LinkSource::seed`]): called once,
+    /// with the checkpoint its copy holds, between the copy and the hold
+    /// left there.
+    #[cfg(test)]
+    after_copy: Mutex<Option<AfterCopy>>,
 }
+
+#[cfg(test)]
+type AfterCopy = Box<dyn FnOnce(u64) + Send>;
 
 /// One reader of this node's log, for a status page.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,6 +192,8 @@ impl Holds {
             released: AtomicBool::new(false),
             saved: Mutex::new(None),
             writing: Mutex::new(()),
+            #[cfg(test)]
+            after_copy: Mutex::new(None),
         }
     }
 
@@ -560,6 +579,83 @@ impl LinkSource {
         } else {
             holds.note(reader, after)
         }
+    }
+
+    /// This node's snapshot as a stream, for the seed of the standby that
+    /// will read as `reader` ([`crate::rsm::link::seed`]) — and that
+    /// standby's first hold.
+    ///
+    /// A seeded standby reads this log for the first time long after its
+    /// snapshot was made: its node stages the stream, starts on it, elects
+    /// itself and logs its standby entry first. A hold left by that read
+    /// ([`Self::serve`]) comes too late — the entries after the snapshot may
+    /// be purged by then — so the seed leaves it:
+    ///
+    /// - before the store is copied, at this node's purge point. The copy
+    ///   takes as long as the store is large, and the checkpoint it turns
+    ///   out to hold is not below that point: the purge driver stays behind
+    ///   the store's durable index, and the copy holds that index at least;
+    /// - once the copy is made, at its checkpoint, which the standby's first
+    ///   read names;
+    /// - again as the standby reads the stream, piece by piece, so a
+    ///   transfer longer than the hold's time does not outlive its hold.
+    ///
+    /// From the last piece on it is a hold like any other: the standby has
+    /// `QUEEN_LINK_HOLD_S` to read, and its first read moves the hold. When
+    /// the snapshot cannot be built the hold is dropped again. An empty
+    /// `reader`: nobody reads after this snapshot, and nothing is held.
+    pub(crate) async fn seed(
+        &self,
+        ctx: &Arc<SendCtx>,
+        reader: &str,
+    ) -> io::Result<axum::body::Body> {
+        if reader.is_empty() {
+            return stream_checkpoint(ctx, None).await;
+        }
+        // Noted whatever the purge point is by now: a hold at or below it
+        // stops the purge where it stands, which is what the copy needs.
+        let (me, name) = (self.clone(), reader.to_string());
+        tokio::task::spawn_blocking(move || {
+            let holds = &me.shared.link_holds;
+            if holds.note(&name, me.purged()) {
+                holds.save();
+            }
+        })
+        .await
+        .map_err(|e| io::Error::other(format!("link hold task: {e}")))?;
+        let (me, name) = (self.clone(), reader.to_string());
+        let held: Held = Arc::new(move |checkpoint| {
+            #[cfg(test)]
+            {
+                let test = me.shared.link_holds.after_copy.lock().expect("seam").take();
+                if let Some(test) = test {
+                    test(checkpoint);
+                }
+            }
+            if me.hold(&name, checkpoint) {
+                me.shared.link_holds.save();
+            }
+        });
+        let built = stream_checkpoint(ctx, Some(held)).await;
+        if built.is_err() {
+            let (me, name) = (self.clone(), reader.to_string());
+            let _ = tokio::task::spawn_blocking(move || {
+                let holds = &me.shared.link_holds;
+                if holds.forget(&name) {
+                    holds.save();
+                }
+            })
+            .await;
+        }
+        built
+    }
+
+    /// Stand between the next seed's copy and the hold left at its
+    /// checkpoint: `test` is called once there, with the checkpoint, and the
+    /// seed goes on when it returns.
+    #[cfg(test)]
+    pub(crate) fn after_the_next_copy(&self, test: impl FnOnce(u64) + Send + 'static) {
+        *self.shared.link_holds.after_copy.lock().expect("seam") = Some(Box::new(test));
     }
 
     /// Answer one call of a standby, encoded: leave its hold, wait for

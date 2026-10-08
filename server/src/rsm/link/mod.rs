@@ -243,11 +243,13 @@ impl Role {
 pub struct RoleDoc {
     /// `standby` or `promoted`.
     pub role: String,
-    /// This standby's id ([`link_id`]): drawn once, when the cluster becomes a
-    /// standby, and the same on every node since it is replicated state. It
-    /// is what the source knows the standby by ([`reader_name`]), so the
-    /// standby's hold on the source's log follows the standby's leadership,
-    /// and two standbys of one source never share a hold.
+    /// This standby's id ([`link_id`]): drawn once — when the cluster becomes
+    /// a standby, or before that by the node that takes its seed, which asks
+    /// for the snapshot under it ([`seed`]) — and the same on every node
+    /// since it is replicated state. It is what the source knows the standby
+    /// by ([`reader_name`]), so the standby's hold on the source's log
+    /// follows the standby's leadership, and two standbys of one source never
+    /// share a hold.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
     /// Where the source was reached when the row was written: a label for
@@ -292,8 +294,8 @@ impl From<Position> for PositionDoc {
 pub const ROLE_STANDBY: &str = "standby";
 pub const ROLE_PROMOTED: &str = "promoted";
 
-/// A standby's id, from the request id of the entry that made it one: the
-/// random end of it (the start of a UUIDv7 is the time).
+/// A standby's id, from a request id — the standby entry's, or one drawn for
+/// a seed: the random end of it (the start of a UUIDv7 is the time).
 pub fn link_id(request_id: &super::entry::RequestId) -> String {
     request_id[12..].iter().map(|b| format!("{b:02x}")).collect()
 }

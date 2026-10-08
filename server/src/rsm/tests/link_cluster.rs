@@ -27,6 +27,10 @@
 //!   purged the start of its log seeds the standby's first node with its
 //!   snapshot; the other two join it; a standby it cannot serve holds none of
 //!   its log.
+//! - [`a_source_keeps_its_log_for_the_seed_it_sent`]: a seed leaves the
+//!   standby's first hold on the node that sent it, so a source that writes
+//!   and purges on while the standby's node starts still serves its first
+//!   read.
 //! - [`a_source_refuses_a_standby_without_its_token`]: the link's route
 //!   answers a wrong token 401 and nothing else, and a source without a
 //!   token serves no link.
@@ -1157,6 +1161,193 @@ async fn a_standby_is_seeded_from_a_source_with_a_history() {
     served.sort_unstable();
     let want: Vec<u64> = (0..90).filter(|n| !acked.contains(n)).collect();
     assert_eq!(served, want);
+
+    close(standby).await;
+    close(source).await;
+    for d in src_dirs.into_iter().chain(sb_dirs) {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// A seed is a snapshot, and the standby reads its source for the first time
+/// long after it was made: once its node has staged the snapshot, started on
+/// it, elected itself and logged its standby entry. A source that keeps
+/// writing and purging meanwhile must not purge the seed's place away. So the
+/// node that sends the snapshot holds its log for the standby, under the name
+/// the standby reads with — here the one made of the id it drew before it
+/// asked: from before it copies its store, which takes as long as the store is
+/// large, and from the copy's checkpoint once it knows it. The standby's first
+/// read moves that hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_source_keeps_its_log_for_the_seed_it_sent() {
+    let _one = serial().await;
+    log_init();
+    use futures_util::StreamExt;
+
+    // The source: one node that purges its log as soon as it may.
+    let src_dirs = vec![scratch("held-source")];
+    let src_ports = free_ports(1);
+    let eager = RaftOpts {
+        purge_hold: Duration::from_secs(2),
+        log_keep: 0,
+        purge_batch: 1,
+        ..test_opts()
+    };
+    let (d, c) = (
+        src_dirs[0].clone(),
+        cluster_config(&src_ports, 1, Some(TOKEN)),
+    );
+    let source: Nodes = vec![Arc::new(
+        tokio::task::spawn_blocking(move || open_node_with(&d, c, eager, LinkSetup::default()))
+            .await
+            .expect("open the source"),
+    )];
+    leader_of(&source).await;
+    for n in 0..40 {
+        push(&source[0], n).await.expect("push");
+    }
+    let purged = || match &*source[0].repl_for_test() {
+        crate::rsm::replicator::node::NodeReplicator::Raft(r) => r.purged_index(),
+        _ => 0,
+    };
+    wait_for("the source purges the start of its log", || purged() > 0).await;
+
+    // A snapshot asked for by nobody is kept for nobody.
+    let sources = raft_addrs(&src_ports);
+    let mut unnamed = crate::rsm::link::seed::http_snapshot(&sources[0], Some(TOKEN), "")
+        .await
+        .expect("a snapshot without a reader");
+    while let Some(piece) = unnamed.next().await {
+        piece.expect("a piece of the snapshot");
+    }
+    assert!(
+        readers(&source[0]).is_empty(),
+        "a hold for a snapshot nobody reads after: {:?}",
+        readers(&source[0])
+    );
+
+    // The standby's one node asks for its seed, and the source's copy of its
+    // store is held up here for as long as the source needs to go on.
+    let sb_dirs = vec![scratch("held-standby")];
+    let sb_ports = free_ports(1);
+    let cfg = LinkConfig {
+        sources,
+        token: Some(TOKEN.to_string()),
+        name: None,
+    };
+    let cluster = cluster_config(&sb_ports, 1, None);
+    let me = cluster
+        .members
+        .get(&1)
+        .cloned()
+        .expect("node 1 of the standby");
+    let (copied, at_the_copy) = std::sync::mpsc::channel::<u64>();
+    let (go_on, held_up) = std::sync::mpsc::channel::<()>();
+    source[0]
+        .repl_for_test()
+        .link_source()
+        .expect("a cluster node")
+        .after_the_next_copy(move |checkpoint| {
+            let _ = copied.send(checkpoint);
+            let _ = held_up.recv_timeout(Duration::from_secs(120));
+        });
+    let taking = tokio::task::spawn_blocking({
+        let (dir, cfg) = (sb_dirs[0].clone(), cfg.clone());
+        move || crate::rsm::link::seed::take_blocking(&dir, 1, me, &cfg)
+    });
+    let checkpoint = tokio::task::spawn_blocking(move || {
+        at_the_copy.recv_timeout(Duration::from_secs(60))
+    })
+    .await
+    .expect("join")
+    .expect("the source copied its store for the seed");
+    // The source already knows the standby, by the name it will read with,
+    // and has held its log since before the copy.
+    let record = crate::rsm::link::seed::read(&sb_dirs[0])
+        .expect("seed record")
+        .expect("the record of a seed being taken");
+    assert_eq!(
+        record.id.len(),
+        8,
+        "the standby's id, drawn with the seed: {record:?}"
+    );
+    let name = format!("standby-{}", record.id);
+    let held = readers(&source[0]);
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].0, name, "{held:?}");
+    assert!(
+        held[0].1 <= checkpoint,
+        "held from before the copy at {checkpoint}: {held:?}"
+    );
+
+    // The source goes on, and purges whatever it may: its new entries are
+    // durable, and its purge driver has had four steps.
+    for n in 40..60 {
+        push(&source[0], n).await.expect("push");
+    }
+    let applied = source[0].health().applied;
+    assert!(applied > checkpoint, "{applied} after {checkpoint}");
+    wait_for("the source's new entries are durable", || {
+        source[0].repl_for_test().metrics().durable_index >= applied
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        purged() <= checkpoint,
+        "the source purged up to {}, past the seed it is sending at {checkpoint}",
+        purged()
+    );
+
+    // The copy is let go: the seed arrives, and the hold is at its position.
+    go_on.send(()).expect("the copy waits");
+    let seeded = taking
+        .await
+        .expect("join")
+        .expect("the seed")
+        .expect("taken");
+    assert_eq!(seeded.applied, checkpoint);
+    assert_eq!(
+        readers(&source[0]),
+        vec![(name.clone(), seeded.applied)],
+        "the hold a seed leaves"
+    );
+
+    // The standby starts on its seed and follows: the source kept what comes
+    // after it.
+    let setup = LinkSetup {
+        source: Some(cfg.clone()),
+        standby: false,
+        seed: Some(1),
+        fetch: None,
+    };
+    let d = sb_dirs[0].clone();
+    let standby: Nodes = vec![Arc::new(
+        tokio::task::spawn_blocking(move || open_node(&d, cluster, setup))
+            .await
+            .expect("open the seeded node"),
+    )];
+    wait_for("the seeded node leads its own cluster", || {
+        standby[0].health().role == "leader"
+    })
+    .await;
+    converge(&source, &standby, "a standby whose source went on under its seed").await;
+
+    // One standby, one name, one hold: what the seed left is what the reads
+    // move, and the purge follows it.
+    let status = link_status(&standby[0]).await;
+    assert_eq!(status["id"], record.id.as_str(), "{status}");
+    assert_eq!(status["name"], name.as_str(), "{status}");
+    let held = readers(&source[0]);
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].0, name, "{held:?}");
+    assert!(
+        held[0].1 > seeded.applied,
+        "the hold moved with the standby: {held:?}"
+    );
+    wait_for("the source purges behind the standby", || {
+        purged() > seeded.applied
+    })
+    .await;
 
     close(standby).await;
     close(source).await;

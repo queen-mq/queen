@@ -24,6 +24,24 @@
 //! log. Once it has, the cluster's own role row decides, and the record is a
 //! note of where the cluster came from.
 //!
+//! # The source keeps its log for the seed
+//!
+//! The standby reads its source for the first time long after the snapshot
+//! was made: the stream is staged, the node starts on it, elects itself and
+//! logs the standby entry first. Until that read nothing but the seed itself
+//! can tell the source to keep the entries after the snapshot's position, so
+//! the call names the standby ([`super::wire::SeedRequest`]) and the node that
+//! sends the snapshot holds its log for that name
+//! ([`crate::rsm::replicator::raft::link::LinkSource::seed`]) until the first
+//! read moves the hold.
+//!
+//! The name is the one every later read carries ([`super::reader_name`]),
+//! which is made of the standby's id unless `QUEEN_LINK_NAME` gives one. So a
+//! seeded standby's id is drawn HERE, before the snapshot is asked for, kept
+//! in the record, and written into the role row by the standby entry
+//! ([`LinkBoot::id`]); an empty standby, which has no hold to leave before
+//! its first read, draws its id with that entry.
+//!
 //! # A seed never replaces data
 //!
 //! It is taken only by a node whose directory holds none. A node told to
@@ -39,8 +57,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::driver::LinkConfig;
-use super::wire::{SNAPSHOT_PATH, TOKEN_HEADER};
-use super::{Position, FLAG_ROLE};
+use super::wire::{SeedRequest, SNAPSHOT_PATH, TOKEN_HEADER};
+use super::{link_id, reader_name, Position, FLAG_ROLE};
 use crate::rsm::batcher::LinkBoot;
 use crate::rsm::replicator::raft::log_store::write_atomic;
 use crate::rsm::replicator::raft::snapshot::{stage_seed, Seeded};
@@ -67,6 +85,12 @@ pub struct SeedRecord {
     pub at_ms: u64,
     /// `staging` while the snapshot is read, `staged` once it is whole.
     pub state: String,
+    /// The standby's id ([`super::RoleDoc::id`]), drawn before the snapshot
+    /// was asked for: the source holds its log for the name made of it. A
+    /// seed that is read again after an interruption asks under the same id.
+    /// Empty in a record written before seeds left a hold.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     /// Where the source's log stood in the snapshot: the standby's position.
     #[serde(default)]
     pub applied: u64,
@@ -126,8 +150,14 @@ fn holds_data(dir: &Path) -> bool {
 /// binary reads over HTTP ([`http_snapshot`]); a test may read in-process.
 pub type SnapshotStream = std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, String>> + Send>>;
 
-/// `POST http://<addr>/link/v1/snapshot` with the link's token.
-pub async fn http_snapshot(addr: &str, token: Option<&str>) -> Result<SnapshotStream, String> {
+/// `POST http://<addr>/link/v1/snapshot` with the link's token, as the
+/// standby that will read under the name `reader`: the node that answers
+/// keeps its log for that name from the snapshot's position on.
+pub async fn http_snapshot(
+    addr: &str,
+    token: Option<&str>,
+    reader: &str,
+) -> Result<SnapshotStream, String> {
     use axum::body::Body;
     use axum::http::{header, Method, StatusCode};
     use http_body_util::BodyExt;
@@ -138,15 +168,19 @@ pub async fn http_snapshot(addr: &str, token: Option<&str>) -> Result<SnapshotSt
     let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
         .build::<_, Body>(connector);
     let url = format!("http://{addr}{SNAPSHOT_PATH}");
+    let body = serde_json::to_vec(&SeedRequest {
+        reader: reader.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
     let mut req = axum::http::Request::builder()
         .method(Method::POST)
         .uri(&url)
-        .header(header::CONTENT_LENGTH, "0");
+        .header(header::CONTENT_TYPE, "application/json");
     if let Some(t) = token {
         req = req.header(TOKEN_HEADER, t);
     }
     let req = req
-        .body(Body::empty())
+        .body(Body::from(body))
         .map_err(|e| format!("{url}: {e}"))?;
     // The source builds the snapshot (a copy of its store) before the first
     // byte of the answer.
@@ -218,11 +252,12 @@ pub async fn take(
     node: QueenNode,
     cfg: &LinkConfig,
 ) -> io::Result<Result<Seeded, Skipped>> {
-    match read(dir)? {
+    let id = match read(dir)? {
         Some(rec) if rec.state == STAGED => return Ok(Err(Skipped::Seeded)),
         // Interrupted while the snapshot was read: nothing of it is in place
-        // (the marker that swaps it in is written last), so read it again.
-        Some(_) => {}
+        // (the marker that swaps it in is written last), so read it again —
+        // as the standby that asked before, whose hold the source then moves.
+        Some(rec) => rec.id,
         None if holds_data(dir) => {
             tracing::error!(
                 target: "rsm",
@@ -233,8 +268,16 @@ pub async fn take(
             );
             return Ok(Err(Skipped::HoldsData));
         }
-        None => {}
-    }
+        None => String::new(),
+    };
+    // The standby's id, before the source hears of the standby at all: the
+    // seed's call and every later read carry the one name made of it.
+    let id = if id.is_empty() {
+        link_id(&crate::util::uuidv7_bytes())
+    } else {
+        id
+    };
+    let reader = reader_name(cfg.name.as_deref(), &id);
     std::fs::create_dir_all(dir)?;
     let mut last = String::from("no source node is configured");
     for addr in &cfg.sources {
@@ -244,6 +287,7 @@ pub async fn take(
                 source: addr.clone(),
                 at_ms: now_ms(),
                 state: STAGING.to_string(),
+                id: id.clone(),
                 applied: 0,
                 applied_term: 0,
                 captured: None,
@@ -252,9 +296,10 @@ pub async fn take(
         tracing::warn!(
             target: "rsm",
             source = %addr,
+            reader = %reader,
             "rsm link: seeding this node from its source's snapshot",
         );
-        let stream = match http_snapshot(addr, cfg.token.as_deref()).await {
+        let stream = match http_snapshot(addr, cfg.token.as_deref(), &reader).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(target: "rsm", error = %e, "rsm link: the seed was not read");
@@ -270,6 +315,7 @@ pub async fn take(
                         source: addr.clone(),
                         at_ms: now_ms(),
                         state: STAGED.to_string(),
+                        id: id.clone(),
                         applied: seeded.applied,
                         applied_term: seeded.applied_term,
                         captured: None,
@@ -360,6 +406,7 @@ pub fn boot<S: Store>(dir: &Path, store: &S) -> io::Result<Option<LinkBoot>> {
         },
         last_now_us: captured.last_now_us,
         role_row: captured.role_row.map(String::into_bytes),
+        id: Some(rec.id).filter(|id| !id.is_empty()),
     }))
 }
 
@@ -399,6 +446,7 @@ mod tests {
             source: "a:7400".into(),
             at_ms: 5,
             state: STAGED.into(),
+            id: "5e1f09c2".into(),
             applied: 41_233,
             applied_term: 7,
             captured: Some(Captured {
@@ -408,6 +456,14 @@ mod tests {
         };
         write(&dir, &rec).unwrap();
         assert_eq!(read(&dir).unwrap(), Some(rec));
+        // A record written before a seed carried the standby's id: read, with
+        // none.
+        std::fs::write(
+            dir.join(SEED_FILE),
+            br#"{"source":"a:7400","atMs":5,"state":"staged","applied":3,"appliedTerm":1}"#,
+        )
+        .unwrap();
+        assert_eq!(read(&dir).unwrap().expect("the older record").id, "");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

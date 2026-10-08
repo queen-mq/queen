@@ -102,6 +102,10 @@ pub(crate) type CopyStore = Box<dyn Fn(&Path) -> io::Result<(u64, u64)> + Send +
 /// snapshot carries it; answers whether it does.
 pub(crate) type CopyTraces = Box<dyn Fn(&Path) -> io::Result<bool> + Send + Sync>;
 
+/// Told the RSM index of the checkpoint a streamed snapshot holds
+/// ([`stream_checkpoint`]).
+pub(crate) type Held = Arc<dyn Fn(u64) + Send + Sync>;
+
 /// What a node needs to send its snapshot.
 pub(crate) struct SendCtx {
     pub(crate) data_dir: PathBuf,
@@ -304,12 +308,14 @@ fn materialize(ctx: &SendCtx, dir: &Path) -> io::Result<(u64, u64, Vec<FileEntry
 
 /// The request body: prefix, every file, the checksum. Read on a plain thread,
 /// which holds `keep` (the staging directory the files are read from) until
-/// it has read the last of them or the receiver went away.
+/// it has read the last of them or the receiver went away, and calls
+/// `reading` after every piece of a file the receiver made room for.
 fn body_of(
     dir: PathBuf,
     prefix: Vec<u8>,
     files: Vec<FileEntry>,
     keep: Option<Arc<Staging>>,
+    reading: Option<Box<dyn Fn() + Send>>,
 ) -> Body {
     let (tx, rx) = tokio::sync::mpsc::channel::<io::Result<Bytes>>(8);
     std::thread::Builder::new()
@@ -332,6 +338,9 @@ fn body_of(
                         left -= n as u64;
                         if tx.blocking_send(Ok(Bytes::from(buf))).is_err() {
                             return Ok(());
+                        }
+                        if let Some(reading) = &reading {
+                            reading();
                         }
                     }
                 }
@@ -419,7 +428,7 @@ pub(crate) async fn send(
         url,
         token,
         "application/octet-stream",
-        body_of(dir.clone(), prefix, files, None),
+        body_of(dir.clone(), prefix, files, None, None),
         ttl,
     )
     .await;
@@ -436,7 +445,15 @@ pub(crate) async fn send(
 /// its membership is this cluster's, which the receiver replaces.
 ///
 /// The staging directory lives as long as the stream is read.
-pub(crate) async fn stream_checkpoint(ctx: &Arc<SendCtx>) -> io::Result<Body> {
+///
+/// `held` is told the RSM index of the checkpoint the snapshot holds: once the
+/// copy is made, before a byte of it is sent, and again with every piece of a
+/// file the receiver makes room for — as long as the stream is read, and no
+/// longer. Whoever keeps this node's log for the receiver's first read
+/// ([`super::link::LinkSource::seed`]) learns from it where to keep it from,
+/// and that the receiver is still there. It is called off the runtime, and
+/// may block.
+pub(crate) async fn stream_checkpoint(ctx: &Arc<SendCtx>, held: Option<Held>) -> io::Result<Body> {
     let dir = ctx
         .data_dir
         .join(SNAP_DIR)
@@ -444,10 +461,16 @@ pub(crate) async fn stream_checkpoint(ctx: &Arc<SendCtx>) -> io::Result<Body> {
     let staging = Arc::new(Staging(dir.clone()));
     let c = ctx.clone();
     let s = staging.clone();
-    let (applied, applied_term, files) =
-        tokio::task::spawn_blocking(move || materialize(&c, &s.0))
-            .await
-            .map_err(|e| io::Error::other(format!("snapshot build: {e}")))??;
+    let first = held.clone();
+    let (applied, applied_term, files) = tokio::task::spawn_blocking(move || {
+        let made = materialize(&c, &s.0)?;
+        if let Some(held) = &first {
+            held(made.0);
+        }
+        Ok::<_, io::Error>(made)
+    })
+    .await
+    .map_err(|e| io::Error::other(format!("snapshot build: {e}")))??;
     let last_log_id = applied_log_id(applied, applied_term);
     let Some(last_membership) = (ctx.membership_at)(&last_log_id) else {
         return Err(io::Error::other(format!(
@@ -481,7 +504,8 @@ pub(crate) async fn stream_checkpoint(ctx: &Arc<SendCtx>) -> io::Result<Body> {
     prefix.push(VERSION);
     prefix.extend_from_slice(&(header.len() as u32).to_le_bytes());
     prefix.extend_from_slice(&header);
-    Ok(body_of(dir, prefix, files, Some(staging)))
+    let reading = held.map(|held| Box::new(move || held(applied)) as Box<dyn Fn() + Send>);
+    Ok(body_of(dir, prefix, files, Some(staging), reading))
 }
 
 /// A sender's staging directory (an LMDB copy, hard links to every queue-log
@@ -983,7 +1007,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use super::{applied_log_id, one_checkpoint, Staging};
+    use super::{applied_log_id, body_of, one_checkpoint, FileEntry, Staging, CHUNK};
     use crate::rsm::replicator::raft::types::{SnapshotMeta, StoredMembership};
 
     fn meta_at(index: u64, term: u64) -> SnapshotMeta {
@@ -1025,5 +1049,71 @@ mod tests {
             assert!(Instant::now() < deadline, "the staging directory was left");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// What keeps a seed's hold alive ([`super::stream_checkpoint`]): the
+    /// sender says the stream is being read once for every piece of a file
+    /// the receiver made room for, and stops with the receiver.
+    #[tokio::test]
+    async fn a_stream_says_it_is_read_for_as_long_as_it_is() {
+        use futures_util::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = std::env::temp_dir().join(format!(
+            "queen-snap-reading-{}-{}",
+            std::process::id(),
+            super::stamp()
+        ));
+        std::fs::create_dir_all(dir.join("store")).unwrap();
+        // More pieces than the sender may run ahead of its receiver by.
+        const PIECES: usize = 20;
+        std::fs::write(
+            dir.join("store").join("data.mdb"),
+            vec![7u8; PIECES * CHUNK],
+        )
+        .unwrap();
+        let files = || {
+            vec![FileEntry {
+                path: "store/data.mdb".into(),
+                len: (PIECES * CHUNK) as u64,
+            }]
+        };
+        let stream_of = |said: &Arc<AtomicUsize>| {
+            let said = said.clone();
+            let reading: Box<dyn Fn() + Send> = Box::new(move || {
+                said.fetch_add(1, Ordering::SeqCst);
+            });
+            body_of(dir.clone(), b"head".to_vec(), files(), None, Some(reading)).into_data_stream()
+        };
+        // The sender is gone once it let go of what it was given.
+        async fn sender_gone(said: &Arc<AtomicUsize>) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Arc::strong_count(said) > 1 {
+                assert!(Instant::now() < deadline, "the sender is still there");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        // A receiver that reads to the end: every piece was said.
+        let said = Arc::new(AtomicUsize::new(0));
+        let mut stream = stream_of(&said);
+        let mut bytes = 0usize;
+        while let Some(piece) = stream.next().await {
+            bytes += piece.expect("a piece").len();
+        }
+        assert_eq!(bytes, 4 + PIECES * CHUNK + 8, "head, file, checksum");
+        sender_gone(&said).await;
+        assert_eq!(said.load(Ordering::SeqCst), PIECES);
+
+        // A receiver that leaves after the head: the sender stops where its
+        // buffer let it get to, far from the end.
+        let said = Arc::new(AtomicUsize::new(0));
+        let mut stream = stream_of(&said);
+        stream.next().await.expect("the head").expect("a piece");
+        drop(stream);
+        sender_gone(&said).await;
+        let n = said.load(Ordering::SeqCst);
+        assert!(n < PIECES, "{n} pieces said to a receiver that took one");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

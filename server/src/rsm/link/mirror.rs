@@ -3,7 +3,7 @@
 
 use super::super::effect::{CodecError, Effect};
 use super::super::entry::{catalogue_version_of, Entry, Outcome, RequestId};
-use super::{is_link_flag, link_id, Cursor, Position, RoleDoc};
+use super::{is_link_flag, Cursor, Position, RoleDoc};
 
 /// Whether an effect describes the cluster it was planned in and nothing a
 /// standby may take over (see the module header of [`super`]).
@@ -88,13 +88,15 @@ fn own_entry(
     Ok(e)
 }
 
-/// The entry that makes this cluster a standby of `source`, at `position` in
-/// the source's log. The standby's id is drawn from the entry's request id
-/// ([`link_id`]). `wall_us`: the planning node's wall clock, written into the
-/// role row for people and used for nothing.
+/// The entry that makes this cluster the standby `id` of `source`, at
+/// `position` in the source's log. The id is drawn from the entry's request
+/// id ([`super::link_id`]), unless the standby had one before it had an
+/// entry: a seed's ([`super::seed`]). `wall_us`: the planning node's wall
+/// clock, written into the role row for people and used for nothing.
 pub fn standby_entry(
     cursor: &Cursor,
     request_id: RequestId,
+    id: &str,
     source: &str,
     position: Position,
     wall_us: i64,
@@ -103,7 +105,7 @@ pub fn standby_entry(
         cursor,
         request_id,
         vec![
-            RoleDoc::standby(&link_id(&request_id), source, cursor.last_now_us, wall_us).effect(),
+            RoleDoc::standby(id, source, cursor.last_now_us, wall_us).effect(),
             position.effect(),
         ],
     )
@@ -246,7 +248,8 @@ mod tests {
             kv_version_next: 3,
             cluster_version: 4,
         };
-        let start = standby_entry(&cursor, id(9), "a:7400", Position::START, 5_000).unwrap();
+        let start =
+            standby_entry(&cursor, id(9), "5e1f09c2", "a:7400", Position::START, 5_000).unwrap();
         assert_eq!(
             (start.now_us, start.pid_base, start.kv_version_base),
             (900, 16, 3)
@@ -258,7 +261,7 @@ mod tests {
         let Role::Standby(doc) = decode_role(Some(value)).unwrap() else {
             panic!("a standby role");
         };
-        assert_eq!(doc.id, "09090909", "the id is the request id's end");
+        assert_eq!(doc.id, "5e1f09c2", "the id the standby was given");
         assert_eq!(
             (doc.at_us, doc.wall_us),
             (900, 5_000),

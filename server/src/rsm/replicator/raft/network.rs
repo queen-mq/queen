@@ -1012,19 +1012,29 @@ mod server {
     /// A standby cluster's SEED: this node's snapshot as a stream
     /// ([`super::super::snapshot::stream_checkpoint`]) — what a follower
     /// that is too far behind receives, asked for with the link's token
-    /// instead of pushed by a leader. Any node can serve it.
+    /// instead of pushed by a leader. Any node can serve it, and the one
+    /// that does keeps its log from the snapshot's position for the standby
+    /// the call names ([`super::super::link::LinkSource::seed`]).
     async fn link_snapshot<S: Store + 'static>(
         State(st): State<Arc<RpcState<S>>>,
         headers: HeaderMap,
+        body: Bytes,
     ) -> Response {
         let link = match LinkRpc::admit(&st.link, &headers) {
             Ok(link) => link,
             Err(refused) => return refused,
         };
-        let built = crate::obs::panic_policy::non_core(
-            super::super::snapshot::stream_checkpoint(&link.snap),
-        )
-        .await;
+        // No body names no reader: a snapshot nobody reads after.
+        let req: crate::rsm::link::wire::SeedRequest = if body.is_empty() {
+            Default::default()
+        } else {
+            match serde_json::from_slice(&body) {
+                Ok(r) => r,
+                Err(e) => return bad_request(e),
+            }
+        };
+        let built =
+            crate::obs::panic_policy::non_core(link.source.seed(&link.snap, &req.reader)).await;
         match built {
             Ok(body) => {
                 let mut resp = Response::new(body);

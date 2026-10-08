@@ -119,6 +119,11 @@ pub struct LinkBoot {
     /// The role row of that state: `None` for an empty cluster, what the
     /// source's snapshot held for a seed.
     pub role_row: Option<Vec<u8>>,
+    /// The standby's id ([`link::RoleDoc::id`]), when it was drawn before the
+    /// standby entry: a seed's, which its source already holds its log for
+    /// under the name made of it ([`link::seed`]). `None`: drawn with the
+    /// standby entry, from its request id.
+    pub id: Option<String>,
 }
 
 impl LinkBoot {
@@ -130,6 +135,7 @@ impl LinkBoot {
             position: Position::START,
             last_now_us: 0,
             role_row: None,
+            id: None,
         }
     }
 }
@@ -147,8 +153,9 @@ pub(super) enum LinkMode {
 pub(super) struct Standby {
     /// The state the next entry lands on, after everything planned so far.
     cursor: Cursor,
-    /// The standby's id ([`link::RoleDoc::id`]), for the promotion's role
-    /// row. Empty until the standby entry is planned.
+    /// The standby's id ([`link::RoleDoc::id`]), for the role rows. Empty
+    /// until the standby entry is planned, unless a seed drew it before
+    /// ([`LinkBoot::id`]).
     id: String,
     /// The source's label, for the role rows.
     source: String,
@@ -211,7 +218,7 @@ pub(super) fn read_mode<S: Store>(store: &S, boot: Option<&LinkBoot>) -> LinkMod
             );
             return LinkMode::Standby(Standby {
                 cursor,
-                id: String::new(),
+                id: b.id.clone().unwrap_or_default(),
                 source: b.source.clone(),
                 attach: Some(b.position),
                 promoting: None,
@@ -300,17 +307,20 @@ fn plan_link<S: Store>(
     let (entry, slots, planned) = match job {
         Job::Attach(position) => {
             let request_id = crate::util::uuidv7_bytes();
-            match mirror::standby_entry(&cursor, request_id, source, position, wall_us()) {
+            // A seed's id is the one its source already knows the standby
+            // by; an empty cluster's is drawn here.
+            let id = match id {
+                "" => link::link_id(&request_id),
+                seeded => seeded.to_string(),
+            };
+            match mirror::standby_entry(&cursor, request_id, &id, source, position, wall_us()) {
                 Ok(e) => {
                     let mut after = cursor;
                     after.position = position;
                     (
                         Some(Arc::new(e)),
                         waiting(answered),
-                        Some(LinkPlanned::Attached {
-                            cursor: after,
-                            id: link::link_id(&request_id),
-                        }),
+                        Some(LinkPlanned::Attached { cursor: after, id }),
                     )
                 }
                 Err(e) => refuse(Refusal::client("internal", format!("standby entry: {e:?}"))),

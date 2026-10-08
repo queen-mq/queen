@@ -24,6 +24,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the raft port serves two more routes under /link/v1/ (network.rs), outside the raft token and under QUEEN_LINK_TOKEN (cluster.rs): the port table, a paragraph under the raft token and the no-TLS limit say so.
 # sourceOfTruth re-read 2026-10-08 (locks): main.rs declares the locks module; auth.rs makes /api/v1/locks
 # read-write, which the level table now names; proxy_embed.rs maps the new KV refusal to its 503.
+# sourceOfTruth re-read 2026-10-08 (a seed's hold): network.rs's snapshot route under /link/v1/ now reads a JSON body that names the standby and leaves that standby's hold on the node's log, as a read already did. The two routes, their token and what its holder cannot do are as described.
 ---
 
 Out of the box a node authenticates nobody: its HTTP port is plain HTTP, and every route answers
