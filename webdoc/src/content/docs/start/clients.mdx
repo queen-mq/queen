@@ -155,7 +155,7 @@ request does.
 
 The client is one header, `clients/client-cpp/queen_client.hpp`, used from a checkout of the
 repository: it includes the thread pool in `clients/server/include/` by a relative path, and
-`clients/server/vendor/` carries the nlohmann/json it needs. You install cpp-httplib and OpenSSL
+`clients/server/vendor/` carries the nlohmann/json it needs. You install cpp-httplib 0.27.0 or later and OpenSSL
 (`brew install cpp-httplib openssl` on macOS).
 
 ```cpp
@@ -175,7 +175,10 @@ g++ -std=c++17 -O2 -pthread \
 ```
 
 C++17 or later. Link OpenSSL even over plain HTTP: the header turns on cpp-httplib's TLS support
-itself.
+itself. Fluent consumers can enable dashboard observations with
+`.supervision(queen::SupervisionConfig{"billing-production"})` before `.consume(...)`;
+they are off by default. The README describes worker counts, handler progress and publication
+timings. These observations do not restart or scale application processes.
 [README](https://github.com/queen-mq/queen/tree/master/clients/client-cpp)
 
 </TabItem>

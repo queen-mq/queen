@@ -886,3 +886,29 @@ Same as Queen Message Queue project.
 
 For issues and questions, please refer to the main Queen repository.
 
+
+### Optional consumer supervision
+
+```cpp
+client.queue("orders").group("billing")
+    .supervision(queen::SupervisionConfig{"billing-production"})
+    .concurrency(4).each().consume(handler);
+```
+
+Supervision defaults to off; `.supervision(std::nullopt)` disables it. The group
+names an application/deployment independently of the consumer group. Each consume
+invocation publishes a unique `queen.consumer.status/v1` instance into the
+broker's `queen-supervisor` KV namespace every 10 seconds (30-second heartbeat
+timeout, 60-second TTL), plus stopped status on orderly exit. Credentials need
+KV write access. A dedicated thread serializes publications using the configured
+endpoint and bearer token, with one attempt and bounded HTTP timeouts. Publishing
+uses cpp-httplib's two-second maximum request timeout (v0.27.0, as pinned in CI).
+There is no 429/failover retry on status writes; failures do not affect consumers.
+
+The compatible Supervisors dashboard shows actual started consumer threads,
+busy handlers, successful/failed handler calls, last completion and oldest
+in-flight duration. Tasks waiting for a thread-pool slot are not counted as
+running. Batch callbacks count once; completion does not imply ACK success.
+Hostname uses `HOSTNAME`/`COMPUTERNAME` when available. Payloads and error text
+are never published. Reporting does not restart processes, autoscale or enable
+remote commands. Disabled reporting creates no additional thread or KV traffic.

@@ -750,7 +750,82 @@ void test_consume_refuses_commit_on_delivery_before_any_request() {
 
 // ============================================================================
 
+void test_optional_consumer_supervision() {
+    for (bool enabled : {false, true}) {
+        StubServer server([](const httplib::Request& req, httplib::Response& res) {
+            if (req.path == "/api/v1/kv") {
+                res.set_content(R"({"results":[{"applied":true},{"applied":true}]})", "application/json");
+            } else { res.set_content(popped(1, "lease-1"), "application/json"); }
+        });
+        QueenClient client({server.url()}, fast_config());
+        auto builder = client.queue("orders").concurrency(2).each().limit(1).auto_ack(false).wait(false);
+        if (enabled) builder.supervision(SupervisionConfig{"billing-production"});
+        std::atomic<int> calls{0};
+        builder.consume([&](const json&) { if (++calls == 1) throw std::runtime_error("private failure"); });
+        std::vector<json> docs;
+        for (const auto& call : server.calls()) if (call.path == "/api/v1/kv") {
+            auto ops = json::parse(call.body).at("operations");
+            check(ops.size() == 2, "status must be an atomic head/chunk batch");
+            check(ops[0]["ns"] == "queen-supervisor" && ops[0]["ttlSeconds"] == 60 && ops[1]["ttlSeconds"] == 60, "namespace and TTL");
+            check(ops[0]["value"]["write"] == ops[1]["value"]["write"], "generation must match");
+            auto raw = util::base64_decode(ops[1]["value"]["data"].get<std::string>());
+            check(raw.size() == ops[0]["value"]["bytes"].get<size_t>(), "UTF-8 byte length");
+            check(raw.find("private failure") == std::string::npos, "error text must not be published");
+            docs.push_back(json::parse(raw));
+        }
+        check(calls == 2, "publication must not affect consumption");
+        check(server.count_with_prefix("/api/v1/ack") == 0, "manual ACK policy must be preserved");
+        if (!enabled) { check(docs.empty(), "default off must not publish"); continue; }
+        check(docs.size() >= 2, "lifecycle observations");
+        auto last = docs.back(); const auto& pool = last["pool_status"][0];
+        check(last["state"] == "stopped", "final state");
+        check(pool["running"] == 0 && pool["busy"] == 0, "actual exits");
+        check(pool["completed"] == 1 && pool["failed"] == 1, "handler outcomes");
+    }
+}
+
+void test_supervision_progress_and_validation() {
+    ConsumeOptions options; options.queue = "orders"; options.concurrency = 2;
+    options.supervision = SupervisionConfig{"billing"};
+    ConsumerSupervision reporter(nullptr, options), other(nullptr, options);
+    check(reporter.document("running")["instance_id"] != other.document("running")["instance_id"], "unique instance identity");
+    reporter.worker_started(); auto id = reporter.begin_handler();
+    auto pool = reporter.document("running")["pool_status"][0];
+    check(pool["running"] == 1 && pool["busy"] == 1 && pool["completed"] == 0, "only started threads count as running");
+    reporter.end_handler(id, true); reporter.worker_exited();
+    pool = reporter.document("running")["pool_status"][0];
+    check(pool["running"] == 0 && pool["completed"] == 1 && pool["oldest_inflight_seconds"].is_null(), "progress and exit cleanup");
+    for (const auto& group : {"", "coordination", "a/b", "a\n"}) {
+        options.supervision = SupervisionConfig{group}; bool refused = false;
+        try { ConsumerSupervision invalid(nullptr, options); } catch (const std::invalid_argument&) { refused = true; }
+        check(refused, "invalid publication group must fail");
+    }
+}
+
+void test_supervision_publication_is_bounded() {
+    StubServer server([](const httplib::Request& req, httplib::Response& res) {
+        if (req.path == "/api/v1/kv") {
+            check(req.get_header_value("Authorization") == "Bearer test-token", "publication uses existing credentials");
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            res.status = 429; res.set_header("Retry-After", "1000");
+        } else { res.set_content(popped(1, "lease-1"), "application/json"); }
+    });
+    auto config = fast_config(); config.bearer_token = "test-token";
+    QueenClient client({server.url()}, config);
+    const auto started = std::chrono::steady_clock::now();
+    int handled = 0;
+    client.queue("orders").supervision(SupervisionConfig{"billing"}).auto_ack(false).wait(false).limit(1)
+        .consume([&](const json&) { ++handled; });
+    check(handled == 1, "failed publication cannot stop the handler");
+    check(std::chrono::steady_clock::now() - started < std::chrono::seconds(6), "publication cannot inherit unbounded retries");
+    check(server.count_with_prefix("/api/v1/kv") == 2, "exactly one attempt per lifecycle publication");
+}
+
 int main() {
+    run_test("optional supervision reports actual consumer lifecycle", test_optional_consumer_supervision);
+    run_test("supervision observes progress and validates groups", test_supervision_progress_and_validation);
+    run_test("supervision publication is bounded", test_supervision_publication_is_bounded);
+
     std::cout << "========================================" << std::endl;
     std::cout << "Queen C++ Client - Consume Contract Tests" << std::endl;
     std::cout << "========================================\n" << std::endl;
