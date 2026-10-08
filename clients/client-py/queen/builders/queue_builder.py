@@ -63,6 +63,7 @@ class QueueBuilder:
         self._config: Dict[str, Any] = {}
 
         # Consume options
+        self._supervision = None
         self._concurrency = CONSUME_DEFAULTS["concurrency"]
         self._batch: Optional[int] = None
         self._limit = CONSUME_DEFAULTS["limit"]
@@ -226,6 +227,11 @@ class QueueBuilder:
     def group(self, name: str) -> "QueueBuilder":
         """Set consumer group"""
         self._group = name
+        return self
+
+    def supervision(self, config: Optional[Union[Dict[str, Any], bool]] = None) -> "QueueBuilder":
+        """Opt into consumer dashboard reporting; None/False (default) disables it."""
+        self._supervision = dict(config) if isinstance(config, dict) else config
         return self
 
     def concurrency(self, count: int) -> "QueueBuilder":
@@ -412,6 +418,7 @@ class QueueBuilder:
             "task": self._task,
             "group": self._group,
             "concurrency": self._concurrency,
+            "supervision": self._supervision,
             "batch": self._batch,
             "limit": self._limit,
             "idle_millis": self._idle_millis,
