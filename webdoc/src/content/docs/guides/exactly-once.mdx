@@ -1,5 +1,5 @@
 ---
-title: "Exactly-once processing: charge a card once"
+title: "Exactly-once processing with an idempotent consumer"
 description: "Make a redelivered order harmless: write a charge marker in the same transaction as the ack, gate it with putIfAbsent, and let the lease fence a worker that ran out of time."
 type: how-to
 tier: use
@@ -28,6 +28,12 @@ is slow, a node restarts, someone replays the queue. Make the second delivery ha
 marker in the same transaction as the ack, so an order is either charged and acknowledged or
 neither. That gives you exactly-once effects inside Queen. The charge itself is a call to another
 system, and the last section is honest about what that leaves open.
+
+This is the idempotent-consumer pattern. Where the broker and the database commit separately, it
+takes an inbox table of processed message IDs, written in the same database transaction as the
+effect, and the ack stays a separate call. Here the marker is the inbox, and it commits with the ack
+as one entry of Queen's log. [Compare](/start/compare/#postgresql-and-a-transactional-outbox) puts
+the usual stack, outbox and relay included, beside Queen's.
 
 ## The fix
 

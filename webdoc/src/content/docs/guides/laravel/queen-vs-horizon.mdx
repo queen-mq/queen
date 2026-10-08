@@ -1,5 +1,5 @@
 ---
-title: "Queen vs Laravel Horizon: which to choose"
+title: "Laravel Horizon alternative: Queen vs Horizon"
 description: "For a team that runs Horizon: the two stacks side by side, where each one is ahead, what happened when we broke both on purpose, and the limits of that evidence."
 type: concept
 tier: use
@@ -53,8 +53,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps its response and status filters; the documented Laravel dashboard and broker capabilities are unchanged.
 ---
 
-Horizon and Queen both run ordinary Laravel jobs and both supervise their workers, on different
-backends: Horizon on Redis, Queen on its own broker. This page puts the two whole stacks side by
+Queen is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both
+supervise their workers, on different backends: Horizon on Redis, Queen on its own broker. This page puts the two whole stacks side by
 side for a team that runs Horizon today. We are proud of where Queen comes out ahead, and we say as
 plainly where it does not. [How Queen runs Laravel jobs](/guides/laravel/concepts/) defines the
 terms, and the [Laravel benchmark](/benchmarks/laravel/) has every run behind the numbers.
