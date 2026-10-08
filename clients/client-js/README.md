@@ -1095,6 +1095,41 @@ Each consume invocation publishes its own instance into the broker's
 60-second TTL), plus a final stopped observation. The credential needs KV write
 access. Publication is serialized and best effort with a two-second deadline.
 
+#### Match supervision to the consumer lifetime
+
+The instance belongs to one **`consume()` invocation**, not to the `Queen`
+client, queue, hostname, process or publication group. Reusing the same client,
+builder and group does not reuse the instance ID. Each invocation starts new
+counters, publishes its initial state, then reports `stopped` when all its
+workers exit, including a normal exit caused by `.limit(...)`, `.idleMillis(...)`
+or cancellation.
+
+| Application pattern | Supervision setup |
+| --- | --- |
+| One persistent `consume()` with several concurrent workers | Enable `.supervision({ group })` on that invocation. |
+| Several persistent `consume()` calls in one process | Enable reporting on each; expect several instances with the same hostname. Budget their combined concurrency. |
+| An outer scheduler repeatedly calling `.limit(1).consume(...)` or rotating queues | Leave per-call supervision off when you need the scheduler's lifetime status; publish one observation for the persistent scheduler instead. |
+
+For a persistent consumer, omit limits that deliberately end the invocation.
+Pass an `AbortSignal` to `consume(handler, { signal })`; on shutdown, abort it,
+await the consume promise so active handlers drain, then close the client.
+Do not remove an existing scheduler's limits just to change the dashboard:
+those limits may enforce queue fairness and the application's worker budget.
+
+Supervising short calls is valid when you want to observe those calls. A loop
+that starts a new call after every message or idle poll will produce many
+recent `stopped` instances, with `running: 0`, until their 60-second TTL expires.
+Expired records can remain visible until the broker sweeps them.
+That is the last state of each finished invocation, not evidence that its
+process or pod has stopped. Compare instance IDs and application logs.
+
+The JavaScript API has no option to attach several consume invocations to one
+persistent reporter or supply their instance ID. A custom scheduler can publish
+the [consumer status contract](https://queenmq.com/reference/supervisor-status/#reporting-an-application-owned-scheduler)
+with one ID per scheduler lifetime, stable worker pool names and counters
+across turns. Keep SDK supervision disabled on its short calls and preserve
+their ACK/NACK, lease renewal, cancellation and scheduling behavior.
+
 The Supervisors page supporting `queen.consumer.status/v1` shows live async
 consumer loops, busy handlers, successful/failed handler calls and progress times.
 A batch is one handler call; completion does not imply ACK success. No payloads or

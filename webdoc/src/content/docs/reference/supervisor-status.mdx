@@ -16,6 +16,10 @@ sourceOfTruth:
   - app/src/composables/supervisorStatus.js
   - app/src/composables/supervisorQueueMetrics.js
   - app/src/views/Supervisors.vue
+  - app/src/composables/consumerStatus.js
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+  - clients/client-js/client-v2/consumer/Supervision.js
+  - clients/client-js/client-v2/builders/QueueBuilder.js
 verifiedBy:
   - clients/client-php/tests/RemoteStatusDocumentTest.php
   - clients/client-php/tests/RemoteStatusPublisherTest.php
@@ -23,6 +27,7 @@ verifiedBy:
   - app/test/supervisor-queue-metrics.test.js
   - clients/client-php/tests/LaravelSupervisorCommandTest.php
   - clients/client-php/tests/LaravelSupervisorTest.php
+  - clients/client-js/test-v2/consumer-unit/supervision.test.js
 # sourceOfTruth re-read 2026-10-07 (supervisors refresh): Supervisors.vue drops its refresh checkbox; how it reads and judges publications is unchanged. Nothing this page states changes.
 ---
 
@@ -177,6 +182,13 @@ schema: `queen.consumer.status/v1`. A consumer instance identifies one invocatio
 of a consume loop; multiple loops in one process have different instance IDs.
 Consumers are internal tasks, not additional operating-system processes.
 
+In JavaScript, the reporter is created for each `consume()` call. Reusing a
+client, builder, queue or publication group does not preserve its identity or
+counters. A normal exit from `.limit(...)` or `.idleMillis(...)` ends that
+instance and publishes `stopped` with zero running workers. Repeated short calls
+therefore leave multiple recent stopped observations for the same hostname.
+The SDK does not aggregate them into process or pod liveness.
+
 Reporting is explicitly enabled by the application and defaults to off. A disabled
 reporter creates no timer, task, thread or KV traffic. The standard interval is 10
 seconds, heartbeat timeout 30 seconds and record TTL 60 seconds. Cooperative PHP
@@ -242,3 +254,32 @@ become overdue during a long handler or network wait. Operators must compare
 progress and in-flight age, and inspect application logs. SDK reporting does not
 provide remote commands, process restart or autoscaling. No message payloads,
 error text, credentials or arbitrary client configuration belong in these records.
+
+### Reporting an application-owned scheduler
+
+A scheduler may own persistent worker slots while using short SDK consume calls
+to rotate between queues. To observe that runtime, implement a publisher of
+`queen.consumer.status/v1` with the scheduler's lifetime. The JavaScript SDK
+does not expose a shared reporter or an instance-ID override; its `.supervision()`
+option continues to describe individual consume calls.
+
+Generate one unique instance ID when the scheduler starts and keep it for every
+heartbeat and its final status. Replicas share a publication group but use
+different IDs. Generate a new ID after a restart. Leave per-call SDK supervision
+disabled to avoid also publishing a separate instance for every turn.
+
+Give each persistent worker slot a unique, stable pool `name`, such as
+`worker-1`. A slot that processes one message at a time has `desired: 1`.
+Report `running: 1` while its outer loop is alive, including idle polls and
+queue changes, and `running: 0` after it exits. Report its currently assigned
+`queue`, or `null` when none is assigned, and count only active handler calls in
+`busy`. Counters accumulate for that slot across turns; they reset with the
+new scheduler instance. Do not report the configured worker count as running
+without observing whether those loops are still alive.
+
+Use the atomic head/chunk publication above, a serialized heartbeat and bounded
+best-effort writes. On shutdown, stop taking work, drain active handlers and
+observe worker exits before the final `stopped` publication. A reporting failure
+must leave scheduling, ACK/NACK, lease renewal and cancellation unchanged.
+Retain limits used for fairness or a shared concurrency budget; replacing
+short calls with unbounded per-queue consumers changes that scheduling policy.
