@@ -572,6 +572,12 @@ impl LogStore {
         self.inner.mem.lock().expect("log mem").last_log_id
     }
 
+    /// The last entry purged from the log (openraft numbering): reads start
+    /// above it.
+    pub(crate) fn purged_log_id(&self) -> Option<LogId> {
+        self.inner.mem.lock().expect("log mem").purged
+    }
+
     /// Entries in memory and their bytes (gauges).
     pub(crate) fn cached(&self) -> (usize, usize) {
         let m = self.inner.mem.lock().expect("log mem");
@@ -617,8 +623,10 @@ impl LogStore {
 
     /// Every entry with an openraft index in `[start, end)` the log holds, in
     /// order: the queue logs below the in-memory window (payloads restored),
-    /// then the window.
-    fn read_range(&self, start: u64, end: u64) -> io::Result<Vec<REntry>> {
+    /// then the window. A `start` at or below the purge point is moved above
+    /// it without a word: a caller that needs every entry checks the first
+    /// index it gets.
+    pub(crate) fn read_range(&self, start: u64, end: u64) -> io::Result<Vec<REntry>> {
         let (disk_end, from_cache, start) = {
             let m = self.inner.mem.lock().expect("log mem");
             let first = m.purged.map_or(0, |p| p.index + 1).max(m.start);
@@ -838,6 +846,23 @@ pub(crate) fn state_after_snapshot(state_dir: &Path, purged: Option<LogId>) -> i
         _ => {}
     }
     Ok(())
+}
+
+/// Before a standby's seed is swapped in (`snapshot::stage_seed`): give this
+/// node — whose directory holds no log yet — the vote it starts its own
+/// cluster with. [`state_after_snapshot`] keeps it.
+pub(crate) fn seed_vote(state_dir: &Path, vote: Vote) -> io::Result<()> {
+    fs::create_dir_all(state_dir)?;
+    let state = Persisted {
+        vote: Some(vote),
+        purged: None,
+        floor_v: FLOOR_V,
+    };
+    write_atomic(
+        state_dir,
+        STATE_FILE,
+        &serde_json::to_vec(&state).map_err(io::Error::other)?,
+    )
 }
 
 /// `state.json`, with the purge point the later of its own and

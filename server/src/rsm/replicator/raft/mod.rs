@@ -68,6 +68,8 @@ mod admin;
 pub use admin::QuiesceHook;
 pub mod cluster;
 pub(crate) mod forward;
+/// The source side of a cluster link: a node's log as a standby reads it.
+pub mod link;
 pub(crate) mod log_store;
 mod members;
 mod network;
@@ -169,6 +171,9 @@ pub(crate) struct Shared {
     /// `<data_dir>/raft`: the vote, the commit point, and the operator
     /// repairs' records ([`repair`]).
     state_dir: PathBuf,
+    /// The standbys reading this node's log, and how far each has got: the
+    /// purge driver keeps what they still need ([`link`]).
+    link_holds: link::Holds,
 }
 
 /// One member of the cluster as a node sees it ([`RaftReplicator::cluster_view`]).
@@ -657,6 +662,14 @@ pub struct RaftOpts {
     /// to play a newer or an older build, or `None` to say nothing, as a node
     /// older than 2.0.0-beta.2 (it then counts as the baseline).
     pub kinds: Option<u32>,
+    /// `QUEEN_LINK_HOLD_S` (default 3600 s): how long a standby that stopped
+    /// reading still holds this node's log back from being purged
+    /// ([`link::Holds`]).
+    pub link_hold: Duration,
+    /// `QUEEN_LINK_HOLD_DISK_PCT` (default: `QUEEN_RAFT_DISK_LOW_PCT`, 80): how
+    /// full the data volume may be while the node still keeps its log for a
+    /// standby. 100: the volume's fullness never ends a hold.
+    pub link_hold_disk_pct: f64,
 }
 
 impl RaftOpts {
@@ -689,6 +702,8 @@ impl RaftOpts {
             apply_skip,
             promote_max_lag: admin::promote_max_lag_from_env(),
             kinds: Some(crate::rsm::effect::SUPPORTED_KINDS_VERSION),
+            link_hold: link::hold_from_env(),
+            link_hold_disk_pct: link::hold_disk_pct_from_env(),
         })
     }
 }
@@ -767,6 +782,9 @@ async fn purge_step<S: Store + 'static>(
     let upto = (durable - 1)
         .min(applied)
         .min(floor)
+        // A standby reading this log is no follower, and holds it the same
+        // way: the purge stays behind every reader heard from lately.
+        .min(shared.link_holds.floor())
         .saturating_sub(opts.keep);
     let next = m.purged.as_ref().map_or(0, |p| p.index + 1);
     if upto < next + opts.batch {
@@ -1259,6 +1277,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
             admin: Arc::new(admin::AdminCtx::new(opts.promote_max_lag, live_within)),
             apply_failure: Mutex::new(None),
             state_dir: state_dir.clone(),
+            link_holds: link::Holds::open(&state_dir, opts.link_hold, opts.link_hold_disk_pct),
         });
         // The membership checks' catalogue inputs (D20): the committed cluster
         // version, and the token a joining node's `/raft/v1/state` takes.
@@ -1445,18 +1464,23 @@ impl<S: Store + 'static> RaftReplicator<S> {
             }
         }
 
-        let net = match &cluster {
-            None => Net::None(NoNetwork),
-            Some(c) => Net::Http(HttpNetwork::new(
+        // What sends this node's snapshot: to a follower that is too far
+        // behind, and to a standby cluster's seed ([`link`]).
+        let send_ctx = cluster.as_ref().map(|_| {
+            Arc::new(SendCtx::new(
+                data_dir.clone(),
+                store.clone(),
+                opened.reader.clone(),
+                sm.membership_at(),
+            ))
+        });
+        let net = match (&cluster, &send_ctx) {
+            (Some(c), Some(snap)) => Net::Http(HttpNetwork::new(
                 c.token.clone(),
-                Arc::new(SendCtx::new(
-                    data_dir.clone(),
-                    store.clone(),
-                    opened.reader.clone(),
-                    sm.membership_at(),
-                )),
+                snap.clone(),
                 shared.members.clone(),
             )),
+            _ => Net::None(NoNetwork),
         };
         let members: BTreeMap<NodeId, Node> = match &cluster {
             Some(c) => c.members.clone(),
@@ -1498,6 +1522,16 @@ impl<S: Store + 'static> RaftReplicator<S> {
                     shared.local.clone(),
                     shared.members.clone(),
                     shared.admin.clone(),
+                    // A standby cluster reads this node's log only where the
+                    // node has a token to ask it for (`QUEEN_LINK_TOKEN`).
+                    c.link_token
+                        .as_deref()
+                        .zip(send_ctx.clone())
+                        .map(|(t, snap)| network::LinkRpc {
+                            source: link::LinkSource::new(log.clone(), shared.clone()),
+                            snap,
+                            token: Arc::<str>::from(t),
+                        }),
                 ))
             }
             _ => None,
@@ -1515,8 +1549,17 @@ impl<S: Store + 'static> RaftReplicator<S> {
                     }
                     .map_err(|e| io::Error::other(format!("openraft start: {e}")))?;
                     #[cfg(feature = "server")]
-                    if let Some((listener, token, stop_rx, snap, remote, local, view, admin)) =
-                        rpc_serve
+                    if let Some((
+                        listener,
+                        token,
+                        stop_rx,
+                        snap,
+                        remote,
+                        local,
+                        view,
+                        admin,
+                        link_rpc,
+                    )) = rpc_serve
                     {
                         let state = network::RpcState {
                             raft: raft.clone(),
@@ -1526,6 +1569,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
                             local,
                             members: view,
                             admin,
+                            link: link_rpc,
                         };
                         tokio::spawn(network::serve(listener, state, async move {
                             let _ = stop_rx.await;
@@ -2083,6 +2127,11 @@ impl<S: Store + 'static> RaftReplicator<S> {
         self.log.cached()
     }
 
+    /// This node's log as a standby cluster reads it ([`link`]).
+    pub fn link_source(&self) -> link::LinkSource {
+        link::LinkSource::new(self.log.clone(), self.shared.clone())
+    }
+
     /// The RSM index of the last entry openraft purged (0 for none).
     pub fn purged_index(&self) -> u64 {
         self.metrics_now()
@@ -2578,6 +2627,27 @@ async fn peer_with_state(c: &ClusterConfig) -> Option<NodeId> {
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
+}
+
+/// [`peer_with_state`] from a boot path, before any replicator exists: the
+/// node of `c`'s cluster that already holds cluster state, if one does. A
+/// standby's seed asks it first ([`crate::rsm::link::seed`]): a node whose
+/// disk was emptied under a cluster that lives on must join that cluster,
+/// never seed itself into a second one. Blocking, on a thread and a runtime
+/// of its own (the caller may be on a runtime worker).
+pub fn peer_holding_state(c: &ClusterConfig) -> Option<NodeId> {
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            rt.block_on(peer_with_state(c))
+        })
+        .join()
+        .ok()
+        .flatten()
+    })
 }
 
 fn repl_err<E: std::fmt::Display>(e: E) -> ReplError {

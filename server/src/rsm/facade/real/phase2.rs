@@ -19,6 +19,7 @@ use crate::rsm::store::{Keyspace, Reads, Store, StoreError, TypedReads};
 
 mod admin;
 mod dash;
+mod link;
 mod offsets;
 mod positions;
 mod reads;
@@ -134,6 +135,8 @@ impl RaftFacade {
                 self.api_flag_set(ctx, "ephemeral_enabled", &req.body).await
             }
             ("GET", "/api/v1/system/shared-state") => self.api_shared_state(ctx).await,
+            ("GET", "/api/v1/system/link") => self.api_link_status().await,
+            ("POST", "/api/v1/system/link/promote") => self.api_link_promote(ctx).await,
             ("POST", "/api/v1/ephemeral/configure") => {
                 self.api_ephemeral_configure(ctx, &req.body).await
             }
@@ -160,6 +163,9 @@ impl RaftFacade {
         });
         match self.submit(ctx, cmd).await? {
             Reply::Done { .. } => Ok(()),
+            Reply::Refused(r) if r.code == crate::rsm::link::STANDBY_CODE => {
+                Err(RsmError::Standby)
+            }
             Reply::Refused(r) if r.retryable => Err(RsmError::Retry { leader_hint: None }),
             Reply::Refused(r) => Err(RsmError::Rejected {
                 code: r.code,

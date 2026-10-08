@@ -302,12 +302,20 @@ fn materialize(ctx: &SendCtx, dir: &Path) -> io::Result<(u64, u64, Vec<FileEntry
     Ok((applied, term, files))
 }
 
-/// The request body: prefix, every file, the checksum. Read on a plain thread.
-fn body_of(dir: PathBuf, prefix: Vec<u8>, files: Vec<FileEntry>) -> Body {
+/// The request body: prefix, every file, the checksum. Read on a plain thread,
+/// which holds `keep` (the staging directory the files are read from) until
+/// it has read the last of them or the receiver went away.
+fn body_of(
+    dir: PathBuf,
+    prefix: Vec<u8>,
+    files: Vec<FileEntry>,
+    keep: Option<Arc<Staging>>,
+) -> Body {
     let (tx, rx) = tokio::sync::mpsc::channel::<io::Result<Bytes>>(8);
     std::thread::Builder::new()
         .name("queen-raft-snap-send".into())
         .spawn(move || {
+            let _keep = keep;
             let run = || -> io::Result<()> {
                 if tx.blocking_send(Ok(Bytes::from(prefix))).is_err() {
                     return Ok(());
@@ -411,13 +419,69 @@ pub(crate) async fn send(
         url,
         token,
         "application/octet-stream",
-        body_of(dir.clone(), prefix, files),
+        body_of(dir.clone(), prefix, files, None),
         ttl,
     )
     .await;
     drop(staging);
     let bytes = res?;
     serde_json::from_slice(&bytes).map_err(|e| Fail::Network(format!("snapshot answer: {e}")))
+}
+
+/// This node's snapshot as a stream, for a caller that is not a follower: a
+/// standby cluster's seed ([`crate::rsm::link::seed`]). The same stream a
+/// follower receives — the store's checkpoint as it is now, every queue-log
+/// and segment file, the checksum — built the same way ([`materialize`]). The
+/// header's vote says nothing (the receiver starts a cluster of its own) and
+/// its membership is this cluster's, which the receiver replaces.
+///
+/// The staging directory lives as long as the stream is read.
+pub(crate) async fn stream_checkpoint(ctx: &Arc<SendCtx>) -> io::Result<Body> {
+    let dir = ctx
+        .data_dir
+        .join(SNAP_DIR)
+        .join(format!("seed-{}", stamp()));
+    let staging = Arc::new(Staging(dir.clone()));
+    let c = ctx.clone();
+    let s = staging.clone();
+    let (applied, applied_term, files) =
+        tokio::task::spawn_blocking(move || materialize(&c, &s.0))
+            .await
+            .map_err(|e| io::Error::other(format!("snapshot build: {e}")))??;
+    let last_log_id = applied_log_id(applied, applied_term);
+    let Some(last_membership) = (ctx.membership_at)(&last_log_id) else {
+        return Err(io::Error::other(format!(
+            "snapshot at {last_log_id:?}: the membership in force there is no longer known; \
+             ask again"
+        )));
+    };
+    let total: u64 = files.iter().map(|f| f.len).sum();
+    tracing::info!(
+        target: "rsm",
+        last_log_id = ?last_log_id,
+        applied,
+        files = files.len(),
+        bytes = total,
+        "raft: streaming a snapshot to a standby cluster's seed",
+    );
+    let header = Header {
+        // No leader sends this: the receiver starts a cluster of its own.
+        vote: Vote::new(applied_term, 0),
+        meta: SnapshotMeta {
+            last_log_id,
+            last_membership,
+        },
+        applied,
+        applied_term,
+        files: files.clone(),
+    };
+    let header = serde_json::to_vec(&header).map_err(io::Error::other)?;
+    let mut prefix = Vec::with_capacity(9 + header.len());
+    prefix.extend_from_slice(MAGIC);
+    prefix.push(VERSION);
+    prefix.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    prefix.extend_from_slice(&header);
+    Ok(body_of(dir, prefix, files, Some(staging)))
 }
 
 /// A sender's staging directory (an LMDB copy, hard links to every queue-log
@@ -543,7 +607,143 @@ pub(crate) async fn receive<S: Store + 'static>(
     let Ok(_one) = ctx.receiving.try_lock() else {
         return Err(io::Error::other("another snapshot is being received here"));
     };
-    let mut stream = body.into_data_stream();
+    let (header, rel_dir) = stage_stream(&ctx.data_dir, body.into_data_stream()).await?;
+    let staged = ctx.data_dir.join(&rel_dir);
+
+    // The marker goes down BEFORE openraft sees the snapshot: see the module
+    // header, step 1.
+    write_pending(
+        &ctx.data_dir,
+        &header,
+        rel_dir,
+        header.meta.last_membership.clone(),
+    )?;
+    tracing::info!(
+        target: "rsm",
+        last_log_id = ?header.meta.last_log_id,
+        applied = header.applied,
+        "raft: a snapshot is staged; handing it to openraft",
+    );
+    let snap = Snapshot {
+        meta: header.meta.clone(),
+        snapshot: Checkpoint {
+            last_log_id: header.meta.last_log_id,
+        },
+    };
+    match raft.install_full_snapshot(header.vote, snap).await {
+        Ok(resp) => {
+            if ctx.restart.requested().is_none() {
+                // openraft did not install it: this node already has as much.
+                let _ = fs::remove_file(ctx.data_dir.join(PENDING));
+                let _ = fs::remove_dir_all(&staged);
+            }
+            Ok(Ok(resp))
+        }
+        // The state machine stopped openraft to load the snapshot at the
+        // restart: it is durably staged, so tell the leader it is installed (it
+        // then replicates from the snapshot on instead of sending it again).
+        Err(_) if ctx.restart.requested().is_some() => Ok(Ok(SnapshotResponse::new(header.vote))),
+        Err(fatal) => Ok(Err(RaftError::Fatal(fatal))),
+    }
+}
+
+/// Write `snapshot.pending` for the snapshot staged at `rel_dir`: at the next
+/// boot [`apply_pending`] swaps it in, with `membership` as the node's.
+fn write_pending(
+    data_dir: &Path,
+    header: &Header,
+    rel_dir: String,
+    membership: StoredMembership,
+) -> io::Result<()> {
+    let traces_prefix = format!("{}/", crate::rsm::traces::DIR);
+    let pending = Pending {
+        staged: rel_dir,
+        applied: header.applied,
+        applied_term: header.applied_term,
+        last_log_id: header.meta.last_log_id,
+        membership,
+        traces: header
+            .files
+            .iter()
+            .any(|f| f.path.starts_with(&traces_prefix)),
+    };
+    write_atomic(
+        data_dir,
+        PENDING,
+        &serde_json::to_vec(&pending).map_err(io::Error::other)?,
+    )
+}
+
+/// What a standby's seed staged ([`stage_seed`]): where the source's log
+/// stood in the snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Seeded {
+    /// The source's RSM index the snapshot's store had applied.
+    pub applied: u64,
+    pub applied_term: u64,
+}
+
+/// Stage a source cluster's snapshot stream ([`stream_checkpoint`]) under
+/// `data_dir` as the first state of a NEW cluster whose only voter is this
+/// node: at the next boot [`apply_pending`] swaps it in.
+///
+/// Two things make it a cluster of its own, not a member of the source's:
+///
+/// - the membership the node boots with names `node_id` alone, at `node`'s
+///   addresses — the source's membership never reaches the disk;
+/// - the node's vote is its own, in the term AFTER the snapshot's last entry,
+///   so the first entry it writes as leader does not take the log's terms
+///   backwards (what `QUEEN_RAFT_FORCE_RECOVER` does for a survivor).
+///
+/// `data_dir` must hold no data: the caller checked.
+pub async fn stage_seed<St, E>(
+    data_dir: &Path,
+    stream: St,
+    node_id: NodeId,
+    node: super::types::QueenNode,
+) -> io::Result<Seeded>
+where
+    St: futures_util::Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    let (header, rel_dir) = stage_stream(data_dir, stream).await?;
+    let membership = super::types::Membership::new(
+        vec![std::collections::BTreeSet::from([node_id])],
+        std::collections::BTreeMap::from([(node_id, node)]),
+    )
+    .map_err(|e| io::Error::other(format!("the seeded membership: {e}")))?;
+    let term = header.applied_term + 1;
+    super::log_store::seed_vote(&data_dir.join("raft"), Vote::new(term, node_id))?;
+    write_pending(
+        data_dir,
+        &header,
+        rel_dir,
+        StoredMembership::new(header.meta.last_log_id, membership),
+    )?;
+    sync_dir(data_dir)?;
+    tracing::warn!(
+        target: "rsm",
+        node = node_id,
+        applied = header.applied,
+        applied_term = header.applied_term,
+        files = header.files.len(),
+        "raft: a source cluster's snapshot is staged as this node's first state",
+    );
+    Ok(Seeded {
+        applied: header.applied,
+        applied_term: header.applied_term,
+    })
+}
+
+/// Read a snapshot stream into a fresh staging directory under `data_dir`
+/// and check it: the header, every file, the checksum. Returns the header and
+/// the staging directory, relative to `data_dir`. Nothing is left behind on
+/// an error.
+async fn stage_stream<St, E>(data_dir: &Path, mut stream: St) -> io::Result<(Header, String)>
+where
+    St: futures_util::Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
     let mut buf: Vec<u8> = Vec::new();
     // The prefix and header.
     let header: Header = loop {
@@ -572,7 +772,7 @@ pub(crate) async fn receive<S: Store + 'static>(
         .map(|f| safe_rel(&f.path))
         .collect::<io::Result<_>>()?;
     let rel_dir = format!("{SNAP_DIR}/recv-{}", stamp());
-    let staged = ctx.data_dir.join(&rel_dir);
+    let staged = data_dir.join(&rel_dir);
     let _ = fs::remove_dir_all(&staged);
     fs::create_dir_all(&staged)?;
 
@@ -636,53 +836,7 @@ pub(crate) async fn receive<S: Store + 'static>(
         }
     };
     let _ = trailer;
-
-    // The marker goes down BEFORE openraft sees the snapshot: see the module
-    // header, step 1.
-    let traces_prefix = format!("{}/", crate::rsm::traces::DIR);
-    let pending = Pending {
-        staged: rel_dir,
-        applied: header.applied,
-        applied_term: header.applied_term,
-        last_log_id: header.meta.last_log_id,
-        membership: header.meta.last_membership.clone(),
-        traces: header
-            .files
-            .iter()
-            .any(|f| f.path.starts_with(&traces_prefix)),
-    };
-    write_atomic(
-        &ctx.data_dir,
-        PENDING,
-        &serde_json::to_vec(&pending).map_err(io::Error::other)?,
-    )?;
-    tracing::info!(
-        target: "rsm",
-        last_log_id = ?header.meta.last_log_id,
-        applied = header.applied,
-        "raft: a snapshot is staged; handing it to openraft",
-    );
-    let snap = Snapshot {
-        meta: header.meta.clone(),
-        snapshot: Checkpoint {
-            last_log_id: header.meta.last_log_id,
-        },
-    };
-    match raft.install_full_snapshot(header.vote, snap).await {
-        Ok(resp) => {
-            if ctx.restart.requested().is_none() {
-                // openraft did not install it: this node already has as much.
-                let _ = fs::remove_file(ctx.data_dir.join(PENDING));
-                let _ = fs::remove_dir_all(&staged);
-            }
-            Ok(Ok(resp))
-        }
-        // The state machine stopped openraft to load the snapshot at the
-        // restart: it is durably staged, so tell the leader it is installed (it
-        // then replicates from the snapshot on instead of sending it again).
-        Err(_) if ctx.restart.requested().is_some() => Ok(Ok(SnapshotResponse::new(header.vote))),
-        Err(fatal) => Ok(Err(RaftError::Fatal(fatal))),
-    }
+    Ok((header, rel_dir))
 }
 
 // ---------------------------------------------------------------------------

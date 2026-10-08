@@ -365,6 +365,69 @@ async fn a_timeout_keeps_the_entry_in_flight_without_duplicate_offsets() {
     fx.close().await;
 }
 
+/// A node that stops while it leads with an entry that will never commit still
+/// stops: the last node of a cluster to go down has lost its quorum, and an
+/// entry it logged a moment before never applies. The entry's waiter is
+/// answered `Retry` when the propose times out; the driver then holds the
+/// pipeline on it (I3) so that nothing is planned over it — and a closing
+/// driver plans nothing more, so it leaves, and what waited behind the entry
+/// is answered `Retry` on the way out. It used to wait for the entry to apply:
+/// for ever, spinning on its closed command channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closing_driver_does_not_wait_for_an_entry_that_never_commits() {
+    // Closed after the entry timed out.
+    let fx = FakeFixture::open("close-held", small_pipeline(2, 60));
+    fx.fake.set_default(Step::Timeout);
+    let first = submit(&fx.tx, push(1, "q", "p0", &["a"])).await;
+    assert!(
+        matches!(first, Reply::Retry { .. }),
+        "a timeout answers Retry, got {first:?}"
+    );
+    // Queued behind the held pipeline: never planned.
+    let (sub, behind) = Submission::new(push(2, "q", "p0", &["b"]));
+    fx.tx.send(sub).await.expect("send");
+    let FakeFixture {
+        tx, handle, dir, ..
+    } = fx;
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the driver left with an entry it holds on")
+        .expect("the driver task");
+    let behind = behind.await.expect("reply");
+    assert!(
+        matches!(behind, Reply::Retry { .. }),
+        "what waited behind the entry retries, got {behind:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Closed while the entry is still within its deadline: its waiter gets
+    // its answer first (the timeout's `Retry`), then the driver leaves.
+    let fx = FakeFixture::open("close-inflight", small_pipeline(2, 300));
+    fx.fake.set_default(Step::Timeout);
+    let (sub, waiting) = Submission::new(push(1, "q", "p0", &["a"]));
+    fx.tx.send(sub).await.expect("send");
+    let end = Instant::now() + Duration::from_secs(10);
+    while fx.fake.proposal_count() == 0 {
+        assert!(Instant::now() < end, "the entry was never proposed");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let FakeFixture {
+        tx, handle, dir, ..
+    } = fx;
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the driver left once the entry timed out")
+        .expect("the driver task");
+    let waiting = waiting.await.expect("reply");
+    assert!(
+        matches!(waiting, Reply::Retry { .. }),
+        "the entry's waiter retries, got {waiting:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// PERF-G (`QUEEN_RAFT_DRIVER_NOTIFY`, default on): when the applied index
 /// advances past an in-flight entry the driver answers its waiter `Done` off
 /// the applied-index wake, WITHOUT waiting for the propose future — so an entry

@@ -109,6 +109,8 @@ fn test_opts() -> RaftOpts {
         apply_skip: Vec::new(),
         promote_max_lag: 1000,
         kinds: Some(crate::rsm::effect::SUPPORTED_KINDS_VERSION),
+        link_hold: Duration::from_secs(3600),
+        link_hold_disk_pct: 100.0,
     }
 }
 

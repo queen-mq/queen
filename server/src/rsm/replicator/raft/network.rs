@@ -578,7 +578,7 @@ impl RaftNetworkV2<TypeConfig> for HttpPeer {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "server")]
-pub(crate) use server::{bind, serve, RpcState};
+pub(crate) use server::{bind, serve, LinkRpc, RpcState};
 
 #[cfg(feature = "server")]
 mod server {
@@ -613,6 +613,39 @@ mod server {
         /// The membership changes a follower forwards here, on the leader
         /// ([`super::super::admin`]).
         pub(crate) admin: Arc<super::super::admin::AdminCtx>,
+        /// This node's log for a standby cluster's reads, when the node
+        /// serves a link ([`super::super::link`]).
+        pub(crate) link: Option<LinkRpc>,
+    }
+
+    /// What a standby's calls need: this node's log for its reads, this
+    /// node's snapshot for its seed, and the token the standby presents
+    /// (`QUEEN_LINK_TOKEN`).
+    pub(crate) struct LinkRpc {
+        pub(crate) source: super::super::link::LinkSource,
+        pub(crate) snap: Arc<super::super::snapshot::SendCtx>,
+        pub(crate) token: Arc<str>,
+    }
+
+    impl LinkRpc {
+        /// The link's own token check: 404 on a node that serves no link,
+        /// 401 for any other token than the link's.
+        #[allow(clippy::result_large_err)]
+        fn admit<'a>(link: &'a Option<LinkRpc>, headers: &HeaderMap) -> Result<&'a LinkRpc, Response> {
+            use crate::rsm::link::wire::TOKEN_HEADER;
+            let Some(link) = link else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    "this node serves no cluster link: QUEEN_LINK_TOKEN is not set",
+                )
+                    .into_response());
+            };
+            let presented = headers.get(TOKEN_HEADER).map(|v| v.as_bytes());
+            if !presented.is_some_and(|g| token_eq(g, link.token.as_bytes())) {
+                return Err((StatusCode::UNAUTHORIZED, "bad link token").into_response());
+            }
+            Ok(link)
+        }
     }
 
     impl<S: Store + 'static> RpcState<S> {
@@ -945,6 +978,66 @@ mod server {
         }
     }
 
+    /// A standby cluster's read of this node's log ([`super::super::link`]).
+    /// Not behind [`guard`]: a standby presents the LINK's token, never the
+    /// cluster's, so what it holds lets it read and nothing else — no vote,
+    /// no append, no membership change. Without `QUEEN_LINK_TOKEN` the node
+    /// serves no link at all.
+    async fn link_read<S: Store + 'static>(
+        State(st): State<Arc<RpcState<S>>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        let link = match LinkRpc::admit(&st.link, &headers) {
+            Ok(link) => link,
+            Err(refused) => return refused,
+        };
+        let req: crate::rsm::link::wire::Request = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => return bad_request(e),
+        };
+        // Non-core, as every RPC behind the guard is: a panic in one read
+        // fails that read.
+        match crate::obs::panic_policy::non_core(link.source.serve(req)).await {
+            Ok(answer) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/octet-stream")],
+                answer,
+            )
+                .into_response(),
+            Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+        }
+    }
+
+    /// A standby cluster's SEED: this node's snapshot as a stream
+    /// ([`super::super::snapshot::stream_checkpoint`]) — what a follower
+    /// that is too far behind receives, asked for with the link's token
+    /// instead of pushed by a leader. Any node can serve it.
+    async fn link_snapshot<S: Store + 'static>(
+        State(st): State<Arc<RpcState<S>>>,
+        headers: HeaderMap,
+    ) -> Response {
+        let link = match LinkRpc::admit(&st.link, &headers) {
+            Ok(link) => link,
+            Err(refused) => return refused,
+        };
+        let built = crate::obs::panic_policy::non_core(
+            super::super::snapshot::stream_checkpoint(&link.snap),
+        )
+        .await;
+        match built {
+            Ok(body) => {
+                let mut resp = Response::new(body);
+                resp.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/octet-stream"),
+                );
+                resp
+            }
+            Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+        }
+    }
+
     /// Bind the Raft RPC listener. Blocking, at boot: a taken port fails the
     /// open instead of a background task.
     pub(crate) fn bind(addr: &str) -> std::io::Result<std::net::TcpListener> {
@@ -1017,6 +1110,17 @@ mod server {
                 state.clone(),
                 guard::<S>,
             ))
+            // A standby's calls: after the guard's layer, so outside it (they
+            // check the link's own token, `LinkRpc::admit`).
+            .merge(
+                axum::Router::new()
+                    .route(crate::rsm::link::wire::READ_PATH, post(link_read::<S>))
+                    .route(
+                        crate::rsm::link::wire::SNAPSHOT_PATH,
+                        post(link_snapshot::<S>),
+                    )
+                    .layer(DefaultBodyLimit::max(CONTROL_BODY_CAP)),
+            )
             .with_state(state);
         // No Nagle: the append stream's answers are small frames written one
         // at a time, and a unary answer is one small body; either would wait
