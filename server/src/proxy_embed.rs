@@ -96,6 +96,9 @@ impl KvBackend for RsmKv {
                 Err(KvFailure::Precondition { detail }) => Err(KvError::Precondition {
                     detail: serde_json::from_str(&detail).unwrap_or(Value::String(detail)),
                 }),
+                Err(KvFailure::NotYet { reason, detail }) => {
+                    Err(KvError::Unavailable(format!("{reason}: {detail}")))
+                }
                 Err(KvFailure::Rsm(e)) => Err(KvError::Unavailable(e.to_string())),
             }
         })

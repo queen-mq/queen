@@ -997,6 +997,10 @@ pub(crate) fn build_raft_router(
             get(super::handle_kv_namespaces),
         )
         .route("/api/v1/resources/kv/list", post(super::handle_kv_list))
+        // ------------------------------------------------- locks → kv → facade
+        // A lock and a semaphore, as leases stored in KV: the one route, whose
+        // handler turns each operation into the KV calls above (`locks.rs`).
+        .route("/api/v1/locks", post(super::handle_locks_batch))
         // ------------------------------------ timers (WP-2.3) → facade, 025's wire
         // The four timer routes; the handlers dispatch to the state machine.
         .route("/api/v1/timers", post(super::handle_timers_batch))
@@ -2024,6 +2028,177 @@ mod tests {
         )
         .await;
         assert!(text.contains("\"found\":false"), "{text}");
+
+        drop(st);
+        if let Ok(f) = Arc::try_unwrap(facade) {
+            f.shutdown().await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `POST /api/v1/locks`, through the REAL handler and the REAL state
+    /// machine: the envelope, the status rule (a held lock is a 200), the
+    /// refusals by name, the series, and the claim the whole feature rests on
+    /// — a permit is a KV row, so the KV routes show it and an operator
+    /// breaks a stuck lock with a KV delete.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn the_locks_route_is_served_through_kv_in_raft_mode() {
+        use std::collections::HashMap;
+
+        use crate::metrics::{KvResult, LockOp};
+        use crate::rsm::facade::real::RaftFacade;
+        use crate::rsm::facade::RsmBuildCtx;
+
+        std::env::set_var("QUEEN_RAFT_MAP_BYTES", (256usize << 20).to_string());
+        let dir =
+            std::env::temp_dir().join(format!("queen-raft-locks-route-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let facade = Arc::new(
+            RaftFacade::open(&RsmBuildCtx {
+                data_dir: dir.display().to_string(),
+                notifier: crate::notify::Notifier::new(false),
+                disk_high_pct: 85.0,
+                disk_low_pct: 80.0,
+            })
+            .expect("open the facade"),
+        );
+        let mut s = Arc::try_unwrap(raft_state())
+            .ok()
+            .expect("a fresh raft state has one owner");
+        s.rsm = facade.clone();
+        let st = Arc::new(s);
+        let t = || Extension(Tenant::default_tenant());
+        let q = || Query(HashMap::<String, String>::new());
+        let locks = |body: &str| {
+            super::super::handle_locks_batch(State(st.clone()), t(), Bytes::from(body.to_string()))
+        };
+        let results = |text: &str| -> Vec<serde_json::Value> {
+            let b: serde_json::Value = serde_json::from_str(text).expect("json");
+            b["results"].as_array().expect("results").clone()
+        };
+
+        // Acquire, in the envelope and as a bare array.
+        let (status, text) = body_of(
+            locks(r#"{"operations":[{"op":"acquire","name":"daily-report","ttlSeconds":30,"owner":"a"}]}"#)
+                .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let a = results(&text).remove(0);
+        assert_eq!(a["acquired"], true, "{text}");
+        let token = a["token"].as_u64().expect("a token");
+        assert_eq!(a["guard"]["key"], "daily-report#0");
+
+        // Held by somebody else: 200, with the verdict in the body.
+        let (status, text) = body_of(
+            locks(r#"[{"op":"acquire","name":"daily-report","ttlSeconds":30,"owner":"b"}]"#).await,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a held lock is not an error: {text}"
+        );
+        let b = results(&text).remove(0);
+        assert_eq!(b["acquired"], false, "{text}");
+        assert_eq!(b["reason"], "held");
+        assert_eq!(b["holders"][0]["owner"], "a");
+
+        // The series: one acquire applied, one rejected, no error.
+        let m = &st.metrics.kvt;
+        assert_eq!(m.lock_ops_total(LockOp::Acquire, KvResult::Applied), 1);
+        assert_eq!(m.lock_ops_total(LockOp::Acquire, KvResult::Rejected), 1);
+        assert_eq!(m.lock_ops_total(LockOp::Acquire, KvResult::Error), 0);
+
+        // Refused by name, before anything is sent.
+        for (body, reason) in [
+            ("{", "locks_bad_body"),
+            (r#"{"ops":[]}"#, "locks_bad_body"),
+            (r#"[{"op":"acquire","name":"x"}]"#, "locks_ttl_required"),
+            (
+                r#"[{"op":"acquire","name":"a#b","ttlSeconds":1}]"#,
+                "locks_bad_name",
+            ),
+            (r#"[{"op":"release","name":"x"}]"#, "locks_token_required"),
+        ] {
+            let (status, text) = body_of(locks(body).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {text}");
+            assert!(text.contains("\"error\":\"locks_bad_request\""), "{text}");
+            assert!(text.contains(reason), "{body}: {text}");
+        }
+        // An empty call is an empty answer.
+        let (status, text) = body_of(locks("[]").await).await;
+        assert_eq!(
+            (status, text.as_str()),
+            (StatusCode::OK, r#"{"results":[]}"#)
+        );
+
+        // The permit is a KV row: the console list of the lock namespace
+        // shows it, at the version that is the token.
+        let (status, text) = body_of(
+            super::super::handle_kv_list(
+                State(st.clone()),
+                t(),
+                q(),
+                Bytes::from_static(br#"{"namespace":"queen-locks"}"#),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let l: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(l["rows"].as_array().map(Vec::len), Some(1), "{text}");
+        assert_eq!(l["rows"][0]["key"], "daily-report#0");
+        assert_eq!(l["rows"][0]["value"], serde_json::json!({"owner":"a"}));
+        assert_eq!(l["rows"][0]["version"].as_u64(), Some(token));
+
+        // An operator breaks the lock with a KV delete; b takes it, and a's
+        // release is told the permit is b's.
+        let (status, text) = body_of(
+            super::super::handle_kv_delete(
+                State(st.clone()),
+                t(),
+                Path(("queen-locks".to_string(), "daily-report#0".to_string())),
+                q(),
+                Bytes::new(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(text.contains("\"applied\":true"), "{text}");
+        let (_, text) = body_of(
+            locks(r#"[{"op":"acquire","name":"daily-report","ttlSeconds":30,"owner":"b"}]"#).await,
+        )
+        .await;
+        let b = results(&text).remove(0);
+        assert_eq!(b["acquired"], true, "{text}");
+        assert!(b["token"].as_u64().unwrap() > token);
+        let (_, text) = body_of(
+            locks(&format!(
+                r#"[{{"op":"release","name":"daily-report","token":{token}}},{{"op":"get","name":"gpu"}}]"#
+            ))
+            .await,
+        )
+        .await;
+        let r = results(&text);
+        assert_eq!(r[0]["released"], false, "{text}");
+        assert_eq!(r[0]["holders"][0]["owner"], "b");
+        assert_eq!(r[1]["held"], false, "{text}");
+
+        // The operator's KV switch turns the locks off with the keys: a
+        // permit is a KV row, and the ladder is KV's.
+        st.switches.set_kv(false);
+        let (status, text) = body_of(
+            locks(r#"[{"op":"acquire","name":"other","ttlSeconds":30,"owner":"a"}]"#).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+        let (status, _) = body_of(locks(r#"[{"op":"get","name":"other"}]"#).await).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        st.switches.set_kv(true);
+        let (status, text) = body_of(locks(r#"[{"op":"get","name":"other"}]"#).await).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
 
         drop(st);
         if let Ok(f) = Arc::try_unwrap(facade) {

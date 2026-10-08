@@ -148,6 +148,11 @@ fn kv_failure(f: KvFailure) -> Response {
             "bad_request",
             format!("{reason}: {detail}"),
         ),
+        KvFailure::NotYet { reason, detail } => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            format!("{reason}: {detail}"),
+        ),
         KvFailure::Rsm(e) => crate::handlers::raft::err_response(e),
     }
 }

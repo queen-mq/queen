@@ -20,6 +20,10 @@ mod proxy_embed;
 // its own runtime, calling the broker through the router — no child.
 #[cfg(feature = "kafka")]
 mod kafka_inproc;
+// Locks: `POST /api/v1/locks`, turned into KV calls by the node that received
+// it. Twin of the `mod locks;` in lib.rs (the twin-list rule of its header).
+#[allow(dead_code)]
+mod locks;
 #[allow(dead_code)]
 mod metrics;
 #[allow(dead_code)]

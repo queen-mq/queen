@@ -105,6 +105,8 @@ mod connectors;
 mod data;
 // PLAN_KV_TIMERS.md §8.1 — the KV and timer HTTP surfaces.
 mod kv;
+// `POST /api/v1/locks`: locks and semaphores, as KV calls (`crate::locks`).
+mod locks;
 // EPHEMERAL_QUEUES.md §3.3 — the three hot verbs of the RAM-class queues.
 mod ephemeral;
 #[allow(dead_code)]
@@ -126,6 +128,7 @@ pub use connectors::*;
 pub use data::*;
 pub use ephemeral::*;
 pub use kv::*;
+pub use locks::*;
 // The embedded API (src/embedded) calls these; the binary serves the same
 // routes through the facade fallback (`handlers::raft::raft_fallback`).
 #[allow(unused_imports)]

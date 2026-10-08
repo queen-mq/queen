@@ -480,6 +480,28 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
         };
     }
 
+    // --- locks (the broker's `locks.rs`: a permit is a KV row) ---
+    //
+    // The plan gate is KV's — a lock is a `putIfAbsent` with a lifetime, so a
+    // cell whose plan has no `kv` has no locks — and the quota half is `Open`:
+    // never refused by a storage block or a billing hold. A tenant drains its
+    // backlog with the workers its locks coordinate, and a block that took
+    // their locks away would stop the consumers that get it back under its
+    // quota (the §9.6 argument, on the consume side). What a permit costs is
+    // bounded where it is stored: the broker charges every `acquire` to the
+    // tenant's KV occupancy and its KV write rate, block or no block.
+    //
+    // NOT `Mixed`, although one body carries `acquire` beside `release`:
+    // `Gated(Kv, Mixed)` is `POST /api/v1/kv` and nothing else, which is what
+    // lets `kafka_kv::is_kv_batch` key on the class.
+    if p == "/api/v1/locks" || p == "/api/v1/locks/" {
+        return if *m == Method::POST {
+            RouteClass::Gated(Feature::Kv, GatedOp::Open)
+        } else {
+            RouteClass::Blocked
+        };
+    }
+
     // --- timers (§8.1, §9.6) ---
     if p == "/api/v1/timers" || p == "/api/v1/timers/" {
         return if *m == Method::POST {
@@ -1031,6 +1053,33 @@ mod tests {
             assert_eq!(classify(&m, "/api/v1/kv"), RouteClass::Blocked, "{m} /api/v1/kv");
         }
         assert_eq!(classify(&Method::PATCH, "/api/v1/kv/ns/k"), RouteClass::Blocked);
+    }
+
+    /// The locks route: KV's plan flag, never the storage block, and never
+    /// the class the Kafka override keys on.
+    #[test]
+    fn locks_are_gated_by_the_kv_plan_and_never_blocked() {
+        for p in ["/api/v1/locks", "/api/v1/locks/"] {
+            let class = classify(&Method::POST, p);
+            assert_eq!(class, RouteClass::Gated(Feature::Kv, GatedOp::Open), "{p}");
+            assert!(
+                !crate::kafka_kv::is_kv_batch(class),
+                "a locks call is not the KV batch whose body decides its class"
+            );
+        }
+        // One route, one method: nothing else is served there.
+        for m in [Method::GET, Method::PUT, Method::DELETE, Method::PATCH] {
+            assert_eq!(classify(&m, "/api/v1/locks"), RouteClass::Blocked, "{m}");
+        }
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/locks/daily-report"),
+            RouteClass::Blocked,
+            "a lock is named in the body, never in the path"
+        );
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/locksmith"),
+            RouteClass::Blocked
+        );
     }
 
     /// §9.6, the whole point of the split. The cancel route must never come

@@ -203,7 +203,14 @@ fn every_kind_pins_its_catalogue_version() {
             all.push(v3);
         }
     }
-    assert_eq!(kinds_version_of(&all), SUPPORTED_KINDS_VERSION);
+    // The highest version an EFFECT is minted at. This build supports one
+    // more: catalogue version 5 is a forwarded command shape (the KV `check`
+    // op), which logs nothing, so no entry ever reports it.
+    assert_eq!(kinds_version_of(&all), crate::rsm::effect::VERSION_4 as u32);
+    assert_eq!(
+        SUPPORTED_KINDS_VERSION,
+        crate::rsm::effect::VERSION_5 as u32
+    );
 }
 
 #[test]

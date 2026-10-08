@@ -1,7 +1,8 @@
 //! `POST /api/v1/kv` and the three path routes — the key/value surface.
 //!
-//! Seven names, five code paths: `get`, `getMany`, `getPrefix`, `put`,
-//! `putIfAbsent` (an alias for `put` with `expect: 0`), `delete`, `incr`.
+//! Eight names, six code paths: `get`, `getMany`, `getPrefix`, `put`,
+//! `putIfAbsent` (an alias for `put` with `expect: 0`), `delete`, `incr`, and
+//! `check` — a precondition that writes nothing.
 //!
 //! Three rules of this wire are worth stating here, because a client that gets
 //! any of them wrong fails silently rather than loudly:
@@ -136,6 +137,12 @@ pub enum KvOpKind {
     Delete,
     #[serde(rename = "incr")]
     Incr,
+    /// A precondition on a key the call does not write: the key is at
+    /// `expect`, or — `expect: 0` — is not there. It writes nothing. With
+    /// `required` it is the gate of a batch or of a transaction, which is how
+    /// a step is tied to a lock. Needs a broker at cluster version 5.
+    #[serde(rename = "check")]
+    Check,
 }
 
 impl KvOpKind {
@@ -148,6 +155,7 @@ impl KvOpKind {
             Self::PutIfAbsent => "putIfAbsent",
             Self::Delete => "delete",
             Self::Incr => "incr",
+            Self::Check => "check",
         }
     }
 
@@ -324,6 +332,22 @@ impl KvOperation {
         Self {
             key: Some(key.into()),
             ..Self::bare(KvOpKind::Delete, ns)
+        }
+    }
+
+    /// Is the key still at `version`? `0` asks the opposite: the key must not
+    /// exist. Writes nothing and takes no expiry. Add [`Self::required`] to
+    /// make everything beside it — the rest of a batch, a whole transaction —
+    /// commit only if it holds.
+    ///
+    /// The `expect` is mandatory on the wire (a check without one says
+    /// nothing, and the broker refuses it), which is why it is an argument
+    /// here and not the builder method the writes use.
+    pub fn check(ns: impl Into<String>, key: impl Into<String>, version: i64) -> Self {
+        Self {
+            key: Some(key.into()),
+            expect: Some(version),
+            ..Self::bare(KvOpKind::Check, ns)
         }
     }
 
@@ -522,10 +546,12 @@ pub struct KvResult {
 
     /// The current version.
     ///
-    /// **An opaque token, not an ordering.** Compare versions with `==`, never
-    /// with `<`. Versions are unique across every key and never re-issued, on
-    /// purpose: a key that expired, was pruned and was recreated cannot reissue
-    /// a version an old holder still carries.
+    /// **A fencing token for its key.** Versions are unique across every key
+    /// and never re-issued, and on ONE key a later write always carries a
+    /// higher version than every earlier one: across a delete and a
+    /// re-create, an expiry, a restart and a change of leader. So `==` says
+    /// "nobody wrote since", and `<` on the same key says "this one is older".
+    /// Between two different keys the order of versions means nothing.
     ///
     /// On a lost race it is also **advisory**: it is the version when the
     /// precondition was checked and may have changed since, so it must not be
@@ -639,7 +665,8 @@ mod tests {
         };
         let kind = match obj.get("op").and_then(|v| v.as_str()) {
             Some(
-                k @ ("get" | "getMany" | "getPrefix" | "put" | "putIfAbsent" | "delete" | "incr"),
+                k @ ("get" | "getMany" | "getPrefix" | "put" | "putIfAbsent" | "delete" | "incr"
+                | "check"),
             ) => k,
             _ => return Verdict::Raise("kv_unknown_op"),
         };
@@ -680,7 +707,10 @@ mod tests {
         if matches!(kind, "put" | "putIfAbsent") && !obj.contains_key("value") {
             return Verdict::Raise("kv_bad_request");
         }
-        if matches!(kind, "put" | "putIfAbsent" | "delete") {
+        if kind == "check" && !obj.contains_key("expect") {
+            return Verdict::Raise("kv_bad_expect");
+        }
+        if matches!(kind, "put" | "putIfAbsent" | "delete" | "check") {
             if let Some(e) = obj.get("expect") {
                 match e.as_i64() {
                     Some(n) if n >= 0 => {
@@ -731,6 +761,8 @@ mod tests {
             KvOperation::incr("quota", "acme:minute", 1, Expiry::seconds(60))
                 .unwrap()
                 .max(100),
+            KvOperation::check("queen-locks", "daily-report#0", 90101).required(),
+            KvOperation::check("orders", "idem:9137", 0),
         ];
         for op in &ops {
             assert_eq!(
@@ -792,6 +824,53 @@ mod tests {
             validate_like_the_procedure(&body_of(&op), false),
             Verdict::Ok
         );
+    }
+
+    #[test]
+    fn a_check_is_its_expect_and_nothing_else() {
+        // The guard a lock hands out: this exact body, in a KV batch or in a
+        // transaction's `kv` array.
+        let guard = KvOperation::check("queen-locks", "daily-report#0", 90101).required();
+        assert_eq!(
+            serde_json::to_string(&guard).unwrap(),
+            r#"{"op":"check","ns":"queen-locks","key":"daily-report#0","expect":90101,"required":true}"#
+        );
+        assert!(
+            !guard.op.is_write(),
+            "it never counts against an occupancy quota"
+        );
+        for in_wire in [false, true] {
+            assert_eq!(
+                validate_like_the_procedure(&body_of(&guard), in_wire),
+                Verdict::Ok
+            );
+        }
+        // `expect: 0` is "must not exist", and it reaches the wire as 0:
+        // dropping it would send a check that says nothing.
+        let absent = body_of(&KvOperation::check("orders", "k", 0));
+        assert_eq!(absent["expect"], 0);
+        let mut silent = absent.clone();
+        silent.as_object_mut().unwrap().remove("expect");
+        assert_eq!(
+            validate_like_the_procedure(&silent, false),
+            Verdict::Raise("kv_bad_expect")
+        );
+        // The answers: held (the version asked about, and no value), and lost
+        // (what a reader would see).
+        let held: KvResult = serde_json::from_str(
+            r#"{"index":0,"op":"check","applied":true,"key":"daily-report#0","version":90101}"#,
+        )
+        .unwrap();
+        assert!(held.applied());
+        assert_eq!(held.value, None, "a held check hands back no value");
+        let lost: KvResult = serde_json::from_str(
+            r#"{"index":0,"op":"check","applied":false,"reason":"version","key":"daily-report#0",
+                "value":{"owner":"b"},"version":90210}"#,
+        )
+        .unwrap();
+        assert!(!lost.applied());
+        assert_eq!(lost.reason, Some(KvReason::Version));
+        assert_eq!(lost.value.unwrap()["owner"], "b");
     }
 
     #[test]

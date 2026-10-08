@@ -1906,6 +1906,11 @@ impl RaftFacade {
             Ok(o) => o,
             Err(e) => return Ok(answer(e.status, e.reason, &e.detail)),
         };
+        // D20: a `check` goes to the leader only once every member decodes it
+        // (the KV route's own gate, `kv_ops_admitted`). Nothing ran; retryable.
+        if let Err(super::KvFailure::NotYet { reason, detail }) = self.kv_ops_admitted(&kv_ops) {
+            return Ok(answer(503, &reason, &detail));
+        }
         // The positions rider, validated here (names, offsets, metadata) and
         // planned inside the same command.
         let position_ops = match crate::rsm::planner::positions::parse_position_ops(

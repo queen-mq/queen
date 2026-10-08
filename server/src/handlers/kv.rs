@@ -107,7 +107,13 @@ fn note_reject(st: &AppState, answer: crate::switches::Answer) {
 }
 
 /// Render a ladder answer, or `None` when the call may proceed.
-fn gated(st: &AppState, tenant: &str, surface: Surface, rows: i64, bytes: i64) -> Option<Response> {
+pub(super) fn gated(
+    st: &AppState,
+    tenant: &str,
+    surface: Surface,
+    rows: i64,
+    bytes: i64,
+) -> Option<Response> {
     let a = decide(&st.switches, &st.quota, tenant, surface, rows, bytes);
     let h = a.http(Origin::Route, surface)?;
     note_reject(st, a);
@@ -221,7 +227,7 @@ fn body_obj(pairs: Vec<(&str, Value)>) -> String {
 /// only field a client may branch on: string matching on a message is forbidden
 /// everywhere in this codebase. `reason` carries the planner's opaque MESSAGE (also a
 /// stable identifier, e.g. `kv_bad_ttl`), `detail` the human half.
-fn err(code: &str, reason: Option<&str>, detail: Option<&str>) -> String {
+pub(super) fn err(code: &str, reason: Option<&str>, detail: Option<&str>) -> String {
     let mut pairs = vec![("error", Value::String(code.to_string()))];
     if let Some(r) = reason {
         pairs.push(("reason", Value::String(r.to_string())));
@@ -232,7 +238,7 @@ fn err(code: &str, reason: Option<&str>, detail: Option<&str>) -> String {
     body_obj(pairs)
 }
 
-fn json_retry(status: StatusCode, body: String, secs: u32) -> Response {
+pub(super) fn json_retry(status: StatusCode, body: String, secs: u32) -> Response {
     (
         status,
         [
@@ -421,7 +427,7 @@ async fn apply_ops(
 // ---------------------------------------------------------------------------
 
 /// A refusal that never reached a verdict, rendered in this file's envelope.
-fn raft_failure(f: crate::rsm::facade::KvFailure) -> Response {
+pub(super) fn raft_failure(f: crate::rsm::facade::KvFailure) -> Response {
     use crate::rsm::facade::{KvFailure, RsmError};
     match f {
         KvFailure::Invalid {
@@ -442,6 +448,13 @@ fn raft_failure(f: crate::rsm::facade::KvFailure) -> Response {
             }
         }
         KvFailure::Precondition { detail } => precondition_200(Some(&detail)),
+        // A rolling upgrade is under way and the op is newer than the oldest
+        // member: nothing ran, and it works once the last member is upgraded.
+        KvFailure::NotYet { reason, detail } => json_retry(
+            StatusCode::SERVICE_UNAVAILABLE,
+            err("kv_unavailable", Some(&reason), Some(&detail)),
+            1,
+        ),
         // Transient, and not the tenant's doing: the class 40/08/53 row.
         KvFailure::Rsm(RsmError::Timeout) => unavailable("kv_timeout"),
         KvFailure::Rsm(RsmError::Retry { .. }) => unavailable("kv_retry"),
@@ -517,6 +530,7 @@ fn kv_op_label(op: Option<&str>) -> Option<crate::metrics::KvOp> {
         "put" | "putIfAbsent" => Some(KvOp::Put),
         "delete" => Some(KvOp::Delete),
         "incr" => Some(KvOp::Incr),
+        "check" => Some(KvOp::Check),
         _ => None,
     }
 }
@@ -593,7 +607,7 @@ pub fn facade_kv(
     }
 }
 
-fn batch_response(results: Vec<Value>) -> Response {
+pub(super) fn batch_response(results: Vec<Value>) -> Response {
     json(
         StatusCode::OK,
         Value::Object(Map::from_iter([(
@@ -654,11 +668,13 @@ pub async fn handle_kv_batch(
     };
     // A batch is a write as soon as one op writes: the bucket must charge the
     // expensive rate, or a single read in front of 255 writes buys the write
-    // rate at the read price.
+    // rate at the read price. A `check` writes nothing and is charged the
+    // same: what the write rate protects is the planner, the one serial point
+    // of the broker, and a check is judged there like a write's `expect`.
     let write = ops.iter().any(|o| {
         matches!(
             o.get("op").and_then(|v| v.as_str()),
-            Some("put" | "putIfAbsent" | "delete" | "incr")
+            Some("put" | "putIfAbsent" | "delete" | "incr" | "check")
         )
     });
     match apply_ops(&st, tenant.as_str(), ops, write).await {

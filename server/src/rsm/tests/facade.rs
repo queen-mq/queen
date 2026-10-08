@@ -1923,6 +1923,102 @@ async fn a_transaction_carries_a_kv_rider_all_or_nothing() {
     facade.shutdown().await;
 }
 
+/// A step guarded by a lock: the bundle's push and its state write commit
+/// only while the lock's row is still at the version the holder was handed.
+/// The guard is a `check` — it does not write the row, so the holder's token
+/// stays the one acquire gave it — and a holder that was replaced commits
+/// nothing: no message, no state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_transaction_commits_only_while_its_check_holds() {
+    let dir = scratch("txn-check");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    // A node alone raises the cluster version to its own on its first tick.
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while !facade.cluster_allows(crate::rsm::effect::VERSION_5) {
+        assert!(
+            std::time::Instant::now() < end,
+            "the cluster version never reached 5"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let taken = txn(
+        &facade,
+        serde_json::json!({"kv": [{"op": "putIfAbsent", "ns": "locks", "key": "job",
+                                   "value": {"owner": "a"}, "ttlSeconds": 600}]}),
+    )
+    .await;
+    assert_eq!(taken["results"][0]["applied"], true, "{taken}");
+    let token = taken["results"][0]["version"].as_u64().expect("a version");
+    let step = |token: u64, n: u64, id: &str| {
+        serde_json::json!({
+            "operations": [{"type": "push", "items": [
+                {"queue": "guarded", "payload": {"n": n}, "transactionId": id}]}],
+            "kv": [
+                {"op": "check", "ns": "locks", "key": "job", "expect": token, "required": true},
+                {"op": "put", "ns": "work", "key": "state", "value": {"n": n}, "forever": true}
+            ]
+        })
+    };
+
+    let ok = txn(&facade, step(token, 1, "g1")).await;
+    assert_eq!(ok["success"], true, "{ok}");
+    let res = ok["results"].as_array().expect("results");
+    assert_eq!(res.len(), 3, "{ok}");
+    assert_eq!(res[1]["type"], "kv");
+    assert_eq!(res[1]["op"], "check");
+    assert_eq!(res[1]["applied"], true, "{ok}");
+    assert_eq!(res[1]["version"].as_u64(), Some(token));
+    assert!(
+        res[1].get("value").is_none(),
+        "a held check hands back no value: {ok}"
+    );
+    assert_eq!(res[2]["applied"], true, "{ok}");
+
+    // The lock changes hands: the row is rewritten, so its version moves.
+    let other = txn(
+        &facade,
+        serde_json::json!({"kv": [{"op": "put", "ns": "locks", "key": "job",
+                                   "value": {"owner": "b"}, "ttlSeconds": 600, "expect": token}]}),
+    )
+    .await;
+    let token_b = other["results"][0]["version"].as_u64().expect("a version");
+    assert!(token_b > token, "a later write on the key: {other}");
+
+    let stale = txn(&facade, step(token, 2, "g2")).await;
+    assert_eq!(stale["success"], false, "{stale}");
+    assert_eq!(stale["reason"], "kv_precondition", "{stale}");
+    assert_eq!(
+        stale["failedIndex"], 1,
+        "the check, in the flat space: {stale}"
+    );
+    assert_eq!(stale["kvReason"], "version", "{stale}");
+    assert_eq!(stale["version"].as_u64(), Some(token_b), "{stale}");
+    assert_eq!(stale["value"], serde_json::json!({"owner": "b"}), "{stale}");
+
+    let msgs = pop_q(&facade, "guarded").await;
+    assert_eq!(
+        msgs["messages"].as_array().map(|m| m.len()),
+        Some(1),
+        "only the real holder's message: {msgs}"
+    );
+    let state = txn(
+        &facade,
+        serde_json::json!({"kv": [{"op": "get", "ns": "work", "key": "state"}]}),
+    )
+    .await;
+    assert_eq!(
+        state["results"][0]["value"],
+        serde_json::json!({"n": 1}),
+        "{state}"
+    );
+    // The new holder's step commits with its own token.
+    let ok_b = txn(&facade, step(token_b, 3, "g3")).await;
+    assert_eq!(ok_b["success"], true, "{ok_b}");
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_transaction_schedules_a_timer_that_fires_only_if_it_commits() {
     // Phase B4: the `timers` rider rides the transaction's one entry.
