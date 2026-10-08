@@ -70,6 +70,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (standby cluster): phase2.rs gains the two /api/v1/system/link routes; the routes this page reads are as described. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (locks): planner/kv.rs gained the `check` op and states that a key's
 # versions only rise. The supervisor's KV reads and writes are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (dashboard store tests): dashboard/store.rs changes how its own tests name their scratch directories, no code the broker runs. Nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the

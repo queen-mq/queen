@@ -399,9 +399,16 @@ fn rewrite(path: &Path, win: &Window) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// A directory of the calling test's own. The clock does not tell two
+    /// tests apart: started together, they read the same microsecond.
     fn dir() -> PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("queen-dash-{}-{}", std::process::id(), now_us()));
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "queen-dash-{}-{}-{}",
+            std::process::id(),
+            now_us(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
