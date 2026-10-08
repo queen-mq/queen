@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 2.0.3
 
 **Server: a pop that nobody receives no longer counts a delivery attempt.** A pop's answer waits for
 the checkpoint that holds its lease. When that takes longer than the margin the broker keeps before
