@@ -64,6 +64,7 @@
     "/operate/recovery",
     "/operate/recovery-backups",
     "/operate/security",
+    "/operate/standby",
     "/operate/tenants",
     "/reference",
     "/reference/configuration",

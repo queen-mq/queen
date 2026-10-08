@@ -68,7 +68,9 @@ It opens the data directory, recovering whatever it holds, and serves on `PORT`
 
 Configuration is environment variables; `QUEEN_RAFT_DIR` is the one a single node
 needs, and a cluster adds `QUEEN_RAFT_REPLICATOR=openraft`, `QUEEN_RAFT_NODE_ID`,
-`QUEEN_RAFT_PEERS` and `QUEEN_RAFT_TOKEN`. Boolean knobs accept `true/false`,
+`QUEEN_RAFT_PEERS` and `QUEEN_RAFT_TOKEN`. A second cluster that replays the first
+one's log, to take over on when the first is lost, adds `QUEEN_LINK_SOURCE` and its
+token ([queenmq.com/operate/standby](https://queenmq.com/operate/standby)). Boolean knobs accept `true/false`,
 `1/0`, `yes/no`, `on/off`; any other value fails the boot with a message naming the
 variable (embedded, it becomes a `StartError::Config` instead of an exit). The full
 generated reference is at

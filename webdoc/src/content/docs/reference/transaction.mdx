@@ -20,6 +20,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the route can answer 503 `standby` on a standby cluster: it joins the engine-body answers.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step
@@ -303,9 +304,9 @@ A lost `required` KV operation adds the operation that lost:
 
 Some failures use the engine's error body `{"error", "code"}` instead, with no `reason`: 413
 `name_too_long` (a pushed queue or partition name over the key budget), 400 `bad_request` (a
-`transactionId` over 65,535 bytes), 429 `overloaded`, 503 `retry`, `no_leader` or `timeout`, 507
-`storage_full`, 500 `internal`, and the 401/403 of authentication. See
-[errors](/reference/errors/).
+`transactionId` over 65,535 bytes), 429 `overloaded`, 503 `retry`, `no_leader` or `timeout`, 503
+`standby` on a [standby cluster](/operate/standby/), 507 `storage_full`, 500 `internal`, and the
+401/403 of authentication. See [errors](/reference/errors/).
 
 ## Retries
 

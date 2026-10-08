@@ -16,16 +16,18 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/rsm/dashboard/collector.rs
       - server/src/rsm/dashboard/store.rs
       - server/src/rsm/facade/groups.rs
+      - server/src/rsm/link/driver.rs
       - server/src/rsm/planner/kv.rs
       - server/src/rsm/planner/timers.rs
       - server/src/rsm/qlog/set.rs
       - server/src/rsm/replicator/node.rs
       - server/src/rsm/replicator/raft/cluster.rs
+      - server/src/rsm/replicator/raft/link.rs
       - server/src/rsm/replicator/raft/mod.rs
       - server/src/s3_inproc.rs
 */}
 
-The broker is configured entirely through environment variables: 101 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 110 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set.
 
@@ -105,6 +107,20 @@ The broker is configured entirely through environment variables: 101 of them, li
 | `QUEEN_RAFT_REPLICATOR` | string | `local (openraft for a cluster)` |  |
 | `QUEEN_RAFT_TOKEN` | string | `(empty)` |  |
 | `QUEEN_TENANT_GROUPS` | string | `(empty: placement by hash)` |  |
+
+### Standby cluster
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `QUEEN_LINK_HOLD_DISK_PCT` | number (percent) | `QUEEN_RAFT_DISK_LOW_PCT (80)` |  |
+| `QUEEN_LINK_HOLD_S` | integer | `3600` |  |
+| `QUEEN_LINK_NAME` | string | `standby-<the standby's id>` |  |
+| `QUEEN_LINK_PIPELINE` | integer | `64` |  |
+| `QUEEN_LINK_SEED` | integer | `(unset: no node takes a seed)` |  |
+| `QUEEN_LINK_SOURCE` | string | `(unset: this cluster follows no source)` |  |
+| `QUEEN_LINK_SOURCE_TOKEN` | string | `(unset)` |  |
+| `QUEEN_LINK_STANDBY` | boolean | `false` |  |
+| `QUEEN_LINK_TOKEN` | string | `(unset: the node serves no standby)` |  |
 
 ### Authentication
 

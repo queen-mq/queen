@@ -35,6 +35,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (optional client supervision): HttpClient.post accepts an optional AbortSignal for bounded status publication, using the existing abort/retry path; the error codes and normal request behavior described here are unchanged.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the engine answers 503 `standby` with Retry-After 1 on a standby cluster (facade/mod.rs, handlers/raft.rs): a row in Engine codes.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code
@@ -73,6 +74,7 @@ The `code` of the first shape.
 | `no_leader` | 503 | No leader is known after the hold: an election is running, or a majority is down. | Retry. |
 | `timeout` | 503 | The request's deadline passed before an answer. A write may have committed. | Retry a write that is safe to repeat; otherwise read to check. |
 | `outcome_unknown` | 503 | The leader changed while an ack, nack or DLQ move was being made durable, or a forwarded one was lost after it went out. It may or may not have applied. | Send the same ack again: a repeat of an ack that applied is answered as the first one was. |
+| `standby` | 503 | The cluster is a [standby](/operate/standby/): it replays another cluster and takes no writes until it is promoted. Every write route answers it, on every node, and nothing was applied. | Retry after `Retry-After` (1 s) if a switch to this cluster is under way: the call is served once the standby is promoted. Otherwise you are pointed at the wrong cluster. |
 | `overloaded` | 429 | The node's admission budget for writes stayed full for the whole hold. | Retry after `Retry-After` (1 to 5 s). |
 | `storage_full` | 507 | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Pushes, KV writes and timer schedules are refused; acks and deletes still work. | Free disk or add space, then retry. |
 | `name_too_long` | 413 | The tenant, queue and partition or group names together exceed the store's key budget. | Shorten the name. |

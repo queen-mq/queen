@@ -15,6 +15,11 @@
  *   server/src/rsm/replicator/raft/forward.rs
  *                                  raw `# HELP` / `# TYPE` strings: the batched
  *                                  forwarding counter, rendered by admit.rs
+ *   server/src/rsm/facade/real/phase2/link.rs
+ *                                  raw `# HELP` / `# TYPE` strings: the standby
+ *                                  cluster's families, appended by real.rs and
+ *                                  present only on a cluster that is part of a
+ *                                  link
  *
  * All are parsed. Every `"queen_*"` string literal in those files is then
  * checked against what was parsed, so a family can never quietly vanish from
@@ -38,6 +43,7 @@ const SOURCES = [
   "server/src/rsm/admit.rs",
   "server/src/handlers/raft.rs",
   "server/src/rsm/replicator/raft/forward.rs",
+  "server/src/rsm/facade/real/phase2/link.rs",
 ];
 
 /**
@@ -207,6 +213,8 @@ const GROUPS = [
     n === "queen_raft_proposals_total" || n === "queen_raft_log_storage" || n === "queen_raft_storage_full"],
   ["Admission", (n) => n.startsWith("queen_raft_admit_")],
   ["Forwarding between nodes", (n) => n === "queen_raft_forward_total"],
+  // Only on a cluster that is a standby, was one, or is read by one.
+  ["Standby cluster", (n) => n.startsWith("queen_link_")],
   ["Pipeline timing", (n) => n.startsWith("queen_raft_")],
   ["Per-queue rates and depth", (n) => n.startsWith("queen_queue_") || n.startsWith("queen_dlq_")],
   ["Engine internals", (n) => n.startsWith("queen_seg_") || n.startsWith("queen_batch") || n.startsWith("queen_fusion") || n.startsWith("queen_pop_")],

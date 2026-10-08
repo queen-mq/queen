@@ -142,6 +142,8 @@ const GROUPS = [
     n === "QUEEN_RAFT_RETENTION_VISIT" || n === "QUEEN_RAFT_TXN_WINDOW_MIN_S" || n === "QUEEN_RAFT_TRACE_RETENTION_S" ||
     n.startsWith("METRICS_") || n.startsWith("QUEEN_DASH_")],
   ["Storage and replication", (n) => n.startsWith("QUEEN_RAFT_") || n === "QUEEN_QLOG_SHARDS" || n === "QUEEN_TENANT_GROUPS"],
+  // A standby cluster and the source it replays (operate/standby).
+  ["Standby cluster", (n) => n.startsWith("QUEEN_LINK_")],
   ["Authentication", (n) => n.startsWith("JWT_")],
   ["Consume and long-poll", (n) => n.startsWith("POP_") || n === "DEFAULT_TIMEOUT" || n === "DEFAULT_SUBSCRIPTION_MODE"],
   ["Security and tenancy", (n) => n.startsWith("QUEEN_ENCRYPTION") || n === "QUEEN_TENANCY_HEADER"],
@@ -185,6 +187,70 @@ const EXTRA_VARS = [
     def: "67108864 (64 MiB)",
     aliases: [],
     source: "server/src/handlers/raft.rs", // the router's DefaultBodyLimit
+  },
+  // --- Standby cluster: server/src/rsm/link and the source side in raft/
+  {
+    name: "QUEEN_LINK_SOURCE",
+    type: "string",
+    def: "(unset: this cluster follows no source)",
+    aliases: [],
+    source: "server/src/rsm/link/driver.rs",
+  },
+  {
+    name: "QUEEN_LINK_SOURCE_TOKEN",
+    type: "string",
+    def: "(unset)",
+    aliases: [],
+    source: "server/src/rsm/link/driver.rs",
+  },
+  {
+    name: "QUEEN_LINK_STANDBY",
+    type: "boolean",
+    def: "false",
+    aliases: [],
+    source: "server/src/rsm/link/driver.rs",
+  },
+  {
+    name: "QUEEN_LINK_SEED",
+    type: "integer",
+    def: "(unset: no node takes a seed)",
+    aliases: [],
+    source: "server/src/rsm/link/driver.rs",
+  },
+  {
+    name: "QUEEN_LINK_NAME",
+    type: "string",
+    def: "standby-<the standby's id>",
+    aliases: [],
+    source: "server/src/rsm/link/driver.rs",
+  },
+  {
+    name: "QUEEN_LINK_PIPELINE",
+    type: "integer",
+    def: "64",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "QUEEN_LINK_TOKEN",
+    type: "string",
+    def: "(unset: the node serves no standby)",
+    aliases: [],
+    source: "server/src/rsm/replicator/raft/cluster.rs",
+  },
+  {
+    name: "QUEEN_LINK_HOLD_S",
+    type: "integer",
+    def: "3600",
+    aliases: [],
+    source: "server/src/rsm/replicator/raft/link.rs",
+  },
+  {
+    name: "QUEEN_LINK_HOLD_DISK_PCT",
+    type: "number (percent)",
+    def: "QUEEN_RAFT_DISK_LOW_PCT (80)",
+    aliases: [],
+    source: "server/src/rsm/replicator/raft/link.rs",
   },
   // --- Storage and replication: server/src/rsm
   {

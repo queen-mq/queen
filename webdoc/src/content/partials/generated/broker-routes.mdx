@@ -13,7 +13,7 @@ description: "Every HTTP route the broker registers, with its access level and w
       - server/src/handlers/*.rs (Tenant extension)
 */}
 
-Queen's broker serves **109 method + path pairs**. Every row below is read out of the router, the generic adapter behind it and the authorization table at build time.
+Queen's broker serves **111 method + path pairs**. Every row below is read out of the router, the generic adapter behind it and the authorization table at build time.
 
 ### Message plane
 
@@ -146,6 +146,8 @@ Queen's broker serves **109 method + path pairs**. Every row below is read out o
 | `POST` | `/api/v1/system/ephemeral` | admin | no |
 | `GET` | `/api/v1/system/kv-timers` | admin | no |
 | `POST` | `/api/v1/system/kv-timers` | admin | no |
+| `GET` | `/api/v1/system/link` | admin | no |
+| `POST` | `/api/v1/system/link/promote` | admin | no |
 | `POST` | `/api/v1/system/quota` | admin | no |
 | `POST` | `/api/v1/system/quotas` | admin | no |
 | `GET` | `/api/v1/system/raft/membership` | admin | no |
@@ -189,4 +191,4 @@ Queen's broker serves **109 method + path pairs**. Every row below is read out o
 | `POST` | `/auth/logout` | public | no |
 | `GET` | `/auth/me` | public | no |
 
-82 of these handlers resolve a tenant from the request; 20 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.
+82 of these handlers resolve a tenant from the request; 22 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.

@@ -3,6 +3,31 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Server: a standby cluster.** A second cluster can now replay the first one's log and take over
+when the first is lost. The standby's leader reads the source's committed entries over the raft
+port and proposes each one into its own log, so the standby holds the source's messages, cursors,
+leases, KV, timers and dedup window, a moment behind. It answers reads, refuses
+writes with `503` and `"code": "standby"` on every node, and becomes an ordinary cluster with
+`POST /api/v1/system/link/promote`. An empty standby follows a young source from the start of its
+log (`QUEEN_LINK_STANDBY`); a source with a history seeds the standby's first node with its
+snapshot (`QUEEN_LINK_SEED`). Replication is asynchronous: a promotion after a crash loses at most
+what the standby had not read yet, and a planned switch loses nothing. On one laptop, with both
+clusters and the load generator sharing a disk, a standby stayed within 0.25 s of a source taking
+200,000 messages a second. The source keeps its log for the standby on every node and across
+restarts, and gives it up when its own disk fills (`QUEEN_LINK_HOLD_S`,
+`QUEEN_LINK_HOLD_DISK_PCT`). `GET /api/v1/system/link`, the `link` block of `/health` and the
+`queen_link_*` series say where a standby is. The source needs `QUEEN_LINK_TOKEN`, the standby
+`QUEEN_LINK_SOURCE` and `QUEEN_LINK_SOURCE_TOKEN`; a cluster with none of them behaves as before.
+See [Standby cluster](https://queenmq.com/operate/standby/).
+
+**Server: the last node of a cluster to stop no longer hangs.** A node that led a cluster whose
+other nodes were already down, with an entry in its log that could no longer commit, waited for
+that entry for ever while it shut down, and used a whole core doing it. A stopping node now leaves
+once every caller of its entries in flight has an answer; an entry that timed out had already
+answered `retry`.
+
 ## 2.0.4 - 2026-10-08
 
 **Dashboard, sign-in page and docs: the logo is a yellow sunflower.** A new drawing replaces the

@@ -22,6 +22,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/ephemeral.rs reads the pop's commit at delivery from commitOnDelivery or from autoAck, its deprecated alias. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the raft port may also be read by a standby cluster's pods: the NetworkPolicy paragraph says so. /health gains a `link` block only on a linked cluster, and the probes read what they read.
 ---
 
 On Kubernetes a Queen cluster is a StatefulSet of three (or five) pods. Each pod gets its own
@@ -274,4 +275,6 @@ on, an ephemeral request forwarded to the owning pod does not keep its tenant, s
 behind the proxy are safe on a single node only, for now ([ephemeral queues](/guides/ephemeral/)).
 
 Port 7400 belongs to the pods. Keep it off the client Service and close it to everything else with
-a NetworkPolicy ([security](/operate/security/)).
+a NetworkPolicy ([security](/operate/security/)). The one other caller it may need is a
+[standby cluster](/operate/standby/): the standby's pods read this cluster's pods on 7400, each by
+its own address, so the policy lets them in and nobody else.

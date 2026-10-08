@@ -32,6 +32,7 @@ digest: >-
   is one log entry with no coordinator and no two-phase commit; one tenant's writes go through one
   leader and one log, and more raft groups and clusters add capacity across tenants.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the engine drops idle parts (QUEEN_CONSUME_IDLE_UNLOAD_S) and loads them back on the next append; traces live in their own LMDB file.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): rsm gains the link module, the batcher a standby mode and a rule for stopping (a closing driver no longer waits on an entry that timed out), the engine a standby flag, the replicator what a standby reads and the hold on its log. A paragraph under Replication says what a standby cluster is; the planner, the lanes, the pipeline and the engine are as described.
 ---
 
 Queen is one process per node, built around one idea: decide every write once, on the leader, and
@@ -153,6 +154,13 @@ files. The leader streams entries to each follower over one long-lived connectio
 appends in flight, and an entry commits once a majority has written and fsynced it. A node reports
 itself leader only after it has applied an entry of its own term, so it always plans over complete
 committed state.
+
+A second cluster can follow the first from outside its raft group. A
+[standby cluster](/operate/standby/) has a leader of its own, which reads the first cluster's
+committed entries from any of its nodes and proposes each one into its own log, with the position
+it has reached written in the same entry. An entry is self-contained (it carries the time, the ids
+and the offsets its planner chose), so replaying it builds the same state, and the standby plans
+nothing of its own until it is promoted.
 
 Every node applies every committed entry, so a follower holds a full copy of its raft groups. With
 `QUEEN_RAFT_CLIENT_OFFLOAD` (on by default) it also serves its own clients: it parses and prepares

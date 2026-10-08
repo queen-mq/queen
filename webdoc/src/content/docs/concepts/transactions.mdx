@@ -27,6 +27,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (optional client supervision): ConsumerManager wraps handler calls for optional observations; transaction settlement and handler error behavior described here are unchanged.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): a standby cluster answers the transaction route 503 `standby` with nothing applied: one sentence after the 503 codes says so.
 ---
 
 A transaction is one call that writes one step. It acks what the worker took, pushes the next
@@ -129,7 +130,8 @@ than any redelivery can arrive.
 The broker checks the acks first, then the pushes and their dedup, then KV, then timers, and the
 first refusal decides the `reason`. [Errors](/reference/errors/) lists every code. A 503 is not a
 rollback: `retry`, `timeout` and `no_leader` mean the outcome is not known (the call may still
-commit), and they carry `Retry-After`.
+commit), and they carry `Retry-After`. A 503 `standby` comes from a
+[standby cluster](/operate/standby/), which applied nothing.
 
 ## One tenant, one raft group
 

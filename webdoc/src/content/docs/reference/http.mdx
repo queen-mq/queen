@@ -26,6 +26,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/data.rs and handlers/ephemeral.rs name the pop's commit at delivery commitOnDelivery; the parameter example names it, and the OpenAPI document lists it on every pop route, with the old name marked deprecated.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): 503 `standby` joins the status codes, /health gains `raft.link` on a linked cluster, and two /api/v1/system/link routes join the generated table: a row, a clause and a paragraph.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no
@@ -130,6 +131,7 @@ read it there:
 | `204` from a pop | No message was available before the long-poll ended. |
 | `503` `outcome_unknown` | The leader changed while an ack, nack or DLQ move was being made durable. It may or may not have applied. |
 | `503` `retry`, `no_leader`, `timeout` | The call did not complete. Retry after `Retry-After` (1 s); a write may still have applied, so make it safe to repeat. |
+| `503` `standby` | The cluster is a [standby](/operate/standby/) and takes no writes until it is promoted. Nothing was applied. |
 | `429` `overloaded` | The node's admission budget for writes (pushes, transactions, KV writes, timer schedules) stayed full for the whole hold. Retry after `Retry-After`. |
 | `507` `storage_full` | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Writes that grow storage are refused; acks and deletes still work. |
 
@@ -143,7 +145,8 @@ with it, is on [errors](/reference/errors/).
 `GET /health` answers `200` with `"status": "healthy"` when this node knows a leader and its apply
 lag is within `QUEEN_RAFT_READY_LAG_MS` (2000 ms), and `503` with `"status": "settling"` otherwise.
 The body carries `engine`, `version` and a `raft` block (`role`, `leader`, `term`, `applied`,
-`commit`, `lag`, `storageReady`, `clusterVersion`). Those two conditions are the whole check: the
+`commit`, `lag`, `storageReady`, `clusterVersion`, and `link` on a cluster that is part of a
+[standby](/operate/standby/) pair). Those two conditions are the whole check: the
 node does not contact the other members to answer, so a probe sees what this node believes. What
 that means during a quorum loss is on [recovery](/operate/recovery/).
 
@@ -154,6 +157,11 @@ that means during a quorum loss is on [recovery](/operate/recovery/).
 `POST /api/v1/ephemeral/_adopt` and `_leaving` are broker-to-broker hand-over calls: they also
 require the forward mark that only another node sets (and the cluster token when one is
 configured), and the proxy never lets a tenant reach them.
+
+`GET /api/v1/system/link` and `POST /api/v1/system/link/promote` are the two calls of a
+[standby cluster](/operate/standby/): where it is in its source's log, and the switch that makes
+it an ordinary cluster. What a standby reads from its source is not on this port: it is served on
+the source's raft port, under `/link/v1/`, to the holder of the source's `QUEEN_LINK_TOKEN`.
 
 ## Message browsing
 

@@ -30,6 +30,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps its existing limit and offset handling; the listed request limits are unchanged.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): a row under Retention for when a node stops keeping its log for a standby cluster; the batcher's and the facade's other limits are as described.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -180,3 +181,4 @@ The last three are constants in `server/src/handlers/ephemeral.rs`.
 | Message traces (on disk, expired at most 512 per step) | 7 days | `QUEEN_RAFT_TRACE_RETENTION_S` |
 | A trace whose `transactionId` or one of its names makes a store key over 511 bytes is answered `400` | 511 bytes | none |
 | Disk high-water mark: writes that grow storage answer 507 | 85% | `QUEEN_RAFT_DISK_HIGH_PCT` (released at `QUEEN_RAFT_DISK_LOW_PCT`, 80%) |
+| A node stops keeping its log for a [standby cluster](/operate/standby/) that is behind | when its disk is 80% full, or the standby was silent for 3600 s | `QUEEN_LINK_HOLD_DISK_PCT`, `QUEEN_LINK_HOLD_S` |

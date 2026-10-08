@@ -51,6 +51,7 @@ sourceOfTruth:
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (PHP client 2.3.1): 2.3.0 is on Packagist, and 2.3.1 adds the opt-in
 # supervision of a fluent consumer with the same supervisor pin (0.8.0). The Versions section says so.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the facade can open a node as a member of a standby cluster, which answers 503 `standby` until it is promoted; the queue connection is as described. Nothing this page states changes.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and
