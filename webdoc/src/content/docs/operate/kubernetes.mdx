@@ -26,6 +26,10 @@ sourceOfTruth:
 # path crates, broker) instead of over cache mounts; the image and what it runs are unchanged. Nothing this page
 # states changes.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the raft port may also be read by a standby cluster's pods: the NetworkPolicy paragraph says so. /health gains a `link` block only on a linked cluster, and the probes read what they read.
+# sourceOfTruth re-read 2026-10-08 (locks): main.rs declares the locks module; handlers/raft.rs registers POST
+# /api/v1/locks; proxy_embed.rs maps the new KV refusal to its 503; facade/mod.rs names that refusal
+# (KvFailure::NotYet); facade/real.rs refuses a transaction's KV `check` below cluster version 5. Nothing this
+# page states changes.
 ---
 
 On Kubernetes a Queen cluster is a StatefulSet of three (or five) pods. Each pod gets its own

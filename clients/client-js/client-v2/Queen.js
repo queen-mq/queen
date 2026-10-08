@@ -10,6 +10,7 @@ import { QueueBuilder } from './builders/QueueBuilder.js'
 import { TransactionBuilder } from './builders/TransactionBuilder.js'
 import { TimerBuilder } from './builders/TimerBuilder.js'
 import { Kv } from './kv/Kv.js'
+import { Locks, Lock } from './locks/Locks.js'
 import { Ephemeral } from './ephemeral/Ephemeral.js'
 import { StreamBuilder } from './stream/StreamBuilder.js'
 import { StreamConsumer } from './stream/StreamConsumer.js'
@@ -93,6 +94,7 @@ export class Queen {
   #shutdownHandlers = []
   #admin = null
   #kv = null
+  #locks = null
   #ephemeral = null
   // Process-wide kill switch for pop autopilot, read from
   // QUEEN_SDK_POP_AUTOPILOT once here rather than on every pop: it is a
@@ -296,6 +298,76 @@ export class Queen {
       this.#kv = new Kv(this.#httpClient)
     }
     return this.#kv
+  }
+
+  // ===========================
+  // Locks API Entry Point
+  // ===========================
+
+  /**
+   * A lock: one holder at a time, held as a lease, with a fencing token.
+   *
+   *     const lock = queen.lock('daily-report', { ttl: '30s' })
+   *     if (!(await lock.acquire())) return            // somebody else has it
+   *     try {
+   *       await queen.transaction().guard(lock)
+   *         .queue('reports').push([{ data: report }]).commit()
+   *     } finally {
+   *       await lock.release()
+   *     }
+   *
+   * Creating the handle sends nothing. `acquire()` resolves a boolean,
+   * `acquire({ wait: '10s' })` keeps trying, and while it is held the handle
+   * renews it in the background and aborts `lock.signal` if it is lost.
+   *
+   * It is a lease, not a mutex: it expires, and a holder that outlived it
+   * keeps running. `.guard(lock)` on a transaction is what makes the WORK
+   * exclusive; see `locks/Locks.js` for the whole argument.
+   *
+   * @param {string} name - no '#', no control characters, at most 256 bytes
+   * @param {{ttl?: string, ttlSeconds?: number, owner?: string, autoRenew?: boolean, renewEvery?: string}} opts
+   *   a lifetime is mandatory: `ttl: '30s'` or `ttlSeconds: 30`
+   * @returns {Lock}
+   */
+  lock(name, opts = {}) {
+    if (opts.limit !== undefined && opts.limit !== 1) {
+      throw new Error('lock: a lock has one permit — queen.semaphore(name, limit, opts) is the one with more')
+    }
+    return new Lock(this.locks, name, opts)
+  }
+
+  /**
+   * A semaphore: at most `limit` holders at a time. One handle is ONE permit;
+   * make a handle per holder.
+   *
+   *     const gpu = queen.semaphore('gpu', 4, { ttl: '2m' })
+   *     const { acquired } = await gpu.run(() => train(job), { wait: '30s' })
+   *
+   * Everything a lock's handle does, this one does (it is the same class: a
+   * lock is the semaphore of one). Every holder of one name passes the same
+   * limit — it is the caller's and is stored nowhere, so while a limit is
+   * being changed the larger one rules.
+   *
+   * @returns {Lock}
+   */
+  semaphore(name, limit, opts = {}) {
+    return new Lock(this.locks, name, { ...opts, limit })
+  }
+
+  /**
+   * The four lock operations as the broker speaks them — `acquire`, `renew`,
+   * `release`, `get`, and `batch` for several locks in one call — with no
+   * state kept: you carry the token. `queen.lock()` is what most code wants;
+   * this is for `get` (who holds it?) and for a caller with its own loop.
+   *
+   * Lazily initialized, singleton, like `kv`.
+   * @returns {Locks}
+   */
+  get locks() {
+    if (!this.#locks) {
+      this.#locks = new Locks(this.#httpClient)
+    }
+    return this.#locks
   }
 
   // ===========================
@@ -716,6 +788,18 @@ export class Queen {
 
     // Cleanup buffer manager
     this.#bufferManager.cleanup()
+
+    // Give back the locks this client's handles still hold, so the next
+    // holder does not wait out their lifetime. Best effort: one that cannot
+    // be released expires by itself.
+    if (this.#locks) {
+      try {
+        const released = await this.#locks.releaseAll()
+        if (released > 0) logger.log('Queen.close', { locksReleased: released })
+      } catch (error) {
+        logger.warn('Queen.close', { error: error.message, phase: 'lock-release' })
+      }
+    }
 
     // Remove shutdown handlers
     for (const cleanup of this.#shutdownHandlers) {

@@ -1534,6 +1534,118 @@ inline json kv_put_if_absent_op(const std::string& ns, const std::string& key, c
     return kv_write_op("putIfAbsent", ns, key, value, ttl, cleaned);
 }
 
+/**
+ * A precondition that writes nothing: the key is at `version`, or -- version 0
+ * -- is not there. It takes no expiry.
+ *
+ * The version is an argument and not KvWriteOptions::expect because here it is
+ * MANDATORY: a check without one says nothing, and the broker refuses it. With
+ * `required` it is the gate of a whole batch or transaction on a key that call
+ * does not write, which is how a step is tied to a lock (Lock::guard() is
+ * exactly this operation).
+ */
+inline json kv_check_op(const std::string& ns, const std::string& key, long long version,
+                        bool required) {
+    if (version < 0) {
+        throw std::invalid_argument(
+            "a check's version is 0 (the key must not exist) or above");
+    }
+    json op = {{"op", "check"}, {"ns", ns}, {"key", key}, {"expect", version}};
+    if (required) {
+        op["required"] = true;
+    }
+    return op;
+}
+
+// ---------------------------------------------------------------------------
+// Lock operations (POST /api/v1/locks). One place per wire shape, as above.
+// ---------------------------------------------------------------------------
+
+inline void lock_require_name(const std::string& name) {
+    // The broker's rule, checked here so the mistake surfaces at the call: no
+    // '#', which sits between a name and its slot in the row's key.
+    bool bad = name.empty() || name.size() > 256;
+    for (size_t i = 0; !bad && i < name.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(name[i]);
+        bad = c < 0x20 || c == 0x7f || c == '#' ||
+              (c == 0xc2 && i + 1 < name.size() &&
+               static_cast<unsigned char>(name[i + 1]) >= 0x80 &&
+               static_cast<unsigned char>(name[i + 1]) <= 0x9f);
+    }
+    if (bad) {
+        throw std::invalid_argument(
+            "a lock's name is a non-empty string of at most 256 bytes, without control "
+            "characters and without '#'");
+    }
+}
+
+inline void lock_require_ttl(long long ttl_seconds) {
+    // Mandatory, finite, in whole seconds. There is no `forever`: a lock that
+    // never expires is one nobody can take back from a holder that died.
+    if (ttl_seconds <= 0) {
+        throw std::invalid_argument(
+            "a lock needs a lifetime: ttl_seconds above zero. There is no forever; a holder "
+            "that needs longer renews");
+    }
+}
+
+inline void lock_require_token(long long token, const char* what) {
+    if (token <= 0) {
+        throw std::invalid_argument(
+            std::string(what) +
+            " needs the token of the permit (the one the last acquire or renew answered)");
+    }
+}
+
+inline json lock_acquire_op(const std::string& name, long long ttl_seconds,
+                            const std::string& owner, int limit) {
+    lock_require_name(name);
+    lock_require_ttl(ttl_seconds);
+    if (limit < 1 || limit > 1024) {
+        throw std::invalid_argument("limit is a whole number from 1 (a lock) to 1024");
+    }
+    json op = {{"op", "acquire"}, {"name", name}, {"ttlSeconds", ttl_seconds}};
+    if (!owner.empty()) {
+        op["owner"] = owner;
+    }
+    // A lock is the semaphore of one, and sends no limit at all.
+    if (limit > 1) {
+        op["limit"] = limit;
+    }
+    return op;
+}
+
+inline json lock_renew_op(const std::string& name, long long token, long long ttl_seconds,
+                          int slot, const std::string& owner) {
+    lock_require_name(name);
+    lock_require_token(token, "renew");
+    lock_require_ttl(ttl_seconds);
+    json op = {{"op", "renew"}, {"name", name}, {"token", token}, {"ttlSeconds", ttl_seconds}};
+    // Slot 0, the only slot a lock has, is the default and is not sent.
+    if (slot != 0) {
+        op["slot"] = slot;
+    }
+    if (!owner.empty()) {
+        op["owner"] = owner;
+    }
+    return op;
+}
+
+inline json lock_release_op(const std::string& name, long long token, int slot) {
+    lock_require_name(name);
+    lock_require_token(token, "release");
+    json op = {{"op", "release"}, {"name", name}, {"token", token}};
+    if (slot != 0) {
+        op["slot"] = slot;
+    }
+    return op;
+}
+
+inline json lock_get_op(const std::string& name) {
+    lock_require_name(name);
+    return json{{"op", "get"}, {"name", name}};
+}
+
 inline json timer_schedule_op(const TimerSchedule& timer) {
     json op = {
         {"op", "schedule"},
@@ -2791,6 +2903,335 @@ public:
 };
 
 // ============================================================================
+// Locks - a lock and a semaphore, as leases with a fencing token
+//
+// WHAT IT IS. A permit is one KV row in the namespace `queen-locks`, written
+// with a lifetime: acquire is a putIfAbsent, renew a put with expect, release a
+// delete with expect. The broker's POST /api/v1/locks does that turning, so
+// every client shares one implementation. A lock is the semaphore of one
+// permit.
+//
+// WHAT IT IS NOT: A MUTEX. A permit EXPIRES, and nobody tells its holder. A
+// process that is paused, partitioned or slow keeps running past its lifetime
+// while somebody else acquires. So the lock alone never makes two holders
+// impossible; what makes their WORK exclusive is the token:
+//
+//   * inside Queen, TransactionBuilder::guard(lock): the acks, pushes, KV
+//     writes and timers of a step commit only if the permit is still this
+//     holder's, in the same log entry. A holder that was replaced commits
+//     nothing.
+//   * outside Queen, Lock::token(): a number that only rises on a lock. A
+//     resource that remembers the highest token it accepted and refuses a lower
+//     one refuses the holder that was replaced. Accept an EQUAL one: a holder
+//     writes many times with one token.
+//
+// STATUS CODES ARE NOT VERDICTS, as on the KV surface: a lock somebody else
+// holds, a token that is no longer the row's, a release of what was not held
+// are HTTP 200 with `acquired`, `renewed` or `released` false. An HttpError
+// from here means the CALL did not happen.
+//
+// A RENEW ANSWERS A NEW TOKEN. It rewrites the row, so the token before it
+// stops working -- for the guard, for the next renew, for the release.
+// ============================================================================
+
+/** The KV namespace the permits live in. */
+inline const char* const LOCK_NAMESPACE = "queen-locks";
+
+/**
+ * How a Lock behaves. The lifetime is not here: it is mandatory and is an
+ * argument of QueenClient::lock.
+ */
+struct LockOptions {
+    /// The holder's identity, instead of the one minted per handle. Two handles
+    /// with one owner are one holder.
+    std::string owner;
+    /// How a waiting acquire comes back: first after retry_min_millis, then
+    /// half as long again each time up to retry_max_millis, with jitter.
+    int retry_min_millis = 100;
+    int retry_max_millis = 1000;
+};
+
+/**
+ * The four lock operations as the broker speaks them, with no state kept: the
+ * caller carries the token. QueenClient::lock is what most code wants; this is
+ * for `get` (who holds it?) and for a caller with its own loop.
+ */
+class LocksBuilder {
+private:
+    std::shared_ptr<HttpClient> http_client_;
+
+public:
+    explicit LocksBuilder(std::shared_ptr<HttpClient> http_client)
+        : http_client_(std::move(http_client)) {
+    }
+
+    /**
+     * Several operations in one call, each on a different lock (build them with
+     * the wire::lock_*_op functions). One result per operation, in order; they
+     * are independent, nothing here is all-or-nothing.
+     */
+    json batch(const json& operations) {
+        if (!operations.is_array() || operations.empty()) {
+            throw std::invalid_argument("a locks call needs at least one operation");
+        }
+        json response = http_client_->post("/api/v1/locks", json{{"operations", operations}});
+        if (!response.is_object() || !response.contains("results") ||
+            !response["results"].is_array() ||
+            response["results"].size() != operations.size()) {
+            throw std::runtime_error(
+                "locks: the broker did not answer one result per operation; this is an "
+                "alignment failure, not a verdict");
+        }
+        return response["results"];
+    }
+
+    /**
+     * Take a permit: {acquired, slot, token, owner, guard, already?}, or
+     * {acquired:false, reason:"held"|"contended", holders}. `limit` above 1
+     * makes it a semaphore; every caller of one name passes the same limit,
+     * which is stored nowhere.
+     */
+    json acquire(const std::string& name, long long ttl_seconds,
+                 const std::string& owner = "", int limit = 1) {
+        return batch(json::array({wire::lock_acquire_op(name, ttl_seconds, owner, limit)}))[0];
+    }
+
+    /** Extend a permit: {renewed, slot, token, guard} with a NEW token, or
+     *  {renewed:false, reason:"lost", holders}. */
+    json renew(const std::string& name, long long token, long long ttl_seconds, int slot = 0,
+               const std::string& owner = "") {
+        return batch(json::array({wire::lock_renew_op(name, token, ttl_seconds, slot, owner)}))[0];
+    }
+
+    /** Give a permit back: {released}; false with reason "lost" when the token
+     *  is no longer the row's. */
+    json release(const std::string& name, long long token, int slot = 0) {
+        return batch(json::array({wire::lock_release_op(name, token, slot)}))[0];
+    }
+
+    /** Who holds it: {held, holders:[{slot, owner, token, since, expiresAt, renewedAt}]}. */
+    json get(const std::string& name) {
+        return batch(json::array({wire::lock_get_op(name)}))[0];
+    }
+};
+
+/** Thrown where something needed a held lock and the handle holds none. */
+class LockNotHeldError : public std::runtime_error {
+public:
+    explicit LockNotHeldError(const std::string& message) : std::runtime_error(message) {
+    }
+};
+
+/**
+ * One holder's hold on one lock, or on one permit of a semaphore.
+ *
+ *     auto lock = client.lock("daily-report", 30);
+ *     if (!lock.acquire()) return;                  // somebody else has it
+ *     client.transaction()
+ *         .guard(lock)                              // commits only while it is ours
+ *         .queue("reports").push({{{"data", report}}})
+ *         .commit();
+ *     lock.release();
+ *
+ * NOTHING RENEWS THIS IN THE BACKGROUND. The lifetime has to cover the work,
+ * or the work calls keep_alive() at its checkpoints: it renews once a third of
+ * the lifetime has passed and costs nothing before that. A handle whose
+ * lifetime ran out on this machine's clock says held() == false, and its next
+ * guarded step is refused by the broker.
+ *
+ * THE TOKEN CHANGES AT EVERY RENEW. The handle keeps the current one: read
+ * token() and guard() when you use them.
+ *
+ * THE OWNER is the holder's identity, minted per handle. With it a call is safe
+ * to send again when its answer was lost: the broker answers the permit the
+ * first attempt took.
+ *
+ * Not thread-safe: one handle, one thread at a time.
+ */
+class Lock {
+private:
+    using Clock = std::chrono::steady_clock;
+
+    LocksBuilder locks_;
+    std::string name_;
+    long long ttl_seconds_;
+    int limit_;
+    LockOptions options_;
+    std::string owner_;
+
+    long long token_ = 0;
+    int slot_ = -1;
+    // The broker's own guard of the current lease period, kept as answered:
+    // where a permit's row lives is the broker's rule, written once, there.
+    json guard_;
+    Clock::time_point valid_until_{};
+    Clock::time_point renewed_at_{};
+
+    static std::string mint_owner() {
+        // Same sources as the consumer's status report: no socket header for a
+        // host name, and the two spellings of the process id.
+        const char* env = std::getenv("HOSTNAME");
+        if (!env) env = std::getenv("COMPUTERNAME");
+        std::string host = env ? std::string(env).substr(0, 128) : std::string("host");
+#ifdef _WIN32
+        const auto pid = _getpid();
+#else
+        const auto pid = getpid();
+#endif
+        std::random_device rd;
+        std::ostringstream out;
+        out << host << ":" << pid << ":" << std::hex << std::setfill('0')
+            << std::setw(6) << (rd() & 0xffffff) << std::setw(6) << (rd() & 0xffffff);
+        return out.str();
+    }
+
+    void take(const json& result, Clock::time_point sent_at) {
+        token_ = result.at("token").get<long long>();
+        slot_ = result.at("slot").get<int>();
+        guard_ = result.at("guard");
+        // Counted from when the request was SENT, so it is never later than the
+        // broker's own deadline.
+        valid_until_ = sent_at + std::chrono::seconds(ttl_seconds_);
+        renewed_at_ = sent_at;
+    }
+
+    void drop() {
+        token_ = 0;
+        slot_ = -1;
+        guard_ = nullptr;
+        valid_until_ = Clock::time_point{};
+    }
+
+public:
+    Lock(std::shared_ptr<HttpClient> http_client, const std::string& name, long long ttl_seconds,
+         int limit, const LockOptions& options)
+        : locks_(std::move(http_client)), name_(name), ttl_seconds_(ttl_seconds), limit_(limit),
+          options_(options), owner_(options.owner.empty() ? mint_owner() : options.owner) {
+        // Validated here, so a bad name or lifetime surfaces where the handle
+        // is made and not at the first acquire.
+        (void)wire::lock_acquire_op(name_, ttl_seconds_, owner_, limit_);
+    }
+
+    const std::string& name() const { return name_; }
+    const std::string& owner() const { return owner_; }
+    int limit() const { return limit_; }
+
+    /**
+     * Whether this handle holds a permit, as far as it can know: the broker
+     * granted or renewed it, and its lifetime has not run out on this
+     * machine's clock. A belief with a deadline, not a proof -- the proof is
+     * the guard on the transaction.
+     */
+    bool held() const { return token_ != 0 && Clock::now() < valid_until_; }
+
+    /** The fencing token of the current lease period; 0 when not held. */
+    long long token() const { return held() ? token_ : 0; }
+
+    /** The semaphore slot this handle holds (0 for a lock); -1 when not held. */
+    int slot() const { return held() ? slot_ : -1; }
+
+    /**
+     * The KV operation that holds while the permit is this handle's: a `check`
+     * of the permit's row at the current token, required.
+     * TransactionBuilder::guard adds it for you; use this one to put it in a KV
+     * batch yourself, at the moment you send.
+     */
+    json guard() const {
+        if (!held()) {
+            throw LockNotHeldError("lock '" + name_ + "' is not held; there is nothing to guard with");
+        }
+        return guard_;
+    }
+
+    /**
+     * Take the permit. With wait_millis it keeps trying until the permit is
+     * free or the wait is over, coming back every 100 ms to 1 s with jitter,
+     * and BLOCKS for that long.
+     */
+    bool acquire(int wait_millis = 0) {
+        if (held()) {
+            return true;
+        }
+        auto deadline = Clock::now() + std::chrono::milliseconds(wait_millis);
+        double pause = options_.retry_min_millis;
+        std::mt19937 rng{std::random_device{}()};
+        std::uniform_real_distribution<double> jitter(0.75, 1.0);
+        for (;;) {
+            auto sent_at = Clock::now();
+            json result = locks_.acquire(name_, ttl_seconds_, owner_, limit_);
+            if (result.value("acquired", false)) {
+                take(result, sent_at);
+                return true;
+            }
+            auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - Clock::now()).count();
+            if (left <= 0) {
+                return false;
+            }
+            // A random quarter off, so a crowd of waiters spreads.
+            auto nap = static_cast<long long>(pause * jitter(rng));
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(std::min<long long>(nap, left)));
+            pause = std::min<double>(pause * 1.5, options_.retry_max_millis);
+        }
+    }
+
+    /**
+     * Extend the lease now. true with a new token in place, or false: the
+     * permit is gone. Throws when the broker could not be asked -- the permit
+     * is then neither renewed nor known lost, and its deadline stands.
+     */
+    bool renew() {
+        if (token_ == 0) {
+            return false;
+        }
+        auto sent_at = Clock::now();
+        json result = locks_.renew(name_, token_, ttl_seconds_, slot_, owner_);
+        if (!result.value("renewed", false)) {
+            drop();
+            return false;
+        }
+        take(result, sent_at);
+        return true;
+    }
+
+    /**
+     * Renew if it is due: once a third of the lifetime has passed since the
+     * permit was taken or last renewed. Call it at the checkpoints of long
+     * work; it sends nothing before then. false means stop: the permit expired
+     * here, or the broker says it is somebody else's.
+     */
+    bool keep_alive() {
+        if (!held()) {
+            drop();
+            return false;
+        }
+        if (Clock::now() - renewed_at_ < std::chrono::milliseconds(ttl_seconds_ * 1000 / 3)) {
+            return true;
+        }
+        return renew();
+    }
+
+    /**
+     * Give the permit back. true when the broker removed it; false when it was
+     * not this handle's any more or was never held. Either way the handle
+     * holds nothing afterwards and can acquire again.
+     */
+    bool release() {
+        if (token_ == 0) {
+            return false;
+        }
+        long long token = token_;
+        int slot = slot_;
+        drop();
+        return locks_.release(name_, token, slot).value("released", false);
+    }
+
+    /** The broker said the permit is not this handle's (TransactionBuilder::guard). */
+    void mark_lost() { drop(); }
+};
+
+// ============================================================================
 // TransactionBuilder - Atomic transactions
 // ============================================================================
 
@@ -2803,6 +3244,10 @@ private:
     json kv_ops_ = json::array();
     json timer_ops_ = json::array();
     std::vector<std::string> required_leases_;
+    // Lock handles whose permit this bundle commits under. Kept as handles, not
+    // as operations: the token is read when commit() sends, because a renew
+    // between here and there changes it. Each must outlive the commit.
+    std::vector<Lock*> guards_;
 
     class QueuePushBuilder {
     private:
@@ -2906,6 +3351,18 @@ private:
         TransactionBuilder& del(const std::string& key,
                                 const KvWriteOptions& options = KvWriteOptions()) {
             parent_->kv_ops_.push_back(wire::kv_delete_op(namespace_, key, options));
+            return *parent_;
+        }
+
+        /**
+         * A precondition on a key the bundle does not write: `version` is what
+         * it must be at, or 0 for a key that must not exist. Required by
+         * default here, because inside a bundle that is what it is for: the
+         * gate. Pass false for a look that holds nothing back.
+         */
+        TransactionBuilder& check(const std::string& key, long long version,
+                                  bool required = true) {
+            parent_->kv_ops_.push_back(wire::kv_check_op(namespace_, key, version, required));
             return *parent_;
         }
 
@@ -3024,6 +3481,28 @@ public:
     }
 
     /**
+     * Commit this bundle only while `lock` is held.
+     *
+     * The guard is a `check` of the permit's row at the lock's token, required:
+     * the broker judges it in the same log entry as the acks, pushes, keys and
+     * timers beside it. A holder that was paused past its lifetime and replaced
+     * commits NOTHING -- which the lock by itself cannot promise, since nobody
+     * stops an expired holder from running.
+     *
+     * The token is read when commit() sends. A guard that loses is the verdict,
+     * returned like any lost required precondition (`reason:"kv_precondition"`),
+     * and the handle then holds nothing.
+     *
+     * commit() throws LockNotHeldError when the handle holds nothing: a step
+     * that asked for a guard must not go out without one. `lock` must outlive
+     * the commit.
+     */
+    TransactionBuilder& guard(Lock& lock) {
+        guards_.push_back(&lock);
+        return *this;
+    }
+
+    /**
      * Commit the bundle.
      *
      * WHERE THE TWO RIDER ARRAYS GO, AND WHY IT IS NOT NEGOTIABLE
@@ -3060,7 +3539,7 @@ public:
      * still arrives as an HttpError from the transport layer.
      */
     json commit() {
-        if (operations_.empty() && kv_ops_.empty() && timer_ops_.empty()) {
+        if (operations_.empty() && kv_ops_.empty() && timer_ops_.empty() && guards_.empty()) {
             throw std::runtime_error("Transaction has no operations to commit");
         }
 
@@ -3073,8 +3552,18 @@ public:
             {"operations", operations_},
             {"requiredLeases", required_leases_}
         };
-        if (!kv_ops_.empty()) {
-            request["kv"] = kv_ops_;
+        // The guards go first in `kv`: guard i is op i of the rider.
+        // Lock::guard() throws for a handle that holds nothing, before
+        // anything is sent.
+        json kv = json::array();
+        for (Lock* lock : guards_) {
+            kv.push_back(lock->guard());
+        }
+        for (const auto& op : kv_ops_) {
+            kv.push_back(op);
+        }
+        if (!kv.empty()) {
+            request["kv"] = kv;
         }
         if (!timer_ops_.empty()) {
             request["timers"] = timer_ops_;
@@ -3084,6 +3573,24 @@ public:
 
         if (!result.contains("success") || !result["success"].get<bool>()) {
             if (result.is_object() && result.value("reason", std::string()) == "kv_precondition") {
+                // The guard of one of this bundle's locks: the permit expired,
+                // was released, or is somebody else's. The handle says so.
+                // `failedIndex` is in the FLAT result space: every pushed item
+                // and every ack first, then the kv rider.
+                if (!guards_.empty() && result.contains("failedIndex") &&
+                    result["failedIndex"].is_number_integer()) {
+                    long long flat_operations = 0;
+                    for (const auto& op : operations_) {
+                        flat_operations += (op.value("type", std::string()) == "push" &&
+                                            op.contains("items"))
+                                               ? static_cast<long long>(op["items"].size())
+                                               : 1;
+                    }
+                    long long at = result["failedIndex"].get<long long>() - flat_operations;
+                    if (at >= 0 && at < static_cast<long long>(guards_.size())) {
+                        guards_[static_cast<size_t>(at)]->mark_lost();
+                    }
+                }
                 return result;
             }
             std::string error = result.contains("error") ?
@@ -3187,6 +3694,25 @@ public:
     /** Delete a key. `applied:false, reason:"absent"` when there was nothing. */
     json del(const std::string& key, const KvWriteOptions& options = KvWriteOptions()) {
         return apply(wire::kv_delete_op(namespace_, key, options), "kv delete");
+    }
+
+    /**
+     * Is the key still at `version`? Writes nothing. Version 0 asks the
+     * opposite: the key must not exist.
+     *
+     * Returns {applied, key, version}; `applied` is "the precondition held".
+     * When it did not: `reason` (version | absent | exists) with the CURRENT
+     * value and version, what a reader would see.
+     *
+     * On its own it is a linearizable look. Where it earns its place is beside
+     * writes, required, in a transaction (`tx.kv(ns).check(key, version)`):
+     * everything else then commits only if a key the bundle does not write is
+     * unchanged -- which is how a step is tied to a lock.
+     *
+     * Needs a broker at cluster version 5, the first with this operation.
+     */
+    json check(const std::string& key, long long version, bool required = false) {
+        return apply(wire::kv_check_op(namespace_, key, version, required), "kv check");
     }
 
     /**
@@ -4321,6 +4847,43 @@ public:
      */
     KvBuilder kv(const std::string& ns) {
         return KvBuilder(http_client_, ns);
+    }
+
+    /**
+     * A lock: one holder at a time, held as a lease of `ttl_seconds`, with a
+     * fencing token.
+     *
+     *     auto lock = client.lock("daily-report", 30);
+     *     if (!lock.acquire()) return;          // somebody else has it
+     *
+     * Creating the handle sends nothing. It is a lease, not a mutex: it
+     * expires, and a holder that outlived it keeps running.
+     * TransactionBuilder::guard is what makes the WORK exclusive; read the
+     * note on the Lock class once, including the part about keep_alive() --
+     * nothing renews a lock in the background.
+     */
+    Lock lock(const std::string& name, long long ttl_seconds,
+              const LockOptions& options = LockOptions()) {
+        return Lock(http_client_, name, ttl_seconds, 1, options);
+    }
+
+    /**
+     * A semaphore: at most `limit` holders at a time. One handle is ONE
+     * permit; make a handle per holder. Every holder of one name passes the
+     * same limit -- it is the caller's and is stored nowhere, so while a limit
+     * is being changed the larger one rules.
+     */
+    Lock semaphore(const std::string& name, int limit, long long ttl_seconds,
+                   const LockOptions& options = LockOptions()) {
+        return Lock(http_client_, name, ttl_seconds, limit, options);
+    }
+
+    /**
+     * The four lock operations as the broker speaks them, with no state kept:
+     * for `get` (who holds it?) and for a caller that carries the token itself.
+     */
+    LocksBuilder locks() {
+        return LocksBuilder(http_client_);
     }
 
     /**

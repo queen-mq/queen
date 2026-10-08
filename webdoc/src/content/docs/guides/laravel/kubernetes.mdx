@@ -38,6 +38,8 @@ sourceOfTruth:
 # QUEEN_SUPERVISOR_PREFORK still turns it on for every pool, so nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): only message browsing changes; depth reads, autoscaling inputs and supervisor coordination are unchanged.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): phase2.rs gains the two /api/v1/system/link routes; the routes this page reads are as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/kv.rs counts a `check` as a write and answers 503 for one
+# below cluster version 5. The supervisor sends no `check`. Nothing this page states changes.
 ---
 
 This page puts the supervisor features together for the setup most teams end up with: Laravel

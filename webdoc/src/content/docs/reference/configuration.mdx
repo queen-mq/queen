@@ -36,6 +36,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): nine QUEEN_LINK_* variables join the generated table (batcher.rs reads QUEEN_LINK_PIPELINE, raft/link.rs and link/driver.rs the others, both now among this page's sources), with a pointer to the page that explains them. The engine tuning tables are as described.
+# sourceOfTruth re-read 2026-10-08 (locks): proxy_embed.rs maps the new KV refusal to its 503; facade/real.rs
+# refuses a transaction's KV `check` below cluster version 5. No setting was added or changed. Nothing this
+# page states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

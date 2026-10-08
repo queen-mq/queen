@@ -527,6 +527,47 @@ Use `queen.timers.cancel(...)`, not a `cancel` op inside a batch: the DELETE
 route it takes is the one that is never blocked by a quota. A tenant that cannot
 cancel keeps producing messages it cannot stop.
 
+### Locks and semaphores
+
+A lock is a lease: one holder at a time, for a lifetime the holder renews, with a
+token that fences a holder that outlived it. `client.semaphore(name, n, ...)` is the
+same with `n` permits.
+
+```python
+lock = client.lock("daily-report", ttl_seconds=30)
+if not await lock.acquire(wait=5):          # up to 5 s for our turn
+    return                                  # somebody else holds it
+try:
+    await (client.transaction()
+           .guard(lock)                     # commits only while the lock is ours
+           .queue("reports").push([{"data": report}])
+           .commit())
+finally:
+    await lock.release()
+
+# Or as a context manager, which raises LockNotHeldError when it is held:
+async with client.lock("sync:crm", ttl="1m") as lock:
+    await sync(lock)
+```
+
+It is a lease, not a mutex: it expires, and nobody tells the holder. A paused or
+partitioned process carries on past its lifetime while somebody else acquires, so
+the lock alone never makes two holders impossible. The guard is what keeps the
+old holder's work out: a guarded transaction rolls back with `kv_precondition`
+once the lock is no longer this handle's. Outside Queen, fence with the token,
+which only rises on a lock. The token changes at every renew, so read it when you
+use it.
+
+The handle renews in the background, every third of the lifetime
+(`auto_renew=False` to call `lock.renew()` yourself), and says when the lock is
+gone: `lock.lost` is an `asyncio.Event` and `lock.on_lost(fn)` runs. Nothing stops
+your code: check `lock.lost.is_set()` in a long loop.
+
+`client.locks` is the wire, with no state kept: `acquire`, `renew`, `release`,
+`get(name)` and `batch`. `client.kv.check(ns, key, expect=...)` is the precondition
+on its own, and `transaction().kv.check(..., required=True)` gates a commit on a key
+the transaction does not write.
+
 ### Inside a transaction
 
 The transaction is the **primary fence**; `expect` is only the secondary

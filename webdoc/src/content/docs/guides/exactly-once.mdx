@@ -21,6 +21,10 @@ sidebar:
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): a standby cluster answers writes 503 `standby` with nothing applied; what a retry needs to be safe is the same there after a promotion, since the dedup window, the leases and KV are replayed. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): TransactionBuilder.js gained guard(lock) and kv.check, Kv.js
+# gained check; planner/kv.rs gained the `check` op and states that a key's versions only rise; facade/real.rs
+# refuses a transaction's KV `check` below cluster version 5. putIfAbsent with required is unchanged. Nothing
+# this page states changes.
 ---
 
 A consumer that charges cards will see some orders twice: a lease runs out while the card network

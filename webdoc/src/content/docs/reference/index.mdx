@@ -29,6 +29,9 @@ digest: >-
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the digest names 503 `standby`.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks; facade/real.rs
+# refuses a transaction's KV `check` below cluster version 5; facade/mod.rs names that refusal
+# (KvFailure::NotYet). Nothing this page states changes.
 ---
 
 This section is the contract written down: what every route takes and answers, what each status

@@ -529,6 +529,50 @@ with every option in the [PHP client reference](REFERENCE.md).
 
 ---
 
+### Locks and semaphores
+
+A lock is a lease: one holder at a time, for a lifetime the holder renews, with a
+token that fences a holder that outlived it. `$queen->semaphore($name, $n, $opts)`
+is the same with `$n` permits.
+
+```php
+$lock = $queen->lock('daily-report', ['ttlSeconds' => 30]);
+if (!$lock->acquire(5.0)) {            // up to 5 s for our turn
+    return;                            // somebody else holds it
+}
+try {
+    foreach ($pages as $page) {
+        if (!$lock->keepAlive()) {     // renews when a third of the lifetime has passed
+            break;                     // lost: stop
+        }
+        importPage($page);
+    }
+    $queen->transaction()
+        ->guard($lock)                 // commits only while the lock is ours
+        ->queue('reports')->push([['data' => $report]])
+        ->commit();
+} finally {
+    $lock->release();
+}
+```
+
+It is a lease, not a mutex: it expires, and nobody tells the holder. A paused or
+partitioned process carries on past its lifetime while somebody else acquires, so
+the lock alone never makes two holders impossible. The guard is what keeps the
+old holder's work out: a guarded transaction rolls back with `kv_precondition`
+once the lock is no longer this handle's. Outside Queen, fence with the token,
+which only rises on a lock. The token changes at every renew, so read it when you
+use it.
+
+**PHP has no background renewal.** A handle that never calls `keepAlive()` (or
+`renew()`) holds the lock for one lifetime only. Call `keepAlive()` at a checkpoint
+inside the work loop: it sends nothing until a third of the lifetime has passed,
+and returns `false` once the lock is gone.
+
+`$queen->locks()` is the wire, with no state kept: `acquire`, `renew`, `release`,
+`get($name)` and `batch`. `$queen->kv()->check($ns, $key, ['expect' => $version])`
+is the precondition on its own.
+
 ## Configuration
 
 Every key is in the published `config/queen.php`, and

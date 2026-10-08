@@ -17,6 +17,7 @@
             [jepsen.queen.workload [dedup :as dedup]
                                    [dlq :as dlq]
                                    [elle :as elle]
+                                   [locks :as locks]
                                    [log :as log]
                                    [pipeline :as pipeline]
                                    [queue :as queue]
@@ -37,7 +38,9 @@
    :dlq      dlq/workload         ; W7
    :retention retention/workload  ; W8
    :streams  streams/workload     ; W9
-   :timers   timers/workload})    ; W10
+   :timers   timers/workload      ; W10
+   :locks    locks/workload       ; W11
+   :semaphore locks/semaphore-workload}) ; W11b
 
 (def all-faults
   #{:pause :kill :partition :clock :pause-kill :part-kill :bridge :leader-deaf
@@ -260,6 +263,9 @@
             :extra-env   (merge (when (:kv-lift opts) (:db-env workload))
                                 (:env opts))
             :queue-names (mapv #(str "jepsen-" %) (range (:queues opts)))
+            ; The fault names, for a checker that must know them: :nemesis
+            ; above is the nemesis itself.
+            :faults      (set (:nemesis opts))
             :client-timeout-ms (+ (:server-timeout-ms opts) 5000)
             :generator
             ((:wrap-generator workload identity)
@@ -442,7 +448,15 @@
     :default 8
     :parse-fn parse-long]
 
-   ["-w" "--workload NAME" "Workload: log (W1), queue (W2), register (W3), counter (W3b), claim (W3c), elle (W4), pipeline (W5), dedup (W6), dlq (W7), retention (W8), streams (W9), timers (W10)."
+   [nil "--w11-locks N" "locks / semaphore workloads: how many locks (each guards one partition)."
+    :default 3
+    :parse-fn parse-long]
+
+   [nil "--w11-limit N" "semaphore workload: permits of each semaphore (at least 2)."
+    :default 3
+    :parse-fn parse-long]
+
+   ["-w" "--workload NAME" "Workload: log (W1), queue (W2), register (W3), counter (W3b), claim (W3c), elle (W4), pipeline (W5), dedup (W6), dlq (W7), retention (W8), streams (W9), timers (W10), locks (W11), semaphore (W11b)."
     :default :log
     :parse-fn keyword
     :validate [workloads (cli/one-of workloads)]]])

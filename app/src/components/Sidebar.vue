@@ -399,6 +399,7 @@ const icons = {
   messages: MessagesIcon,
   kv: KvIcon,
   timers: TimersIcon,
+  locks: LocksIcon,
   traces: TracesIcon,
   analytics: AnalyticsIcon,
   workload: WorkloadIcon,
@@ -423,6 +424,9 @@ function KvIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', s
 /* Timers: a clock, and nothing else. A timer is a message with an instant on
    it, and the instant is the only thing the glyph has to carry. */
 function TimersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('circle',{cx:'12',cy:'13',r:'8'}),h('path',{d:'M12 9v4l3 2'}),h('path',{d:'M9 2h6'})]) }
+/* Locks: a padlock, closed. A lock here is something a holder HAS, for a
+   while; the page lists the ones that are held. */
+function LocksIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('rect',{x:'5',y:'11',width:'14',height:'9',rx:'2'}),h('path',{d:'M8 11V8a4 4 0 018 0v3'})]) }
 function TracesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M3 6h6M11 10h8M7 14h10M3 18h6'}),h('circle',{cx:'9',cy:'6',r:'1.6',fill:'currentColor'}),h('circle',{cx:'19',cy:'10',r:'1.6',fill:'currentColor'}),h('circle',{cx:'17',cy:'14',r:'1.6',fill:'currentColor'}),h('circle',{cx:'9',cy:'18',r:'1.6',fill:'currentColor'})]) }
 function WorkloadIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round' }, [h('rect',{x:'3',y:'4',width:'8',height:'6',rx:'1.5'}),h('rect',{x:'13',y:'4',width:'8',height:'11',rx:'1.5'}),h('rect',{x:'3',y:'14',width:'8',height:'6',rx:'1.5'}),h('path',{d:'M17 18v2'})]) }
 function AnalyticsIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M4 20V10M10 20V4M16 20v-8M22 20H2'})]) }

@@ -4,7 +4,7 @@ description: "A transactionId makes a push idempotent inside its partition's ded
 type: concept
 tier: use
 sidebar:
-  order: 7
+  order: 8
 sourceOfTruth:
   - server/src/rsm/planner/push.rs
   - server/src/rsm/planner/txn.rs
@@ -21,6 +21,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): a standby cluster answers pushes 503 `standby`, and the facade exports the queen_link_* families; dedup on an ordinary cluster is as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): TransactionBuilder.js gained guard(lock) and kv.check, Kv.js
+# gained check; facade/real.rs refuses a transaction's KV `check` below cluster version 5. once() is
+# unchanged. Nothing this page states changes.
 ---
 
 Every message carries a `transactionId`. Push the same id to the same partition again, inside the

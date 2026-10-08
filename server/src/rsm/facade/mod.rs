@@ -736,6 +736,11 @@ pub enum KvFailure {
     /// 23514): nothing was written, and the answer is a 200 built from this
     /// DETAIL JSON (cut at 4096 characters like the SP's).
     Precondition { detail: String },
+    /// An op the cluster cannot take YET (D20): it was minted at a catalogue
+    /// version above the cluster's, so a member still runs a release that
+    /// cannot decode it. Nothing ran. 503 with this `reason`, retryable: the
+    /// version rises by itself when the last member is upgraded.
+    NotYet { reason: String, detail: String },
     /// Anything the facade itself answers (retry, no leader, timeout, …).
     Rsm(RsmError),
 }

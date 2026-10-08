@@ -57,6 +57,7 @@ mod delete_race;
 mod edge;
 mod facade;
 mod facade_kv;
+mod facade_locks;
 mod fetch_offsets;
 mod fuzz;
 mod gates;

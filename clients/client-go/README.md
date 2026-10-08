@@ -577,6 +577,44 @@ path. Both arrive as `*queen.SurfaceError` (the transaction also hands back its
 `TransactionResponse`, whose `Reason` carries the code): branch on `Code` or
 `Reason`, never on the prose.
 
+## Locks and semaphores
+
+A lock is a lease: one holder at a time, for a lifetime the holder renews, with a
+token that fences a holder that outlived it. `client.Semaphore(name, n, ttl)` is
+the same with `n` permits.
+
+```go
+lock := client.Lock("daily-report", 30*time.Second)
+
+ok, err := lock.TryAcquire(ctx) // once; lock.Acquire(ctx) waits until ctx is done
+if err != nil || !ok {
+    return err // somebody else holds it
+}
+defer lock.Release(context.Background())
+
+res, err := client.Transaction().
+    Guard(lock). // commits only while the lock is ours
+    Queue("reports").Push(report).
+    Commit(ctx)
+```
+
+It is a lease, not a mutex: it expires, and nobody tells the holder. A paused or
+partitioned process carries on past its lifetime while somebody else acquires, so
+the lock alone never makes two holders impossible. The guard is what keeps the
+old holder's work out: a guarded transaction rolls back with `kv_precondition`
+once the lock is no longer this handle's. Outside Queen, fence with the token,
+which only rises on a lock. The token changes at every renew, so read it when you
+use it.
+
+The handle renews in the background, every third of the lifetime
+(`LockOptions{ManualRenew: true}` to call `lock.Renew` yourself), and says when
+the lock is gone: `<-lock.Lost()`. Nothing stops your code: select on it in a
+long loop.
+
+`client.Locks()` is the wire, with no state kept: `Send`, `Batch` and `Get`.
+`KV().Check(ctx, ns, key, version)` is the precondition on its own, and
+`queen.KVCheckOp(ns, key, version)` rides a transaction.
+
 ## Dead Letter Queue
 
 ```go

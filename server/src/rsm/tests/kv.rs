@@ -59,7 +59,7 @@ enum Answer {
 /// One KV call of `tenant`, as the facade makes it.
 fn call_as(cell: &mut Cell, tenant: &str, id: u64, v: Value) -> Answer {
     let ops = ops_for(tenant, &v);
-    let pre: Vec<KvOpOutcome> = if ops.iter().any(KvOp::is_write) {
+    let pre: Vec<KvOpOutcome> = if ops.iter().any(KvOp::is_planned) {
         let cmd = Cmd::Kv(KvCommand {
             request_id: rid(id),
             tenant: tenant.into(),
@@ -835,6 +835,374 @@ fn a_get_before_a_write_of_the_same_key_sees_the_old_value() {
     assert_eq!(r[2]["rows"][0]["value"], "v3", "multi-key reads run last");
     assert_eq!(r[1]["index"], 1);
     assert_eq!(r[2]["index"], 2);
+}
+
+// ---------------------------------------------------------------------------
+// check: a precondition that writes nothing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_check_holds_or_loses_and_never_writes() {
+    let mut c = Cell::new("kv-check");
+    let put = one(
+        &mut c,
+        1,
+        json!({"op":"put","ns":"chk","key":"k","value":{"n":1},"ttlSeconds":60}),
+    );
+    let v1 = version(&put);
+    let before = c.digest();
+
+    // Held: the version asked about, and no value (the caller holds it).
+    let held = one(
+        &mut c,
+        2,
+        json!({"op":"check","ns":"chk","key":"k","expect":v1}),
+    );
+    assert!(applied(&held), "{held}");
+    assert_eq!(held["op"], "check");
+    assert_eq!(held["key"], "k");
+    assert_eq!(version(&held), v1);
+    assert!(
+        held.get("value").is_none(),
+        "a held check hands back no value: {held}"
+    );
+
+    // Lost: what a reader would see, like every other loser.
+    let stale = one(
+        &mut c,
+        3,
+        json!({"op":"check","ns":"chk","key":"k","expect":v1 + 777}),
+    );
+    assert!(!applied(&stale) && reason(&stale) == "version", "{stale}");
+    assert_eq!(stale["value"], json!({"n":1}));
+    assert_eq!(version(&stale), v1);
+    let taken = one(
+        &mut c,
+        4,
+        json!({"op":"check","ns":"chk","key":"k","expect":0}),
+    );
+    assert!(!applied(&taken) && reason(&taken) == "exists", "{taken}");
+
+    // A key that is not there: `expect: 0` holds, a version does not.
+    let free = one(
+        &mut c,
+        5,
+        json!({"op":"check","ns":"chk","key":"nobody","expect":0}),
+    );
+    assert!(applied(&free) && version(&free) == 0, "{free}");
+    let gone = one(
+        &mut c,
+        6,
+        json!({"op":"check","ns":"chk","key":"nobody","expect":v1}),
+    );
+    assert!(!applied(&gone) && reason(&gone) == "absent", "{gone}");
+    assert_eq!(gone["value"], Value::Null);
+    assert_eq!(version(&gone), 0);
+
+    assert_eq!(before, c.digest(), "six checks, nothing logged");
+    assert_eq!(
+        row(&c, "chk", "k").unwrap().version,
+        v1,
+        "a check leaves the version it read"
+    );
+
+    // An expired row is not there, before the sweep takes it (§5.7).
+    c.advance(61 * SEC);
+    let expired = one(
+        &mut c,
+        7,
+        json!({"op":"check","ns":"chk","key":"k","expect":v1}),
+    );
+    assert!(
+        !applied(&expired) && reason(&expired) == "absent",
+        "{expired}"
+    );
+    let reusable = one(
+        &mut c,
+        8,
+        json!({"op":"check","ns":"chk","key":"k","expect":0}),
+    );
+    assert!(applied(&reusable), "{reusable}");
+}
+
+/// What a check is for: a call (or a transaction's `kv` rider) that commits
+/// only while a key the call does not write is still at the version the
+/// caller holds — a lock's row. The guard does not move the version, so the
+/// holder keeps using the token it has.
+#[test]
+fn a_required_check_gates_the_whole_call_and_leaves_the_key_alone() {
+    let mut c = Cell::new("kv-check-gate");
+    let lock = one(
+        &mut c,
+        1,
+        json!({"op":"putIfAbsent","ns":"locks","key":"report","value":{"owner":"a"},
+               "ttlSeconds":30}),
+    );
+    let token = version(&lock);
+    let step = |token: u64, n: u64| {
+        json!([
+            {"op":"check","ns":"locks","key":"report","expect":token,"required":true},
+            {"op":"put","ns":"work","key":"result","value":{"n":n},"forever":true},
+        ])
+    };
+
+    for n in 1..=3u64 {
+        let r = results(&mut c, 10 + n, step(token, n));
+        assert!(applied(&r[0]) && applied(&r[1]), "{r:?}");
+        assert_eq!(version(&r[0]), token);
+    }
+    assert_eq!(
+        row(&c, "locks", "report").unwrap().version,
+        token,
+        "three guarded steps, the token is the one acquire handed out"
+    );
+
+    // The lease expires and another holder takes the lock: the first holder's
+    // next step commits nothing.
+    c.advance(31 * SEC);
+    let other = one(
+        &mut c,
+        20,
+        json!({"op":"putIfAbsent","ns":"locks","key":"report","value":{"owner":"b"},
+               "ttlSeconds":30}),
+    );
+    assert!(applied(&other), "{other}");
+    let before = c.digest();
+    match call_as(&mut c, TENANT, 21, step(token, 4)) {
+        Answer::Precondition(d) => {
+            assert_eq!(d["index"], 0);
+            assert_eq!(d["op"], "check");
+            assert_eq!(d["ns"], "locks");
+            assert_eq!(d["key"], "report");
+            assert_eq!(d["reason"], "version");
+            assert_eq!(d["version"].as_u64(), Some(version(&other)));
+            assert_eq!(d["value"], json!({"owner":"b"}));
+        }
+        Answer::Results(r) => panic!("a stale holder's step must abort: {r:?}"),
+    }
+    assert_eq!(before, c.digest(), "nothing of the stale step was logged");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&row(&c, "work", "result").unwrap().value).unwrap(),
+        json!({"n":3}),
+        "the last step of the real holder stands"
+    );
+}
+
+#[test]
+fn pass_one_refuses_a_check_that_says_nothing_or_shadows_a_write() {
+    let no_expect = refused(json!([{"op":"check","ns":"n","key":"k"}]));
+    assert_eq!((no_expect.status, no_expect.reason), (400, "kv_bad_expect"));
+    let negative = refused(json!([{"op":"check","ns":"n","key":"k","expect":-1}]));
+    assert_eq!(negative.reason, "kv_bad_expect");
+    let null = refused(json!([{"op":"check","ns":"n","key":"k","expect":null}]));
+    assert_eq!(null.reason, "kv_bad_expect");
+    // A key gets one verdict per call: a write's own `expect` is its check.
+    let both = refused(json!([
+        {"op":"check","ns":"n","key":"k","expect":1},
+        {"op":"put","ns":"n","key":"k","value":1,"forever":true},
+    ]));
+    assert_eq!(both.reason, "kv_duplicate_key_in_call");
+    let twice = refused(json!([
+        {"op":"check","ns":"n","key":"k","expect":1},
+        {"op":"check","ns":"n","key":"k","expect":1},
+    ]));
+    assert_eq!(twice.reason, "kv_duplicate_key_in_call");
+    // It needs no lifetime (it writes nothing), and it is a transaction op.
+    let in_txn = parse_ops(
+        json!([{"op":"check","ns":"n","key":"k","expect":7,"required":true}])
+            .as_array()
+            .unwrap(),
+        TENANT,
+        true,
+        MAX_KEY,
+        MAX_VALUE_BYTES_DEFAULT,
+    )
+    .expect("a check rides in a transaction");
+    assert_eq!(
+        in_txn[0],
+        KvOp::Check {
+            ns: "n".into(),
+            key: "k".into(),
+            expect: 7,
+            required: true,
+        }
+    );
+    assert!(in_txn[0].is_planned() && !in_txn[0].is_write() && !in_txn[0].is_read());
+    assert_eq!(
+        in_txn[0].min_cluster_version(),
+        crate::rsm::effect::VERSION_5
+    );
+}
+
+/// D20: a prepared command names an op by its position in the enum, so the
+/// ops a 2.0.3 leader decodes keep theirs and the new one is last.
+#[test]
+fn check_is_the_last_variant_of_a_forwarded_kv_op() {
+    let tag = |op: &KvOp| postcard::to_stdvec(op).expect("encode")[0];
+    let ops = ops_for(
+        TENANT,
+        &json!([
+            {"op":"get","ns":"n","key":"a"},
+            {"op":"getMany","ns":"n","keys":["b"]},
+            {"op":"getPrefix","ns":"n","prefix":"c"},
+            {"op":"put","ns":"n","key":"d","value":1,"forever":true},
+            {"op":"delete","ns":"n","key":"e"},
+            {"op":"incr","ns":"n","key":"f","delta":1,"forever":true},
+            {"op":"check","ns":"n","key":"g","expect":0},
+        ]),
+    );
+    assert_eq!(
+        ops.iter().map(tag).collect::<Vec<u8>>(),
+        vec![0, 1, 2, 3, 4, 5, 6]
+    );
+}
+
+/// THE FENCING CONTRACT (the planner's header): on one key a later write
+/// carries a higher version, whatever happened to the key in between and
+/// whatever other keys were written meanwhile.
+#[test]
+fn on_one_key_a_later_write_always_carries_a_higher_version() {
+    fn write(c: &mut Cell, id: &mut u64, op: Value, what: &str) -> Value {
+        *id += 1;
+        let r = one(c, *id, op);
+        assert!(applied(&r), "{what}: {r}");
+        r
+    }
+    fn rises(last: &mut u64, r: &Value, what: &str) {
+        let v = version(r);
+        assert!(v > *last, "{what}: version {v} is not above {last}");
+        *last = v;
+    }
+    let mut c = Cell::new("kv-fence");
+    let (mut id, mut last) = (0u64, 0u64);
+
+    let r = write(
+        &mut c,
+        &mut id,
+        json!({"op":"putIfAbsent","ns":"f","key":"k","value":1,"ttlSeconds":30}),
+        "create",
+    );
+    rises(&mut last, &r, "create");
+    for n in 0..4u64 {
+        // Other keys take versions in between.
+        write(
+            &mut c,
+            &mut id,
+            json!({"op":"put","ns":"f","key":format!("other-{n}"),"value":n,"forever":true}),
+            "another key",
+        );
+        let r = write(
+            &mut c,
+            &mut id,
+            json!({"op":"put","ns":"f","key":"k","value":n,"ttlSeconds":30,"expect":last}),
+            "renew",
+        );
+        rises(&mut last, &r, "renew");
+    }
+    // Deleted and created again.
+    write(
+        &mut c,
+        &mut id,
+        json!({"op":"delete","ns":"f","key":"k","expect":last}),
+        "delete",
+    );
+    let r = write(
+        &mut c,
+        &mut id,
+        json!({"op":"putIfAbsent","ns":"f","key":"k","value":"again","ttlSeconds":30}),
+        "re-create",
+    );
+    rises(&mut last, &r, "re-create after a delete");
+    // Expired, not swept, and taken by a new holder.
+    c.advance(31 * SEC);
+    let r = write(
+        &mut c,
+        &mut id,
+        json!({"op":"putIfAbsent","ns":"f","key":"k","value":"heir","ttlSeconds":30}),
+        "take over",
+    );
+    rises(&mut last, &r, "re-create over an expired row");
+    // A counter is a key like any other.
+    let mut counter = 0u64;
+    for _ in 0..4 {
+        let r = write(
+            &mut c,
+            &mut id,
+            json!({"op":"incr","ns":"f","key":"n","delta":1,"forever":true}),
+            "incr",
+        );
+        rises(&mut counter, &r, "incr");
+    }
+}
+
+/// A call that reads is answered at its own position in the log, so one that
+/// writes nothing still needs a position: it logs a single no-op. A call
+/// with no read needs none and logs nothing.
+#[test]
+fn a_call_that_reads_and_writes_nothing_logs_one_no_op_for_its_position() {
+    let mut c = Cell::new("kv-noop-position");
+    one(
+        &mut c,
+        1,
+        json!({"op":"putIfAbsent","ns":"np","key":"k","value":1,"forever":true}),
+    );
+    let lost_and_read = kv_cmd(
+        2,
+        json!([
+            {"op":"putIfAbsent","ns":"np","key":"k","value":2,"forever":true},
+            {"op":"get","ns":"np","key":"k"},
+        ]),
+    );
+    match c.plan_only(std::slice::from_ref(&lost_and_read)).remove(0) {
+        Ok(Plan::Logged { effects, outcome }) => {
+            assert_eq!(effects, vec![Effect::Noop]);
+            match outcome {
+                Outcome::Kv(o) => {
+                    assert!(matches!(
+                        &o.results[0],
+                        KvOpOutcome::Write(KvWrite { applied: false, .. })
+                    ));
+                    assert_eq!(o.results[1], KvOpOutcome::Deferred);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        other => panic!("expected one logged no-op, planned {other:?}"),
+    }
+    for (what, ops) in [
+        (
+            "a lost write alone",
+            json!([{"op":"putIfAbsent","ns":"np","key":"k","value":2,"forever":true}]),
+        ),
+        (
+            "a check alone",
+            json!([{"op":"check","ns":"np","key":"k","expect":0}]),
+        ),
+    ] {
+        let cmd = kv_cmd(3, ops);
+        assert!(
+            matches!(
+                c.plan_only(std::slice::from_ref(&cmd)).remove(0),
+                Ok(Plan::Empty(_))
+            ),
+            "{what} logs nothing"
+        );
+    }
+    // And a required precondition that is lost aborts, read or no read.
+    let aborted = kv_cmd(
+        4,
+        json!([
+            {"op":"check","ns":"np","key":"k","expect":0,"required":true},
+            {"op":"get","ns":"np","key":"k"},
+        ]),
+    );
+    match c.plan_only(std::slice::from_ref(&aborted)).remove(0) {
+        Ok(Plan::Empty(Outcome::Kv(KvOutcome {
+            failed: Some(KvPrecondition { index: 0, .. }),
+            ..
+        }))) => {}
+        other => panic!("{other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------

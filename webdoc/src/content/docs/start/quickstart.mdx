@@ -33,6 +33,10 @@ verifiedBy:
 # path crates, broker) instead of over cache mounts; the image and what it runs are unchanged. Nothing this page
 # states changes.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): /health gains a `link` block only on a cluster that is part of a standby pair, which the example's node is not. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks; facade/real.rs
+# refuses a transaction's KV `check` below cluster version 5; planner/kv.rs gained the `check` op and states
+# that a key's versions only rise; TransactionBuilder.js gained guard(lock) and kv.check. A new node reports
+# clusterVersion 5, which the /health example now shows.
 ---
 
 You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the
@@ -50,7 +54,7 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
    ```
 
    ```json
-   {"status":"healthy","engine":"raft","version":"2.0.4","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4}}
+   {"status":"healthy","engine":"raft","version":"2.0.4","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5}}
    ```
 
    That is the whole installation. There is no database to start first, because the node keeps

@@ -545,7 +545,7 @@ impl Ring {
     }
 }
 
-/// The five KV code paths (§5: seven names, five code paths — `putIfAbsent` is an
+/// The KV code paths (§5: eight names, seven code paths — `putIfAbsent` is an
 /// alias that desugars to `put` with `expect:0` when the call is parsed, so it
 /// is NOT a label of its own; one code path, one series).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -556,8 +556,9 @@ pub enum KvOp {
     Put,
     Delete,
     Incr,
+    Check,
 }
-const KV_OPS: usize = 6;
+const KV_OPS: usize = 7;
 impl KvOp {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -567,6 +568,7 @@ impl KvOp {
             KvOp::Put => "put",
             KvOp::Delete => "delete",
             KvOp::Incr => "incr",
+            KvOp::Check => "check",
         }
     }
     const ALL: [KvOp; KV_OPS] = [
@@ -576,7 +578,31 @@ impl KvOp {
         KvOp::Put,
         KvOp::Delete,
         KvOp::Incr,
+        KvOp::Check,
     ];
+}
+
+/// The four operations of `POST /api/v1/locks` (`locks.rs`). A series of their
+/// own, not the KV ones underneath: `acquire` is a `put` in the planner and a
+/// lock to whoever reads the dashboard, and one series must not mean both.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LockOp {
+    Acquire,
+    Renew,
+    Release,
+    Get,
+}
+const LOCK_OPS: usize = 4;
+impl LockOp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LockOp::Acquire => "acquire",
+            LockOp::Renew => "renew",
+            LockOp::Release => "release",
+            LockOp::Get => "get",
+        }
+    }
+    const ALL: [LockOp; LOCK_OPS] = [LockOp::Acquire, LockOp::Renew, LockOp::Release, LockOp::Get];
 }
 
 /// `applied|rejected|error`, and the split is load-bearing: a lost precondition is
@@ -778,6 +804,13 @@ pub struct KvTimers {
     kv_pool_available: AtomicI64,
     kv_pool_waiting: AtomicI64,
 
+    // ---- locks ---------------------------------------------------------------
+    /// `rejected` is a verdict here as it is for KV: a lock somebody else
+    /// holds, a token that is no longer the row's. A waiter polling a held
+    /// lock is the product working, not a fault.
+    lock_ops: [[AtomicU64; KV_RESULTS]; LOCK_OPS],
+    lock_dur: [Ring; LOCK_OPS],
+
     // ---- timers --------------------------------------------------------------
     /// From the due probe, and CAPPED there for the same reason as above.
     timers_due: AtomicI64,
@@ -848,6 +881,15 @@ impl KvTimers {
     }
     pub fn kv_read_rejected(&self, why: KvReject) {
         self.kv_read_rejected[why as usize].fetch_add(1, Ordering::Relaxed);
+    }
+    /// One lock operation with its outcome and its share of the call's time.
+    pub fn lock_op(&self, op: LockOp, result: KvResult, ms: f64) {
+        self.lock_ops[op as usize][result as usize].fetch_add(1, Ordering::Relaxed);
+        self.lock_dur[op as usize].record(ms);
+    }
+    /// A test's (and `/metrics`'s) reading of one lock series.
+    pub fn lock_ops_total(&self, op: LockOp, result: KvResult) -> u64 {
+        self.lock_ops[op as usize][result as usize].load(Ordering::Relaxed)
     }
     /// Two in-flight `GET`s for the same `(tenant, ns, key)` shared one query. The
     /// ONLY safe amplification mechanism for this store (a cached VALUE is forbidden
@@ -1193,6 +1235,40 @@ impl KvTimers {
                 .load(Ordering::Relaxed)
                 .to_string(),
         );
+        ht(
+            s,
+            "queen_locks_ops_total",
+            "Lock operations by kind and outcome (rejected = held by another, or a token that is no longer the row's)",
+            "counter",
+        );
+        for op in LockOp::ALL {
+            for res in KvResult::ALL {
+                g(
+                    s,
+                    "queen_locks_ops_total",
+                    &format!("{{op=\"{}\",result=\"{}\"}}", op.as_str(), res.as_str()),
+                    self.lock_ops[op as usize][res as usize]
+                        .load(Ordering::Relaxed)
+                        .to_string(),
+                );
+            }
+        }
+        ht(
+            s,
+            "queen_locks_op_duration_milliseconds",
+            "Lock operation latency",
+            "gauge",
+        );
+        for op in LockOp::ALL {
+            for (q, p) in [("0.5", 50.0), ("0.99", 99.0)] {
+                g(
+                    s,
+                    "queen_locks_op_duration_milliseconds",
+                    &format!("{{op=\"{}\",quantile=\"{}\"}}", op.as_str(), q),
+                    format!("{:.3}", self.lock_dur[op as usize].percentile(p)),
+                );
+            }
+        }
         ht(
             s,
             "queen_timers_due",
@@ -1977,6 +2053,9 @@ mod kv_timers_tests {
             "queen_kv_expired_not_pruned",
             "queen_kv_read_rejected_total",
             "queen_kv_pool",
+            "queen_kv_ops_total{op=\"check\",result=\"applied\"}",
+            "queen_locks_ops_total{op=\"acquire\",result=\"rejected\"}",
+            "queen_locks_op_duration_milliseconds",
             "queen_timers_due",
             "queen_timers_fired_total",
             "queen_timers_dlq_total",
@@ -2011,7 +2090,13 @@ mod kv_timers_tests {
         m.kvt.set_timers_due(2000, true, 12_000);
         m.kvt.timers_fired(FireResult::Fired, 7);
         m.kvt.sweeper_cycle(SweepPhase::Fire, 12.0, 40);
+        m.kvt.lock_op(LockOp::Acquire, KvResult::Applied, 2.0);
+        m.kvt.lock_op(LockOp::Acquire, KvResult::Rejected, 1.0);
+        m.kvt.lock_op(LockOp::Acquire, KvResult::Rejected, 1.0);
         let out = m.prometheus();
+        assert!(out.contains("queen_locks_ops_total{op=\"acquire\",result=\"applied\"} 1"));
+        assert!(out.contains("queen_locks_ops_total{op=\"acquire\",result=\"rejected\"} 2"));
+        assert!(out.contains("queen_locks_ops_total{op=\"release\",result=\"applied\"} 0"));
         assert!(out.contains("queen_kv_ops_total{op=\"put\",result=\"applied\"} 1"));
         assert!(out.contains("queen_kv_bytes_total{dir=\"in\"} 128"));
         assert!(out.contains("queen_kv_singleflight_coalesced_total 3"));

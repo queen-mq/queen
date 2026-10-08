@@ -38,6 +38,10 @@ mod httpget;
 // `None` for `handlers::status`.
 #[cfg(feature = "kafka")]
 mod kafka_inproc;
+// Locks: a lock and a semaphore as leases stored in KV; `POST /api/v1/locks`
+// is turned into KV calls by the node that received it. Twin of the
+// `mod locks;` in main.rs.
+mod locks;
 mod metrics;
 mod notify;
 mod obs;

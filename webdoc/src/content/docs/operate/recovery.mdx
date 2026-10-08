@@ -58,6 +58,9 @@ digest: >-
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): a cluster may have a standby to promote: the "every disk is gone" row and a card say so. The procedures, the health fields they read and the purge hold for followers are as described.
+# sourceOfTruth re-read 2026-10-08 (locks): facade/real.rs refuses a transaction's KV `check` below cluster
+# version 5; facade/mod.rs names that refusal (KvFailure::NotYet); handlers/raft.rs registers POST
+# /api/v1/locks; main.rs declares the locks module. The rollback paragraph names the raise from 4 to 5.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and
@@ -479,8 +482,9 @@ release on the same directory, which works until the leader raises the cluster v
 that only once every member runs a release that reads the new version, and from then on an older
 build refuses to boot with `this build reads effect catalogue version N, and the cluster this store
 belongs to writes version M ... never an older one`. 2.0.1 is the first release that raises it,
-from 3 to 4; to keep a rollback possible while it bakes, run it with `QUEEN_RAFT_CLUSTER_VERSION_MS=0`
-and remove that setting once you stay. On Kubernetes, a rolling update stalls on a pod
+from 3 to 4, and the release that follows 2.0.4 raises it from 4 to 5; to keep a rollback possible
+while a release bakes, run it with `QUEEN_RAFT_CLUSTER_VERSION_MS=0` and remove that setting once
+you stay. On Kubernetes, a rolling update stalls on a pod
 that cannot become Ready: fix that pod, or change only it with `OnDelete`.
 
 Give each stop its time. A stopping node first hands its ephemeral partitions to their next owners

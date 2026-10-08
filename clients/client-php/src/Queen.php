@@ -19,6 +19,7 @@ class Queen
     private array $config;
     private ?Admin $admin = null;
     private ?Kv $kv = null;
+    private ?Locks $locks = null;
     private ?Timers $timers = null;
     private ?Ephemeral $ephemeral = null;
     /** Process-wide kill switch for pop autopilot, settled in the constructor. */
@@ -87,6 +88,61 @@ class Queen
             $this->kv = new Kv($this->httpClient);
         }
         return $this->kv;
+    }
+
+    // ===========================
+    // Locks API
+    // ===========================
+
+    /**
+     * A lock: one holder at a time, held as a lease, with a fencing token.
+     *
+     *     $lock = $queen->lock('daily-report', ['ttlSeconds' => 30]);
+     *     if (!$lock->acquire()) {
+     *         return;                          // somebody else has it
+     *     }
+     *
+     * Creating the handle sends nothing. It is a lease, not a mutex: it
+     * expires, and a holder that outlived it keeps running. `->guard($lock)`
+     * on a transaction is what makes the WORK exclusive; read the note on the
+     * Lock class once, including the part about keepAlive() — nothing renews a
+     * lock in the background in PHP.
+     *
+     * @param array $opts ttlSeconds (required), owner, retryMinMs, retryMaxMs.
+     */
+    public function lock(string $name, array $opts = []): Lock
+    {
+        if (($opts['limit'] ?? 1) !== 1) {
+            throw new \InvalidArgumentException(
+                'a lock has one permit — $queen->semaphore($name, $limit, $opts) is the one with more'
+            );
+        }
+
+        return new Lock($this->locks(), $name, $opts);
+    }
+
+    /**
+     * A semaphore: at most $limit holders at a time. One handle is ONE
+     * permit; make a handle per holder. Every holder of one name passes the
+     * same limit — it is the caller's and is stored nowhere, so while a limit
+     * is being changed the larger one rules.
+     */
+    public function semaphore(string $name, int $limit, array $opts = []): Lock
+    {
+        return new Lock($this->locks(), $name, ['limit' => $limit] + $opts);
+    }
+
+    /**
+     * The four lock operations as the broker speaks them, with no state kept:
+     * for `get` (who holds it?) and for a caller that carries the token
+     * itself.
+     */
+    public function locks(): Locks
+    {
+        if ($this->locks === null) {
+            $this->locks = new Locks($this->httpClient);
+        }
+        return $this->locks;
     }
 
     // ===========================

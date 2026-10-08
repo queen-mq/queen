@@ -25,6 +25,8 @@ digest: >-
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the facade can open a node as a member of a standby cluster, which takes no writes until it is promoted; the model this page describes is the same. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): facade/real.rs refuses a transaction's KV `check` below cluster
+# version 5. The glossary gained Lock; the five roles are as they were.
 ---
 
 Queen has one idea, and every concept page zooms into a part of it. Every entity gets an ordered
@@ -133,6 +135,7 @@ outside any commit, and needs that system's own idempotency key. See
 | `transactionId` | A message's idempotency key. A second push of the same id to the same partition, inside the dedup window, writes nothing. |
 | KV namespace | A named set of keys inside a tenant, such as `orders`. |
 | Timer | A message promised for later, keyed by queue and `timerKey`, pushed into its queue through the log when it fires. |
+| Lock | A lease on a name: one holder at a time, or N for a semaphore, with a token that fences a holder that outlived it. A KV row underneath. See [locks](/concepts/locks/). |
 | Tenant | An isolated set of queues, KV namespaces and timers. With `QUEEN_TENANCY_HEADER` off, every request uses the default tenant. |
 | Raft group | One replicated log with its own leader. A node runs `QUEEN_RAFT_GROUPS` of them (default 1), and a tenant lives in exactly one. |
 

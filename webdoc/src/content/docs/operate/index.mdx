@@ -46,6 +46,9 @@ digest: >-
 # path crates, broker) instead of over cache mounts; the image and what it runs are unchanged. Nothing this page
 # states changes.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): a cluster can have a standby: the digest says so, and the section's list names the new page. The node and replicator code a single node runs is as described.
+# sourceOfTruth re-read 2026-10-08 (locks): main.rs declares the locks module; facade/real.rs refuses a
+# transaction's KV `check` below cluster version 5. A new node reports clusterVersion 5, which the /health
+# example now shows.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its
@@ -98,7 +101,7 @@ curl -s localhost:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.4","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4}}
+{"status":"healthy","engine":"raft","version":"2.0.4","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5}}
 ```
 
 The dashboard is at `http://localhost:6632/`, and the image carries the CLI, so

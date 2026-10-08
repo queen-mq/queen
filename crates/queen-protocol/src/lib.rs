@@ -29,6 +29,7 @@ pub mod ephemeral;
 pub mod error;
 pub mod fetch;
 pub mod kv;
+pub mod locks;
 pub mod partitions;
 pub mod pop;
 pub mod push;
@@ -58,6 +59,10 @@ pub use fetch::{
 pub use kv::{
     Expiry, KvDeleteBody, KvOpKind, KvOperation, KvPutBody, KvReason, KvRequest, KvResponse,
     KvResult, KvRow,
+};
+pub use locks::{
+    LockHolder, LockOpKind, LockOperation, LockReason, LockRequest, LockResponse, LockResult,
+    LOCK_MAX_LIMIT, LOCK_NAMESPACE,
 };
 // `partitions::ERR_UNKNOWN_TOPIC_OR_PARTITION` is deliberately NOT re-exported
 // here: it is the same marker, spelled the same way and carrying the same

@@ -26,6 +26,8 @@ digest: >-
   queues to a bucket as JSONL or Parquet. Apache 2.0; the image is ghcr.io/queen-mq/queen:latest,
   built for linux/amd64 and linux/arm64.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): cluster.rs reads QUEEN_LINK_TOKEN, the token of a standby cluster's reads. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): TransactionBuilder.js gained guard(lock) and kv.check. Nothing
+# this page states changes.
 ---
 
 **A message queue is the smallest thing Queen MQ does.**

@@ -44,6 +44,8 @@ sourceOfTruth:
 # handler behavior, renewal and exit semantics described here are unchanged.
 # sourceOfTruth re-read 2026-10-08 (PHP client 2.3.1): 2.3.0 is released, so the page no longer says it
 # is not. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): Queen.php gained lock(), semaphore() and locks(); the worker loop
+# does not use them. Nothing this page states changes.
 ---
 
 `php artisan queen:consume` reads a Queen queue and passes each message to a class of yours. Use it

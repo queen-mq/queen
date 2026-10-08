@@ -1844,10 +1844,12 @@ fn mixed_batch_grows(body: &[u8]) -> bool {
     // never heard of counts as growing. The taxonomy is owned by the stored
     // procedures; when it gains a member, the fail-safe direction is that a
     // tenant over quota waits rather than that an unknown op slips the gate.
+    // `check` is on it: a precondition that writes nothing, and the gate of a
+    // batch of deletes is not what makes that batch grow.
     ops.iter().any(|o| {
         !matches!(
             o.get("op").and_then(|v| v.as_str()),
-            Some("get" | "getPrefix" | "delete" | "cancel")
+            Some("get" | "getPrefix" | "delete" | "cancel" | "check")
         )
     })
 }
@@ -2349,6 +2351,15 @@ mod tests {
         assert!(!mixed_batch_grows(br#"[{"op":"get","ns":"a","key":"k"}]"#));
         assert!(!mixed_batch_grows(br#"[{"op":"getPrefix","ns":"a","prefix":"k"}]"#));
         assert!(!mixed_batch_grows(br#"[{"op":"delete","ns":"a","key":"k"}]"#));
+        // A check writes nothing: a guarded batch of deletes still gets through.
+        assert!(!mixed_batch_grows(
+            br#"[{"op":"check","ns":"queen-locks","key":"job#0","expect":7,"required":true},
+                 {"op":"delete","ns":"a","key":"k"}]"#
+        ));
+        assert!(mixed_batch_grows(
+            br#"[{"op":"check","ns":"queen-locks","key":"job#0","expect":7,"required":true},
+                 {"op":"put","ns":"a","key":"k","value":1}]"#
+        ));
 
         assert!(mixed_batch_grows(br#"[{"op":"put","ns":"a","key":"k","value":1}]"#));
         assert!(mixed_batch_grows(br#"[{"op":"putIfAbsent","ns":"a","key":"k"}]"#));

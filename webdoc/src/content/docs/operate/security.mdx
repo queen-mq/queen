@@ -22,6 +22,8 @@ sourceOfTruth:
   - SECURITY.md
 # sourceOfTruth re-read 2026-10-03 (4e2bd24a): SECURITY.md supports 2.x only (the page says so); auth.rs lets the ephemeral hand-over calls in on the cluster token since 892e7d81 (the JWT sentence says so).
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the raft port serves two more routes under /link/v1/ (network.rs), outside the raft token and under QUEEN_LINK_TOKEN (cluster.rs): the port table, a paragraph under the raft token and the no-TLS limit say so.
+# sourceOfTruth re-read 2026-10-08 (locks): main.rs declares the locks module; auth.rs makes /api/v1/locks
+# read-write, which the level table now names; proxy_embed.rs maps the new KV refusal to its 503.
 ---
 
 Out of the box a node authenticates nobody: its HTTP port is plain HTTP, and every route answers
@@ -76,7 +78,7 @@ read-write rather than below it.
 | public | `/health`, `/metrics`, `/metrics/prometheus`, the dashboard's files, `/auth/*`, and whatever `JWT_SKIP_PATHS` adds | none needed |
 | read-only | `GET` listings, status, messages, consumer groups, the DLQ, traces, KV and timer reads; the batched reads by offset | `read-only`, `read-write`, `admin` |
 | write-only | `POST /api/v1/push`, `POST /api/v1/timers`, the ephemeral push | `write-only`, `read-write`, `admin` |
-| read-write | everything else: pop, ack, transaction, KV writes, configure | `read-write`, `admin` |
+| read-write | everything else: pop, ack, transaction, KV writes, locks, configure | `read-write`, `admin` |
 | admin | `/api/v1/system/*` (raft membership, kill switches), `/internal/*`, queue, consumer-group and DLQ deletes | `admin` |
 
 The role names are settings as well (`JWT_ROLE_ADMIN`, `JWT_ROLE_READ_WRITE`,

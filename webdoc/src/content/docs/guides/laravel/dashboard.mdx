@@ -68,6 +68,8 @@ sourceOfTruth:
 # already says; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps the queue and status filters used by the dashboard links; depth, lag and analytics reads are unchanged.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): phase2.rs gains the two /api/v1/system/link routes; the routes this page reads are as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): planner/kv.rs gained the `check` op and states that a key's
+# versions only rise. The supervisor's KV reads and writes are unchanged. Nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the

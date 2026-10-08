@@ -11,6 +11,10 @@
 //!   every node.
 //! - [`the_cluster_version_never_falls`]: a cluster at 4 keeps it across a
 //!   leader change and a restart, with a new leader that has heard nothing yet.
+//! - [`a_check_waits_for_cluster_version_5_and_is_then_served_by_every_node`]:
+//!   the first FORWARDED SHAPE minted at a catalogue version (5, the KV
+//!   `check` op): refused, retryable, by every node while one member reads 4;
+//!   served by every node, the followers through the leader, once it reads 5.
 //!
 //! The refusals of a node that reads less (to join, to boot) are
 //! `raft_cluster.rs`'s; the writers' gate is the consumption engine's
@@ -297,6 +301,124 @@ async fn the_cluster_version_never_falls() {
     leader(&nodes).await;
     tokio::time::sleep(Duration::from_millis(1_000)).await;
     assert_eq!(versions(&nodes), vec![4, 4, 4]);
+
+    for n in nodes.into_iter().flatten() {
+        close(n).await;
+    }
+    for d in dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// One KV call on one node, as the HTTP layer makes it.
+async fn kv(
+    n: &RaftFacade,
+    ops: serde_json::Value,
+) -> Result<Vec<serde_json::Value>, crate::rsm::facade::KvFailure> {
+    n.kv(
+        crate::rsm::facade::ReqCtx::new(
+            crate::config::DEFAULT_TENANT,
+            crate::rsm::facade::Deadline::after(Duration::from_secs(10)),
+        ),
+        crate::rsm::facade::KvReq {
+            ops: ops.as_array().expect("an op array").clone(),
+        },
+    )
+    .await
+    .map(|o| o.results)
+}
+
+/// D20 for a forwarded command shape. The KV `check` op is catalogue version
+/// 5: a follower's prepared call carries it to the leader, and a member on
+/// the release before cannot decode it. So while one member reads 4 every
+/// node refuses a check — retryable, nothing ran, the reason named — and
+/// everything older keeps working; once the last member reads 5 the leader
+/// raises the version and every node serves the op, a follower by sending the
+/// new shape to the leader.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_check_waits_for_cluster_version_5_and_is_then_served_by_every_node() {
+    use crate::rsm::facade::KvFailure;
+    use serde_json::json;
+
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("check")).collect();
+    let ports = free_ports(3);
+    let reads = [Some(5), Some(5), Some(4)];
+    let mut opening = Vec::new();
+    for (i, d) in dirs.iter().enumerate() {
+        let (d, c, k) = (d.clone(), cluster_config(&ports, i as u64 + 1), reads[i]);
+        opening.push(tokio::spawn(async move { open(&d, c, k).await }));
+    }
+    let mut nodes: Vec<Option<Arc<RaftFacade>>> = Vec::new();
+    for o in opening {
+        nodes.push(Some(o.await.expect("open")));
+    }
+    until_version(&nodes, 4).await;
+    heard(&nodes, &[(1, Some(5)), (2, Some(5)), (3, Some(4))]).await;
+    assert_eq!(versions(&nodes), vec![4, 4, 4], "held by the member at 4");
+
+    // Everything a version-4 cluster does still works, from any node.
+    let put = kv(
+        nodes[0].as_ref().unwrap(),
+        json!([{"op":"putIfAbsent","ns":"d20","key":"lock","value":{"owner":"a"},"forever":true}]),
+    )
+    .await
+    .expect("a put at version 4")
+    .remove(0);
+    assert_eq!(put["applied"], true, "{put}");
+    let token = put["version"].as_u64().expect("a version");
+
+    // A check is refused by every node, as "not yet".
+    let check = json!([{"op":"check","ns":"d20","key":"lock","expect":token}]);
+    for (i, n) in nodes.iter().flatten().enumerate() {
+        match kv(n, check.clone()).await {
+            Err(KvFailure::NotYet { reason, detail }) => {
+                assert_eq!(reason, "kv_check_needs_cluster_version_5", "node {}", i + 1);
+                assert!(detail.contains("this cluster is at 4"), "{detail}");
+            }
+            other => panic!("node {}: a check below version 5 answered {other:?}", i + 1),
+        }
+    }
+
+    // The last member is upgraded: the version rises, the op is served.
+    close(nodes[2].take().unwrap()).await;
+    nodes[2] = Some(open(&dirs[2], cluster_config(&ports, 3), Some(5)).await);
+    until_version(&nodes, 5).await;
+    let l = leader(&nodes).await;
+    for (i, n) in nodes.iter().flatten().enumerate() {
+        let r = kv(n, check.clone())
+            .await
+            .unwrap_or_else(|e| panic!("node {} at version 5: {e:?}", i + 1))
+            .remove(0);
+        assert_eq!(r["applied"], true, "node {}: {r}", i + 1);
+        assert_eq!(r["version"].as_u64(), Some(token));
+    }
+    // A follower's guarded call: the gate is judged by the leader's planner.
+    let f = (0..3).find(|i| *i != l).expect("a follower");
+    let stale = kv(
+        nodes[f].as_ref().unwrap(),
+        json!([
+            {"op":"check","ns":"d20","key":"lock","expect":token + 1,"required":true},
+            {"op":"put","ns":"d20","key":"work","value":1,"forever":true},
+        ]),
+    )
+    .await;
+    assert!(
+        matches!(stale, Err(KvFailure::Precondition { .. })),
+        "{stale:?}"
+    );
+    let guarded = kv(
+        nodes[f].as_ref().unwrap(),
+        json!([
+            {"op":"check","ns":"d20","key":"lock","expect":token,"required":true},
+            {"op":"put","ns":"d20","key":"work","value":2,"forever":true},
+            {"op":"get","ns":"d20","key":"work"},
+        ]),
+    )
+    .await
+    .expect("a guarded call through a follower");
+    assert_eq!(guarded[0]["applied"], true, "{guarded:?}");
+    assert_eq!(guarded[2]["value"], 2, "{guarded:?}");
 
     for n in nodes.into_iter().flatten() {
         close(n).await;

@@ -17,6 +17,8 @@ verifiedBy:
   - examples/apps/go/saga/main.go
   - examples/apps/http/saga.sh
 # sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): TransactionBuilder.js gained guard(lock) and kv.check. The example
+# uses neither. Nothing this page states changes.
 ---
 
 A booking holds a room while the guest pays, and gives the room back if the payment never comes.

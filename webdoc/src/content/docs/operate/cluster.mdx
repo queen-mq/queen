@@ -32,6 +32,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the raft port also answers a standby cluster's reads, under a token of its own (QUEEN_LINK_TOKEN, cluster.rs), and the purge keeps the log for a standby too: two lines under Limits. Membership, the hold for followers, the engine and the routes are as described.
+# sourceOfTruth re-read 2026-10-08 (locks): effect.rs adds catalogue version 5 (the KV `check` op, a forwarded
+# shape and no effect kind); the upgrade section names the raise from 4 to 5 and the health example shows 5.
+# main.rs declares the locks module; facade/real.rs refuses a transaction's KV `check` below cluster version
+# 5.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They
@@ -112,7 +116,7 @@ curl -s localhost:36632/health | jq -c .raft
 ```
 
 ```json
-{"role":"follower","leader":true,"term":3,"applied":13,"commit":13,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}
+{"role":"follower","leader":true,"term":3,"applied":13,"commit":13,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"apply":{"failure":null,"skipped":[]}}
 ```
 
 `applied` equal to `commit`, the same 13 the leader reports, means node 3 has applied everything
@@ -321,9 +325,13 @@ exists from 2.0.0-beta.2 on; the move to beta.1 was a stop-all upgrade.
 
 2.0.1 is such a release: once every node runs it, the cluster moves from version 3 to 4 and
 traces start going to their own file on disk. From then on 2.0.0 and 2.0.1-beta refuse to start
-on that data, so going back means an empty data directory. To keep the way back open while a new
-release bakes, set `QUEEN_RAFT_CLUSTER_VERSION_MS=0` on every node: the leader then never raises
-the version, and removing the setting later raises it within a second.
+on that data, so going back means an empty data directory. The release that follows 2.0.4 is the
+next one: it moves the cluster from 4 to 5, which turns on the KV `check` operation that
+[locks](/concepts/locks/) are guarded with, and from then on 2.0.4 and older refuse to start on
+that data. To keep the way back open while a new release bakes, set
+`QUEEN_RAFT_CLUSTER_VERSION_MS=0` on every node: the leader then never raises the version, and
+removing the setting later raises it within a second. While the version stays at 4, a call that
+carries a `check` answers 503, and locks can be taken and released but not used as a guard.
 
 ## Ephemeral queues in a cluster
 
@@ -410,7 +418,7 @@ on `PORT`:
 The leader checks every change before it writes it. One change runs at a time, a live majority has
 to exist before and after (`409 no_quorum` otherwise), the last voter cannot be removed, and a
 learner is promoted only within 1,000 entries of the leader (`QUEEN_RAFT_PROMOTE_MAX_LAG`;
-`409 learner_behind`, or `"force": true`). On a cluster at version 4, a learner is added only once
+`409 learner_behind`, or `"force": true`). On a cluster at version 4 or later, a learner is added only once
 its node is running and answering, so start the new node first. Every change is idempotent, so a
 lost answer is safe to repeat. To replace node 3 after its disk is gone:
 

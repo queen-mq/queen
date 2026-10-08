@@ -32,6 +32,13 @@ cd /src/clients/client-cpp
 # against a responder the test controls. The live half is in test_client.
 ./bin/test_consumer
 
+# Locks, semaphores, `check` and guard(lock). The wire half is broker-free, for
+# the reason the KV/timer suite gives: a guard in the wrong place of a bundle
+# still commits against a live broker, it merely commits unguarded. Given the
+# broker URL the same binary then runs its live half: one holder, a takeover
+# after expiry whose old holder commits nothing, a semaphore at its limit.
+./bin/test_locks "$QUEEN_HTTP_URL"
+
 # Broker URL is argv[1] (there is no env override); default would be localhost.
 # The KV/timer INTEGRATION tests inside this binary run unconditionally: every
 # broker carries both surfaces, so a failure there is a failure and not a

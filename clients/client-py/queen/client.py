@@ -17,6 +17,7 @@ from .ephemeral.ephemeral import Ephemeral
 from .http.http_client import HttpClient
 from .http.load_balancer import LoadBalancer
 from .kv.kv import KV
+from .locks.locks import Lock, Locks
 from .timers.timers import TimerBuilder, Timers
 from .utils import logger
 from .utils.autopilot import pop_autopilot_disabled_by_env
@@ -170,6 +171,7 @@ class Queen:
 
         # KV and timer surfaces (lazily initialized, same discipline as Admin)
         self._kv: Optional[KV] = None
+        self._locks: Optional[Locks] = None
         self._timers: Optional[Timers] = None
         self._ephemeral: Optional[Ephemeral] = None
 
@@ -357,6 +359,68 @@ class Queen:
         if self._kv is None:
             self._kv = KV(self._http_client)
         return self._kv
+
+    @property
+    def locks(self) -> Locks:
+        """
+        The four lock operations as the broker speaks them -- ``acquire``,
+        ``renew``, ``release``, ``get``, and ``batch`` for several locks in one
+        call -- with no state kept: you carry the token. ``lock()`` is what
+        most code wants; this is for ``get`` (who holds it?) and for a caller
+        with its own loop.
+
+        Returns:
+            Locks API instance (lazily initialized, singleton)
+        """
+        if self._locks is None:
+            self._locks = Locks(self._http_client)
+        return self._locks
+
+    def lock(self, name: str, **options: Any) -> Lock:
+        """
+        A lock: one holder at a time, held as a lease, with a fencing token.
+
+            lock = client.lock("daily-report", ttl_seconds=30)
+            if not await lock.acquire():
+                return                      # somebody else has it
+            try:
+                await client.transaction().guard(lock).queue("reports").push([...]).commit()
+            finally:
+                await lock.release()
+
+        Creating the handle sends nothing. While the permit is held the handle
+        renews it in the background and sets ``lock.lost`` if it is lost.
+
+        It is a lease, not a mutex: it expires, and a holder that outlived it
+        keeps running. ``.guard(lock)`` on a transaction is what makes the WORK
+        exclusive; read the note in ``queen/locks/locks.py`` once.
+
+        Args:
+            name: no '#', no control characters, at most 256 bytes
+            options: a lifetime is mandatory (``ttl_seconds=`` or ``ttl=``);
+                also ``owner``, ``auto_renew``, ``renew_every``, ``wait``
+
+        Returns:
+            Lock handle
+        """
+        if options.get("limit", 1) != 1:
+            raise ValueError("a lock has one permit -- client.semaphore(name, limit, ...) is the one with more")
+        return Lock(self.locks, name, **options)
+
+    def semaphore(self, name: str, limit: int, **options: Any) -> Lock:
+        """
+        A semaphore: at most ``limit`` holders at a time. One handle is ONE
+        permit; make a handle per holder.
+
+        Everything a lock's handle does, this one does (it is the same class: a
+        lock is the semaphore of one). Every holder of one name passes the same
+        limit -- it is the caller's and is stored nowhere, so while a limit is
+        being changed the larger one rules.
+
+        Returns:
+            Lock handle holding one permit once acquired
+        """
+        return Lock(self.locks, name, limit=limit, **options)
 
     @property
     def timers(self) -> Timers:
@@ -798,6 +862,17 @@ class Queen:
         # holding the condition's lock). Skipping the await would leave a
         # blocked push hanging forever on a client that is already closed.
         await self._buffer_manager.cleanup()
+
+        # Give back the locks this client's handles still hold, so the next
+        # holder does not wait out their lifetime. Best effort: one that cannot
+        # be released expires by itself.
+        if self._locks is not None:
+            try:
+                released = await self._locks.release_all()
+                if released:
+                    logger.log("Queen.close", {"locks_released": released})
+            except Exception as error:  # noqa: BLE001
+                logger.warn("Queen.close", {"error": str(error), "phase": "lock-release"})
 
         # Close HTTP client
         await self._http_client.close()

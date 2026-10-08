@@ -15,7 +15,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
       - server/src/rsm/facade/real/phase2/link.rs
 */}
 
-`GET /metrics/prometheus` exposes **122 families**. Every one describes the node that answered: `queen_process_*` counts what this node did since it started, and the `queen_raft_*` families describe its replicated log, its store and its pipeline. Scrape every node. The pipeline timing, admission and forwarding families are skipped when `QUEEN_RAFT_METRICS` is `0`, `false`, `off` or `no`; it is on by default. The per-queue families are written only for queues that have something to report. 27 families are declared but not written by this release; their Help says so.
+`GET /metrics/prometheus` exposes **124 families**. Every one describes the node that answered: `queen_process_*` counts what this node did since it started, and the `queen_raft_*` families describe its replicated log, its store and its pipeline. Scrape every node. The pipeline timing, admission and forwarding families are skipped when `QUEEN_RAFT_METRICS` is `0`, `false`, `off` or `no`; it is on by default. The per-queue families are written only for queues that have something to report. 27 families are declared but not written by this release; their Help says so.
 
 ### Process (this broker instance)
 
@@ -193,3 +193,5 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | --- | --- | --- |
 | `queen_consume_engine` | gauge | What the consumption engine holds in memory (only the leader holds any): groups, (group, partition) parts, partitions |
 | `queen_consume_parts_total` | counter | Parts the engine loaded (first contacts and loads back) and unloaded (idle) |
+| `queen_locks_op_duration_milliseconds` | gauge | Lock operation latency |
+| `queen_locks_ops_total` | counter | Lock operations by kind and outcome (rejected = held by another, or a token that is no longer the row's) |

@@ -42,6 +42,7 @@ __all__ = [
     "put_if_absent",
     "delete",
     "incr",
+    "check",
     "expiry_fields",
 ]
 
@@ -280,6 +281,33 @@ def delete(
     required: bool = False,
 ) -> Dict[str, Any]:
     op: Dict[str, Any] = {"op": "delete", "ns": _name("ns", ns), "key": _name("key", key)}
+    op.update(_expect_field(expect))
+    op.update(_required_field(required))
+    return op
+
+
+def check(
+    ns: str,
+    key: str,
+    *,
+    expect: Any = UNSET,
+    required: bool = False,
+) -> Dict[str, Any]:
+    """A precondition that writes nothing: the key is at version ``expect``,
+    or -- ``expect=0`` -- is not there.
+
+    ``expect`` is keyword-only like everywhere else and MANDATORY here: a
+    check without one says nothing, and the broker's ``applied: true`` to it
+    would read as a guard that held. No expiry: it writes nothing.
+
+    With ``required=True`` it is the gate of a whole batch or transaction on a
+    key that call does not write, which is how a step is tied to a lock.
+    """
+    if isinstance(expect, _Unset):
+        raise ValueError(
+            "check needs expect: the version the key must be at, or 0 for a key that must not exist"
+        )
+    op: Dict[str, Any] = {"op": "check", "ns": _name("ns", ns), "key": _name("key", key)}
     op.update(_expect_field(expect))
     op.update(_required_field(required))
     return op

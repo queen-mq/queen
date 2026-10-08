@@ -4,7 +4,7 @@ description: "What Queen MQ guarantees for each API, which faults the Jepsen tes
 type: concept
 tier: use
 sidebar:
-  order: 8
+  order: 9
 sourceOfTruth:
   - server/src/rsm/replicator/mod.rs
   - server/src/rsm/replicator/local.rs
@@ -22,6 +22,7 @@ sourceOfTruth:
   - test/jepsen/src/jepsen/queen/workload/pipeline.clj
   - test/jepsen/src/jepsen/queen/workload/dedup.clj
   - test/jepsen/src/jepsen/queen/workload/timers.clj
+  - test/jepsen/src/jepsen/queen/workload/locks.clj
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): QUEEN_CONSUME_IDLE_UNLOAD_S (600 s) drops idle parts from the leader's memory. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
@@ -48,6 +49,7 @@ guarantee.
 | Queue (pop, ack) | No acked message lost, none acked twice, no redelivery after a successful ack. Leases exclusive in real time. Order per partition without skips. | W2 `queue` |
 | `POST /api/v1/transaction` (an ack with its lease, a push, a KV `incr`) | Atomic, and each input's effects applied exactly once. | W5 `pipeline` |
 | `transactionId` dedup | Idempotent across failover: a retry gets the original offset. | W6 `dedup` |
+| Locks (`POST /api/v1/locks`) | A lock is a KV row, so one `acquire` wins (the `putIfAbsent` row above) and a later holder has a higher token. A transaction that carries a lock's guard commits only while that token is still the lock's. | W11 `locks`, W11b `semaphore` (2026-10-08, after P26) |
 | Timers | A timer fires at most once, never after a cancel that reported removing it, and not before its delay (not judged under clock faults). | W10 `timers` |
 | Every answered write, with two exceptions below | Survives kill -9 and power loss. | all, with `lazyfs` |
 

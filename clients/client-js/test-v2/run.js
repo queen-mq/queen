@@ -17,6 +17,7 @@ import * as semanticsTests from './semantics.js'
 import * as ackWindowTests from './ackwindow.js'
 import * as kvTests from './kv.js'
 import * as timerTests from './timers.js'
+import * as lockTests from './locks.js'
 import * as streamTests from './stream/index.js'
 import * as docsTests from './docs.js'
 import { LoadBalancer } from '../client-v2/http/LoadBalancer.js';
@@ -115,6 +116,7 @@ async function main() {
         ackWindowTests,
         kvTests,
         timerTests,
+        lockTests,
         docsTests
     ]
     

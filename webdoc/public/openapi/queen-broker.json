@@ -39,6 +39,9 @@
       "name": "Key/value state and timers"
     },
     {
+      "name": "Locks and semaphores"
+    },
+    {
       "name": "Ephemeral queues"
     },
     {
@@ -1155,6 +1158,59 @@
           "x-queen-schema-source": "KvListBody"
         },
         "x-queen-note": "This route takes no query parameters and refuses any query string outright, rather than ignoring one: a prefix or key in a URL is recorded by every access log, proxy sample and tracing span between the client and the broker."
+      }
+    },
+    "/api/v1/locks": {
+      "post": {
+        "operationId": "locks_batch",
+        "tags": [
+          "Locks and semaphores"
+        ],
+        "summary": "POST /api/v1/locks",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/locks.rs::handle_locks_batch",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operations": {
+                    "description": "See the reference page for this route."
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
       }
     },
     "/api/v1/timers": {

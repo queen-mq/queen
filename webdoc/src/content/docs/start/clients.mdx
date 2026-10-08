@@ -91,12 +91,15 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (8c6239d23): the Dockerfile compiles the broker in three layers (dependencies,
 # path crates, broker) instead of over cache mounts; the image and what it runs are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): every SDK gained lock, semaphore, kv check and guard on a
+# transaction (queen_client.hpp among them); the capability matrix has the two lock rows and counts
+# eight KV operations. package.json only adds the lock wire tests to test:unit; no version moved.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same
 routes, and curl is a complete client. What an SDK adds is the part that is tedious to write by
 hand: consume loops that ack and nack for you, lease renewal, push buffering, retries with
-failover across the nodes of a cluster, and builders for transactions, KV and timers. Pick the one
+failover across the nodes of a cluster, and builders for transactions, KV, timers and locks. Pick the one
 for your language. The tutorials in `examples/tutorials/` use these same packages, one program
 per language, and check themselves against a live broker.
 
