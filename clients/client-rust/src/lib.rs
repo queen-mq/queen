@@ -68,6 +68,7 @@ pub mod kv;
 pub mod lb;
 pub mod queue;
 pub mod streams;
+pub mod supervision;
 pub mod timers;
 pub mod transaction;
 pub mod uuid;
@@ -85,6 +86,7 @@ pub use error::{Error, Result};
 pub use kv::{Kv, KvOutcome};
 pub use lb::Strategy;
 pub use queue::{PopOutcome, QueueBuilder};
+pub use supervision::SupervisionConfig;
 pub use timers::Timers;
 pub use transaction::TransactionBuilder;
 

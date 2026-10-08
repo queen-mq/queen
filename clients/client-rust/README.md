@@ -333,3 +333,33 @@ The repo-wide harness runs this as the `rust-client` suite:
 ```bash
 test/run.sh --suite rust-client
 ```
+
+### Optional consumer supervision
+
+```rust,no_run
+use queen_mq::SupervisionConfig;
+# async fn example(client: queen_mq::Queen) -> queen_mq::Result<()> {
+client.queue("orders").group("billing")
+    .supervision(Some(SupervisionConfig::new("billing-production")))
+    .concurrency(4)
+    .consume(|message| async move { /* process message */ Ok::<(), String>(()) })
+    .await?;
+# Ok(()) }
+```
+
+Supervision defaults to `None`/off; `.supervision(None)` disables it. The group
+names an application/deployment independently of the consumer group. Each consume
+invocation publishes a unique `queen.consumer.status/v1` instance into the
+broker's `queen-supervisor` KV namespace every 10 seconds (30-second heartbeat
+timeout, 60-second TTL), plus stopped status when its tasks exit. Credentials
+need KV write access. One background task serializes authenticated publications
+with a two-second total deadline; errors do not change ACK/lease behavior.
+
+The compatible Supervisors dashboard shows actual live tasks, busy handlers,
+successful/failed handler calls, last completion and oldest in-flight duration.
+Batch callbacks count as one call; panicked/dropped handler futures count as
+failed calls. Completion does not imply ACK success. Hostname is read from
+`HOSTNAME` or `COMPUTERNAME` when available. No payloads or error text are published.
+Runtime starvation can stop heartbeats. Reporting does not restart tasks or
+processes, autoscale or enable remote commands. Disabled reporting creates no
+background task or KV traffic.

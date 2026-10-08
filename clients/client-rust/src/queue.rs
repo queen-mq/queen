@@ -52,6 +52,7 @@ pub struct QueueBuilder {
     pub(crate) task: Option<String>,
     pub(crate) group: Option<String>,
 
+    pub(crate) supervision: Option<crate::supervision::SupervisionConfig>,
     pub(crate) concurrency: usize,
     /// The CALLER's own values. `None` means the setter was never called, which
     /// is the dimension pop autopilot gets to choose (see [`crate::autopilot`]);
@@ -88,6 +89,7 @@ impl QueueBuilder {
             namespace: None,
             task: None,
             group: None,
+            supervision: None,
             concurrency: 1,
             batch: None,
             max_partitions: None,
@@ -108,6 +110,12 @@ impl QueueBuilder {
             cancel: None,
             buffer: None,
         }
+    }
+
+    /// Optional consumer observations in the dashboard. `None` (default) is off.
+    pub fn supervision(mut self, config: Option<crate::supervision::SupervisionConfig>) -> Self {
+        self.supervision = config;
+        self
     }
 
     /// Hand the consumer a shutdown signal. Without one, `consume` runs until
