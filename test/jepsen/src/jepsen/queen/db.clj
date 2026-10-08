@@ -393,23 +393,42 @@
 
 (defn await-following!
   "Waits until the standby's leader reads the source and has nothing left to
-  read. Returns its status; throws after timeout-ms."
+  read. Returns its status; throws after timeout-ms, having logged what every
+  node of the standby says of the link and the lines of its log that say why
+  (the test's teardown removes the logs before they are collected)."
   [test timeout-ms]
   (let [http (qh/client)]
-    (util/await-fn
-      (fn []
-        (let [[node st] (standby-leader-status http test)
-              f         (:follower st)]
-          (when-not (and (= "standby" (:role st))
-                         (= "following" (:state f))
-                         (= 0 (:lagEntries f)))
-            (throw (ex-info "the standby does not follow yet" {:node node, :status st})))
-          (info "the standby follows its source:" node (select-keys f [:source :scanned :sourceApplied]))
-          st))
-      {:timeout        timeout-ms
-       :retry-interval 500
-       :log-interval   10000
-       :log-message    "waiting for the standby to follow its source"})))
+    (try
+      (util/await-fn
+        (fn []
+          (let [[node st] (standby-leader-status http test)
+                f         (:follower st)]
+            (when-not (and (= "standby" (:role st))
+                           (= "following" (:state f))
+                           (= 0 (:lagEntries f)))
+              (throw (ex-info "the standby does not follow yet" {:node node, :status st})))
+            (info "the standby follows its source:" node (select-keys f [:source :scanned :sourceApplied]))
+            st))
+        {:timeout        timeout-ms
+         :retry-interval 500
+         :log-interval   10000
+         :log-message    "waiting for the standby to follow its source"})
+      (catch Exception e
+        (doseq [n (standby-nodes test)]
+          (warn "the standby does not follow:" n
+                (pr-str (select-keys (link-status http n 2000)
+                                     [:role :leader :position :follower]))
+                (pr-str (select-keys (:raft (qh/health http n 2000))
+                                     [:role :leader :term :applied :commit]))))
+        (doseq [[n lines] (c/on-nodes
+                            test (standby-nodes test)
+                            (fn [_ _]
+                              (try (c/su (c/exec :bash :-c
+                                                 (str "grep -a 'rsm link\\|ERROR\\| WARN rsm\\|becomes leader\\|steps down'"
+                                                      " " log-file " | cut -c1-400 | tail -25")))
+                                   (catch Exception e (str "no log: " (.getMessage e))))))]
+          (warn "the standby does not follow, log of" n "\n" lines))
+        (throw e)))))
 
 (defn disable-ntp!
   "The clock nemesis needs the node's clock left alone: on Ubuntu 24.04
@@ -452,13 +471,19 @@
       (configure-queues! test node))
     (jepsen/synchronize test)
     ; --standby-nodes: the test begins on a standby that reads its source.
+    ; 40 s: the others wait at the next barrier, which breaks after a minute.
     (when (= node (first (standby-nodes test)))
-      (await-following! test 120000))
+      (await-following! test 40000))
     (jepsen/synchronize test)
     (when (:disk-hog test)
       (start-disk-hog! test)))
 
   (teardown! [this test node]
+    ; A test that was killed in the middle of a partition leaves its packet
+    ; rules behind, and the next test's nodes then cannot form their clusters
+    ; (the partition nemesis heals at ITS setup, which comes after the DB's).
+    (c/su (meh (c/exec :iptables :-F :-w))
+          (meh (c/exec :iptables :-X :-w)))
     (stop-disk-hog!)
     (stop-state-loop!)
     ; Always unmount a lazyfs left over from an earlier test, whatever this
