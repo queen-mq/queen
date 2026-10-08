@@ -92,7 +92,7 @@ curl -s http://queen-1:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.2","raft":{"role":"follower","leader":true,"term":5,"applied":112,"commit":112,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}}
+{"status":"healthy","engine":"raft","version":"2.0.3","raft":{"role":"follower","leader":true,"term":5,"applied":112,"commit":112,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}}
 ```
 
 It answers `200 healthy` when the node knows a leader and its `lag` is at most
@@ -124,7 +124,7 @@ curl -s http://queen-1:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.2","raft":{"role":"leader","leader":true,"term":4,"applied":111,"commit":111,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}}
+{"status":"healthy","engine":"raft","version":"2.0.3","raft":{"role":"leader","leader":true,"term":4,"applied":111,"commit":111,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}}
 ```
 
 ```bash
