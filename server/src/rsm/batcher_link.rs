@@ -611,10 +611,20 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     }
 
     /// This node stopped leading: what it knew of the link is the next
-    /// leader's to read.
+    /// leader's to read, and the engine no longer says this node leads a
+    /// standby. The cluster may be promoted under another leader: a node that
+    /// went on saying standby answered so for a promoted cluster once it was
+    /// elected again, to what its followers forwarded from the moment raft
+    /// named it, until its driver had read the role. A command that reaches
+    /// this node before it leads again waits in the queue or is sent on to
+    /// the leader ([`RunState::enqueue`]), and [`Self::adopt_link`] answers
+    /// what waited if the cluster is a standby still.
     pub(super) fn lose_link(&mut self, hint: Option<NodeId>) {
         self.fail_link(hint);
         self.link = LinkMode::Unknown;
+        if let Some(e) = &self.engine {
+            e.set_standby(false);
+        }
     }
 
     /// The first half of a link cycle: the standby entry if it is still owed,
@@ -720,6 +730,10 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// the consumption engine serves from the cursor rows as they are — their
     /// leases live on, as across any leader change.
     ///
+    /// What the link sent before the promotion's entry was proposed, and no
+    /// cycle took, is answered here: a promoted cluster plans no link entry,
+    /// and the standby's follower awaits the answer of each entry it sent.
+    ///
     /// Whoever asked for the promotion is answered here, last: the command
     /// they send next is planned by this driver or served by the engine.
     pub(super) fn check_promotion(&mut self) {
@@ -753,6 +767,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             if let Some(term) = self.planning_term {
                 e.on_leader(term, self.next_index - 1);
             }
+        }
+        // What is still queued for the link: each is answered what it would
+        // be had it arrived now, a source entry refused and a second
+        // promotion done. Left there, they waited for this node to stop
+        // leading ([`Self::fail_link`]).
+        for sub in std::mem::take(&mut self.link_queue) {
+            self.on_link(sub);
         }
         for reply in asked {
             let _ = reply.send(Reply::Done {
