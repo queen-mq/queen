@@ -25,6 +25,7 @@ sourceOfTruth:
 # queen_locks_op_duration_milliseconds and the KV op label `check` (the generated table lists them);
 # facade/real.rs refuses a transaction's KV `check` below cluster version 5; handlers/raft.rs registers POST
 # /api/v1/locks; proxy_embed.rs maps the new KV refusal to its 503. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (promotion's answer): facade/real/phase2/link.rs changes two comments of the promote route, no metric family and no help text. Nothing this page states changes.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node

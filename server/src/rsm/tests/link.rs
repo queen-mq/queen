@@ -16,6 +16,11 @@
 //!   ([`full_entry`]) and replayed by a standby's batcher, which refuses its
 //!   own clients meanwhile; the standby resumes from its position after a
 //!   restart; and a promotion makes it an ordinary cluster.
+//! - **a promotion's answer**
+//!   ([`a_promotion_is_answered_once_the_cluster_takes_its_clients_commands`]):
+//!   the driver answers a promotion only when it plans as an ordinary leader
+//!   and its engine no longer refuses clients — read, with a client's push
+//!   sent, at the instant the answer is given.
 //! - **the driver's refusals** ([`a_standby_refuses_what_does_not_follow_it`]):
 //!   an entry out of sequence, an entry that does not continue the standby's
 //!   state, and a link command on a cluster that is not a standby.
@@ -27,7 +32,7 @@
 //!   what it is; and it goes on when the source does.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,6 +44,7 @@ use crate::rsm::batcher::{
     Batcher, BatcherConfig, Command, CommandTx, LinkBoot, LinkOp, LinkSubmission, LinkTx, Reply,
     Submission, DIVERGED_CODE, NOT_STANDBY_CODE, OUT_OF_SEQUENCE_CODE,
 };
+use crate::rsm::consume::Engine;
 use crate::rsm::effect::Effect;
 use crate::rsm::entry::{decode_entry, encode_entry, Entry, Outcome, PushVerdict};
 use crate::rsm::link::mirror::{mirror_entry, standby_entry};
@@ -366,10 +372,30 @@ impl Cluster {
     }
 
     fn start_with(&mut self, cfg: BatcherConfig, boot: Option<LinkBoot>) {
+        self.start_driver(cfg, boot, None);
+    }
+
+    /// Start a driver that has a consumption engine, as a facade's does: the
+    /// engine is what a leader's intake asks whether its cluster is a standby.
+    fn start_with_engine(&mut self, boot: Option<LinkBoot>) -> Arc<Engine> {
+        let engine = Engine::new(self.store.clone());
+        self.start_driver(driver_cfg(), boot, Some(engine.clone()));
+        engine
+    }
+
+    fn start_driver(
+        &mut self,
+        cfg: BatcherConfig,
+        boot: Option<LinkBoot>,
+        engine: Option<Arc<Engine>>,
+    ) {
         let (link, link_rx) = tokio::sync::mpsc::channel(64);
-        let (tx, handle) = Batcher::new(self.store.clone(), self.repl.clone(), cfg)
-            .with_link(link_rx, boot)
-            .spawn();
+        let mut batcher =
+            Batcher::new(self.store.clone(), self.repl.clone(), cfg).with_link(link_rx, boot);
+        if let Some(engine) = engine {
+            batcher = batcher.with_engine(engine);
+        }
+        let (tx, handle) = batcher.spawn();
         self.driver = Some(Driver { tx, link, handle });
     }
 
@@ -778,6 +804,137 @@ async fn a_standby_replays_its_source_restarts_and_is_promoted() {
     b.shut().await;
     let _ = std::fs::remove_dir_all(da);
     let _ = std::fs::remove_dir_all(db);
+}
+
+/// The waker of a promotion's answer. A oneshot's send wakes its receiver
+/// before it returns, so this runs on the driver's own task at the instant the
+/// answer is given and before the driver does anything else: what it reads
+/// and sends is read and sent then, with no timing involved.
+struct AtTheAnswer {
+    /// Taken at the answer: the engine a leader's intake asks, and a client's
+    /// push with the driver's channel to put it in.
+    armed: std::sync::Mutex<Option<(Arc<Engine>, CommandTx, Submission)>>,
+    /// What held then: whether the engine still called its cluster a standby,
+    /// and the role this node's own state said.
+    seen: std::sync::Mutex<Option<(bool, Option<Role>)>>,
+    /// Whether the driver's channel took the push.
+    sent: AtomicBool,
+    answered: tokio::sync::Notify,
+}
+
+impl std::task::Wake for AtTheAnswer {
+    fn wake(self: Arc<Self>) {
+        if let Some((engine, tx, push)) = self.armed.lock().expect("armed").take() {
+            let role = engine.store.read(|r| link::read_role(r)).ok();
+            *self.seen.lock().expect("seen") = Some((engine.is_standby(), role));
+            self.sent.store(tx.try_send(push).is_ok(), Ordering::SeqCst);
+        }
+        self.answered.notify_one();
+    }
+}
+
+/// A promotion's answer says the cluster takes writes: whoever asked sends
+/// one next. The driver therefore answers once it plans as an ordinary leader
+/// and its engine serves — a step after the promotion's entry applies here.
+/// Answered at that apply, the cluster that had just said it was promoted
+/// refused the next command as a standby (a pop on the promoted cluster of
+/// `link_cluster`, under load, 2026-10-08).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_promotion_is_answered_once_the_cluster_takes_its_clients_commands() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    // A standby whose driver has an engine, as a facade's does: the intake
+    // refuses every client command while the engine says standby.
+    let mut b = Cluster::open(scratch("answer-standby"));
+    let engine = b.start_with_engine(Some(LinkBoot::empty("test://source")));
+    refused(
+        b.command(push(1, "q", "p0", &["before"])).await,
+        link::STANDBY_CODE,
+        true,
+        "a client write on a standby",
+    );
+    assert!(
+        engine.is_standby(),
+        "the driver told the engine its cluster is a standby"
+    );
+
+    // The promotion, with the probe as its answer's waker from before it is
+    // asked: the answer cannot be given without the probe running.
+    let (write, written) = Submission::new(push(2, "q", "p0", &["after"]));
+    let probe = Arc::new(AtTheAnswer {
+        armed: std::sync::Mutex::new(Some((engine.clone(), b.driver().tx.clone(), write))),
+        seen: std::sync::Mutex::new(None),
+        sent: AtomicBool::new(false),
+        answered: tokio::sync::Notify::new(),
+    });
+    let waker = Waker::from(probe.clone());
+    let (sub, answer) = LinkSubmission::new(LinkOp::Promote);
+    // Outside the runtime's poll budget, which wakes a waker too: nothing but
+    // the answer wakes the probe.
+    let mut answer = tokio::task::unconstrained(answer);
+    assert!(
+        Pin::new(&mut answer)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending(),
+        "nothing was asked yet"
+    );
+    b.driver().link.send(sub).await.expect("send link op");
+    tokio::time::timeout(Duration::from_secs(30), probe.answered.notified())
+        .await
+        .expect("the promotion was never answered");
+    let Poll::Ready(reply) = Pin::new(&mut answer).poll(&mut Context::from_waker(&waker)) else {
+        panic!("woken without an answer");
+    };
+    done(reply.expect("await link reply"), "the promotion");
+
+    assert!(
+        probe.sent.load(Ordering::SeqCst),
+        "the driver's channel took the push"
+    );
+    let written = tokio::time::timeout(Duration::from_secs(30), written)
+        .await
+        .expect("the push was never answered")
+        .expect("await reply");
+    let (standby, role) = probe
+        .seen
+        .lock()
+        .expect("seen")
+        .take()
+        .expect("the probe ran");
+    let planned = matches!(
+        written,
+        Reply::Done {
+            outcome: Outcome::Push(_),
+            ..
+        }
+    );
+    assert!(
+        !standby && planned,
+        "the promotion was answered before its cluster took a client's command: at the answer \
+         the engine said standby = {standby}, and a push sent then was answered {written:?}"
+    );
+    // And after its entry applied here: what the node says of itself next is
+    // the promoted cluster's.
+    assert!(
+        matches!(role, Some(Role::Promoted(_))),
+        "the promotion was answered while this node's state said {role:?}"
+    );
+
+    // The engine goes before the node: its serve thread may hold the store.
+    drop((waker, probe));
+    let gone = Arc::downgrade(&engine);
+    drop(engine);
+    b.stop().await;
+    let end = Instant::now() + Duration::from_secs(10);
+    while gone.strong_count() > 0 {
+        assert!(Instant::now() < end, "the engine is still held");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let dir = b.dir.clone();
+    b.shut().await;
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

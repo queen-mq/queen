@@ -17,6 +17,7 @@ sourceOfTruth:
 verifiedBy:
   - server/src/rsm/tests/link.rs
   - server/src/rsm/tests/link_cluster.rs
+# sourceOfTruth re-read 2026-10-08 (promotion's answer): batcher_link.rs answers a promotion once the leader's driver plans as an ordinary leader and its engine serves, a step after the promotion's entry applies, and facade/real/phase2/link.rs says so. Promote, step 2, now says when the route answers; nothing else this page states changes.
 ---
 
 Three replicas protect you from losing a machine, and a [backup](/operate/recovery-backups/)
@@ -233,9 +234,9 @@ After a crash of the source:
    curl -X POST http://standby-0:6632/api/v1/system/link/promote
    ```
 
-   It answers once that node has applied the promotion, with `"role": "promoted"` and the
-   `position` the standby had reached: the source's entries after that index are not in this
-   cluster.
+   It answers once the standby's leader takes writes and the node you asked has applied the
+   promotion, with `"role": "promoted"` and the `position` the standby had reached: the source's
+   entries after that index are not in this cluster.
 3. Point your clients at the standby. Those that kept retrying the `503` are served at once.
 
 For a planned switch, with nothing lost:
