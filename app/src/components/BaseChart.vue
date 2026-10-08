@@ -41,7 +41,7 @@ function buildChartData(data) {
       borderColor: ds.borderColor || c.line,
       backgroundColor: ds.fill ? c.fill : (ds.backgroundColor || c.fill),
       borderWidth: ds.borderWidth || 1.4,
-      pointRadius: 0,
+      pointRadius: ds.pointRadius ?? 0,
       pointHoverRadius: 3,
       pointHoverBackgroundColor: ds.borderColor || c.line,
       tension: 0,
