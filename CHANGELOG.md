@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## 2.0.4
+## 2.0.4 - 2026-10-08
 
 **Dashboard, sign-in page and docs: the logo is a yellow sunflower.** A new drawing replaces the
 red one of 2.0.3: seven yellow petals round the q of "queen", with "message queue" under the name.
