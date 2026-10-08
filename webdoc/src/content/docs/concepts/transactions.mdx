@@ -26,6 +26,7 @@ verifiedBy:
 # back unstarted each() messages with a retry ack when consume() is stopped. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-07 (optional client supervision): ConsumerManager wraps handler calls for optional observations; transaction settlement and handler error behavior described here are unchanged.
 ---
 
 A transaction is one call that writes one step. It acks what the worker took, pushes the next

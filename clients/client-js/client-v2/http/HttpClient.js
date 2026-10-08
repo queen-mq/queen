@@ -611,8 +611,8 @@ export class HttpClient {
     return this.#requestWithFailover('GET', path, null, requestTimeoutMillis, affinityKey, retryKind, signal)
   }
 
-  async post(path, body = null, requestTimeoutMillis = null, affinityKey = null, retryKind = null) {
-    return this.#requestWithFailover('POST', path, body, requestTimeoutMillis, affinityKey, retryKind)
+  async post(path, body = null, requestTimeoutMillis = null, affinityKey = null, retryKind = null, signal = null) {
+    return this.#requestWithFailover('POST', path, body, requestTimeoutMillis, affinityKey, retryKind, signal)
   }
 
   async put(path, body = null, requestTimeoutMillis = null, affinityKey = null, retryKind = null) {

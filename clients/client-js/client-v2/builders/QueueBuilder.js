@@ -42,6 +42,7 @@ export class QueueBuilder {
   #config = {}
 
   // Consume options
+  #supervision = false
   #concurrency = CONSUME_DEFAULTS.concurrency
   // batch / maxPartitions hold the USER's value, and null means the setter was
   // never called -- which is the dimension pop autopilot gets to choose. The
@@ -238,6 +239,12 @@ export class QueueBuilder {
     return this
   }
 
+  /** Opt-in consumer observations in the broker dashboard; false by default. */
+  supervision(config = false) {
+    this.#supervision = config
+    return this
+  }
+
   concurrency(count) {
     this.#concurrency = Math.max(1, count)
     return this
@@ -410,6 +417,7 @@ export class QueueBuilder {
       // has to survive all the way to #buildParams: it is the ONLY record that
       // the user said nothing about that dimension.
       autopilot: this.#autopilotEnabled(),
+      supervision: options.supervision ?? this.#supervision,
       signal: options.signal
     }
 
