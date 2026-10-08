@@ -11,9 +11,10 @@ name: Docker Images
 # A package is PRIVATE the first time it is published. Flip it once by hand at
 # https://github.com/orgs/queen-mq/packages -> package -> Package settings.
 #
-# Docker Hub is a MIRROR of the same build, not a second build: buildx pushes
-# one manifest to every tag listed below, so the images are bit-identical
-# across the two registries. It is opt-in and stays off until both exist:
+# Docker Hub is a MIRROR of the same build, not a second build: the `publish`
+# job pushes one manifest to every tag listed below, so the images are
+# bit-identical across the two registries. It is opt-in and stays off until both
+# exist:
 #
 #   vars.DOCKERHUB_NAMESPACE        the Docker Hub account/org that owns the
 #                                   repos, e.g. `queenmq` -> queenmq/queen.
@@ -23,8 +24,8 @@ name: Docker Images
 #   secrets.DOCKER_USERNAME         Docker ID
 #   secrets.DOCKER_PASSWORD         Docker Hub access token (Read & Write)
 #
-# Without them the job still builds and still publishes to GHCR — which is what
-# keeps pull requests and forks green.
+# Without them the workflow still builds and still publishes to GHCR — which is
+# what keeps pull requests and forks green.
 
 on:
   push:
@@ -40,9 +41,20 @@ concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Where both platforms are pushed by digest, and what `publish` tags.
+  IMAGE: ghcr.io/${{ github.repository_owner }}/queen
+
 jobs:
+  # One job per platform, each on a runner of that architecture. On one amd64
+  # runner the arm64 half was the whole Rust release build under QEMU: 100 to
+  # 150 minutes a run. Native, it costs what the amd64 half costs.
+  #
+  # A job pushes its image by digest only, under no tag. `publish` below names
+  # both with the tags, and it runs only when both jobs succeeded, so a tag
+  # never points at one platform alone.
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
 
     permissions:
       contents: read
@@ -52,19 +64,92 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: queen
-            dockerfile: ./Dockerfile
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    outputs:
+      # Each job writes the one named after its own architecture.
+      amd64: ${{ steps.digest.outputs.amd64 }}
+      arm64: ${{ steps.digest.outputs.arm64 }}
 
     steps:
     - uses: actions/checkout@v4
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
     # The image is versioned from server.json (the same file build.rs reads).
+    - name: Resolve version and commit
+      id: meta
+      run: |
+        VERSION=$(jq -r '.version' server/server.json)
+        test -n "$VERSION" || { echo "could not resolve version for queen"; exit 1; }
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+    - name: Log in to GHCR
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push by digest
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        # The repo root: the broker links the proxy, the Kafka facade and
+        # queen-protocol by relative path.
+        context: .
+        file: ./Dockerfile
+        platforms: linux/${{ matrix.arch }}
+        # A pull request builds and pushes nothing.
+        outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || 'type=cacheonly' }}
+        labels: |
+          org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          org.opencontainers.image.licenses=Apache-2.0
+        # Stamped into queenctl so that `queenctl version` inside the container
+        # matches the tag the image is published under.
+        build-args: |
+          QUEENCTL_VERSION=${{ steps.meta.outputs.version }}
+          QUEENCTL_COMMIT=${{ steps.meta.outputs.sha }}
+        # Scoped per image and platform, so neither platform (nor a future
+        # second image) can evict the other's layers. The unscoped second
+        # source is the cache of tests.yml, which builds this Dockerfile for
+        # amd64 on every push: a commit it has already built is not compiled
+        # again here.
+        cache-from: |
+          type=gha,scope=queen-${{ matrix.arch }}
+          type=gha
+        cache-to: type=gha,scope=queen-${{ matrix.arch }},mode=max
+
+    - name: Hand the digest to the publish job
+      id: digest
+      if: github.event_name != 'pull_request'
+      run: echo "${{ matrix.arch }}=${{ steps.build.outputs.digest }}" >> $GITHUB_OUTPUT
+
+  # One manifest over the two platform images, pushed to every tag: GHCR
+  # always, Docker Hub when the mirror is configured.
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
     - name: Resolve version, commit and tags
       id: meta
       env:
@@ -74,10 +159,9 @@ jobs:
         HUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
         HUB_NAMESPACE_FALLBACK: ${{ secrets.DOCKER_REGISTRY }}
         HUB_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-        IS_PR: ${{ github.event_name == 'pull_request' }}
       run: |
         VERSION=$(jq -r '.version' server/server.json)
-        test -n "$VERSION" || { echo "could not resolve version for ${{ matrix.image }}"; exit 1; }
+        test -n "$VERSION" || { echo "could not resolve version for queen"; exit 1; }
         SHA=$(git rev-parse --short HEAD)
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "sha=$SHA" >> $GITHUB_OUTPUT
@@ -91,10 +175,9 @@ jobs:
           HUB_NS="${HUB_NAMESPACE_FALLBACK#docker.io/}"
         fi
 
-        # Mirroring needs a namespace AND a login, and a pull request has no
-        # access to either — secrets are not exposed to forked PRs.
+        # Mirroring needs a namespace AND a login.
         DOCKERHUB=false
-        if [ -n "$HUB_NS" ] && [ -n "$HUB_USERNAME" ] && [ "$IS_PR" != "true" ]; then
+        if [ -n "$HUB_NS" ] && [ -n "$HUB_USERNAME" ]; then
           DOCKERHUB=true
         fi
         echo "dockerhub=$DOCKERHUB" >> $GITHUB_OUTPUT
@@ -107,17 +190,16 @@ jobs:
         {
           echo "tags<<TAGS_EOF"
           for reg in $REGISTRIES; do
-            echo "$reg/${{ matrix.image }}:$VERSION"
-            echo "$reg/${{ matrix.image }}:sha-$SHA"
-            echo "$reg/${{ matrix.image }}:latest"
+            echo "$reg/queen:$VERSION"
+            echo "$reg/queen:sha-$SHA"
+            echo "$reg/queen:latest"
           done
           echo "TAGS_EOF"
         } >> $GITHUB_OUTPUT
 
-        echo "Building ${{ matrix.image }}:$VERSION (docker hub mirror: $DOCKERHUB)"
+        echo "Publishing queen:$VERSION (docker hub mirror: $DOCKERHUB)"
 
     - name: Log in to GHCR
-      if: github.event_name != 'pull_request'
       uses: docker/login-action@v3
       with:
         registry: ghcr.io
@@ -133,39 +215,31 @@ jobs:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: Build and push
-      uses: docker/build-push-action@v5
-      with:
-        # The repo root: the broker links the proxy, the Kafka facade and
-        # queen-protocol by relative path.
-        context: .
-        file: ${{ matrix.dockerfile }}
-        platforms: linux/amd64,linux/arm64
-        push: ${{ github.event_name != 'pull_request' }}
-        # GHCR always, Docker Hub when the mirror is configured. One build, one
-        # manifest, pushed to every tag in the list.
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: |
-          org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          org.opencontainers.image.revision=${{ github.sha }}
-          org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-          org.opencontainers.image.licenses=Apache-2.0
-        # Stamped into queenctl so that `queenctl version` inside the container
-        # matches the tag the image was published under.
-        build-args: |
-          QUEENCTL_VERSION=${{ steps.meta.outputs.version }}
-          QUEENCTL_COMMIT=${{ steps.meta.outputs.sha }}
-        # Scoped per image, so a future second image cannot evict this one's
-        # layers.
-        cache-from: type=gha,scope=${{ matrix.image }}
-        cache-to: type=gha,scope=${{ matrix.image }},mode=max
+    # Both sources are on GHCR; for a Docker Hub tag imagetools copies them
+    # over, so the mirror holds the same two images under the same manifest.
+    - name: Publish one manifest for both platforms
+      env:
+        TAGS: ${{ steps.meta.outputs.tags }}
+        AMD64: ${{ needs.build.outputs.amd64 }}
+        ARM64: ${{ needs.build.outputs.arm64 }}
+      run: |
+        test -n "$AMD64" || { echo "no digest from the amd64 build"; exit 1; }
+        test -n "$ARM64" || { echo "no digest from the arm64 build"; exit 1; }
+
+        args=()
+        while IFS= read -r tag; do
+          if [ -n "$tag" ]; then args+=(--tag "$tag"); fi
+        done <<< "$TAGS"
+
+        docker buildx imagetools create "${args[@]}" "$IMAGE@$AMD64" "$IMAGE@$ARM64"
+        docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
 
     - name: Summary
       env:
         TAGS: ${{ steps.meta.outputs.tags }}
       run: |
         {
-          echo "### ${{ matrix.image }}"
+          echo "### queen"
           echo ""
           echo '```'
           echo "$TAGS"
@@ -173,6 +247,5 @@ jobs:
           echo ""
           echo "- platforms: linux/amd64, linux/arm64"
           echo "- revision: ${{ steps.meta.outputs.sha }}"
-          echo "- pushed: ${{ github.event_name != 'pull_request' }}"
           echo "- docker hub mirror: ${{ steps.meta.outputs.dockerhub }}"
         } >> $GITHUB_STEP_SUMMARY
