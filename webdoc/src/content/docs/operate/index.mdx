@@ -38,6 +38,8 @@ digest: >-
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (2.0.3): server/Cargo.toml moves the broker to 2.0.3; the /health sample says so.
 # sourceOfTruth re-read 2026-10-08 (2.0.4): server/Cargo.toml moves the broker to 2.0.4; the /health sample says so.
+# sourceOfTruth re-read 2026-10-08 (Dockerfile build cache, 8c6239d2): the Rust stage compiles in
+# cached layers; the image, its port, its data directory and the queenctl it carries are unchanged.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its
