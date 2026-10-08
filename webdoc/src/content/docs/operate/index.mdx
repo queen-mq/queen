@@ -49,6 +49,7 @@ digest: >-
 # sourceOfTruth re-read 2026-10-08 (locks): main.rs declares the locks module; facade/real.rs refuses a
 # transaction's KV `check` below cluster version 5. A new node reports clusterVersion 5, which the /health
 # example now shows.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; replicator/mod.rs and node.rs carry the new error and call. Nothing this page states changes.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its

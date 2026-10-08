@@ -27,6 +27,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks; facade/real.rs
 # refuses a transaction's KV `check` below cluster version 5. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only; a command that waited out a standby's election is refused by the node that wins. The path of a step on an ordinary cluster is as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader. Nothing this page states changes.
 ---
 
 A worker's step in Queen is three calls at most: it pops a batch, does its work, and commits a

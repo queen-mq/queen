@@ -38,6 +38,11 @@
 //!   next cycle until the entry applies or the role changes. `LocalReplicator`
 //!   keeps that promise by leaving the entry in its log and its pipeline; only
 //!   a stalled disk produces a `Timeout` on a single node.
+//! - [`ProposeError::Unwritable`] — still leader, and the log would not take
+//!   the entry: nothing was appended, and no change of role follows. The
+//!   overlay is dropped as on `NotLeader` (every later entry was planned on
+//!   this one), and the planner plans again in the same term, from the log's
+//!   end, once everything logged has applied.
 //! - [`ProposeError::Refused`] / [`ProposeError::Fatal`] — a malformed
 //!   proposal, or a log/apply failure that stops this node (§12.1 `Fatal`).
 
@@ -127,6 +132,11 @@ pub enum ProposeError {
     NotLeader { hint: Option<NodeId> },
     OutcomeUnknown,
     Timeout,
+    /// This node leads and its log took no entry. openraft answers a write so
+    /// on a leader whose quorum lease ran out (no RPC it sent in the last
+    /// `election_timeout_max` was acknowledged by a quorum): the node goes on
+    /// leading in the same term, and its role watch never moves.
+    Unwritable,
     Refused(String),
     Fatal(String),
 }
@@ -139,6 +149,9 @@ impl std::fmt::Display for ProposeError {
                 write!(f, "leadership lost after append; outcome unknown")
             }
             ProposeError::Timeout => write!(f, "propose deadline elapsed; entry kept in flight"),
+            ProposeError::Unwritable => {
+                write!(f, "this leader's log takes no entry now; nothing was appended")
+            }
             ProposeError::Refused(s) => write!(f, "propose refused: {s}"),
             ProposeError::Fatal(s) => write!(f, "propose fatal: {s}"),
         }
@@ -472,6 +485,17 @@ pub trait Replicator: Send + Sync + 'static {
         let _ = index;
         None
     }
+
+    /// The driver dropped its pipeline (a lost leadership, an entry the log
+    /// refused, a restart from the log's end): whatever it proposed that is
+    /// not in the log yet must never get there. Each of those entries was
+    /// planned on top of the ones before it, and the driver plans again
+    /// without them. Their `propose` answers [`ProposeError::OutcomeUnknown`].
+    ///
+    /// The default does nothing: a backend that appends in the propose's
+    /// first poll holds nothing back. [`raft::RaftReplicator`] hands its
+    /// entries to openraft from a queue, and empties it of that pipeline's.
+    fn drop_unlogged(&self) {}
 
     async fn transfer_leadership(
         &self,

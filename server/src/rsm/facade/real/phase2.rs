@@ -1141,6 +1141,7 @@ fn map_propose(e: ProposeError) -> RsmError {
         ProposeError::NotLeader { hint } => RsmError::Retry {
             leader_hint: hint.map(|h| h.to_string()),
         },
+        ProposeError::Unwritable => RsmError::Retry { leader_hint: None },
         ProposeError::OutcomeUnknown | ProposeError::Timeout => RsmError::Timeout,
         ProposeError::Refused(m) | ProposeError::Fatal(m) => RsmError::Internal(m),
     }

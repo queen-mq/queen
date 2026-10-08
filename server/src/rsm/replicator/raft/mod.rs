@@ -95,7 +95,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::Bytes;
 use openraft::async_runtime::WatchReceiver;
-use openraft::errors::{ClientWriteError, InitializeError, RaftError};
+use openraft::errors::{ClientWriteError, ForwardReason, InitializeError, RaftError};
 use openraft::impls::ProgressResponder;
 use openraft::raft::ReadPolicy;
 use openraft::{ServerState, SnapshotPolicy};
@@ -174,6 +174,11 @@ pub(crate) struct Shared {
     /// The standbys reading this node's log, and how far each has got: the
     /// purge driver keeps what they still need ([`link`]).
     link_holds: link::Holds,
+    /// Which of the driver's pipelines is alive: moved every time the driver
+    /// drops one ([`Replicator::drop_unlogged`]). A proposal carries the value
+    /// it was made under, and the submitter hands openraft none of an older
+    /// one ([`SubmitGate`]).
+    pipeline: AtomicU64,
 }
 
 /// One member of the cluster as a node sees it ([`RaftReplicator::cluster_view`]).
@@ -525,6 +530,179 @@ impl Drop for RaftNotify {
 struct Submit {
     app: AppEntry,
     responder: WriteResponder,
+    /// The driver's pipeline it was planned in ([`Shared::pipeline`]).
+    pipeline: u64,
+}
+
+/// How long ago a quorum last acknowledged the leader these metrics describe
+/// (openraft's `last_quorum_acked`: when it SENT the newest RPC a quorum has
+/// acknowledged). `None`: none yet in this term. A single voter is its own
+/// quorum (zero).
+fn quorum_age(m: &openraft::RaftMetrics<TypeConfig>) -> Option<Duration> {
+    if m.membership_config.membership().voter_ids().count() < 2 {
+        return Some(Duration::ZERO);
+    }
+    m.last_quorum_acked
+        .as_ref()
+        .map(|t| openraft::Instant::elapsed(&**t))
+}
+
+/// Entries handed over less than this long after the one before them are a
+/// pipeline in motion ([`SubmitGate`]).
+const HANDED_WITHIN: Duration = Duration::from_millis(100);
+
+/// What the submitter knows of the pipeline it is handing over.
+struct Handing {
+    pipeline: u64,
+    /// The log's next index when this pipeline's first entry was handed over,
+    /// and how many of its entries have been since: once openraft has taken
+    /// them all, the log ends at `base + sent`.
+    base: u64,
+    sent: u64,
+    last: Option<Instant>,
+}
+
+/// The submitter's gate: what stands between the driver's pipeline and
+/// openraft's log.
+///
+/// openraft refuses a write on a leader whose quorum lease ran out
+/// (`ForwardReason::LeaseExpired`: no RPC it sent in the last
+/// `election_timeout_max` was acknowledged by a quorum). The node goes on
+/// leading, in the same term. Two things follow from a refusal, and the gate
+/// is there for both:
+///
+/// - **The refused entry is not in the log, and the next one may be.** The
+///   driver proposes several entries before the first is answered, each
+///   planned on top of the ones before it. A quorum acknowledgement that
+///   arrives between two of them makes openraft refuse the first and take the
+///   second: an append at an offset its partition never reached, a partition
+///   id or a KV version nobody assigned. Apply refuses such an entry on every
+///   node, and each stops.
+/// - **The driver has to start over**, and until it has, nothing it proposed
+///   before may still reach the log ([`Replicator::drop_unlogged`]).
+///
+/// So an entry is handed to openraft only while the pipeline it was planned
+/// in is the driver's current one, and:
+///
+/// - with the lease young (under a quarter of it) and the entry before it
+///   handed over a moment ago ([`HANDED_WITHIN`]), at once. openraft cannot
+///   refuse that earlier entry and take this one: every entry is handed over
+///   with at least a quarter of the lease left, so a refusal means openraft
+///   read the entry a quarter of a lease later, and by then this one is
+///   queued behind it and read in the same pass, with no acknowledgement in
+///   between;
+/// - otherwise only once every entry handed over before it is IN the log
+///   (none was refused), and the lease is under three quarters of its length.
+///   A leader cut off from its quorum, or one whose quorum answers slowly,
+///   therefore keeps its entries here, in order, and logs them when it is
+///   acknowledged again, where openraft would have refused them one by one.
+///
+/// Until this gate (2026-10-08) a refusal reached the driver as "not the
+/// leader": it stopped planning, and with no change of role to start it again
+/// it never did, while the node led on. A standby whose leader had been cut
+/// off for two seconds could not be promoted (Jepsen W12, `fo-crash-part`),
+/// and a five-node cluster whose quorum needed a slow disk answered nothing
+/// for the rest of its test (`p11-w2-slow-lz-kill`).
+struct SubmitGate<S: Store + 'static> {
+    raft: RaftHandle<S>,
+    shared: Arc<Shared>,
+    log: LogStore,
+    /// openraft's leader lease (`election_timeout_max`).
+    lease: Duration,
+}
+
+impl<S: Store + 'static> SubmitGate<S> {
+    fn log_next(&self) -> u64 {
+        self.log.last_log_id().map_or(0, |l| l.index + 1)
+    }
+
+    /// Wait until the next entry of `pipeline` may be handed to openraft.
+    /// `false`: it must not be (the driver dropped that pipeline).
+    async fn admit(&self, run: &mut Handing, pipeline: u64) -> bool {
+        // Since when this entry waits, and what the first look found.
+        let mut since: Option<(Instant, Option<Duration>, bool)> = None;
+        let mut said = false;
+        let admitted = loop {
+            if self.shared.pipeline.load(Ordering::Acquire) != pipeline {
+                crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.submit_gate_dropped, 1);
+                break false;
+            }
+            if run.pipeline != pipeline {
+                *run = Handing {
+                    pipeline,
+                    base: self.log_next(),
+                    sent: 0,
+                    last: None,
+                };
+            }
+            let age = {
+                let metrics = self.raft.metrics();
+                let m = metrics.borrow_watched();
+                // Not leading (or stopped): openraft says so itself, and a
+                // change of role follows.
+                if m.state != ServerState::Leader || m.running_state.is_err() {
+                    break true;
+                }
+                quorum_age(&m)
+            };
+            let young = age.is_some_and(|a| a < self.lease / 4);
+            if young && run.last.is_some_and(|t| t.elapsed() < HANDED_WITHIN) {
+                break true;
+            }
+            let logged = self.log_next() >= run.base + run.sent;
+            if logged && age.is_some_and(|a| a < self.lease * 3 / 4) {
+                break true;
+            }
+            let waited = since
+                .get_or_insert_with(|| (Instant::now(), age, logged))
+                .0
+                .elapsed();
+            if !said && waited >= Duration::from_millis(500) {
+                said = true;
+                tracing::warn!(
+                    target: "rsm",
+                    quorum_ack_age_ms = age.map(|a| a.as_millis() as u64),
+                    lease_ms = self.lease.as_millis() as u64,
+                    logged,
+                    "raft: this leader's entries wait to be logged: no quorum has acknowledged it \
+                     recently enough for openraft to take a write",
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        if let Some((at, age0, logged0)) = since {
+            let waited_ms = at.elapsed().as_millis() as u64;
+            crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.submit_gate_waits, 1);
+            crate::rsm::dbgctr::max(&crate::rsm::dbgctr::C.submit_gate_wait_max_ms, waited_ms);
+            // What the first look found: an age near the lease is a write
+            // openraft would have refused; `logged = false`, an entry handed
+            // over before this one that openraft had not read yet.
+            let age0_ms = age0.map(|a| a.as_millis() as u64);
+            let lease_ms = self.lease.as_millis() as u64;
+            if said {
+                tracing::warn!(
+                    target: "rsm",
+                    waited_ms,
+                    admitted,
+                    quorum_ack_age_ms = age0_ms,
+                    lease_ms,
+                    logged = logged0,
+                    "raft: an entry waited to be logged",
+                );
+            } else if waited_ms >= 20 {
+                tracing::info!(
+                    target: "rsm",
+                    waited_ms,
+                    admitted,
+                    quorum_ack_age_ms = age0_ms,
+                    lease_ms,
+                    logged = logged0,
+                    "raft: an entry waited to be logged",
+                );
+            }
+        }
+        admitted
+    }
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -1278,6 +1456,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
             apply_failure: Mutex::new(None),
             state_dir: state_dir.clone(),
             link_holds: link::Holds::open(&state_dir, opts.link_hold, opts.link_hold_disk_pct),
+            pipeline: AtomicU64::new(0),
         });
         // The membership checks' catalogue inputs (D20): the committed cluster
         // version, and the token a joining node's `/raft/v1/state` takes.
@@ -1369,6 +1548,9 @@ impl<S: Store + 'static> RaftReplicator<S> {
         // timeout: 3 s by default.
         let quorum_loss =
             Duration::from_millis(config.election_timeout_max + config.election_timeout_min);
+        // openraft's leader lease: it takes a write only while a quorum has
+        // acknowledged an RPC sent within it ([`SubmitGate`]).
+        let lease = Duration::from_millis(config.election_timeout_max);
         // `QUEEN_RAFT_RT_THREADS` (default 4): openraft's core, the replication
         // streams to every follower and the Raft RPC server share this runtime.
         // Two threads ran ~60% busy on a leader shipping ~700 MB/s to two
@@ -1658,16 +1840,37 @@ impl<S: Store + 'static> RaftReplicator<S> {
         // first-polled them. Each one's payload compression (started on the
         // codec pool at propose) is awaited first, in that order, so the
         // leader's writer and every follower get the same stored bytes.
+        // Each is handed over only when openraft will take it, and never once
+        // the driver has dropped the pipeline it was planned in ([`SubmitGate`]).
         let (submit_tx, mut submit_rx) = mpsc::unbounded_channel::<Submit>();
         let r2 = raft.clone();
+        let gate = SubmitGate {
+            raft: raft.clone(),
+            shared: shared.clone(),
+            log: log.clone(),
+            lease,
+        };
         rt.spawn(async move {
+            let mut run = Handing {
+                pipeline: u64::MAX,
+                base: 0,
+                sent: 0,
+                last: None,
+            };
             while let Some(s) = submit_rx.recv().await {
                 s.app.settle_codec().await;
+                if !gate.admit(&mut run, s.pipeline).await {
+                    // Its responder is dropped with it: the propose answers
+                    // `OutcomeUnknown`, to a driver that no longer holds it.
+                    continue;
+                }
                 if r2.client_write_ff(s.app, Some(s.responder)).await.is_err() {
                     // openraft stopped: every later proposal sees its responder
                     // dropped, and the role watch reports `Stopped`.
                     break;
                 }
+                run.sent += 1;
+                run.last = Some(Instant::now());
             }
         });
 
@@ -2437,12 +2640,7 @@ impl<S: Store + 'static> RaftReplicator<S> {
         if m.state != ServerState::Leader {
             return None;
         }
-        if m.membership_config.membership().voter_ids().count() < 2 {
-            return Some(Duration::ZERO);
-        }
-        m.last_quorum_acked
-            .as_ref()
-            .map(|t| openraft::Instant::elapsed(&**t))
+        quorum_age(&m)
     }
 }
 
@@ -2707,6 +2905,7 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
                 .send(Submit {
                     app: AppEntry::proposed(planned, pre),
                     responder,
+                    pipeline: self.shared.pipeline.load(Ordering::Acquire),
                 })
                 .is_ok(),
             None => false,
@@ -2729,6 +2928,14 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
                 index: rsm_index(resp.log_id.index),
                 term: term_of(&resp.log_id),
             }),
+            // The lease ran out between the gate and openraft's own look (a
+            // process that stood still for a quarter of it): this node still
+            // leads, and no change of role will tell the driver to plan again.
+            Ok(Ok(Err(ClientWriteError::ForwardToLeader(f))))
+                if f.reason == ForwardReason::LeaseExpired =>
+            {
+                Err(ProposeError::Unwritable)
+            }
             Ok(Ok(Err(ClientWriteError::ForwardToLeader(f)))) => {
                 Err(ProposeError::NotLeader { hint: f.leader_id })
             }
@@ -2816,6 +3023,13 @@ impl<S: Store + 'static> Replicator for RaftReplicator<S> {
             return None;
         }
         self.shared.term_at(index)
+    }
+
+    /// Every proposal still waiting for the submitter belongs to the pipeline
+    /// that ends here: it is dropped there, never handed to openraft
+    /// ([`SubmitGate::admit`]).
+    fn drop_unlogged(&self) {
+        self.shared.pipeline.fetch_add(1, Ordering::AcqRel);
     }
 
     async fn transfer_leadership(

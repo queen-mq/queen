@@ -44,6 +44,12 @@ ctrs!(
     writer_write_max_us,
     writer_handoff_max_us,
     writer_persist_max_us,
+    // The raft submitter's gate (`replicator::raft::SubmitGate`): entries that
+    // waited before openraft was handed them, the longest such wait, and
+    // entries of a pipeline the driver had dropped.
+    submit_gate_waits,
+    submit_gate_wait_max_ms,
+    submit_gate_dropped,
 );
 
 #[inline]

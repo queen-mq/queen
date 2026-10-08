@@ -27,6 +27,7 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the facade can open a node as a member of a standby cluster, and phase2.rs gains the two /api/v1/system/link routes; partitions are as described. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (locks): facade/real.rs refuses a transaction's KV `check` below cluster
 # version 5. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). Nothing this page states changes.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a

@@ -417,6 +417,13 @@ impl<S: Store + 'static> Replicator for NodeReplicator<S> {
         }
     }
 
+    fn drop_unlogged(&self) {
+        match self {
+            NodeReplicator::Local(r) => r.drop_unlogged(),
+            NodeReplicator::Raft(r) => r.drop_unlogged(),
+        }
+    }
+
     async fn transfer_leadership(
         &self,
         to: Option<NodeId>,

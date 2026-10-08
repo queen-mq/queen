@@ -40,6 +40,7 @@ sourceOfTruth:
 # refuses a transaction's KV `check` below cluster version 5. No setting was added or changed. Nothing this
 # page states changes.
 # sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only. No setting was added or changed. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader. No setting was added or changed. Nothing this page states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

@@ -42,6 +42,7 @@ sourceOfTruth:
 # table, the code table and the verdict paragraph now carry them. auth.rs makes the route read-write.
 # proxy/src/gateway.rs counts `check` as an op that cannot grow storage; no proxy code changes.
 # TransactionBuilder.js still returns a lost required precondition from commit(), a lock's guard included.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). No error code was added: such a write waits, and is answered late or `timeout`. Nothing this page states changes.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code

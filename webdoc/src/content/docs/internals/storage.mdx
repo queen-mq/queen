@@ -23,6 +23,7 @@ sourceOfTruth:
   - server/src/rsm/replicator/raft/snapshot.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): traces moved to their own LMDB file (traces/), expiry in bounded steps, snapshots carry traces/; the store, the checkpoint and the replay rules are otherwise unchanged.
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the layout names raft/link_holds.json and link.seed, and the snapshot paragraph says a standby's first node takes the same snapshot. snapshot.rs splits the stream's writer and its stager out of the install path, which behaves as described; log_store.rs and the purge are as described, with a standby holding the log as a follower that is behind does.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned. Nothing this page states changes.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are

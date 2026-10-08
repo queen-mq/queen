@@ -36,6 +36,7 @@ verifiedBy:
 # shape and no effect kind); the upgrade section names the raise from 4 to 5 and the health example shows 5.
 # main.rs declares the locks module; facade/real.rs refuses a transaction's KV `check` below cluster version
 # 5.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; replicator/mod.rs names that refusal (`Unwritable`) and the call that drops a pipeline, node.rs forwards it; phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). "What each failure costs" gains the row for a leader no quorum has acknowledged for 1.5 s. Nothing else this page states changes.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They
@@ -249,6 +250,7 @@ above.
 | A follower stops or crashes | The other two keep committing, and its clients move to another URL. When it starts again it catches up from the leader. |
 | The leader gets SIGTERM | It hands leadership over first: under a second to a new leader in the run above. |
 | The leader crashes (kill -9, OOM, a lost host) | The followers wait out the election timeout (1 to 2 s, `QUEEN_RAFT_ELECTION_MS`) and elect a new leader: 3.7 s in the Compose cluster under emulation, at most 4 s in the recovery rehearsals. |
+| A leader hears from no quorum for 1.5 s | It keeps new writes waiting, in order, instead of logging them, until a quorum answers again or another node leads. Raft takes no write from a leader that no quorum has acknowledged for 2 s, so a client sees a slower answer, or `503` with code `timeout` when its deadline comes first. |
 | A leader hears from no quorum for 3 s | It hands leadership to the most caught-up voter, so a leader that can send but not receive does not hold every write hostage. |
 | A majority is down | Nothing commits. Requests wait out their deadline and fail with `503`, code `no_leader` or `timeout`, and `Retry-After: 1`, until a majority is back. |
 | A node was away more than 10 minutes (`QUEEN_RAFT_PURGE_HOLD_S`, 600) | The leader stops holding its log for it. If the entries it missed are purged, the node receives a snapshot, exits with code 75 and loads it on its next start, and a restart policy brings it back. |

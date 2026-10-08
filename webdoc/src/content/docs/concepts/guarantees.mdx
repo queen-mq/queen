@@ -29,6 +29,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the engine serves nothing on a standby and
 # the log store gains what a seed and a standby's reads need. A standby answers 503 `standby`
 # with nothing applied, and is asynchronous and untested by Jepsen: one sentence and one limit.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): replicator/mod.rs names one more propose error (`Unwritable`: a leader's log took no entry and the node still leads) and the call that drops a pipeline. No guarantee changes. Nothing this page states changes.
 ---
 
 We test Queen with Jepsen, on five nodes, under kill -9, network partitions, process pauses, clock

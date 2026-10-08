@@ -258,6 +258,184 @@ async fn not_leader_retries_the_waiter_with_the_hint() {
     fx.close().await;
 }
 
+/// A reply, or a panic saying the driver never answered `what`.
+async fn within(what: &str, limit: Duration, tx: &CommandTx, command: Command) -> Reply {
+    tokio::time::timeout(limit, submit(tx, command))
+        .await
+        .unwrap_or_else(|_| panic!("{what}: no answer within {limit:?}: the driver plans nothing"))
+}
+
+/// The log takes no entry and the node goes on leading (openraft, on a leader
+/// whose quorum lease ran out): the waiter retries, and the retry is planned,
+/// with no change of role in between. The driver that took the refusal for a
+/// lost leadership waited for the role watch to change, which it never did:
+/// the node led on and answered nothing (Jepsen `p11-w2-slow-lz-kill` and W12
+/// `fo-crash-part`, 2026-10-08).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_the_log_refused_while_this_node_leads_is_planned_again() {
+    let fx = FakeFixture::open("unwritable", small_pipeline(4, 5_000));
+    fx.fake.push_step(Step::Fail(ProposeError::Unwritable));
+
+    let first = submit(&fx.tx, push(1, "q", "p0", &["a"])).await;
+    assert!(
+        matches!(first, Reply::Retry { hint: None }),
+        "the refused entry's waiter retries, got {first:?}"
+    );
+    assert_eq!(
+        fx.fake.pipelines_dropped(),
+        1,
+        "the replicator is told the pipeline is gone"
+    );
+    assert!(fx.fake.role().is_leader(), "the role never changed");
+
+    let started = Instant::now();
+    let retry = within(
+        "the retry",
+        Duration::from_secs(10),
+        &fx.tx,
+        push(1, "q", "p0", &["a"]),
+    )
+    .await;
+    assert_eq!(done(&retry).1, Some(1), "planned at the log's end: {retry:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "restarted at once, not by the stranded driver's wait: {:?}",
+        started.elapsed()
+    );
+    fx.close().await;
+}
+
+/// The same with entries in flight: the pipeline restarts only once
+/// everything logged has applied, from the index after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_write_restarts_the_pipeline_after_what_was_logged() {
+    let fx = FakeFixture::open("unwritable-mid", small_pipeline(4, 5_000));
+    fx.fake.push_steps([
+        Step::After(Duration::from_millis(300)),
+        Step::After(Duration::from_millis(300)),
+        Step::Fail(ProposeError::Unwritable),
+    ]);
+    let mut rxs = Vec::new();
+    for i in 0..3u64 {
+        let (sub, rx) = Submission::new(push(2_000 + i, "q", &format!("p{i}"), &["a"]));
+        fx.tx.send(sub).await.expect("send");
+        rxs.push(rx);
+    }
+    for (i, rx) in rxs.into_iter().enumerate() {
+        let reply = rx.await.expect("reply");
+        assert!(
+            matches!(reply, Reply::Retry { hint: None }),
+            "push {i}: the whole pipeline goes with the refused entry, got {reply:?}"
+        );
+    }
+    // The two entries that were logged commit 300 ms after their propose; a
+    // command sent before that waits for them, and lands after them.
+    let next = within(
+        "the next command",
+        Duration::from_secs(10),
+        &fx.tx,
+        push(2_100, "q", "p9", &["a"]),
+    )
+    .await;
+    assert_eq!(
+        done(&next).1,
+        Some(3),
+        "planned after the two entries the log holds: {next:?}"
+    );
+    assert_eq!(fx.fake.proposals().len(), 3, "two logged before, one after");
+    fx.close().await;
+}
+
+/// A driver that dropped its pipeline on `NotLeader` waits for the role watch
+/// to change. When the watch goes on naming this node the leader of the term
+/// it planned in, nothing else resumes it: after `STRANDED_AFTER` (5 s) it
+/// starts again by itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_driver_paused_with_no_change_of_role_to_come_starts_again() {
+    let fx = FakeFixture::open("stranded", small_pipeline(4, 5_000));
+    fx.fake
+        .push_step(Step::Fail(ProposeError::NotLeader { hint: None }));
+
+    let first = submit(&fx.tx, push(1, "q", "p0", &["a"])).await;
+    assert!(matches!(first, Reply::Retry { hint: None }), "{first:?}");
+
+    let started = Instant::now();
+    let retry = within(
+        "the retry",
+        Duration::from_secs(15),
+        &fx.tx,
+        push(1, "q", "p0", &["a"]),
+    )
+    .await;
+    assert_eq!(done(&retry).1, Some(1), "{retry:?}");
+    assert!(
+        started.elapsed() >= Duration::from_secs(4),
+        "it waited for the change of role first: {:?}",
+        started.elapsed()
+    );
+    fx.close().await;
+}
+
+/// An entry's own answer can come long after the loss that dropped it (it
+/// waited for the replicator to say so). By then this node may lead again, in
+/// a new term, with a new pipeline: the late answer is not that pipeline's,
+/// and drops nothing. Taken for a lost leadership it paused the driver with
+/// no change of role left to come.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_answer_for_a_dropped_entry_leaves_the_new_pipeline_alone() {
+    let fx = FakeFixture::open("late-answer", small_pipeline(4, 5_000));
+    fx.fake.push_step(Step::FailAfter(
+        Duration::from_millis(400),
+        ProposeError::OutcomeUnknown,
+    ));
+
+    let (sub, old) = Submission::new(push(1, "q", "p0", &["a"]));
+    fx.tx.send(sub).await.expect("send");
+    let end = Instant::now() + Duration::from_secs(10);
+    while fx.fake.proposal_count() < 1 {
+        assert!(Instant::now() < end, "the entry was never proposed");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    // Another node leads, then this one again, in term 2.
+    fx.fake.step_down(Some(2));
+    let reply = old.await.expect("reply");
+    assert!(matches!(reply, Reply::Retry { hint: Some(2) }), "{reply:?}");
+    fx.fake.set_role(Role::Leader { term: 2 });
+
+    let second = within(
+        "the first command of term 2",
+        Duration::from_secs(10),
+        &fx.tx,
+        push(2, "q", "p0", &["b"]),
+    )
+    .await;
+    assert_eq!(done(&second).1, Some(1), "{second:?}");
+    let dropped = fx.fake.pipelines_dropped();
+
+    // The dropped entry's answer arrives now.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let started = Instant::now();
+    let third = within(
+        "a command after the late answer",
+        Duration::from_secs(10),
+        &fx.tx,
+        push(3, "q", "p0", &["c"]),
+    )
+    .await;
+    assert_eq!(done(&third).1, Some(2), "{third:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the pipeline was never dropped: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        fx.fake.pipelines_dropped(),
+        dropped,
+        "the late answer dropped no pipeline"
+    );
+    fx.close().await;
+}
+
 /// §7.1 / I13, the D4 "drop every overlay together on any propose error" path,
 /// reached by a per-entry `Poll::Ready(Err)` ARRIVING MID-PIPELINE — not by a
 /// role-watch step-down. A depth-4 pipeline of healthy, slow-committing entries

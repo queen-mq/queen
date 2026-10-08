@@ -33,6 +33,9 @@ pub enum Step {
     After(Duration),
     /// Resolve with this error before appending (`NotLeader`, `Refused`, …).
     Fail(ProposeError),
+    /// Resolve with this error after a delay, with nothing appended: an
+    /// answer that reaches a driver which has dropped the entry since.
+    FailAfter(Duration, ProposeError),
     /// Never resolve inside the caller's deadline: the caller sees `Timeout`.
     /// The entry is "appended" (an index is consumed) but never committed —
     /// the pure timeout of a stalled disk.
@@ -50,6 +53,9 @@ struct Shared {
     committed: AtomicU64,
     next_index: AtomicU64,
     proposals: AtomicU64,
+    /// How many times the driver dropped its pipeline
+    /// ([`Replicator::drop_unlogged`]).
+    dropped: AtomicU64,
     /// Every proposed entry's bytes, in order, for a test to inspect.
     log: Mutex<Vec<Bytes>>,
     script: Mutex<VecDeque<Step>>,
@@ -91,6 +97,7 @@ impl FakeReplicator {
                 committed: AtomicU64::new(0),
                 next_index: AtomicU64::new(1),
                 proposals: AtomicU64::new(0),
+                dropped: AtomicU64::new(0),
                 log: Mutex::new(Vec::new()),
                 script: Mutex::new(VecDeque::new()),
                 default: Mutex::new(Step::Now),
@@ -144,6 +151,11 @@ impl FakeReplicator {
         self.shared.committed.load(Ordering::Acquire)
     }
 
+    /// How many pipelines the driver has dropped.
+    pub fn pipelines_dropped(&self) -> u64 {
+        self.shared.dropped.load(Ordering::Acquire)
+    }
+
     /// Force the applied index forward (a test committing an entry the caller
     /// left in flight after a `Timeout`).
     pub fn set_applied(&self, index: u64) {
@@ -188,6 +200,10 @@ impl Replicator for FakeReplicator {
 
         match self.take_step() {
             Step::Fail(e) => Err(e),
+            Step::FailAfter(d, e) => {
+                sleep_until(deadline, d).await;
+                Err(e)
+            }
             Step::Now => {
                 let index = self.append(&entry);
                 self.commit(index);
@@ -254,6 +270,12 @@ impl Replicator for FakeReplicator {
     /// The fake never truncates: what applied is of the current term.
     fn applied_term_at(&self, index: u64) -> Option<u64> {
         (index <= self.shared.applied.load(Ordering::Acquire)).then(|| self.term())
+    }
+
+    /// The fake appends in the propose itself: nothing waits to be logged.
+    /// It counts the calls, for a test to see the driver made them.
+    fn drop_unlogged(&self) {
+        self.shared.dropped.fetch_add(1, Ordering::AcqRel);
     }
 
     async fn transfer_leadership(

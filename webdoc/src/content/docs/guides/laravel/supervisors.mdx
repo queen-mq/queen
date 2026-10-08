@@ -70,6 +70,7 @@ sourceOfTruth:
 # `check` as a write and answers 503 for one below cluster version 5; planner/kv.rs gained the `check` op and
 # states that a key's versions only rise. The supervisor's KV calls are unchanged. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). Nothing this page states changes.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number

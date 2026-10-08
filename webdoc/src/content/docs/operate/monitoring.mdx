@@ -36,6 +36,7 @@ sourceOfTruth:
 # that refusal (KvFailure::NotYet); facade/real.rs refuses a transaction's KV `check` below cluster version 5;
 # metrics.rs gained queen_locks_ops_total, queen_locks_op_duration_milliseconds and the KV op label `check`
 # (the generated metrics table lists them). The health examples show clusterVersion 5.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned, and logs it. "Log lines to alert on" gains three lines: a leader's entries waiting to be logged, a pipeline restarted without a change of leadership, a standby's driver that plans none of the link's entries. Nothing else this page states changes.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -198,12 +199,15 @@ with `QUEEN_LOG_JSON=true`. `LOG_LEVEL` and `RUST_LOG` take the full filter synt
 | `APPLY FAILED at entry N (term T), a NODE-LOCAL failure` (ERROR, `rsm`) | This node's disk, space or files. Repair the node; do not skip the entry |
 | `raft log writer poisoned; node stops` (ERROR, `rsm`) | A log write, fsync or truncation failed (`why=` says which). The process stays up with role `stopped` |
 | `raft storage pressure changed` with `full=true` (WARN, `rsm`) | The disk gate closed |
+| `raft: this leader's entries wait to be logged` (WARN, `rsm`) | No quorum has acknowledged the leader for 1.5 s (`quorum_ack_age_ms`), so it holds its writes until one does or another node leads: a partition, or followers that answer slowly. `raft: an entry waited to be logged` follows, with `waited_ms` |
 | `raft: no quorum acknowledgement: handing leadership to another voter` (WARN, `rsm`) | The leader has not heard from a majority and is trying to step down |
+| `this node still leads: the pipeline restarts from the log's end` (WARN, `rsm`) | The leader's planner dropped what it had in flight and started again with no change of leadership (`why=` says what stopped it). Harmless once; report it when it repeats |
 | `refused this node's QUEEN_RAFT_TOKEN`, inside a replication error (WARN) | The nodes do not share one raft token. The node that refuses logs nothing |
 | `raft: the process exits to load a received snapshot` (ERROR, `rsm`) | Exit code 75 after a long absence. Normal once, trouble when it repeats |
 | `core panic: aborting` or `poisoned lock: aborting` (ERROR, `panic`, `fatal=true`) | The process aborts and replays from its durable state on restart |
 | `hand-over failed; the partition's contents are dropped` (WARN, `ephemeral`) | Ephemeral messages were lost while a partition moved |
 | `rsm link: the standby stopped following its source` (ERROR, `rsm`) | A [standby](/operate/standby/) can no longer replay (`why=` says which way) and needs a new seed |
+| `rsm link: the driver does not plan the link's entries` (WARN, `rsm`) | A standby's leader is not replaying, or cannot take a promotion. `what=` and the fields say what its planner waits for |
 | `rsm link: this node's data volume is too full to keep its log for a standby` (ERROR, `rsm`) | A source node purges without regard for its standby, which may then need a new seed |
 | `QUEEN_ENCRYPTION_KEY must be 64 hex chars; encryption DISABLED` (WARN, `encryption`) | Queues flagged for encryption are being stored in plaintext |
 

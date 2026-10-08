@@ -40,6 +40,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (standby cluster): phase2.rs gains the two /api/v1/system/link routes; the routes this page reads are as described. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (locks): handlers/kv.rs counts a `check` as a write and answers 503 for one
 # below cluster version 5. The supervisor sends no `check`. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). Nothing this page states changes.
 ---
 
 This page puts the supervisor features together for the setup most teams end up with: Laravel

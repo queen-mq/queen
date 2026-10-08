@@ -56,6 +56,15 @@
 //!   locally or the role changes. Dropping the overlay here would plan the next
 //!   cycle without an entry that can still commit: duplicate offsets, double
 //!   claims, two CAS winners.
+//! - [`ProposeError::Unwritable`]: still leader, and the log took no entry.
+//!   The overlay goes as on `NotLeader` (every later entry was planned on this
+//!   one), but no change of role follows, so the driver starts itself again:
+//!   from the log's end, once everything logged has applied
+//!   ([`RunState::check_realign`]). The same restart, five seconds late, is what
+//!   a driver gets that dropped its pipeline for any other reason and then
+//!   sees the role watch go on naming it the leader of the term it planned in
+//!   ([`RunState::check_stranded`]): waiting for a change of role that never
+//!   came is how a node led for minutes and answered nothing.
 //! - [`ProposeError::Refused`] / [`ProposeError::Fatal`]: a malformed proposal
 //!   or a log/apply failure. The node is broken; fail every waiter `Retry` and
 //!   stop the driver.
@@ -114,6 +123,18 @@ pub use link_mode::{
 /// How often the driver polls the applied index while it holds the pipeline on
 /// a [`ProposeError::Timeout`] (I3). Node-local timing, never state.
 const HOLD_POLL_MS: u64 = 2;
+
+/// How long a driver that dropped its pipeline waits for the role watch to
+/// change before it starts again by itself ([`RunState::check_stranded`]).
+/// Longer than a change of leadership takes to show on the watch: a leader
+/// that handed its leadership to a node which never took it (the quorum-loss
+/// hand-off of a leader cut off from that node) refuses writes and stops
+/// heartbeating until the others elect, 3.5 s later in the Jepsen run this
+/// was read from (`fo-repro-primaries-2`, 2026-10-08).
+const STRANDED_AFTER: Duration = Duration::from_secs(5);
+
+/// How often a driver that may be stranded looks again.
+const STRANDED_POLL: Duration = Duration::from_millis(250);
 
 // ---------------------------------------------------------------------------
 // Configuration (Appendix H)
@@ -2012,6 +2033,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             prefetch: None,
             quiescing: None,
             realign_at: None,
+            stranded_since: None,
             clock_anchor: None,
             version_raise: None,
             link_rx: self.link_rx,
@@ -2057,6 +2079,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             st.check_promotion();
             st.take_link();
             st.sync_scan();
+            st.check_stranded();
             // A cycle launched early by the last one is always finished, even
             // when nothing else is left to plan (it may have drained the queue).
             while st.prefetch.is_some() || st.can_plan() {
@@ -2153,6 +2176,11 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 {
                     st.note_wake("hold");
                     st.check_hold();
+                }
+                // Paused, leading by the watch, nothing set to resume it: the
+                // top of the loop decides ([`RunState::check_stranded`]).
+                _ = tokio::time::sleep(STRANDED_POLL), if st.stranded_since.is_some() => {
+                    st.note_wake("stranded");
                 }
                 Some(sub) = recv_link(&mut st.link_rx) => {
                     st.note_wake("link");
@@ -2359,9 +2387,15 @@ struct RunState<S: Store, R: Replicator> {
     /// (`QUEEN_RAFT_PIPELINED_PLANNING`); finished by the next `plan_cycle`.
     prefetch: Option<Launched>,
     quiescing: Option<Quiescing>,
-    /// An entry landed at another index than planned: planning resumes, from
-    /// the log's end, once apply reaches this index ([`RunState::check_hold`]).
+    /// The pipeline was dropped while this node still leads in the term it
+    /// planned in (an entry landed at another index than planned, or the log
+    /// took none): planning resumes, from the log's end, once apply reaches
+    /// this index ([`RunState::check_hold`]).
     realign_at: Option<u64>,
+    /// Since when this driver has been paused with nothing to resume it
+    /// although the role watch names it the leader of the term it planned in
+    /// ([`RunState::check_stranded`]).
+    stranded_since: Option<Instant>,
     /// The RSM clock when this node's leadership began planning, and the
     /// monotonic instant it was read at ([`RunState::plan_wall`]).
     clock_anchor: Option<(i64, Instant)>,
@@ -3627,8 +3661,33 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     self.holding_until = Some(self.holding_until.map_or(idx, |h| h.max(idx)));
                 }
             }
-            Err(ProposeError::NotLeader { hint }) => self.lose_leadership(hint),
-            Err(ProposeError::OutcomeUnknown) => self.lose_leadership(None),
+            // An entry this driver no longer holds was answered already, by
+            // the loss that dropped its pipeline: its own answer comes late
+            // (it waited for the submitter, or for openraft to say so), and
+            // must not drop the pipeline of a driver that has started again
+            // since. Paused by such an answer while it led a new term, with no
+            // change of role left to come, a driver planned nothing more.
+            Err(ProposeError::NotLeader { hint }) => {
+                if self.awaits(seq) {
+                    self.lose_leadership(hint);
+                }
+            }
+            Err(ProposeError::OutcomeUnknown) => {
+                if self.awaits(seq) {
+                    self.lose_leadership(None);
+                }
+            }
+            // The log took no entry and this node still leads: the pipeline
+            // goes, as every later entry was planned on this one, and nothing
+            // but this driver will start it again.
+            Err(ProposeError::Unwritable) => {
+                if self.awaits(seq) {
+                    self.lose_leadership(None);
+                    self.realign_while_leading(
+                        "the log took no entry: no quorum acknowledged this leader within its lease",
+                    );
+                }
+            }
             Err(ProposeError::Refused(why)) | Err(ProposeError::Fatal(why)) => {
                 tracing::error!(target: "rsm", why, "batcher propose failed fatally; driver stops");
                 self.stopped = true;
@@ -3645,6 +3704,10 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         if let Some(e) = &self.engine {
             e.on_step_down();
         }
+        // What was proposed and is not in the log yet never gets there: it was
+        // planned on entries this driver no longer counts on. Before anyone
+        // is told to retry.
+        self.repl.drop_unlogged();
         for mut e in self.inflight.drain(..) {
             e.fail(hint);
         }
@@ -3657,6 +3720,63 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         // The cluster link: its queue is answered, and its state is read
         // again by whoever leads next ([`link_mode`]).
         self.lose_link(hint);
+    }
+
+    /// Whether the entry proposed as `seq` is still in flight and unanswered.
+    fn awaits(&self, seq: u64) -> bool {
+        self.inflight
+            .iter()
+            .any(|e| e.seq == seq && e.resolved.is_none())
+    }
+
+    /// The pipeline was dropped ([`Self::lose_leadership`]) and the role watch
+    /// still names this node the leader of the term it planned in: no change
+    /// of role will come to start it again ([`Self::on_role`]). Plan again,
+    /// from the log's end, once apply has caught up with everything logged
+    /// ([`Self::check_realign`]). Anything else on the watch is a change of
+    /// role on its way, and that restarts the driver as it always did.
+    fn realign_while_leading(&mut self, why: &'static str) {
+        let Role::Leader { term } = *self.role_rx.borrow() else {
+            return;
+        };
+        if !self.paused || self.stopped || self.planning_term != Some(term) {
+            return;
+        }
+        let last = self.repl.metrics().last_log_index;
+        self.realign_at = Some(last);
+        tracing::warn!(
+            target: "rsm",
+            why,
+            term,
+            last_log_index = last,
+            applied = self.repl.applied_index(),
+            "this node still leads: the pipeline restarts from the log's end",
+        );
+    }
+
+    /// A driver that dropped its pipeline on `NotLeader` or `OutcomeUnknown`
+    /// waits for the role watch to change. When the watch goes on naming this
+    /// node the leader of the term it planned in for [`STRANDED_AFTER`], no
+    /// change is coming, and nothing else resumes a paused driver: it starts
+    /// again by itself ([`Self::realign_while_leading`]). A write refused
+    /// while a leadership is handed over is the case that resolves by itself
+    /// (the other node is elected within that time, and the watch moves).
+    fn check_stranded(&mut self) {
+        let stranded = self.paused
+            && !self.stopped
+            && self.realign_at.is_none()
+            && matches!(*self.role_rx.borrow(), Role::Leader { term } if self.planning_term == Some(term));
+        if !stranded {
+            self.stranded_since = None;
+            return;
+        }
+        let since = *self.stranded_since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= STRANDED_AFTER {
+            self.stranded_since = None;
+            self.realign_while_leading(
+                "the driver waited for a change of role that did not come",
+            );
+        }
     }
 
     /// The role watch changed.
@@ -3810,6 +3930,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     fn on_resume(&mut self) {
         self.quiescing = None;
         if !self.paused {
+            // With nothing in flight (the change waited for that, unless it
+            // gave up), a new pipeline starts here for the replicator too: it
+            // counts this pipeline's entries from the log's end as it is now,
+            // past openraft's own.
+            if self.inflight.is_empty() {
+                self.repl.drop_unlogged();
+            }
             self.next_index = self.repl.metrics().last_log_index + 1;
             self.front.reset();
             self.invalidate_kept();

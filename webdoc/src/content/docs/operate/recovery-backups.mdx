@@ -16,6 +16,7 @@ verifiedBy:
   - test/recovery/sc12-restore-backup.sh
   - test/recovery/k8s-K4-restore.sh
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the purge also keeps the log for a standby cluster; a paragraph and a card point at the standby as the way to lose a moment and not everything since the last copy. Backups and restores are as described.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned. Nothing this page states changes.
 ---
 
 Three replicas protect you from losing a machine. They do not protect you from a mistake: a

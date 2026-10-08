@@ -36,6 +36,7 @@ sourceOfTruth:
 # version 5). handlers/raft.rs registers the route; facade/mod.rs and facade/real.rs carry the refusal
 # below version 5. No existing limit or default changes.
 # sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only. No limit or default changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader; phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). No limit or default changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
