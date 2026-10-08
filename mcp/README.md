@@ -34,12 +34,16 @@ claude mcp add --transport http queen-local http://localhost:8787/mcp
 
 ## Deploy
 
+The `docs` workflow deploys it. On master, once the site is out, its `mcp` job takes the build the site
+was published from, runs `npm test`, deploys the Worker and checks that the server reports the commit.
+A change under `mcp/` starts that workflow too. By hand:
+
 ```bash
 pnpm --dir webdoc build && npm --prefix mcp run deploy
 ```
 
 `wrangler.jsonc` deploys the Worker `queen-mcp` with the route `queenmq.com/mcp*`. The docs Worker keeps
-the domain; a route takes precedence over a custom domain on the same hostname. Deploy it with the docs
+the domain; a route takes precedence over a custom domain on the same hostname. It goes out with the docs
 so the bundle matches what the site says. Publishing to the MCP Registry: [PUBLISH.md](PUBLISH.md).
 
 ## Add a trap

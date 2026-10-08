@@ -14,10 +14,15 @@ name: docs
 # this build produced and checked to queenmq.com. It stays off until the
 # repository variable CLOUDFLARE_ACCOUNT_ID and the secret CLOUDFLARE_API_TOKEN
 # exist, so master is not red while Cloudflare access is being set up.
+#
+# The mcp job then redeploys the MCP server at queenmq.com/mcp, whose answers
+# are cut out of that same build. mcp/** is on the push list for it: a change
+# to the server or to its traps goes out as well.
 on:
   push:
     paths:
       - "webdoc/**"
+      - "mcp/**"
       - "server/src/**"
       - "server/tests/**"
       - "proxy/src/routes.rs"
@@ -196,3 +201,57 @@ jobs:
             echo "https://queenmq.com${path} -> ${code}"
             test "$code" = 200
           done
+
+  # The MCP server answers from a bundle that mcp/scripts/build-bundle.mjs cuts
+  # out of webdoc/dist, so it goes out with the site. Deployed by hand it
+  # trailed: it named the broker version and served the pages of the day
+  # somebody last ran the deploy.
+  mcp:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # One deploy at a time, whichever run it comes from.
+    concurrency:
+      group: mcp-deploy
+      cancel-in-progress: false
+    steps:
+      # Not a sparse checkout: besides the build, the bundle reads the tested
+      # snippets, the example programs, the Kafka compatibility tables and the
+      # broker's version, all from the repository.
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: webdoc-dist
+          path: webdoc/dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Builds the bundle and runs the server's tests against it. A bundle the
+      # tests refuse is not deployed, and the server stays on its last one.
+      - name: Bundle and test
+        run: npm --prefix mcp test
+      # mcp/wrangler.jsonc declares the route queenmq.com/mcp*, so the token
+      # needs Workers Routes: Edit on the zone beside Workers Scripts: Edit.
+      - name: Deploy to Cloudflare
+        working-directory: mcp
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4.145.0 deploy
+      # The server reports the commit its bundle was cut from, as
+      # 2.0.0+docs.<short sha>: it has to be this run's.
+      - name: The server answers from this commit
+        run: |
+          ask='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"docs-ci","version":"0"}}}'
+          for _ in 1 2 3 4 5 6; do
+            version=$(curl -s -X POST https://queenmq.com/mcp \
+              -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+              -d "$ask" | jq -r '.result.serverInfo.version // empty' || true)
+            commit="${version##*+docs.}"
+            if [ -n "$commit" ] && [ "${GITHUB_SHA#"$commit"}" != "$GITHUB_SHA" ]; then break; fi
+            sleep 5
+          done
+          echo "https://queenmq.com/mcp -> ${version}"
+          [ -n "$commit" ] && [ "${GITHUB_SHA#"$commit"}" != "$GITHUB_SHA" ]
