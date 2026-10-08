@@ -29,6 +29,9 @@ sourceOfTruth:
 # is still 1.88. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (2.0.4): server/Cargo.toml only moves the broker's version to 2.0.4; rust-version
 # is still 1.88. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (8c6239d23): the Dockerfile compiles the broker in three layers (dependencies,
+# path crates, broker) instead of over cache mounts; the image and what it runs are unchanged. Nothing this page
+# states changes.
 ---
 
 Queen is one repository with one Rust binary at its center: the broker, which links the proxy and

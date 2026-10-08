@@ -38,6 +38,9 @@ digest: >-
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (2.0.3): server/Cargo.toml moves the broker to 2.0.3; the /health sample says so.
 # sourceOfTruth re-read 2026-10-08 (2.0.4): server/Cargo.toml moves the broker to 2.0.4; the /health sample says so.
+# sourceOfTruth re-read 2026-10-08 (8c6239d23): the Dockerfile compiles the broker in three layers (dependencies,
+# path crates, broker) instead of over cache mounts; the image and what it runs are unchanged. Nothing this page
+# states changes.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its
