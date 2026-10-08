@@ -1,0 +1,25 @@
+w11-lock-smoke2         --workload locks --nemesis none --time-limit 120 --rate 200
+w11-lock-kill           --workload locks --nemesis kill --time-limit 300 --rate 200
+w11-lock-part           --workload locks --nemesis partition --time-limit 300 --rate 200
+w11-lock-pause          --workload locks --nemesis pause --time-limit 300 --rate 200
+w11-lock-restart        --workload locks --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+w11-lock-leader-deaf    --workload locks --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+w11-lock-bridge         --workload locks --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+w11-lock-lz-kill        --workload locks --lazyfs --nemesis kill --time-limit 300 --rate 200
+w11-lock-membership     --workload locks --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+w11-lock-clock          --workload locks --nemesis clock --time-limit 300 --rate 200
+w11-lock-many-kill      --workload locks --w11-locks 12 --nemesis kill --time-limit 300 --rate 400
+w11-sem-kill            --workload semaphore --nemesis kill --time-limit 300 --rate 200
+w11-sem-part            --workload semaphore --nemesis partition --time-limit 300 --rate 200
+w11-sem-pause           --workload semaphore --nemesis pause --time-limit 300 --rate 200
+w11-sem-restart         --workload semaphore --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+w3-kill                 --workload register --nemesis kill --time-limit 300 --rate 100
+w3-part                 --workload register --nemesis partition --time-limit 300 --rate 100
+w3-clock                --workload register --nemesis clock --time-limit 300 --rate 100
+w3b-kill                --workload counter --nemesis kill --time-limit 300 --rate 100
+w3c-kill                --workload claim --nemesis kill --time-limit 300 --rate 100
+w3c-part                --workload claim --nemesis partition --time-limit 300 --rate 100
+w4-kill                 --workload elle --nemesis kill --time-limit 300 --rate 100
+w4-part                 --workload elle --nemesis partition --time-limit 300 --rate 100
+w5-kill                 --workload pipeline --nemesis kill --time-limit 300 --rate 200
+w5-part                 --workload pipeline --nemesis partition --time-limit 300 --rate 200

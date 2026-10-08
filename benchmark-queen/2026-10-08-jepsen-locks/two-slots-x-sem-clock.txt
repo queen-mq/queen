@@ -1,0 +1,73 @@
+51 reads showed an owner in two slots: 12 pairs of permits, seen in 17 stretches of reads (a stretch ends at a read that shows one slot or none)
+  t=  189.60s..  190.47s  lock 1  owner o-n4-28c098f  slots {1: 1395, 2: 1409}  7 reads
+  t=  190.02s..  190.57s  lock 0  owner o-n1-54019be  slots {0: 1411, 2: 1410}  4 reads
+  t=  197.75s..  198.07s  lock 0  owner o-n2-4a117b3  slots {0: 1462, 1: 1449}  4 reads
+  t=  225.49s..  226.19s  lock 0  owner o-n3-df832e2  slots {0: 1669, 2: 1671}  3 reads
+  t=  232.02s..  232.02s  lock 1  owner o-n5-eeb619c  slots {1: 1708, 2: 1693}  1 reads
+  t=  234.88s..  234.88s  lock 1  owner o-n5-3220897  slots {0: 1718, 1: 1716}  1 reads
+  t=  235.54s..  235.54s  lock 1  owner o-n5-3220897  slots {0: 1718, 1: 1716}  1 reads
+  t=  245.93s..  245.93s  lock 2  owner o-n3-df832e2  slots {1: 1802, 2: 1804}  1 reads
+  t=  246.12s..  247.32s  lock 2  owner o-n3-df832e2  slots {1: 1802, 2: 1804}  5 reads
+  t=  248.03s..  248.54s  lock 2  owner o-n3-df832e2  slots {1: 1802, 2: 1804}  3 reads
+  t=  249.14s..  249.39s  lock 2  owner o-n3-df832e2  slots {1: 1802, 2: 1804}  2 reads
+  t=  249.81s..  249.81s  lock 0  owner o-n3-ea08b91  slots {0: 1819, 2: 1810}  1 reads
+  t=  259.63s..  259.63s  lock 1  owner o-n3-df832e2  slots {0: 1861, 2: 1885}  1 reads
+  t=  261.06s..  261.37s  lock 1  owner o-n5-eeb619c  slots {0: 1895, 1: 1894}  2 reads
+  t=  269.72s..  269.72s  lock 0  owner o-n3-ea08b91  slots {1: 1954, 2: 1951}  1 reads
+  t=  270.64s..  270.64s  lock 0  owner o-n3-ea08b91  slots {1: 1954, 2: 1951}  1 reads
+  t=  279.09s..  280.47s  lock 1  owner o-n5-eeb619c  slots {1: 2012, 2: 2008}  13 reads
+
+The first episode, traced (lock 1, owner o-n4-28c098f, 185.5 s to 191 s):
+  186.08  :acquire  :fail    slot - token - ttl 2 error [:not-acquired "held"]
+  186.67  :acquire  :fail    slot - token - ttl 4 error [:not-acquired "held"]
+  187.40  :acquire  :ok      slot 1 token 1395 ttl 4
+  187.43  :step     :ok      slot 1 token 1395 ttl -
+  187.45  :step     :ok      slot 1 token 1395 ttl -
+  187.51  :step     :ok      slot 1 token 1395 ttl -
+  187.55  :step     :ok      slot 1 token 1395 ttl -
+  187.59  get            mine [('1', '1395')]  others [('0', 'o-n4-a4a6', '1392'), ('2', 'o-n1-1c22', '1385')]
+  187.62  :step     :ok      slot 1 token 1395 ttl -
+  187.72  :step     :ok      slot 1 token 1395 ttl -
+  187.81  :step     :ok      slot 1 token 1395 ttl -
+  187.95  :step     :ok      slot 1 token 1395 ttl -
+  188.00  :step     :ok      slot 1 token 1395 ttl -
+  188.08  get            mine [('1', '1395')]  others [('0', 'o-n4-a4a6', '1398'), ('2', 'o-n1-1c22', '1385')]
+  188.13  :step     :ok      slot 1 token 1395 ttl -
+  188.18  :step     :ok      slot 1 token 1395 ttl -
+  188.25  :step     :ok      slot 1 token 1395 ttl -
+  188.29  :step     :ok      slot 1 token 1395 ttl -
+  188.34  :step     :ok      slot 1 token 1395 ttl -
+  188.43  get            mine [('1', '1395')]  others [('0', 'o-n4-a4a6', '1398'), ('2', 'o-n1-1c22', '1385')]
+  189.07  :step     :ok      slot 1 token 1395 ttl -
+  189.12  :step     :ok      slot 1 token 1395 ttl -
+  189.17  :step     :ok      slot 1 token 1395 ttl -
+  189.19  :step     :ok      slot 1 token 1395 ttl -
+  189.27  :step     :ok      slot 1 token 1395 ttl -
+  189.32  get            mine [('1', '1395')]  others [('0', 'o-n4-a4a6', '1398')]
+  189.33  :acquire  :ok      slot 2 token 1409 ttl 2
+  189.42  :acquire  :ok      slot 1 token 1395 ttl 4 already
+  189.47  :step     :ok      slot 1 token 1395 ttl -
+  189.54  :acquire  :ok      slot 1 token 1395 ttl 3 already
+  189.59  :step     :ok      slot 1 token 1395 ttl -
+  189.60  get            mine [('1', '1395'), ('2', '1409')]  others [('0', 'o-n4-a4a6', '1398')]
+  189.72  :step     :ok      slot 1 token 1395 ttl -
+  189.75  :acquire  :ok      slot 1 token 1395 ttl 2 already
+  189.81  get            mine [('1', '1395'), ('2', '1409')]  others [('0', 'o-n4-a4a6', '1398')]
+  189.82  :step     :ok      slot 1 token 1395 ttl -
+  189.83  get            mine [('1', '1395'), ('2', '1409')]  others [('0', 'o-n4-a4a6', '1398')]
+  189.89  get            mine [('1', '1395'), ('2', '1409')]  others [('0', 'o-n4-a4a6', '1398')]
+  189.91  :step     :ok      slot 1 token 1395 ttl -
+  190.03  :step     :ok      slot 1 token 1395 ttl -
+  190.08  :step     :ok      slot 1 token 1395 ttl -
+  190.11  get            mine [('1', '1395'), ('2', '1409')]  others [('0', 'o-n4-a4a6', '1398')]
+  190.13  :step     :ok      slot 1 token 1395 ttl -
+  190.23  :step     :ok      slot 1 token 1395 ttl -
+  190.27  get            mine [('1', '1395'), ('2', '1409')]  others [('0', 'o-n4-a4a6', '1398')]
+  190.33  :step     :ok      slot 1 token 1395 ttl -
+  190.40  :step     :ok      slot 1 token 1395 ttl -
+  190.47  get            mine [('1', '1395'), ('2', '1409')]  others [('0', 'o-n4-a4a6', '1398')]
+  190.52  :step     :ok      slot 1 token 1395 ttl -
+  190.61  :step     :ok      slot 1 token 1395 ttl -
+  190.67  :step     :ok      slot 1 token 1395 ttl -
+  190.86  :step     :ok      slot 1 token 1395 ttl -
+  190.93  :step     :ok      slot 1 token 1395 ttl -

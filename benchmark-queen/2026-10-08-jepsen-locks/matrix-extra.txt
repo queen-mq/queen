@@ -1,0 +1,14 @@
+x-lock-all              --workload locks --nemesis all --time-limit 300 --rate 200
+x-lock-kill-nooffload   --workload locks --no-offload --nemesis kill --time-limit 300 --rate 200
+x-lock-part-nooffload   --workload locks --no-offload --nemesis partition --time-limit 300 --rate 200
+x-lock-pause-kill       --workload locks --lazyfs --nemesis pause-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+x-lock-part-kill        --workload locks --lazyfs --nemesis part-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+x-lock-lanes1-kill      --workload locks --lanes 1 --nemesis kill --time-limit 300 --rate 200
+x-sem-clock             --workload semaphore --nemesis clock --time-limit 300 --rate 200
+x-sem-leader-deaf       --workload semaphore --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+x-sem-bridge            --workload semaphore --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+x-sem-lz-kill           --workload semaphore --lazyfs --nemesis kill --time-limit 300 --rate 200
+x-sem-membership        --workload semaphore --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+x-sem-wide-kill         --workload semaphore --w11-limit 8 --w11-locks 2 --nemesis kill --time-limit 300 --rate 400
+x-w5-restart            --workload pipeline --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+x-w4-leader-deaf        --workload elle --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
