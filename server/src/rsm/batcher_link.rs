@@ -611,10 +611,20 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     }
 
     /// This node stopped leading: what it knew of the link is the next
-    /// leader's to read.
+    /// leader's to read, and the engine no longer says this node leads a
+    /// standby. The cluster may be promoted under another leader: a node that
+    /// went on saying standby answered so for a promoted cluster once it was
+    /// elected again, to what its followers forwarded from the moment raft
+    /// named it, until its driver had read the role. A command that reaches
+    /// this node before it leads again waits in the queue or is sent on to
+    /// the leader ([`RunState::enqueue`]), and [`Self::adopt_link`] answers
+    /// what waited if the cluster is a standby still.
     pub(super) fn lose_link(&mut self, hint: Option<NodeId>) {
         self.fail_link(hint);
         self.link = LinkMode::Unknown;
+        if let Some(e) = &self.engine {
+            e.set_standby(false);
+        }
     }
 
     /// The first half of a link cycle: the standby entry if it is still owed,

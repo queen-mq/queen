@@ -241,4 +241,19 @@ impl RaftFacade {
             }),
         }
     }
+
+    /// The leader's intake ([`crate::rsm::facade::intake::submit_here`]) for
+    /// the link's tests, which stand in for the facade: what `command` is
+    /// answered on a node, whether its own client sent it or a follower
+    /// forwarded it.
+    #[cfg(test)]
+    pub(crate) async fn submit_here_for_test(
+        engine: &crate::rsm::consume::Engine,
+        batcher: &crate::rsm::batcher::CommandTx,
+        command: Command,
+        deadline: std::time::Instant,
+    ) -> Result<Reply, RsmError> {
+        crate::rsm::facade::intake::submit_here(engine, || Some(batcher.clone()), command, deadline)
+            .await
+    }
 }
