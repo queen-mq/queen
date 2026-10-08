@@ -1,43 +1,25 @@
-// Theme. Two schemes — dark (the default and the one the product was designed
-// in) and light — selected in this order:
-//
-//   1. an explicit choice the operator made here, in localStorage
-//   2. the OS preference, but only when it asks for LIGHT
-//   3. dark
-//
-// Step 2 is deliberately one-sided. `prefers-color-scheme` has three states
-// and `no-preference` is common on Linux and on locked-down corporate
-// profiles; treating "not light" as dark keeps every existing user on the
-// surface they already have and makes light strictly opt-in — by the OS
-// saying so, or by the toggle in the header.
-//
-// The OS preference is only consulted while nothing is stored. Once someone
-// picks a scheme it wins, on this device, until they pick the other one.
-//
-// The pre-paint script in index.html runs this same resolution before any
-// bundle loads, so the first frame is already correct; initTheme() re-runs it
-// to seed the reactive ref and attach the media listener.
+// Three preferences, two rendered schemes. System follows the OS live;
+// Light and Dark remain fixed until the operator selects System again.
+// `theme` always contains the resolved scheme so charts keep reacting to it.
+// Keep the pre-paint resolution in index.html in sync with resolveTheme().
 
 import { computed, ref } from 'vue'
 
 export const THEME_STORAGE_KEY = 'queen-theme'
 
 const THEMES = ['light', 'dark']
+const PREFERENCES = ['system', ...THEMES]
+const LIGHT_QUERY = '(prefers-color-scheme: light)'
 
-// Pure. The whole policy above, with the two environment reads passed in, so
-// it is testable without a DOM and cannot drift from the inline script.
-export const resolveTheme = (stored, prefersLight) =>
-  THEMES.includes(stored) ? stored : (prefersLight ? 'light' : 'dark')
+const resolvePreference = (value) => PREFERENCES.includes(value) ? value : 'system'
+export const resolveTheme = (preference, prefersLight) =>
+  THEMES.includes(preference) ? preference : (prefersLight ? 'light' : 'dark')
 
+export const themePreference = ref('system')
 export const theme = ref('dark')
 export const isDark = computed(() => theme.value === 'dark')
 export const isLight = computed(() => theme.value === 'light')
 
-const LIGHT_QUERY = '(prefers-color-scheme: light)'
-
-// Storage and matchMedia both throw rather than return null in hardened
-// contexts (Safari private mode, `storage-access` denied, SSR). A theme is
-// never worth an exception, so every environment read is total.
 const readStored = () => {
   try {
     return typeof localStorage !== 'undefined' ? localStorage.getItem(THEME_STORAGE_KEY) : null
@@ -48,9 +30,11 @@ const readStored = () => {
 
 const writeStored = (value) => {
   try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(THEME_STORAGE_KEY, value)
+    if (typeof localStorage === 'undefined') return
+    if (value === 'system') localStorage.removeItem(THEME_STORAGE_KEY)
+    else localStorage.setItem(THEME_STORAGE_KEY, value)
   } catch {
-    // Preference simply won't survive the reload; the app still works.
+    // The in-memory preference still works when persistence is unavailable.
   }
 }
 
@@ -62,58 +46,55 @@ const mediaQuery = () => {
   }
 }
 
-const prefersLight = () => mediaQuery()?.matches === true
-
-// The only place that touches <html>. `color-scheme` is what makes the form
-// controls, the scrollbars and the caret flip — the CSS tokens alone leave
-// native widgets painted for the wrong scheme.
+// color-scheme also updates native form controls and scrollbars.
 const applyTheme = (value) => {
+  theme.value = value
   if (typeof document === 'undefined') return
   const root = document.documentElement
   root.classList.toggle('light', value === 'light')
-  root.classList.toggle('dark', value !== 'light')
-  root.style.colorScheme = value === 'light' ? 'light' : 'dark'
+  root.classList.toggle('dark', value === 'dark')
+  root.style.colorScheme = value
 }
 
-/** Set the scheme and remember it. Persisting is what makes it survive reload. */
+/** Remember the preference and immediately apply its resolved scheme. */
 export const setTheme = (value) => {
-  const next = THEMES.includes(value) ? value : 'dark'
-  theme.value = next
+  themePreference.value = resolvePreference(value)
+  const next = resolveTheme(themePreference.value, mediaQuery()?.matches === true)
   applyTheme(next)
-  writeStored(next)
+  writeStored(themePreference.value)
   return next
 }
 
-export const toggleTheme = () => setTheme(theme.value === 'dark' ? 'light' : 'dark')
+export const toggleTheme = () => {
+  const next = (PREFERENCES.indexOf(themePreference.value) + 1) % PREFERENCES.length
+  return setTheme(PREFERENCES[next])
+}
 
 let listening = false
 
-/**
- * Resolve and apply the scheme. Idempotent; called once from main.js.
- * Does NOT write to storage — an unstored preference must stay unstored so
- * the app keeps following the OS until the operator picks a side.
- */
+/** Hydrate without writing storage; attach listeners once, on app boot. */
 export const initTheme = () => {
-  const stored = readStored()
-  const next = resolveTheme(stored, prefersLight())
-  theme.value = next
-  applyTheme(next)
+  themePreference.value = resolvePreference(readStored())
+  applyTheme(resolveTheme(themePreference.value, mediaQuery()?.matches === true))
 
-  // Follow the OS live, but only while the choice is still the OS's to make.
   if (!listening) {
-    const mq = mediaQuery()
-    if (mq?.addEventListener) {
-      mq.addEventListener('change', (e) => {
-        if (THEMES.includes(readStored())) return // operator has decided
-        const followed = e.matches ? 'light' : 'dark'
-        theme.value = followed
-        applyTheme(followed)
+    mediaQuery()?.addEventListener?.('change', (event) => {
+      if (themePreference.value === 'system') {
+        applyTheme(resolveTheme('system', event.matches))
+      }
+    })
+    if (typeof window !== 'undefined') {
+      window.addEventListener('storage', (event) => {
+        if (event.key === THEME_STORAGE_KEY || event.key === null) {
+          themePreference.value = resolvePreference(readStored())
+          applyTheme(resolveTheme(themePreference.value, mediaQuery()?.matches === true))
+        }
       })
-      listening = true
     }
+    listening = true
   }
 
-  return next
+  return theme.value
 }
 
-export default { theme, isDark, isLight, initTheme, setTheme, toggleTheme }
+export default { theme, themePreference, isDark, isLight, initTheme, setTheme, toggleTheme }

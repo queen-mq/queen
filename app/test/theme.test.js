@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
 
 import { resolveTheme, THEME_STORAGE_KEY } from '../src/composables/useTheme.js'
 
@@ -71,4 +72,128 @@ test('the light token set covers every colour token in :root', () => {
 
   assert.match(block('  html.light {'), /color-scheme:\s*light/)
   assert.match(block('  :root {'), /color-scheme:\s*dark/)
+})
+
+
+test('System resolves to the device scheme', () => {
+  assert.equal(resolveTheme('system', true), 'light')
+  assert.equal(resolveTheme('system', false), 'dark')
+})
+
+// Exercise the real state and listeners with browser boundaries supplied here.
+let themeInstance = 0
+async function themeBrowser(t, { stored = null, light = false, blocked = false } = {}) {
+  const mediaListeners = [], storageListeners = []
+  const mq = { matches: light, addEventListener: (_, fn) => mediaListeners.push(fn) }
+  const classes = new Set()
+  const root = {
+    style: {},
+    classList: { toggle: (name, on) => on ? classes.add(name) : classes.delete(name) },
+  }
+  const storage = {
+    getItem: () => { if (blocked) throw new Error('denied'); return stored },
+    setItem: (_, value) => { if (blocked) throw new Error('denied'); stored = value },
+    removeItem: () => { if (blocked) throw new Error('denied'); stored = null },
+  }
+  for (const [key, value] of Object.entries({
+    localStorage: storage,
+    matchMedia: () => mq,
+    document: { documentElement: root },
+    window: { addEventListener: (_, fn) => storageListeners.push(fn) },
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key)
+    Object.defineProperty(globalThis, key, { value, configurable: true, writable: true })
+    t.after(() => descriptor
+      ? Object.defineProperty(globalThis, key, descriptor)
+      : delete globalThis[key])
+  }
+  const api = await import(`../src/composables/useTheme.js?test=${++themeInstance}`)
+  return {
+    ...api, root, classes,
+    stored: () => stored,
+    mediaListeners,
+    changeDevice: (light) => {
+      mq.matches = light
+      mediaListeners.forEach(fn => fn({ matches: light }))
+    },
+    changeStorage: (value) => {
+      stored = value
+      storageListeners.forEach(fn => fn({ key: THEME_STORAGE_KEY }))
+    },
+  }
+}
+
+test('System follows device changes live and initialization attaches one listener', async (t) => {
+  const env = await themeBrowser(t)
+  env.initTheme()
+  env.initTheme()
+  assert.equal(env.themePreference.value, 'system')
+  assert.equal(env.theme.value, 'dark')
+  assert.equal(env.mediaListeners.length, 1)
+  env.changeDevice(true)
+  assert.equal(env.theme.value, 'light')
+  assert.equal(env.root.style.colorScheme, 'light')
+  assert.deepEqual([...env.classes], ['light'])
+  env.changeDevice(false)
+  assert.equal(env.theme.value, 'dark')
+  assert.equal(env.stored(), null)
+})
+
+test('a fixed preference persists; selecting System releases the override immediately', async (t) => {
+  const env = await themeBrowser(t, { stored: 'light' })
+  env.initTheme()
+  assert.equal(env.themePreference.value, 'light')
+  env.changeDevice(false)
+  assert.equal(env.theme.value, 'light')
+  env.setTheme('dark')
+  assert.equal(env.stored(), 'dark')
+  env.changeDevice(true)
+  assert.equal(env.theme.value, 'dark')
+  env.setTheme('system')
+  assert.equal(env.stored(), null)
+  assert.equal(env.themePreference.value, 'system')
+  assert.equal(env.theme.value, 'light')
+  env.initTheme()
+  assert.equal(env.themePreference.value, 'system')
+})
+
+test('a fixed choice remains fixed even when storage is blocked', async (t) => {
+  const env = await themeBrowser(t, { blocked: true })
+  env.initTheme()
+  env.setTheme('light')
+  env.changeDevice(false)
+  assert.equal(env.theme.value, 'light')
+  env.setTheme('system')
+  assert.equal(env.theme.value, 'dark')
+  env.changeDevice(true)
+  assert.equal(env.theme.value, 'light')
+})
+
+test('other tabs can select a fixed scheme or restore System', async (t) => {
+  const env = await themeBrowser(t)
+  env.initTheme()
+  env.changeStorage('light')
+  assert.equal(env.themePreference.value, 'light')
+  assert.equal(env.theme.value, 'light')
+  env.changeStorage(null)
+  assert.equal(env.themePreference.value, 'system')
+  assert.equal(env.theme.value, 'dark')
+})
+
+test('pre-paint matches System and fixed preferences, including blocked storage', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8')
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1]
+  for (const stored of [null, 'system', 'light', 'dark', 'invalid']) {
+    for (const prefersLight of [true, false]) {
+      for (const blocked of [true, false]) {
+        const root = { style: {}, classList: { toggle() {} } }
+        runInNewContext(script, {
+          localStorage: { getItem() { if (blocked) throw new Error('denied'); return stored } },
+          window: { matchMedia: () => ({ matches: prefersLight }) },
+          document: { documentElement: root },
+        })
+        assert.equal(root.style.colorScheme, resolveTheme(blocked ? null : stored, prefersLight))
+      }
+    }
+  }
 })

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """The docs' picture: the queen bee flying to the sunflower.
 
-Drawn the logo's way (assets/wordmark.py): flat red and one body colour, every
+Drawn the logo's way (assets/wordmark.py): sunflower yellow and one body colour, every
 shape built from circles and arcs, and round each petal a contour in the body
 colour. There is no background: the picture stands on the page, and what looks
 like the page's colour inside a shape is a hole cut in it.
 
   the flower   Two rows of PETALS lens petals, the back row a half step round
                from the front one and a little longer, so its tips show
-               between the front tips. Red, each with its contour.
+               between the front tips. Yellow, each with its contour.
   the head     A disc in the body colour, AIR away from the petals. Its seeds
                are holes: SEEDS of them on Vogel's spiral (one every golden
                angle), growing from the centre outward, inside a thin ring.
@@ -16,8 +16,8 @@ like the page's colour inside a shape is a hole cut in it.
   the leaves   Two arcs each, drawn as a line, with a midrib. No fill: the
                flower is the only thing with weight.
   the bee      The queen, as assets/sunflower.py constructs her, flat: a body
-               with its bands cut out of it, red wings with the petals'
-               contour, a red crown.
+               with its bands cut out of it, yellow wings with the petals'
+               contour, a yellow crown.
   her trail    Dots along a curve, growing toward her.
 
 One file per theme, the body in the theme's ink:
@@ -34,7 +34,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sunflower as S  # noqa: E402
 import wordmark as W  # noqa: E402
 
-RED, INK, PAPER = W.RED, W.INK, W.PAPER
+BRAND_YELLOW = "#fcc620"  # app --brand / webdoc --nb-brand
+INK, PAPER = W.INK, W.PAPER
 WIDTH, HEIGHT = S.SCENE
 
 CENTRE, HEAD = (700.0, 596.0), 160.0    # the flower's centre, and the radius of its head
@@ -97,7 +98,7 @@ def flower(body, behind):
     """The flower, over `behind` (the stem), which it hides with AIR to spare."""
     cx, cy = CENTRE
     front, back = row(0, *FRONT), row(0.5, *BACK)
-    petals = f'<g fill="{RED}" stroke="{body}" stroke-width="{LINE}" stroke-linejoin="round">{back}{front}</g>'
+    petals = f'<g fill="{BRAND_YELLOW}" stroke="{body}" stroke-width="{LINE}" stroke-linejoin="round">{back}{front}</g>'
     air = f'<circle cx="{cx}" cy="{cy}" r="{HEAD + AIR}"/>'
     hidden = cut(f'<g stroke-width="{2 * AIR}" stroke-linejoin="round">{front}{back}</g>{air}', behind)
     # the seeds: seed k stands k golden angles round, at a distance that grows as the root of k
@@ -138,7 +139,7 @@ def leaf(t, side, deg, length, half, bow):
 def bee(body):
     """sunflower.bee's construction, flat. She faces +x; back to front: far wing, abdomen, thorax,
     head, antenna, eye, crown, near wing."""
-    wing = f'fill="{RED}" stroke="{body}" stroke-width="{LINE / 0.5:.1f}" stroke-linejoin="round"'
+    wing = f'fill="{BRAND_YELLOW}" stroke="{body}" stroke-width="{LINE / 0.5:.1f}" stroke-linejoin="round"'
     o = [f'<g transform="translate(14,-52) rotate(-146)"><path d="{lens((0, 0), (228, 0), 46)}" {wing}/></g>']
 
     r0, tail = 106.0, 232.0
@@ -163,7 +164,7 @@ def bee(body):
     w, band, spike = 54.0, 24.0, 50.0
     side = -band - spike * 0.62
     crown = [(-w, 0), (-w, side), (-w / 2, -band), (0, -band - spike), (w / 2, -band), (w, side), (w, 0)]
-    o.append(f'<g transform="translate({cx:.1f},{cy:.1f}) rotate(-22)" fill="{RED}">'
+    o.append(f'<g transform="translate({cx:.1f},{cy:.1f}) rotate(-22)" fill="{BRAND_YELLOW}">'
              f'<path d="M {" L ".join(f"{x:.1f} {y:.1f}" for x, y in crown)} Z"/>')
     o += [f'<circle cx="{x:.1f}" cy="{y:.1f}" r="10"/>' for x, y in ((-w, side), (0, -band - spike), (w, side))]
     o.append('</g>')

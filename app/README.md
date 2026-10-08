@@ -4,8 +4,10 @@ A beautiful, modern dashboard for monitoring and managing Queen message queues.
 
 ## Features
 
-Two themes, dark by default and light opt-in (`src/composables/useTheme.js`: an explicit
-choice wins, otherwise the OS preference is honoured only when it asks for light).
+Three theme preferences in the header: **System**, **Light** and **Dark**.
+System is the default and follows changes to the device's colour scheme live
+(falling back to dark when no preference is available). Light and Dark stay fixed
+and persist on this device; choosing System clears that override.
 
 - **Real-time charts** — throughput, lag and resource series, on a shared ticker
 - **Queues** — the list, **create a queue**, and a detail page that reads all 21 options and
@@ -191,7 +193,7 @@ app/
 │   │   ├── useQueueConfig.js     # the 21-option catalogue, diff, validate
 │   │   ├── useRaftCluster.js     # member rows, quorum, the raft alert
 │   │   ├── useRefresh.js         # shell refresh registry + shared ticker
-│   │   ├── useTheme.js           # dark by default, light opt-in
+│   │   ├── useTheme.js           # System, Light and Dark preferences
 │   │   ├── useTimers.js          # broker instants, payload decode, verdicts
 │   │   └── useToast.js           # notifications
 │   ├── stores/                   # module singletons
@@ -233,10 +235,14 @@ app/
 
 Tokens live in `src/style.css` — use the CSS variables, not hex literals.
 
-- `--crown-*` — primary accent (white)
-- `--ice-*` — info / chart-in (logo cyan)
-- `--ember-*` — danger / chart-out (logo pink)
-- `--warn-*` — warning, and the operator/cell-level surfaces
+- `--brand` / `--accent` — sunflower yellow from the logo (`#fcc620`), with black text on primary buttons
+- `--accent-text` / `--crown-*` — yellow in dark mode, dark gold in light mode for readable text and focus rings
+- `--ice-*` / `--ok-*` — neutral idle and healthy states
+- `--ember-*` — coral for failures
+- `--warn-*` — amber for warnings
+- `--scope-*` — neutral operator/cell-level indicators
+
+Keep the brand and surface tokens aligned with `webdoc/src/styles/globals.css`.
 
 ### Components
 

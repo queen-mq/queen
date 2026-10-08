@@ -1312,7 +1312,7 @@ onMounted(fetchAll)
   font: inherit; color: var(--text-hi); text-decoration: underline;
   text-underline-offset: 2px;
 }
-.qd-config-link:hover { color: var(--accent); }
+.qd-config-link:hover { color: var(--accent-text); }
 
 /* The delete modal uses the shared shell — .modal-backdrop / .modal-card /
    .modal-foot — and the shared .panel-err for its form error, so it is not a

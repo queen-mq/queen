@@ -8,7 +8,7 @@
  *   2. `@theme` block exposes them to Tailwind so utilities like
  *      `bg-card`, `text-foreground`, `border-border` work
  *   3. Dark mode uses the `[data-mode="dark"]` attribute
- *   4. All colors use oklch for perceptual uniformity
+ *   4. Brand colours match the Queen logo and dashboard tokens
  *
  * Naming convention:
  *   - Surfaces paired with foregrounds: `card` / `card-foreground`
@@ -19,11 +19,9 @@
  * ============================================================ */
 
 /* ---- Light mode (default) ----
- * The colours are the dashboard's (app/src/style.css, "sunflower on a cloudy
- * day"): warm paper and warm near-black, never blue, no shadows, and colour
- * only where something needs the reader (amber = attention, coral = failure).
- * Light = the dashboard's html.light inks, dark = its :root inks. Change them
- * there first and copy them here, so the two surfaces stay one product. */
+ * Keep this palette aligned with app/src/style.css: sunflower yellow from
+ * the logo, neutral surfaces, and separate status colours. Brand text uses
+ * dark gold on light surfaces; filled actions always use yellow with black. */
 :root {
 	color-scheme: light;
 
@@ -37,19 +35,21 @@
 	--nb-muted: #f1eee9;
 	--nb-muted-foreground: #6c675f;
 
-	--nb-accent: #ebe7e1;
+	--nb-accent: color-mix(in srgb, var(--nb-brand) 8%, var(--nb-card));
 	--nb-accent-foreground: var(--nb-foreground);
 
 	/* Primary action / brand */
-	--nb-primary: #1f1d1a;
-	--nb-primary-foreground: #f9f7f4;
-	--nb-primary-hover: #4f4b45;
+	--nb-brand: #fcc620;
+	--nb-primary: var(--nb-brand);
+	--nb-primary-foreground: #000000;
+	--nb-primary-hover: #e6ae05;
+	--nb-primary-text: #806000;
 
 	/* Borders / focus */
 	--nb-border: #e0dcd6;
 	--nb-border-strong: #cfc9c1;
-	--nb-selected: #e2ded7;
-	--nb-ring: rgba(31, 29, 26, 0.35);
+	--nb-selected: color-mix(in srgb, var(--nb-brand) 14%, var(--nb-card));
+	--nb-ring: var(--nb-primary-text);
 
 	/* Status colors — paired (saturated for text/border + muted for bg) */
 	--nb-info: #4f4b45;
@@ -119,17 +119,19 @@
 	--nb-muted: #070606;
 	--nb-muted-foreground: #8f8a83;
 
-	--nb-accent: #1c1b19;
+	--nb-accent: color-mix(in srgb, var(--nb-brand) 8%, var(--nb-card));
 	--nb-accent-foreground: var(--nb-foreground);
 
-	--nb-primary: #eeebe6;
-	--nb-primary-foreground: #0b0a0a;
-	--nb-primary-hover: #aaa59e;
+	--nb-brand: #fcc620;
+	--nb-primary: var(--nb-brand);
+	--nb-primary-foreground: #000000;
+	--nb-primary-hover: #e6ae05;
+	--nb-primary-text: var(--nb-brand);
 
 	--nb-border: #1f1d1b;
 	--nb-border-strong: #34312e;
-	--nb-selected: #242220;
-	--nb-ring: rgba(238, 235, 230, 0.42);
+	--nb-selected: color-mix(in srgb, var(--nb-brand) 14%, var(--nb-card));
+	--nb-ring: var(--nb-primary-text);
 
 	--nb-info: #aaa59e;
 	--nb-info-foreground: #aaa59e;
@@ -170,7 +172,9 @@
 	--color-accent: var(--nb-accent);
 	--color-accent-foreground: var(--nb-accent-foreground);
 
+	--color-brand: var(--nb-brand);
 	--color-primary: var(--nb-primary);
+	--color-primary-text: var(--nb-primary-text);
 	--color-primary-foreground: var(--nb-primary-foreground);
 	--color-primary-hover: var(--nb-primary-hover);
 

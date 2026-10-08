@@ -8,47 +8,12 @@
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 }
 
-/* ==========================================================================
-   QUEEN DASHBOARD — docs palette, dashboard density
-   Dark-only. Neutral near-black ladder taken from the documentation site
-   (webdoc/src/styles/globals.css, [data-mode="dark"]) so the two surfaces
-   read as one product. Every grey here is oklch(L 0 0) — chroma zero. The
-   old ladder carried a faint blue cast (#141415 is rgb 20,20,21, C≈0.002 at
-   h=286°); on a page this dark that cast is visible as a tint, so it is gone.
-
-   WHAT IS PORTED: the surface ramp, the border ladder, the text ladder, the
-   focus ring, the radius scale, and the primary accent.
-
-   WHAT IS NOT: the docs' reading rhythm (15px/1.75 body, 10px cell padding)
-   would cost ~38% of the visible table rows on a fixed-viewport console, and
-   the docs' four status hues, which are tuned for prose callouts and are 28%
-   less separable by luminance than the ones below — the wrong trade for a
-   surface whose whole job is telling healthy from broken at a glance.
-   ========================================================================== */
+/* Queen's sunflower yellow (#fcc620), black and white. Keep the dashboard
+   and webdoc/src/styles/globals.css aligned. Brand fills use the logo yellow;
+   text and focus rings use a darker gold on light surfaces for contrast.
+   Status and categorical chart colours keep their own meanings. */
 
 @layer base {
-  /* ========================================================================
-     SUNFLOWER ON A CLOUDY DAY — the 2026-09 redesign.
-
-     Alice's brief: minimal; black and white with a touch of colour; warm,
-     not cold; cloudy light; nothing fake; Unix over showmanship. Read as
-     rules:
-
-     1. Warm near-black, never charcoal and never blue. Every neutral leans
-        a few degrees warm (the old ladder was deliberately zero-chroma).
-     2. Colour means "you are needed". Healthy is silent grey: --ok-* is a
-        NEUTRAL now, so every green dot, line and chip in the app goes quiet
-        in one place. Amber = attention, coral = failing. Nothing else is
-        warm except the sunflower mark itself.
-     3. No fake depth. Shadows are gone from anything that sits on the page;
-        only things that genuinely float (menus, toasts) keep --shadow-pop.
-     4. Scope stays stated, but in words and a neutral outline — --info-* and
-        --scope-* are neutral too, so a scope mark can never be read as a
-        state or as the brand.
-
-     Token NAMES are unchanged, so every component and useChartTheme.js
-     (which reads these by name) follows without edits.
-     ======================================================================== */
   :root {
     /* ---- Surfaces: sidebar < page < card ---------------------------------- */
     --rail:  #000000;  /* the sidebar column: one visible step below the page;
@@ -62,7 +27,7 @@
 
     --recessed: var(--ink-1);
     --card:     var(--ink-2);
-    --selected: var(--ink-5);
+    --selected: color-mix(in srgb, var(--accent) 14%, var(--ink-2));
 
     /* ---- Text: warm white down to warm grey. --text-low is 5.4:1 on a card. */
     --text-hi:    #eeebe6;
@@ -70,11 +35,12 @@
     --text-low:   #8f8a83;
     --text-faint: #57534e;  /* rules and glyphs, never text */
     --text: var(--text-mid);
-    --brand: #cdc8c0;       /* the badge: between --text-hi, which glared as a disc, and --text-mid, too grey */
+    --brand: #fcc620;       /* sunflower yellow sampled from the logo */
 
-    --accent:     #eeebe6;
-    --accent-dim: #aaa59e;
-    --on-accent:  var(--ink-0);
+    --accent:     var(--brand);
+    --accent-dim: #e6ae05;
+    --accent-text: var(--brand);
+    --on-accent:  #000000;
 
     /* ---- State. ok and idle are NEUTRAL: healthy says nothing. ------------ */
     --ok-500: #8f8a83;
@@ -87,7 +53,7 @@
     --warn-bd:   rgba(232, 168, 73, 0.30);
     --amber: var(--warn-400);
 
-    --ember-400: #f07a5f;                    /* failing: coral, the flower's  */
+    --ember-400: #f07a5f;                    /* failure: coral                */
     --ember-500: #e0664b;
     --ember-600: #c9523a;
     --ember-glow: rgba(240, 122, 95, 0.12);
@@ -107,7 +73,7 @@
     --scope-glow: transparent;
     --scope-bd:   var(--bd-hi);
 
-    --crown-400: var(--accent);
+    --crown-400: var(--accent-text);
 
     /* ---- Charts: warm greys, adjacent slots apart by lightness. ----------- */
     --series-1: #eeebe6;
@@ -126,7 +92,7 @@
     --bd-hi:   #34312e;
     --bd-soft: #181716;
 
-    --ring: rgba(238, 235, 230, 0.42);
+    --ring: var(--accent-text);
 
     --r-chip:    4px;
     --r-control: 6px;
@@ -161,18 +127,19 @@
 
     --recessed: var(--ink-3);
     --card:     var(--ink-2);
-    --selected: var(--ink-5);
+    --selected: color-mix(in srgb, var(--accent) 14%, var(--ink-2));
 
     --text-hi:    #1f1d1a;
     --text-mid:   #4f4b45;
     --text-low:   #6c675f;  /* 5.3:1 on a card */
     --text-faint: #b0aaa2;
     --text: var(--text-mid);
-    --brand: var(--text-mid);  /* the badge */
+    --brand: #fcc620;
 
-    --accent:     #1f1d1a;
-    --accent-dim: #4f4b45;
-    --on-accent:  var(--ink-2);
+    --accent:     var(--brand);
+    --accent-dim: #e6ae05;
+    --accent-text: #806000;
+    --on-accent:  #000000;
 
     --ok-500: #6c675f;
     --ok-glow: rgba(108, 103, 95, 0.08);
@@ -204,7 +171,7 @@
     --scope-glow: transparent;
     --scope-bd:   var(--bd-hi);
 
-    --crown-400: var(--accent);
+    --crown-400: var(--accent-text);
 
     --series-1: #1f1d1a;
     --series-2: #8f8a83;
@@ -221,7 +188,7 @@
     --bd-hi:   #cfc9c1;
     --bd-soft: #ebe7e1;
 
-    --ring: rgba(31, 29, 26, 0.35);
+    --ring: var(--accent-text);
 
     --shadow-sm: none;
     --shadow:    none;
@@ -231,14 +198,6 @@
 
     color-scheme: light;
   }
-
-  /* The mark is a single-colour white SVG, so on a light page it is a white
-     shape on a white page. It is monochrome, which makes invert() exact:
-     #ffffff becomes #000000, within a hair of --accent. Cheaper and far
-     safer than forking the brand asset into a second file that then has to
-     be kept in step with it. */
-  /* The boot mark is the badge: inline, in its own quiet colour, so nothing
-     is inverted. */
 
   html, body, #app { height: 100%; margin: 0; }
 
@@ -361,10 +320,7 @@
   display: flex; align-items: center; gap: 10px;
   height: 52px; flex: none; padding: 0 16px;
 }
-/* The badge: inline SVG in one colour, so one file serves both themes and the
-   brand is never mistaken for a state. That colour is --brand, quieter than
-   the name beside it: a solid disc in the loudest text colour outweighed the
-   page. */
+/* The inline badge takes the sunflower yellow in both themes. */
 .brand-mark { flex: none; display: block; color: var(--brand); }
 .brand-mark svg { height: 26px; width: auto; display: block; }
 .brand-word { font-size: 13px; font-weight: 600; line-height: 1; color: var(--text-hi); letter-spacing: -0.01em; }
@@ -391,12 +347,13 @@
 }
 .nav-item:hover { color: var(--text-hi); background: var(--ink-2); }
 /* The page you are on is filled like a selected segment (.seg .on). */
-.nav-item-active, .nav-item-active:hover { color: var(--text-hi); font-weight: 500; background: var(--selected); }
+.nav-item-active, .nav-item-active:hover { color: var(--accent-text); font-weight: 500; background: var(--selected); }
 .nav-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Icons a step quieter than the words; the row you are on, or point at,
    gives them the words' ink. */
 .nav-icon { width: 16px; height: 16px; flex: none; margin-right: 2px; color: var(--text-low); transition: color .12s var(--ease); }
-.nav-item:hover .nav-icon, .nav-item-active .nav-icon { color: var(--text-hi); }
+.nav-item:hover .nav-icon { color: var(--text-hi); }
+.nav-item-active .nav-icon, .nav-item-active:hover .nav-icon { color: var(--accent-text); }
 .nav-mark {
   margin-left: auto; display: inline-flex; align-items: center; gap: 10px;
   font-size: 12px; font-weight: 400; color: var(--text-mid); font-variant-numeric: tabular-nums;
@@ -510,6 +467,15 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
 }
 .top-btn:hover { color: var(--text-hi); background: var(--ink-4); }
 .top-btn svg { width: 15px !important; height: 15px !important; }
+.theme-select { position: relative; display: flex; align-items: center; flex: none; color: var(--text-mid); }
+.theme-select > svg { position: absolute; left: 8px; width: 15px; height: 15px; pointer-events: none; }
+.theme-select select {
+  height: 32px; padding: 0 6px 0 29px; border: 1px solid var(--bd);
+  border-radius: var(--r-control); background: var(--ink-2);
+  color: inherit; font: inherit; font-size: 12px; cursor: pointer;
+}
+.theme-select:hover { color: var(--text-hi); }
+.theme-select select:hover { border-color: var(--bd-hi); }
 /* The sidebar toggle leads the bar (the rail, below). Up to 1100px the
    sidebar is a drawer with its own button in this corner. */
 .nav-toggle { margin-left: -8px; }
@@ -753,7 +719,7 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
   .seg button { padding: 3px 10px; border-radius: var(--r-chip); font-size: 11.5px; color: var(--text-mid); font-weight: 500; cursor: pointer; border: none; background: transparent; transition: .12s; }
   .seg button:hover { color: var(--text-hi); }
   .seg button.on { color: var(--text-hi); }
-  .seg button.on { background: var(--ink-5); }
+  .seg button.on { color: var(--accent-text); background: var(--selected); }
 
   /* --- Bars --- */
   .bar { display: inline-block; height: 4px; border-radius: var(--r-pill); background: var(--ink-4); overflow: hidden; vertical-align: middle; }
@@ -1163,7 +1129,7 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
     background: transparent; transition: .15s var(--ease);
   }
   .pill:hover { color: var(--text-hi); }
-  .pill.on { color: var(--text-hi); background: var(--ink-5); border-color: var(--bd-hi); }
+  .pill.on { color: var(--accent-text); background: var(--selected); border-color: var(--bd-hi); }
 
   /* --- Liveness tick ----------------------------------------------------- */
   .live-tick {
@@ -1197,7 +1163,7 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
   .count-item.count-static { cursor: default; }
   .count-item.count-tight { gap: 4px; }
   .count-item:not(:disabled):not(.count-static):hover { color: var(--text-hi); }
-  .count-item:not(:disabled):not(.count-static):hover strong { color: var(--accent); }
+  .count-item:not(:disabled):not(.count-static):hover strong { color: var(--accent-text); }
   .count-item:disabled { opacity: .5; cursor: default; }
   .count-item strong {
     font-family: var(--font-mono); font-variant-numeric: tabular-nums;
@@ -1270,6 +1236,8 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
 
 /* Mobile topbar — must be last to win cascade */
 @media (max-width: 700px) {
+  .topbar { gap: 6px; }
+  .topbar-end { flex: none; gap: 6px; }
   .crumbs { flex: 1; text-align: center; justify-content: center; }
   /* One search box at every width: on a phone it is a magnifier until it is
      used, then it opens over the top bar. */
@@ -1285,6 +1253,11 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
     border-color: var(--bd-hi); background: var(--ink-3); cursor: text;
   }
   .cmd-search.open .cmd-input { display: block; }
+}
+
+@media (max-width: 380px) {
+  .theme-select > svg { display: none; }
+  .theme-select select { padding-left: 6px; }
 }
 
 /* =========================================================================
@@ -1339,7 +1312,7 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
   padding: 7px 10px; cursor: pointer; border: none; background: transparent; text-align: left;
 }
 .cluster-option:hover { background: var(--ink-4); }
-.cluster-option-active { background: var(--ink-5); }
+.cluster-option-active { background: var(--selected); }
 .cluster-option-main { display: flex; align-items: baseline; gap: 4px; font-size: 12px; min-width: 0; }
 .cluster-option-meta { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
 .cluster-role { font-size: 11px; color: var(--text-low); }
