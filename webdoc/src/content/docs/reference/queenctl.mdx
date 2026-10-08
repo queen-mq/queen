@@ -19,7 +19,11 @@ sourceOfTruth:
   - clients/client-cli/internal/errors/exit.go
   - clients/client-cli/Makefile
   - clients/client-cli/.goreleaser.yaml
+  - clients/client-go/consumer_manager.go
+  - clients/client-go/supervision.go
   - go.work
+verifiedBy:
+  - clients/client-cli/cmd/supervision_test.go
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): tail.go's --auto-ack help now says the client acks each message after printing it, which is what this page already said. pop and ephemeral pop gain --commit-on-delivery, described below.
 ---
 
@@ -122,6 +126,17 @@ handler progress through KV. Each completed handler means a message was printed,
 pipe's downstream consumer processed it or an acknowledgement succeeded. Publication failures
 do not stop tailing, and status stays out of stdout. See the client README for heartbeat and
 expiry details. This option does not restart or scale CLI processes.
+
+Each tail invocation starts a new instance ID and fresh counters, even with the same host,
+queue and publication group. Normal exits caused by `--limit`, `--idle-millis` or the default
+one-shot batch limit publish `stopped` with zero running workers. The final observation has
+a 60-second TTL; expired records can remain visible until the broker sweeps them. A shell
+loop that restarts short tails can show several stopped cards while the shell keeps running.
+
+For a persistent observed tail, use `--follow` without stopping limits; it does not override
+an explicit `--limit` or `--idle-millis`. If an outer scheduler's lifetime is what you want to
+observe, omit `--supervision-group` on its short commands and
+[publish that scheduler's status](/reference/supervisor-status/#reporting-an-application-owned-scheduler).
 
 `pop` prints leased messages: ack each one with `queenctl ack`, or it is delivered again when the
 lease expires. With `--commit-on-delivery` the broker moves the group's cursor past the messages

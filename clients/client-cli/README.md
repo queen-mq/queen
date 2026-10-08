@@ -283,6 +283,25 @@ There is no automatic restart or scaling of CLI processes. Other commands do
 not enable reporting, and omitting the flag adds no reporting goroutine or KV
 traffic. The existing token must have write access to `queen-supervisor` KV.
 
+### Match supervision to the tail lifetime
+
+Each `queenctl tail` invocation gets a new instance ID and fresh counters, even
+with the same queue, hostname, `--cg` and `--supervision-group`. Repeated commands
+in a shell loop publish separate instances; the fixed publication group does
+not merge them. A normal exit from `--limit`, `--idle-millis`, or the default
+one-shot batch limit publishes `stopped` with zero running workers. This is the
+last state of that tail invocation, not the state of a shell loop or another
+consumer on the same host. Its final observation has a 60-second TTL; expired
+records can remain visible until the broker sweeps them.
+
+Use one `tail --follow` invocation for a persistent observed tail, without
+`--limit` or `--idle-millis` that deliberately end it. `--follow` does not override
+those explicit limits. On shutdown, interrupt that invocation and allow its
+normal cleanup. An outer scheduler that repeatedly starts limited tails needs
+its own persistent [status publisher](https://queenmq.com/reference/supervisor-status/#reporting-an-application-owned-scheduler)
+if its lifetime is what you want to observe; omit `--supervision-group` on the
+short tails in that case. Preserve scheduling limits used for fairness.
+
 ## License
 
 [Apache 2.0](LICENSE.md), same as the rest of Queen MQ.

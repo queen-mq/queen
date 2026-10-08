@@ -833,3 +833,26 @@ not assert ACK success. No message payloads or error text are published.
 Event-loop starvation can stop heartbeats; a heartbeat does not prove progress.
 Reporting does not restart tasks/processes, autoscale or enable remote commands.
 Disabled reporting creates no background task or KV traffic.
+
+#### Match supervision to the consumer lifetime
+
+Each awaited `consume()` execution gets a new instance ID and fresh counters,
+even when it reuses the client, builder, queue, hostname and publication group.
+A normal exit caused by `.limit(...)` or `.idle_millis(...)` publishes `stopped`
+with zero running workers. The final observation has a 60-second TTL; expired
+records can remain visible until the broker sweeps them. Repeated short calls
+can therefore show many stopped instances for a process whose outer loop is
+still running. Compare instance IDs and application logs before diagnosing it.
+
+For a persistent consumer, enable supervision on one execution and omit limits
+that deliberately end it. Await its exit under the application's cancellation
+policy before closing the client. Several persistent executions in one process
+have separate instances and concurrency budgets.
+
+If an outer scheduler rotates queues through short calls, keep per-call
+supervision off when you need the scheduler's lifetime status. Publish the
+[consumer status contract](https://queenmq.com/reference/supervisor-status/#reporting-an-application-owned-scheduler)
+with one ID per scheduler lifetime, stable worker pool names and counters across
+turns. The fluent supervision option does not share a reporter or override its
+instance ID. Preserve limits used for fairness, the shared worker budget and
+existing ACK/NACK, lease renewal and cancellation behavior.

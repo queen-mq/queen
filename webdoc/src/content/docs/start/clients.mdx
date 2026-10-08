@@ -13,6 +13,21 @@ sourceOfTruth:
   - clients/client-cpp/queen_client.hpp
   - clients/client-php/composer.json
   - clients/client-php/config/queen.php
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+  - clients/client-js/client-v2/consumer/Supervision.js
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+  - clients/client-py/queen/consumer/consumer_manager.py
+  - clients/client-py/queen/consumer/supervision.py
+  - clients/client-py/queen/builders/queue_builder.py
+  - clients/client-go/consumer_manager.go
+  - clients/client-go/supervision.go
+  - clients/client-rust/src/consumer.rs
+  - clients/client-rust/src/supervision.rs
+  - clients/client-rust/src/queue.rs
+  - clients/client-php/src/Consumer/ConsumerManager.php
+  - clients/client-php/src/Consumer/Supervision.php
+  - clients/client-php/src/Builders/QueueBuilder.php
+  - clients/client-cli/cmd/tail.go
   - Dockerfile
   - server/Cargo.toml
   - server/src/embedded/mod.rs
@@ -23,6 +38,13 @@ verifiedBy:
   - examples/tutorials/rust/src/bin/01_hello_world.rs
   - examples/tutorials/cpp/01-hello-world.cpp
   - examples/tutorials/php/01-hello-world.php
+  - clients/client-js/test-v2/consumer-unit/supervision.test.js
+  - clients/client-py/tests/client_unit/test_supervision.py
+  - clients/client-go/supervision_test.go
+  - clients/client-rust/tests/supervision_wire.rs
+  - clients/client-cpp/test_consumer.cpp
+  - clients/client-php/tests/ConsumerSupervisionTest.php
+  - clients/client-cli/cmd/supervision_test.go
   - server/tests/embedded_raft_smoke.rs
 # sourceOfTruth re-read 2026-10-05 (Laravel env cut): config/queen.php still reads QUEEN_URL, the
 # only variable the PHP snippet sets besides Laravel's QUEUE_CONNECTION; nothing else changes.
@@ -231,6 +253,42 @@ The [quickstart](/start/quickstart/) runs a whole step this way, with curl and j
 [HTTP reference](/reference/http/) lists every route. `queenctl`, the operator CLI (status, tail,
 push, replay, lag, dead letters), ships inside the Docker image (`docker exec queen queenctl
 status`) and as release binaries for Linux, macOS and Windows. See [queenctl](/reference/queenctl/).
+
+## Consumer supervision
+
+All six SDKs offer optional consumer observations through the authenticated KV API.
+Reporting is off by default. Enable it before executing the consume loop:
+
+| Client | Opt-in API | Observed lifetime |
+| --- | --- | --- |
+| JavaScript | `.supervision({ group: 'billing-production' })` | One awaited `consume()` execution. |
+| Python | `.supervision({"group": "billing-production"})` | One awaited `consume()` execution. |
+| Go | `Supervision(&queen.SupervisionConfig{Group: "billing-production"})` | One `Consume(...).Execute(...)` execution. |
+| Rust | `.supervision(Some(SupervisionConfig::new("billing-production")))` | One awaited `consume()` or `consume_batch()` execution. |
+| C++ | `.supervision(queen::SupervisionConfig{"billing-production"})` | One blocking `consume()` call. |
+| PHP | `->supervision(['group' => 'billing-production'])` | One fluent `consume()->execute()` execution, separate from the Laravel process supervisor. |
+| queenctl | `tail --supervision-group billing-production` | One tail command invocation. |
+
+Each execution gets a new instance ID and fresh counters, including repeated calls on the
+same client, builder, queue or host. The publication group collects instances; it does not
+merge them or change the consumer group. Message and idle limits end an instance normally
+and publish `stopped` with zero running workers. Several stopped cards for one host can
+therefore describe finished short calls while an outer scheduler is still running.
+
+JavaScript, Python, Go, Rust, C++ and queenctl publish at 10-second intervals with a
+30-second heartbeat timeout and 60-second TTL. PHP publishes cooperatively when the loop
+regains control, with heartbeat timeout `max(30, ceil(poll_timeout_ms / 1000) + 15)` seconds
+(capped at 86400) and a TTL of at least twice that. Its default 30-second poll gives a
+45-second heartbeat timeout and 90-second TTL. Long synchronous work can delay PHP
+publication. Expired observations can remain visible until the broker sweeps them.
+
+Use one persistent consume execution for persistent consumer observations, or `tail --follow`
+without stopping limits for the CLI. If the application owns worker slots that rotate through
+short calls, [publish its scheduler status](/reference/supervisor-status/#reporting-an-application-owned-scheduler)
+with one ID for its lifetime and leave per-call supervision off. The fluent APIs do not offer
+a shared reporter or instance-ID override. Preserve limits used for queue fairness and the
+combined concurrency budget. [Consuming](/concepts/consuming/#optional-sdk-consumer-supervision)
+explains the lifetime; the [status contract](/reference/supervisor-status/) defines the wire format.
 
 ## What each SDK implements
 
