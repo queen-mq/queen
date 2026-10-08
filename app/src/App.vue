@@ -2,12 +2,12 @@
   <!-- Boot gate: nothing renders until /auth/me says who this is. A shell
        drawn before identity is a shell that has to guess a permission. -->
   <div v-if="status === 'loading' || status === 'idle'" class="boot-screen">
-    <img src="/queen-sunflower.webp" alt="" class="boot-mark" />
+    <span class="boot-mark" aria-hidden="true" v-html="mark" />
     <p>Starting session…</p>
   </div>
 
   <div v-else-if="status === 'error'" class="boot-screen boot-error">
-    <img src="/queen-sunflower.webp" alt="" class="boot-mark" />
+    <span class="boot-mark" aria-hidden="true" v-html="mark" />
     <h2>Cannot start the dashboard</h2>
     <p>
       <code>/auth/me</code> did not answer ({{ loadError }}). The server may be
@@ -61,6 +61,7 @@
 <script setup>
 import { computed, onUnmounted, provide, watch } from 'vue'
 
+import mark from '@/assets/q-badge.svg?raw'
 import Sidebar from '@/components/Sidebar.vue'
 import Header from '@/components/Header.vue'
 import ToastHost from '@/components/ToastHost.vue'

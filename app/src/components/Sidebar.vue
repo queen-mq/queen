@@ -15,11 +15,14 @@
 
   <aside class="sidebar" :class="{ 'sidebar-mobile-open': mobileOpen, rail }">
     <!-- Brand. As tall as the top bar, so the two share a baseline; no rule
-         under it. The sunflower is the only colour here that is not a state. -->
+         under it. The mark is the badge: the q that is the sunflower, cut out
+         of a disc (assets/wordmark.py writes it). It is in one colour, a
+         little quieter than the name: nothing in this column is coloured
+         unless it is a state. The name beside it is plain interface type. -->
     <div class="brand">
-      <img src="/queen-sunflower.webp" alt="" class="brand-mark" width="24" height="24" />
+      <span class="brand-mark" aria-hidden="true" v-html="mark" />
       <template v-if="!rail">
-        <span class="brand-word">QueenMQ</span>
+        <span class="brand-word">queen</span>
         <span v-if="brokerVersion" class="brand-ver" :title="`Broker ${brokerVersion}`">{{ shortVersion }}</span>
       </template>
     </div>
@@ -116,6 +119,7 @@
 import { h, ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import mark from '@/assets/q-badge.svg?raw'
 import ClusterSelector from '@/components/ClusterSelector.vue'
 import { system } from '@/api'
 import { formatNumber } from '@/composables/useApi'

@@ -70,6 +70,7 @@
     --text-low:   #8f8a83;
     --text-faint: #57534e;  /* rules and glyphs, never text */
     --text: var(--text-mid);
+    --brand: #cdc8c0;       /* the badge: between --text-hi, which glared as a disc, and --text-mid, too grey */
 
     --accent:     #eeebe6;
     --accent-dim: #aaa59e;
@@ -167,6 +168,7 @@
     --text-low:   #6c675f;  /* 5.3:1 on a card */
     --text-faint: #b0aaa2;
     --text: var(--text-mid);
+    --brand: var(--text-mid);  /* the badge */
 
     --accent:     #1f1d1a;
     --accent-dim: #4f4b45;
@@ -235,7 +237,8 @@
      #ffffff becomes #000000, within a hair of --accent. Cheaper and far
      safer than forking the brand asset into a second file that then has to
      be kept in step with it. */
-  /* The boot mark is the sunflower now: a colour image, never inverted. */
+  /* The boot mark is the badge: inline, in its own quiet colour, so nothing
+     is inverted. */
 
   html, body, #app { height: 100%; margin: 0; }
 
@@ -358,7 +361,12 @@
   display: flex; align-items: center; gap: 10px;
   height: 52px; flex: none; padding: 0 16px;
 }
-.brand-mark { width: 24px; height: 24px; flex: none; border-radius: 50%; display: block; }
+/* The badge: inline SVG in one colour, so one file serves both themes and the
+   brand is never mistaken for a state. That colour is --brand, quieter than
+   the name beside it: a solid disc in the loudest text colour outweighed the
+   page. */
+.brand-mark { flex: none; display: block; color: var(--brand); }
+.brand-mark svg { height: 26px; width: auto; display: block; }
 .brand-word { font-size: 13px; font-weight: 600; line-height: 1; color: var(--text-hi); letter-spacing: -0.01em; }
 .brand-ver { margin-left: auto; font-size: 11px; color: var(--text-low); white-space: nowrap; }
 
@@ -1404,7 +1412,8 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
   align-items: center; justify-content: center; gap: 10px;
   color: var(--text-mid); font-size: 13px; padding: 24px; text-align: center;
 }
-.boot-mark { width: 46px; height: 46px; opacity: .85; }
+.boot-mark { color: var(--brand); }
+.boot-mark svg { height: 56px; width: auto; display: block; }
 .boot-error h2 { font-size: 16px; color: var(--text-hi); font-weight: 600; }
 .boot-error p { max-width: 460px; line-height: 1.5; }
 .boot-error code { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-hi); }

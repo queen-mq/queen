@@ -28,22 +28,18 @@ Outputs (all regenerated, do not hand-edit):
   assets/queen-avatar.png            512px square with the bee, GitHub org avatar (upload only)
   assets/queen-social-card.png       1280x640, GitHub social preview (upload only)
   assets/sunflower/queen-sunflower-bee[-<sky>][-borderless].{svg,png}
-  app/public/favicon.svg             the mark
-  app/public/favicon-32.png          raster fallback
-  app/public/queen-sunflower.webp    96px mark: sidebar, boot screen, and the sign-in
-                                     page (proxy/src/oauth.rs inlines it from the build)
-  webdoc/public/favicon.svg          the mark
-  webdoc/public/favicon-32.png       raster fallback
-  webdoc/public/favicon.ico          16 (13 petals) / 32 / 48 for browsers that ignore SVG icons
-  webdoc/public/apple-touch-icon.png 180px square (iOS rounds the corners itself)
-  webdoc/public/queen-tile.png       512px square, schema.org Organization.logo
-  webdoc/public/queen-mark.svg       the docs header
+  webdoc/public/queen-mark.svg       the flower head, for docs pages and figures that want it
   webdoc/public/queen-badge.svg      the badge, for docs pages that want it
-  webdoc/public/queen-scene.svg      the tall scene on plum, the docs homepage hero in the light theme
-  webdoc/public/queen-scene-cream.svg  the same on cream (rose trail), the hero in the dark theme
+  webdoc/public/queen-scene.svg      the tall scene on plum
+  webdoc/public/queen-scene-cream.svg  the same on cream (rose trail)
+                                     (the docs homepage shows assets/scene.py's picture now)
   clients/client-php/resources/views/dashboard/partials/mark.blade.php
                                      the mark inline, for the Laravel dashboard's header
                                      (it is served by the user's app, so nothing to fetch)
+
+The logo (the q that is the sunflower), the favicons, the touch icon, the
+schema.org tile and the sign-in page's mark are assets/wordmark.py's: the
+sidebar, the boot screen and the docs header show that logo.
 
 Run:  python3 assets/generate-brand.py
 Then: cd app && npm run build     (server/webapp/dist is the artifact BOTH the
@@ -102,7 +98,6 @@ def save(img, *path, **kw):
 BADGE = S.badge_svg(sky=S.PLUM, rim=False)
 MARK = S.mark_svg(21)
 MARK16 = S.mark_svg(13)
-SQUARE = S.square_svg(bee_too=False)
 
 print("masters")
 write(S.badge_svg(), "assets", "queen-sunflower-bee.svg")
@@ -119,26 +114,11 @@ for name, sky in [("", None)] + [(f"-{n}", c) for n, c in SKY_VARIANTS.items()]:
         write(svg, "assets", "sunflower", f"queen-sunflower-bee{name}{suffix}.svg")
         save(raster(svg, 1024, ss=1), "assets", "sunflower", f"queen-sunflower-bee{name}{suffix}.png")
 
-print("dashboard (app/public is copied into the build the broker and the proxy embed)")
-write(MARK, "app", "public", "favicon.svg")
-save(raster(MARK, 32), "app", "public", "favicon-32.png")
-save(raster(MARK, 96), "app", "public", "queen-sunflower.webp", lossless=True, quality=100, method=6)
-
 print("docs")
-write(MARK, "webdoc", "public", "favicon.svg")
 write(MARK, "webdoc", "public", "queen-mark.svg")
 write(BADGE, "webdoc", "public", "queen-badge.svg")
 write(S.scene_svg(), "webdoc", "public", "queen-scene.svg")
 write(S.scene_svg(sky=S.CREAM, trail=S.ROSE), "webdoc", "public", "queen-scene-cream.svg")
-save(raster(MARK, 32), "webdoc", "public", "favicon-32.png")
-raster(MARK, 48).save(P("webdoc", "public", "favicon.ico"), sizes=[(16, 16), (32, 32), (48, 48)],
-                      append_images=[raster(MARK16, 16), raster(MARK, 32)])
-print("  ", "webdoc/public/favicon.ico", f"{os.path.getsize(P('webdoc/public/favicon.ico')) // 1024}KB")
-save(raster(SQUARE, 180, ss=4), "webdoc", "public", "apple-touch-icon.png")
-# schema.org Organization.logo (webdoc/astro.config.ts): consumers fetch it
-# blind and composite it on a ground of their choosing, so it has to carry its
-# own ground, and be a raster — several ignore SVG.
-save(raster(SQUARE, 512, ss=2), "webdoc", "public", "queen-tile.png")
 
 print("laravel dashboard")
 write("{{-- The Queen mark, inline. Written by assets/generate-brand.py: do not edit. --}}\n"

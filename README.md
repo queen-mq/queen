@@ -1,8 +1,9 @@
 <div align="center">
 
-<img src="assets/queen-badge.svg" alt="" width="120" height="120">
-
-# Queen MQ
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark/queen-tagline-on-dark.svg">
+  <img src="assets/wordmark/queen-tagline.svg" alt="Queen, message queue" width="340">
+</picture>
 
 **High-performance transactional message broker**
 

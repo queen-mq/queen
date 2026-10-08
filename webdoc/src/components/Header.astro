@@ -5,6 +5,8 @@ import { LinkButton } from "./ui/link-button";
 import { ThemeToggle } from "./ui/theme-toggle";
 import { SearchTrigger } from "./ui/search";
 import { config } from "virtual:nimbus/config";
+import mark from "../assets/q.svg?raw";
+import wordmark from "../assets/queen-tagline.svg?raw";
 import { getSidebarSections } from "@cloudflare/nimbus-docs";
 
 interface Props {
@@ -52,23 +54,25 @@ const showSections = sections.length >= 2;
   )}
   <div class="mx-auto flex items-center justify-between h-14 px-4 lg:px-6">
     <div class="flex items-center gap-3">
-      <a href="/" class="group flex items-center gap-2">
+      <a href="/" class="group flex items-center" aria-label={config.title}>
         {/*
-          The small mark: the badge's sunflower head on its own (21 two-tone
-          petals, plain head), drawn for 16-48 px where the full badge turns to
-          mush. It has no ground of its own, so it reads on the light and the
-          dark theme as it is.
+          The small logo, in colour, inlined (assets/wordmark.py writes
+          src/assets/): the petals keep their red and the letters take the
+          text colour of the theme. The home page shows the wordmark with
+          "message queue" under it; every other page has the room for the q
+          alone. The logo with its contours is for larger sizes: the README.
         */}
-        <img
-          src="/queen-mark.svg"
-          alt=""
-          width="26"
-          height="26"
-          class="h-[26px] w-[26px] shrink-0"
-        />
-        <span class="font-semibold text-sm text-foreground group-hover:text-primary transition-colors">
-          {config.title}
-        </span>
+        {currentSlug === "/" ? (
+          <span
+            class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[34px] [&>svg]:w-auto"
+            set:html={wordmark}
+          />
+        ) : (
+          <span
+            class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[28px] [&>svg]:w-auto"
+            set:html={mark}
+          />
+        )}
       </a>
 
       {showSections && (
@@ -137,29 +141,5 @@ const showSections = sections.length >= 2;
     background-color: transparent;
     border-bottom-color: transparent;
     --tw-backdrop-blur: blur(0);
-  }
-  /* From lg the homepage's picture runs up under the right end of the bar, so
-     while the bar is clear the controls there sit on the picture and take its
-     ink: white on the plum scene (light theme), plum on the cream one (dark).
-     The Tailwind colour variables are what the controls' utilities read. */
-  @media (min-width: 1024px) {
-    header[data-transparent-top]:not([data-scrolled]) [data-hdr-actions] {
-      --color-foreground: #ffffff;
-      --color-muted-foreground: rgb(255 255 255 / 0.82);
-      --color-card: rgb(255 255 255 / 0.08);
-      --color-muted: rgb(255 255 255 / 0.1);
-      --color-border: rgb(255 255 255 / 0.28);
-      --color-border-strong: rgb(255 255 255 / 0.5);
-      --color-accent: rgb(255 255 255 / 0.14);
-    }
-    :global(:root[data-mode="dark"]) header[data-transparent-top]:not([data-scrolled]) [data-hdr-actions] {
-      --color-foreground: #4a2330;
-      --color-muted-foreground: rgb(74 35 48 / 0.85);
-      --color-card: rgb(74 35 48 / 0.05);
-      --color-muted: rgb(74 35 48 / 0.08);
-      --color-border: rgb(74 35 48 / 0.3);
-      --color-border-strong: rgb(74 35 48 / 0.55);
-      --color-accent: rgb(74 35 48 / 0.1);
-    }
   }
 </style>

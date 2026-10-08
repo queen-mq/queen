@@ -1752,15 +1752,15 @@ fn login_html(
             let divider = if buttons.is_empty() {
                 String::new()
             } else {
-                format!("{buttons}<div class=\"sep\">or</div>")
+                format!("<div class=\"providers\">{buttons}</div><div class=\"sep\">or</div>")
             };
             format!(
                 "{divider}<form method=\"post\" action=\"/auth/login\">\
 <input type=\"hidden\" name=\"next\" value=\"{next_e}\">\
-<label for=\"email\">Email</label>\
-<input id=\"email\" name=\"email\" type=\"email\" autocomplete=\"username\" required autofocus>\
-<label for=\"password\">Password</label>\
-<input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" required>\
+<label class=\"field\"><span>Email</span>\
+<input id=\"email\" name=\"email\" type=\"email\" autocomplete=\"username\" required autofocus></label>\
+<label class=\"field\"><span>Password</span>\
+<input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" required></label>\
 <button type=\"submit\">Sign in</button></form>"
             )
         }
@@ -1780,24 +1780,10 @@ Sign in through the control plane that operates it, then return here.</p>{link}"
         }
     };
     let favicon = favicon_data_uri();
-    let badge = brand_badge_data_uri();
-    let mark = if badge.is_empty() {
-        String::new()
-    } else {
-        format!("<img class=\"mark\" src=\"{badge}\" alt=\"\">")
+    let mark = match wordmark_svg() {
+        "" => "<span class=\"word\">queen</span>".to_string(),
+        svg => format!("<span class=\"mark\" role=\"img\" aria-label=\"Queen, message queue\">{svg}</span>"),
     };
-    // The sign-in page is plain server-rendered HTML: it exists BEFORE the SPA
-    // (and, under mandatory auth, before any of its assets are reachable), so it
-    // cannot import the webapp's stylesheet. It therefore restates the app's
-    // design tokens inline — surfaces ink-0/2/3/4, borders bd/bd-hi, text
-    // hi/low/faint, the #dedede primary, ember for errors, the 6/8px radius
-    // ladder and the 2px focus ring — and the brand block copies .brand /
-    // .brand-mark / .brand-word from the sidebar so the two read as one product.
-    //
-    // THESE VALUES ARE A COPY BY NECESSITY, NOT BY CHOICE. They must be kept in
-    // step with the `:root` block in app/src/style.css by hand; there is no
-    // build step that checks it. The current set is the docs-derived palette
-    // (page #020202, card #0f0f0f, input #171717, border #262626/#404040).
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -1805,70 +1791,123 @@ Sign in through the control plane that operates it, then return here.</p>{link}"
 <link rel=\"icon\" type=\"image/svg+xml\" href=\"{favicon}\">\
 <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\
 <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\
-<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap\" rel=\"stylesheet\">\
-<style>\
-:root{{color-scheme:dark}}\
-*{{box-sizing:border-box}}\
-body{{font:15px/1.5 'Inter',ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:-.005em;\
-margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
-background:#020202;color:#f5f5f5;padding:24px}}\
-.card{{width:100%;max-width:340px}}\
-.brand{{display:flex;align-items:center;gap:9px;margin-bottom:20px}}\
-.mark{{width:28px;height:28px;flex:none;border-radius:50%;object-fit:contain}}\
-.word{{font-size:15px;font-weight:600;line-height:1;color:#f5f5f5;letter-spacing:-.015em}}\
-.word b{{font-weight:500;font-size:11px;letter-spacing:.06em;margin-left:3px;color:#9e9e9e}}\
-.panel{{background:#0f0f0f;border:1px solid #262626;border-radius:8px;padding:22px 20px}}\
-h1{{font-size:14px;margin:0 0 16px;font-weight:600;letter-spacing:-.01em;color:#f5f5f5}}\
-label{{display:block;font-size:11px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;\
-color:#808080;margin:14px 0 5px}}\
-input{{width:100%;padding:9px 10px;border:1px solid #262626;border-radius:6px;font-size:14px;\
-font-family:inherit;background:#171717;color:#f5f5f5}}\
-input:hover{{border-color:#404040}}\
-input:focus{{outline:2px solid rgba(222,222,222,.35);outline-offset:2px;border-color:#404040;background:#1e1e1e}}\
-button{{width:100%;margin-top:18px;padding:9px;border:0;border-radius:6px;background:#dedede;color:#020202;\
-font-family:inherit;font-size:14px;font-weight:600;letter-spacing:-.005em;cursor:pointer}}\
-button:hover{{background:#9e9e9e}}\
-.oauth{{display:block;text-align:center;margin-bottom:8px;padding:9px;border:1px solid #262626;\
-border-radius:6px;text-decoration:none;color:#f5f5f5;background:#0f0f0f;font-size:14px;font-weight:500}}\
-.oauth:hover{{background:#171717;border-color:#404040}}\
-.sep{{display:flex;align-items:center;gap:10px;color:#525252;font-size:10px;margin:14px 0 2px;\
-text-transform:uppercase;letter-spacing:.08em}}\
-.sep:before,.sep:after{{content:'';flex:1;height:1px;background:#262626}}\
-.err{{background:rgba(244,63,94,.12);border:1px solid rgba(244,63,94,.28);color:#fb7185;\
-padding:8px 10px;border-radius:6px;font-size:13px;margin-bottom:14px}}\
-.note{{margin:0;color:#9e9e9e;font-size:13px;line-height:1.6}}\
-.note+.oauth{{margin:16px 0 0}}\
-</style></head><body><div class=\"card\">\
-<div class=\"brand\">{mark}<span class=\"word\">Queen<b>MQ</b></span></div>\
-<div class=\"panel\"><h1>Sign in</h1>{err_html}{panel}</div></div></body></html>"
+<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap\" rel=\"stylesheet\">\
+<script>{SIGN_IN_THEME}</script><style>{SIGN_IN_CSS}</style></head><body><main class=\"sign\">\
+<div class=\"brand\">{mark}</div>\
+<div class=\"card\"><div class=\"card-header\"><h1>Sign in</h1></div>\
+<div class=\"card-body\">{err_html}{panel}</div></div></main></body></html>"
     )
 }
 
-/// The brand mark as a `data:` URI — the SAME built asset the sidebar shows
-/// (`app/public/queen-sunflower.webp`, the small sunflower mark), pulled out
-/// of the embedded webapp so the sign-in page and the
-/// app it fronts can never drift apart, and so replacing it (+ `npm run build`)
-/// updates this page too.
+/// The dashboard's scheme, resolved the way `app/index.html` resolves it, before
+/// the first paint: the choice stored by the dashboard's own toggle wins, else
+/// the OS but only when it asks for light, else dark. This page and the SPA are
+/// one origin, so they read the same key, and signing out of a light dashboard
+/// lands on a light page.
+const SIGN_IN_THEME: &str = "(function(){var t='dark';try{var s=localStorage.getItem('queen-theme');\
+if(s==='light'||s==='dark')t=s;else if(window.matchMedia('(prefers-color-scheme: light)').matches)t='light'}\
+catch(e){}var r=document.documentElement;r.classList.toggle('light',t==='light');\
+r.classList.toggle('dark',t!=='light');r.style.colorScheme=t})();";
+
+/// The sign-in page's stylesheet. The page is plain server-rendered HTML: it
+/// exists BEFORE the SPA (and, under mandatory auth, before any of its assets
+/// are reachable), so it cannot import the webapp's stylesheet. It restates it
+/// instead, and reads as one of the dashboard's own dialogs: the same tokens in
+/// both schemes, the card with its header, a field as its name over its input,
+/// the primary button, the error block, the focus rings.
 ///
-/// It is inlined rather than linked because webapp.rs's gate is deliberately
-/// absolute — not one byte without a live session — so a plain
-/// `<img src="/queen-sunflower.webp">` here would 302 back to this very page.
-/// Encoded once: the bytes are fixed for the life of the process.
+/// THE TOKENS ARE A COPY BY NECESSITY, NOT BY CHOICE. `:root` and `html.light`
+/// here repeat the blocks of the same name in app/src/style.css, value for
+/// value; `the_sign_in_tokens_are_the_dashboards` fails when one of them drifts.
+/// The rules under them are the dashboard's `.card`, `.card-header`, `.input`,
+/// `.btn`, `.btn-primary` and `.panel-err`, kept in step by hand.
 ///
-/// Empty when the webapp is not built. The page then renders without a mark
-/// rather than with a broken one; `the_login_brand_is_embedded` fails the build
-/// long before that reaches anyone.
-fn brand_badge_data_uri() -> &'static str {
-    static URI: OnceLock<String> = OnceLock::new();
-    URI.get_or_init(|| match crate::webapp::embedded_asset(BRAND_BADGE) {
-        Some(bytes) => format!("data:image/webp;base64,{}", B64.encode(bytes)),
-        None => String::new(),
+/// What is this page's own: the buttons run the width of the card, since they
+/// are its one action and its provider choices, not a row at the foot of a
+/// dialog; and an autofilled field keeps the input's surface, where a browser
+/// would paint its own blue over the two fields this page has.
+///
+/// The brand is not the sidebar's badge: there is room here for the wordmark
+/// with its line, centred over the card, at about the smallest height that
+/// still lets the line be read.
+const SIGN_IN_CSS: &str = "\
+:root{--ink-0:#0b0a0a;--ink-2:#111010;--ink-3:#171615;\
+--text-hi:#eeebe6;--text-mid:#aaa59e;--text-low:#8f8a83;--text-faint:#57534e;\
+--accent:#eeebe6;--accent-dim:#aaa59e;--on-accent:var(--ink-0);\
+--ember-400:#f07a5f;--ember-glow:rgba(240,122,95,0.12);--ember-bd:rgba(240,122,95,0.30);\
+--bd:#1f1d1b;--bd-hi:#34312e;--ring:rgba(238,235,230,0.42);color-scheme:dark}\
+html.light{--ink-0:#f2f0ec;--ink-2:#f9f7f4;--ink-3:#f1eee9;\
+--text-hi:#1f1d1a;--text-mid:#4f4b45;--text-low:#6c675f;--text-faint:#b0aaa2;\
+--accent:#1f1d1a;--accent-dim:#4f4b45;--on-accent:var(--ink-2);\
+--ember-400:#c6452e;--ember-glow:rgba(198,69,46,0.09);--ember-bd:rgba(198,69,46,0.30);\
+--bd:#e0dcd6;--bd-hi:#cfc9c1;--ring:rgba(31,29,26,0.35);color-scheme:light}\
+*{box-sizing:border-box}\
+body{margin:0;min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;\
+padding:24px;font:13px/1.5 'Inter',ui-sans-serif,system-ui,sans-serif;\
+font-feature-settings:'cv11','ss01','ss03','cv02';-webkit-font-smoothing:antialiased;\
+text-rendering:optimizeLegibility;letter-spacing:-.005em;background:var(--ink-0);color:var(--text-hi)}\
+::selection{background:color-mix(in srgb,var(--accent) 12%,transparent)}\
+:focus-visible{outline:2px solid var(--ring);outline-offset:2px}\
+.sign{width:100%;max-width:340px}\
+.brand{display:flex;justify-content:center;margin-bottom:24px}\
+.mark svg{display:block;height:56px;width:auto}\
+.word{font-size:15px;font-weight:600;line-height:1;letter-spacing:-.015em}\
+.card{border:1px solid var(--bd);border-radius:8px;background:var(--ink-2);overflow:hidden}\
+.card-header{padding:10px 14px;border-bottom:1px solid var(--bd)}\
+h1{margin:0;font-size:14px;font-weight:600}\
+.card-body{padding:14px}\
+.card-body,form{display:grid;gap:14px}\
+.field{display:grid;gap:6px}\
+.providers{display:grid;gap:8px}\
+.field span{font-weight:500}\
+input{width:100%;padding:5px 9px;border:1px solid var(--bd-hi);border-radius:6px;font:inherit;font-size:12.5px;\
+background:var(--ink-3);color:var(--text-hi);transition:box-shadow .12s cubic-bezier(.2,.7,.2,1)}\
+input:focus{outline:none;box-shadow:0 0 0 1px var(--ring)}\
+input:-webkit-autofill{-webkit-text-fill-color:var(--text-hi);caret-color:var(--text-hi);\
+box-shadow:0 0 0 100px var(--ink-3) inset}\
+input:-webkit-autofill:focus{box-shadow:0 0 0 100px var(--ink-3) inset,0 0 0 1px var(--ring)}\
+input:autofill{filter:none}\
+button,.oauth{display:flex;justify-content:center;width:100%;padding:5px 10px;border:1px solid var(--bd-hi);\
+border-radius:6px;font:inherit;font-size:12px;font-weight:500;text-decoration:none;cursor:pointer;\
+color:var(--text-hi);background:color-mix(in srgb,var(--text-hi) 3%,transparent);\
+transition:.12s cubic-bezier(.2,.7,.2,1)}\
+.oauth:hover{border-color:var(--text-faint)}\
+button{margin-top:4px;border-color:var(--accent);background:var(--accent);color:var(--on-accent)}\
+button:hover{border-color:var(--accent-dim);background:var(--accent-dim)}\
+.sep{display:flex;align-items:center;gap:10px;color:var(--text-low);font-size:12px;line-height:1}\
+.sep:before,.sep:after{content:'';flex:1;height:1px;background:var(--bd)}\
+.err{padding:12px 14px;border:1px solid var(--ember-bd);border-radius:8px;background:var(--ember-glow);\
+color:var(--ember-400);font-size:12.5px;line-height:1.45}\
+.note{margin:0;color:var(--text-mid)}";
+
+/// The brand: the wordmark with its line, as SVG markup
+/// (`app/public/queen-wordmark.svg`, written by `assets/wordmark.py` with the
+/// app's other brand files), pulled out of the embedded webapp, so replacing it
+/// (+ `npm run build`) updates this page too.
+///
+/// It is inlined rather than linked for two reasons. webapp.rs's gate is
+/// deliberately absolute — not one byte without a live session — so a plain
+/// `<img src="/queen-wordmark.svg">` here would 302 back to this very page. And
+/// its letters are `currentColor`: inline, they take the page's text colour, so
+/// one file serves both schemes.
+///
+/// Empty when the webapp is not built. The page then spells the name in plain
+/// type rather than showing nothing; `the_login_brand_is_embedded` fails the
+/// build long before that reaches anyone.
+fn wordmark_svg() -> &'static str {
+    static SVG: OnceLock<String> = OnceLock::new();
+    SVG.get_or_init(|| {
+        crate::webapp::embedded_asset(BRAND_WORDMARK)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(|svg| svg.trim().to_string())
+            .unwrap_or_default()
     })
 }
 
-/// The tab icon: the webapp's own favicon, the small sunflower mark as vector
-/// (`assets/queen-mark.svg`). The flower reads on a light or a dark tab strip
-/// as it is, without a second file.
+/// The tab icon: the webapp's own favicon, the small logo as vector
+/// (`assets/wordmark/small/q-auto.svg`). Its letter follows the viewer's
+/// colour scheme, so it reads on a light or a dark tab strip without a second
+/// file.
 fn favicon_data_uri() -> &'static str {
     static URI: OnceLock<String> = OnceLock::new();
     URI.get_or_init(|| match crate::webapp::embedded_asset(BRAND_FAVICON) {
@@ -1878,8 +1917,8 @@ fn favicon_data_uri() -> &'static str {
 }
 
 /// Brand art inside the built webapp (`app/public/` is copied to the Vite
-/// output root): the mark the sidebar shows, and the tab icon.
-const BRAND_BADGE: &str = "queen-sunflower.webp";
+/// output root): the wordmark for this page, and the tab icon.
+const BRAND_WORDMARK: &str = "queen-wordmark.svg";
 const BRAND_FAVICON: &str = "favicon.svg";
 
 #[cfg(test)]
@@ -2488,7 +2527,7 @@ mod tests {
             "/",
             None,
         );
-        assert!(!nasty.contains("<script>"), "no markup escapes the href");
+        assert!(!nasty.contains("<script>alert"), "no markup escapes the href");
         assert!(!nasty.contains("L<b>"), "nor the label");
     }
 
@@ -2523,30 +2562,84 @@ mod tests {
     #[test]
     fn the_login_brand_is_embedded() {
         // The sign-in page can only inline what the build actually embedded.
-        // If `app/public/queen-sunflower.webp` is renamed or the webapp is not
-        // built, fail HERE rather than shipping a login page with no mark.
-        let decode = |uri: &str, prefix: &str, what: &str| {
-            let b64 = uri
-                .strip_prefix(prefix)
-                .unwrap_or_else(|| panic!("{what} is a {prefix} URI"));
-            B64.decode(b64).expect("valid base64")
-        };
+        // If `app/public/queen-wordmark.svg` is renamed or the webapp is not
+        // built, fail HERE rather than shipping a login page with no logo.
+        let wordmark = wordmark_svg();
+        assert!(wordmark.starts_with("<svg"), "the wordmark is SVG markup, with no prolog for the page to print");
+        assert!(wordmark.ends_with("</svg>"), "and nothing after it either");
+        // One file for both schemes: its letters take the page's text colour.
+        assert!(wordmark.contains("fill=\"currentColor\""), "the letters follow the scheme");
+        assert!(!wordmark.contains("<script"), "markup that goes into the page as it is carries no code");
 
-        let badge = decode(brand_badge_data_uri(), "data:image/webp;base64,", "badge");
+        let favicon = favicon_data_uri()
+            .strip_prefix("data:image/svg+xml;base64,")
+            .expect("the favicon is an SVG data URI");
+        let favicon = String::from_utf8(B64.decode(favicon).expect("valid base64")).unwrap();
+        assert!(favicon.contains("<svg"), "the favicon decodes back to an SVG");
+
+        for (art, what) in [(wordmark, "wordmark"), (favicon.as_str(), "favicon")] {
+            // Inlining is pointless if the art then reaches for a URL of its own:
+            // webapp.rs would answer that with a 302 back to this page. It must
+            // be self-contained geometry, with nothing to fetch.
+            assert!(!art.contains("href=\"/"), "no same-origin refs inside the {what}");
+            assert!(!art.contains("href=\"http"), "no remote refs inside the {what}");
+            assert!(!art.contains("<image"), "the {what} is vector, with no raster to fetch");
+        }
+    }
+
+    // --- sign-in page look ----------------------------------------------------
+
+    /// The custom properties one block of a stylesheet declares, with the
+    /// spaces taken out of their values so the two spellings compare. Comments
+    /// go first: the dashboard's are full of dashes, colons and semicolons.
+    fn tokens(css: &str, block: &str) -> std::collections::BTreeMap<String, String> {
+        let mut plain = String::new();
+        let mut rest = css;
+        while let Some(at) = rest.find("/*") {
+            plain.push_str(&rest[..at]);
+            rest = rest[at..].split_once("*/").map_or("", |(_, after)| after);
+        }
+        plain.push_str(rest);
+        let from = plain.find(block).unwrap_or_else(|| panic!("no `{block}` block")) + block.len();
+        let body = &plain[from..from + plain[from..].find('}').expect("the block closes")];
+        body.split(';')
+            .filter_map(|declaration| declaration.trim().split_once(':'))
+            .filter(|(name, _)| name.starts_with("--"))
+            .map(|(name, value)| (name.trim().to_string(), value.replace(' ', "")))
+            .collect()
+    }
+
+    #[test]
+    fn the_sign_in_tokens_are_the_dashboards() {
+        // The page restates the dashboard's tokens because it cannot import its
+        // stylesheet, and a copy nothing checks goes stale: the dashboard moved
+        // to its warm palette and gained a light scheme while this page kept
+        // the old dark greys. Every token the page declares must carry the
+        // value app/src/style.css gives it, in both schemes.
+        let app = include_str!("../../app/src/style.css");
+        for (page_block, app_block) in [(":root{", "  :root {"), ("html.light{", "  html.light {")] {
+            let (page, app) = (tokens(SIGN_IN_CSS, page_block), tokens(app, app_block));
+            assert!(page.len() >= 16, "`{page_block}` declares the page's tokens");
+            for (name, value) in &page {
+                assert_eq!(Some(value), app.get(name), "{name} in `{page_block}` is the dashboard's");
+            }
+        }
+    }
+
+    #[test]
+    fn the_sign_in_page_takes_the_dashboards_scheme() {
+        // Same key and same fallback as the script in app/index.html: a
+        // different key here would be a page that ignores the dashboard's toggle.
+        let app = include_str!("../../app/index.html");
+        for part in ["localStorage.getItem('queen-theme')", "(prefers-color-scheme: light)"] {
+            assert!(app.contains(part), "the dashboard resolves its scheme with {part}");
+            assert!(SIGN_IN_THEME.contains(part), "and so does this page");
+        }
+        let html = login_html(SignIn::Here, &[], None, "/", None);
+        assert!(html.contains(SIGN_IN_THEME), "the script is on the page");
         assert!(
-            badge.len() > 12 && &badge[..4] == b"RIFF" && &badge[8..12] == b"WEBP",
-            "decodes back to the webp the sidebar shows"
+            html.find("<script>").unwrap() < html.find("<style>").unwrap(),
+            "and runs before anything is painted"
         );
-
-        let icon = decode(favicon_data_uri(), "data:image/svg+xml;base64,", "favicon");
-        let icon = String::from_utf8(icon).unwrap();
-        assert!(icon.contains("<svg"), "decodes back to the tab icon");
-
-        // Inlining is pointless if the art then reaches for a URL of its own:
-        // webapp.rs would answer that with a 302 back to this page. The icon
-        // must be self-contained geometry, with nothing to fetch.
-        assert!(!icon.contains("href=\"/"), "no same-origin refs inside the favicon");
-        assert!(!icon.contains("href=\"http"), "no remote refs inside the favicon");
-        assert!(!icon.contains("<image"), "favicon is vector, with no raster to fetch");
     }
 }
