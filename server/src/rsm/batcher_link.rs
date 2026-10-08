@@ -29,12 +29,18 @@
 //! standby entry before anything else. A PROMOTION is one more entry; until it
 //! has applied here the driver plans nothing at all, and then it plans as an
 //! ordinary leader from the log's end, with the reset a leadership regain does.
+//!
+//! Whoever asked for the promotion is answered by that last step
+//! ([`RunState::check_promotion`]), not by the entry: the answer says the
+//! cluster takes its clients' commands, and until the driver plans as an
+//! ordinary leader and has told the engine so, it does not — a command sent
+//! between the entry's apply and that step is still refused as a standby's.
 
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
-use super::{Launched, PlanOutput, Reply, RunState, Slot};
+use super::{Launched, PlanOutput, Reply, RunState, Slot, Waiter};
 use crate::rsm::entry::{Entry, Outcome};
 use crate::rsm::link::{self, mirror, Cursor, Position, Refused};
 use crate::rsm::planner::Refusal;
@@ -69,11 +75,12 @@ pub enum LinkOp {
     Promote,
 }
 
-/// One submission on the driver's link channel. The answer is
-/// [`Reply::Done`] once the entry is COMMITTED — in this cluster's log for
-/// good, whichever node leads next — which is a moment before this node has
-/// applied it (an entry whose outcome needs no local apply is answered at its
-/// commit, like every other).
+/// One submission on the driver's link channel. A mirrored entry is answered
+/// [`Reply::Done`] once it has applied on this node, so it is in this
+/// cluster's log for good, whichever node leads next. A promotion is answered
+/// `Done` a step later: once this driver plans as an ordinary leader and its
+/// engine serves ([`RunState::check_promotion`]), so that whoever asked can
+/// send the cluster a command next.
 pub struct LinkSubmission {
     pub op: LinkOp,
     pub reply: oneshot::Sender<Reply>,
@@ -145,6 +152,10 @@ pub(super) struct Standby {
     attach: Option<Position>,
     /// The index of the promotion's entry, once planned.
     promoting: Option<u64>,
+    /// Whoever asked for the promotion in flight. Answered `Done` once this
+    /// driver plans as an ordinary leader ([`RunState::check_promotion`]),
+    /// `Retry` if it stops leading first ([`RunState::fail_link`]).
+    asked: Vec<oneshot::Sender<Reply>>,
 }
 
 /// What a link cycle planned, for the driver to note once the entry is handed
@@ -199,6 +210,7 @@ pub(super) fn read_mode<S: Store>(store: &S, boot: Option<&LinkBoot>) -> LinkMod
                 source: b.source.clone(),
                 attach: Some(b.position),
                 promoting: None,
+                asked: Vec::new(),
             });
         }
     }
@@ -209,6 +221,7 @@ pub(super) fn read_mode<S: Store>(store: &S, boot: Option<&LinkBoot>) -> LinkMod
             source: doc.source,
             attach: None,
             promoting: None,
+            asked: Vec::new(),
         }),
         Ok(link::Role::Promoted(_)) => LinkMode::Primary { promoted: true },
         Ok(link::Role::Primary) => {
@@ -503,10 +516,17 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
     }
 
-    /// Answer every queued link submission `Retry`.
+    /// Answer every queued link submission `Retry`, and whoever waits for a
+    /// promotion in flight: its entry may still commit under whichever node
+    /// leads next, and asking that node says whether it did.
     pub(super) fn fail_link(&mut self, hint: Option<NodeId>) {
         for sub in self.link_queue.drain(..) {
             let _ = sub.reply.send(Reply::Retry { hint });
+        }
+        if let LinkMode::Standby(s) = &mut self.link {
+            for reply in s.asked.drain(..) {
+                let _ = reply.send(Reply::Retry { hint });
+            }
         }
     }
 
@@ -587,7 +607,21 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 s.attach = None;
             }
             LinkPlanned::Mirrored { cursor } => s.cursor = cursor,
-            LinkPlanned::Promoted => s.promoting = Some(index),
+            LinkPlanned::Promoted => {
+                s.promoting = Some(index);
+                // An entry answers its waiters when it applies here, and a
+                // promotion is done a step after that. Its answer is taken
+                // off the entry: the driver gives it
+                // ([`Self::check_promotion`]). A propose that times out
+                // therefore leaves whoever asked waiting, to the deadline of
+                // their own, for the promotion or for the end of this
+                // leadership.
+                if let Some(e) = self.inflight.iter_mut().rev().find(|e| e.index == index) {
+                    s.asked.extend(e.waiters.drain(..).map(|w| match w {
+                        Waiter::Command { reply, .. } | Waiter::Fixed { reply, .. } => reply,
+                    }));
+                }
+            }
         }
     }
 
@@ -605,8 +639,11 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     /// starts from this node's wall clock (never behind the last stamp), and
     /// the consumption engine serves from the cursor rows as they are — their
     /// leases live on, as across any leader change.
+    ///
+    /// Whoever asked for the promotion is answered here, last: the command
+    /// they send next is planned by this driver or served by the engine.
     pub(super) fn check_promotion(&mut self) {
-        let LinkMode::Standby(s) = &self.link else {
+        let LinkMode::Standby(s) = &mut self.link else {
             return;
         };
         let Some(at) = s.promoting else {
@@ -614,13 +651,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         };
         // In flight until it is resolved, which it is once applied here in
         // this driver's term; a lost leadership reset the link instead.
-        if self
-            .inflight
-            .iter()
-            .any(|e| e.index == at && e.resolved.is_none())
-        {
-            return;
-        }
+        let landed = match self.inflight.iter().find(|e| e.index == at) {
+            Some(e) if e.resolved.is_none() => return,
+            Some(e) => e.resolved,
+            None => None,
+        };
+        let asked = std::mem::take(&mut s.asked);
         tracing::info!(
             target: "rsm",
             index = at,
@@ -637,6 +673,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             if let Some(term) = self.planning_term {
                 e.on_leader(term, self.next_index - 1);
             }
+        }
+        for reply in asked {
+            let _ = reply.send(Reply::Done {
+                outcome: Outcome::Empty,
+                at: landed,
+            });
         }
     }
 }

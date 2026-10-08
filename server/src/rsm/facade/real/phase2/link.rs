@@ -200,8 +200,9 @@ impl RaftFacade {
 
     /// `POST /api/v1/system/link/promote`: make this standby an ordinary
     /// cluster. The request travels as a command, so any node takes it and
-    /// the leader does it; it answers once THIS node has applied the
-    /// promotion. Promoting a promoted cluster again changes nothing.
+    /// the leader does it; it answers once the leader takes its clients'
+    /// commands and THIS node has applied the promotion. Promoting a promoted
+    /// cluster again changes nothing.
     ///
     /// Nothing here tells the source: a promotion while the source still
     /// takes writes makes two clusters that both serve. Stop the source
@@ -211,10 +212,12 @@ impl RaftFacade {
         match self.submit(&ctx, cmd).await? {
             Reply::Done { .. } => {
                 tracing::warn!(target: "rsm", "rsm link: this cluster was promoted by request");
-                // Answered at the promotion's commit. This node applies it a
-                // moment later (later still on a follower that forwarded the
-                // request): the answer is the status AFTER it, so whoever
-                // asked can write to this node next.
+                // The leader's driver answered once it plans as an ordinary
+                // leader and its engine serves, so whoever asked can write to
+                // this cluster next, through any node. What they are told is
+                // the status AFTER the promotion as THIS node holds it: a
+                // follower that forwarded the request has applied the entry
+                // by now, and this read makes sure.
                 loop {
                     let role = self.store.read(|r| link::read_role(r)).map_err(read_error)?;
                     if !role.is_standby() || ctx.deadline.remaining().is_zero() {
