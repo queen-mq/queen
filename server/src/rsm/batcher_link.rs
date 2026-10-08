@@ -61,6 +61,10 @@ pub const DIVERGED_CODE: &str = "link_diverged";
 /// standby reads. Retryable: it goes through once every member is upgraded.
 pub const MEMBER_BEHIND_CODE: &str = "link_member_behind";
 
+/// When a driver of this process last said why the link's entries wait
+/// ([`RunState::note_link_wait`]).
+static LINK_NOTED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
 /// What a link asks of the driver.
 #[derive(Clone, Debug)]
 pub enum LinkOp {
@@ -475,6 +479,50 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
     }
 
+    /// Say why the link's work is not planned, at most once every five
+    /// seconds: a standby that does not replay, or that cannot be promoted, is
+    /// otherwise silent about what its leader's driver waits for, and whoever
+    /// asked only reads "the request deadline elapsed".
+    pub(super) fn note_link_wait(&self, what: &'static str) {
+        {
+            let mut last = LINK_NOTED.lock().unwrap_or_else(|p| p.into_inner());
+            let now = std::time::Instant::now();
+            if last.is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(5)) {
+                return;
+            }
+            *last = Some(now);
+        }
+        let link = match &self.link {
+            LinkMode::Unknown => "unknown".to_string(),
+            LinkMode::Primary { promoted } => format!("primary promoted={promoted}"),
+            LinkMode::Standby(s) => format!(
+                "standby attach={} promoting={:?} position={}",
+                s.attach.is_some(),
+                s.promoting,
+                s.cursor.position.index
+            ),
+        };
+        tracing::warn!(
+            target: "rsm",
+            what,
+            role = ?*self.role_rx.borrow(),
+            paused = self.paused,
+            hold = ?self.holding_until,
+            quiescing = self.quiescing.is_some(),
+            realign = ?self.realign_at,
+            term = ?self.planning_term,
+            link = %link,
+            link_queue = self.link_queue.len(),
+            queued = self.queued(),
+            in_flight = self.inflight.len(),
+            uncommitted = self.uncommitted(),
+            unresolved = self.unresolved(),
+            next_index = self.next_index,
+            applied = self.repl.applied_index(),
+            "rsm link: the driver does not plan the link's entries",
+        );
+    }
+
     /// `Some(due)` while this is not an ordinary cluster: the driver plans
     /// link entries only, and `due` says whether one waits. `None`: plan as
     /// always.
@@ -500,8 +548,20 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             // Another node leads, or none is known: only a leader builds the
             // link's entries, and the sender follows the hint.
             let hint = self.bounce_hint().flatten();
+            if matches!(sub.op, LinkOp::Promote) && hint.is_none() {
+                self.note_link_wait("a promotion was asked of a driver that is paused, with no leader to send it to");
+            }
             let _ = sub.reply.send(Reply::Retry { hint });
             return;
+        }
+        if matches!(sub.op, LinkOp::Promote)
+            && match &self.link {
+                LinkMode::Unknown => true,
+                LinkMode::Standby(s) => s.promoting.is_some(),
+                LinkMode::Primary { .. } => false,
+            }
+        {
+            self.note_link_wait("a promotion was asked while the link role is unread or a promotion is in flight");
         }
         let answer = match (&self.link, &sub.op) {
             (LinkMode::Unknown, _) => self.link_refusal().map(Reply::Refused),

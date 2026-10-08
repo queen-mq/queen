@@ -2039,6 +2039,9 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             e.on_step_down();
         }
 
+        // Since when link entries have waited with none planned, and the
+        // index the next entry would have had then.
+        let mut link_stall: Option<(Instant, u64)> = None;
         loop {
             // Take every command that has already arrived BEFORE planning. The
             // biased select below reaches the command channel last, so without
@@ -2065,6 +2068,18 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                     st.enqueue(more);
                 }
                 st.take_link();
+            }
+            // Link entries that wait while none is planned for two seconds:
+            // the driver says what it waits for ([`RunState::note_link_wait`]).
+            if st.link_queue.is_empty() || link_stall.is_some_and(|(_, next)| next != st.next_index)
+            {
+                link_stall = None;
+            }
+            if !st.link_queue.is_empty() {
+                let (since, _) = *link_stall.get_or_insert((Instant::now(), st.next_index));
+                if since.elapsed() >= Duration::from_secs(2) {
+                    st.note_link_wait("link entries wait in the queue and none is planned");
+                }
             }
             if st.should_exit() {
                 break;
