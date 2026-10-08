@@ -563,8 +563,8 @@ so a queue read to its end and idle lags by about the guard and one discovery in
 growing; a node exports a queue's gauges only while it runs the queue. The commit pointer's `tEnd` is now an
 ISO-8601 timestamp: 1.5.0 wrote integer microseconds, which the retention hold could not read,
 so `retentionSinkHold` always sat at its cap; it now follows the sink. Running it is
-[deploy/s3](https://queenmq.com/deploy/s3); what it writes is
-[reference/s3](https://queenmq.com/reference/s3).
+[deploy/s3](https://queenmq.com/guides/s3/); what it writes is
+[reference/s3](https://queenmq.com/guides/s3/).
 
 **Every broker tenant can have an S3 sink and a bucket of its own.** The default tenant's sink is
 configured by `QUEEN_S3_*` and turned on by `QUEEN_S3_QUEUES`: without it the default tenant has no

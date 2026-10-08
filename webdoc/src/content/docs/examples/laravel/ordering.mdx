@@ -1,9 +1,10 @@
 ---
-title: One customer at a time
+title: "Laravel jobs in order, one customer at a time"
 description: "A Laravel job that names its partition with QueenPartitionable. Three customers' jobs, dispatched interleaved to four workers, run in dispatch order and one at a time per customer, while different customers run in parallel."
 type: example
 tier: use
 sidebar:
+  label: "One customer at a time"
   order: 2
 sourceOfTruth:
   - examples/apps/laravel/app/Console/Commands/Examples/OrderingExample.php

@@ -1,9 +1,10 @@
 ---
-title: How prefetch fills a batch
+title: "How Laravel queue prefetch fills a batch"
 description: "One Laravel worker, three queues: with prefetch 1 every job costs a pop; with prefetch 'auto' the batch doubles after every two full pops on a backlog of short jobs, up to about 250 ms of work, and stays at one job when a job alone is longer."
 type: example
 tier: use
 sidebar:
+  label: "How prefetch fills a batch"
   order: 3
 sourceOfTruth:
   - examples/apps/laravel/app/Console/Commands/Examples/PrefetchExample.php

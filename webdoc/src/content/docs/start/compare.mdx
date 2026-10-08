@@ -1,9 +1,10 @@
 ---
-title: Compare
+title: "Queen MQ vs Kafka, RabbitMQ, Temporal and the outbox"
 description: "Queen next to Kafka, Pulsar, RabbitMQ, SQS, Temporal and Restate, and PostgreSQL with an outbox: how each gets per-entity order, what one commit covers, and where each is better."
 type: concept
 tier: use
 sidebar:
+  label: "Compare"
   order: 4
 sourceOfTruth:
   - server/src/rsm/planner/txn.rs
@@ -181,4 +182,5 @@ These are Queen's, the ones that decide a comparison:
 - One leader orders every write of a raft group, which bounds one tenant's write rate. A hot
   partition is sequential by design.
 
-The full list is on [limits](/reference/limits/).
+The full list is on [limits](/reference/limits/), and the cases where another system fits better,
+with what to use instead, are on [when not to use Queen](/start/when-not-to-use/).

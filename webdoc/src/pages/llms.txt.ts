@@ -17,7 +17,7 @@ import { HOME_HEADLINE, HOME_SUMMARY } from "./index.md.ts";
 // advertised beside the link has to be the size of the file that will arrive.
 // `sidebarLabels()` lives there too, so one place decides that the heading an
 // agent reads is the heading a reader sees.
-import { buildBrief, sidebarLabels } from "@/lib/llms-brief";
+import { IDENTITY_LINE, buildBrief, sidebarLabels } from "@/lib/llms-brief";
 
 export const prerender = true;
 
@@ -37,6 +37,8 @@ export async function GET() {
     `# ${config.title}`,
     "",
     `> ${config.description ?? "Documentation index for AI agents."}`,
+    "",
+    IDENTITY_LINE,
     "",
     // Order matters more than content here. This file used to open on the full
     // corpus, which is the one pointer an agent should almost never take: at

@@ -1,5 +1,5 @@
 ---
-title: Architecture
+title: "Broker architecture: Raft log, planner, store"
 description: "One process per node: an HTTP edge, a planner on the leader that turns commands into effects, one replicated log per raft group, a deterministic apply and an in-memory store checkpointed to disk."
 type: concept
 tier: internals

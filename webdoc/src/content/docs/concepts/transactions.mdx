@@ -1,9 +1,10 @@
 ---
-title: Transactions
+title: "Transactions: one commit for acks, state and events"
 description: "One POST /api/v1/transaction writes a whole step (acks, pushes, KV writes, timers) as one log entry: all of it applies or none of it does."
 type: concept
 tier: use
 sidebar:
+  label: "Transactions"
   order: 4
 sourceOfTruth:
   - server/src/rsm/planner/txn.rs

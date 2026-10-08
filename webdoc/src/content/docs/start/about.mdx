@@ -1,0 +1,65 @@
+---
+title: "About Queen MQ: who builds it and how to reach us"
+description: "Who builds Queen MQ, its licence, where the code, the releases and the packages live, which versions are supported, how to report a bug or a vulnerability, and where the evidence for its claims is."
+type: reference
+tier: use
+sidebar:
+  label: "About"
+  order: 7
+sourceOfTruth:
+  - SECURITY.md
+  - CONTRIBUTING.md
+  - LICENSE.md
+---
+
+Queen MQ is built at Smartness and developed in the open. The broker, the clients, the dashboard,
+the Laravel driver and supervisor, the benchmarks and these docs live in one repository,
+[github.com/queen-mq/queen](https://github.com/queen-mq/queen), and every change to them is a
+commit there.
+
+## Licence
+
+Queen MQ is open source under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+That covers the broker and every client in the repository. Contributions are accepted under the same
+licence.
+
+## Releases and packages
+
+The broker ships as one container image, `ghcr.io/queen-mq/queen`, and as a binary you can build
+from source ([run a node](/operate/)). Each release is listed, with what changed, on the
+[changelog](/reference/changelog/) and on
+[GitHub Releases](https://github.com/queen-mq/queen/releases). The clients are published to the
+package registry of their language; [clients](/start/clients/) has the install line for each.
+
+Version 2.0.0 (2026-10-03) replaced the PostgreSQL storage of 1.x with Queen's own log, replicated
+with Raft. Security fixes go to 2.x only: 1.x is not supported, and a 1.x deployment has to
+upgrade.
+
+## Bugs, questions and features
+
+Open an issue with one of the
+[issue templates](https://github.com/queen-mq/queen/issues/new/choose). For a bug, include the
+broker version, how you run it (Docker, Helm or the binary) and the client you use. For a code
+change, open an issue first; [contributing](/internals/contributing/) has the build, the tests and
+the rules a change to the engine, the docs or a benchmark follows.
+
+## Security
+
+Do not report a vulnerability in a public issue. Report it privately through
+[GitHub private vulnerability reporting](https://github.com/queen-mq/queen/security/advisories/new),
+with the affected component and version, what the issue allows, and how to reproduce it if you can.
+We acknowledge the report, keep you informed while we fix it, and credit you in the release notes
+unless you prefer otherwise. How a deployment is secured is on [security](/operate/security/).
+
+## Hosted Queen
+
+[Queen Cloud](https://queenmq.cloud/) runs Queen for you, and has a free tier.
+
+## The evidence behind the claims
+
+The pages that describe the running system name, at their foot, the source files that govern them
+and the tests that exercise what they show, and a check fails the docs build when such a page is
+older than the code it describes. The performance claims come with the machines, the settings and the
+commands that produced them ([how we measure](/benchmarks/methodology/)), including the runs where
+another system does better. Correctness is tested with [Jepsen](/benchmarks/jepsen/), with every
+campaign, the faults it injected and the bugs it found.

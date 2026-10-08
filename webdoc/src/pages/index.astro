@@ -48,7 +48,7 @@ const card =
 
 <BaseLayout title={HOME_TITLE} description={config.description}>
   <div class="flex min-h-screen flex-col">
-    <Header transparentTop />
+    <Header transparentTop showSidebar={false} />
 
     <main class="w-full flex-1">
       {/* Hero: full height, two halves from lg up; the scene fills the right
@@ -57,12 +57,17 @@ const card =
         <div class="flex lg:items-center lg:justify-center lg:px-16 xl:px-24">
           <div class="mx-auto w-full max-w-6xl px-6 pb-12 pt-12 lg:max-w-[30rem] lg:px-0 lg:py-24">
             <p class={eyebrow}>{hero.eyebrow}</p>
-            <h1
-              data-md
-              class="mt-5 text-foreground"
-              style="font-size: clamp(2.25rem, 3.4vw, 3.125rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
-            >
-              {hero.headline}
+            <h1 data-md class="mt-5 text-foreground">
+              <span
+                class="block"
+                style="font-size: clamp(2.25rem, 3.4vw, 3.125rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
+              >
+                {hero.headline}
+              </span>
+              {" "}
+              <span class="mt-4 block text-[1.125rem] font-medium leading-snug tracking-tight text-foreground/70 lg:text-[1.25rem]">
+                {hero.subline}
+              </span>
             </h1>
             <p data-md class="mt-6 text-[1.0625rem] leading-relaxed text-foreground/85">{hero.lead}</p>
             <p data-md class="mt-4 text-[0.9375rem] leading-relaxed text-muted-foreground">{hero.second}</p>
@@ -251,20 +256,24 @@ const card =
             </div>
           </div>
           <div class="mt-12 overflow-hidden rounded-xl border border-border">
+            {/* WebP at 2048 wide: twice the 1024px the frame reaches, so it stays
+                sharp on a 2x screen at a quarter of the 2880px PNG's bytes. Only
+                the visible one loads: a lazy image that is not rendered is not
+                fetched. */}
             <img
-              src={`/screenshots/${dashboardSection.image}-light.png`}
+              src={`/screenshots/${dashboardSection.image}-light.webp`}
               alt={dashboardSection.alt}
-              width="2880"
-              height="1800"
+              width="2048"
+              height="1280"
               loading="lazy"
               decoding="async"
               class="home-shot-light block h-auto w-full"
             />
             <img
-              src={`/screenshots/${dashboardSection.image}-dark.png`}
+              src={`/screenshots/${dashboardSection.image}-dark.webp`}
               alt={dashboardSection.alt}
-              width="2880"
-              height="1800"
+              width="2048"
+              height="1280"
               loading="lazy"
               decoding="async"
               class="home-shot-dark block h-auto w-full"
@@ -352,7 +361,8 @@ const card =
           <a href="/reference/">Reference</a>
           <a href="/benchmarks/">Benchmarks</a>
           <a href="/reference/http/">HTTP API</a>
-          <span class="ml-auto">Built at Smartness.</span>
+          <a href="/reference/changelog/">Changelog</a>
+          <a href="/start/about/" class="ml-auto">Built at Smartness.</a>
         </div>
       </footer>
     </main>

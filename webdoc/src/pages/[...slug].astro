@@ -11,7 +11,9 @@ import {
   getLastUpdated,
   getTOC,
 } from "@cloudflare/nimbus-docs";
+import { getCollection } from "astro:content";
 import { components } from "../components";
+import { linkSectionCrumbs } from "../lib/breadcrumbs";
 
 export const prerender = true;
 export const getStaticPaths = getDocsStaticPaths;
@@ -31,7 +33,12 @@ const prevNext = await getPrevNext(currentSlug, {
 });
 // Pass `collection` so versioned pages (docs-<v>) get version-prefixed
 // breadcrumb hrefs — parity with the getSidebar call above.
-const breadcrumbs = await getBreadcrumbs(currentSlug, { collection: entry.collection });
+const pageIds = new Set((await getCollection(entry.collection)).map((e) => e.id));
+const breadcrumbs = linkSectionCrumbs(
+  await getBreadcrumbs(currentSlug, { collection: entry.collection }),
+  currentSlug,
+  (id) => pageIds.has(id),
+);
 const editUrl = await getEditUrl(entry);
 // Frontmatter wins; git is the fallback.
 const lastUpdated = entry.data.lastUpdated ?? await getLastUpdated(entry);

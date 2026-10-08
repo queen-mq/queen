@@ -1,9 +1,10 @@
 ---
-title: A job longer than its lease
+title: "Laravel job longer than its lease: renewal example"
 description: "One 8-second Laravel job on a 6-second lease, two workers. Without lease renewal the other worker runs it again, every ACK is refused and the job ends in the dead-letter queue unfinished. With lease renewal it runs once."
 type: example
 tier: use
 sidebar:
+  label: "A job longer than its lease"
   order: 5
 sourceOfTruth:
   - examples/apps/laravel/app/Console/Commands/Examples/LeaseExample.php

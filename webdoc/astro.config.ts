@@ -3,6 +3,8 @@ import icon from "astro-icon";
 import tailwindcss from "@tailwindcss/vite";
 import nimbus, { defineConfig as defineNimbusConfig } from "@cloudflare/nimbus-docs";
 import { tableScroll } from "@cloudflare/nimbus-docs/markdown";
+import { fileURLToPath } from "node:url";
+import { sitemapLastmod } from "./src/lib/sitemap-lastmod";
 
 // Site-wide structured data. Nothing else on the site states what this
 // software is, so the framework's WebSite node is the only machine-readable
@@ -11,34 +13,61 @@ import { tableScroll } from "@cloudflare/nimbus-docs/markdown";
 // disagree on it, and a hardcoded version here goes stale without failing
 // anything. No `softwareRequirements` either: since 2.0 the broker needs
 // nothing beside itself but a data directory on local disk.
+//
+// `sameAs` is how a search engine or a model ties this site to the same thing
+// elsewhere: the GitHub organisation for the publisher, the repository for the
+// software. Not the npm, PyPI, crates.io or Packagist pages: those are the
+// client libraries, a different thing from the broker.
+//
+// The WebSite node's @id is the one the framework's own WebSite node (on the
+// homepage) and every page's isPartOf carry, through patches/ and
+// DocsLayout.astro, so consumers merge them into one site.
+const DESCRIPTION =
+  "A transactional event broker in one binary: one ordered partition per entity, and the ack, the state change, the next events and the timer of each step commit as one entry, replicated with Raft.";
+
 const structuredData = {
   "@context": "https://schema.org",
   "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://queenmq.com/#website",
+      name: "Queen MQ",
+      url: "https://queenmq.com/",
+      inLanguage: "en",
+      publisher: { "@id": "https://queenmq.com/#org" },
+    },
     {
       "@type": "Organization",
       "@id": "https://queenmq.com/#org",
       name: "Queen MQ",
       url: "https://queenmq.com/",
       logo: "https://queenmq.com/queen-tile.png",
-      sameAs: ["https://github.com/queen-mq/queen"],
+      sameAs: ["https://github.com/queen-mq"],
     },
     {
       "@type": "SoftwareApplication",
       "@id": "https://queenmq.com/#software",
       name: "Queen MQ",
+      alternateName: "QueenMQ",
+      description: DESCRIPTION,
       applicationCategory: "DeveloperApplication",
       applicationSubCategory: "Message broker",
       operatingSystem: "Linux",
       programmingLanguage: "Rust",
       license: "https://www.apache.org/licenses/LICENSE-2.0",
       downloadUrl: "https://ghcr.io/queen-mq/queen",
+      installUrl: "https://queenmq.com/start/quickstart/",
       url: "https://queenmq.com/",
+      image: "https://queenmq.com/queen-tile.png",
       author: { "@id": "https://queenmq.com/#org" },
+      publisher: { "@id": "https://queenmq.com/#org" },
       offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+      sameAs: ["https://github.com/queen-mq/queen"],
     },
     {
       "@type": "SoftwareSourceCode",
       "@id": "https://queenmq.com/#source",
+      name: "Queen MQ source code",
       codeRepository: "https://github.com/queen-mq/queen",
       programmingLanguage: "Rust",
       license: "https://www.apache.org/licenses/LICENSE-2.0",
@@ -50,8 +79,7 @@ const structuredData = {
 const nimbusConfig = defineNimbusConfig({
   site: "https://queenmq.com",
   title: "Queen MQ",
-  description:
-    "A transactional event broker in one binary: one ordered partition per entity, and the ack, the state change, the next events and the timer of each step commit as one entry, replicated with Raft.",
+  description: DESCRIPTION,
   locale: "en",
   homeLabel: "Queen MQ",
   github: "https://github.com/queen-mq/queen",
@@ -69,7 +97,9 @@ const nimbusConfig = defineNimbusConfig({
     {
       tag: "script",
       attrs: { type: "application/ld+json" },
-      content: JSON.stringify(structuredData),
+      // Injected with set:html: close off the one sequence that could end the
+      // script element early, as DocsLayout does for its own JSON-LD.
+      content: JSON.stringify(structuredData).replace(/</g, "\\u003c"),
     },
   ],
   sidebar: {
@@ -141,6 +171,10 @@ export default defineConfig({
       // (styled by `.nb-table-scroll` in src/styles/prose.css).
       markdown: {
         hastPlugins: [tableScroll()],
+      },
+      // `<lastmod>` from git, the same date as each page's "Updated" line.
+      sitemap: {
+        serialize: sitemapLastmod(fileURLToPath(new URL(".", import.meta.url))),
       },
     }),
   ],

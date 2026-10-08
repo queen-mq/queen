@@ -4,13 +4,18 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@cloudflare/nimbus-docs@0.8.2':
+    hash: f9cb13436bd1685ab048dc36d3b4c31b0ab62201377fda4625eef8e81983880f
+    path: patches/@cloudflare__nimbus-docs@0.8.2.patch
+
 importers:
 
   .:
     dependencies:
       '@cloudflare/nimbus-docs':
         specifier: 0.8.2
-        version: 0.8.2(astro@7.1.6(@astrojs/markdown-remark@7.2.2)(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@26.1.2)(jiti@2.7.0)(yaml@2.9.0))
+        version: 0.8.2(patch_hash=f9cb13436bd1685ab048dc36d3b4c31b0ab62201377fda4625eef8e81983880f)(astro@7.1.6(@astrojs/markdown-remark@7.2.2)(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@26.1.2)(jiti@2.7.0)(yaml@2.9.0))
       '@fontsource-variable/inter':
         specifier: ^5.2.8
         version: 5.3.0
@@ -3241,7 +3246,7 @@ snapshots:
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
 
-  '@cloudflare/nimbus-docs@0.8.2(astro@7.1.6(@astrojs/markdown-remark@7.2.2)(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@26.1.2)(jiti@2.7.0)(yaml@2.9.0))':
+  '@cloudflare/nimbus-docs@0.8.2(patch_hash=f9cb13436bd1685ab048dc36d3b4c31b0ab62201377fda4625eef8e81983880f)(astro@7.1.6(@astrojs/markdown-remark@7.2.2)(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@26.1.2)(jiti@2.7.0)(yaml@2.9.0))':
     dependencies:
       '@astrojs/markdown-satteri': 0.3.5
       '@astrojs/mdx': 7.0.5(@astrojs/markdown-satteri@0.3.5)(astro@7.1.6(@astrojs/markdown-remark@7.2.2)(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(@types/node@26.1.2)(jiti@2.7.0)(yaml@2.9.0))
