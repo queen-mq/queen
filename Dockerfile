@@ -55,62 +55,98 @@ COPY proxy/console/ ./
 
 RUN npm run build
 
+# Stage 2a: what the dependency layer of stage 2 is built from
+#
+# The broker's manifest and lock file and the manifest of each crate it links by
+# path, with an empty library in place of every crate's source. Stage 2 copies
+# this folder and compiles it: that layer holds every dependency, and it is
+# reused until a manifest or the lock file changes.
+#
+# A cache mount cannot do this in CI. `cache-to` exports layers, not the content
+# of a cache mount, so on a fresh runner the mount is empty and every dependency
+# compiles again.
+#
+# The broker's own version is blanked: it changes at every release and no
+# dependency is compiled differently for it. With the real number every release
+# would compile every dependency again.
+FROM rust:1-bookworm AS manifests
+
+WORKDIR /manifests
+
+COPY crates/queen-protocol/Cargo.toml crates/queen-protocol/Cargo.toml
+COPY protocols/queen-kafka/Cargo.toml protocols/queen-kafka/Cargo.toml
+COPY connectors/queen-s3/Cargo.toml connectors/queen-s3/Cargo.toml
+COPY connectors/queen-pg/Cargo.toml connectors/queen-pg/Cargo.toml
+COPY proxy/Cargo.toml proxy/Cargo.toml
+COPY server/Cargo.toml server/Cargo.lock server/
+
+RUN sed -i '0,/^version = /s/^version = .*/version = "0.0.0"/' server/Cargo.toml \
+    && sed -i '/^name = "queen-engine"$/{n;s/^version = .*/version = "0.0.0"/}' server/Cargo.lock \
+    && for crate in crates/queen-protocol protocols/queen-kafka connectors/queen-s3 connectors/queen-pg proxy server; do \
+        mkdir -p "$crate/src" && : > "$crate/src/lib.rs"; \
+    done
+
 # Stage 2: Build the Rust broker
+#
+# Three layers, each compiled on top of the one before, from what changes least
+# to what changes most: the dependencies, the crates linked by path, the broker.
+# No cache mounts: a multi-platform build runs this stage once per platform,
+# each with its own layers, so nothing is shared across arches.
 FROM rust:1-bookworm AS server-builder
-# TARGETARCH folds the platform into the cache ids below: a multi-platform build
-# runs this stage once per platform CONCURRENTLY, and two cargo processes
-# unpacking one registry (or writing one target/) race — `.cargo-ok` /
-# `File exists (os error 17)` at the first crate, before any Queen code compiles.
-# Per-platform ids give each half its own cache; nothing is shared across arches.
-ARG TARGETARCH
 
 WORKDIR /usr/build/server
 
-# Layer 0: the shared wire-type crate. server/Cargo.toml takes queen-protocol as
-# a DEV dependency (the conformance tests only — the release binary never links
-# it), but cargo resolves the entire dependency graph, dev dependencies
-# included, before it compiles anything. So the path has to exist even here.
-COPY crates /usr/build/crates
+# Layer 0: the dependencies, from stage 2a. `--lib` and no src/main.rs: no
+# binary is ever built from the empty sources, so none can reach the image. The
+# rest of the command line is the one of the real build below, so cargo finds
+# the dependencies already compiled there.
+COPY --from=manifests /manifests/ /usr/build/
+RUN cargo build --release --lib
+
+# Layer 1: the crates the broker links by path. First the shared wire-type
+# crate, queen-protocol.
+COPY crates/queen-protocol/src /usr/build/crates/queen-protocol/src
 # ...and the Kafka facade library, linked into the broker by the default `kafka`
-# feature (server/src/kafka_inproc.rs runs it in-process). A path dependency
-# like queen-protocol, so it has to be in the context here too.
-COPY protocols/queen-kafka/Cargo.toml /usr/build/protocols/queen-kafka/Cargo.toml
+# feature (server/src/kafka_inproc.rs runs it in-process).
 COPY protocols/queen-kafka/src /usr/build/protocols/queen-kafka/src
 # ...and the S3 / data-lake sink library, linked in by the default `s3` feature
-# (server/src/s3_inproc.rs runs it in-process). A path dependency too.
-COPY connectors/queen-s3/Cargo.toml /usr/build/connectors/queen-s3/Cargo.toml
+# (server/src/s3_inproc.rs runs it in-process).
 COPY connectors/queen-s3/src /usr/build/connectors/queen-s3/src
 # ...and the Postgres connectors library, linked in by the default `pg` feature
-# (server/src/pg_inproc.rs runs every connector in-process). A path dependency
-# like the Kafka facade; its own Cargo.lock is not needed here, the broker's
-# lock covers it.
-COPY connectors/queen-pg/Cargo.toml /usr/build/connectors/queen-pg/Cargo.toml
+# (server/src/pg_inproc.rs runs every connector in-process). Its own Cargo.lock
+# is not needed here, the broker's lock covers it.
 COPY connectors/queen-pg/src /usr/build/connectors/queen-pg/src
 # ...and the proxy library, linked in by the default `server` feature (stage 1b).
-# Its console is rust_embed-ed, so it has to be here. Its second embed,
-# ../server/webapp/dist, is the dashboard that layer 3 below puts at
-# /usr/build/server/webapp/dist.
-COPY proxy/Cargo.toml /usr/build/proxy/Cargo.toml
+# It embeds two folders with rust_embed, which hard-errors at compile time when
+# a folder is missing: its console, and ../server/webapp/dist, the dashboard.
+# The broker embeds the same dashboard (server/src/handlers/static_files.rs),
+# so that COPY is a build dependency of both, not packaging.
 COPY proxy/src /usr/build/proxy/src
 COPY --from=console-builder /build/console/dist /usr/build/proxy/console/dist
-
-# Layer 1: manifests + build script + version file (build.rs embeds
-# server.json's version into the binary via env!("QUEEN_VERSION")).
-COPY server/Cargo.toml server/Cargo.lock server/server.json server/build.rs ./
-
-# Layer 2: source.
-COPY server/src ./src
-
-# Layer 3: the built dashboard. server/src/handlers/static_files.rs embeds
-# `webapp/dist` with rust_embed, which hard-errors at compile time when the
-# folder is missing — so this COPY is a build dependency, not packaging.
 COPY --from=frontend-builder /app/server/webapp/dist ./webapp/dist
 
-# Build. Cargo registry + target dirs are BuildKit caches; copy the binary out of
-# the (non-persisted) target cache so it lands in the image layer.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-server-${TARGETARCH} \
-    --mount=type=cache,target=/usr/build/server/target,id=target-server-${TARGETARCH} \
-    cargo build --release && cp target/release/queen /queen
+# `touch`: COPY keeps every file's own modification time and cargo decides by
+# modification time. A source file last edited before layer 0 was built would
+# look older than the empty library compiled there, and cargo would keep that.
+RUN touch /usr/build/crates/queen-protocol/src/lib.rs \
+        /usr/build/protocols/queen-kafka/src/lib.rs \
+        /usr/build/connectors/queen-s3/src/lib.rs \
+        /usr/build/connectors/queen-pg/src/lib.rs \
+        /usr/build/proxy/src/lib.rs \
+    && cargo build --release --lib
+
+# Layer 2: the broker. Manifests + build script + version file (build.rs embeds
+# server.json's version into the binary via env!("QUEEN_VERSION")), then source.
+COPY server/Cargo.toml server/Cargo.lock server/server.json server/build.rs ./
+COPY server/src ./src
+
+# Build. target/ holds the two layers above; the binary is copied out and the
+# folder removed, so that this layer, the one that changes with every commit, is
+# the size of the binary in the layer cache and not of the broker's build.
+RUN touch build.rs src/lib.rs src/main.rs \
+    && cargo build --release \
+    && cp target/release/queen /queen \
+    && rm -rf target
 
 # Verify
 RUN test -f /queen && echo "Build successful"
