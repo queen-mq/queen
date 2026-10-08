@@ -29,6 +29,10 @@ choice wins, otherwise the OS preference is honoured only when it asks for light
 - **Timers** — scheduled messages per queue: keyset list, exact count for a key prefix, a peek
   drawer that decodes the payload in the browser, and cancel. No auto-refresh, because every
   row is a database read on a metered route
+- **Locks** — who holds each lock and semaphore permit: the holder, since when, its last
+  renewal and when it expires. A permit is a KV row, so the page is the KV listing asked for
+  the namespace `queen-locks` and a viewer can open it. Read-only: the drawer shows the guard
+  a transaction carries and the release call for the lease period on screen, and sends neither
 - **Queue Operations** — per-queue throughput, lag and consumer health over a time range
   (`QueueOperations.vue`). It inspects; it does not push, pop or ack
 - **Consumer Groups** — health, lag, subscription changes, seek, delete
@@ -187,6 +191,7 @@ app/
 │   │   ├── useGatedVerdict.js    # absent / gated / paused / transient
 │   │   ├── useKeysetPager.js     # cursor stack: no page numbers, no totals
 │   │   ├── useKvView.js          # KV list body, expiry and state copy
+│   │   ├── useLocks.js           # a KV row as a permit; the guard and release it prints
 │   │   ├── usePushVerdict.js     # PushStatus -> what the modal says
 │   │   ├── useQueueConfig.js     # the 21-option catalogue, diff, validate
 │   │   ├── useRaftCluster.js     # member rows, quorum, the raft alert
@@ -208,6 +213,7 @@ app/
 │   │   ├── DeadLetter.vue
 │   │   ├── Ephemeral.vue
 │   │   ├── Kv.vue
+│   │   ├── Locks.vue
 │   │   ├── Messages.vue
 │   │   ├── QueueDetail.vue
 │   │   ├── QueueOperations.vue
