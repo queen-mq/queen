@@ -84,7 +84,12 @@ const AUTH = "server/src/auth.rs";
 //   * the Postgres connectors (feature `pg`): every verb but GET is admin
 //     (a connector carries a database password and decides what it writes), the
 //     GET reads are read-only, first in the GET block.
-const ACCESS_FINGERPRINT = "e1f91361e0ec0697";
+// 2026-10-08: re-read for locks. One new rule, mirrored below in the position
+// the Rust evaluates it: everything under `/api/v1/locks` is read-write, stated
+// right after the KV and timer arm instead of left to the fallthrough. The
+// route is POST only, so nothing for it belongs in the `m === "GET"` block: a
+// `get` operation travels in the POST body and takes the route's level.
+const ACCESS_FINGERPRINT = "215d0b9c1407bdaa";
 
 /** PLAN_PG_CONNECTORS.md — the connectors config surface (feature `pg`). */
 function isConnectorsPath(path) {
@@ -161,6 +166,9 @@ function accessLevel(method, path) {
   if (m === "POST" && path === "/api/v1/ephemeral/push") return "write-only";
 
   if (path.startsWith("/api/v1/kv") || path.startsWith("/api/v1/timers")) return "read-write";
+  // Locks: one POST route whose body takes, renews, gives back or reads a
+  // permit. Read-write for the route, whatever the operations in the body.
+  if (path.startsWith("/api/v1/locks")) return "read-write";
   // Pop, ack, configure, reset and the queue delete.
   if (path.startsWith("/api/v1/ephemeral")) return "read-write";
 
@@ -220,6 +228,10 @@ const GROUPS = [
   // "Ungrouped".
   ["Key/value state and timers", (p) =>
     /^\/api\/v1\/(kv|timers)(\/|$)/.test(p) || p.startsWith("/api/v1/resources/kv/")],
+  // One route, registered unconditionally. A lock is a KV row, but a reader
+  // looking for "lock" must find it under its own name; without this entry it
+  // lands in "Ungrouped".
+  ["Locks and semaphores", (p) => /^\/api\/v1\/locks(\/|$)/.test(p)],
   // EPHEMERAL_QUEUES.md §3.1. Registered unconditionally like the eight above;
   // without this entry the family lands in "Ungrouped".
   ["Ephemeral queues", (p) => /^\/api\/v1\/ephemeral(\/|$)/.test(p)],

@@ -22,6 +22,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/ephemeral.rs reads the pop's commit at delivery from commitOnDelivery or from autoAck, its deprecated alias. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): main.rs declares the locks module; handlers/raft.rs registers POST
+# /api/v1/locks; proxy_embed.rs maps the new KV refusal to its 503; facade/mod.rs names that refusal
+# (KvFailure::NotYet); facade/real.rs refuses a transaction's KV `check` below cluster version 5. Nothing this
+# page states changes.
 ---
 
 On Kubernetes a Queen cluster is a StatefulSet of three (or five) pods. Each pod gets its own

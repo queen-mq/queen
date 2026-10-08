@@ -21,6 +21,8 @@ verifiedBy:
   - connectors/queen-pg/tests/sink_live.rs
 sidebar:
   order: 7.8
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/connectors.rs maps the new KV refusal (a `check` below
+# cluster version 5) to a retry; the connectors send no `check`. Nothing this page states changes.
 ---
 
 The broker can stream a PostgreSQL table into a queue, and a queue into a table, with no other

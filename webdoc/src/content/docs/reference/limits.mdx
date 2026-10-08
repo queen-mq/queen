@@ -30,6 +30,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps its existing limit and offset handling; the listed request limits are unchanged.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): a Locks section lists the constants of server/src/locks.rs,
+# and the KV table names `check` (planner/kv.rs, handlers/kv.rs: a write for the rate, needs cluster
+# version 5). handlers/raft.rs registers the route; facade/mod.rs and facade/real.rs carry the refusal
+# below version 5. No existing limit or default changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -130,10 +134,29 @@ Applied in `server/src/rsm/facade/real/phase2/reads.rs` and `offsets.rs`.
 | Bytes read per call | 4 MiB | 4 MiB | |
 | Writes of one key per call | 1 | 1 | |
 | Expiry | `ttlSeconds` above 0 or `forever: true`, required on every `put`, `putIfAbsent` and `incr` | the same | |
+| `check` | needs cluster format version 5 (503 below it) | the same | |
 | Calls per tenant | reads 200/s (burst 400), writes 100/s (burst 200) | not counted | `QUEEN_KV_READ_RATE`, `QUEEN_KV_READ_BURST`, `QUEEN_KV_WRITE_RATE`, `QUEEN_KV_WRITE_BURST` |
 
 A call over a tenant's rate answers 429 `rate_limited`. A tenant's quota row can set its own rates
 and row and byte caps; see [tenants](/operate/tenants/).
+
+## Locks
+
+A lock is a KV row in the namespace `queen-locks`, so the KV value, rate and quota limits above
+apply to it. The route's own limits are constants in `server/src/locks.rs`.
+
+| Limit | `POST /api/v1/locks` |
+|---|---|
+| Operations per call | 64, each on a different lock |
+| Permits of one semaphore (`limit`) | 1 by default (a lock), at most 1,024 |
+| Slots named per call | 4,096 (an `acquire` counts its `limit`, a `get` 1,000) |
+| Lock name | 1 to 256 bytes, no control character, no `#` |
+| `owner` | at most 256 bytes, no control character |
+| Lifetime | `ttlSeconds`, a whole number above 0, required on every `acquire` and `renew`; there is no `forever` |
+| Calls per tenant | a call with an `acquire`, `renew` or `release` spends one token of the KV write rate; a call of `get`s alone, one of the read rate |
+
+A waiting `acquire` in the SDKs comes back every 100 ms to 1 s, with jitter, and the handles that
+renew in the background do so every third of the lifetime.
 
 ## Timers
 

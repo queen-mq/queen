@@ -27,6 +27,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (optional client supervision): ConsumerManager wraps handler calls for optional observations; transaction settlement and handler error behavior described here are unchanged.
+# sourceOfTruth re-read 2026-10-08 (locks): the KV part gained `check`, and TransactionBuilder.js gained
+# guard(lock); the parts table, the lease section and the kv_precondition row now say so. handlers/raft.rs
+# registers POST /api/v1/locks, which this page does not list.
 ---
 
 A transaction is one call that writes one step. It acks what the worker took, pushes the next
@@ -78,7 +81,7 @@ and it has written nothing.
 |---|---|---|
 | Acks | `operations`, `type: "ack"` | Messages leased from any partitions, queues and consumer groups of the tenant. Each names `transactionId`, `partitionId`, `consumerGroup` (default `__QUEUE_MODE__`) and its `leaseId`. |
 | Pushes | `operations`, `type: "push"` | Messages to any queues and partitions. A queue or partition that does not exist is created, as by a push. |
-| KV | `kv` | `put`, `putIfAbsent`, `delete`, `incr`, `get`, `getMany`. No `getPrefix`. See [KV](/concepts/kv/). |
+| KV | `kv` | `put`, `putIfAbsent`, `delete`, `incr`, `check`, `get`, `getMany`. No `getPrefix`. See [KV](/concepts/kv/). |
 | Timers | `timers` | `schedule` (an upsert) and `cancel`. See [timers](/concepts/timers/). |
 
 <Figure id="concepts/txn-anatomy" />
@@ -105,6 +108,10 @@ exactly one lease in `requiredLeases` and the acks without their own `leaseId` t
 ends up with no lease is not checked and still moves the cursor. The SDKs put each message's lease
 on its ack.
 
+A step that acks nothing has no lease to fence it: a cron job, a singleton, anything that is not
+the answer to a message. For those, take a [lock](/concepts/locks/) and add `.guard(lock)` to the
+transaction. It commits only while the lock is still yours, which fences the same way.
+
 ## `once`, the gate
 
 `.once(ns, key, { ttl })` writes a KV marker with `putIfAbsent` and `required: true`. When the marker
@@ -119,7 +126,7 @@ than any redelivery can arrive.
 
 | `reason` | Cause | JS `commit()` |
 |---|---|---|
-| `kv_precondition` | A KV operation with `required: true` lost its precondition (`once` found its marker, an `expect` missed). | returns the verdict |
+| `kv_precondition` | A KV operation with `required: true` lost its precondition (`once` found its marker, an `expect` missed, a lock's guard found the lock gone). | returns the verdict |
 | `duplicate` | A pushed `transactionId` is already in its partition's dedup window. | throws, `err.reason` |
 | `rejected_ack` | An ack's lease has expired or moved, or the message it names is no longer leased to this worker. | throws |
 | `reserved` | Another transaction or a checkpoint holds that cursor at this moment. Retry. | throws |

@@ -16,6 +16,8 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-js/test-v2/timers.js
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): TraceRecord is refused below cluster version 4. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): auth.rs makes /api/v1/locks read-write; the timer levels are as
+# they were. Nothing this page states changes.
 ---
 
 A timer schedules a message for later. When it fires, the broker pushes the message into a real

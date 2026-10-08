@@ -26,6 +26,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/data.rs and handlers/ephemeral.rs name the pop's commit at delivery commitOnDelivery; the parameter example names it, and the OpenAPI document lists it on every pop route, with the old name marked deprecated.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks and auth.rs
+# makes it read-write (the generated route table lists it); the status-code table now names the lock
+# verdict. A new node reports clusterVersion 5. main.rs, facade/mod.rs, facade/real.rs and
+# proxy_embed.rs only carry the new module and the `check` refusal below version 5.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no
@@ -126,7 +130,7 @@ read it there:
 |---|---|
 | `201` from `POST /api/v1/push` | The request was handled. Each item has its own `status`: `queued`, `duplicate` (its `transactionId` is already in the partition's dedup window, or repeated in the request) or `error`. |
 | `200` from `POST /api/v1/transaction` with `success: false` | Rolled back: nothing was written. `reason` says why. See [transaction](/reference/transaction/). |
-| `200` from the KV and timer routes | A business verdict: `applied: false` (a lost `putIfAbsent`, a version mismatch) or `ok: false` (cancelling a timer that is not pending). |
+| `200` from the KV, lock and timer routes | A business verdict: `applied: false` (a lost `putIfAbsent`, a version mismatch), `acquired: false` (a lock somebody else holds) or `ok: false` (cancelling a timer that is not pending). |
 | `204` from a pop | No message was available before the long-poll ended. |
 | `503` `outcome_unknown` | The leader changed while an ack, nack or DLQ move was being made durable. It may or may not have applied. |
 | `503` `retry`, `no_leader`, `timeout` | The call did not complete. Retry after `Retry-After` (1 s); a write may still have applied, so make it safe to repeat. |
@@ -134,8 +138,8 @@ read it there:
 | `507` `storage_full` | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Writes that grow storage are refused; acks and deletes still work. |
 
 An engine error body is `{"error": "<message>", "code": "<code>"}`, plus `"leader"` on a 503
-`retry` when the leader is known. The KV and timer routes, the transaction route, the ephemeral
-routes and the authentication layer have shapes of their own. Every code, and what a client does
+`retry` when the leader is known. The KV, lock and timer routes, the transaction route, the
+ephemeral routes and the authentication layer have shapes of their own. Every code, and what a client does
 with it, is on [errors](/reference/errors/).
 
 ## Health

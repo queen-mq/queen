@@ -57,6 +57,7 @@ of the result, never an error status.
 | `putIfAbsent` | `put` with `expect: 0`. Of several concurrent callers, one wins; the others get the winner's value and version. |
 | `delete` | Removes a key, optionally with `expect`. |
 | `incr` | Adds `delta` without a compare-and-swap loop. With `min` or `max`, an increment past the bound does not apply (`reason: "limit"`). The TTL is set when the counter is created; an expired counter counts from zero. |
+| `check` | Asserts that a key is at the version in `expect`, or absent with `expect: 0`, and writes nothing. With `required: true` it gates the call, or the transaction it rides in, on a key the call does not write. |
 
 **Read `applied` on every write.** The JS SDK returns an object for each write, and an object is
 always truthy, so `if (await queen.kv.put(...))` tells you nothing.
@@ -72,8 +73,13 @@ never counts as existing, even before the sweep removes it.
 
 ## Versions and `expect`
 
-Every write gives the key a new version. Versions are unique and never reused, but don't rely on
-their order. `expect: 0` means the key must not exist; `expect: N` means it must be at version N,
+Every write gives the key a new version. Versions are unique and never reused, and on one key a
+later write always has a higher version than every earlier one, across a delete and a re-create,
+an expiry, a restart and a change of leader. That makes the version a writer was handed a fencing
+token: whatever is guarded by "the key is still at this version" refuses a writer that was
+replaced. Between two different keys the order of versions means nothing.
+
+`expect: 0` means the key must not exist; `expect: N` means it must be at version N,
 and writes nothing when the key is absent. A lost precondition answers `applied: false` with a
 `reason` (`exists`, `absent` or `version`) and the key's current value and version, so you can see
 who won without a second read.
@@ -81,6 +87,22 @@ who won without a second read.
 The other operations of the call still apply. Add `required: true` to an operation and a lost
 precondition aborts the whole call instead: it answers HTTP 200 with `ok: false`,
 `reason: "kv_precondition"`, the `failedIndex` and the `kvReason`.
+
+`check` is the precondition on its own: `expect` and nothing written. Use it to make a call
+depend on a key it does not change, such as a configuration row a step must not outlive, or the
+row of a [lock](/concepts/locks/) the caller holds:
+
+```js
+const res = await queen.transaction()
+  .kv.check('config', 'pricing', { expect: seen.version, required: true })
+  .queue('quotes').push([{ data: quote }])
+  .commit()
+if (res.success === false) return        // the pricing changed: nothing was pushed
+```
+
+A `check` that holds answers `applied: true` with the version and no value. `check` exists from
+cluster format version 5, which a cluster reaches by itself once every node runs a release that has
+it; before that a call carrying one answers 503 with `kv_check_needs_cluster_version_5`.
 
 ## Consistency
 
@@ -112,12 +134,13 @@ transaction holds at most 64 KV operations over 256 keys.
 
 KV is the state a step needs next to its ack, and we kept it small on purpose. There are no
 queries, secondary indexes or joins: applications read by key, by a list of keys or by prefix, so
-records you search belong in your database. A `putIfAbsent` with a TTL is no lock either. It
-expires, nobody revokes it, and a holder that outlived it keeps working, so fence later writes
-with `expect` on the version you won, or keep the work inside a transaction whose ack carries the
-lease. Every value travels through the replicated log and is stored on every node, which is the
-price of committing it with the ack. And there is no way to watch a key: when a change matters to
-someone, push them a message in the same transaction.
+records you search belong in your database. A `putIfAbsent` with a TTL is not a lock by itself
+either: it expires, nobody revokes it, and a holder that outlived it keeps working. What makes it
+one is fencing the work with the version you won, and [locks](/concepts/locks/) do exactly that
+for you, with renewal, a guard for transactions and semaphores on top. Every value travels through
+the replicated log and is stored on every node, which is the price of committing it with the ack.
+And there is no way to watch a key: when a change matters to someone, push them a message in the
+same transaction.
 
 ## Limits
 
@@ -139,5 +162,6 @@ someone, push them a message in the same transaction.
 
 <CardGrid>
   <LinkCard title="Timers" href="/concepts/timers/" description="Schedule what a step must do later, in the same commit." />
+  <LinkCard title="Locks" href="/concepts/locks/" description="A lease and a semaphore built on a KV row and its version." />
   <LinkCard title="Dedup and once" href="/concepts/dedup/" description="A KV marker that makes a whole step run at most once." />
 </CardGrid>

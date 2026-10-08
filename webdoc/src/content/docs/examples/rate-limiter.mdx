@@ -18,6 +18,8 @@ verifiedBy:
   - examples/apps/go/rate-limiter/main.go
   - examples/apps/rust/src/bin/rate_limiter.rs
   - examples/apps/js/deferred-work.mjs
+# sourceOfTruth re-read 2026-10-08 (locks): Kv.js gained check; planner/kv.rs gained the `check` op and states
+# that a key's versions only rise. incr and its bounds are unchanged. Nothing this page states changes.
 ---
 
 A rate limiter needs a count that is exact and survives restarts, and the usual place for it is a

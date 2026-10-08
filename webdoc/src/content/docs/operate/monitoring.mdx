@@ -29,6 +29,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-07 (78970a242, 2.0.2): both /health examples show 2.0.2; nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks; facade/mod.rs names
+# that refusal (KvFailure::NotYet); facade/real.rs refuses a transaction's KV `check` below cluster version 5;
+# metrics.rs gained queen_locks_ops_total, queen_locks_op_duration_milliseconds and the KV op label `check`
+# (the generated metrics table lists them). The health examples show clusterVersion 5.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -92,7 +96,7 @@ curl -s http://queen-1:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.3","raft":{"role":"follower","leader":true,"term":5,"applied":112,"commit":112,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}}
+{"status":"healthy","engine":"raft","version":"2.0.3","raft":{"role":"follower","leader":true,"term":5,"applied":112,"commit":112,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"apply":{"failure":null,"skipped":[]}}}
 ```
 
 It answers `200 healthy` when the node knows a leader and its `lag` is at most
@@ -124,7 +128,7 @@ curl -s http://queen-1:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.3","raft":{"role":"leader","leader":true,"term":4,"applied":111,"commit":111,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}}
+{"status":"healthy","engine":"raft","version":"2.0.3","raft":{"role":"leader","leader":true,"term":4,"applied":111,"commit":111,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"apply":{"failure":null,"skipped":[]}}}
 ```
 
 ```bash

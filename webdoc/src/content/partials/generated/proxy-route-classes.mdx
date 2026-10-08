@@ -21,7 +21,7 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | read | Listings, status, analytics, DLQ and message reads, all tenant-scoped. |
 | gated (streams) | Available when the plan enables the streams feature. Registration and the state read are never quota-blocked. The cycle is the produce half of the family: a cycle whose body carries sink `push_items` answers the storage and monthly blocks (refused whole, with the same code the equivalent push would get), its sink queues and partitions pass registry admission, its items answer the per-item payload cap, and its accepted sink messages are billed as push. An ack-only or state-only cycle always passes, so a blocked tenant can keep draining its source. |
 | gated (traces) | Writing a trace is available when the plan enables the traces feature. |
-| gated (kv) | Available when the plan enables the KV feature, which a plan that has never heard of it does not. A `PUT` is the half a storage quota blocks; a `GET` is read level; a `DELETE` is how a tenant at its cap gets back under it and is never quota-blocked. The batch `POST` carries both halves in one array, so a quota refuses the whole call with a named reason and never drops part of it. One exception is decided on the body, which this table cannot show: a batch that addresses only the Kafka facade's own consumer-group keys (namespace `queen-kafka`, keys `qk:`) is classified consume, so a Kafka client needs neither the KV feature nor room under the storage quota to commit offsets. |
+| gated (kv) | Available when the plan enables the KV feature, which a plan that has never heard of it does not. A `PUT` is the half a storage quota blocks; a `GET` is read level; a `DELETE` is how a tenant at its cap gets back under it and is never quota-blocked. The batch `POST` carries both halves in one array, so a quota refuses the whole call with a named reason and never drops part of it. One exception is decided on the body, which this table cannot show: a batch that addresses only the Kafka facade's own consumer-group keys (namespace `queen-kafka`, keys `qk:`) is classified consume, so a Kafka client needs neither the KV feature nor room under the storage quota to commit offsets. The locks route (`POST /api/v1/locks`) is behind the same plan flag, because a permit is a KV row, and is never quota-blocked: the workers that drain a tenant back under its quota are the ones holding the locks. |
 | gated (timers) | Available when the plan enables the timers feature. Scheduling is quota-blockable; cancelling is not, and has its own route for that reason, since a tenant blocked from cancelling would keep producing messages it can no longer stop. |
 | gated (ephemeral) | Available when the plan enables the ephemeral feature, which a plan that has never heard of it does not. A `push` is the half a storage quota blocks and its messages are counted like any other; a pop is metered as a delivery and holds a parked-consumer slot while it waits; ack, configure, reset and the queue `DELETE` are write level and never quota-blocked, since dropping a queue is how a tenant gets its memory back. The two status reads are read level. |
 | operator | Cell-wide surfaces, which no tenant can be scoped to. Only an operator reaches them, on a node with `QUEEN_PROXY_OPERATOR_ENABLED=true` and an account listed in `QUEEN_PROXY_OPERATORS`; any other credential gets the same 404 a blocked route returns. |
@@ -129,6 +129,7 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `DELETE` | `/api/v1/kv/:ns/*key` |
 | `GET` | `/api/v1/kv/:ns/*key` |
 | `PUT` | `/api/v1/kv/:ns/*key` |
+| `POST` | `/api/v1/locks` |
 
 ### gated (timers)
 
@@ -191,4 +192,4 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/metrics` |
 | `GET` | `/status` |
 
-81 of the broker's 109 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.
+82 of the broker's 110 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.

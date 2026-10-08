@@ -24,6 +24,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (new logo): proxy/src/oauth.rs redraws the sign-in page: the wordmark,
 # the dashboard's tokens and its colour scheme. Its routes, providers and settings are as they were.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): proxy_embed.rs maps the new KV refusal to its 503; main.rs
+# declares the locks module; proxy/src/routes.rs puts POST /api/v1/locks behind the KV plan flag, never
+# quota-blocked; proxy/src/gateway.rs counts `check` as an op that cannot grow storage. The scopes section
+# says where locks sit.
 ---
 
 The broker on its own has no users: anything that reaches its port can use it. The proxy compiled
@@ -152,6 +156,10 @@ carries a non-empty set of scopes, while humans hold one role per cluster:
 | Queue admin: configure, deletes, seeks, DLQ replay | `admin` | admin |
 | Read: listings, status, message and DLQ reads | `read` or `admin` | every role |
 | KV, timers, ephemeral, streams, traces, when the plan has the feature | `produce` or `consume`; their reads take any scope | every role but viewer; their reads every role |
+
+Locks belong to the KV feature: a plan with KV has them. Every call on `POST /api/v1/locks` takes
+`produce` or `consume`, a `get` included, and no storage or billing block refuses one, because the
+workers that drain a cluster back under its quota are the ones holding the locks.
 
 A produce-only key that tries to list queues gets
 `403 {"code":"forbidden","error":"operation not permitted for this credential"}`. A revoked key stops

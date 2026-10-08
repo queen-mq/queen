@@ -37,6 +37,9 @@ digest: >-
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (2.0.3): server/Cargo.toml moves the broker to 2.0.3; the /health sample says so.
+# sourceOfTruth re-read 2026-10-08 (locks): main.rs declares the locks module; facade/real.rs refuses a
+# transaction's KV `check` below cluster version 5. A new node reports clusterVersion 5, which the /health
+# example now shows.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its
@@ -89,7 +92,7 @@ curl -s localhost:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.3","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4}}
+{"status":"healthy","engine":"raft","version":"2.0.3","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5}}
 ```
 
 The dashboard is at `http://localhost:6632/`, and the image carries the CLI, so

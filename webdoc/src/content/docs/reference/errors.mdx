@@ -35,6 +35,12 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (optional client supervision): HttpClient.post accepts an optional AbortSignal for bounded status publication, using the existing abort/retry path; the error codes and normal request behavior described here are unchanged.
+# sourceOfTruth re-read 2026-10-08 (locks): POST /api/v1/locks answers the KV envelope with its own
+# locks_bad_request reasons, and a `check` below cluster version 5 answers 503
+# kv_check_needs_cluster_version_5 (handlers/kv.rs, facade/mod.rs, facade/real.rs); the body-shape
+# table, the code table and the verdict paragraph now carry them. auth.rs makes the route read-write.
+# proxy/src/gateway.rs counts `check` as an op that cannot grow storage; no proxy code changes.
+# TransactionBuilder.js still returns a lost required precondition from commit(), a lock's guard included.
 ---
 
 When Queen refuses a call it answers a status code and a JSON body with a stable code, and the code
@@ -53,14 +59,14 @@ those reasons are on [transaction](/reference/transaction/#rollback-reasons).
 | Most routes: push, pop, ack, lease, queues, consumer groups, DLQ, status | `{"error": "<message>", "code": "<code>"}`, plus `"leader"` on a 503 `retry` when the leader is known | `code` |
 | Reads by offset refused for their shape (too many entries, a negative offset, a bad timestamp) | `{"error": "<message>"}` with 400; a per-entry `error` (`UNKNOWN_TOPIC_OR_PARTITION`, `OFFSET_OUT_OF_RANGE`, `BAD_CURSOR`) inside a 200 | the status, then each entry |
 | `POST /api/v1/transaction`, rolled back | `{"transactionId", "success": false, "reason", "error", "results": []}` | `reason` |
-| `/api/v1/kv*` and `/api/v1/timers*` | `{"error": "<code>", "reason": "<finer code>", "detail": "<message>"}` | `error`, then `reason` |
+| `/api/v1/kv*`, `/api/v1/locks` and `/api/v1/timers*` | `{"error": "<code>", "reason": "<finer code>", "detail": "<message>"}` | `error`, then `reason` |
 | `/api/v1/ephemeral/*` | `{"error": "<message>", "code": "<code>"}` | `code` |
 | A pop refused for its parameters | `{"success": false, "error": "<message>", "messages": []}` with 400 | the status |
 | Authentication and the tenancy header | `{"error": "<message>"}` | the status |
 | The proxy, and `/api/cp` | `{"error": "<message>", "code": "<code>"}` | `code` |
 | Raft membership changes | `{"ok": false, "code": "<code>", "error": "<message>"}` | `code` |
 
-The 429 and 503 answers of the engine, KV and timer routes carry `Retry-After`, in seconds. A 404
+The 429 and 503 answers of the engine, KV, lock and timer routes carry `Retry-After`, in seconds. A 404
 for something that does not exist (a queue, a message) may carry only `error`.
 
 ## Engine codes
@@ -109,27 +115,33 @@ All of this holds for a cluster. Lease exclusivity across a leader change assume
 within `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. See
 [guarantees](/concepts/guarantees/).
 
-## KV and timer codes
+## KV, lock and timer codes
 
-The `error` of the third shape. The `reason` beside it is finer, and stable too.
+The `error` of the third shape. The `reason` beside it is finer, and stable too. The locks route
+is KV underneath, so apart from its own `locks_bad_request` it answers the KV codes below: the
+quota, the grant, the rates and the pause are KV's.
 
 | `error` | Status | `reason`, and when | Client |
 |---|---|---|---|
 | `kv_bad_request` | 400 | `kv_bad_body`, `kv_bad_namespace`, `kv_bad_key`, `kv_expiry_not_specified`, `kv_bad_ttl`, `kv_bad_expect`, `kv_unknown_op`, `kv_prefix_required`, `kv_too_many_ops`, `kv_too_many_keys`, `kv_duplicate_key_in_call`, `kv_tenant_not_an_input`, `kv_no_query_string`, `kv_field_in_path`. | Fix the request. |
+| `locks_bad_request` | 400 | `locks_bad_body`, `locks_bad_request`, `locks_unknown_op`, `locks_bad_name`, `locks_ttl_required`, `locks_bad_ttl`, `locks_bad_owner`, `locks_token_required`, `locks_bad_token`, `locks_bad_slot`, `locks_bad_limit`, `locks_too_many_ops`, `locks_too_many_keys`, `locks_duplicate_in_call`, `locks_tenant_not_an_input`. | Fix the request. |
 | `timers_bad_request` | 400 | `timers_bad_body`, `timers_bad_op`, `timers_queue_required`, `timers_delay_required`, `timers_payload_required`, `timers_payload_not_base64`, `timers_too_many_ops`, `timers_server_owned_field`, or a read-mode reason on the list routes. | Fix the request. |
 | `payload_too_large` | 413 | `kv_value_too_large`, `kv_key_too_large`, `timers_payload_too_large`, `timers_call_too_large`. | Shrink it, or raise the ceiling (see [limits](/reference/limits/)). |
 | `timer_horizon_exceeded` | 403 | `timers_horizon`: `delayMs` is beyond the horizon in force. | Use a shorter delay. |
 | `kv_quota_exceeded`, `timers_quota_exceeded` | 403 | The tenant is over its KV rows or bytes, or its timer count. Deletes and cancels are never refused for this. | Free space or raise the quota; do not retry unchanged. |
 | `feature_gated` | 403 | The tenant has no grant for this surface (`QUEEN_KV_REQUIRE_GRANT`). | An operator grants it. |
 | `rate_limited` | 429 | The tenant's KV read or write rate. | Retry after `Retry-After`. |
-| `kv_unavailable`, `timers_unavailable` | 503 | `kv_timeout`, `kv_retry`, `kv_no_leader`, `timers_timeout`, `timers_retry`, `no_leader`; or `kv_unavailable` when the node already tracks `QUEEN_KV_MAX_TENANTS` (10,000) tenants. | Retry after `Retry-After`. |
+| `kv_unavailable`, `timers_unavailable` | 503 | `kv_timeout`, `kv_retry`, `kv_no_leader`, `timers_timeout`, `timers_retry`, `no_leader`; `kv_check_needs_cluster_version_5` for a `check` while a node of the cluster still runs a release without it; or `kv_unavailable` when the node already tracks `QUEEN_KV_MAX_TENANTS` (10,000) tenants. | Retry after `Retry-After`. A lock call that failed this way may have applied some of its operations: send it again with the same owners. |
 | `kv_disabled`, `timers_disabled` | 503 | An operator paused the surface at runtime. | Retry later. |
 | `kv_error`, `timers_error` | 500 | A broker fault. | Report it. |
 
 A lost precondition on `POST /api/v1/kv` is not an error either. An ordinary one shows as
 `applied: false` in its result, and a `required` one answers 200 with
 `{"ok": false, "reason": "kv_precondition", "failedIndex", "kvReason", "version", "value"}`.
-Cancelling a timer that is not pending answers 200 with `ok: false`.
+Cancelling a timer that is not pending answers 200 with `ok: false`. On `POST /api/v1/locks`, a
+lock somebody else holds answers 200 with `acquired: false` and `reason: "held"` (or `contended`
+for a busy semaphore), and a renew or release whose token is no longer the lock's answers
+`renewed: false` or `released: false` with `reason: "lost"`.
 
 ## Ephemeral codes
 

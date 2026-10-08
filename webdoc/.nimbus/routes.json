@@ -18,6 +18,7 @@
     "/concepts/dedup",
     "/concepts/guarantees",
     "/concepts/kv",
+    "/concepts/locks",
     "/concepts/partitions",
     "/concepts/timers",
     "/concepts/transactions",

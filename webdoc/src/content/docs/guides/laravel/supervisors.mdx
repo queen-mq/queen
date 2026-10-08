@@ -65,6 +65,10 @@ sourceOfTruth:
 # every queen connection from config/queen.php, as QueenConnector does and as the configuration page
 # already says; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): only message browsing changes; supervisor depth reads, scaling and coordination are unchanged.
+# sourceOfTruth re-read 2026-10-08 (locks): auth.rs makes /api/v1/locks read-write; handlers/kv.rs counts a
+# `check` as a write and answers 503 for one below cluster version 5; planner/kv.rs gained the `check` op and
+# states that a key's versions only rise. The supervisor's KV calls are unchanged. Nothing this page states
+# changes.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number

@@ -502,6 +502,8 @@ function accessLevel(method, path) {
   if (path.startsWith("/streams/")) return "read-write";
   if (path === "/api/v1/push") return "write-only";
   if (m === "POST" && path === "/api/v1/ephemeral/push") return "write-only";
+  // Locks: read-write for the route, stated as the Rust states it (2026-10-08).
+  if (path.startsWith("/api/v1/locks")) return "read-write";
   if (path.startsWith("/api/v1/ephemeral")) return "read-write";
   return "read-write";
 }
@@ -538,6 +540,10 @@ const TAGS = [
   // name, down to the /resources/kv/ arm the Queues entry above gives up.
   ["Key/value state and timers", (p) =>
     /^\/api\/v1\/(kv|timers)(\/|$)/.test(p) || p.startsWith("/api/v1/resources/kv/")],
+  // The one locks route. Same predicate as gen-routes.mjs's group of the same
+  // name; its own tag so a generated client has a `locks` section and not one
+  // more uncategorised method.
+  ["Locks and semaphores", (p) => /^\/api\/v1\/locks(\/|$)/.test(p)],
   // EPHEMERAL_QUEUES.md §3.1 — its own tag, not folded into the message plane:
   // the two families share no storage, no durability contract and no verbs.
   ["Ephemeral queues", (p) => /^\/api\/v1\/ephemeral(\/|$)/.test(p)],

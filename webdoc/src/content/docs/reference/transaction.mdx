@@ -20,6 +20,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): planner/kv.rs gained the `check` op and facade/real.rs
+# refuses one below cluster version 5 with a 503; the KV operations table, the result row and the
+# reasons table now carry both. TransactionBuilder.js gained guard(lock), named in the same section.
+# handlers/raft.rs registers POST /api/v1/locks, which is not this route.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step
@@ -130,6 +134,7 @@ The same operations as `POST /api/v1/kv`, without `getPrefix`.
 | `putIfAbsent` | `ns`, `key`, `value`, expiry, `required`? (it is `put` with `expect: 0`) |
 | `delete` | `ns`, `key`, `expect`?, `required`? |
 | `incr` | `ns`, `key`, `delta` (number), `min`?, `max`?, expiry, `required`? |
+| `check` | `ns`, `key`, `expect`, `required`? (it writes nothing) |
 
 Every `put`, `putIfAbsent` and `incr` carries exactly one expiry: `ttlSeconds` (an integer greater
 than 0) or `forever: true`; the JS SDK turns `ttl: '30d'` into `ttlSeconds`. A `value` is any JSON
@@ -140,6 +145,15 @@ and `0` means the key must not exist.
 `version`, `limit`, `type`), the whole transaction rolls back with `reason: "kv_precondition"`.
 Without `required`, a lost precondition is `applied: false` in the results and the rest commits.
 The JS `.once(ns, key)` is `putIfAbsent` with `required: true`.
+
+`check` is a precondition on a key the transaction does not write: `expect: N` holds while the key
+is at version N, `expect: 0` while it is absent, and `expect` is mandatory. The `guard` that
+`POST /api/v1/locks` answers is one, with `required: true`, on the row of the lock the caller
+holds: put it in `kv` and the transaction commits only while the lock is still the caller's (the
+SDKs' `.guard(lock)` does that). See [locks](/concepts/locks/). A cluster serves `check` from
+format version 5, which it reaches once every node runs a release that has it; before that a
+transaction carrying one answers HTTP 503 with `reason: "kv_check_needs_cluster_version_5"` and has
+written nothing.
 
 `ns` matches `^[a-z0-9][a-z0-9._-]{0,63}$`, a key is 1 to 512 bytes with no NUL, and a key may be
 written once per call. A transaction carries at most 64 KV operations naming at most 256 keys.
@@ -189,7 +203,7 @@ position results also carry `opIndex`, their place in their own array. The top-l
 |---|---|
 | `ack` | `success`, `transactionId`, `error`, `dlq` (true when the ack dead-lettered the message) |
 | `push` | `success`, `transactionId`, `messageId`, `queueName`, and `duplicate: true` for an in-call repeat |
-| `kv` | `op`, `applied`, `reason` (when not applied), `key`, `value`, `version`; a read has `found` or `rows`/`missing` |
+| `kv` | `op`, `applied`, `reason` (when not applied), `key`, `value`, `version`; a read has `found` or `rows`/`missing`; a `check` that holds has no `value` |
 | `timer` | `ok`, `status` (`scheduled`, `rescheduled`, `cancelled`, or `absent` with `ok: false`), `queue`, `timerKey`, `txn`, `messageId`, `deliverAt` |
 | `position` | `success` |
 
@@ -288,7 +302,8 @@ A lost `required` KV operation adds the operation that lost:
 
 | `reason` | HTTP | When | What to do |
 |---|---|---|---|
-| `kv_precondition` | 200 | A `required` KV operation lost. The body adds `failedIndex`, `kvReason`, `version`, `value`. | The step already happened. The ack rolled back with it: ack the input on its own (`POST /api/v1/ack`). |
+| `kv_precondition` | 200 | A `required` KV operation lost. The body adds `failedIndex`, `kvReason`, `version`, `value`. | A marker that exists: the step already happened, and the ack rolled back with it, so ack the input on its own (`POST /api/v1/ack`). A lock's guard that lost: the lock is somebody else's, or gone; stop, do not retry. |
+| `kv_check_needs_cluster_version_5` | 503 | The transaction carries a `check` and a node of the cluster still runs a release without it. | Retry once the upgrade is done. |
 | `duplicate` | 200 | A pushed item's `transactionId` is already in its partition, inside the queue's `dedupWindowSeconds`. | The step already happened. Ack the input on its own; do not retry. |
 | `rejected_ack` | 200 | A fenced ack's lease is not the partition's live lease, or its message is outside the leased batch; an ack's message is not found after the cursor; or the `partitionId` is unknown or belongs to another tenant. | Do not retry: the message is redelivered to whoever holds it, or was already done. |
 | `reserved` | 200 | Another transaction, or the engine's checkpoint, holds a cursor this transaction acks or positions. | Retry. |

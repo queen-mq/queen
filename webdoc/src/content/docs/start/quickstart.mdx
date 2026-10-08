@@ -29,6 +29,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-07 (image tags): ghcr.io/queen-mq/queen is published for linux/amd64 and linux/arm64 (2.0.0, 2.0.1 and 2.0.2 all are) and latest is the current release, 2.0.2, so the command no longer names a platform. Run on an Apple-silicon Mac: the arm64 image answers /health as 2.0.2.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks; facade/real.rs
+# refuses a transaction's KV `check` below cluster version 5; planner/kv.rs gained the `check` op and states
+# that a key's versions only rise; TransactionBuilder.js gained guard(lock) and kv.check. A new node reports
+# clusterVersion 5, which the /health example now shows.
 ---
 
 You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the
@@ -46,7 +50,7 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
    ```
 
    ```json
-   {"status":"healthy","engine":"raft","version":"2.0.3","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4}}
+   {"status":"healthy","engine":"raft","version":"2.0.3","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5}}
    ```
 
    That is the whole installation. There is no database to start first, because the node keeps

@@ -19,6 +19,9 @@ sidebar:
 # autoAck=true; its autoAck option is a deprecated alias, and passing both throws. The request/reply example and
 # the acks paragraph now use and describe commitOnDelivery. Nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/ephemeral.rs names the pop's commit at delivery commitOnDelivery and still reads the old name the JS SDK sends; the page documents the JS SDK's option, which is unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): main.rs declares the locks module; metrics.rs gained
+# queen_locks_ops_total, queen_locks_op_duration_milliseconds and the KV op label `check`. The ephemeral
+# families are unchanged. Nothing this page states changes.
 ---
 
 An ephemeral queue keeps its messages in memory and nowhere else. A push is a memory write and a
