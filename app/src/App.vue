@@ -61,7 +61,7 @@
 <script setup>
 import { computed, onUnmounted, provide, watch } from 'vue'
 
-import mark from '@/assets/q-badge.svg?raw'
+import mark from '@/assets/q.svg?raw'
 import Sidebar from '@/components/Sidebar.vue'
 import Header from '@/components/Header.vue'
 import ToastHost from '@/components/ToastHost.vue'

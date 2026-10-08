@@ -14,8 +14,11 @@
   </button>
 
   <aside class="sidebar" :class="{ 'sidebar-mobile-open': mobileOpen, rail }">
-    <!-- The sunflower badge uses the logo yellow; the wordmark follows the
-         theme's text colour. Both align with the top bar. -->
+    <!-- Brand. As tall as the top bar, so the two share a baseline; no rule
+         under it. The mark is the small logo: the q with its sunflower
+         (assets/logo.py writes it). Its petals are the logo's yellow, the
+         dashboard's brand colour, and its letter takes the name's colour.
+         The name beside it is plain interface type. -->
     <div class="brand">
       <span class="brand-mark" aria-hidden="true" v-html="mark" />
       <template v-if="!rail">
@@ -116,7 +119,7 @@
 import { h, ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import mark from '@/assets/q-badge.svg?raw'
+import mark from '@/assets/q.svg?raw'
 import ClusterSelector from '@/components/ClusterSelector.vue'
 import { system } from '@/api'
 import { formatNumber } from '@/composables/useApi'

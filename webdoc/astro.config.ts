@@ -58,7 +58,7 @@ const nimbusConfig = defineNimbusConfig({
   editPattern: "https://github.com/queen-mq/queen/edit/master/webdoc/{path}",
   socialImageAlt: "Queen MQ documentation",
   // Brand assets are generated: the logo, the favicons and the tile by
-  // assets/wordmark.py, the homepage's picture by assets/scene.py. The favicon
+  // assets/logo.py, the homepage's picture by assets/scene.py. The favicon
   // is the small logo, the q that is the sunflower; the SVG switches its
   // letter with the tab strip's colour scheme.
   // No `rel="icon"` entry here: NimbusHead already emits one for whichever of

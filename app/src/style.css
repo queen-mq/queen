@@ -320,9 +320,12 @@
   display: flex; align-items: center; gap: 10px;
   height: 52px; flex: none; padding: 0 16px;
 }
-/* The inline badge takes the sunflower yellow in both themes. */
-.brand-mark { flex: none; display: block; color: var(--brand); }
-.brand-mark svg { height: 26px; width: auto; display: block; }
+/* The small logo, inline SVG: its letter is the name's colour, so one file
+   serves both themes, and its petals carry the logo's yellow themselves (the
+   value --brand repeats). It is taller than it is wide, and the q inside it
+   is a third of its height. */
+.brand-mark { flex: none; display: block; color: var(--text-hi); }
+.brand-mark svg { height: 36px; width: auto; display: block; }
 .brand-word { font-size: 13px; font-weight: 600; line-height: 1; color: var(--text-hi); letter-spacing: -0.01em; }
 .brand-ver { margin-left: auto; font-size: 11px; color: var(--text-low); white-space: nowrap; }
 
@@ -1385,8 +1388,8 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
   align-items: center; justify-content: center; gap: 10px;
   color: var(--text-mid); font-size: 13px; padding: 24px; text-align: center;
 }
-.boot-mark { color: var(--brand); }
-.boot-mark svg { height: 56px; width: auto; display: block; }
+.boot-mark { color: var(--text-hi); }
+.boot-mark svg { height: 72px; width: auto; display: block; }
 .boot-error h2 { font-size: 16px; color: var(--text-hi); font-weight: 600; }
 .boot-error p { max-width: 460px; line-height: 1.5; }
 .boot-error code { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-hi); }

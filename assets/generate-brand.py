@@ -38,7 +38,7 @@ Outputs (all regenerated, do not hand-edit):
                                      (it is served by the user's app, so nothing to fetch)
 
 The logo (the q that is the sunflower), the favicons, the touch icon, the
-schema.org tile and the sign-in page's mark are assets/wordmark.py's: the
+schema.org tile and the sign-in page's mark are assets/logo.py's: the
 sidebar, the boot screen and the docs header show that logo.
 
 Run:  python3 assets/generate-brand.py

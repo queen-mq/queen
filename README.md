@@ -1,8 +1,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark/queen-tagline-on-dark.svg">
-  <img src="assets/wordmark/queen-tagline.svg" alt="Queen, message queue" width="340">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo/queen-tagline-on-dark.svg">
+  <img src="assets/logo/queen-tagline.svg" alt="Queen, message queue" width="340">
 </picture>
 
 **High-performance transactional message broker**
@@ -15,7 +15,7 @@ On three nodes it carries 1M msg/s in and out of one queue of 10M partitions.
 
 Queen speaks HTTP but is also compatible with Kafka clients.
 
-[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/start/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.0.3
+[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/start/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.0.4
 
 </div>
 

@@ -18,7 +18,7 @@
     
     <!-- Theme initialization (prevent flash) -->
     <!-- Same resolution as src/composables/useTheme.js resolveTheme(): stored
-         choice wins, else the OS but only when it asks for LIGHT, else dark.
+         Light/Dark wins; System (or no stored choice) follows the OS, else dark.
          It runs here, before any bundle, so the first painted frame is already
          the right scheme — on every SPA route, including hard reloads of pages
          that pull no chart chunk (e.g. /messages). Keep in sync with
@@ -26,21 +26,24 @@
     <script>
       (function () {
         var t = 'dark';
-        try {
-          var stored = localStorage.getItem('queen-theme');
-          if (stored === 'light' || stored === 'dark') t = stored;
-          else if (window.matchMedia('(prefers-color-scheme: light)').matches) t = 'light';
-        } catch (e) { /* storage or matchMedia unavailable: stay dark */ }
+        var stored;
+        try { stored = localStorage.getItem('queen-theme'); } catch (e) { /* use system */ }
+        if (stored === 'light' || stored === 'dark') t = stored;
+        else {
+          try {
+            if (window.matchMedia('(prefers-color-scheme: light)').matches) t = 'light';
+          } catch (e) { /* matchMedia unavailable: stay dark */ }
+        }
         var root = document.documentElement;
         root.classList.toggle('light', t === 'light');
         root.classList.toggle('dark', t !== 'light');
         root.style.colorScheme = t;
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-hMkYH4xX.js"></script>
+    <script type="module" crossorigin src="/assets/index-CIxly4kG.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/runtime-core.esm-bundler-CLZ-RoPR.js">
     <link rel="modulepreload" crossorigin href="/assets/useRefresh-oCgQ3p7k.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-CHm5N93-.css">
+    <link rel="stylesheet" crossorigin href="/assets/index-ZNUwSi7d.css">
   </head>
   <body class="antialiased">
     <div id="app"></div>

@@ -3,6 +3,31 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 2.0.4
+
+**Dashboard, sign-in page and docs: the logo is a yellow sunflower.** A new drawing replaces the
+red one of 2.0.3: seven yellow petals round the q of "queen", with "message queue" under the name.
+The dashboard shows the q and its petals beside the word "queen", the sign-in page and the README
+show the whole logo, and the tab icon is the q with its petals. The picture of the bee and the
+sunflower on the documentation site takes the same yellow.
+
+**Dashboard: the logo's yellow is the accent.** Primary buttons are yellow with black labels, and
+the page you are on, selected segments and focus rings take the same colour. On light surfaces,
+text and rings in that colour are a darker gold, so they can be read. The sign-in page and the
+documentation site follow. Status colours keep their meanings: amber is attention, coral is failure.
+
+**Dashboard: System, Light and Dark.** The theme toggle in the top bar is now a choice of three.
+System follows the device's colour scheme as it changes, and is what a browser with no stored choice
+gets. Light and Dark stay fixed on that device until System is chosen again, and a choice made
+before 2.0.4 is kept.
+
+**Dashboard: supervisor cards share one grid.** The Supervisors page gave each publication group
+its own two-column grid, so two groups with one instance each took two rows and left the second
+column empty. The instances now share one grid, each card under its group's name: two to a row on
+a wide screen, one on a narrow one.
+
+The broker's engine, its API and the clients are as in 2.0.3.
+
 ## 2.0.3 - 2026-10-08
 
 **Server: a pop that nobody receives no longer counts a delivery attempt.** A pop's answer waits for

@@ -1833,14 +1833,14 @@ r.classList.toggle('dark',t!=='light');r.style.colorScheme=t})();";
 const SIGN_IN_CSS: &str = "\
 :root{--ink-0:#0b0a0a;--ink-2:#111010;--ink-3:#171615;\
 --text-hi:#eeebe6;--text-mid:#aaa59e;--text-low:#8f8a83;--text-faint:#57534e;\
---accent:#eeebe6;--accent-dim:#aaa59e;--on-accent:var(--ink-0);\
+--brand:#fcc620;--accent:var(--brand);--accent-dim:#e6ae05;--accent-text:var(--brand);--on-accent:#000000;\
 --ember-400:#f07a5f;--ember-glow:rgba(240,122,95,0.12);--ember-bd:rgba(240,122,95,0.30);\
---bd:#1f1d1b;--bd-hi:#34312e;--ring:rgba(238,235,230,0.42);color-scheme:dark}\
+--bd:#1f1d1b;--bd-hi:#34312e;--ring:var(--accent-text);color-scheme:dark}\
 html.light{--ink-0:#f2f0ec;--ink-2:#f9f7f4;--ink-3:#f1eee9;\
 --text-hi:#1f1d1a;--text-mid:#4f4b45;--text-low:#6c675f;--text-faint:#b0aaa2;\
---accent:#1f1d1a;--accent-dim:#4f4b45;--on-accent:var(--ink-2);\
+--brand:#fcc620;--accent:var(--brand);--accent-dim:#e6ae05;--accent-text:#806000;--on-accent:#000000;\
 --ember-400:#c6452e;--ember-glow:rgba(198,69,46,0.09);--ember-bd:rgba(198,69,46,0.30);\
---bd:#e0dcd6;--bd-hi:#cfc9c1;--ring:rgba(31,29,26,0.35);color-scheme:light}\
+--bd:#e0dcd6;--bd-hi:#cfc9c1;--ring:var(--accent-text);color-scheme:light}\
 *{box-sizing:border-box}\
 body{margin:0;min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;\
 padding:24px;font:13px/1.5 'Inter',ui-sans-serif,system-ui,sans-serif;\
@@ -1850,7 +1850,7 @@ text-rendering:optimizeLegibility;letter-spacing:-.005em;background:var(--ink-0)
 :focus-visible{outline:2px solid var(--ring);outline-offset:2px}\
 .sign{width:100%;max-width:340px}\
 .brand{display:flex;justify-content:center;margin-bottom:24px}\
-.mark svg{display:block;height:56px;width:auto}\
+.mark svg{display:block;height:96px;width:auto}\
 .word{font-size:15px;font-weight:600;line-height:1;letter-spacing:-.015em}\
 .card{border:1px solid var(--bd);border-radius:8px;background:var(--ink-2);overflow:hidden}\
 .card-header{padding:10px 14px;border-bottom:1px solid var(--bd)}\
@@ -1881,7 +1881,7 @@ color:var(--ember-400);font-size:12.5px;line-height:1.45}\
 .note{margin:0;color:var(--text-mid)}";
 
 /// The brand: the wordmark with its line, as SVG markup
-/// (`app/public/queen-wordmark.svg`, written by `assets/wordmark.py` with the
+/// (`app/public/queen-wordmark.svg`, written by `assets/logo.py` with the
 /// app's other brand files), pulled out of the embedded webapp, so replacing it
 /// (+ `npm run build`) updates this page too.
 ///
@@ -1905,7 +1905,7 @@ fn wordmark_svg() -> &'static str {
 }
 
 /// The tab icon: the webapp's own favicon, the small logo as vector
-/// (`assets/wordmark/small/q-auto.svg`). Its letter follows the viewer's
+/// (`assets/logo/q-auto.svg`). Its letter follows the viewer's
 /// colour scheme, so it reads on a light or a dark tab strip without a second
 /// file.
 fn favicon_data_uri() -> &'static str {

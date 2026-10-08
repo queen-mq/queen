@@ -6,7 +6,7 @@ import { ThemeToggle } from "./ui/theme-toggle";
 import { SearchTrigger } from "./ui/search";
 import { config } from "virtual:nimbus/config";
 import mark from "../assets/q.svg?raw";
-import wordmark from "../assets/queen-tagline.svg?raw";
+import wordmark from "../assets/queen.svg?raw";
 import { getSidebarSections } from "@cloudflare/nimbus-docs";
 
 interface Props {
@@ -56,20 +56,21 @@ const showSections = sections.length >= 2;
     <div class="flex items-center gap-3">
       <a href="/" class="group flex items-center" aria-label={config.title}>
         {/*
-          The small logo, in colour, inlined (assets/wordmark.py writes
-          src/assets/): the petals use the brand yellow and the letters take the
-          text colour of the theme. The home page shows the wordmark with
-          "message queue" under it; every other page has the room for the q
-          alone. The logo with its contours is for larger sizes: the README.
+          The logo, inlined (assets/logo.py writes src/assets/): the petals
+          keep their yellow and the letters take the text colour of the
+          theme. The home page shows the name; every other page has the room
+          for the q alone. The line "message queue" stays out of this bar:
+          the flower is tall, and at a height that fits here the line could
+          not be read.
         */}
         {currentSlug === "/" ? (
           <span
-            class="block shrink-0 text-foreground [&>svg>path:first-child]:fill-brand [&>svg]:block [&>svg]:h-[34px] [&>svg]:w-auto"
+            class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[44px] [&>svg]:w-auto"
             set:html={wordmark}
           />
         ) : (
           <span
-            class="block shrink-0 text-foreground [&>svg>path:first-child]:fill-brand [&>svg]:block [&>svg]:h-[28px] [&>svg]:w-auto"
+            class="block shrink-0 text-foreground [&>svg]:block [&>svg]:h-[40px] [&>svg]:w-auto"
             set:html={mark}
           />
         )}
