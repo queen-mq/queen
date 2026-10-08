@@ -368,12 +368,21 @@
                   :gauges (gauges http n)}]))
           (qdb/standby-nodes test))))
 
+(declare heal!)
+
 (defn- promote!
   "POST /api/v1/system/link/promote on the standby's nodes in turn until one
   answers 200: the standby's leader may be dead, paused or cut off right now.
   A promotion that needed more than one request says what each node answered
   (the first six, then how many of each kind) and what the standby's nodes
-  showed, at the first refusal and every 20 s after it."
+  showed, at the first refusal and every 20 s after it.
+
+  Every 20 s without an answer the standby's nodes are healed again, as
+  whoever asks for a promotion that does not go through would do. The nemesis
+  runs one op at a time, so while this one waits no other package restarts a
+  node it killed a moment before: a kill of two of the three nodes that came
+  between :heal-standby and :promote left the standby without a quorum for as
+  long as the promotion was asked for."
   [http test]
   (let [t0 (System/currentTimeMillis)]
     (loop [attempt 1
@@ -405,7 +414,12 @@
 
           :else
           (let [views (if (<= (* 20000 (count views)) waited)
-                        (conj views [waited (standby-view http test)])
+                        (let [view (standby-view http test)]
+                          ; Not at the first refusal: a leader change answers
+                          ; one too, and needs no healing.
+                          (when (seq views)
+                            (heal! test (qdb/standby-nodes test)))
+                          (conj views [waited view]))
                         views)]
             (Thread/sleep 250)
             (recur (inc attempt) (rest nodes) (conj answers answer) views)))))))
@@ -427,7 +441,9 @@
                     as dead as :stop-source left it.
      :quiesce        the source's clients stop sending (the planned switch),
                     and every send in flight is given the time to end.
-     :await-standby  the standby has read everything the source applied.
+     :await-standby  every node is up and reachable again, and the standby has
+                    read everything the source applied: a planned switch is
+                    made on two whole clusters.
      :stop-source    kill -9 every node of the source; with --lazyfs a power
                     loss. Its value carries the standby's link status as it
                     was just before.
@@ -470,8 +486,15 @@
                      (Thread/sleep (long (:client-timeout-ms test)))
                      {:waited-ms (:client-timeout-ms test)})
 
+                 ; Whole clusters first: the other packages' faults go on
+                 ; between this package's ops, and one that came after
+                 ; :heal-all (a kill of two nodes of the standby, in
+                 ; `fo-planned-txn-kill` on 2026-10-08) stays in force for as
+                 ; long as this op waits, because the nemesis runs one op at
+                 ; a time and the start that would undo it waits behind it.
                  :await-standby
-                 (await-standby! @http test)
+                 (let [healed (heal! test (:nodes test))]
+                   (assoc (await-standby! @http test) :healed-first (:healed healed)))
 
                  :stop-source
                  (let [before (link-brief (qdb/standby-leader-status @http test))]
