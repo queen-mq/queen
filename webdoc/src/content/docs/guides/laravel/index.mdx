@@ -61,6 +61,12 @@ sourceOfTruth:
 # queue driver and Horizon; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-09 (PHP client 2.4.0): 2.4.0 adds locks, semaphores, the transaction guard and
 # the KV check to the client and pins supervisor 0.8.0, as 2.3.1 does. The Versions section says so.
+# sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): config/queen.php reads every
+# switch variable through filter_var; the failed-job provider leaves other drivers' records to
+# Laravel, and failed_jobs with its commands stay unchanged for a Queen job, as the table says; a
+# pool takes its connection's queue and consumer_group; the connector scopes the pool's
+# environment to the worked connection. Nothing this page states changes; the versions table gains
+# 2.4.1 at its release.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and

@@ -19,6 +19,10 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
 verifiedBy:
   - examples/apps/laravel/app/Console/Commands/Examples/LeaseExample.php
+# sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): QueenConnector applies a
+# pool's environment settings to the worked connection alone and keeps a connection's own url over
+# the default urls; SupervisorConfiguration takes a pool's queue and consumer_group from its
+# connection. The lease timing this page measures is unchanged; nothing this page states changes.
 ---
 
 Without lease renewal, a job that runs longer than `retry_after` goes to a second worker while the
