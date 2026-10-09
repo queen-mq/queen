@@ -199,6 +199,8 @@
        (when (seq (:slow-fsync-nodes opts))
          (str "_slowfsync=" (str/join "," (:slow-fsync-nodes opts))
               ":" (:slow-fsync-ms opts)))
+       (when (not= 86400 (:dedup-window opts 86400))
+         (str "_dedupwin=" (:dedup-window opts)))
        "_offload=" (if (:offload opts) "on" "off")
        "_lanes=" (:lanes opts)
        (when (seq (:env opts))
@@ -352,6 +354,11 @@
 
    [nil "--dedup-index MODE" "QUEEN_RAFT_DEDUP_INDEX: txns (the product default), rows or segment. P0/P1 ran segment, as qc.sh did."
     :default "txns"]
+
+   [nil "--dedup-window SECONDS" "dedupWindowSeconds of the test queues (default 86400: longer than any test). A short one, with QUEEN_RAFT_TXN_WINDOW_MIN_S as short, lets a push's index row leave the store during the test (cluster version 6), so a consumer behind it reads from the queue log."
+    :default 86400
+    :parse-fn parse-long
+    :validate [pos? "must be positive"]]
 
    [nil "--env K=V,..." "Extra environment for every node, e.g. QUEEN_RAFT_PURGE_HOLD_S=5,QUEEN_RAFT_LOG_KEEP=16."
     :default {}

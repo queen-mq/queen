@@ -344,7 +344,8 @@
 
 (def queue-options
   "Every test queue: no ttl, no retention, no DLQ, retries effectively
-  unbounded, dedup longer than any test, a short lease."
+  unbounded, dedup longer than any test (--dedup-window shortens it), a
+  short lease."
   {:leaseTime          5
    :retryLimit         1000000
    :retryDelay         0
@@ -365,7 +366,11 @@
         (fn []
           (let [r (qh/request! http :post
                                (str (qh/base-url node) "/api/v1/configure")
-                               {:queue q, :options queue-options} 10000)]
+                               {:queue q
+                                :options (assoc queue-options
+                                                :dedupWindowSeconds
+                                                (:dedup-window test 86400))}
+                               10000)]
             (when-not (= 200 (:status r))
               (throw (ex-info "configure failed" r)))
             (info "configured" q (:body r))
