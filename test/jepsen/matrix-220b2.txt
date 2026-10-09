@@ -27,3 +27,9 @@ fo-behind               --workload failover --standby-nodes 3 --failover crash-b
 fo-behind-txn           --workload failover --standby-nodes 3 --failover crash-behind --txn --nemesis none --time-limit 300 --rate 200
 fo-behind-kill          --workload failover --standby-nodes 3 --failover crash-behind --nemesis kill --time-limit 300 --rate 200
 fo-behind-txn-part      --workload failover --standby-nodes 3 --failover crash-behind --txn --nemesis partition --time-limit 300 --rate 200
+# The same with rows that live two seconds and small log files on both clusters: the standby
+# replays the source's rows watermarks, and the source reclaims files it also holds for the link.
+rw-fo-crash-kill        --workload failover --standby-nodes 3 --failover crash --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-fo-planned-kill      --workload failover --standby-nodes 3 --failover planned --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-fo-crash-part        --workload failover --standby-nodes 3 --failover crash --nemesis partition --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-fo-planned-lz-kill   --workload failover --standby-nodes 3 --failover planned --lazyfs --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10

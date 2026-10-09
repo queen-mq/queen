@@ -226,3 +226,13 @@ x-sem-bridge            --workload semaphore --nemesis bridge --time-limit 300 -
 x-sem-lz-kill           --workload semaphore --lazyfs --nemesis kill --time-limit 300 --rate 200
 x-sem-membership        --workload semaphore --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
 x-sem-wide-kill         --workload semaphore --w11-limit 8 --w11-locks 2 --nemesis kill --time-limit 300 --rate 400
+# sh: the shared-log layout (QUEEN_QLOG_SHARDS=4, eight queues), which no campaign had run: with
+# the default settings, and with rows that live two seconds on small files.
+sh-w2-kill              --workload queue --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+sh-w2-lz-kill           --workload queue --lazyfs --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+sh-w5-kill              --workload pipeline --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+sh-w1-part              --workload log --nemesis partition --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+sh-rw-w2-kill           --workload queue --w2-partitions 400 --nemesis kill --time-limit 300 --rate 200 --queues 8 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4
+sh-rw-w2-lz-kill        --workload queue --w2-partitions 400 --lazyfs --nemesis kill --time-limit 300 --rate 200 --queues 8 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4
+sh-rw-w5-part           --workload pipeline --w5-partitions 200 --nemesis partition --time-limit 300 --rate 200 --queues 8 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4
+sh-rw-w8-kill           --workload retention --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4
