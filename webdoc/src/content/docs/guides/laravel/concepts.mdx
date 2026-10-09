@@ -70,6 +70,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (broker supervisor dashboard): config/queen.php changes remote-publication comments only; queue, lease, scaling and shutdown defaults remain as described.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (worker count and prefetch): QueenQueue leases one batch per
+# worker and runs its jobs sequentially; available partitions determine concurrent execution.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,
@@ -277,7 +279,8 @@ store whose locks every worker host can see (`null` means Laravel's default stor
 ## Prefetch, ack_async and pop_ahead
 
 Each of these takes broker round trips off a worker's path, and each leaves more work leased or
-unconfirmed when a worker fails. All are off by default.
+unconfirmed when a worker fails. The defaults are `prefetch=1`, `ack_batch=1`, `ack_async=false`
+and `pop_ahead=false`: each worker claims one job and confirms its ACK before claiming another.
 
 - **`prefetch`**: one pop leases several jobs, run one after another.
   - Saves one pop per job.
@@ -325,6 +328,35 @@ sent a job that never ran to `failed_jobs`
 with `tries` 1 on such a connection (a job class that sets `$tries = 1` is not checked).
 
 A Horizon worker pops one job per Redis call and deletes it with another; Horizon has no prefetch.
+
+### Worker count and prefetch
+
+Worker count sets how many jobs can execute at once. `prefetch` sets how many jobs each worker
+leases in one pop; that worker still executes them one after another. For a pool serving one
+queue, with `pop_ahead` and `ack_async` off and `ack_batch=1`, full batches give these bounds:
+
+| Workers | `prefetch` per worker | Jobs executing at once, at most | Jobs leased across all workers, at most |
+| ---: | ---: | ---: | ---: |
+| 1 | 1 | 1 | 1 |
+| 2 | 1 | 2 | 2 |
+| 2 | 4 | 2 | 8 |
+
+With two workers and `prefetch=1`, a worker waiting on a slow HTTP call holds its active job;
+the other can claim available work. With `prefetch=4`, the waiting worker can also hold three
+unstarted jobs that the other worker cannot claim while their lease is held. Renewal protects
+those leases; it does not move the unstarted jobs to the free worker. Keep `prefetch=1` when
+avoiding that wait matters more than saving pop requests, such as jobs with slow or variable
+external calls. Increase the worker count to add execution capacity. Higher prefetch also keeps
+more job payloads and delivery state in each worker's memory; the cost depends on their size.
+
+This concurrency is across available [partitions](#queues-and-stripes). Jobs in the same
+partition remain ordered behind its active job, even with spare workers. Default jobs share 64
+stripes, so two unrelated jobs can also land in the same stripe; `QueenPartitionable` gives an
+entity its own ordering lane.
+
+The [two-worker example](/guides/laravel/supervisors/#two-fixed-workers-for-slow-jobs) sets both
+the pool size and the master's process budget. Prefetch above 1 also needs `lease_renewal` and
+the extra process slots reserved for its helper fallback.
 
 ## The supervisor
 

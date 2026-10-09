@@ -66,6 +66,8 @@ sourceOfTruth:
 # every queen connection from config/queen.php, as QueenConnector does and as the configuration page
 # already says; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): only message browsing changes; supervisor depth reads, scaling and coordination are unchanged.
+# sourceOfTruth re-read 2026-10-09 (two fixed workers): SupervisorConfiguration resolves two
+# workers with a two-slot budget, or four slots when lease renewal reserves helper fallbacks.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
@@ -162,6 +164,57 @@ supervisor: a set of workers with one configuration (every key is in the
     ],
 ],
 ```
+
+### Two fixed workers for slow jobs
+
+For a queue that calls external services, two workers keep execution capacity available while
+one waits for a response. Put these settings in the published `config/queen.php`:
+
+```php
+'prefetch' => 1,
+'ack_batch' => 1,
+'pop_ahead' => false,
+'lease_renewal' => false,
+'supervisor' => [
+    'process_limit' => 2,
+    'supervisors' => [
+        'default' => [
+            'connection' => 'queen',
+            'consumer_group' => 'laravel',
+            'queues' => ['default'],
+            'balance' => 'simple',
+            'processes' => 2,
+            'min_processes' => 2,
+            'max_processes' => 2,
+            'timeout' => 60,
+            'retry_after' => 90,
+            'tries' => 3,
+        ],
+    ],
+],
+```
+
+`simple` keeps this fixed target even with an empty queue. Keep `processes`, `min_processes`
+and `max_processes` aligned for a fixed pool: `processes` is clamped to the min/max bounds.
+The master starts ordinary PHP workers; it does not execute the jobs itself. Each worker
+claims one job at a time here, so a busy worker holds no prefetched tail. Spare workers can
+advance on other partitions; jobs in the [same partition](/guides/laravel/concepts/#queues-and-stripes)
+still wait in order.
+
+The process budget must cover every pool's maximum and its renewal reservation:
+
+| Two-worker pool | Minimum `process_limit` | Why |
+| --- | ---: | --- |
+| `lease_renewal=false`, `prefetch=1`, `pop_ahead=false` | 2 | One child slot per worker |
+| `lease_renewal=true`, including when `prefetch` is above 1 | 4 | One worker slot and one renewal-helper slot per worker |
+
+The four-slot budget remains required when the Rust master renews leases on Linux. The helper
+slot is reserved for fallback; it does not mean four PHP processes normally run. Without renewal,
+keep the worker timeout and every job's timeout below `retry_after`. Turning on renewal keeps
+leases safe during a long wait; the [prefetch tradeoff](/guides/laravel/concepts/#worker-count-and-prefetch)
+still applies.
+
+### Master settings and startup checks
 
 The keys outside `supervisors` apply to the whole master. Two of them read an environment variable,
 named in parentheses; set the others in the file:

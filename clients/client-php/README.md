@@ -229,6 +229,14 @@ connection in `config/queue.php` win over them.
 | `ack_async` | `false` | sends each ACK without waiting; the answer is read after the next job |
 | `pop_ahead` | `false` | pops the next batch while the last job of a full batch runs |
 
+Prefetch applies to each worker. Two workers with the default `prefetch=1` can execute two jobs
+at once, each holding one job. For one queue, with `pop_ahead` off and `prefetch=4`, they can
+lease up to eight jobs but still execute only two at once; a slow worker also holds its unstarted
+batch. Other workers can proceed on available partitions, while jobs in the same partition
+remain ordered. See
+[worker count and prefetch](https://queenmq.com/guides/laravel/concepts/#worker-count-and-prefetch)
+and the [fixed two-worker pool](https://queenmq.com/guides/laravel/supervisors/#two-fixed-workers-for-slow-jobs).
+
 Raising prefetch trades round trips for a wider redelivery window: a crash can redeliver the
 unflushed batch, and a paused worker can sit on prefetched jobs until the lease expires. So the
 connector **rejects `prefetch` above 1 unless `lease_renewal` is `true`**, however the worker was
