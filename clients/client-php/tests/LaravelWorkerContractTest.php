@@ -94,6 +94,31 @@ final class LaravelWorkerContractTest extends TestCase
         }
     }
 
+    /** A document without `quiet` ran the PHP engine's workers verbose; the Rust master reads it as quiet. */
+    public function testThePhpEngineRunsQuietWhenTheDocumentDoesNotSay(): void
+    {
+        $case = WorkerInvocationFixture::cases()[0];
+        $pool = $case['pool'];
+        unset($pool['quiet']);
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            [
+                'state_directory' => $this->temporaryDirectory(),
+                'cwd' => dirname(__DIR__),
+                'php_binary' => PHP_BINARY,
+                'artisan' => __DIR__ . '/Fixtures/FakeArtisan.php',
+                'shutdown_grace' => 1,
+            ],
+        );
+
+        $process = (new \ReflectionMethod(PhpSupervisor::class, 'startWorker'))
+            ->invoke($supervisor, $case['supervisor'], $case['queue'], $pool);
+        $this->assertSame(0, $process->wait(), $process->getErrorOutput());
+        $seen = json_decode(trim($process->getOutput()), true, 512, JSON_THROW_ON_ERROR);
+
+        $this->assertContains('--quiet', $seen['arguments']);
+    }
+
     /** @param array<string, mixed> $document */
     private static function sorted(array $document): array
     {

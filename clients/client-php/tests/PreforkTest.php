@@ -238,6 +238,55 @@ final class PreforkTest extends TestCase
         $this->assertSame(0, $worker->getExitCode());
     }
 
+    /** A request line over the limit ended the server, and the fence with it SIGKILLed every worker. */
+    public function testAnOversizedRequestIsRefusedAndTheServerKeepsServing(): void
+    {
+        $report = $this->report();
+        $worker = new ForkedProcess($this->server, $this->server->fork(['sleep', $report], [], 5));
+        $this->waitUntil(fn (): bool => is_file($report) && filesize($report) > 0);
+        $commands = (new \ReflectionProperty(ForkServerClient::class, 'commands'))->getValue($this->server);
+
+        fwrite($commands, str_repeat('x', 1_100_000) . "\n");
+
+        $this->assertTrue($worker->isRunning(), 'the oversized request fenced the worker');
+        $late = new ForkedProcess($this->server, $this->server->fork(['exit', $this->report(), '0'], [], 5));
+        $this->waitUntil(fn (): bool => !$late->isRunning());
+        $this->assertSame(0, $late->getExitCode());
+        $worker->signal(SIGTERM);
+        $this->waitUntil(fn (): bool => !$worker->isRunning());
+    }
+
+    /**
+     * The late reply to a timed-out request stopped its stray only when
+     * exitStatus() of some other worker read it. A master that gave up on
+     * its first fork and spawns since tracks no forked worker: tick() reads
+     * the reply.
+     */
+    public function testATickStopsAStrayWhenNoWorkerIsPolled(): void
+    {
+        for ($attempt = 1; ; ++$attempt) {
+            $report = $this->report();
+            try {
+                $early = $this->server->fork(['sleep', $report], [], 0);
+            } catch (\RuntimeException $error) {
+                $this->assertStringContainsString('did not answer in time', $error->getMessage());
+                break;
+            }
+            posix_kill($early, SIGKILL);
+            $this->assertLessThan(5, $attempt, 'The fork never timed out.');
+        }
+        $this->waitUntil(fn (): bool => is_file($report) && filesize($report) > 0);
+        $stray = json_decode((string) file_get_contents($report), true)['pid'];
+        $this->assertTrue(posix_kill($stray, 0));
+
+        $this->waitUntil(function () use ($stray): bool {
+            $this->server->tick();
+
+            return !@posix_kill($stray, 0);
+        });
+        $this->addToAssertionCount(1);
+    }
+
     public function testTheResolverExportsPreforkOnlyWhenEnabled(): void
     {
         $queen = fn (array $supervisor): array => ['url' => 'http://queen.test:6632', 'supervisor' => $supervisor];

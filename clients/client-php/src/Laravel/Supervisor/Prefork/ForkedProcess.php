@@ -30,10 +30,18 @@ final class ForkedProcess extends Process
             return false;
         }
         $status = $this->server->exitStatus($this->forkedPid);
-        if ($status === null && !$this->server->isAlive() && !@posix_kill($this->forkedPid, 0)) {
-            // The server is gone and so is the worker: its exit status went
-            // with the server.
-            $status = 0;
+        if ($status === null && !$this->server->isAlive()) {
+            // The server is gone. Its worker came to this master when the
+            // master is the nearest subreaper, as PID 1 in a container:
+            // reaped here, with its real status, instead of staying a zombie.
+            // Otherwise it is init's, and once gone its status went with the
+            // server.
+            $reaped = pcntl_waitpid($this->forkedPid, $raw, WNOHANG);
+            if ($reaped === $this->forkedPid) {
+                $status = $raw;
+            } elseif ($reaped !== 0 && !@posix_kill($this->forkedPid, 0)) {
+                $status = 0;
+            }
         }
         if ($status === null) {
             return true;
