@@ -1,0 +1,11 @@
+test                       verdict   waits restarts  notes refusals  longest wait
+fo-repro-planned-1         valid         8        0      1        0  9215 ms
+fo-repro-planned-2         valid        15        0      0        0  11099 ms
+fo-planned-smoke           valid         0        0      0        0  0 ms
+fo-planned-kill            valid         3        0      0        0  13063 ms
+fo-planned-part            valid         4        0      0        0  4485 ms
+fo-planned-pause           valid         0        0      0        0  0 ms
+fo-planned-lz-kill         valid         0        0      0        0  0 ms
+fo-planned-restart         valid         0        0      0        0  0 ms
+fo-planned-txn-kill        valid         1        0      1        0  7043 ms
+fo-planned-txn-part        valid         0        0      4        0  0 ms

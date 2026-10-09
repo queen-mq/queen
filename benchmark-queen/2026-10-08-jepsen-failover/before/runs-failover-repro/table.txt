@@ -1,0 +1,7 @@
+test                   verdict      acked replayed     lost  lost-ms    older  pl-lost   diverg      own  refused late-ref  late-ms  1st-own  anomalies
+fo-repro-primaries-1   UNKNOWN/:unknown        -        -        -        -        -        -        -        -        -        -        -        -  
+fo-repro-primaries-2   CRASHED(rc=255)        -        -        -        -        -        -        -        -        -        -        -        -  
+fo-repro-primaries-3   valid         6871     6873        0      nil        0        0        0     2942    10518        0      nil       23  
+fo-repro-one-1         valid         8170     8174        0      nil        0        0        0     6129     9231        0      nil       30  
+fo-repro-one-2         valid         7263     7271        0      nil        0        0        0     7134     9749        0      nil        9  
+fo-repro-planned-1     UNKNOWN/:unknown        -        -        -        -        -        -        -        -        -        -        -        -  

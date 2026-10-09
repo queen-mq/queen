@@ -1,0 +1,76 @@
+2026-10-08T20:37:06Z start fo-repro-primaries-1: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T20:41:26Z done  fo-repro-primaries-1: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T20:37:22.67431323Z log=/root/runs-final/fo-repro-primaries-1.log
+2026-10-08T20:41:27Z start fo-repro-primaries-2: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T20:45:37Z done  fo-repro-primaries-2: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T20:41:40.105581617Z log=/root/runs-final/fo-repro-primaries-2.log
+2026-10-08T20:45:37Z start fo-repro-primaries-3: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T20:49:42Z done  fo-repro-primaries-3: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T20:45:50.269303735Z log=/root/runs-final/fo-repro-primaries-3.log
+2026-10-08T20:49:42Z start fo-repro-primaries-4: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T20:53:47Z done  fo-repro-primaries-4: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T20:49:54.992396161Z log=/root/runs-final/fo-repro-primaries-4.log
+2026-10-08T20:53:47Z start fo-repro-primaries-5: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T20:57:52Z done  fo-repro-primaries-5: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T20:54:01.073207136Z log=/root/runs-final/fo-repro-primaries-5.log
+2026-10-08T20:57:52Z start fo-repro-primaries-6: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T21:02:03Z done  fo-repro-primaries-6: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T20:58:06.934021876Z log=/root/runs-final/fo-repro-primaries-6.log
+2026-10-08T21:02:03Z start fo-repro-one-1: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets one --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T21:06:18Z done  fo-repro-one-1: valid store=/root/jepsen-failover/store/queen-failover-partition_p=one_standby=3_crash_offload=on_lanes=16/2026-10-08T21:02:18.362596494Z log=/root/runs-final/fo-repro-one-1.log
+2026-10-08T21:06:18Z start fo-repro-one-2: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets one --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T21:10:28Z done  fo-repro-one-2: valid store=/root/jepsen-failover/store/queen-failover-partition_p=one_standby=3_crash_offload=on_lanes=16/2026-10-08T21:06:33.168110666Z log=/root/runs-final/fo-repro-one-2.log
+2026-10-08T21:10:28Z start fo-repro-planned-1: --workload failover --standby-nodes 3 --failover planned --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T21:14:38Z done  fo-repro-planned-1: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_planned_offload=on_lanes=16/2026-10-08T21:10:43.783273648Z log=/root/runs-final/fo-repro-planned-1.log
+2026-10-08T21:14:38Z start fo-repro-planned-2: --workload failover --standby-nodes 3 --failover planned --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T21:18:49Z done  fo-repro-planned-2: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_planned_offload=on_lanes=16/2026-10-08T21:14:52.958640613Z log=/root/runs-final/fo-repro-planned-2.log
+2026-10-08T21:18:49Z matrix matrix-failover-repro.txt finished
+2026-10-08T21:18:49Z start fo-crash-smoke: --workload failover --standby-nodes 3 --failover crash --nemesis none --time-limit 180 --rate 200
+2026-10-08T21:22:39Z done  fo-crash-smoke: valid store=/root/jepsen-failover/store/queen-failover-none_standby=3_crash_offload=on_lanes=16/2026-10-08T21:19:05.193077118Z log=/root/runs-final/fo-crash-smoke.log
+2026-10-08T21:22:39Z start fo-planned-smoke: --workload failover --standby-nodes 3 --failover planned --nemesis none --time-limit 180 --rate 200
+2026-10-08T21:26:24Z done  fo-planned-smoke: valid store=/root/jepsen-failover/store/queen-failover-none_standby=3_planned_offload=on_lanes=16/2026-10-08T21:22:52.632914925Z log=/root/runs-final/fo-planned-smoke.log
+2026-10-08T21:26:24Z start fo-crash-kill: --workload failover --standby-nodes 3 --failover crash --nemesis kill --time-limit 300 --rate 200
+2026-10-08T21:32:14Z done  fo-crash-kill: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_crash_offload=on_lanes=16/2026-10-08T21:26:39.120238434Z log=/root/runs-final/fo-crash-kill.log
+2026-10-08T21:32:14Z start fo-crash-part: --workload failover --standby-nodes 3 --failover crash --nemesis partition --time-limit 300 --rate 200
+2026-10-08T21:38:10Z done  fo-crash-part: valid store=/root/jepsen-failover/store/queen-failover-partition_p=one,primaries,majority,majorities-ring_standby=3_crash_offload=on_lanes=16/2026-10-08T21:32:29.486334634Z log=/root/runs-final/fo-crash-part.log
+2026-10-08T21:38:10Z start fo-crash-pause: --workload failover --standby-nodes 3 --failover crash --nemesis pause --time-limit 300 --rate 200
+2026-10-08T21:44:05Z done  fo-crash-pause: valid store=/root/jepsen-failover/store/queen-failover-pause_t=one,primaries,majority,all_standby=3_crash_offload=on_lanes=16/2026-10-08T21:38:25.647436147Z log=/root/runs-final/fo-crash-pause.log
+2026-10-08T21:44:05Z start fo-crash-lz-kill: --workload failover --standby-nodes 3 --failover crash --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-08T21:50:00Z done  fo-crash-lz-kill: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_crash_lazyfs_offload=on_lanes=16/2026-10-08T21:44:20.719525225Z log=/root/runs-final/fo-crash-lz-kill.log
+2026-10-08T21:50:00Z start fo-crash-restart: --workload failover --standby-nodes 3 --failover crash --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-08T21:55:51Z done  fo-crash-restart: valid store=/root/jepsen-failover/store/queen-failover-restart_standby=3_crash_offload=on_lanes=16/2026-10-08T21:50:18.312710842Z log=/root/runs-final/fo-crash-restart.log
+2026-10-08T21:55:51Z start fo-crash-clock: --workload failover --standby-nodes 3 --failover crash --nemesis clock --time-limit 300 --rate 200
+2026-10-08T22:01:46Z done  fo-crash-clock: valid store=/root/jepsen-failover/store/queen-failover-clock_t=one,primaries,majority,all_standby=3_crash_offload=on_lanes=16/2026-10-08T21:56:05.635772362Z log=/root/runs-final/fo-crash-clock.log
+2026-10-08T22:01:46Z start fo-crash-all: --workload failover --standby-nodes 3 --failover crash --nemesis all --time-limit 300 --rate 200
+2026-10-08T22:07:31Z done  fo-crash-all: valid store=/root/jepsen-failover/store/queen-failover-clock,kill,partition,pause_p=one,primaries,majority,majorities-ring_t=one,primaries,majority,all_standby=3_crash_offload=on_lanes=16/2026-10-08T22:01:59.355277559Z log=/root/runs-final/fo-crash-all.log
+2026-10-08T22:07:31Z start fo-planned-kill: --workload failover --standby-nodes 3 --failover planned --nemesis kill --time-limit 300 --rate 200
+2026-10-08T22:13:17Z done  fo-planned-kill: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_planned_offload=on_lanes=16/2026-10-08T22:07:46.525075036Z log=/root/runs-final/fo-planned-kill.log
+2026-10-08T22:13:17Z start fo-planned-part: --workload failover --standby-nodes 3 --failover planned --nemesis partition --time-limit 300 --rate 200
+2026-10-08T22:19:12Z done  fo-planned-part: valid store=/root/jepsen-failover/store/queen-failover-partition_p=one,primaries,majority,majorities-ring_standby=3_planned_offload=on_lanes=16/2026-10-08T22:13:31.893224275Z log=/root/runs-final/fo-planned-part.log
+2026-10-08T22:19:12Z start fo-planned-pause: --workload failover --standby-nodes 3 --failover planned --nemesis pause --time-limit 300 --rate 200
+2026-10-08T22:25:07Z done  fo-planned-pause: valid store=/root/jepsen-failover/store/queen-failover-pause_t=one,primaries,majority,all_standby=3_planned_offload=on_lanes=16/2026-10-08T22:19:27.220253268Z log=/root/runs-final/fo-planned-pause.log
+2026-10-08T22:25:07Z start fo-planned-lz-kill: --workload failover --standby-nodes 3 --failover planned --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-08T22:31:02Z done  fo-planned-lz-kill: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_planned_lazyfs_offload=on_lanes=16/2026-10-08T22:25:24.153576089Z log=/root/runs-final/fo-planned-lz-kill.log
+2026-10-08T22:31:02Z start fo-planned-restart: --workload failover --standby-nodes 3 --failover planned --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-08T22:36:53Z done  fo-planned-restart: valid store=/root/jepsen-failover/store/queen-failover-restart_standby=3_planned_offload=on_lanes=16/2026-10-08T22:31:17.85026522Z log=/root/runs-final/fo-planned-restart.log
+2026-10-08T22:36:53Z start fo-crash-txn-kill: --workload failover --standby-nodes 3 --failover crash --txn --nemesis kill --time-limit 300 --rate 200
+2026-10-08T22:42:43Z done  fo-crash-txn-kill: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_txn_standby=3_crash_offload=on_lanes=16/2026-10-08T22:37:08.429902076Z log=/root/runs-final/fo-crash-txn-kill.log
+2026-10-08T22:42:43Z start fo-crash-txn-part: --workload failover --standby-nodes 3 --failover crash --txn --nemesis partition --time-limit 300 --rate 200
+2026-10-08T22:48:38Z done  fo-crash-txn-part: valid store=/root/jepsen-failover/store/queen-failover-partition_p=one,primaries,majority,majorities-ring_txn_standby=3_crash_offload=on_lanes=16/2026-10-08T22:42:56.435433966Z log=/root/runs-final/fo-crash-txn-part.log
+2026-10-08T22:48:38Z start fo-crash-txn-lz-kill: --workload failover --standby-nodes 3 --failover crash --txn --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-08T22:54:29Z done  fo-crash-txn-lz-kill: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_txn_standby=3_crash_lazyfs_offload=on_lanes=16/2026-10-08T22:48:51.804316972Z log=/root/runs-final/fo-crash-txn-lz-kill.log
+2026-10-08T22:54:29Z start fo-planned-txn-kill: --workload failover --standby-nodes 3 --failover planned --txn --nemesis kill --time-limit 300 --rate 200
+2026-10-08T23:00:29Z done  fo-planned-txn-kill: UNKNOWN store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_txn_standby=3_planned_offload=on_lanes=16/2026-10-08T22:54:42.81839362Z log=/root/runs-final/fo-planned-txn-kill.log
+2026-10-08T23:00:29Z start fo-planned-txn-part: --workload failover --standby-nodes 3 --failover planned --txn --nemesis partition --time-limit 300 --rate 200
+2026-10-08T23:06:29Z done  fo-planned-txn-part: valid store=/root/jepsen-failover/store/queen-failover-partition_p=one,primaries,majority,majorities-ring_txn_standby=3_planned_offload=on_lanes=16/2026-10-08T23:00:44.941974817Z log=/root/runs-final/fo-planned-txn-part.log
+2026-10-08T23:06:29Z start fo-crash-kill-2: --workload failover --standby-nodes 3 --failover crash --nemesis kill --time-limit 300 --rate 200
+2026-10-08T23:12:20Z done  fo-crash-kill-2: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_crash_offload=on_lanes=16/2026-10-08T23:06:43.861035288Z log=/root/runs-final/fo-crash-kill-2.log
+2026-10-08T23:12:20Z start fo-crash-part-2: --workload failover --standby-nodes 3 --failover crash --nemesis partition --time-limit 300 --rate 200
+2026-10-08T23:18:10Z done  fo-crash-part-2: valid store=/root/jepsen-failover/store/queen-failover-partition_p=one,primaries,majority,majorities-ring_standby=3_crash_offload=on_lanes=16/2026-10-08T23:12:33.197845483Z log=/root/runs-final/fo-crash-part-2.log
+2026-10-08T23:18:10Z start fo-crash-lz-kill-2: --workload failover --standby-nodes 3 --failover crash --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-08T23:24:00Z done  fo-crash-lz-kill-2: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_crash_lazyfs_offload=on_lanes=16/2026-10-08T23:18:24.732424587Z log=/root/runs-final/fo-crash-lz-kill-2.log
+2026-10-08T23:24:00Z start fo-crash-txn-kill-2: --workload failover --standby-nodes 3 --failover crash --txn --nemesis kill --time-limit 300 --rate 200
+2026-10-08T23:29:51Z done  fo-crash-txn-kill-2: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_txn_standby=3_crash_offload=on_lanes=16/2026-10-08T23:24:15.64699652Z log=/root/runs-final/fo-crash-txn-kill-2.log
+2026-10-08T23:29:51Z start fo-behind: --workload failover --standby-nodes 3 --failover crash-behind --nemesis none --time-limit 300 --rate 200
+2026-10-08T23:35:41Z done  fo-behind: valid store=/root/jepsen-failover/store/queen-failover-none_standby=3_crash-behind_offload=on_lanes=16/2026-10-08T23:30:06.910305834Z log=/root/runs-final/fo-behind.log
+2026-10-08T23:35:41Z start fo-behind-txn: --workload failover --standby-nodes 3 --failover crash-behind --txn --nemesis none --time-limit 300 --rate 200
+2026-10-08T23:41:31Z done  fo-behind-txn: valid store=/root/jepsen-failover/store/queen-failover-none_txn_standby=3_crash-behind_offload=on_lanes=16/2026-10-08T23:35:54.87282903Z log=/root/runs-final/fo-behind-txn.log
+2026-10-08T23:41:31Z start fo-behind-kill: --workload failover --standby-nodes 3 --failover crash-behind --nemesis kill --time-limit 300 --rate 200
+2026-10-08T23:47:17Z done  fo-behind-kill: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_crash-behind_offload=on_lanes=16/2026-10-08T23:41:44.310220546Z log=/root/runs-final/fo-behind-kill.log
+2026-10-08T23:47:17Z start fo-behind-txn-part: --workload failover --standby-nodes 3 --failover crash-behind --txn --nemesis partition --time-limit 300 --rate 200
+2026-10-08T23:53:17Z done  fo-behind-txn-part: valid store=/root/jepsen-failover/store/queen-failover-partition_p=one,primaries,majority,majorities-ring_txn_standby=3_crash-behind_offload=on_lanes=16/2026-10-08T23:47:30.516654956Z log=/root/runs-final/fo-behind-txn-part.log
+2026-10-08T23:53:17Z matrix matrix-failover.txt finished

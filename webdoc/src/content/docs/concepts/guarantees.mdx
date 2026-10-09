@@ -117,7 +117,8 @@ you to run.
   minority, and no more.
 - A [standby cluster](/operate/standby/) replays this one a moment later, and the cluster does not
   wait for it. Promoting the standby after the cluster is lost gives up the acked writes the
-  standby had not read yet. No Jepsen campaign has run against a standby.
+  standby had not read yet, and nothing older: that, and a planned switch that loses nothing, is
+  what the failover workload (W12) checks. Its runs are on the [Jepsen](/benchmarks/jepsen/) page.
 - A node cut off from the majority keeps answering `/health` with 200 while every write it takes
   times out with a 503 after 30 seconds, so check that a cluster can commit with a write, not with
   `/health`.

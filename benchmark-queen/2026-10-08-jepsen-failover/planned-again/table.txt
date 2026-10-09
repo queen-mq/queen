@@ -1,0 +1,11 @@
+test                   verdict      acked replayed     lost  lost-ms    older  pl-lost   diverg      own  refused late-ref  late-ms  1st-own  anomalies
+fo-repro-planned-1     valid         6198     6207        0      nil        0        0        0     3944    11629        0      nil        4  
+fo-repro-planned-2     valid         5990     5990        0      nil        0        0        0     4154    12106        0      nil        6  
+fo-planned-smoke       valid         8059     8059        0      nil        0        0        0     6262     8246        0      nil       21  
+fo-planned-kill        valid         5492     5499        0      nil        0        0        0     4959     6377        0      nil        8  
+fo-planned-part        valid        11169    11174        0      nil        0        0        0     8547    15234        0      nil        3  
+fo-planned-pause       valid         9068     9068        0      nil        0        0        0     7101     8044        0      nil       15  
+fo-planned-lz-kill     valid        10833    10834        0      nil        0        0        0     5426     9427        0      nil        5  
+fo-planned-restart     valid        13226    13226        0      nil        0        0        0    10927    13351        0      nil       28  
+fo-planned-txn-kill    valid        13336    13340        0      nil        0        0        0    13687     6359        0      nil       14  
+fo-planned-txn-part    valid        26661    26675        0      nil        0        0        0    20716    14438        0      nil       25  

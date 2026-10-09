@@ -1,0 +1,21 @@
+2026-10-08T23:53:36Z start fo-repro-planned-1: --workload failover --standby-nodes 3 --failover planned --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T23:57:47Z done  fo-repro-planned-1: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_planned_offload=on_lanes=16/2026-10-08T23:53:49.524640689Z log=/root/runs-final-planned/fo-repro-planned-1.log
+2026-10-08T23:57:47Z start fo-repro-planned-2: --workload failover --standby-nodes 3 --failover planned --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-09T00:01:52Z done  fo-repro-planned-2: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_planned_offload=on_lanes=16/2026-10-08T23:57:58.863009081Z log=/root/runs-final-planned/fo-repro-planned-2.log
+2026-10-09T00:01:52Z start fo-planned-smoke: --workload failover --standby-nodes 3 --failover planned --nemesis none --time-limit 180 --rate 200
+2026-10-09T00:05:37Z done  fo-planned-smoke: valid store=/root/jepsen-failover/store/queen-failover-none_standby=3_planned_offload=on_lanes=16/2026-10-09T00:02:06.781181425Z log=/root/runs-final-planned/fo-planned-smoke.log
+2026-10-09T00:05:37Z start fo-planned-kill: --workload failover --standby-nodes 3 --failover planned --nemesis kill --time-limit 300 --rate 200
+2026-10-09T00:11:27Z done  fo-planned-kill: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_planned_offload=on_lanes=16/2026-10-09T00:05:51.06459414Z log=/root/runs-final-planned/fo-planned-kill.log
+2026-10-09T00:11:27Z start fo-planned-part: --workload failover --standby-nodes 3 --failover planned --nemesis partition --time-limit 300 --rate 200
+2026-10-09T00:17:23Z done  fo-planned-part: valid store=/root/jepsen-failover/store/queen-failover-partition_p=one,primaries,majority,majorities-ring_standby=3_planned_offload=on_lanes=16/2026-10-09T00:11:42.143159439Z log=/root/runs-final-planned/fo-planned-part.log
+2026-10-09T00:17:23Z start fo-planned-pause: --workload failover --standby-nodes 3 --failover planned --nemesis pause --time-limit 300 --rate 200
+2026-10-09T00:23:08Z done  fo-planned-pause: valid store=/root/jepsen-failover/store/queen-failover-pause_t=one,primaries,majority,all_standby=3_planned_offload=on_lanes=16/2026-10-09T00:17:36.349572847Z log=/root/runs-final-planned/fo-planned-pause.log
+2026-10-09T00:23:08Z start fo-planned-lz-kill: --workload failover --standby-nodes 3 --failover planned --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-09T00:28:58Z done  fo-planned-lz-kill: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_planned_lazyfs_offload=on_lanes=16/2026-10-09T00:23:23.325470671Z log=/root/runs-final-planned/fo-planned-lz-kill.log
+2026-10-09T00:28:58Z start fo-planned-restart: --workload failover --standby-nodes 3 --failover planned --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-09T00:34:44Z done  fo-planned-restart: valid store=/root/jepsen-failover/store/queen-failover-restart_standby=3_planned_offload=on_lanes=16/2026-10-09T00:29:13.033213156Z log=/root/runs-final-planned/fo-planned-restart.log
+2026-10-09T00:34:44Z start fo-planned-txn-kill: --workload failover --standby-nodes 3 --failover planned --txn --nemesis kill --time-limit 300 --rate 200
+2026-10-09T00:40:39Z done  fo-planned-txn-kill: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_txn_standby=3_planned_offload=on_lanes=16/2026-10-09T00:34:58.224982405Z log=/root/runs-final-planned/fo-planned-txn-kill.log
+2026-10-09T00:40:39Z start fo-planned-txn-part: --workload failover --standby-nodes 3 --failover planned --txn --nemesis partition --time-limit 300 --rate 200
+2026-10-09T00:46:39Z done  fo-planned-txn-part: valid store=/root/jepsen-failover/store/queen-failover-partition_p=one,primaries,majority,majorities-ring_txn_standby=3_planned_offload=on_lanes=16/2026-10-09T00:40:53.330141539Z log=/root/runs-final-planned/fo-planned-txn-part.log
+2026-10-09T00:46:39Z matrix matrix-planned-again.txt finished

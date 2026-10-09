@@ -14,6 +14,8 @@ sourceOfTruth:
   - test/jepsen/src/jepsen/queen/workload/dlq.clj
   - test/jepsen/src/jepsen/queen/workload/timers.clj
   - test/jepsen/src/jepsen/queen/workload/locks.clj
+  - test/jepsen/src/jepsen/queen/workload/failover.clj
+  - test/jepsen/src/jepsen/queen/db.clj
   - test/jepsen/run-campaign.sh
 ---
 
@@ -31,8 +33,10 @@ Each test starts a fresh five-node cluster, which needs three nodes for a quorum
 workload for 300 seconds at 100 to 200 operations a second while the nemesis injects one class of
 fault (a few tests combine two), then heals everything, lets the clients finish (drain the queues,
 read every partition) and hands the full history to the workload's checkers. A test is valid only
-when every checker is. The harness is in `test/jepsen/` (Clojure, Jepsen 0.3.14), and
-`run-campaign.sh` runs a list of tests and writes one verdict line per test:
+when every checker is. The failover workload is the exception in its shape: it starts two
+clusters of three nodes, one following the other, and the faults run on both. The harness is in
+`test/jepsen/` (Clojure, Jepsen 0.3.14), and `run-campaign.sh` runs a list of tests and writes
+one verdict line per test:
 
 <Figure id="benchmarks/jepsen-test" />
 
@@ -63,6 +67,7 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | W9 `streams` | stream cycles: pop a batch, read the partition's state, one cycle that acks it, writes output and updates the state | a batch counted twice or never, state that disagrees with the output |
 | W10 `timers` | schedule, reschedule and cancel timers, and consume what fires | a timer that fires twice or early, a cancelled timer that fires, fires and cancels that do not add up to the timers created |
 | W11 `locks`, W11b `semaphore` | take a lock, or one permit of a semaphore, for 2 to 4 seconds; commit transactions that carry its guard and push to the partition it protects; renew it, release it and read its holders. No client watches a clock, so each goes on using a token whose lease ran out | a guarded transaction that commits after its permit moved on, a token with two owners, a record of a transaction that rolled back, a grant whose token is not above the one before it, a permit handed to another owner before its lease could have ended |
+| W12 `failover` | two clusters of three nodes, one [following the other](/operate/standby/): push to the source, one record or a transaction over several partitions, and keep sending writes to the standby, which must refuse them; then the source stops (a crash, a crash while the standby is 10 s behind, or a planned switch that waits for the standby), the standby is promoted, and the clients write to it | a write a standby took before its promotion; a promoted log that is not the source's, record for record, up to where it ends; a transaction there in part; a planned switch that lost a write; after a crash, an acknowledged write missing while a later one is there; a write of the promoted cluster lost; a write refused as a standby's and found in the log |
 
 ## The faults
 
@@ -90,12 +95,27 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | Kafka-facade build | 2026-10-02 | the code of 2.0.0-beta.5, before a fix inside the facade | 65 | 64 valid, 1 unknown |
 | 2.0.1 | 2026-10-05 | 2.0.1, `bc1b5bfb6` | 19: queue, pipeline, dead letters, log, dedup and KV register under kills, pauses, partitions, restarts, a deaf leader and power loss, the queue and the pipeline on 2,000 and 1,000 partitions whose idle consumer state leaves the leader's memory after a second | 19 valid |
 | Locks | 2026-10-08 | `2287397a3`: 2.0.3 with locks, the KV `check` op and cluster version 5 | 41: W11 and W11b (29, three of them without faults), then KV register, counter and claim, Elle and the pipeline again (12), under kills, pauses, partitions, clock faults, restarts, membership changes, bridges, a deaf leader and power loss, and with kills, pauses, partitions and clock faults in one test | 41 valid |
+| Failover | 2026-10-08 and 09 | `b69470031`: 2.0.4 with the standby cluster, locks and the four fixes of that night | 37: W12 on two clusters of three nodes, with crashes of the source, planned switches, transactions and crashes that find the standby 10 s behind, under kills, power loss, pauses, partitions, clock faults, restarts and all of them at once | 36 valid; the other was the harness, and the 10 planned switches ran again valid |
 
 The unknown is W9 under bridge partitions. After the last heal, a follower's pops kept timing out
 for about 90 seconds although it had caught up, so the final reads did not finish within the
 test's time limit and the checker had no end state to judge. It is a liveness problem, and it is
 open. P8 to P10 are archived with every history in
 `benchmark-queen/2026-09-27-jepsen-archive/`.
+
+The failover campaign started on the build as it was merged and found three bugs in its first
+two hours, listed below; a fourth came from the standby's own tests the same evening. On the build
+with the four fixes, the sources acknowledged 446,016 writes over 37 tests. No standby took a
+write before its promotion, no promoted log differed from its source's, and the ten planned
+switches lost nothing. A crash of the source lost what the standby had not read: nothing in 19
+of 23 runs, the writes of the last 3 to 20 seconds in the other four, where the standby's own
+leader was cut off or dead at that moment, and about 10 seconds of writes in the four runs that
+cut the two clusters apart for 10 seconds first. Every standby was promoted, in 9 ms at the
+median, and took its first write 10 ms later. The one test that did not end valid was a planned
+switch during which the harness killed two nodes of each cluster and then waited two minutes
+for a standby it had left without a quorum; the ten planned tests ran again on a harness that
+heals before it waits, all valid. The verdicts and counts are in
+`benchmark-queen/2026-10-08-jepsen-failover/`.
 
 The locks campaign counted what the fence did. In its 29 lock and semaphore tests 373,312 guarded
 transactions committed, permits changed hands 18,456 times, and the guard refused 3,245
@@ -122,11 +142,23 @@ that found it.
 | P14 | W2, clock strobe | the new consumption engine timed leases on the wall clock: 223 overlapping leases | `d013946d` |
 | P15 | W2, graceful restart | an ack whose answer was lost in a leader change was answered "stale" on the new leader, and its message never came back | `7a2a1711` |
 | P22 | W7, kill -9 | 1 to 8 of about 7,600 dead letters were filed without their payload | `7a2a1711` |
+| Failover | W12, power loss and partitions | a standby's new leader planned a client's command that had waited out its election, stamped with its own clock; every node refused the next entry it replayed, and stopped | `963f7846b` |
+| Full, 2026-10-08 | W2, power loss with two slow disks; W12, partitions | a leader that no quorum had acknowledged for 2 s had a write refused by raft, stopped planning and never started again while it led: every request ran into its deadline, and a standby could not be promoted | `5d48aef94` |
+| Failover | W12, partitions | a node that had led the standby and was elected again after the promotion answered `503 standby`, also to the retry of a write the cluster had already taken | `63a4805ed` |
 
 Two of P8's failures were our own. The claim workload lost ids when a call timed out, and Elle
 reported version cycles that did not exist, because a set union in its `bifurcan` dependency
 modified its inputs. The W4 checker runs with that union replaced (`edc699b6`), until Elle ships on
 a fixed `bifurcan`.
+
+The night of 2026-10-08 had two of our own as well. A planned switch ended unknown because the
+failover's steps let the kill nemesis in between them: it killed two nodes of each cluster, and
+the harness then waited for a standby it had left without a quorum (`7bf42d5ac`). And a
+semaphore test was judged invalid because the nodes' clocks had drifted 0.55 s apart. The
+harness turns the nodes' time daemon off for the clock faults, only a clock test set the clocks
+again, and the last one on those nodes was three hours old; a lease survives a leader change
+only while the clocks agree within 500 ms. Every test now starts with its nodes' clocks set
+(`c4525140e`).
 
 ## Limits
 
@@ -137,8 +169,9 @@ Lease exclusivity across a leader change needs the nodes' clocks within
 `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. Losing a majority of the disks for good can
 lose acknowledged writes, since raft survives the loss of a minority. And the full campaign last
 ran on the code of 2.0.0-beta.5: 2.0.1 and the locks build each ran the tests of what they
-changed. The locks build was tested before it was merged with 2.0.4 and the standby cluster, and
-no campaign has run against a standby.
+changed. A standby's failover has its own workload since 2026-10-08, on a standby that starts
+empty beside its source: a seeded standby, one that follows across a version upgrade, and two
+clusters in different places were not part of it.
 
 What each API guarantees, written for the developer using it, is on
 [guarantees](/concepts/guarantees/).

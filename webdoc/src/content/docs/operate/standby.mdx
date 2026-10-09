@@ -86,6 +86,16 @@ never holds half an entry, and never an entry the source did not commit.
 A planned switch loses nothing, because you can wait for the moment to be zero. The steps are
 under [Promote](#promote).
 
+Both statements are what the [Jepsen failover tests](/benchmarks/jepsen/) check, on two clusters
+of three nodes with kills, power loss, pauses, partitions and clock faults running on both. In
+the 37 runs of 2026-10-08 no promoted log differed from its source's, no write was missing
+while a later one was there, and the 10 planned switches lost none of 111,813 acknowledged
+writes. The moment was not always short, though. Only the standby's leader reads the source, so
+while that node is cut off or dead the standby falls behind until another of its nodes leads.
+A crash of the source lost nothing in 19 of the 23 runs without a cut link, and in the other
+four it lost the writes of the last 3 to 20 seconds, because the standby's leader was cut off
+or dead when the source died.
+
 ## Start a standby
 
 ### On the source
