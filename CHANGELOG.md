@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## 2.1.0
+## 2.1.0 - 2026-10-09
 
 **Server: a standby cluster.** A second cluster can now replay the first one's log and take over
 when the first is lost. The standby's leader reads the source's committed entries over the raft
@@ -73,13 +73,22 @@ renew in the background every third of the lifetime and signal a lost lock. The 
 handles have no background renewal: `keepAlive()` (`keep_alive()` in C++) renews at a checkpoint
 in the work loop. A guarded commit that lost only to its own handle's renewal is sent again with
 the new token. `kv.check` is on the KV client and the transaction's KV builder of each SDK. In the
-JavaScript, Python, Go, Rust and C++ clients 2.1.0 and the PHP client 2.4.0.
+JavaScript, Python, Go, Rust and C++ clients 2.1.0 and the PHP client 2.4.0. The Rust client
+requires `queen-protocol` 1.4.0, the wire-types crate that carries the lock types.
 
 **Dashboard: a Locks page.** Every held lock and semaphore permit with its holder, since when it
 is held, its last renewal and when it expires. It reads the permits as KV rows, so a viewer can
 open it, and it writes nothing: the drawer shows the guard a transaction carries and the call
 that releases the lease period on screen. `get` answers the same `since` for each holder: a
 renewal does not move it.
+
+**Dashboard: supervisors grouped by application.** Instances that publish under one group share
+one card: workers against the target, pools to check, the instances underneath, and the last hour
+of traffic or backlog of a reported queue (#110). The card is built from the dashboard's own
+header, stats and tables, and a healthy application is a grey dot, as on the Overview.
+
+**Dashboard: the theme switch is an icon menu.** System, Light and Dark sit behind one icon in the
+header instead of a select (#108).
 
 **Server: a KV call that mixed a read with writes that all lost no longer hangs.** A batch on
 `POST /api/v1/kv` such as a `putIfAbsent` that lost beside a `get` wrote nothing, so it had no log
