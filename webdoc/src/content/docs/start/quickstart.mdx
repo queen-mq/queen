@@ -44,6 +44,9 @@ verifiedBy:
 # exports two metric families. Nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-09 (2.2.0): the /health line is a fresh 2.2.0 node's: version 2.2.0,
 # cluster version 6, and one entry applied, the one that raises the version.
+# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): facade/real.rs
+# exports queen_raft_qlog_index_maps, the mapped log-file indexes and the kernel's limit. Nothing
+# this page states changes.
 ---
 
 You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the

@@ -69,6 +69,9 @@ digest: >-
 # directory by a rename and sweeps what is left at a start, so the refusal "it ends at seq 0" no
 # longer follows a removal that stopped half-way; the remedy on this page for a node that refuses is
 # unchanged. The rollback paragraph names 2.2.0.
+# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): qlog/set.rs asks the
+# kernel for a chunk of records at once when a walk over old messages finds the file cold, and
+# facade/real.rs exports queen_raft_qlog_index_maps. Nothing this page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and

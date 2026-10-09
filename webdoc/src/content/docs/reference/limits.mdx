@@ -40,6 +40,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader; phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). No limit or default changes.
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): a row for what a push
 # costs in memory, and for how long.
+# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): a row for the memory
+# maps of the sealed files' indexes (qlog/index.rs reads a small one into memory); batcher.rs warns
+# near the limit and facade/real.rs exports queen_raft_qlog_index_maps.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -218,4 +221,5 @@ The last three are constants in `server/src/handlers/ephemeral.rs`.
 | Message traces (on disk, expired at most 512 per step) | 7 days | `QUEEN_RAFT_TRACE_RETENTION_S` |
 | A trace whose `transactionId` or one of its names makes a store key over 511 bytes is answered `400` | 511 bytes | none |
 | Disk high-water mark: writes that grow storage answer 507 | 85% | `QUEEN_RAFT_DISK_HIGH_PCT` (released at `QUEEN_RAFT_DISK_LOW_PCT`, 80%) |
+| Sealed log files whose index is memory-mapped (one that fits a page, about 80 records, is read into memory and takes no map) | 65,530 maps a process, about 4 TB of log at 64 MiB a file | the kernel's `vm.max_map_count`; `QUEEN_RAFT_SEGMENT_BYTES` |
 | A node stops keeping its log for a [standby cluster](/operate/standby/) that is behind | when its disk is 80% full, or the standby was silent for 3600 s | `QUEEN_LINK_HOLD_DISK_PCT`, `QUEEN_LINK_HOLD_S` |

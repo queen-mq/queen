@@ -47,6 +47,9 @@ sourceOfTruth:
 # QUEEN_RAFT_ROWS_WINDOW and QUEEN_QLOG_DIRX join the table.
 # sourceOfTruth re-read 2026-10-09 (two housekeeping fixes): qlog/set.rs retires an empty log's
 # directory by a rename before deleting it; no variable is added or changed.
+# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): qlog/set.rs reads
+# old messages a chunk at a time with a read-ahead hint, batcher.rs warns near the kernel's map
+# limit, facade/real.rs exports a series for it; no variable is added or changed.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

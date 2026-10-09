@@ -19,6 +19,9 @@ sourceOfTruth:
 # hash list is kept, as the settings table says; the runs on this page predate the change.
 # sourceOfTruth re-read 2026-10-09 (two housekeeping fixes): qlog/set.rs retires an empty log's
 # directory by a rename before deleting it. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): qlog/set.rs asks the
+# kernel for a chunk of records at once when a walk over old messages finds the file cold. Nothing
+# this page states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

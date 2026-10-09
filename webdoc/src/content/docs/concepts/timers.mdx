@@ -25,6 +25,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): batcher.rs reads
 # QUEEN_RAFT_ROWS_WINDOW and QUEEN_QLOG_DIRX and hands the retention scanner the queue-log reader.
 # The timer tick and the fire step are untouched.
+# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): batcher.rs warns in
+# the log when the log files' mapped indexes pass 70% of vm.max_map_count. The timer tick and the
+# fire step are untouched.
 ---
 
 A timer schedules a message for later. When it fires, the broker pushes the message into a real

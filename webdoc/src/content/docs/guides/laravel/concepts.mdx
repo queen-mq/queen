@@ -79,6 +79,9 @@ sourceOfTruth:
 # messages whose rows are gone from the queue log, apply_shard.rs applies the watermark that removes
 # those rows, facade/real.rs exports two metric families. Claims, leases, retries and the DLQ are as
 # described.
+# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): facade/real.rs
+# exports queen_raft_qlog_index_maps, the mapped log-file indexes and the kernel's limit. Nothing
+# this page states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,

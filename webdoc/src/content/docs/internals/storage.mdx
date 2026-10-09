@@ -10,6 +10,7 @@ sourceOfTruth:
   - server/src/rsm/qlog/mod.rs
   - server/src/rsm/qlog/set.rs
   - server/src/rsm/qlog/dirx.rs
+  - server/src/rsm/qlog/index.rs
   - server/src/rsm/qlog/record.rs
   - server/src/rsm/qlog/codec.rs
   - server/src/rsm/store/mod.rs
@@ -33,6 +34,9 @@ sourceOfTruth:
 # directory by a rename before it deletes it, and sweeps retired directories at a start (the reclaim
 # paragraph says so); qlog/mod.rs lowers the first seq of an empty file to a log cut; snapshot.rs
 # leaves retired directories out of a snapshot. The refusals at boot are as listed.
+# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): qlog/index.rs reads
+# an index that fits a page into memory, qlog/set.rs gives the kernel a read-ahead hint for old
+# records; the limits paragraph says both.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are
@@ -235,9 +239,12 @@ cursors, KV keys and request ids are loaded at boot on every node, so memory gro
 Messages are not in that list: a push costs a row in RAM (about 200 bytes, measured on 2.1.0)
 for the queue's dedup window, 15 minutes at least, and nothing after it, so memory follows the
 push rate times that window and not the retention. Until the cluster is at version 6 the row
-stays as long as the message. Every sealed log file keeps its `.qidx` memory-mapped: Linux allows
-65,530 mappings per process by default (`vm.max_map_count`), which is about 4 TB of log per node
-at 64 MiB per file; raise it, or `QUEEN_RAFT_SEGMENT_BYTES`, for more.
+stays as long as the message. A sealed log file's `.qidx` is memory-mapped, unless it fits one
+page (about 80 records): then it is read into memory, so that the many small files of quiet
+queues take no mapping. Linux allows a process 65,530 mappings by default (`vm.max_map_count`),
+which is about 4 TB of log per node at 64 MiB per file; `queen_raft_qlog_index_maps` shows the
+mapped indexes against that limit, the node warns in its log past 70% of it, and raising it, or
+`QUEEN_RAFT_SEGMENT_BYTES`, gives more.
 Traces are the exception: the trace file is page cache, a trace costs its row on disk and no RAM,
 and expiry (`QUEEN_RAFT_TRACE_RETENTION_S`, 7 days) deletes at most 512 of them per step.
 Replication protects against losing a minority of disks; losing a majority for good can lose

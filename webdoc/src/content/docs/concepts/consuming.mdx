@@ -54,6 +54,9 @@ verifiedBy:
 # the frames of messages whose rows are gone from the queue log, outside the consume lock, and
 # consume/state.rs keeps where a partition's rows begin; facade/real.rs exports two metric families.
 # Order, leases, subscription modes and acks are as described.
+# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): facade/real.rs
+# exports queen_raft_qlog_index_maps, the mapped log-file indexes and the kernel's limit. Nothing
+# this page states changes.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers

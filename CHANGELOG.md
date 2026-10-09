@@ -22,7 +22,11 @@ from memory as before: at 300,000 messages a second the push p50 was 6.4 to 6.7 
 The backlog of that run, 5.9 million messages with no row left, was read back by 16 consumers at
 about 500,000 messages a second, against about 590,000 on 2.1.0, which read it from memory. While
 it was being read, the traffic at the tail kept its 300,000 messages a second, with a push p50 of
-about 21 ms for those seconds on both builds.
+about 21 ms for those seconds on both builds. From the disk it is the same on both: with 32 GB of
+backlog (48.75 million messages) and the page cache dropped, the consumers read it back at about
+365,000 messages a second on this build and 375,000 on 2.1.0, and the broker's own memory stayed
+at 0.5 GB against 2.2 GB. A walk over old messages asks the kernel for a chunk of records at
+once as soon as one read has waited for the disk, so the reads overlap.
 The change needs cluster version 6, which the leader raises by itself once every node runs this
 release; from then on 2.1.0 and older refuse to start on that data, and
 `QUEEN_RAFT_CLUSTER_VERSION_MS=0` keeps the way back open while the release bakes. Until the
@@ -50,6 +54,15 @@ was already acked is still a no-op. The broker recognises it while the message's
 dedup window), and after that while the message is among the last 65,536 its group consumed from
 that partition; an older one is answered as not found. On a queue without retention, 2.1.0
 recognised it for as long as the queue existed.
+
+**Server: small log files take no memory map.** Every sealed log file kept its index
+memory-mapped, and the kernel allows a process 65,530 maps unless `vm.max_map_count` is raised. A
+quiet queue's log is sealed ten minutes after its oldest message for as long as the queue gets
+one now and then, so a node with many quiet queues holds far more small files than it may hold
+maps, and at the limit it could not seal its next file. An index that fits one page (about 80
+records) is now read into memory instead of mapped. For the files that are mapped there is a
+series, `queen_raft_qlog_index_maps` (mapped, and the limit), and a warning in the log past 70%
+of the limit.
 
 **Server: an entry written after a log cut can be read.** A log file is created for a sequence
 number: by a roll, for the group about to be written, and by the idle pass, which seals a quiet

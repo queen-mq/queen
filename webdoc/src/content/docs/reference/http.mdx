@@ -34,6 +34,9 @@ sourceOfTruth:
 # proxy_embed.rs only carry the new module and the `check` refusal below version 5.
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): the timestamp lookup
 # names the queue log's index for messages older than the rows.
+# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): facade/real.rs
+# exports queen_raft_qlog_index_maps, the mapped log-file indexes and the kernel's limit. Nothing
+# this page states changes.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no
