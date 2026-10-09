@@ -91,11 +91,15 @@ class ForkServerCommand extends Command
      * forked worker never goes through: without this, a pool configured
      * quiet printed two lines for every job.
      *
-     * @param list<string> $argv
+     * @param list<string> $argv queue:work's arguments, the connection first
      */
     private function runWorker(SymfonyCommand $work, array $argv): int
     {
-        $input = new ArgvInput(['artisan', ...$argv]);
+        // Command::run() binds the input against the command's definition
+        // merged with the application's, whose first argument is the command
+        // name: bound without it, the connection was taken for that name and
+        // the worker fell back to queue.default.
+        $input = new ArgvInput(['artisan', 'queue:work', ...$argv]);
         $verbosity = match (true) {
             $input->hasParameterOption(['--quiet', '-q'], true) => OutputInterface::VERBOSITY_QUIET,
             $input->hasParameterOption('-vvv', true) => OutputInterface::VERBOSITY_DEBUG,

@@ -190,7 +190,7 @@ final class PreforkTest extends TestCase
     public function testAForkedWorkerKeepsTheVerbosityItWasGiven(array $flags, bool $quiet, bool $verbose): void
     {
         $work = new class extends \Symfony\Component\Console\Command\Command {
-            /** @var array{quiet: bool, verbose: bool}|null */
+            /** @var array{quiet: bool, verbose: bool, connection: ?string}|null */
             public ?array $seen = null;
 
             protected function configure(): void
@@ -204,7 +204,11 @@ final class PreforkTest extends TestCase
                 \Symfony\Component\Console\Input\InputInterface $input,
                 \Symfony\Component\Console\Output\OutputInterface $output,
             ): int {
-                $this->seen = ['quiet' => $output->isQuiet(), 'verbose' => $output->isVerbose()];
+                $this->seen = [
+                    'quiet' => $output->isQuiet(),
+                    'verbose' => $output->isVerbose(),
+                    'connection' => $input->getArgument('connection'),
+                ];
 
                 return 0;
             }
@@ -219,7 +223,7 @@ final class PreforkTest extends TestCase
         $code = (new \ReflectionMethod($server, 'runWorker'))->invoke($server, $work, ['queen', '--queue=high', ...$flags]);
 
         $this->assertSame(0, $code);
-        $this->assertSame(['quiet' => $quiet, 'verbose' => $verbose], $work->seen);
+        $this->assertSame(['quiet' => $quiet, 'verbose' => $verbose, 'connection' => 'queen'], $work->seen);
     }
 
     public function testAMalformedRequestIsRefusedAndTheServerKeepsServing(): void
