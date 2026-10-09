@@ -438,6 +438,22 @@
     (meh (c/exec :timedatectl :set-ntp :false))
     (meh (c/exec :systemctl :disable :--now :systemd-timesyncd))))
 
+(defn set-clock!
+  "Steps this node's clock to true time, before its broker starts. With the
+  time daemon off a node's clock runs free from one clock test, which resets
+  it, to the next: 40 minutes after one, five nodes were 124 ms apart
+  (-93 ms to +31 ms of true time), and three hours after one, two nodes of
+  another set were 0.55 s apart. A lease survives a leader change only while
+  the nodes' clocks agree within QUEEN_RAFT_MAX_CLOCK_SKEW_MS (500 ms), which
+  is also the margin the lock checker allows: on that second set a permit
+  went to its next owner 543 ms early when leadership moved to the node that
+  was ahead, and W11b was judged invalid (x-sem-leader-deaf, 2026-10-09).
+
+  ntpdate is what jepsen's clock nemesis resets the clocks with; a node that
+  does not have it keeps its clock."
+  []
+  (c/su (meh (c/exec :ntpdate :-b "time.google.com"))))
+
 (def ^:private shared-http
   (delay (qh/client)))
 
@@ -449,6 +465,7 @@
   (setup! [this test node]
     (c/su
       (disable-ntp!)
+      (set-clock!)
       (c/exec :mkdir :-p dir data-dir buf-dir)
       (let [md5 (install-binary! test)]
         (info node "queen md5" md5)))
