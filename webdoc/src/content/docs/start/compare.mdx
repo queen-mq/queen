@@ -1,9 +1,10 @@
 ---
-title: Compare
+title: "Queen MQ vs Kafka, RabbitMQ, SQS and Temporal"
 description: "Queen next to Kafka, Pulsar, RabbitMQ, SQS, Temporal and Restate, and PostgreSQL with an outbox: how each gets per-entity order, what one commit covers, and where each is better."
 type: concept
 tier: use
 sidebar:
+  label: "Compare"
   order: 4
 sourceOfTruth:
   - server/src/rsm/planner/txn.rs
@@ -14,7 +15,8 @@ sourceOfTruth:
 
 Two questions separate these systems more than any feature list: how you keep order per entity when
 there are millions of entities, and what one commit covers when a service handles an event. Queen's
-answers are a partition per entity, created by its first message, and one transaction that writes
+answers are a [partition per entity](/concepts/partitions/), created by its first message, and one
+[transaction](/concepts/transactions/) that writes
 the ack, the state, the next events and the timers as one entry. Every system below answers
 differently, and each is better than Queen at something, which each section says.
 
@@ -22,7 +24,8 @@ differently, and each is better than Queen at something, which each section says
 
 A Kafka topic has a number of partitions chosen when you create it; it can grow but never shrink.
 The producer hashes each record's key onto a partition, so an entity shares its partition with
-every other entity that hashes there, and a slow one delays the rest of its partition. Growing the
+every other entity that hashes there, and a slow one delays the rest of its partition (head-of-line
+blocking). Growing the
 count can send a key's new records to a different partition, and then that key's order across the
 change is lost. Since 4.2, share groups give Kafka queue-style consumption, with per-record acks
 and a delivery limit, and they get there by giving up ordering.
@@ -60,7 +63,7 @@ and at 50,000 partitions Pulsar could not keep up with the load Queen carried.
 
 Producers publish to exchanges, and bindings route each message into queues. A queue delivers in
 order, but competing consumers on one queue do not process in order. Per-entity order needs a
-queue per entity, a consistent-hash exchange over a fixed set of queues each with a single active
+queue per entity (a queue per user, say), a consistent-hash exchange over a fixed set of queues each with a single active
 consumer, or a super stream with single active consumers.
 
 Channel transactions group a channel's publishes and acks, but RabbitMQ does not make them atomic
@@ -117,7 +120,8 @@ entity. Queen 1.x itself kept all of its state in PostgreSQL; 2.0 keeps it in it
 
 The database transaction covers the state and the outbox row. The publish, the consumer's ack and
 the consumer's own state write are separate commits, and the idempotency table and the
-reconciliation code exist to stitch them together.
+reconciliation code exist to stitch them together. [Exactly-once processing](/guides/exactly-once/)
+shows the same consumer in Queen, where the marker and the ack commit as one entry.
 
 PostgreSQL is better when your state is relational: SQL, joins, constraints and ad hoc queries,
 with the backups and tooling you already run. Queen's [KV](/concepts/kv/) reads by key or
@@ -181,4 +185,5 @@ These are Queen's, the ones that decide a comparison:
 - One leader orders every write of a raft group, which bounds one tenant's write rate. A hot
   partition is sequential by design.
 
-The full list is on [limits](/reference/limits/).
+The full list is on [limits](/reference/limits/), and the cases where another system fits better,
+with what to use instead, are on [when not to use Queen](/start/when-not-to-use/).

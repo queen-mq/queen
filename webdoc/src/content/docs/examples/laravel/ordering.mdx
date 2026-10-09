@@ -1,9 +1,10 @@
 ---
-title: One customer at a time
-description: "A Laravel job that names its partition with QueenPartitionable. Three customers' jobs, dispatched interleaved to four workers, run in dispatch order and one at a time per customer, while different customers run in parallel."
+title: "Laravel jobs in order, one customer at a time"
+description: "A Laravel job that names its partition with QueenPartitionable, so each customer's or user's jobs run one at a time and in dispatch order. Three customers' jobs, interleaved on four workers, show it, while different customers run in parallel."
 type: example
 tier: use
 sidebar:
+  label: "One customer at a time"
   order: 2
 sourceOfTruth:
   - examples/apps/laravel/app/Console/Commands/Examples/OrderingExample.php
@@ -17,6 +18,11 @@ verifiedBy:
 A job that implements `QueenPartitionable` waits until the job before it of the same customer has
 ended, whichever worker takes it. Jobs of different customers still run at the same time. The
 program dispatches 5 jobs for each of 3 customers, runs them on 4 workers, and checks both.
+
+Laravel's own `WithoutOverlapping` middleware also keeps two jobs with the same key from running
+at once, but it does so by releasing the second job back to the queue. The release costs the job
+an attempt, and a later job of the same customer can run before it. A partition gives both: one
+job at a time, in dispatch order.
 
 ## Run it
 

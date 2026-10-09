@@ -1,0 +1,115 @@
+---
+title: "When not to use Queen MQ, and what to use instead"
+description: "The cases where another system fits better than Queen: content routing, the most throughput from a few partitions, relational state, workflows written as code, nothing to operate, and the hard limits."
+type: concept
+tier: use
+sidebar:
+  label: "When not to use it"
+  order: 5
+sourceOfTruth:
+  - server/src/rsm/planner/txn.rs
+  - server/src/rsm/planner/push.rs
+  - server/src/rsm/facade/groups.rs
+  - protocols/queen-kafka/src/topic_config.rs
+---
+
+Queen is built for one shape of work: many entities, each with its own ordered stream of events,
+where a worker's step (the ack, the state it changes, the events it emits and the timer it sets)
+has to commit whole. Outside that shape another system is often the better choice. Each case below
+names it. The side-by-side view of the same systems is on [Compare](/start/compare/).
+
+## You route messages by their content
+
+Queen has no exchanges, bindings, topic patterns or header matching: the producer names the queue
+and the partition. When messages have to reach queues the producer does not know about, by type,
+by topic pattern or by header, use RabbitMQ. It also speaks AMQP 0-9-1 and 1.0, MQTT, STOMP and its
+stream protocol, where Queen speaks HTTP and the Kafka wire protocol.
+
+## You need the most throughput from a few hundred partitions
+
+On 200 partitions, Kafka kept up with 4,000,000 messages a second in our runs and Queen with
+1,000,000, with Kafka at a lower p99 and about half the CPU. Pulsar kept up with 2,000,000, the
+highest rate we ran for it, and beat Queen on latency and CPU at 200 and at 10,000 partitions.
+These runs used three 16-vCPU nodes, 256-byte messages in batches of 100 and Queen 2.0.0-beta.2
+([throughput](/benchmarks/throughput/)). Part of Kafka's lead is that it acknowledges a write from
+the page cache, before an fsync; Queen and Pulsar wait for two of three fsyncs.
+
+If your keys fit a few hundred partitions and the order you need is per partition rather than per
+entity, Kafka or Pulsar is the cheaper broker. Queen's cost stays flat as partitions grow, which is
+where it pulls ahead: at 50,000 partitions Kafka's p99 was 1.5 s and Pulsar fell behind, while
+Queen's stayed at 103 ms ([partitions](/benchmarks/partitions/)).
+
+## You depend on the Kafka ecosystem
+
+Kafka Connect and its connectors, Kafka Streams and its state stores, schema registries and log
+compaction are Kafka's. Queen's [Kafka facade](/guides/kafka/) lets existing producers and
+consumers connect unchanged and accepts the topic settings Streams and Connect create, but Queen
+does not compact: a compacted topic keeps every record. If compaction or a connector is what your
+system stands on, stay on Kafka.
+
+## Your transactions are the bottleneck
+
+With 10 messages per transaction, Pulsar reached 17,600 transactions a second over 1,800
+partitions; Queen's best was 8,900, in one raft group. One leader orders every write of a raft
+group, so one tenant's write rate is what one leader can plan. Queen scales out with more raft
+groups and more clusters, and a single tenant does not span them. A Queen commit was faster at low
+rates: 3 ms at p50 and 4 ms at p99 with 10 messages per transaction at 9,000 messages a second,
+where Kafka took 12 and 34 ms and Pulsar 22 and 32 ms ([transactions](/benchmarks/transactions/)).
+
+## Your state is relational
+
+Queen's [KV](/concepts/kv/) reads by key or by prefix. When the state a step changes needs SQL,
+joins, constraints or ad hoc queries, keep it in PostgreSQL with a transactional outbox, with the
+backups and tooling you already run, and accept that the publish and the consumer's ack commit
+separately from it.
+
+## You want to write workflows as code
+
+Temporal and Restate are better for authoring long workflows as code, where loops, branches, waits
+of days and compensations read as one function. Queen keeps the state machine as data instead: the
+partition is its input, KV is its state and one transaction is one transition, so any language that
+speaks HTTP can be the worker and nothing replays your code. See
+[one state machine per entity](/guides/state-machines/).
+
+## You want nothing to operate
+
+Amazon SQS is better when you want nothing to run: no server to patch or back up, a price per
+request, and no partition count to think about. Queen is a binary you run, as one node or as a
+cluster of three or five. A hosted Queen exists: [Queen Cloud](https://queenmq.cloud/) has a free
+tier.
+
+## One hot entity needs more than one worker
+
+A partition is sequential by design: one entity's events are processed one step at a time, in
+order. Parallelism comes from having many partitions with work. If a single entity's load needs
+several consumers at once, it is not one partition's work: split the entity, or use a system that
+gives up order for parallelism, such as Kafka's share groups.
+
+## Every effect must happen exactly once
+
+Delivery is at-least-once. Effects inside Queen are exactly-once, through
+[transactions](/concepts/transactions/) and [`transactionId` dedup](/concepts/dedup/). A call your
+worker makes to another system, a payment API or an email provider, is outside any commit and needs
+that system's own idempotency key. No broker removes that, Queen included.
+
+## You need interactive transactions
+
+A transaction is one call, inside one tenant: the ack, KV writes, pushes and timers go in one
+request. There is no interactive BEGIN and COMMIT, so a transaction cannot read a value and branch
+on it. A step that reads, decides and writes reads the key first, then commits with `expect` on the
+version it read and `required: true`, and the whole transaction rolls back if another writer got
+there first ([transaction](/reference/transaction/)). When a step needs many reads and decisions
+inside one isolation boundary, that is a database transaction.
+
+## You need durable in-memory queues
+
+[Ephemeral queues](/guides/ephemeral/) keep their contents in memory, outside the log. A graceful
+stop hands them to the next owner, but a node that crashes loses what it held. Use them for
+request/reply, presence and signals, and a regular queue for anything that must survive a crash.
+
+## Next
+
+<CardGrid>
+  <LinkCard title="Compare" href="/start/compare/" description="Queen next to Kafka, Pulsar, RabbitMQ, SQS, Temporal, Restate and the outbox, with measurements." />
+  <LinkCard title="Limits" href="/reference/limits/" description="Every size, window and default, with the setting that moves it." />
+</CardGrid>

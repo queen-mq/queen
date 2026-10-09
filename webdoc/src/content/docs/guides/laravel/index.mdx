@@ -1,9 +1,11 @@
 ---
-title: Laravel
+title: "Laravel queue driver: install and run your jobs"
 description: "Run your Laravel jobs on Queen: install the queue connection, keep your job classes and workers, order jobs per entity, pick a delivery profile, and choose who runs the workers."
 type: how-to
 tier: use
 sidebar:
+  group:
+    label: "Laravel"
   order: 8
 sourceOfTruth:
   - clients/client-php/src/Laravel/Contracts/QueenPartitionable.php
@@ -55,6 +57,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (locks): facade/real.rs refuses a transaction's KV `check` below cluster
 # version 5; proxy/src/routes.rs puts POST /api/v1/locks behind the KV plan flag, never quota-blocked. Nothing
 # this page states changes.
+# sourceOfTruth re-read 2026-10-08 (composer description): composer.json's description names the Laravel
+# queue driver and Horizon; nothing this page states changes.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and
@@ -66,7 +70,9 @@ write fsynced on both sides, 32 workers completed 2,753 jobs/s of 10 ms jobs aga
 Horizon, and an application with 64 forked workers fit in 183 MiB against 1,892. Prefork saves
 the booted framework, about 27 MiB per worker, while the memory a job allocates stays the same on
 both ([benchmark](/benchmarks/laravel/)). These results are diagnostic: each comes from one host, with
-a protocol written by the Queen team.
+a protocol written by the Queen team. If you run Horizon today,
+[Queen or Horizon](/guides/laravel/queen-vs-horizon/) compares the two stacks, and
+[migrate from Horizon](/guides/laravel/migrate-from-horizon/) moves a running application step by step.
 
 ## Install
 
@@ -357,6 +363,7 @@ up. Keep queue names to letters, digits, `-`, `_` and `.`.
 
 Horizon still does some things Queen does not: silenced jobs, job lists, batches in its dashboard,
 Slack and SMS alert routes, per-supervisor controls, and clearing a queue.
+[When not to use Queen](/start/when-not-to-use/) lists the cases where another system fits better.
 
 Messages that other services push to Queen, and that are not Laravel jobs, go to a class of yours
 with `php artisan queen:consume` ([consume Queen messages](/guides/laravel/consume/)).

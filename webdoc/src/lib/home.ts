@@ -17,9 +17,12 @@ export const IMAGE = "ghcr.io/queen-mq/queen:latest";
 
 /**
  * The `<title>`. NimbusHead appends " | Queen MQ" because this differs from
- * the site title, so the brand stays out of the string.
+ * the site title, so the brand stays out of the string. It leads with the
+ * words a reader searches for ("message broker"); the page itself says "event
+ * broker" too, so both reach the index. 54 characters: with the suffix it is
+ * the 65 that scripts/check-seo.mjs allows before results cut it.
  */
-export const HOME_TITLE = "A transactional event broker with one ordered partition per entity";
+export const HOME_TITLE = "Transactional message broker with per-entity ordering";
 
 /** One line describing the page, for the index and corpus rows that list it. */
 export const HOME_SUMMARY =
@@ -30,6 +33,8 @@ export const HOME_SUMMARY =
 export const hero = {
   eyebrow: "Queen MQ 2.0 · open source, Apache 2.0",
   headline: "Nothing happens halfway.",
+  /** Second line of the `<h1>`: what the product is, under the line that says why. */
+  subline: "A transactional message broker, one ordered partition per entity.",
   lead:
     "Queen MQ is a transactional event broker. When a worker handles an event, the ack, the " +
     "state it changes, the events it emits and the timer it sets commit as one entry of a " +

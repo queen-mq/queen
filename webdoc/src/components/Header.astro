@@ -8,6 +8,7 @@ import { config } from "virtual:nimbus/config";
 import mark from "../assets/q.svg?raw";
 import wordmark from "../assets/queen.svg?raw";
 import { getSidebarSections } from "@cloudflare/nimbus-docs";
+import { SITE_NAV, CLOUD_LINK, activeNavHref } from "@/lib/site-nav";
 
 interface Props {
   /** Astro collection id for the current page, forwarded from DocsLayout. */
@@ -36,6 +37,12 @@ const { collection, showSidebar = true, transparentTop = false } = Astro.props;
 const currentSlug = Astro.url.pathname.replace(/\/$/, "") || "/";
 const sections = await getSidebarSections(currentSlug, { collection });
 const showSections = sections.length >= 2;
+// With the full sidebar there are no sections to list, so the bar carries the
+// site's own links instead (src/lib/site-nav.ts).
+const activeHref = activeNavHref(Astro.url.pathname);
+const navLink =
+  "px-2 py-1 rounded-md text-[0.8125rem] font-medium no-underline transition-colors";
+const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent/60";
 ---
 
 <header
@@ -76,22 +83,33 @@ const showSections = sections.length >= 2;
         )}
       </a>
 
-      {showSections && (
+      {showSections ? (
         <nav aria-label="Sections" class="hidden md:flex items-center gap-1 ml-4 pl-4 border-l border-border h-6">
           {sections.map((section) => (
             <a
               href={section.href}
               aria-current={section.isActive ? "page" : undefined}
-              class:list={[
-                "px-2 py-1 rounded-md text-[0.8125rem] font-medium no-underline transition-colors",
-                section.isActive
-                  ? "text-foreground bg-accent"
-                  : "text-muted-foreground hover:text-foreground hover:bg-accent/60",
-              ]}
+              class:list={[navLink, section.isActive ? "text-foreground bg-accent" : navIdle]}
             >
               {section.label}
             </a>
           ))}
+        </nav>
+      ) : (
+        <nav aria-label="Main" class="hidden md:flex items-center gap-1 ml-4 pl-4 border-l border-border h-6">
+          {SITE_NAV.map((link) => (
+            <a
+              href={link.href}
+              aria-current={link.href === activeHref ? "page" : undefined}
+              class:list={[navLink, link.href === activeHref ? "text-foreground bg-accent" : navIdle]}
+            >
+              {link.label}
+            </a>
+          ))}
+          <a href={CLOUD_LINK.href} class:list={[navLink, navIdle, "inline-flex items-center gap-1"]}>
+            {CLOUD_LINK.label}
+            <Icon name="ph:arrow-up-right" class="w-3 h-3" aria-hidden="true" />
+          </a>
         </nav>
       )}
     </div>
@@ -113,7 +131,7 @@ const showSections = sections.length >= 2;
         </LinkButton>
       )}
       <ThemeToggle />
-      {showSidebar && (
+      {showSidebar ? (
         <Button
           variant="ghost"
           shape="square"
@@ -123,12 +141,55 @@ const showSections = sections.length >= 2;
           data-menu-btn
           class="lg:hidden text-muted-foreground"
         />
+      ) : (
+        /*
+          No sidebar drawer on this page (the homepage), so below md the site
+          links live in a popover. The popover attribute gives the button its
+          expanded state, a tap outside and Escape to close it, and the top
+          layer to render in, all without a script, so the CSP's hash list does
+          not grow. A <details> with a full-screen ::before could not do the
+          outside tap: the header's backdrop-filter makes it the containing
+          block of fixed children, so the overlay covered only the bar.
+        */
+        <Fragment>
+          <button
+            type="button"
+            popovertarget="site-menu"
+            aria-label="Menu"
+            class="flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground md:hidden"
+          >
+            <Icon name="ph:list" class="h-5 w-5" aria-hidden="true" />
+          </button>
+          <nav
+            id="site-menu"
+            popover
+            aria-label="Main"
+            class="site-menu w-60 rounded-xl border border-border bg-card p-1.5 text-foreground shadow-lg"
+          >
+            {[...SITE_NAV, CLOUD_LINK].map((link) => (
+              <a
+                href={link.href}
+                aria-current={link.href === activeHref ? "page" : undefined}
+                class="flex items-center justify-between rounded-lg px-3 py-2.5 text-[0.9375rem] font-medium text-foreground no-underline transition-colors hover:bg-accent aria-[current=page]:bg-accent"
+              >
+                {link.label}
+                {link.external && <Icon name="ph:arrow-up-right" class="h-4 w-4 text-muted-foreground" aria-hidden="true" />}
+              </a>
+            ))}
+          </nav>
+        </Fragment>
       )}
     </div>
   </div>
 </header>
 
 <style>
+  /* A popover is centred in the viewport by default; this one hangs under the
+     header's right edge, where its button is. */
+  .site-menu {
+    inset: calc(3.5rem + 0.5rem) 1rem auto auto;
+    margin: 0;
+  }
   header[data-transparent-top] {
     transition:
       background-color 200ms ease,

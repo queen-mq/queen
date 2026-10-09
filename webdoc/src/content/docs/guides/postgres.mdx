@@ -1,5 +1,5 @@
 ---
-title: Postgres source and sink
+title: "PostgreSQL change data capture and table sink"
 description: "Stream PostgreSQL 17+ tables into queues and queues into tables from inside the broker: setup, the change events, how a JSON message maps onto columns, what exactly-once means here, and where it stops."
 type: how-to
 tier: use
@@ -20,6 +20,7 @@ verifiedBy:
   - connectors/queen-pg/tests/source_live.rs
   - connectors/queen-pg/tests/sink_live.rs
 sidebar:
+  label: "Postgres source and sink"
   order: 7.8
 # sourceOfTruth re-read 2026-10-08 (locks): handlers/connectors.rs maps the new KV refusal (a `check` below
 # cluster version 5) to a retry; the connectors send no `check`. Nothing this page states changes.

@@ -93,14 +93,15 @@ if (!effectiveSearchable || versionStatus?.isHidden) {
 
 // BreadcrumbList structured data for the trail <Breadcrumbs> renders below.
 // Without it a search result prints the raw URL path instead of the trail.
-// A crumb with no `href` is the one the component renders as a plain span
-// (the current page, and a hub that is itself the current page); those omit
-// `item`, which is what the schema asks for. Gated on the same `length > 1`
+// A crumb with no `href` is the one the component renders as a plain span;
+// those omit `item`. Google allows that on the last crumb only, so section
+// crumbs arrive here already linked (src/lib/breadcrumbs.ts, applied in
+// src/pages/[...slug].astro) and scripts/check-seo.mjs fails the build if one
+// is not. Gated on the same `length > 1`
 // the component uses, so a page with no visible trail emits no markup.
 const breadcrumbLd =
   Array.isArray(breadcrumbs) && breadcrumbs.length > 1
     ? {
-        "@context": "https://schema.org",
         "@type": "BreadcrumbList",
         itemListElement: breadcrumbs.map((crumb, i) => ({
           "@type": "ListItem",
@@ -113,15 +114,43 @@ const breadcrumbLd =
       }
     : null;
 
+// The page as an article about the software, tied by @id to the publisher and
+// the software that astro.config.ts declares site-wide. The framework's own
+// WebPage node carries no @id, so this is the node that joins each page to
+// that graph. `dateModified` is the same git date as the "Updated" line and
+// the sitemap's <lastmod>. No `datePublished`: nothing records it.
+const siteUrl = Astro.site ? new URL("/", Astro.site).href : null;
+const pageUrl = Astro.site ? new URL(Astro.url.pathname, Astro.site).href : null;
+const articleLd =
+  siteUrl && pageUrl && !isCustom
+    ? {
+        "@type": "TechArticle",
+        "@id": `${pageUrl}#article`,
+        headline: title,
+        ...(description ? { description } : {}),
+        url: pageUrl,
+        mainEntityOfPage: pageUrl,
+        inLanguage: config.locale ?? "en",
+        ...(lastUpdated ? { dateModified: new Date(lastUpdated).toISOString() } : {}),
+        ...(socialImage ? { image: new URL(socialImage, siteUrl).href } : {}),
+        author: { "@id": `${siteUrl}#org` },
+        publisher: { "@id": `${siteUrl}#org` },
+        about: { "@id": `${siteUrl}#software` },
+        isPartOf: { "@id": `${siteUrl}#website` },
+      }
+    : null;
+
+const pageGraph = [articleLd, breadcrumbLd].filter((node) => node !== null);
+
 // `head` entries are injected with `set:html`, so close off the one sequence
 // that could end the script element early.
-const headWithBreadcrumbs = breadcrumbLd
+const headWithBreadcrumbs = pageGraph.length
   ? [
       ...head,
       {
         tag: "script" as const,
         attrs: { type: "application/ld+json" },
-        content: JSON.stringify(breadcrumbLd).replace(/</g, "\\u003c"),
+        content: JSON.stringify({ "@context": "https://schema.org", "@graph": pageGraph }).replace(/</g, "\\u003c"),
       },
     ]
   : head;

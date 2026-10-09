@@ -470,15 +470,6 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
 }
 .top-btn:hover { color: var(--text-hi); background: var(--ink-4); }
 .top-btn svg { width: 15px !important; height: 15px !important; }
-.theme-select { position: relative; display: flex; align-items: center; flex: none; color: var(--text-mid); }
-.theme-select > svg { position: absolute; left: 8px; width: 15px; height: 15px; pointer-events: none; }
-.theme-select select {
-  height: 32px; padding: 0 6px 0 29px; border: 1px solid var(--bd);
-  border-radius: var(--r-control); background: var(--ink-2);
-  color: inherit; font: inherit; font-size: 12px; cursor: pointer;
-}
-.theme-select:hover { color: var(--text-hi); }
-.theme-select select:hover { border-color: var(--bd-hi); }
 /* The sidebar toggle leads the bar (the rail, below). Up to 1100px the
    sidebar is a drawer with its own button in this corner. */
 .nav-toggle { margin-left: -8px; }
@@ -1256,11 +1247,6 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
     border-color: var(--bd-hi); background: var(--ink-3); cursor: text;
   }
   .cmd-search.open .cmd-input { display: block; }
-}
-
-@media (max-width: 380px) {
-  .theme-select > svg { display: none; }
-  .theme-select select { padding-left: 6px; }
 }
 
 /* =========================================================================

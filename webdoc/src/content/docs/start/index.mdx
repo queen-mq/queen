@@ -1,5 +1,5 @@
 ---
-title: Overview
+title: "Queen MQ overview: a transactional event broker"
 description: "Queen MQ is a transactional event broker: every entity gets its own ordered partition, and every step a service takes on an event commits as one entry."
 type: overview
 tier: use
@@ -95,6 +95,9 @@ ZooKeeper or sidecar beside it. For availability you run three or five nodes as 
 every entry is written to a majority of them before you get an answer, any node takes any request
 (a follower forwards writes to the leader), and the cluster keeps serving while a majority is up.
 
+Releases before 2.0.0 (2026-10-03) kept their data in PostgreSQL. 2.0 replaced it with this log,
+and a 2.0 node does not read a 1.x database: see the [changelog](/reference/changelog/).
+
 We keep each tenant inside one raft group, and that is what lets a transaction be a single log
 entry, with no coordinator and no two-phase commit. The price is that one leader orders all of a
 tenant's writes. A cluster can run several raft groups (`QUEEN_RAFT_GROUPS`), each with its own
@@ -135,6 +138,9 @@ guarantees cover is on [guarantees](/concepts/guarantees/).
   the partition.
 - Ephemeral queues lose what a node held when it crashes, because their contents are not in the
   log.
+
+When one of these rules Queen out, [when not to use Queen MQ](/start/when-not-to-use/) names what
+to use instead.
 
 ## Next
 

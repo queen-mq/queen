@@ -1,5 +1,5 @@
 ---
-title: Deliver webhooks
+title: "Deliver webhooks in order with retries"
 description: "Deliver webhooks in order per endpoint, with the broker's retry budget and a dead-letter queue, so an endpoint that is down slows down nobody else."
 type: how-to
 tier: use
@@ -20,6 +20,7 @@ verifiedBy:
   - examples/apps/cpp/webhooks.cpp
   - examples/apps/http/webhooks.sh
 sidebar:
+  label: "Deliver webhooks"
   order: 4
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the consumption engine drops a whole-queue group's idle parts and loads them back on the next append, and a new partition's first message reaches every group; the trace routes read the on-disk trace store and refuse a key over 511 bytes (400 name_too_long); /api/v1/raft/members reports anonBytes. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (JS client fixes): QueueBuilder.js keeps pop()'s behaviour (it long-polls, never sends autoAck) and its defaults and comments now say so; consume() does not change. This page uses consume() only. Nothing this page states changes.
