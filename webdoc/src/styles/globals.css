@@ -238,17 +238,11 @@ body {
 
 /* ---- Reduced motion ---- */
 @media (prefers-reduced-motion: reduce) {
-	/* The hero pauses its own timeline and offers an explicit Play button.
-	   Keep its timing intact so that opting in can resume the animation. */
-	*:not(.queen-illustration *),
+	*,
 	*::before,
 	*::after {
 		animation-duration: 0.01ms !important;
 		animation-iteration-count: 1 !important;
-	}
-	*,
-	*::before,
-	*::after {
 		transition-duration: 0.01ms !important;
 		scroll-behavior: auto !important;
 	}
