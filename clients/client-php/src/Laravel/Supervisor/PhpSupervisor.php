@@ -557,7 +557,10 @@ final class PhpSupervisor
             'QUEEN_LARAVEL_CONNECTION' => $options['connection'],
             'QUEEN_LARAVEL_SUPERVISOR' => $name,
             'QUEEN_LARAVEL_RETRY_AFTER' => (string) ($options['retry_after'] ?? ($options['timeout'] + 1)),
-            'QUEEN_LARAVEL_BLOCK_FOR' => $options['balance'] === 'off' ? '0' : null,
+            // `false`, not null: Symfony Process sets a null variable to an
+            // empty string, which a forked worker and the Rust master's
+            // workers do not have.
+            'QUEEN_LARAVEL_BLOCK_FOR' => $options['balance'] === 'off' ? '0' : false,
             // Where the worker says why it exits; see WorkerExitMarker.
             WorkerExitMarker::ENVIRONMENT => $this->exitMarkers ?? false,
         ];
