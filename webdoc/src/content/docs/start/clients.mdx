@@ -104,6 +104,8 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-09 (queen-protocol 1.4.0): client-rust/Cargo.toml and server/Cargo.toml require
 # queen-protocol 1.4.0, the wire-types crate with the lock types; no client or broker version moved. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-10-09 (2.2.0): server/Cargo.toml moves the broker to 2.2.0; the clients
+# stay at 2.1.0, and the versions sentence says so.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same
@@ -255,7 +257,7 @@ you run Horizon today.
 </Tabs>
 
 The JavaScript, Python, Go, Rust and C++ clients are 2.1.0; the PHP client has its own version
-line. All of them talk to any 2.x broker (the broker is at 2.1.0), and locks need a 2.1 broker. The Go
+line. All of them talk to any 2.x broker (the broker is at 2.2.0), and locks need a 2.1 broker. The Go
 client's module path ends in `/v2`, as Go requires for a major version above 1.
 
 ## curl is a client

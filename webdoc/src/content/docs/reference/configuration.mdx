@@ -45,6 +45,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (a seed's hold): raft/link.rs leaves a seeded standby's first hold when its snapshot is asked for, kept for QUEEN_LINK_HOLD_S like any other. No variable is added and no default changes.
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window):
 # QUEEN_RAFT_ROWS_WINDOW and QUEEN_QLOG_DIRX join the table.
+# sourceOfTruth re-read 2026-10-09 (two housekeeping fixes): qlog/set.rs retires an empty log's
+# directory by a rename before deleting it; no variable is added or changed.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

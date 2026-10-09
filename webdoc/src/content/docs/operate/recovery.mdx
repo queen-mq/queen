@@ -65,6 +65,10 @@ digest: >-
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; replicator/mod.rs and node.rs carry the new error and call. No recovery step changes. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): the rollback
 # paragraph names cluster version 6.
+# sourceOfTruth re-read 2026-10-09 (two housekeeping fixes): qlog/set.rs retires an empty log's
+# directory by a rename and sweeps what is left at a start, so the refusal "it ends at seq 0" no
+# longer follows a removal that stopped half-way; the remedy on this page for a node that refuses is
+# unchanged. The rollback paragraph names 2.2.0.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and
@@ -486,7 +490,7 @@ release on the same directory, which works until the leader raises the cluster v
 that only once every member runs a release that reads the new version, and from then on an older
 build refuses to boot with `this build reads effect catalogue version N, and the cluster this store
 belongs to writes version M ... never an older one`. 2.0.1 is the first release that raises it,
-from 3 to 4, 2.1.0 raises it from 4 to 5, and the release after 2.1.0 from 5 to 6; to keep a rollback possible
+from 3 to 4, 2.1.0 raises it from 4 to 5, and 2.2.0 from 5 to 6; to keep a rollback possible
 while a release bakes, run it with `QUEEN_RAFT_CLUSTER_VERSION_MS=0` and remove that setting once
 you stay. On Kubernetes, a rolling update stalls on a pod
 that cannot become Ready: fix that pod, or change only it with `OnDelete`.

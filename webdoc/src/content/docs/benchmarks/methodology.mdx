@@ -17,6 +17,8 @@ sourceOfTruth:
 # push's row expire at the txns window while its message stays (cluster version 6), and qlog/set.rs
 # maintains a directory of the sealed files. QUEEN_RAFT_TXN_WINDOW_MIN_S is still the least time a
 # hash list is kept, as the settings table says; the runs on this page predate the change.
+# sourceOfTruth re-read 2026-10-09 (two housekeeping fixes): qlog/set.rs retires an empty log's
+# directory by a rename before deleting it. Nothing this page states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

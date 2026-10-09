@@ -29,6 +29,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (a seed's hold): snapshot.rs tells whoever asked for a streamed snapshot where its checkpoint is and that the stream is still being read, which is how a source node keeps its log for the standby it seeds. The snapshot paragraph now says which node keeps its log from when; the stream's content, the staging and the swap are as described.
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): the layout names the
 # directory files, retention has three watermarks, and the limits name the mapped index files.
+# sourceOfTruth re-read 2026-10-09 (two housekeeping fixes): qlog/set.rs retires an empty log's
+# directory by a rename before it deletes it, and sweeps retired directories at a start (the reclaim
+# paragraph says so); qlog/mod.rs lowers the first seq of an empty file to a log cut; snapshot.rs
+# leaves retired directories out of a snapshot. The refusals at boot are as listed.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are
@@ -218,7 +222,10 @@ Retention is decided once, on the leader, and executed on every node, like every
 Reclaim never touches the active file, nor a file holding a record above the last store checkpoint
 or, in a cluster, above the raft purge point. One pass examines at most 256 files, spends at most
 200 ms and rewrites at most one file. An active file that holds data older than
-`QUEEN_QLOG_SEAL_AGE_S` (600) is sealed so that reclaim can reach it.
+`QUEEN_QLOG_SEAL_AGE_S` (600) is sealed so that reclaim can reach it. A queue's log with nothing left
+in it is closed and its directory removed: renamed to `q<id>.dead` first and deleted after, so a
+stop in between leaves a retired directory, which the next start sweeps, and never a log with no
+file in it, which a start refuses.
 
 ## Limits
 

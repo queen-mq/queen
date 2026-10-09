@@ -34,6 +34,9 @@ sourceOfTruth:
 # repeated ack of a message without a row is recognised from the queue log; batcher.rs reads two new
 # switches; qlog/mod.rs finds old records through a directory. The pipeline and its answers are as
 # described.
+# sourceOfTruth re-read 2026-10-09 (two housekeeping fixes): qlog/mod.rs lowers the first seq of an
+# empty log file to a log cut, so the entry written next is found by its seq. Nothing this page
+# states changes.
 ---
 
 A worker's step in Queen is three calls at most: it pops a batch, does its work, and commits a

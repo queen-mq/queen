@@ -1,0 +1,41 @@
+# 2.2.0 candidate, binary queen-220rc1: set B (m1..m5): the suite of 2.1.0, tests 51 to 89
+# (matrix-220.txt says what each part is; the campaign is split over two sets of nodes)
+p11-w6-restart          --workload dedup --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w3c-kill            --workload claim --nemesis kill --time-limit 300 --rate 100
+p11-w3c-part            --workload claim --nemesis partition --time-limit 300 --rate 100
+p11-w3c-lz-kill         --workload claim --lazyfs --nemesis kill --time-limit 300 --rate 100
+p11-w6-kill             --workload dedup --nemesis kill --time-limit 300 --rate 200
+p11-w6-part             --workload dedup --nemesis partition --time-limit 300 --rate 200
+p11-w6-lz-kill          --workload dedup --lazyfs --nemesis kill --time-limit 300 --rate 200
+p11-w6-leader-deaf      --workload dedup --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w3c-leader-deaf     --workload claim --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w6-pause            --workload dedup --nemesis pause --time-limit 300 --rate 200
+p11-w6-bridge           --workload dedup --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-kill             --workload log --nemesis kill --time-limit 300 --rate 200
+p11-w1-pause            --workload log --nemesis pause --time-limit 300 --rate 200
+p11-w1-part             --workload log --nemesis partition --time-limit 300 --rate 200
+p11-w1-lz-kill          --workload log --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+p11-w1-leader-deaf      --workload log --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-bridge           --workload log --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-membership       --workload log --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w6-membership       --workload dedup --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-member-kill      --workload log --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-member-lz-kill   --workload log --lazyfs --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-corrupt-store    --workload log --nemesis corrupt --corrupt-classes store --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 10
+p11-w1-corrupt-all      --workload log --nemesis corrupt --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 10
+p11-w3c-pause-2         --workload claim --nemesis pause --time-limit 300 --rate 100
+p11-w3c-pause-3         --workload claim --nemesis pause --time-limit 300 --rate 100
+p11-w8-kill             --workload retention --nemesis kill --time-limit 300 --rate 200
+p11-w8-part             --workload retention --nemesis partition --time-limit 300 --rate 200
+p11-w8-pause            --workload retention --nemesis pause --time-limit 300 --rate 200
+p11-w8-leader-deaf      --workload retention --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w8-lz-kill          --workload retention --lazyfs --nemesis kill --time-limit 300 --rate 200
+p11-w8-bridge           --workload retention --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w8-restart          --workload retention --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w8-membership       --workload retention --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w8-clock            --workload retention --nemesis clock --time-limit 300 --rate 200
+p11-w9-kill             --workload streams --nemesis kill --time-limit 300 --rate 200
+p11-w9-part             --workload streams --nemesis partition --time-limit 300 --rate 200
+p11-w9-pause            --workload streams --nemesis pause --time-limit 300 --rate 200
+p11-w9-leader-deaf      --workload streams --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w9-lz-kill          --workload streams --lazyfs --nemesis kill --time-limit 300 --rate 200

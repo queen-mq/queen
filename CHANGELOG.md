@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 2.2.0
 
 **Server: a queue's memory no longer grows with the messages it keeps.** Every push left a row in
 the memory of every node (about 200 bytes: where the append begins and ends, when it was written,
@@ -50,6 +50,26 @@ was already acked is still a no-op. The broker recognises it while the message's
 dedup window), and after that while the message is among the last 65,536 its group consumed from
 that partition; an older one is answered as not found. On a queue without retention, 2.1.0
 recognised it for as long as the queue existed.
+
+**Server: an entry written after a log cut can be read.** A log file is created for a sequence
+number: by a roll, for the group about to be written, and by the idle pass, which seals a quiet
+file and creates the next one for the writer's next number. When a follower then cut its log back
+below that number (a tail a new leader overruled), the empty file kept it, the next entry the log
+took carried a lower one, and a search by number skipped the file. The entry was on disk and the
+node refused to start: `raft log entries N..N+1 are not all in the queue logs`. A cut now lowers
+the first number of an empty file to the cut. Every release since 2.0.0 has this; it needs a quiet
+log sealed while the node holds entries that are later overruled, which the default seal age of
+600 seconds makes rare. Found by Jepsen on logs sealed after 10 seconds.
+
+**Server: a node starts after an empty queue log was removed half-way.** A queue's log whose files
+have all been reclaimed is closed and its directory deleted. The deletion was done in place, and
+could stop between the last file and the directory: a crash, or a filesystem that keeps a deleted
+file while it is open and then refuses to remove the directory (FUSE, NFS). The directory that
+was left, with no file in it, is what a log that lost its records looks like, and the next start
+refused it: `it ends at seq 0, below seq N, which this node fsync'd and applied`. The directory is
+now renamed to `q<id>.dead` in one step and deleted after that is durable; a start sweeps such
+directories, and a snapshot leaves them out. Every release since 2.0.0 has this too. Found by
+Jepsen under power loss, where it took every node of a cluster down one after the other.
 
 ## 2.1.0 - 2026-10-09
 
