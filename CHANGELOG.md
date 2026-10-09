@@ -5,6 +5,19 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Supervisor: strays are stopped, prefork is tried again at `queue:restart`, a dead server's
+workers are reaped, and only the probe closes a circuit.** The Rust master has the same four
+changes as the PHP engine above: a late fork reply is read once per loop whether or not a worker
+of that server is polled; a `queue:restart` announced by a spawned worker starts a fork server
+when prefork has none; a forked worker whose server died is reaped by the master when the master
+is the nearest subreaper (PID 1 in a container), with its real status, instead of staying a zombie
+that kept its pool slot; and a sibling that reached `stable_after` while the pool's circuit was in
+backoff no longer closes it, which only the probe does, as in the PHP engine. The master also no
+longer lets a pool that balances inherit its own `QUEEN_LARAVEL_BLOCK_FOR`. These changes need a
+supervisor release; the worker-invocation record pins them.
+
+## PHP client 2.4.1 - 2026-10-09
+
 **Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the
 fork server the arguments after `queue:work`, the connection first, and the fork server bound them
 as a command line of their own: Symfony took the connection for the command's name, `connection`
@@ -83,17 +96,6 @@ once per loop. A forked worker whose server died was taken for exited 0 once gon
 engine is the nearest subreaper its real status is read, instead of a zombie. A request line over
 the limit no longer ends the server, and every worker with it. A document without `quiet` runs
 quiet, as the Rust master reads it.
-
-**Supervisor: strays are stopped, prefork is tried again at `queue:restart`, a dead server's
-workers are reaped, and only the probe closes a circuit.** The Rust master has the same four
-changes as the PHP engine above: a late fork reply is read once per loop whether or not a worker
-of that server is polled; a `queue:restart` announced by a spawned worker starts a fork server
-when prefork has none; a forked worker whose server died is reaped by the master when the master
-is the nearest subreaper (PID 1 in a container), with its real status, instead of staying a zombie
-that kept its pool slot; and a sibling that reached `stable_after` while the pool's circuit was in
-backoff no longer closes it, which only the probe does, as in the PHP engine. The master also no
-longer lets a pool that balances inherit its own `QUEEN_LARAVEL_BLOCK_FOR`. These changes need a
-supervisor release; the worker-invocation record pins them.
 
 ## 2.1.0 - 2026-10-09
 

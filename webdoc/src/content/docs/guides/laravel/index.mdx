@@ -351,6 +351,7 @@ Everything not listed here works from 1.6.0 on.
 | 2.3.0 | 0.8.0 | a pool's own `prefork` ([prefork for some pools only](/guides/laravel/supervisors/#prefork-for-some-pools-only)); `queen:consume` sets and renews its lease, stops on `--idle-timeout`, and reports refused acks ([consume Queen messages](/guides/laravel/consume/)) |
 | 2.3.1 | 0.8.0 | `->supervision([...])` on a fluent `consume()->execute()` reports that consumer to the dashboard, off by default ([consumer status](/reference/supervisor-status/#optional-sdk-consumer-supervision)) |
 | 2.4.0 | 0.8.0 | `$queen->lock()` and `$queen->semaphore()`, `->guard($lock)` on a transaction and `kv()->check()` ([locks](/concepts/locks/)); they need a 2.1 broker |
+| 2.4.1 | 0.8.0 | a forked worker works its pool's connection; a pool's settings reach the worked connection alone, and a pool takes its connection's queue and consumer group; a worker forked after `queue:restart` leaves at once; failed jobs of other drivers stay Laravel's; the switch variables take `1` |
 
 ## Limits
 
