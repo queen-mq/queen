@@ -345,6 +345,66 @@ fn a_small_index_is_read_and_a_large_one_mapped_and_both_answer_alike() {
     }
 }
 
+/// A roll that cannot write or open the outgoing file's index changes
+/// nothing: the file stays active, every message in it is still found, and
+/// the log takes appends. It used to return with the active index already
+/// taken and the file marked sealed, so the file's messages could not be
+/// found; the next roll then wrote the file's index again from what little
+/// the active index held, and a restart trusted that index.
+#[test]
+fn a_roll_that_fails_leaves_the_file_active_and_every_message_found() {
+    let td = TmpDir::new("roll-fails");
+    let dir = td.path().join("log");
+    let opts = QLogOptions::testing(64 * 1024);
+    let (mut q, _) = QLog::open(&dir, 9, opts).unwrap();
+    let mut seq = 0u64;
+    let mut push = |q: &mut QLog, n: u64| {
+        for _ in 0..n {
+            seq += 1;
+            append_one(q, seq, 3, seq - 1, 10_000 + seq as i64);
+        }
+        seq
+    };
+    let read_all = |q: &QLog, upto: u64, when: &str| {
+        for i in 0..upto {
+            assert_eq!(
+                q.read_payload(3, i).unwrap(),
+                Some(payload(i + 1, 96)),
+                "offset {i} {when}"
+            );
+        }
+    };
+    let written = push(&mut q, 40);
+    let active = q.active_index.file_id().expect("an active file");
+    // Something sits where the index must go: the roll cannot write it.
+    let blocker = super::qidx_path(&super::queue_dir(&dir, 9), active);
+    std::fs::create_dir(&blocker).unwrap();
+    assert!(q.seal_active(written + 1).is_err(), "the roll fails");
+    assert_eq!(
+        q.active_index.file_id(),
+        Some(active),
+        "the file is still active"
+    );
+    assert_eq!(q.file_count(), 1);
+    read_all(&q, written, "after the failed roll");
+    // The log goes on in the same file, and a second failed roll loses nothing.
+    let written = push(&mut q, 25);
+    assert!(q.seal_active(written + 1).is_err());
+    read_all(&q, written, "after appends and a second failed roll");
+
+    // The obstacle goes: the roll succeeds and the sealed index holds
+    // everything the file does, here and after a reopen.
+    std::fs::remove_dir(&blocker).unwrap();
+    assert!(q.seal_active(written + 1).unwrap());
+    assert_eq!(q.file_count(), 2);
+    let after = push(&mut q, 10);
+    read_all(&q, after, "after the roll that succeeded");
+    assert_eq!(q.sealed.get(&active).expect("sealed").len() as u64, written);
+    drop(q);
+    let (q, _) = QLog::open(&dir, 9, opts).unwrap();
+    read_all(&q, after, "after a reopen");
+}
+
 /// At `vm.max_map_count` the kernel refuses the next map. The index is then
 /// held in memory, and the log goes on: it seals, reads and reopens. Failing
 /// there left the sealed file without an index (its messages unreadable until

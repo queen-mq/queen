@@ -1243,7 +1243,11 @@ impl QLog {
     /// created) file.
     pub(crate) fn prepare_write(&mut self, first_seq: u64) -> io::Result<(u64, u64)> {
         if self.active.is_none() {
-            self.create_active(FIRST_FILE_ID, first_seq)?;
+            // The first file of a log, or the one after its last: a roll that
+            // sealed a file and could not create the next one (no space, no
+            // file descriptor) leaves the log with none active.
+            let id = self.files.last().map_or(FIRST_FILE_ID, |m| m.id + 1);
+            self.create_active(id, first_seq)?;
         } else {
             let sz = self.active_len();
             if sz > FILE_HEADER_LEN && sz >= self.opts.segment_bytes {
@@ -1779,6 +1783,17 @@ impl QLog {
 
     /// Seal the active file — write its `.qidx`, map it, mark it sealed — and
     /// create the next active file whose first record will carry `first_seq`.
+    ///
+    /// Nothing in memory changes until the outgoing file's index is written
+    /// and open. A roll that failed there (the process out of file
+    /// descriptors or memory maps, a write error) used to return with the
+    /// active index already taken and the file marked sealed but in no map:
+    /// its messages, and those written to it afterwards, could not be found,
+    /// and the next roll wrote the index again from what the active index
+    /// held by then, a part of the file or nothing, which a restart then
+    /// trusted. Now a failed roll leaves the file active and whole (a stray
+    /// `.qidx` beside an active file is dropped at open and rewritten by the
+    /// roll that succeeds). The idle pass logs such a failure and goes on.
     fn roll(&mut self, first_seq: u64) -> io::Result<()> {
         // Fsync the outgoing active file's DATA before sealing it. A sealed file
         // must be FULLY durable: [`QLog::open`] treats a torn or damaged record
@@ -1796,6 +1811,7 @@ impl QLog {
             let logical = self.files.last().expect("active meta").bytes;
             if self.prealloc_end > logical {
                 f.set_len(logical)?;
+                self.prealloc_end = logical;
             }
             fsync_file(f, self.opts.fsync)?;
         }
@@ -1803,16 +1819,19 @@ impl QLog {
             let m = self.files.last().expect("active meta");
             (m.id, m.bytes)
         };
-        // `take` returns the records in (pid, base_offset) order (the map's
-        // order), which is exactly the order `index::encode` needs. Written
-        // WITHOUT its fsyncs: the roll runs on the log writer, which every
-        // write waits for, and a `.qidx` a crash leaves missing or torn is
-        // caught by its checksums and length at open and rebuilt by scanning
-        // the sealed file (which IS fsynced above).
-        let recs = self.active_index.take();
+        // A copy of the records in (pid, base_offset) order (the map's order),
+        // which is exactly the order `index::encode` needs: the active index
+        // keeps them until the sealed one is open. Written WITHOUT its
+        // fsyncs: the roll runs on the log writer, which every write waits
+        // for, and a `.qidx` a crash leaves missing or torn is caught by its
+        // checksums and length at open and rebuilt by scanning the sealed
+        // file (which IS fsynced above).
+        let recs = self.active_index.sorted();
         write_qidx_lazy(&self.dir, old_id, old_bytes, &recs)?;
-        self.files.last_mut().expect("active meta").sealed = true;
         let view = index::View::open(&qidx_path(&self.dir, old_id), Some(old_bytes))?;
+        drop(recs);
+        self.active_index.clear();
+        self.files.last_mut().expect("active meta").sealed = true;
         self.sealed.insert(old_id, Arc::new(view));
         self.active = None;
         self.create_active(old_id + 1, first_seq)?;

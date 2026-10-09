@@ -637,6 +637,14 @@ impl ActiveIndex {
         out
     }
 
+    /// A copy of the active file's records in `(pid, base_offset)` order (the
+    /// map's order, so no [`sort_records`] is needed before [`encode`]): what
+    /// a roll writes out as the sealed file's `.qidx`, while this index still
+    /// answers for the file.
+    pub fn sorted(&self) -> Vec<Record> {
+        self.recs.values().copied().collect()
+    }
+
     /// Take the whole index of the active file and forget the file: what a roll
     /// does, right before writing it out as the sealed file's `.qidx`. The
     /// returned records are in `(pid, base_offset)` order (the map's order), so
