@@ -1,0 +1,105 @@
+2026-10-09T00:46:39Z start x-sem-wide-kill: --workload semaphore --w11-limit 8 --w11-locks 2 --nemesis kill --time-limit 300 --rate 400
+2026-10-09T00:52:55Z done  x-sem-wide-kill: valid store=/root/jepsen-failover/store/queen-semaphore-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T00:46:53.931333056Z log=/root/runs-r21-final-b/x-sem-wide-kill.log
+2026-10-09T00:52:55Z start x-sem-membership: --workload semaphore --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-09T00:58:50Z done  x-sem-membership: valid store=/root/jepsen-failover/store/queen-semaphore-membership_offload=on_lanes=16/2026-10-09T00:53:10.36246831Z log=/root/runs-r21-final-b/x-sem-membership.log
+2026-10-09T00:58:50Z start x-sem-lz-kill: --workload semaphore --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-09T01:04:46Z done  x-sem-lz-kill: valid store=/root/jepsen-failover/store/queen-semaphore-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-09T00:59:04.495417796Z log=/root/runs-r21-final-b/x-sem-lz-kill.log
+2026-10-09T01:04:46Z start x-sem-bridge: --workload semaphore --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-09T01:10:51Z done  x-sem-bridge: valid store=/root/jepsen-failover/store/queen-semaphore-bridge_offload=on_lanes=16/2026-10-09T01:05:00.841603593Z log=/root/runs-r21-final-b/x-sem-bridge.log
+2026-10-09T01:10:51Z start x-sem-leader-deaf: --workload semaphore --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-09T01:16:21Z done  x-sem-leader-deaf: INVALID store=/root/jepsen-failover/store/queen-semaphore-leader-deaf_offload=on_lanes=16/2026-10-09T01:11:05.486664378Z log=/root/runs-r21-final-b/x-sem-leader-deaf.log
+2026-10-09T01:16:21Z start x-sem-clock: --workload semaphore --nemesis clock --time-limit 300 --rate 200
+2026-10-09T01:22:22Z done  x-sem-clock: valid store=/root/jepsen-failover/store/queen-semaphore-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T01:16:36.383786281Z log=/root/runs-r21-final-b/x-sem-clock.log
+2026-10-09T01:22:22Z start x-lock-lanes1-kill: --workload locks --lanes 1 --nemesis kill --time-limit 300 --rate 200
+2026-10-09T01:27:57Z done  x-lock-lanes1-kill: valid store=/root/jepsen-failover/store/queen-locks-kill_t=one,primaries,majority,all_offload=on_lanes=1/2026-10-09T01:22:35.868879487Z log=/root/runs-r21-final-b/x-lock-lanes1-kill.log
+2026-10-09T01:27:57Z start x-lock-part-kill: --workload locks --lazyfs --nemesis part-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+2026-10-09T01:34:07Z done  x-lock-part-kill: valid store=/root/jepsen-failover/store/queen-locks-part-kill_lazyfs_offload=on_lanes=16/2026-10-09T01:28:12.745918909Z log=/root/runs-r21-final-b/x-lock-part-kill.log
+2026-10-09T01:34:07Z start x-lock-pause-kill: --workload locks --lazyfs --nemesis pause-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+2026-10-09T01:40:18Z done  x-lock-pause-kill: valid store=/root/jepsen-failover/store/queen-locks-pause-kill_lazyfs_offload=on_lanes=16/2026-10-09T01:34:23.751202284Z log=/root/runs-r21-final-b/x-lock-pause-kill.log
+2026-10-09T01:40:18Z start x-lock-part-nooffload: --workload locks --no-offload --nemesis partition --time-limit 300 --rate 200
+2026-10-09T01:46:08Z done  x-lock-part-nooffload: valid store=/root/jepsen-failover/store/queen-locks-partition_p=one,primaries,majority,majorities-ring_offload=off_lanes=16/2026-10-09T01:40:32.392720682Z log=/root/runs-r21-final-b/x-lock-part-nooffload.log
+2026-10-09T01:46:08Z start x-lock-kill-nooffload: --workload locks --no-offload --nemesis kill --time-limit 300 --rate 200
+2026-10-09T01:51:53Z done  x-lock-kill-nooffload: valid store=/root/jepsen-failover/store/queen-locks-kill_t=one,primaries,majority,all_offload=off_lanes=16/2026-10-09T01:46:23.474074411Z log=/root/runs-r21-final-b/x-lock-kill-nooffload.log
+2026-10-09T01:51:53Z start x-lock-all: --workload locks --nemesis all --time-limit 300 --rate 200
+2026-10-09T01:57:39Z done  x-lock-all: valid store=/root/jepsen-failover/store/queen-locks-clock,kill,partition,pause_p=one,primaries,majority,majorities-ring_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T01:52:09.243035043Z log=/root/runs-r21-final-b/x-lock-all.log
+2026-10-09T01:57:39Z start p11-w3c-restart: --workload claim --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T02:03:14Z done  p11-w3c-restart: valid store=/root/jepsen-failover/store/queen-claim-restart_offload=on_lanes=16/2026-10-09T01:57:52.839766679Z log=/root/runs-r21-final-b/p11-w3c-restart.log
+2026-10-09T02:03:14Z start p11-w3b-restart: --workload counter --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T02:08:59Z done  p11-w3b-restart: valid store=/root/jepsen-failover/store/queen-counter-restart_offload=on_lanes=16/2026-10-09T02:03:28.528968307Z log=/root/runs-r21-final-b/p11-w3b-restart.log
+2026-10-09T02:08:59Z start p11-w3-restart: --workload register --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T02:14:44Z done  p11-w3-restart: valid store=/root/jepsen-failover/store/queen-register-restart_offload=on_lanes=16/2026-10-09T02:09:15.320386476Z log=/root/runs-r21-final-b/p11-w3-restart.log
+2026-10-09T02:14:44Z start p11-w1-restart: --workload log --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-09T02:20:45Z done  p11-w1-restart: valid store=/root/jepsen-failover/store/queen-log-restart_offload=on_lanes=16/2026-10-09T02:14:58.16343015Z log=/root/runs-r21-final-b/p11-w1-restart.log
+2026-10-09T02:20:45Z start p11-w4-membership: --workload elle --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T02:27:20Z done  p11-w4-membership: valid store=/root/jepsen-failover/store/queen-elle-membership_offload=on_lanes=16/2026-10-09T02:20:59.879464255Z log=/root/runs-r21-final-b/p11-w4-membership.log
+2026-10-09T02:27:20Z start p11-w4-bridge: --workload elle --nemesis bridge --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T02:34:00Z done  p11-w4-bridge: valid store=/root/jepsen-failover/store/queen-elle-bridge_offload=on_lanes=16/2026-10-09T02:27:34.470595592Z log=/root/runs-r21-final-b/p11-w4-bridge.log
+2026-10-09T02:34:00Z start p11-w4-lz-kill: --workload elle --lazyfs --nemesis kill --time-limit 300 --rate 100
+2026-10-09T02:40:11Z done  p11-w4-lz-kill: valid store=/root/jepsen-failover/store/queen-elle-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-09T02:34:15.145731979Z log=/root/runs-r21-final-b/p11-w4-lz-kill.log
+2026-10-09T02:40:11Z start p11-w4-part: --workload elle --nemesis partition --time-limit 300 --rate 100
+2026-10-09T02:46:41Z done  p11-w4-part: valid store=/root/jepsen-failover/store/queen-elle-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-09T02:40:27.477621454Z log=/root/runs-r21-final-b/p11-w4-part.log
+2026-10-09T02:46:41Z start p11-w4-restart: --workload elle --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T02:53:06Z done  p11-w4-restart: valid store=/root/jepsen-failover/store/queen-elle-restart_offload=on_lanes=16/2026-10-09T02:46:54.395663335Z log=/root/runs-r21-final-b/p11-w4-restart.log
+2026-10-09T02:53:06Z start p11-w3c-membership: --workload claim --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T02:58:47Z done  p11-w3c-membership: valid store=/root/jepsen-failover/store/queen-claim-membership_offload=on_lanes=16/2026-10-09T02:53:22.17395379Z log=/root/runs-r21-final-b/p11-w3c-membership.log
+2026-10-09T02:58:47Z start p11-w3c-pause: --workload claim --nemesis pause --time-limit 300 --rate 100
+2026-10-09T03:04:22Z done  p11-w3c-pause: valid store=/root/jepsen-failover/store/queen-claim-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T02:59:00.149546789Z log=/root/runs-r21-final-b/p11-w3c-pause.log
+2026-10-09T03:04:22Z start p11-w4-leader-deaf: --workload elle --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T03:10:52Z done  p11-w4-leader-deaf: valid store=/root/jepsen-failover/store/queen-elle-leader-deaf_offload=on_lanes=16/2026-10-09T03:04:35.709683056Z log=/root/runs-r21-final-b/p11-w4-leader-deaf.log
+2026-10-09T03:10:52Z start p11-w4-pause: --workload elle --nemesis pause --time-limit 300 --rate 100
+2026-10-09T03:16:52Z done  p11-w4-pause: valid store=/root/jepsen-failover/store/queen-elle-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T03:11:07.310457325Z log=/root/runs-r21-final-b/p11-w4-pause.log
+2026-10-09T03:16:53Z start p11-w3-clock: --workload register --nemesis clock --time-limit 300 --rate 100
+2026-10-09T03:22:58Z done  p11-w3-clock: valid store=/root/jepsen-failover/store/queen-register-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T03:17:08.143036798Z log=/root/runs-r21-final-b/p11-w3-clock.log
+2026-10-09T03:22:58Z start p11-w1-clock: --workload log --nemesis clock --time-limit 300 --rate 200
+2026-10-09T03:29:23Z done  p11-w1-clock: valid store=/root/jepsen-failover/store/queen-log-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T03:23:13.522154543Z log=/root/runs-r21-final-b/p11-w1-clock.log
+2026-10-09T03:29:23Z start p11-w5-clock: --workload pipeline --nemesis clock --time-limit 300 --rate 200
+2026-10-09T03:35:49Z done  p11-w5-clock: valid store=/root/jepsen-failover/store/queen-pipeline-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T03:29:37.668413585Z log=/root/runs-r21-final-b/p11-w5-clock.log
+2026-10-09T03:35:49Z start p11-w2-clock: --workload queue --nemesis clock --time-limit 300 --rate 200
+2026-10-09T03:41:49Z done  p11-w2-clock: valid store=/root/jepsen-failover/store/queen-queue-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T03:36:03.873636198Z log=/root/runs-r21-final-b/p11-w2-clock.log
+2026-10-09T03:41:49Z start p11-w10-clock: --workload timers --nemesis clock --time-limit 300 --rate 200
+2026-10-09T03:47:04Z done  p11-w10-clock: valid store=/root/jepsen-failover/store/queen-timers-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T03:42:01.991093316Z log=/root/runs-r21-final-b/p11-w10-clock.log
+2026-10-09T03:47:04Z start p11-w10-membership: --workload timers --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-09T03:52:44Z done  p11-w10-membership: valid store=/root/jepsen-failover/store/queen-timers-membership_offload=on_lanes=16/2026-10-09T03:47:20.009913789Z log=/root/runs-r21-final-b/p11-w10-membership.log
+2026-10-09T03:52:44Z start p11-w10-restart: --workload timers --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-09T03:58:30Z done  p11-w10-restart: valid store=/root/jepsen-failover/store/queen-timers-restart_offload=on_lanes=16/2026-10-09T03:52:57.232628484Z log=/root/runs-r21-final-b/p11-w10-restart.log
+2026-10-09T03:58:30Z start p11-w10-bridge: --workload timers --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-09T04:04:20Z done  p11-w10-bridge: valid store=/root/jepsen-failover/store/queen-timers-bridge_offload=on_lanes=16/2026-10-09T03:58:42.782597669Z log=/root/runs-r21-final-b/p11-w10-bridge.log
+2026-10-09T04:04:20Z start p11-w10-lz-kill: --workload timers --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-09T04:10:15Z done  p11-w10-lz-kill: valid store=/root/jepsen-failover/store/queen-timers-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-09T04:04:34.179211022Z log=/root/runs-r21-final-b/p11-w10-lz-kill.log
+2026-10-09T04:10:15Z start p11-w10-leader-deaf: --workload timers --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-09T04:15:56Z done  p11-w10-leader-deaf: valid store=/root/jepsen-failover/store/queen-timers-leader-deaf_offload=on_lanes=16/2026-10-09T04:10:31.564727604Z log=/root/runs-r21-final-b/p11-w10-leader-deaf.log
+2026-10-09T04:15:56Z start p11-w10-pause: --workload timers --nemesis pause --time-limit 300 --rate 200
+2026-10-09T04:21:46Z done  p11-w10-pause: valid store=/root/jepsen-failover/store/queen-timers-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T04:16:11.482939359Z log=/root/runs-r21-final-b/p11-w10-pause.log
+2026-10-09T04:21:46Z start p11-w10-part: --workload timers --nemesis partition --time-limit 300 --rate 200
+2026-10-09T04:27:31Z done  p11-w10-part: valid store=/root/jepsen-failover/store/queen-timers-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-09T04:22:00.15002188Z log=/root/runs-r21-final-b/p11-w10-part.log
+2026-10-09T04:27:31Z start p11-w10-kill: --workload timers --nemesis kill --time-limit 300 --rate 200
+2026-10-09T04:33:36Z done  p11-w10-kill: valid store=/root/jepsen-failover/store/queen-timers-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T04:27:44.950763026Z log=/root/runs-r21-final-b/p11-w10-kill.log
+2026-10-09T04:33:36Z start p11-w3b-membership: --workload counter --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T04:39:22Z done  p11-w3b-membership: valid store=/root/jepsen-failover/store/queen-counter-membership_offload=on_lanes=16/2026-10-09T04:33:51.496121592Z log=/root/runs-r21-final-b/p11-w3b-membership.log
+2026-10-09T04:39:22Z start p11-w3-membership: --workload register --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T04:45:07Z done  p11-w3-membership: valid store=/root/jepsen-failover/store/queen-register-membership_offload=on_lanes=16/2026-10-09T04:39:35.780579075Z log=/root/runs-r21-final-b/p11-w3-membership.log
+2026-10-09T04:45:07Z start p11-w3b-leader-deaf: --workload counter --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T04:50:37Z done  p11-w3b-leader-deaf: valid store=/root/jepsen-failover/store/queen-counter-leader-deaf_offload=on_lanes=16/2026-10-09T04:45:25.356859556Z log=/root/runs-r21-final-b/p11-w3b-leader-deaf.log
+2026-10-09T04:50:37Z start p11-w3b-pause: --workload counter --nemesis pause --time-limit 300 --rate 100
+2026-10-09T04:56:13Z done  p11-w3b-pause: valid store=/root/jepsen-failover/store/queen-counter-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T04:50:51.389063013Z log=/root/runs-r21-final-b/p11-w3b-pause.log
+2026-10-09T04:56:13Z start p11-w3-lead-pause: --workload register --kv-route leader --nemesis pause --time-limit 300 --rate 100
+2026-10-09T05:02:03Z done  p11-w3-lead-pause: valid store=/root/jepsen-failover/store/queen-register-pause_t=one,primaries,majority,all_kv-leader_offload=on_lanes=16/2026-10-09T04:56:28.356313713Z log=/root/runs-r21-final-b/p11-w3-lead-pause.log
+2026-10-09T05:02:03Z start p11-w3-lead-kill: --workload register --kv-route leader --nemesis kill --time-limit 300 --rate 100
+2026-10-09T05:07:53Z done  p11-w3-lead-kill: valid store=/root/jepsen-failover/store/queen-register-kill_t=one,primaries,majority,all_kv-leader_offload=on_lanes=16/2026-10-09T05:02:20.219359342Z log=/root/runs-r21-final-b/p11-w3-lead-kill.log
+2026-10-09T05:07:53Z start p11-w3-bridge: --workload register --nemesis bridge --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T05:13:43Z done  p11-w3-bridge: valid store=/root/jepsen-failover/store/queen-register-bridge_offload=on_lanes=16/2026-10-09T05:08:09.14250894Z log=/root/runs-r21-final-b/p11-w3-bridge.log
+2026-10-09T05:13:43Z start p11-w3-pause: --workload register --nemesis pause --time-limit 300 --rate 100
+2026-10-09T05:19:29Z done  p11-w3-pause: valid store=/root/jepsen-failover/store/queen-register-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T05:13:57.323945887Z log=/root/runs-r21-final-b/p11-w3-pause.log
+2026-10-09T05:19:29Z start p11-w3b-lz-kill: --workload counter --lazyfs --nemesis kill --time-limit 300 --rate 100
+2026-10-09T05:25:19Z done  p11-w3b-lz-kill: valid store=/root/jepsen-failover/store/queen-counter-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-09T05:19:42.846192323Z log=/root/runs-r21-final-b/p11-w3b-lz-kill.log
+2026-10-09T05:25:19Z start p11-w3b-part: --workload counter --nemesis partition --time-limit 300 --rate 100
+2026-10-09T05:31:09Z done  p11-w3b-part: valid store=/root/jepsen-failover/store/queen-counter-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-09T05:25:36.238134759Z log=/root/runs-r21-final-b/p11-w3b-part.log
+2026-10-09T05:31:09Z start p11-w3b-kill: --workload counter --nemesis kill --time-limit 300 --rate 100
+2026-10-09T05:36:05Z done  p11-w3b-kill: valid store=/root/jepsen-failover/store/queen-counter-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-09T05:31:24.973629558Z log=/root/runs-r21-final-b/p11-w3b-kill.log
+2026-10-09T05:36:05Z start p11-w3-kvdefault-kill: --workload register --no-kv-lift --kv-route leader --nemesis kill --time-limit 300 --rate 400
+2026-10-09T05:42:10Z done  p11-w3-kvdefault-kill: valid store=/root/jepsen-failover/store/queen-register-kill_t=one,primaries,majority,all_kv-leader_kv-default-limits_offload=on_lanes=16/2026-10-09T05:36:20.96494305Z log=/root/runs-r21-final-b/p11-w3-kvdefault-kill.log
+2026-10-09T05:42:10Z start p11-w3-lead-deaf: --workload register --kv-route leader --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+2026-10-09T05:47:55Z done  p11-w3-lead-deaf: valid store=/root/jepsen-failover/store/queen-register-leader-deaf_kv-leader_offload=on_lanes=16/2026-10-09T05:42:26.631905025Z log=/root/runs-r21-final-b/p11-w3-lead-deaf.log
+2026-10-09T05:47:55Z start x-sem-leader-deaf-again: --workload semaphore --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-09T05:53:51Z done  x-sem-leader-deaf-again: valid store=/root/jepsen-failover/store/queen-semaphore-leader-deaf_offload=on_lanes=16/2026-10-09T05:48:11.381229789Z log=/root/runs-r21-final-b/x-sem-leader-deaf-again.log
+2026-10-09T05:53:51Z matrix matrix-r21-reversed.txt finished

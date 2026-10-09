@@ -56,10 +56,12 @@ guarantee.
 | Every answered write, with two exceptions below | Survives kill -9 and power loss. | all, with `lazyfs` |
 
 The workloads are in `test/jepsen/src/jepsen/queen/workload/`. Three more, for the dead-letter
-queue (W7), retention (W8) and streams (W9), have run since P11 (2.0.0-alpha.6, 2026-09-28) but were
-not part of P26, so the table above makes no claim for them. [Jepsen](/benchmarks/jepsen/) has their
-results: W7 caught a real bug (a dead letter filed without its payload), fixed in `7a2a1711`, and
-one W9 run under bridge partitions ended unknown on a liveness problem that is still open.
+queue (W7), retention (W8) and streams (W9), have run since P11 (2.0.0-alpha.6, 2026-09-28): they
+were not part of P26 and are part of the full campaign below, and the table above makes no claim
+for them. [Jepsen](/benchmarks/jepsen/) has their results: W7 caught a real bug (a dead letter filed
+without its payload), fixed in `7a2a1711`, and one W9 run under bridge partitions ended unknown on
+2026-10-02, on a liveness problem whose cause was not found; the same test was valid on
+2026-10-09.
 
 ## Faults and campaigns
 
@@ -69,18 +71,23 @@ primaries, majorities, a ring, a bridge), leaves a leader that hears nobody, jum
 minutes in both directions, cuts the power (a kill that drops whatever was not fsynced, through
 lazyfs), changes the membership and corrupts files.
 
-Two campaigns back this page. P10 ran 82 tests twice, W1 to W6 under every fault class, on raft
+Three campaigns back this page. P10 ran 82 tests twice, W1 to W6 under every fault class, on raft
 commit `ec9d88c4`, the first build without PostgreSQL, and all 82 were valid both times
 (2026-09-26 and 09-27; the results, the Jepsen stores and the tested binary are archived in
 `benchmark-queen/2026-09-27-jepsen-archive/`). P26 ran 65 tests on 2.0.0-beta.3 (2026-10-01): the
 queue, pipeline, register, counter, claim, log, Elle and timer workloads under kill -9, pauses,
 partitions, bridges, a deaf leader, clock jumps, restarts, membership changes and power loss, and
-all 65 were valid. The campaigns before them found real bugs, which is what they are for: a KV
-write that was acknowledged and never committed (a stale leader answering a read by index), a read
-that saw half a batch, a lease cut short by a forward jump of the leader's clock, and pops that
-stalled after a clock jump. Each was fixed. [Jepsen](/benchmarks/jepsen/) lists every campaign and
-every bug. No campaign is claimed for the exact build you run; the suite is in `test/jepsen/`, for
-you to run.
+all 65 were valid. The full campaign of 2026-10-08 and 09 ran 153 tests on `b69470031`, the code
+of 2.1.0: the 125 of P11, which are W1 to W10, and 28 lock and semaphore tests. 152 were valid;
+the other was judged invalid on test nodes whose clocks had drifted more than 500 ms apart, the
+limit named below, and was valid when it ran again. The campaigns before them found real bugs,
+which is what they are for: a KV write that was acknowledged and never committed (a stale leader
+answering a read by index), a read that saw half a batch, a lease cut short by a forward jump of
+the leader's clock, and pops that stalled after a clock jump. So did the first run of the last
+one, on the build before the fixes of 2.1.0: a leader that no majority had acknowledged for two
+seconds stopped planning, and answered nothing for as long as it led. Each was fixed.
+[Jepsen](/benchmarks/jepsen/) lists every campaign and every bug. No campaign is claimed for the
+exact build you run; the suite is in `test/jepsen/`, for you to run.
 
 ## What an answered write means
 

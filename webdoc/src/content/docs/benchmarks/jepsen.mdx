@@ -24,9 +24,11 @@ A million messages a second is worth nothing if one of them can go missing. We c
 Jepsen: five nodes, clients driving the native API as hard as they can, a nemesis that kills,
 pauses, partitions, skews clocks and cuts power, and checkers that read the whole history
 afterwards looking for a message lost, delivered twice, acked twice or seen out of order. The
-latest full campaign, on 2.0.0-beta.3, ran 65 tests and all 65 came back valid, and locks had 41
-tests of their own on 2026-10-08, all valid. That is evidence, not proof. Jepsen finds bugs and
-cannot show there are none, and further down is every bug it found in Queen 2.0.
+latest full campaign ran 153 tests on the code of 2.1.0, on 2026-10-08 and 09: 152 came back valid,
+and the other, judged invalid on test nodes whose clocks had drifted apart, was valid when it ran
+again. A standby cluster's failover had 37 tests of its own on the same build. That is evidence,
+not proof. Jepsen finds bugs and cannot show there are none, and further down is every bug it
+found in Queen 2.
 
 ## How a test runs
 
@@ -96,13 +98,27 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | Kafka-facade build | 2026-10-02 | the code of 2.0.0-beta.5, before a fix inside the facade | 65 | 64 valid, 1 unknown |
 | 2.0.1 | 2026-10-05 | 2.0.1, `bc1b5bfb6` | 19: queue, pipeline, dead letters, log, dedup and KV register under kills, pauses, partitions, restarts, a deaf leader and power loss, the queue and the pipeline on 2,000 and 1,000 partitions whose idle consumer state leaves the leader's memory after a second | 19 valid |
 | Locks | 2026-10-08 | `2287397a3`: 2.0.3 with locks, the KV `check` op and cluster version 5 | 41: W11 and W11b (29, three of them without faults), then KV register, counter and claim, Elle and the pipeline again (12), under kills, pauses, partitions, clock faults, restarts, membership changes, bridges, a deaf leader and power loss, and with kills, pauses, partitions and clock faults in one test | 41 valid |
-| Failover | 2026-10-08 and 09 | `b69470031`: 2.0.4 with the standby cluster, locks and the four fixes of that night | 37: W12 on two clusters of three nodes, with crashes of the source, planned switches, transactions and crashes that find the standby 10 s behind, under kills, power loss, pauses, partitions, clock faults, restarts and all of them at once | 36 valid; the other was the harness, and the 10 planned switches ran again valid |
+| Full | 2026-10-08 and 09 | `b69470031`, the code of 2.1.0: 2.0.4 with the standby cluster, locks and the four fixes of that night | 153: the 125 of P11 (W1 to W10) and 28 lock and semaphore tests (W11, W11b), two of them without faults | 152 valid; the other was the harness, which had let the nodes' clocks drift apart, and it ran again valid |
+| Failover | 2026-10-08 and 09 | the same build | 37: W12 on two clusters of three nodes, with crashes of the source, planned switches, transactions and crashes that find the standby 10 s behind, under kills, power loss, pauses, partitions, clock faults, restarts and all of them at once | 36 valid; the other was the harness, and the 10 planned switches ran again valid |
 
-The unknown is W9 under bridge partitions. After the last heal, a follower's pops kept timing out
-for about 90 seconds although it had caught up, so the final reads did not finish within the
-test's time limit and the checker had no end state to judge. It is a liveness problem, and it is
-open. P8 to P10 are archived with every history in
+The unknown of 2026-10-02 is W9 under bridge partitions. After the last heal, a follower's pops
+kept timing out for about 90 seconds although it had caught up, so the final reads did not finish
+within the test's time limit and the checker had no end state to judge. It was a liveness
+problem, and its cause was not found. The same test was valid in the full campaign, on
+2026-10-09, whose build has the fix for a leader that stops planning while it leads
+(`5d48aef94`): such a leader's requests time out the same way, and whether it was the cause that
+day is not known. P8 to P10 are archived with every history in
 `benchmark-queen/2026-09-27-jepsen-archive/`.
+
+The full campaign started on the build as it was merged (`e2f7236bd`) and was stopped after 48
+tests, 47 of them valid. The other had found a five-node cluster whose leader led on for two
+minutes and answered nothing (the row for `5d48aef94` below), and the fix was ready. The campaign
+then ran from its first test on the build with the four fixes, on two sets of five nodes that
+shared the list. In 51 of its tests a leader was handed an entry when no quorum had acknowledged
+it for 2 s or more, 116 times in all: each is a write that raft refused before the fix, and each
+waited until a quorum answered or that leadership ended. The one test judged invalid, a semaphore
+test under a deaf leader, ran on nodes whose clocks were 0.55 s apart, and is among our own
+faults below. The verdicts of both runs are in `benchmark-queen/2026-10-08-jepsen-full/`.
 
 The failover campaign started on the build as it was merged and found three bugs in its first
 two hours, listed below; a fourth came from the standby's own tests the same evening. On the build
@@ -168,11 +184,11 @@ checker knows, and every campaign ran one raft group with one tenant over the na
 several raft groups, several tenants, the Kafka facade and the embedded proxy were not part of any.
 Lease exclusivity across a leader change needs the nodes' clocks within
 `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. Losing a majority of the disks for good can
-lose acknowledged writes, since raft survives the loss of a minority. And the full campaign last
-ran on the code of 2.0.0-beta.5: 2.0.1 and the locks build each ran the tests of what they
-changed. A standby's failover has its own workload since 2026-10-08, on a standby that starts
-empty beside its source: a seeded standby, one that follows across a version upgrade, and two
-clusters in different places were not part of it.
+lose acknowledged writes, since raft survives the loss of a minority. The full campaign last ran
+on `b69470031`: 2.1.0's server code differs from it in the version number and four lines of a
+unit test, and no campaign ran on the released binary. A standby's failover has its own workload
+since 2026-10-08, on a standby that starts empty beside its source: a seeded standby, one that
+follows across a version upgrade, and two clusters in different places were not part of it.
 
 What each API guarantees, written for the developer using it, is on
 [guarantees](/concepts/guarantees/).

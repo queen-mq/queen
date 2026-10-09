@@ -120,9 +120,10 @@ pushed and consumed 1,000,000 messages a second through one queue at every parti
 tried, from 200 to ten million, with an end-to-end p99 between 103 and 163 ms. An exactly-once step
 of 10 messages committed in 3 ms at the median, and one raft group topped out between 7,000 and
 9,000 such transactions a second (2026-10-01, with Kafka, Redpanda and Pulsar measured on the same
-machines). The latest full Jepsen campaign, on 2.0.0-beta.3, ran 65 tests under kill -9,
-partitions, pauses, clock jumps and power loss, and all 65 were valid; a later run on the
-Kafka-facade build had 64 valid and 1 the checker could not judge ([Jepsen](/benchmarks/jepsen/)). Every number, with its conditions and
+machines). The latest full Jepsen campaign, on the code of 2.1.0, ran 153 tests under kill -9,
+partitions, pauses, clock jumps and power loss: 152 were valid, and the other, judged invalid on
+test nodes whose clocks had drifted apart, was valid when it ran again
+([Jepsen](/benchmarks/jepsen/)). Every number, with its conditions and
 the places where other systems did better, is on [benchmarks](/benchmarks/), and what the
 guarantees cover is on [guarantees](/concepts/guarantees/).
 

@@ -28,6 +28,18 @@ that entry for ever while it shut down, and used a whole core doing it. A stoppi
 once every caller of its entries in flight has an answer; an entry that timed out had already
 answered `retry`.
 
+**Server: a leader that no majority has acknowledged for two seconds no longer stops for good.**
+A leader cut off for two or three seconds and not replaced, or one whose majority needs a
+follower with a slow disk, had its next write refused by raft, took the refusal for a lost
+leadership and stopped planning. It still led, so nothing started it again: every request ran
+into its deadline until the leadership changed or the node restarted. Every release since 2.0.0
+has it. Such a leader now keeps its entries and logs them, in order, when a majority answers
+again, and a leader that finds itself stopped while it leads starts again after 5 s. Found by
+Jepsen on a five-node cluster with two slow disks. With the leader of five nodes cut off for
+2.4 s, the build before the fix took no write afterwards in 11 of the 12 trials where the leader
+kept its leadership, and this one took the next write in all 10. The log lines that say when it
+happens are on [Monitoring](https://queenmq.com/operate/monitoring/).
+
 **Server: locks and semaphores.** A lock is a lease: one holder at a time, for a lifetime the holder
 declares and renews, with a token that fences a holder that outlived it. A semaphore is the same
 lease with up to 1,024 permits. One route, `POST /api/v1/locks`, carries `acquire`, `renew`,
