@@ -1,0 +1,230 @@
+{
+    "_": [
+        "What a pool's worker receives from the supervisor, pinned for the Rust master",
+        "(supervisor/src/main.rs: worker_invocation), the PHP engine (PhpSupervisor::startWorker)",
+        "and the fork server (ForkServerCommand::runWorker), which must agree on it.",
+        "`config` is config/queen.php, `queue_connections` is config('queue.connections'),",
+        "and each case's `pool` is what SupervisorConfiguration::resolve() exports for it.",
+        "`arguments` follow `queue:work`, the connection first. In `environment`, a string",
+        "is the value, `true` a path the master decides, and an absent variable is not set."
+    ],
+    "config": {
+        "url": "http://queen.test:6632",
+        "consumer_group": "workers",
+        "queue": "default",
+        "supervisor": {
+            "supervisors": {
+                "batch": {
+                    "connection": "queen-batch",
+                    "queues": ["compliance", "ical", "background"],
+                    "balance": "off",
+                    "processes": 3,
+                    "sleep": 1,
+                    "timeout": 300,
+                    "retry_after": 330,
+                    "tries": 1,
+                    "memory": 448
+                },
+                "interactive": {
+                    "connection": "queen-interactive",
+                    "queues": ["interactive", "notifications"],
+                    "balance": "auto",
+                    "strategy": "time",
+                    "min_processes": 2,
+                    "max_processes": 8,
+                    "sleep": 0,
+                    "timeout": 60,
+                    "retry_after": 90,
+                    "tries": 2,
+                    "memory": 256,
+                    "backoff": 5,
+                    "max_jobs": 500,
+                    "max_time": 3600,
+                    "rest": 1,
+                    "force": true,
+                    "quiet": false
+                },
+                "default": {
+                    "queues": "default",
+                    "balance": "simple",
+                    "processes": 2
+                }
+            }
+        }
+    },
+    "queue_connections": {
+        "queen": {"driver": "queen", "queue": "default"},
+        "queen-batch": {"driver": "queen", "queue": "batch", "lease": 360},
+        "queen-interactive": {"driver": "queen", "queue": "interactive", "lease_renewal": true}
+    },
+    "cases": [
+        {
+            "name": "a quiet pool on its own connection, balance off: every queue, in order",
+            "supervisor": "batch",
+            "queue": "compliance",
+            "pool": {
+                "connection": "queen-batch",
+                "consumer_group": "workers",
+                "queues": ["compliance", "ical", "background"],
+                "balance": "off",
+                "strategy": "size",
+                "processes": 3,
+                "min_processes": 1,
+                "max_processes": 10,
+                "target_jobs_per_process": 10,
+                "target_clear_seconds": 60.0,
+                "default_runtime_seconds": 1.0,
+                "balance_cooldown": 3,
+                "balance_max_shift": 1,
+                "scale_down_delay": 10,
+                "restart_backoff": 1,
+                "restart_backoff_max": 30,
+                "stable_after": 60,
+                "sleep": 1,
+                "timeout": 300,
+                "retry_after": 330,
+                "lease_renewal": false,
+                "tries": 1,
+                "memory": 448,
+                "backoff": 0,
+                "max_jobs": 0,
+                "max_time": 0,
+                "rest": 0,
+                "force": false,
+                "quiet": true
+            },
+            "arguments": [
+                "queen-batch",
+                "--queue=compliance,ical,background",
+                "--sleep=1",
+                "--timeout=300",
+                "--tries=1",
+                "--memory=448",
+                "--backoff=0",
+                "--max-jobs=0",
+                "--max-time=0",
+                "--rest=0",
+                "--quiet"
+            ],
+            "environment": {
+                "QUEEN_LARAVEL_CONSUMER_GROUP": "workers",
+                "QUEEN_LARAVEL_CONNECTION": "queen-batch",
+                "QUEEN_LARAVEL_SUPERVISOR": "batch",
+                "QUEEN_LARAVEL_RETRY_AFTER": "330",
+                "QUEEN_LARAVEL_BLOCK_FOR": "0"
+            }
+        },
+        {
+            "name": "a verbose, forced, lease-renewing pool, balance auto with the time strategy: one queue",
+            "supervisor": "interactive",
+            "queue": "notifications",
+            "pool": {
+                "connection": "queen-interactive",
+                "consumer_group": "workers",
+                "queues": ["interactive", "notifications"],
+                "balance": "auto",
+                "strategy": "time",
+                "processes": 8,
+                "min_processes": 2,
+                "max_processes": 8,
+                "target_jobs_per_process": 10,
+                "target_clear_seconds": 60.0,
+                "default_runtime_seconds": 1.0,
+                "balance_cooldown": 3,
+                "balance_max_shift": 1,
+                "scale_down_delay": 10,
+                "restart_backoff": 1,
+                "restart_backoff_max": 30,
+                "stable_after": 60,
+                "sleep": 0,
+                "timeout": 60,
+                "retry_after": 90,
+                "lease_renewal": true,
+                "tries": 2,
+                "memory": 256,
+                "backoff": 5,
+                "max_jobs": 500,
+                "max_time": 3600,
+                "rest": 1,
+                "force": true,
+                "quiet": false
+            },
+            "arguments": [
+                "queen-interactive",
+                "--queue=notifications",
+                "--sleep=0",
+                "--timeout=60",
+                "--tries=2",
+                "--memory=256",
+                "--backoff=5",
+                "--max-jobs=500",
+                "--max-time=3600",
+                "--rest=1",
+                "--force"
+            ],
+            "environment": {
+                "QUEEN_LARAVEL_CONSUMER_GROUP": "workers",
+                "QUEEN_LARAVEL_CONNECTION": "queen-interactive",
+                "QUEEN_LARAVEL_SUPERVISOR": "interactive",
+                "QUEEN_LARAVEL_RETRY_AFTER": "90",
+                "QUEEN_SUPERVISOR_TELEMETRY_DIR": true,
+                "QUEEN_SUPERVISOR_LEASE_SOCKET": true
+            }
+        },
+        {
+            "name": "the defaults: the queen connection, balance simple",
+            "supervisor": "default",
+            "queue": "default",
+            "pool": {
+                "connection": "queen",
+                "consumer_group": "workers",
+                "queues": ["default"],
+                "balance": "simple",
+                "strategy": "size",
+                "processes": 2,
+                "min_processes": 1,
+                "max_processes": 10,
+                "target_jobs_per_process": 10,
+                "target_clear_seconds": 60.0,
+                "default_runtime_seconds": 1.0,
+                "balance_cooldown": 3,
+                "balance_max_shift": 1,
+                "scale_down_delay": 10,
+                "restart_backoff": 1,
+                "restart_backoff_max": 30,
+                "stable_after": 60,
+                "sleep": 1,
+                "timeout": 60,
+                "retry_after": 90,
+                "lease_renewal": false,
+                "tries": 3,
+                "memory": 128,
+                "backoff": 0,
+                "max_jobs": 0,
+                "max_time": 0,
+                "rest": 0,
+                "force": false,
+                "quiet": true
+            },
+            "arguments": [
+                "queen",
+                "--queue=default",
+                "--sleep=1",
+                "--timeout=60",
+                "--tries=3",
+                "--memory=128",
+                "--backoff=0",
+                "--max-jobs=0",
+                "--max-time=0",
+                "--rest=0",
+                "--quiet"
+            ],
+            "environment": {
+                "QUEEN_LARAVEL_CONSUMER_GROUP": "workers",
+                "QUEEN_LARAVEL_CONNECTION": "queen",
+                "QUEEN_LARAVEL_SUPERVISOR": "default",
+                "QUEEN_LARAVEL_RETRY_AFTER": "90"
+            }
+        }
+    ]
+}

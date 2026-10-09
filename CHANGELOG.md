@@ -14,8 +14,15 @@ dispatches threw on every pop, every 2 s per worker, and the pool worked no job;
 a Queen connection worked, with the default's settings instead of the pool's. Spawned workers
 (`prefork` off) were never affected, and `ps` showed `queue:work <connection>` all along, because
 the process title is set by hand. Since the PHP client 1.7.0, where prefork arrived. The fork
-server now binds the arguments after the command's name, and a test runs Laravel's `queue:work`
-from an application whose default connection is not the pool's.
+server now binds the arguments after the command's name. The tests that let this through ran a
+stand-in for `queue:work` and, when they ran the real one, an application whose default connection
+was the pool's. They now run Laravel's own `queue:work` from an application whose default
+connection is none of the pools', both as a spawned worker and as a forked one, and the fork
+server, the PHP engine and the Rust master are each checked against one record of what a pool's
+worker receives (`tests/Fixtures/Supervisor/worker-invocation.json`), from `config/queen.php` to
+the worker's arguments and environment. That record also showed the PHP engine giving a spawned
+worker of a balancing pool an empty `QUEEN_LARAVEL_BLOCK_FOR`, which the connector ignored; it is
+no longer set, as for a forked worker.
 
 **Laravel prefork: the fork server accepts a `log` service that is not Laravel's.** Before each
 fork it forgot the log channels through `getChannels()`, which an application's own PSR-3 logger

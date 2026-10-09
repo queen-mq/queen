@@ -4,6 +4,7 @@ namespace Queen\Tests;
 
 use Illuminate\Console\OutputStyle;
 use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Log\LogManager;
 use Illuminate\Queue\Connectors\ConnectorInterface;
 use Illuminate\Queue\NullQueue;
 use Orchestra\Testbench\TestCase;
@@ -72,6 +73,40 @@ final class LaravelForkServerWorkerTest extends TestCase
 
         $this->assertSame(0, $code);
         $this->assertSame([['queen-batch', $expected]], $this->pops);
+    }
+
+    /**
+     * queen:fork-server is started by a supervisor with prefork on, with fd 3
+     * open and QUEEN_FORK_SERVER set; run by hand it refuses and says so.
+     */
+    public function testTheServerRefusesToRunByHand(): void
+    {
+        $this->assertNotSame(\Queen\Laravel\Supervisor\Prefork\ForkServer::PROTOCOL, getenv('QUEEN_FORK_SERVER'));
+
+        $this->artisan('queen:fork-server')
+            ->expectsOutputToContain('started by a Queen supervisor')
+            ->assertFailed();
+    }
+
+    /**
+     * Before each fork the server lets go of what the boot opened: a log
+     * channel and a database connection are built again by whichever worker
+     * first needs them, so no two workers share a socket.
+     */
+    public function testTheServerForgetsTheChannelsAndConnectionsTheBootOpened(): void
+    {
+        $log = $this->app['log'];
+        $this->assertInstanceOf(LogManager::class, $log);
+        $log->channel('null')->info('opened by the boot');
+        $this->app['db']->connection()->select('select 1');
+        $this->assertNotSame([], $log->getChannels());
+        $this->assertNotSame([], $this->app['db']->getConnections());
+        $server = $this->server();
+
+        (new \ReflectionMethod($server, 'releaseBootResources'))->invoke($server);
+
+        $this->assertSame([], $log->getChannels());
+        $this->assertSame([], $this->app['db']->getConnections());
     }
 
     /**

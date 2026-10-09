@@ -7316,4 +7316,74 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
         ])
         .is_err());
     }
+
+    /// The PHP client pins the same file in its tests: what Laravel exports
+    /// for a pool, and the arguments and environment the pool's worker gets,
+    /// whether this master spawns it or the fork server forks it.
+    #[test]
+    fn worker_invocation_matches_the_php_client_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../clients/client-php/tests/Fixtures/Supervisor/worker-invocation.json"
+        );
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut config = config(options("auto"));
+        config.state_directory = "/state".into();
+        config.lease_socket = Some("/state/lease.sock".into());
+        config.exit_markers = Some("/state/exits".into());
+        // What the fixture marks `true`: a path this master decides.
+        let decided = HashMap::from([
+            ("QUEEN_SUPERVISOR_TELEMETRY_DIR", "/state/telemetry"),
+            ("QUEEN_SUPERVISOR_LEASE_SOCKET", "/state/lease.sock"),
+        ]);
+
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let supervisor = case["supervisor"].as_str().unwrap();
+            let queue = case["queue"].as_str().unwrap();
+            // deny_unknown_fields: a field Laravel exports and this master
+            // does not read fails here.
+            let pool: SupervisorConfig = serde_json::from_value(case["pool"].clone())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+
+            let (arguments, environment) = worker_invocation(&config, supervisor, queue, &pool);
+
+            let expected: Vec<String> = serde_json::from_value(case["arguments"].clone()).unwrap();
+            assert_eq!(arguments, expected, "{name}: arguments");
+            let expected = case["environment"].as_object().unwrap();
+            for (variable, value) in &environment {
+                match (expected.get(variable), value.as_deref()) {
+                    (None, None) => {}
+                    (None, Some(value)) if variable == "QUEEN_SUPERVISOR_EXITS_DIR" => {
+                        assert_eq!(value, "/state/exits", "{name}: {variable}");
+                    }
+                    (None, Some(value)) => {
+                        panic!("{name}: {variable}={value} is sent and not in the fixture")
+                    }
+                    (Some(serde_json::Value::String(expected)), value) => {
+                        assert_eq!(value, Some(expected.as_str()), "{name}: {variable}");
+                    }
+                    (Some(serde_json::Value::Bool(true)), value) => {
+                        assert_eq!(
+                            value,
+                            Some(decided[variable.as_str()]),
+                            "{name}: {variable}"
+                        );
+                    }
+                    (Some(other), value) => {
+                        panic!("{name}: {variable}: fixture {other} against {value:?}")
+                    }
+                }
+            }
+            for variable in expected.keys() {
+                assert!(
+                    environment
+                        .iter()
+                        .any(|(sent, value)| sent == variable && value.is_some()),
+                    "{name}: {variable} is in the fixture and not sent"
+                );
+            }
+        }
+    }
 }
