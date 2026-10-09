@@ -91,7 +91,7 @@ use super::{
     DLQ_TRIM_PER_WATERMARK,
 };
 use crate::rsm::dedup;
-use crate::rsm::effect::{CursorRow, Effect, Pid};
+use crate::rsm::effect::{CursorRow, Effect, Pid, RowsMark};
 use crate::rsm::fasthash::{FxBuild, FxHasher};
 use crate::rsm::local_metrics::LocalMetrics;
 use crate::rsm::qlog::set::QLogSet;
@@ -615,8 +615,9 @@ impl Shard {
                 pid,
                 log_start,
                 txns_start,
+                rows,
             } => {
-                self.watermark(w, cx, side, ord, *pid, *log_start, *txns_start)?;
+                self.watermark(w, cx, side, ord, *pid, *log_start, *txns_start, *rows)?;
                 if let Some(en) = cx.engine {
                     en.on_effect(e, cx.index);
                 }
@@ -1102,6 +1103,16 @@ impl Shard {
     /// below the cursor still read them inside the txns window (D10). Each
     /// frame is therefore released TWICE, once per watermark, and only the
     /// second release lets its file die (§11.7).
+    ///
+    /// `rows` (catalogue version 6) also moves `rows_start`, the first offset
+    /// that keeps its `txns` row. It may pass `log_start`: a row then leaves
+    /// while its message stays, and what the row knew of the message — its
+    /// retained length — moves into the partition's `unrowed_bytes`, which
+    /// retention gives back as `log_start` crosses those messages (in
+    /// proportion to how many of them it crosses: no row is left to say which
+    /// one weighed what, and the sum is exact once it has crossed them all).
+    /// A version-1 watermark moves the rows with `txns_start`, as it always
+    /// did.
     #[allow(clippy::too_many_arguments)]
     fn watermark<W: Writes + ?Sized>(
         &mut self,
@@ -1112,17 +1123,23 @@ impl Shard {
         pid: Pid,
         log_start: u64,
         txns_start: u64,
+        rows: Option<RowsMark>,
     ) -> Result<()> {
         let Some(mut p) = w.partition(pid)? else {
             self.stats.missing_rows += 1;
             return Ok(());
         };
-        if log_start < p.log_start || txns_start < p.txns_start {
+        let old_rows_start = p.rows_start.max(p.txns_start);
+        let rows_start = match rows {
+            Some(m) => m.rows_start,
+            None => old_rows_start.max(txns_start),
+        };
+        if log_start < p.log_start || txns_start < p.txns_start || rows_start < old_rows_start {
             return Err(ApplyError::Inconsistent {
                 what: "Watermark",
                 detail: format!(
                     "pid {pid}: watermarks never move back \
-                     (log {} → {log_start}, txns {} → {txns_start})",
+                     (log {} → {log_start}, txns {} → {txns_start}, rows {old_rows_start} → {rows_start})",
                     p.log_start, p.txns_start
                 ),
             });
@@ -1133,8 +1150,42 @@ impl Shard {
                 detail: format!("pid {pid}: txns_start {txns_start} above log_start {log_start}"),
             });
         }
+        if txns_start > rows_start {
+            return Err(ApplyError::Inconsistent {
+                what: "Watermark",
+                detail: format!("pid {pid}: txns_start {txns_start} above rows_start {rows_start}"),
+            });
+        }
         let old_log_start = p.log_start;
         let old_txns_start = p.txns_start;
+
+        // 0. The retained messages that have no row any more, `[old
+        //    log_start, old rows_start)`: what `log_start` crosses of them
+        //    gives back its share of `unrowed_bytes`, all of it once every
+        //    one of them is crossed.
+        let mut unrowed_freed: u64 = 0;
+        if old_log_start < old_rows_start && log_start > old_log_start {
+            let span = old_rows_start - old_log_start;
+            let crossed = log_start.min(old_rows_start) - old_log_start;
+            unrowed_freed = if crossed >= span {
+                p.unrowed_bytes
+            } else {
+                ((p.unrowed_bytes as u128 * crossed as u128) / span as u128) as u64
+            };
+            p.unrowed_bytes -= unrowed_freed;
+        }
+        // The stamp of the oldest message left, read while its row is still
+        // here: the frame at the new `log_start` keeps a row through this
+        // watermark only if it had one before it.
+        let oldest_after = if log_start as i64 > p.last_offset {
+            None
+        } else if log_start >= old_rows_start {
+            frame_stamp_from(w, pid, log_start)?.or(p.oldest_live_at_us)
+        } else {
+            rows.and_then(|m| m.oldest_live_at_us)
+                .filter(|_| log_start > old_log_start)
+                .or(p.oldest_live_at_us)
+        };
 
         // 1. The payload: every frame whose base crossed `log_start` this
         //    time. Its bytes stop being retained; its `seg_loc` row (if it has
@@ -1144,7 +1195,7 @@ impl Shard {
         //    txns row in `DEDUP_INDEX=segment`), its `seg_loc` row's. Where
         //    both exist they are the same number (the frame's encoded length).
         let mut carried: Vec<u64> = Vec::new();
-        let mut bytes_freed: i64 = 0;
+        let mut bytes_freed: i64 = unrowed_freed as i64;
         if dedup::txns_carry_len() {
             let prefix = keys::txns_prefix(pid);
             let start = keys::txns(pid, p.log_start);
@@ -1177,23 +1228,13 @@ impl Shard {
         })?;
         for (base, row) in &released {
             self.release_seg_loc(cx.cfg, side, ord, row, Release::Retained);
-            // Both scans are in base order, so `carried` is sorted.
-            if carried.binary_search(base).is_err() {
+            // Both scans are in base order, so `carried` is sorted. A frame
+            // below the rows has no row to carry its length: it went into
+            // `unrowed_bytes` when the row left, and came back above.
+            if *base >= old_rows_start && carried.binary_search(base).is_err() {
                 bytes_freed += row.len as i64;
             }
         }
-        if bytes_freed != 0 {
-            self.bump(
-                w,
-                pid,
-                &p.tenant,
-                &p.queue,
-                None,
-                Counter::RetainedBytes,
-                -bytes_freed,
-            )?;
-        }
-
         // 2. The hash lists: every frame whose base crossed `txns_start`. Now
         //    the frame is gone for good, so its `seg_loc` row goes with it.
         let mut expired: Vec<(u64, SegLocRow)> = Vec::new();
@@ -1208,7 +1249,33 @@ impl Shard {
             self.release_seg_loc(cx.cfg, side, ord, row, Release::Window);
             w.del_seg_loc(pid, *base)?;
         }
-        self.expire_hashes(w, pid, p.txns_start, txns_start)?;
+        // The rows below the new `rows_start` go — once the partition row
+        // says so (below): a reader that finds a row missing reads the
+        // partition row AFTERWARDS to learn why, and must find `rows_start`
+        // already past it (`consume/frames.rs`). Those of messages that stay
+        // (at or past the new `log_start`) leave their retained length in
+        // `unrowed_bytes`.
+        let (expired_rows, kept_bytes) =
+            self.expired_rows(w, pid, old_rows_start, rows_start, log_start)?;
+        p.unrowed_bytes = p.unrowed_bytes.saturating_add(kept_bytes);
+        if log_start >= rows_start && p.unrowed_bytes != 0 {
+            // Nothing is unrowed any more: whatever the shares left behind
+            // (none, by the arithmetic above) is given back with the rest.
+            bytes_freed += p.unrowed_bytes as i64;
+            p.unrowed_bytes = 0;
+        }
+
+        if bytes_freed != 0 {
+            self.bump(
+                w,
+                pid,
+                &p.tenant,
+                &p.queue,
+                None,
+                Counter::RetainedBytes,
+                -bytes_freed,
+            )?;
+        }
 
         // 3. The dead letters follow the queue's retention: the ones whose
         //    message just left the log go with it.
@@ -1216,15 +1283,14 @@ impl Shard {
 
         p.log_start = log_start;
         p.txns_start = txns_start;
+        p.rows_start = rows_start;
         // `oldestMessage`: the stamp of the oldest message still held, the
-        // frame at the new `log_start`. A partition without txns rows keeps
-        // what it had; an emptied one holds nothing.
-        p.oldest_live_at_us = if log_start as i64 > p.last_offset {
-            None
-        } else {
-            frame_stamp_from(w, pid, log_start)?.or(p.oldest_live_at_us)
-        };
+        // frame at the new `log_start` (read above, before its row could go).
+        // A partition without txns rows keeps what it had; an emptied one
+        // holds nothing.
+        p.oldest_live_at_us = oldest_after;
         w.put_partition(pid, &p)?;
+        self.delete_rows(w, pid, &expired_rows)?;
         match side {
             Side::Inline { metrics, .. } => metrics.record_retention(
                 cx.now_us,
@@ -1369,7 +1435,12 @@ impl Shard {
         settle_dlq_count(w, &mut self.ctr, &mut self.key, pid, tenant, queue, gone)
     }
 
-    /// Drop the dedup occurrences and the `txns` rows below `to`.
+    /// The `txns` rows a watermark expires: those from `from` that end below
+    /// `to`, oldest first, and the retained bytes those at or past
+    /// `keep_from` carried (version-2 rows only: a row without its length
+    /// leaves it in a `seg_loc` row, which gives it back by itself) — the
+    /// messages those rows indexed are still retained, so their bytes are
+    /// owed later. Nothing is deleted here ([`Shard::delete_rows`]).
     ///
     /// The `txns` row of an append that STRADDLES the new watermark is left
     /// alone: it carries the hash list of offsets above it too, and a row is
@@ -1377,24 +1448,26 @@ impl Shard {
     /// the direction that matters — a duplicate is still found — while
     /// deleting them early would answer "new" for a transaction id that is
     /// still a duplicate.
-    fn expire_hashes<W: Writes + ?Sized>(
+    fn expired_rows<W: Writes + ?Sized>(
         &mut self,
         w: &mut W,
         pid: Pid,
         from: u64,
         to: u64,
-    ) -> Result<()> {
+        keep_from: u64,
+    ) -> Result<(Vec<(u64, dedup::TxnsRow)>, u64)> {
         // STORAGE_V2 Lever 2 (`DEDUP_INDEX=segment`): there are NO `Txns` (or
         // `Dedup`) rows to expire — `record` wrote none. The dedup window is
         // enforced entirely by the segment scan's `created >= floor` filter and
         // by segment-file GC. So this is a no-op: no store write on the
         // retention path.
-        if dedup::record_index_mode() == dedup::IndexMode::Segment {
-            return Ok(());
+        if dedup::record_index_mode() == dedup::IndexMode::Segment || to <= from {
+            return Ok((Vec::new(), 0));
         }
-        if to <= from {
-            return Ok(());
-        }
+        let mut kept_bytes: u64 = 0;
+        // Kept rows an older build wrote without their length: it is in
+        // their `seg_loc` row.
+        let mut unsized_rows: Vec<u64> = Vec::new();
         let mut victims: Vec<(u64, dedup::TxnsRow)> = Vec::new();
         let prefix = keys::txns_prefix(pid);
         let start = keys::txns(pid, from);
@@ -1409,6 +1482,12 @@ impl Shard {
                     if row.end >= to {
                         return false;
                     }
+                    if base >= keep_from {
+                        match dedup::TxnsRow::retained_len_of(v) {
+                            Some(len) => kept_bytes += len as u64,
+                            None => unsized_rows.push(base),
+                        }
+                    }
                     victims.push((base, row));
                     true
                 }
@@ -1421,8 +1500,26 @@ impl Shard {
         if let Some(e) = bad {
             return Err(StoreError::corrupt(Keyspace::Txns, e).into());
         }
+        for base in unsized_rows {
+            if let Some(loc) = w.seg_loc(pid, base)? {
+                kept_bytes += loc.len as u64;
+            }
+        }
+        Ok((victims, kept_bytes))
+    }
 
-        for (base, row) in &victims {
+    /// Delete the rows [`Shard::expired_rows`] found, and their dedup
+    /// occurrences (index mode `rows`).
+    fn delete_rows<W: Writes + ?Sized>(
+        &mut self,
+        w: &mut W,
+        pid: Pid,
+        victims: &[(u64, dedup::TxnsRow)],
+    ) -> Result<()> {
+        let Some(to) = victims.last().map(|(_, row)| row.end + 1) else {
+            return Ok(());
+        };
+        for (base, row) in victims {
             for h in row.iter_hashes() {
                 let k = keys::dedup(pid, &h);
                 let Some(cur) = w.get_raw(Keyspace::Dedup, &k)? else {

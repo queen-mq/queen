@@ -627,6 +627,13 @@ impl RaftFacade {
             .expect("read the retention cutoffs")
     }
 
+    /// How many claims the consumption engine served from the queue log,
+    /// their index rows gone from the store.
+    #[cfg(test)]
+    pub(crate) fn cold_claims_for_test(&self) -> u64 {
+        self.engine.engine_stats().cold_claims_total
+    }
+
     /// As if a pop's answer had waited in vain for this node to apply `index`.
     #[cfg(test)]
     pub(crate) fn hold_pops_until_for_test(&self, index: u64) {
@@ -868,10 +875,10 @@ impl RaftFacade {
             } else {
                 let mut o = match raft_opts.take() {
                     Some(o) => o,
-                    None => crate::rsm::replicator::raft::RaftOpts::from_env(
-                        storage_pressure_enabled,
-                    )
-                    .map_err(|e| e.to_string())?,
+                    None => {
+                        crate::rsm::replicator::raft::RaftOpts::from_env(storage_pressure_enabled)
+                            .map_err(|e| e.to_string())?
+                    }
                 };
                 o.join = true;
                 raft_opts = Some(o);
@@ -4036,31 +4043,35 @@ fn render_pop_body(
         let mut off = claim.start_offset;
         // DIAG (render gaps): one bounded wait per claim for a missing record.
         let mut waited = false;
+        // The log file the claim's last record was read from: its next one
+        // is looked for there first.
+        let mut file_hint: Option<u64> = None;
         while off <= claim.end_offset {
             // The payload bytes: from the QUEUE LOG when the knob is on (Phase
             // A2), else the segment files. Both return the same `(base_offset,
             // created_at, count, blob)` for a committed offset, so the rendered
             // wire body is byte-identical.
             let popped: Option<(u64, i64, u32, Vec<u8>)> = match (qlog_reader, qlog_qid) {
-                (Some(ql), Some(qid)) => match ql.read_owned(qid, claim.pid, off) {
-                    Ok(Some(r)) => Some((r.base_offset, r.created_at_us, r.count, r.payload)),
-                    Ok(None) if !waited => {
-                        waited = true;
-                        use crate::rsm::dbgctr::{inc, C};
-                        inc(&C.render_gap_claims, 1);
-                        let before = ql.describe(qid, claim.pid, off);
-                        let mut got = None;
-                        for _ in 0..50 {
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                            if let Ok(Some(r)) = ql.read_owned(qid, claim.pid, off) {
-                                got = Some(r);
-                                break;
+                (Some(ql), Some(qid)) => {
+                    match ql.read_owned_hinted(qid, claim.pid, off, &mut file_hint) {
+                        Ok(Some(r)) => Some((r.base_offset, r.created_at_us, r.count, r.payload)),
+                        Ok(None) if !waited => {
+                            waited = true;
+                            use crate::rsm::dbgctr::{inc, C};
+                            inc(&C.render_gap_claims, 1);
+                            let before = ql.describe(qid, claim.pid, off);
+                            let mut got = None;
+                            for _ in 0..50 {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                                if let Ok(Some(r)) = ql.read_owned(qid, claim.pid, off) {
+                                    got = Some(r);
+                                    break;
+                                }
                             }
-                        }
-                        static LOGGED: std::sync::atomic::AtomicU64 =
-                            std::sync::atomic::AtomicU64::new(0);
-                        if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 {
-                            eprintln!(
+                            static LOGGED: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(0);
+                            if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 {
+                                eprintln!(
                                 "RENDER_GAP pid={} off={off} claim={}..={} attempt={} recovered={} | {before} || after: {}",
                                 claim.pid,
                                 claim.start_offset,
@@ -4069,23 +4080,24 @@ fn render_pop_body(
                                 got.is_some(),
                                 ql.describe(qid, claim.pid, off)
                             );
-                        }
-                        match got {
-                            Some(r) => {
-                                inc(&C.render_gap_recovered, 1);
-                                Some((r.base_offset, r.created_at_us, r.count, r.payload))
                             }
-                            None => None,
+                            match got {
+                                Some(r) => {
+                                    inc(&C.render_gap_recovered, 1);
+                                    Some((r.base_offset, r.created_at_us, r.count, r.payload))
+                                }
+                                None => None,
+                            }
+                        }
+                        Ok(None) => None,
+                        Err(e) => {
+                            return Err(format!(
+                                "read pop payload (qlog) at pid {} off {off}: {e}",
+                                claim.pid
+                            ))
                         }
                     }
-                    Ok(None) => None,
-                    Err(e) => {
-                        return Err(format!(
-                            "read pop payload (qlog) at pid {} off {off}: {e}",
-                            claim.pid
-                        ))
-                    }
-                },
+                }
                 _ => match reader.read_at_within(info.bucket, claim.pid, off, &info.sealed, dl) {
                     Ok(Some(f)) => Some((f.base_offset, f.created_at_us, f.count, f.blob)),
                     Ok(None) => None,
@@ -5287,6 +5299,18 @@ impl Rsm for RaftFacade {
             "queen_consume_parts_total{{kind=\"loaded\"}} {}\nqueen_consume_parts_total{{kind=\"unloaded\"}} {}\n",
             es.loaded_total, es.unloaded_total
         ));
+        out.push_str("# HELP queen_consume_cold_claims_total Claims of messages whose index row had left the store: their frames were read from the queue log, with no consume lock held\n# TYPE queen_consume_cold_claims_total counter\n");
+        out.push_str(&format!(
+            "queen_consume_cold_claims_total {}\n",
+            es.cold_claims_total
+        ));
+        if let Some(q) = self.qlog_reader.as_ref() {
+            let (runs, uncovered) = q.dirx_totals();
+            out.push_str("# HELP queen_raft_qlog_dirx The queue logs' cross-file directory: runs on disk, and sealed files no run covers yet (a lookup probes those one by one)\n# TYPE queen_raft_qlog_dirx gauge\n");
+            out.push_str(&format!(
+                "queen_raft_qlog_dirx{{kind=\"runs\"}} {runs}\nqueen_raft_qlog_dirx{{kind=\"uncovered_files\"}} {uncovered}\n"
+            ));
+        }
         out.push_str(&self.link_prometheus());
         out
     }

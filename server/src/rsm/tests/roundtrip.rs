@@ -203,13 +203,48 @@ fn every_kind_pins_its_catalogue_version() {
             all.push(v3);
         }
     }
-    // The highest version an EFFECT is minted at. This build supports one
-    // more: catalogue version 5 is a forwarded command shape (the KV `check`
-    // op), which logs nothing, so no entry ever reports it.
+    // The highest version an EFFECT was minted at before version 6
+    // (catalogue version 5 is a forwarded command shape, the KV `check` op,
+    // which logs nothing, so no entry ever reports it).
     assert_eq!(kinds_version_of(&all), crate::rsm::effect::VERSION_4 as u32);
+    // Version 6 is one shape of one kind: a watermark carrying its rows
+    // tail. It round-trips whole, with and without the oldest stamp, and the
+    // version-1 shape keeps its bytes.
+    let plain = effect_sample(Kind::Watermark);
+    assert_eq!(plain.version(), crate::rsm::effect::VERSION_1);
+    let plain_bytes = encode_effect(&plain);
+    assert_eq!(
+        plain_bytes.len(),
+        2 + 2 + 4 + 24,
+        "pid, log_start, txns_start"
+    );
+    for oldest in [None, Some(1_768_000_000_123_456i64)] {
+        let v6 = Effect::Watermark {
+            pid: 7,
+            log_start: 40,
+            txns_start: 40,
+            rows: Some(crate::rsm::effect::RowsMark {
+                rows_start: 96,
+                oldest_live_at_us: oldest,
+            }),
+        };
+        assert_eq!(v6.version(), crate::rsm::effect::VERSION_6);
+        let bytes = encode_effect(&v6);
+        assert_eq!(
+            u16::from_le_bytes([bytes[2], bytes[3]]),
+            crate::rsm::effect::VERSION_6
+        );
+        let mut e = Entry::new(1_768_000_000_000_000, 1, 1);
+        e.add_command(uuid(9), crate::rsm::entry::Outcome::Empty, vec![v6.clone()])
+            .unwrap();
+        let back = decode_entry(&encode_entry(&e).expect("encode")).expect("decode");
+        assert_eq!(back.effects[0], v6, "a v6 watermark round-trips");
+        all.push(v6);
+    }
+    assert_eq!(kinds_version_of(&all), crate::rsm::effect::VERSION_6 as u32);
     assert_eq!(
         SUPPORTED_KINDS_VERSION,
-        crate::rsm::effect::VERSION_5 as u32
+        crate::rsm::effect::VERSION_6 as u32
     );
 }
 
@@ -805,6 +840,7 @@ fn every_field_has_its_own_slot() {
         pid: 1,
         log_start: 2,
         txns_start: 3,
+        rows: None,
     };
     assert_eq!(decode_effect(&encode_effect(&e)).unwrap().0, e);
 

@@ -23,7 +23,7 @@ use crate::rsm::planner::{PopCommand, Refusal, MAX_PARTS_AUTO};
 use crate::rsm::store::{Reads, Store, StoreError, TypedReads};
 
 use super::checkpoint::Deps;
-use super::frames::Frames;
+use super::frames::{ColdNeed, Frames};
 use super::load::{contiguous, registration_meta, Seed};
 use super::state::{
     lock, schedule, shard_of, Gid, Group, GroupCfg, Held, Lease, Load, Shard, Waiter, SHARDS,
@@ -87,6 +87,11 @@ pub(crate) enum Claimed {
     Hold(i64),
     /// Nothing (caught up, leased, or a seal that moved the cursor).
     Nothing,
+    /// The claim needs frames that have no row any more, and the queue log
+    /// is not read under the shard lock ([`Frames::defer_cold`]): nothing
+    /// was claimed, the pop reads them with the lock released and claims
+    /// again ([`Engine::claim_cold`]).
+    Cold(ColdNeed),
 }
 
 /// The claim knobs of one pop.
@@ -185,10 +190,17 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
 
     if has_live && tail >= wanted {
         let from = wanted.max(log_start as i64).max(0) as u64;
+        // The frames it starts at have no row any more: they are in the
+        // queue log, which is not read under this lock. Known here without a
+        // scan when the engine already saw the watermark (the walk finds it
+        // out by itself otherwise).
+        if fr.defer_cold && !conflate && from < pi.rows_start && !fr.has_ready(pid) {
+            return Ok(Claimed::Cold(ColdNeed { pid, from }));
+        }
         if conflate {
             // ONE backward step to the newest fresh segment: its last frame is
             // served, (committed, its end] is leased.
-            match fr.newest_fresh(pid, from, tail, &fresh)? {
+            match fr.newest_fresh(pid, from, tail, &fresh, deadline)? {
                 Some(head) if head.end as i64 >= wanted => {
                     taken = 1;
                     start = Some(wanted);
@@ -197,6 +209,9 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
                 _ => {
                     if deadline.is_some() {
                         let first = fr.gather(pid, from, 1, tail, &|_| true, false)?;
+                        if let Some(need) = fr.take_cold_need() {
+                            return Ok(Claimed::Cold(need));
+                        }
                         if let Some(s) = first.iter().find(|s| s.base >= log_start) {
                             hold = Some(s.created_at_us + q.delayed_processing as i64 * SEC_US);
                         }
@@ -204,8 +219,13 @@ pub(crate) fn claim_one<R: Reads + ?Sized>(
                 }
             }
         } else {
-            let segs: Vec<_> = fr
-                .gather(pid, from, budget, tail, &fresh, !req.auto_ack)?
+            let gathered = fr.gather(pid, from, budget, tail, &fresh, !req.auto_ack)?;
+            // What a deferred walk handed over is partial: nothing is
+            // claimed from it (a hole in it would read as a retention gap).
+            if let Some(need) = fr.take_cold_need() {
+                return Ok(Claimed::Cold(need));
+            }
+            let segs: Vec<_> = gathered
                 .into_iter()
                 .filter(|s| s.base >= log_start && s.base as i64 <= tail)
                 .collect();
@@ -418,6 +438,30 @@ pub(crate) fn expired(cmd: &PopCommand, now_us: i64, margin_us: i64) -> bool {
 pub(crate) struct Walk {
     pub claims: Vec<PopClaim>,
     pub deps: Deps,
+    /// Parts whose claim needs the queue log ([`Claimed::Cold`]): still
+    /// armed, to be read with no lock held and claimed again.
+    pub cold: Vec<ColdNeed>,
+    /// Such parts were left after the last round: the pop is not parked on
+    /// them (nothing would wake it), it is answered `Retry`.
+    pub cold_left: bool,
+}
+
+/// How many times one pop reads cold frames and claims again before it
+/// leaves what is left to the next pop.
+const COLD_ROUNDS: usize = 4;
+
+/// Run `f`, which reads files that may not be in memory, without holding up
+/// the async runtime: a pop is served on the worker thread of its request,
+/// and on a multi-threaded runtime that worker's other tasks move to another
+/// thread first. Anywhere else (the engine's own threads, a test on a
+/// current-thread runtime) `f` just runs.
+fn off_runtime<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
 }
 
 impl Engine {
@@ -435,7 +479,7 @@ impl Engine {
         let seg = self.seg_source();
         let gen = self.gen.load(Ordering::Acquire);
         let res = self.store.read(|r| {
-            let fr = self.frames(r, &seg);
+            let fr = self.frames_deferring(r, &seg);
             match kind {
                 Kind::Discover => self.pop_discover(r, &fr, c, now, sink),
                 Kind::Wildcard => self.pop_queue(r, &fr, c, now, sink, None),
@@ -458,7 +502,17 @@ impl Engine {
             PopStep::Taken => Ok(None),
             PopStep::Refuse(r) => Err(r),
             PopStep::Walked(walk, g, pinned) => {
-                let Walk { claims, deps } = walk;
+                let Walk {
+                    claims,
+                    deps,
+                    cold_left,
+                    ..
+                } = walk;
+                if cold_left && claims.is_empty() && deps.rows.is_empty() {
+                    // Frames it needs are still being read from the queue
+                    // log: asked again, not parked.
+                    return Ok(Some(Reply::Retry { hint: None }));
+                }
                 if claims.is_empty() && deps.rows.is_empty() {
                     // Nothing: hold a long poll (its group's registration
                     // commits meanwhile), answer the rest empty — once a
@@ -525,6 +579,7 @@ impl Engine {
                 let w = Walk {
                     claims: Vec::new(),
                     deps,
+                    ..Walk::default()
                 };
                 return Ok(PopStep::Walked(w, Some(g), None));
             }
@@ -545,6 +600,7 @@ impl Engine {
         let mut walk = Walk {
             claims: Vec::new(),
             deps,
+            ..Walk::default()
         };
         let budget = c.budget.max(1) as i64;
         let max_parts = width(c, &g);
@@ -632,38 +688,73 @@ impl Engine {
         };
         let start = g.rr.fetch_add(1, Ordering::Relaxed);
         let mut claimed = 0usize;
-        for i in 0..SHARDS {
-            if budget <= 0 || claimed >= max_parts {
-                break;
-            }
-            let si = (start + i) % SHARDS;
-            let mut sh = lock(&self.shards[si]);
-            let sh = &mut *sh;
-            let Some(gs) = sh.groups.get_mut(&g.id) else {
-                continue;
-            };
-            let n = gs.ready.len();
-            for _ in 0..n {
-                if budget <= 0 || claimed >= max_parts {
+        // A part whose claim needs the queue log counts as a claim to come
+        // (`walk.cold`): a pass stops once the claims made and those to come
+        // fill the pop's width. Without that a pop of a group far behind
+        // would visit every ready part, and read ahead for each of them.
+        // When the claims to come did not all happen (another pop took the
+        // part while this one read), the ready parts after them get a pass.
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            for i in 0..SHARDS {
+                if budget <= 0 || claimed + walk.cold.len() >= max_parts {
                     break;
                 }
-                let gs = sh.groups.get_mut(&g.id).expect("present");
-                let Some(pid) = gs.ready.pop_front() else {
-                    break;
-                };
-                g.unready();
-                if let Some(p) = gs.parts.get_mut(&pid) {
-                    p.queued = false;
-                } else {
+                let si = (start + i) % SHARDS;
+                let mut sh = lock(&self.shards[si]);
+                let sh = &mut *sh;
+                let Some(gs) = sh.groups.get_mut(&g.id) else {
                     continue;
+                };
+                let n = gs.ready.len();
+                for _ in 0..n {
+                    if budget <= 0 || claimed + walk.cold.len() >= max_parts {
+                        break;
+                    }
+                    let gs = sh.groups.get_mut(&g.id).expect("present");
+                    let Some(pid) = gs.ready.pop_front() else {
+                        break;
+                    };
+                    g.unready();
+                    if let Some(p) = gs.parts.get_mut(&pid) {
+                        p.queued = false;
+                    } else {
+                        continue;
+                    }
+                    self.claim_into(fr, sh, g.id, pid, &cfg, &req, &mut budget, now, grace, walk)?;
+                    if walk.claims.last().is_some_and(|cl| cl.pid == pid) {
+                        claimed += 1;
+                    }
                 }
-                self.claim_into(fr, sh, g.id, pid, &cfg, &req, &mut budget, now, grace, walk)?;
-                if walk.claims.last().is_some_and(|cl| cl.pid == pid) {
-                    claimed += 1;
-                }
+            }
+            if walk.cold.is_empty() {
+                // The pass ended on the budget, the width, or the last
+                // ready part.
+                return Ok(());
+            }
+            self.claim_cold(
+                fr,
+                g.id,
+                &cfg,
+                &req,
+                &mut budget,
+                max_parts,
+                &mut claimed,
+                now,
+                grace,
+                walk,
+            )?;
+            if budget <= 0 || claimed >= max_parts || walk.cold_left {
+                return Ok(());
+            }
+            if passes >= COLD_ROUNDS {
+                // Ready parts may be left that no pass reached: a pop with
+                // nothing to show for it asks again instead of parking.
+                walk.cold_left = true;
+                return Ok(());
             }
         }
-        Ok(())
     }
 
     /// One claim attempt on a part, recording the claim and its dependency,
@@ -724,7 +815,67 @@ impl Engine {
                     }
                 }
             }
+            Claimed::Cold(need) => {
+                // Nothing was claimed: the part goes back to the ready ring
+                // (anyone may take it), and this pop reads its frames with
+                // the lock released.
+                arm(sh, gid, pid, now, grace);
+                walk.cold.push(need);
+            }
         }
+        Ok(())
+    }
+
+    /// Read, with no shard lock held, the frames the claims in `walk.cold`
+    /// needed from the queue log ([`Frames::preload`]), then claim those
+    /// parts again — sharing `budget` and `max_parts` with the walk that
+    /// found them. A part another pop took meanwhile simply claims nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn claim_cold<R: Reads + ?Sized>(
+        &self,
+        fr: &Frames<'_, R>,
+        gid: Gid,
+        cfg: &GroupCfg,
+        req: &ClaimReq<'_>,
+        budget: &mut i64,
+        max_parts: usize,
+        claimed: &mut usize,
+        now: i64,
+        grace: i64,
+        walk: &mut Walk,
+    ) -> Result<()> {
+        let mut rounds = 0;
+        while !walk.cold.is_empty() && *budget > 0 && *claimed < max_parts && rounds < COLD_ROUNDS {
+            rounds += 1;
+            let needs = std::mem::take(&mut walk.cold);
+            for n in needs {
+                if *budget <= 0 || *claimed >= max_parts {
+                    break;
+                }
+                // One part at a time, each with what the parts before it left
+                // of the budget: a first part that fills the batch costs the
+                // others no read.
+                self.unload.cold_claims.fetch_add(1, Ordering::Relaxed);
+                off_runtime(|| fr.preload(n.pid, n.from, *budget, !req.auto_ack))?;
+                let before = walk.cold.len();
+                let claims = walk.claims.len();
+                {
+                    let mut sh = lock(&self.shards[shard_of(n.pid)]);
+                    self.claim_into(fr, &mut sh, gid, n.pid, cfg, req, budget, now, grace, walk)?;
+                }
+                if walk.claims.len() > claims {
+                    *claimed += 1;
+                }
+                if walk.cold.len() == before {
+                    // Claimed, or not this pop's to claim any more.
+                    fr.forget_ready(n.pid);
+                }
+            }
+        }
+        // Budget or width ran out with parts still cold: they are armed, the
+        // next pop takes them. Rounds ran out: this pop asks again.
+        walk.cold_left = !walk.cold.is_empty() && *budget > 0 && *claimed < max_parts;
+        walk.cold.clear();
         Ok(())
     }
 
@@ -797,6 +948,7 @@ impl Engine {
                 Walk {
                     claims: Vec::new(),
                     deps,
+                    ..Walk::default()
                 },
                 None,
                 None,
@@ -815,6 +967,7 @@ impl Engine {
         let mut walk = Walk {
             claims: Vec::new(),
             deps,
+            ..Walk::default()
         };
         let mut budget = c.budget.max(1) as i64;
         {
@@ -832,6 +985,19 @@ impl Engine {
                 &mut walk,
             )?;
         }
+        let mut claimed = walk.claims.len();
+        self.claim_cold(
+            fr,
+            g.id,
+            &cfg,
+            &req,
+            &mut budget,
+            1,
+            &mut claimed,
+            now,
+            grace,
+            &mut walk,
+        )?;
         Ok(PopStep::Walked(walk, Some(g), Some(pid)))
     }
 
@@ -903,6 +1069,7 @@ impl Engine {
         let mut walk = Walk {
             claims: Vec::new(),
             deps,
+            ..Walk::default()
         };
         let mut budget = c.budget.max(1) as i64;
         let mut max_parts = match c.max_parts {
@@ -953,7 +1120,7 @@ impl Engine {
         }
         let seg = self.seg_source();
         let res = self.store.read(|r| {
-            let fr = self.frames(r, &seg);
+            let fr = self.frames_deferring(r, &seg);
             let mut walk = Walk::default();
             if let Some(pid) = w.pinned {
                 // Its partition may be one the unloader dropped and an append
@@ -969,15 +1136,30 @@ impl Engine {
                     skip_window: w.cmd.skip_window_debounce,
                 };
                 let mut budget = w.cmd.budget.max(1) as i64;
-                let mut sh = lock(&self.shards[shard_of(pid)]);
-                self.claim_into(
+                {
+                    let mut sh = lock(&self.shards[shard_of(pid)]);
+                    self.claim_into(
+                        &fr,
+                        &mut sh,
+                        g.id,
+                        pid,
+                        &cfg,
+                        &req,
+                        &mut budget,
+                        now,
+                        self.grace(),
+                        &mut walk,
+                    )?;
+                }
+                let mut claimed = walk.claims.len();
+                self.claim_cold(
                     &fr,
-                    &mut sh,
                     g.id,
-                    pid,
                     &cfg,
                     &req,
                     &mut budget,
+                    1,
+                    &mut claimed,
                     now,
                     self.grace(),
                     &mut walk,
@@ -1005,6 +1187,12 @@ impl Engine {
             }
         };
         if walk.claims.is_empty() && walk.deps.is_empty() {
+            if walk.cold_left {
+                // Frames it needs are still to be read from the queue log:
+                // asked again rather than parked (nothing would wake it).
+                let _ = w.sink.send(Reply::Retry { hint: None });
+                return None;
+            }
             return Some(w);
         }
         let reply = Reply::Done {

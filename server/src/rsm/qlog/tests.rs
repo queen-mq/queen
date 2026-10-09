@@ -2104,3 +2104,295 @@ fn a_dropped_file_waits_for_its_unlink_out_of_the_logs_names() {
     // The deferred unlink of what is already gone is a no-op.
     QLog::remove_reclaimed(&dir, &doomed, true).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// The cross-file directory (`dirx`)
+// ---------------------------------------------------------------------------
+
+/// Run directory maintenance on `q` until nothing is due; the steps taken.
+fn dirx_settle(q: &mut QLog) -> usize {
+    let mut steps = 0;
+    while let Some(plan) = q.dirx_plan() {
+        let built = plan.run().expect("directory step");
+        q.dirx_install(super::dirx::Run::open(&built.path).expect("open the run"));
+        steps += 1;
+        assert!(steps < 10_000, "directory maintenance never settles");
+    }
+    if q.dirx_has_dead_runs() {
+        q.dirx_gc();
+    }
+    steps
+}
+
+/// What a log answers for every offset of `pids` up to `upto`, plus its
+/// answers to a grid of searches by time and a claim walk of each partition.
+#[allow(clippy::type_complexity)]
+fn dirx_answers(
+    q: &QLog,
+    pids: &[u64],
+    upto: u64,
+) -> (
+    Vec<Option<Vec<u8>>>,
+    Vec<Option<(u64, u64)>>,
+    Vec<Vec<(u64, u64, i64)>>,
+) {
+    let mut reads = Vec::new();
+    let mut befores = Vec::new();
+    let mut walks = Vec::new();
+    for &pid in pids {
+        for off in 0..upto {
+            reads.push(q.read_payload(pid, off).expect("read"));
+            let loc = q.locate(pid, off);
+            let rec = q.locate_record(pid, off);
+            assert_eq!(loc.is_some(), rec.is_some());
+        }
+        for high in [0, 1, 3, upto / 2, upto, u64::MAX] {
+            for before in [0i64, 10_050, 10_200, 10_390, i64::MAX] {
+                befores.push(
+                    q.record_before(pid, high, before)
+                        .map(|r| (r.base_offset, r.end)),
+                );
+            }
+        }
+        for from in [0, 2, upto / 3] {
+            let mut walk = Vec::new();
+            q.claim_walk(pid, from, u64::MAX, false, &mut |base, end, created, _| {
+                walk.push((base, end, created));
+                true
+            })
+            .expect("walk");
+            walks.push(walk);
+        }
+    }
+    hints_agree(q, pids, upto);
+    (reads, befores, walks)
+}
+
+/// A hint only says where to look first: from every sealed file, from the
+/// active one and from ids no file has, a hinted lookup of every offset
+/// answers what the plain one does (a walk's forward search through the
+/// directory, [`QLog::locate_forward`], decides nothing by itself).
+fn hints_agree(q: &QLog, pids: &[u64], upto: u64) {
+    // Every fourth sealed file and the two at each end: the fixture has more
+    // than a hundred, and the walk's hint is any of them.
+    let sealed: Vec<u64> = q.sealed.keys().copied().collect();
+    let newest = sealed.last().copied().unwrap_or(0);
+    let mut hints: Vec<u64> = sealed
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 4 == 0 || *i < 2 || *i + 2 >= sealed.len())
+        .map(|(_, id)| *id)
+        .collect();
+    hints.extend([0, newest + 1, newest + 1_000]);
+    hints.extend(q.active_index.file_id());
+    for &pid in pids {
+        for off in 0..upto {
+            let plain = q
+                .locate_record(pid, off)
+                .map(|(file, r)| (file, r.base_offset, r.end));
+            for &hint in &hints {
+                let hinted = q
+                    .locate_record_hinted(pid, off, Some(hint))
+                    .map(|(file, r)| (file, r.base_offset, r.end));
+                assert_eq!(hinted, plain, "pid {pid} offset {off} from file {hint}");
+            }
+        }
+    }
+}
+
+/// The directory only ever says WHICH file to ask: every lookup answers what
+/// the per-file probes answered, before a run exists, with runs, after they
+/// are merged, after a reopen, with a run lost, and after retention has
+/// removed and rewritten files.
+#[test]
+fn the_directory_answers_exactly_what_the_files_answer() {
+    let td = TmpDir::new("dirx");
+    let opts = QLogOptions::testing(300);
+    let pids = [3u64, 4, 5, 6, 9];
+    let (mut q, _) = QLog::open(td.path(), 77, opts).unwrap();
+    // 3 and 4 are written all the time, 5 in bursts, 6 once in a while, 9
+    // twice in the whole log.
+    let mut next = std::collections::HashMap::<u64, u64>::new();
+    for i in 0..420u64 {
+        let pid = match i {
+            _ if i == 17 || i == 401 => 9,
+            _ if i % 41 == 0 => 6,
+            _ if (i / 30) % 3 == 1 && i % 2 == 0 => 5,
+            _ if i % 2 == 0 => 3,
+            _ => 4,
+        };
+        let base = *next.entry(pid).and_modify(|b| *b += 1).or_insert(0);
+        append_one(&mut q, i + 1, pid, base, 10_000 + i as i64);
+    }
+    let upto = 220;
+    let files = q.file_count();
+    assert!(files > 100, "the fixture needs many files, got {files}");
+    assert_eq!(q.dirx_stats().0, 0, "no run before maintenance");
+
+    let truth = dirx_answers(&q, &pids, upto);
+    assert!(truth.0.iter().filter(|r| r.is_some()).count() >= 400);
+
+    // Runs for the sealed files, merged as they pile up.
+    let steps = dirx_settle(&mut q);
+    let (runs, uncovered) = q.dirx_stats();
+    assert!(steps > files / super::dirx::BUILD_MAX, "{steps} steps");
+    assert!(runs >= 1 && runs < super::dirx::FANOUT + 2, "{runs} runs");
+    assert!(
+        uncovered < super::dirx::BATCH,
+        "{uncovered} files outside any run"
+    );
+    assert_eq!(dirx_answers(&q, &pids, upto), truth, "with the directory");
+
+    // More appends: the new files are outside every run until the next pass.
+    for i in 420..440u64 {
+        let base = *next.entry(3).and_modify(|b| *b += 1).or_insert(0);
+        append_one(&mut q, i + 1, 3, base, 10_000 + i as i64);
+    }
+    let truth = dirx_answers(&q, &pids, upto);
+    dirx_settle(&mut q);
+    assert_eq!(dirx_answers(&q, &pids, upto), truth, "after more files");
+    let runs_before = q.dirx_stats().0;
+    drop(q);
+
+    // A reopen finds the runs; a damaged one is dropped and built again.
+    let (q, _) = QLog::open(td.path(), 77, opts).unwrap();
+    assert_eq!(q.dirx_stats().0, runs_before);
+    assert_eq!(dirx_answers(&q, &pids, upto), truth, "after a reopen");
+    let victim = q.dirx[0].path().to_path_buf();
+    drop(q);
+    let mut bytes = std::fs::read(&victim).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x5A;
+    std::fs::write(&victim, &bytes).unwrap();
+    let (mut q, _) = QLog::open(td.path(), 77, opts).unwrap();
+    assert!(!victim.exists(), "a damaged run is removed at open");
+    assert_eq!(q.dirx_stats().0, runs_before - 1);
+    assert_eq!(dirx_answers(&q, &pids, upto), truth, "with a run lost");
+    assert!(dirx_settle(&mut q) >= 1, "the hole is filled");
+    assert_eq!(q.dirx_stats().1 < super::dirx::BATCH, true);
+    assert_eq!(dirx_answers(&q, &pids, upto), truth, "with the run rebuilt");
+
+    // Retention: partition 4 is gone entirely, partition 3 below offset 60,
+    // the rest stays. Files die and are rewritten under the runs; a lookup
+    // still answers what the files hold.
+    let mut starts = std::collections::HashMap::new();
+    starts.insert(4, u64::MAX);
+    starts.insert(3, 60);
+    for pid in [5u64, 6, 9] {
+        starts.insert(pid, 0);
+    }
+    assert!(reclaim_all(&mut q, &starts) > 0);
+    for off in 0..upto {
+        assert_eq!(q.read_payload(4, off).unwrap(), None, "pid 4 offset {off}");
+        let want = truth.0[off as usize].clone();
+        let got = q.read_payload(3, off).unwrap();
+        if off >= 60 {
+            assert_eq!(got, want, "pid 3 offset {off} is retained");
+        } else {
+            assert_eq!(got, None, "pid 3 offset {off} is below its watermark");
+        }
+    }
+    for (i, pid) in pids.iter().enumerate().skip(2) {
+        for off in 0..upto {
+            assert_eq!(
+                q.read_payload(*pid, off).unwrap(),
+                truth.0[i * upto as usize + off as usize],
+                "pid {pid} offset {off}"
+            );
+        }
+    }
+    dirx_settle(&mut q);
+    assert!(!q.dirx_has_dead_runs());
+    for off in 60..upto {
+        assert_eq!(
+            q.read_payload(3, off).unwrap(),
+            truth.0[off as usize],
+            "pid 3 offset {off} after the directory caught up"
+        );
+    }
+}
+
+/// A sealed file a run covers can be cut back and opened for appends again:
+/// a follower drops the tail of its log after a leader change, or after a
+/// snapshot (which carries the leader's runs). What is written to that file
+/// next, and to the file ids above it, is not in the old run, so the run must
+/// not answer for them.
+#[test]
+fn a_run_never_answers_for_a_file_that_was_cut_back_and_written_again() {
+    let td = TmpDir::new("dirx-cut");
+    let opts = QLogOptions::testing(300);
+    let (mut q, _) = QLog::open(td.path(), 78, opts).unwrap();
+    // What the log must hold: (pid, offset) -> the seq it was written at.
+    let mut truth = std::collections::HashMap::<(u64, u64), u64>::new();
+    let mut next = std::collections::HashMap::<u64, u64>::new();
+    let write = |q: &mut QLog,
+                 truth: &mut std::collections::HashMap<(u64, u64), u64>,
+                 next: &mut std::collections::HashMap<u64, u64>,
+                 seq: u64,
+                 pid: u64| {
+        let base = *next.entry(pid).and_modify(|b| *b += 1).or_insert(0);
+        append_one(q, seq, pid, base, 10_000 + seq as i64);
+        truth.insert((pid, base), seq);
+    };
+    for seq in 1..=240u64 {
+        write(&mut q, &mut truth, &mut next, seq, 3 + seq % 2);
+    }
+    let check = |q: &QLog, truth: &std::collections::HashMap<(u64, u64), u64>, when: &str| {
+        for pid in [3u64, 4, 7] {
+            for off in 0..200u64 {
+                let want = truth.get(&(pid, off)).map(|seq| payload(*seq, 96));
+                assert_eq!(
+                    q.read_payload(pid, off).unwrap(),
+                    want,
+                    "pid {pid} offset {off} {when}"
+                );
+            }
+        }
+    };
+    dirx_settle(&mut q);
+    let (runs, uncovered) = q.dirx_stats();
+    assert!(
+        runs >= 1 && uncovered < super::dirx::BATCH,
+        "{runs} runs, {uncovered} files outside"
+    );
+    check(&q, &truth, "with the runs");
+
+    // The log loses everything from seq 121 on: the cut falls in a file a
+    // run covers, and that file takes appends again.
+    let covered: Vec<u64> = q.sealed.keys().copied().collect();
+    let cut = 121u64;
+    assert!(q.truncate_seq_from_across(cut).unwrap() > 0);
+    let reopened = q.active_index.file_id().expect("an active file");
+    assert!(
+        covered.contains(&reopened),
+        "file {reopened} was sealed and covered"
+    );
+    truth.retain(|_, seq| *seq < cut);
+    for pid in [3u64, 4] {
+        let kept = truth.keys().filter(|k| k.0 == pid).count() as u64;
+        next.insert(pid, kept - 1);
+    }
+    assert!(
+        q.dirx.iter().all(|r| r.files().1 < reopened),
+        "no run reaches the reopened file"
+    );
+    check(&q, &truth, "after the cut");
+
+    // Other records at the same seqs: a partition the old run never saw, and
+    // one it saw ending elsewhere.
+    for seq in cut..=300u64 {
+        write(
+            &mut q,
+            &mut truth,
+            &mut next,
+            seq,
+            if seq % 3 == 0 { 4 } else { 7 },
+        );
+    }
+    check(&q, &truth, "after the new appends");
+    dirx_settle(&mut q);
+    check(&q, &truth, "with runs over the new files");
+    drop(q);
+    let (q, _) = QLog::open(td.path(), 78, opts).unwrap();
+    check(&q, &truth, "after a reopen");
+}

@@ -193,6 +193,7 @@ pub fn effect_sample(kind: Kind) -> Effect {
             pid: 7,
             log_start: 40,
             txns_start: 16,
+            rows: None,
         },
 
         Kind::KvPut => Effect::KvPut {

@@ -611,6 +611,7 @@ impl Workload {
             pid: p.pid,
             log_start,
             txns_start,
+            rows: None,
         }])
     }
 }
@@ -1492,6 +1493,7 @@ fn a_watermark_releases_the_payload_before_the_hash_lists() {
                     pid: 1,
                     log_start: 2,
                     txns_start: 0,
+                    rows: None,
                 }])
                 .at(6, 1),
         )
@@ -1520,6 +1522,7 @@ fn a_watermark_releases_the_payload_before_the_hash_lists() {
                     pid: 1,
                     log_start: 2,
                     txns_start: 2,
+                    rows: None,
                 }])
                 .at(7, 1),
         )
@@ -1547,6 +1550,7 @@ fn a_watermark_releases_the_payload_before_the_hash_lists() {
                 pid: 1,
                 log_start: 1,
                 txns_start: 0,
+                rows: None,
             }])
             .at(8, 1);
         assert!(matches!(
@@ -1557,6 +1561,170 @@ fn a_watermark_releases_the_payload_before_the_hash_lists() {
             })
         ));
     }
+}
+
+/// Catalogue version 6: a watermark with a rows tail lets a partition's `txns`
+/// rows go while its messages stay. What the rows knew of the bytes moves to
+/// the partition row, and retention gives it back as it passes the messages.
+#[test]
+fn a_rows_watermark_drops_rows_of_messages_that_stay() {
+    use crate::rsm::effect::RowsMark;
+    let node = Node::new("rows-watermark");
+    let (mut a, _) = Applier::open(
+        node.store(),
+        &node.seg_dir(),
+        seg_opts(),
+        cfg(),
+        Arc::new(crate::rsm::apply::NoNotify),
+    )
+    .expect("open");
+    a.apply(
+        &Build::new(BASE_US, 1, 0)
+            .cmd(vec![Effect::PartitionCreate {
+                pid: 1,
+                uuid: uuid(1),
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                partition: "p0".into(),
+                created_at_us: BASE_US,
+            }])
+            .at(1, 1),
+    )
+    .expect("apply");
+    for n in 0..6u64 {
+        a.apply(
+            &Build::new(BASE_US + 10 + n as i64, 2, 10 + n * 10)
+                .cmd(vec![Effect::Append {
+                    pid: 1,
+                    bucket: 1,
+                    base_offset: n,
+                    count: 1,
+                    created_at_us: BASE_US + 10 + n as i64,
+                    hashes: hashes(100 + n, 1),
+                    blob: vec![7; 16],
+                }])
+                .at(2 + n, 1),
+        )
+        .expect("apply");
+    }
+    a.commit().expect("commit");
+    let retained = |node: &Node| {
+        node.store()
+            .read(|r| r.partition_counter(1, Counter::RetainedBytes))
+            .expect("read")
+    };
+    let rows_of = |node: &Node| {
+        let mut bases = Vec::new();
+        node.store()
+            .read(|r| {
+                r.scan_raw(
+                    crate::rsm::store::Keyspace::Txns,
+                    &keys::txns_prefix(1),
+                    &keys::txns_prefix(1),
+                    usize::MAX,
+                    &mut |k, _| {
+                        bases.push(keys::txns_base_of(k).unwrap());
+                        true
+                    },
+                )
+            })
+            .expect("scan");
+        bases
+    };
+    let all = retained(&node);
+    assert!(all > 0 && all % 6 == 0);
+    let one = all / 6;
+    let mut index = 7u64;
+    let mut mark = |a: &mut Applier<_>, log: u64, txns: u64, rows: u64, oldest: Option<i64>| {
+        index += 1;
+        let r = a.apply(
+            &Build::new(BASE_US + 100 + index as i64, 2, index * 100)
+                .cmd(vec![Effect::Watermark {
+                    pid: 1,
+                    log_start: log,
+                    txns_start: txns,
+                    rows: Some(RowsMark {
+                        rows_start: rows,
+                        oldest_live_at_us: oldest,
+                    }),
+                }])
+                .at(index, 1),
+        );
+        if r.is_ok() {
+            a.commit().expect("commit");
+        }
+        r
+    };
+
+    // The rows of offsets 0..=3 go; every message stays.
+    mark(&mut a, 0, 0, 4, None).expect("rows move");
+    assert_eq!(rows_of(&node), vec![4, 5]);
+    assert_eq!(retained(&node), all, "no message left: no byte given back");
+    let p = node
+        .store()
+        .read(|r| r.partition(1))
+        .expect("read")
+        .unwrap();
+    assert_eq!(
+        (p.log_start, p.txns_start, p.rows_start, p.unrowed_bytes),
+        (0, 0, 4, 4 * one as u64)
+    );
+    assert_eq!(
+        p.oldest_live_at_us,
+        Some(BASE_US + 10),
+        "offset 0 is still the oldest"
+    );
+
+    // Retention passes two of the four messages that have no row: half of
+    // what their rows carried comes back, and the oldest stamp is the one
+    // the leader read in its queue log.
+    mark(&mut a, 2, 2, 4, Some(BASE_US + 12)).expect("log moves");
+    assert_eq!(retained(&node), all - 2 * one);
+    let p = node
+        .store()
+        .read(|r| r.partition(1))
+        .expect("read")
+        .unwrap();
+    assert_eq!(
+        (p.log_start, p.txns_start, p.rows_start, p.unrowed_bytes),
+        (2, 2, 4, 2 * one as u64)
+    );
+    assert_eq!(p.oldest_live_at_us, Some(BASE_US + 12));
+
+    // It passes the rest of them and one message that has a row: all of the
+    // unrowed bytes, plus what that row carries. Nothing is unrowed any
+    // more, so the partition row is back to its version-1 bytes.
+    mark(&mut a, 5, 5, 5, None).expect("log passes the rows");
+    assert_eq!(retained(&node), one);
+    assert_eq!(rows_of(&node), vec![5]);
+    let (p, stored) = node
+        .store()
+        .read(|r| {
+            let p = r.partition(1)?.unwrap();
+            let b = crate::rsm::store::rows::partition_encode(&p);
+            Ok((p, b))
+        })
+        .expect("read");
+    assert_eq!(
+        (p.log_start, p.txns_start, p.rows_start, p.unrowed_bytes),
+        (5, 5, 5, 0)
+    );
+    assert_eq!(stored[0], crate::rsm::store::rows::ROW_V1);
+    assert_eq!(
+        p.oldest_live_at_us,
+        Some(BASE_US + 15),
+        "read from the row at offset 5"
+    );
+
+    // The rows never trail the hash-list watermark (and never move back:
+    // the same refusal). Apply stops on it, as on any inconsistent effect.
+    assert!(matches!(
+        mark(&mut a, 6, 6, 5, None),
+        Err(ApplyError::Inconsistent {
+            what: "Watermark",
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -1665,6 +1833,7 @@ fn retention_takes_the_dead_letters_it_passes_and_moves_the_oldest_stamp() {
                 pid: 1,
                 log_start: 3,
                 txns_start: 0,
+                rows: None,
             }])
             .at(9, 1),
     )
@@ -1699,6 +1868,7 @@ fn retention_takes_the_dead_letters_it_passes_and_moves_the_oldest_stamp() {
                 pid: 1,
                 log_start: 6,
                 txns_start: 6,
+                rows: None,
             }])
             .at(10, 1),
     )
@@ -2276,6 +2446,7 @@ fn a_pin_blocks_the_unlink_until_it_is_dropped() {
                 pid: 1,
                 log_start: last,
                 txns_start: last,
+                rows: None,
             }])
             .at(index, 1),
     )
@@ -2843,6 +3014,7 @@ fn retention_cycle<S: Store>(a: &mut Applier<'_, S>, bucket: u16, appends: u64, 
                 pid: 1,
                 log_start: appends,
                 txns_start: appends,
+                rows: None,
             }])
             .at(index, 1),
     )
@@ -3771,6 +3943,7 @@ fn kill_a_partition<S: Store>(
                 pid,
                 log_start: appends,
                 txns_start: appends,
+                rows: None,
             }])
             .at(index, 1),
     )
@@ -4671,6 +4844,7 @@ fn a_delete_releases_each_frame_claim_exactly_once() {
                 pid: 1,
                 log_start: 2,
                 txns_start: 0,
+                rows: None,
             }])
             .at(index, 1),
     )
@@ -4904,6 +5078,7 @@ fn retention_cycle_uncommitted<S: Store>(
                 pid: 1,
                 log_start: appends,
                 txns_start: appends,
+                rows: None,
             }])
             .at(index, 1),
     )
@@ -5061,6 +5236,7 @@ fn an_async_point_is_durable_and_unlinks_only_once_its_cut_is_written() {
                 pid: 1,
                 log_start: 24,
                 txns_start: 24,
+                rows: None,
             }])
             .at(index, 1),
     )
@@ -5267,6 +5443,7 @@ fn b07_entries(frames: u64, payload_free: bool) -> Vec<Committed> {
                 pid,
                 log_start,
                 txns_start,
+                rows: None,
             });
         }
         out.push(

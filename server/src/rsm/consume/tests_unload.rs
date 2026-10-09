@@ -537,6 +537,7 @@ fn sweep_cost_at_one_million_parts() {
                     tail: 5,
                     log_start: 0,
                     txns_start: 0,
+                    rows_start: 0,
                     last_append_us: 0,
                     watchers: smallvec::smallvec![g.id],
                 },

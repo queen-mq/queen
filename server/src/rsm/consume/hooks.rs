@@ -319,11 +319,18 @@ impl Engine {
                 pid,
                 log_start,
                 txns_start,
+                rows,
             } => {
                 let mut sh = lock(&self.shards[shard_of(*pid)]);
                 if let Some(pi) = sh.pids.get_mut(pid) {
                     pi.log_start = *log_start;
                     pi.txns_start = *txns_start;
+                    // A version-1 watermark moves the rows with the hash
+                    // lists (apply's rule).
+                    pi.rows_start = match rows {
+                        Some(m) => m.rows_start,
+                        None => pi.rows_start.max(*txns_start),
+                    };
                 }
             }
             Effect::CursorSet { pid, group, row } => {

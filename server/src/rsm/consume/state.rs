@@ -321,6 +321,9 @@ pub(crate) struct PidInfo {
     pub tail: i64,
     pub log_start: u64,
     pub txns_start: u64,
+    /// Where the partition's `txns` rows begin (catalogue version 6): the
+    /// retained messages below it are read from the queue log.
+    pub rows_start: u64,
     /// When the newest append was applied here (the window buffer), µs.
     pub last_append_us: i64,
     /// The groups holding this partition. A watcher's part may be missing: a

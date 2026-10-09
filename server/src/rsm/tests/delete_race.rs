@@ -1097,6 +1097,7 @@ fn retention_setup(tag: &str) -> (Cycles, Pid, Pid, crate::rsm::maintenance::Con
             pid,
             log_start: 1,
             txns_start: 1,
+            rows: None,
         })
         .collect();
     c.plan(vec![effects(3, marks)], None, None);
@@ -1273,6 +1274,7 @@ fn retention_walks_a_queue_in_bounded_resumable_passes() {
             pid,
             log_start: 1,
             txns_start: 1,
+            rows: None,
         })
         .collect();
     c.plan(vec![effects(10, marks)], None, None);

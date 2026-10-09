@@ -633,6 +633,70 @@ pub fn resolve_txns<R: Reads + ?Sized>(
 }
 
 // ---------------------------------------------------------------------------
+// Seek by time over the txns rows
+// ---------------------------------------------------------------------------
+
+/// The first row at or past offset `from`, as `(base, row)`. One seek.
+pub(crate) fn row_at_or_after<R: Reads + ?Sized>(
+    r: &R,
+    pid: Pid,
+    from: u64,
+) -> Result<Option<(u64, TxnsRow)>> {
+    let mut found = None;
+    let mut bad = false;
+    r.scan_raw(
+        Keyspace::Txns,
+        &keys::txns(pid, from),
+        &keys::txns_prefix(pid),
+        1,
+        &mut |k, v| {
+            match (keys::txns_base_of(k), TxnsRow::decode(v)) {
+                (Some(base), Ok(row)) => found = Some((base, row)),
+                _ => bad = true,
+            }
+            false
+        },
+    )?;
+    if bad {
+        return Err(StoreError::corrupt(Keyspace::Txns, "txns row"));
+    }
+    Ok(found)
+}
+
+/// The first append of partition `pid` in `[from, to)` whose stamp is at or
+/// after `at_us`, as `(its first offset, its stamp)`; `None` when every
+/// append there is older.
+///
+/// A binary search over OFFSETS. `seek(x)` is the first row whose base is at
+/// or past `x`; "`seek(x)` is past `to` or not older than `at_us`" is false and
+/// then true as `x` grows, because the stamps rise with the offsets. The
+/// smallest `x` where it holds is one past the base of the last older append,
+/// and `seek` there is the answer.
+pub(crate) fn first_appended_at_or_after<R: Reads + ?Sized>(
+    r: &R,
+    pid: Pid,
+    from: u64,
+    to: u64,
+    at_us: i64,
+) -> Result<Option<(u64, i64)>> {
+    let (mut lo, mut hi) = (from, to);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match row_at_or_after(r, pid, mid)? {
+            Some((base, row)) if base < to && row.created_at_us < at_us => {
+                // Every probe up to this row's base finds this row or an
+                // earlier one, all older: the answer is past it.
+                lo = base.saturating_add(1);
+            }
+            _ => hi = mid,
+        }
+    }
+    Ok(row_at_or_after(r, pid, lo)?
+        .filter(|(base, _)| *base < to)
+        .map(|(base, row)| (base.max(from), row.created_at_us)))
+}
+
+// ---------------------------------------------------------------------------
 // Probe / resolve over the SEGMENT authority (PERF-E, DEDUP_INDEX=segment)
 // ---------------------------------------------------------------------------
 //

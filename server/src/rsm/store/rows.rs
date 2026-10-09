@@ -278,6 +278,15 @@ pub struct PartitionRow {
     /// The newest stamp written here, and the FLOOR for the next one:
     /// `created_at = max(now, last_created_at + 1 µs)` (PUSHSER).
     pub last_created_at_us: i64,
+    /// The first offset that still has a `txns` row (catalogue version 6).
+    /// A row leaves the store when it leaves its queue's txns window, even
+    /// while its messages are retained: below this offset the queue log's own
+    /// index answers. Never below `txns_start`, and equal to it until a
+    /// version-6 watermark moves it past `log_start`.
+    pub rows_start: u64,
+    /// The retained bytes of the messages in `[log_start, rows_start)`: what
+    /// their rows carried when they left, given back as retention passes them.
+    pub unrowed_bytes: u64,
 }
 
 impl PartitionRow {
@@ -304,6 +313,8 @@ impl PartitionRow {
             oldest_live_at_us: None,
             created_at_us,
             last_created_at_us: created_at_us - 1,
+            rows_start: 0,
+            unrowed_bytes: 0,
         }
     }
 
@@ -320,9 +331,39 @@ impl PartitionRow {
     }
 }
 
+/// Whether a partition's row carries the version-6 tail (`rows_start`,
+/// `unrowed_bytes`). A row that never left the version-5 shape — its rows
+/// start where its hash lists do and nothing is unrowed — keeps its
+/// [`ROW_V1`] bytes, so a cluster below catalogue version 6 writes the rows it
+/// always wrote whatever build each node runs.
+#[inline]
+fn partition_is_v2(txns_start: u64, rows_start: u64, unrowed_bytes: u64) -> bool {
+    // A `rows_start` below `txns_start` says the same as one equal to it
+    // (the rows never trail the hash lists): it is not a second shape.
+    rows_start > txns_start || unrowed_bytes != 0
+}
+
+/// The version byte of a partition row: [`ROW_V1`], or [`ROW_V2`] (the same
+/// body with `rows_start` and `unrowed_bytes` last).
+fn partition_version(r: &mut Reader<'_>) -> Result<u8, CodecError> {
+    let v = r.u8("partition row version")?;
+    if v != ROW_V1 && v != ROW_V2 {
+        return Err(CodecError::UnknownVersion {
+            kind: 0,
+            version: v as u16,
+        });
+    }
+    Ok(v)
+}
+
 pub fn partition_encode(p: &PartitionRow) -> Vec<u8> {
-    let mut w = Writer::with_capacity(96);
-    head(&mut w);
+    let mut w = Writer::with_capacity(112);
+    let v2 = partition_is_v2(p.txns_start, p.rows_start, p.unrowed_bytes);
+    if v2 {
+        head_v2(&mut w);
+    } else {
+        head(&mut w);
+    }
     w.bytes16(&p.uuid);
     w.str(&p.tenant);
     w.str(&p.queue);
@@ -334,25 +375,28 @@ pub fn partition_encode(p: &PartitionRow) -> Vec<u8> {
     w.opt_i64(p.oldest_live_at_us);
     w.i64(p.created_at_us);
     w.i64(p.last_created_at_us);
+    if v2 {
+        w.u64(p.rows_start.max(p.txns_start));
+        w.u64(p.unrowed_bytes);
+    }
     w.into_inner()
 }
 
 pub fn partition_decode(b: &[u8]) -> Result<PartitionRow, CodecError> {
     let mut r = Reader::new(b);
-    expect_v1(&mut r, "partition row version")?;
-    Ok(PartitionRow {
-        uuid: r.bytes16("uuid")?,
-        tenant: r.str("tenant")?,
-        queue: r.str("queue")?,
-        partition: r.str("partition")?,
-        last_offset: r.i64("last_offset")?,
-        log_start: r.u64("log_start")?,
-        txns_start: r.u64("txns_start")?,
-        last_write_at_us: r.i64("last_write_at_us")?,
-        oldest_live_at_us: r.opt_i64("oldest_live_at_us")?,
-        created_at_us: r.i64("created_at_us")?,
-        last_created_at_us: r.i64("last_created_at_us")?,
-    })
+    let v = partition_version(&mut r)?;
+    let uuid = r.bytes16("uuid")?;
+    let tenant = r.str("tenant")?;
+    let queue = r.str("queue")?;
+    let partition = r.str("partition")?;
+    let head = partition_tail(&mut r, uuid, v)?;
+    Ok(PartitionRef {
+        tenant: &tenant,
+        queue: &queue,
+        partition: &partition,
+        head,
+    }
+    .to_row())
 }
 
 /// A length-prefixed string of a row, BORROWED from its bytes (the row codec's
@@ -383,6 +427,10 @@ pub struct PartitionHead {
     pub oldest_live_at_us: Option<i64>,
     pub created_at_us: i64,
     pub last_created_at_us: i64,
+    /// See [`PartitionRow::rows_start`].
+    pub rows_start: u64,
+    /// See [`PartitionRow::unrowed_bytes`].
+    pub unrowed_bytes: u64,
 }
 
 impl PartitionHead {
@@ -422,6 +470,8 @@ impl PartitionRef<'_> {
             oldest_live_at_us: self.head.oldest_live_at_us,
             created_at_us: self.head.created_at_us,
             last_created_at_us: self.head.last_created_at_us,
+            rows_start: self.head.rows_start,
+            unrowed_bytes: self.head.unrowed_bytes,
         }
     }
 }
@@ -438,34 +488,55 @@ impl PartitionRow {
             oldest_live_at_us: self.oldest_live_at_us,
             created_at_us: self.created_at_us,
             last_created_at_us: self.last_created_at_us,
+            rows_start: self.rows_start,
+            unrowed_bytes: self.unrowed_bytes,
         }
     }
 }
 
-/// The tail of a partition row after its three names.
-fn partition_tail(r: &mut Reader<'_>, uuid: [u8; 16]) -> Result<PartitionHead, CodecError> {
+/// The tail of a partition row after its three names; `version` is the row's
+/// ([`partition_version`]).
+fn partition_tail(
+    r: &mut Reader<'_>,
+    uuid: [u8; 16],
+    version: u8,
+) -> Result<PartitionHead, CodecError> {
+    let last_offset = r.i64("last_offset")?;
+    let log_start = r.u64("log_start")?;
+    let txns_start = r.u64("txns_start")?;
+    let last_write_at_us = r.i64("last_write_at_us")?;
+    let oldest_live_at_us = r.opt_i64("oldest_live_at_us")?;
+    let created_at_us = r.i64("created_at_us")?;
+    let last_created_at_us = r.i64("last_created_at_us")?;
+    let (rows_start, unrowed_bytes) = if version == ROW_V2 {
+        (r.u64("rows_start")?, r.u64("unrowed_bytes")?)
+    } else {
+        (txns_start, 0)
+    };
     Ok(PartitionHead {
         uuid,
-        last_offset: r.i64("last_offset")?,
-        log_start: r.u64("log_start")?,
-        txns_start: r.u64("txns_start")?,
-        last_write_at_us: r.i64("last_write_at_us")?,
-        oldest_live_at_us: r.opt_i64("oldest_live_at_us")?,
-        created_at_us: r.i64("created_at_us")?,
-        last_created_at_us: r.i64("last_created_at_us")?,
+        last_offset,
+        log_start,
+        txns_start,
+        last_write_at_us,
+        oldest_live_at_us,
+        created_at_us,
+        last_created_at_us,
+        rows_start,
+        unrowed_bytes,
     })
 }
 
 /// [`partition_decode`]'s fixed-width fields, with no allocation.
 pub fn partition_head_decode(b: &[u8]) -> Result<PartitionHead, CodecError> {
     let mut r = Reader::new(b);
-    expect_v1(&mut r, "partition row version")?;
+    let v = partition_version(&mut r)?;
     let uuid = r.bytes16("uuid")?;
     for f in ["tenant", "queue", "partition"] {
         let n = r.u32(f)? as usize;
         r.skip(n, f)?;
     }
-    partition_tail(&mut r, uuid)
+    partition_tail(&mut r, uuid, v)
 }
 
 /// Rewrite a partition row's fixed-width fields — the uuid, the offsets, the
@@ -479,7 +550,7 @@ pub fn partition_rewrite_head(
     f: impl FnOnce(&mut PartitionHead),
 ) -> Result<bool, CodecError> {
     let mut r = Reader::new(b);
-    expect_v1(&mut r, "partition row version")?;
+    let v = partition_version(&mut r)?;
     let uuid = r.bytes16("uuid")?;
     let names_at = b.len() - r.remaining();
     for f in ["tenant", "queue", "partition"] {
@@ -487,15 +558,16 @@ pub fn partition_rewrite_head(
         r.skip(n, f)?;
     }
     let tail_at = b.len() - r.remaining();
-    let head = partition_tail(&mut r, uuid)?;
+    let head = partition_tail(&mut r, uuid, v)?;
     let mut new = head;
     f(&mut new);
     out.clear();
     if new == head {
         return Ok(false);
     }
-    out.reserve(b.len() + 8);
-    out.push(ROW_V1);
+    out.reserve(b.len() + 24);
+    let v2 = partition_is_v2(new.txns_start, new.rows_start, new.unrowed_bytes);
+    out.push(if v2 { ROW_V2 } else { ROW_V1 });
     out.extend_from_slice(&new.uuid);
     out.extend_from_slice(&b[names_at..tail_at]);
     out.extend_from_slice(&new.last_offset.to_le_bytes());
@@ -511,18 +583,22 @@ pub fn partition_rewrite_head(
     }
     out.extend_from_slice(&new.created_at_us.to_le_bytes());
     out.extend_from_slice(&new.last_created_at_us.to_le_bytes());
+    if v2 {
+        out.extend_from_slice(&new.rows_start.max(new.txns_start).to_le_bytes());
+        out.extend_from_slice(&new.unrowed_bytes.to_le_bytes());
+    }
     Ok(true)
 }
 
 /// [`partition_decode`] borrowing the names from `b`, with no allocation.
 pub fn partition_ref_decode(b: &[u8]) -> Result<PartitionRef<'_>, CodecError> {
     let mut r = Reader::new(b);
-    expect_v1(&mut r, "partition row version")?;
+    let v = partition_version(&mut r)?;
     let uuid = r.bytes16("uuid")?;
     let tenant = str_ref(&mut r, "tenant")?;
     let queue = str_ref(&mut r, "queue")?;
     let partition = str_ref(&mut r, "partition")?;
-    let head = partition_tail(&mut r, uuid)?;
+    let head = partition_tail(&mut r, uuid, v)?;
     Ok(PartitionRef {
         tenant,
         queue,
@@ -1317,6 +1393,54 @@ mod tests {
             assert!(out.is_empty());
         }
         assert!(partition_rewrite_head(&[ROW_V1, 1, 2], &mut out, |_| {}).is_err());
+    }
+
+    /// Catalogue version 6: a partition whose rows start past its hash-list
+    /// watermark (or that holds unrowed bytes) is a `ROW_V2` row; every other
+    /// one keeps its version-1 bytes, so a cluster below version 6 writes the
+    /// rows it always wrote.
+    #[test]
+    fn a_partition_row_takes_the_v2_shape_only_when_its_rows_start_moved() {
+        let mut p = PartitionRow::new([7u8; 16], "t", "q", "p", 1_000);
+        p.last_offset = 99;
+        p.log_start = 10;
+        p.txns_start = 10;
+        p.rows_start = 10;
+        let v1 = partition_encode(&p);
+        assert_eq!(v1[0], ROW_V1);
+        assert_eq!(partition_decode(&v1).unwrap(), p);
+        assert_eq!(partition_head_decode(&v1).unwrap(), p.head());
+
+        for (rows_start, unrowed) in [(40u64, 0u64), (10, 7), (40, 1234)] {
+            let mut q = p.clone();
+            q.rows_start = rows_start;
+            q.unrowed_bytes = unrowed;
+            let b = partition_encode(&q);
+            assert_eq!(b[0], ROW_V2);
+            assert_eq!(b.len(), v1.len() + 16);
+            assert_eq!(partition_decode(&b).unwrap(), q);
+            assert_eq!(partition_head_decode(&b).unwrap(), q.head());
+            assert_eq!(partition_ref_decode(&b).unwrap().to_row(), q);
+            for cut in [b.len() - 1, b.len() - 9, v1.len()] {
+                assert!(partition_decode(&b[..cut]).is_err(), "{cut}");
+            }
+            // The in-place rewrite moves between the two shapes, byte for
+            // byte what the encoder writes.
+            let mut out = Vec::new();
+            assert!(partition_rewrite_head(&v1, &mut out, |h| {
+                h.rows_start = rows_start;
+                h.unrowed_bytes = unrowed;
+            })
+            .unwrap());
+            assert_eq!(out, b);
+            assert!(partition_rewrite_head(&b, &mut out, |h| {
+                h.rows_start = h.txns_start;
+                h.unrowed_bytes = 0;
+            })
+            .unwrap());
+            assert_eq!(out, v1);
+        }
+        assert!(partition_decode(&[9u8, 0, 0]).is_err());
     }
 
     #[test]

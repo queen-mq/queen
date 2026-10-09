@@ -301,6 +301,7 @@ impl Wide {
             pid: p.pid,
             log_start,
             txns_start,
+            rows: None,
         })
     }
 

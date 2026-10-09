@@ -1691,6 +1691,12 @@ impl QLogSet {
 /// one for the planner's `DEDUP_INDEX=segment` dedup read. Every method keys by
 /// `queue_id` ([`QLogSet::queue_id_of`]) and reads under the queue's read lock,
 /// off the SAME live logs the applier appends to.
+impl std::fmt::Debug for QLogReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("QLogReader")
+    }
+}
+
 #[derive(Clone)]
 pub struct QLogReader {
     logs: SharedLogs,
@@ -1921,6 +1927,10 @@ impl Drop for ReclaimPause {
     }
 }
 
+/// How many records a walk over old messages looks up per hold of its
+/// queue's lock ([`QLogReader::walk_frames`]).
+const WALK_CHUNK: usize = 128;
+
 impl QLogReader {
     /// Pause retention (no file is unlinked or rewritten) until the guard is
     /// dropped: a snapshot links every file and needs them to stay put. A
@@ -2026,6 +2036,58 @@ impl QLogReader {
     /// The judging holds no lock on the log. Only the unlink, and the one
     /// rewrite a pass allows, take its write lock, and only when it is free
     /// (`try_write`): an append never queues behind retention.
+    /// One pass of directory maintenance over every log ([`super::dirx`]): at
+    /// most one step per log — a run built for sealed files that have none,
+    /// or adjacent runs merged — until `deadline`. Returns the steps taken.
+    ///
+    /// A step reads only sealed, immutable files and is written and verified
+    /// with NO lock on the log; taking the finished run is a swap under the
+    /// log's write lock.
+    pub(crate) fn dirx_maintain(&self, deadline: std::time::Instant) -> usize {
+        let mut done = 0;
+        for id in self.log_ids() {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            let Some(log) = self.log(id) else { continue };
+            let plan = log.read().expect("qlog poisoned").dirx_plan();
+            if let Some(plan) = plan {
+                // A sealed file that went away under the step (retention)
+                // fails it: the next pass plans it again.
+                match plan.run().and_then(|b| super::dirx::Run::open(&b.path)) {
+                    Ok(run) => {
+                        log.write().expect("qlog poisoned").dirx_install(run);
+                        done += 1;
+                    }
+                    Err(e) => tracing::debug!(
+                        target: "rsm",
+                        log = id,
+                        error = %e,
+                        "rsm qlog directory step failed; it is planned again",
+                    ),
+                }
+            }
+            if log.read().expect("qlog poisoned").dirx_has_dead_runs() {
+                log.write().expect("qlog poisoned").dirx_gc();
+            }
+        }
+        done
+    }
+
+    /// Directory runs and sealed files outside any run, over every log
+    /// (`queen_raft_qlog_dirx`).
+    pub fn dirx_totals(&self) -> (usize, usize) {
+        let mut out = (0, 0);
+        for id in self.log_ids() {
+            if let Some(log) = self.log(id) {
+                let (runs, uncovered) = log.read().expect("qlog poisoned").dirx_stats();
+                out.0 += runs;
+                out.1 += uncovered;
+            }
+        }
+        out
+    }
+
     pub(crate) fn reclaim_log(
         &self,
         log_id: u64,
@@ -2334,6 +2396,29 @@ impl QLogReader {
         }
     }
 
+    /// [`QLogReader::read_owned`] for the consecutive offsets of one
+    /// partition ([`QLog::read_owned_hinted`]).
+    pub fn read_owned_hinted(
+        &self,
+        queue_id: u64,
+        pid: u64,
+        offset: u64,
+        hint: &mut Option<u64>,
+    ) -> io::Result<Option<OwnedRecord>> {
+        let Some(l) = self.log_for(queue_id, pid) else {
+            return Ok(None);
+        };
+        // The lookup under the queue's lock, the read after it.
+        let step = l
+            .read()
+            .expect("qlog poisoned")
+            .plan_read(pid, offset, hint)?;
+        match step {
+            Some(step) => Ok(Some(step.read()?)),
+            None => Ok(None),
+        }
+    }
+
     /// Seek a message-list candidate using only the active/sealed indexes.
     pub fn record_before(
         &self,
@@ -2371,6 +2456,64 @@ impl QLogReader {
                 cb,
             ),
             None => Ok(()),
+        }
+    }
+
+    /// [`QLogReader::claim_frames`] over messages whose index rows left the
+    /// store. Two things differ. The hash blocks it reads stay out of the
+    /// hash cache (each record is read once, and nothing but the band reads
+    /// of `DEDUP_INDEX=segment` would clear them again). And the queue's lock
+    /// is held only while the next [`WALK_CHUNK`] records are looked up in
+    /// the index ([`QLog::walk_plan`]): their hash blocks are read with the
+    /// lock released, so a group reading a queue's history does not hold the
+    /// appends to that queue behind its disk reads.
+    pub fn walk_frames(
+        &self,
+        queue_id: u64,
+        pid: u64,
+        from_offset: u64,
+        committed_end: u64,
+        want_hashes: bool,
+        cb: &mut dyn FnMut(u64, u64, i64, Option<Vec<u8>>) -> bool,
+    ) -> io::Result<()> {
+        let Some(l) = self.log_for(queue_id, pid) else {
+            return Ok(());
+        };
+        if !want_hashes {
+            // The index alone: nothing is read from the files.
+            return l.read().expect("qlog poisoned").claim_walk_with(
+                pid,
+                from_offset,
+                committed_end,
+                false,
+                false,
+                cb,
+            );
+        }
+        let dir = l.read().expect("qlog poisoned").dir().to_path_buf();
+        let mut cur = from_offset;
+        let mut hint: Option<u64> = None;
+        let mut scratch: Vec<u8> = Vec::new();
+        loop {
+            let steps = l.read().expect("qlog poisoned").walk_plan(
+                pid,
+                cur,
+                committed_end,
+                &mut hint,
+                WALK_CHUNK,
+            )?;
+            let planned = steps.len();
+            for step in &steps {
+                let hashes = super::read_walk_hashes(&dir, step, &mut scratch)?;
+                let r = &step.rec;
+                cur = r.end;
+                if !cb(r.base_offset, r.end - 1, r.created_at_us, Some(hashes)) {
+                    return Ok(());
+                }
+            }
+            if planned < WALK_CHUNK {
+                return Ok(()); // the committed tail, or the end of what is there
+            }
         }
     }
 
