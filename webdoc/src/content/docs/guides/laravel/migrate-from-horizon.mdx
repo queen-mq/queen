@@ -48,6 +48,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (broker supervisor dashboard): config/queen.php documents publication groups; main.rs adds optional runtime metadata and negotiated client-version export. The migration mappings, scaling and drain behavior are unchanged.
 # sourceOfTruth re-read 2026-10-08 (locks): proxy/src/routes.rs puts POST /api/v1/locks behind the KV plan
 # flag, never quota-blocked. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): a pool without consumer_group
+# takes its connection's; the failed-job provider leaves other drivers' records to Laravel,
+# without the lock; the connector applies the pool's settings to the worked connection alone. The
+# pool row says so.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place
@@ -220,7 +224,7 @@ the environment variable when the file reads one. The same key on the `queen` co
 | `timeout`, `tries`, `memory`, `sleep`, `rest`, `force` | the same names | the same worker settings |
 | `nice` | none | keep OS priority outside Queen |
 | an array `backoff` | none | the supervisor takes one integer |
-| none | `consumer_group`, `retry_after` | per pool; default to the top-level `consumer_group` (`QUEEN_CONSUMER_GROUP`) and the connection's `retry_after` |
+| none | `consumer_group`, `retry_after` | per pool; default to the connection's `consumer_group` (the top-level one, `QUEEN_CONSUMER_GROUP`, for `queen`) and its `retry_after` |
 
 For strict priority such as `high,default`, use `balance=off`, `prefetch=1` and a non-blocking
 queue scan (`block_for` 0). Auto balancing allocates by measured pressure and ignores queue order.

@@ -61,6 +61,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-09 (supervisors restyle): Supervisors.vue, SupervisorGroupCard.vue and SupervisorActivity.vue
 # are rebuilt from the dashboard's shared card, stats, table and segmented control; a healthy application is a grey
 # dot and the per-instance marks are gone. The colours paragraph says so; what is read and how it is combined is unchanged.
+# sourceOfTruth re-read 2026-10-09 (review fixes): main.rs changes how a pool's circuit closes and
+# how fork servers are refreshed; the status document, its restart_state values and its keys are
+# unchanged.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.
