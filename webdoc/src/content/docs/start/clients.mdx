@@ -104,6 +104,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-09 (queen-protocol 1.4.0): client-rust/Cargo.toml and server/Cargo.toml require
 # queen-protocol 1.4.0, the wire-types crate with the lock types; no client or broker version moved. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): config/queen.php reads its
+# switch variables through filter_var; url, urls and the token this page shows are unchanged.
+# Nothing this page states changes.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same

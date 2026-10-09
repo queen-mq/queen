@@ -36,15 +36,26 @@ final class SyncedFailedJobProvider implements
      *        The outer closure acquires the failed-store lock and passes an
      *        ownership assertion into the operation.
      */
+    /**
+     * @param \Closure(string): bool|null $isQueenConnection whether a connection name is a Queen one;
+     *     null treats every connection as Queen
+     */
     public function __construct(
         private FailedJobProviderInterface $inner,
         private \Closure $queueResolver,
         private ?\Closure $synchronize = null,
+        private ?\Closure $isQueenConnection = null,
     ) {
     }
 
     public function log($connection, $queue, $payload, $exception)
     {
+        if (!$this->concernsQueen($connection)) {
+            // Another driver's failure has no Queen snapshot to keep in step
+            // with: Laravel's own provider, with no lock.
+            return $this->inner->log($connection, $queue, $payload, $exception);
+        }
+
         return $this->synchronized(
             function (\Closure $assertOwned) use ($connection, $queue, $payload, $exception): mixed {
                 $this->makeRoomInBoundedFileProvider($assertOwned);
@@ -217,7 +228,7 @@ final class SyncedFailedJobProvider implements
     {
         $connection = $this->value($record, 'connection');
         $payload = $this->value($record, 'payload');
-        if (!is_string($connection) || $connection === '' || !is_string($payload) || $payload === '') {
+        if (!is_string($connection) || $connection === '' || !is_string($payload) || $payload === '' || !$this->concernsQueen($connection)) {
             return;
         }
 
@@ -235,6 +246,15 @@ final class SyncedFailedJobProvider implements
     {
         $deleted = 0;
         foreach ($records as $record) {
+            if (!$this->concernsQueen($this->value($record, 'connection'))) {
+                // Nothing to keep in step with, and no connection to resolve:
+                // a record of a connection that was removed is still removed.
+                $id = $this->value($record, 'id');
+                if ((is_string($id) || is_int($id)) && $this->inner->forget($id)) {
+                    ++$deleted;
+                }
+                continue;
+            }
             if ($this->synchronized(
                 fn (\Closure $assertOwned): bool => $this->removeRecordUnderLock(
                     $record,
@@ -435,6 +455,16 @@ final class SyncedFailedJobProvider implements
         return $this->synchronized(
             fn (\Closure $assertOwned): array => $records(),
         );
+    }
+
+    /** Whether a failed job's connection is a Queen connection, whose snapshot this provider keeps in step. */
+    private function concernsQueen(mixed $connection): bool
+    {
+        if ($this->isQueenConnection === null) {
+            return true;
+        }
+
+        return is_string($connection) && $connection !== '' && ($this->isQueenConnection)($connection);
     }
 
     private function synchronized(\Closure $operation): mixed

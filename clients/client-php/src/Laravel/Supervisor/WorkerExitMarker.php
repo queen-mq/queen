@@ -48,14 +48,21 @@ final class WorkerExitMarker
     {
     }
 
-    public static function listenFromEnvironment(Dispatcher $events): void
+    /** The marker of this worker, or null when no supervisor asked for one. */
+    public static function fromEnvironment(): ?self
     {
         $directory = getenv(self::ENVIRONMENT);
-        if (!is_string($directory) || $directory === '') {
+
+        return is_string($directory) && $directory !== '' ? new self($directory) : null;
+    }
+
+    public static function listenFromEnvironment(Dispatcher $events): void
+    {
+        $marker = self::fromEnvironment();
+        if ($marker === null) {
             return;
         }
 
-        $marker = new self($directory);
         $events->listen(JobTimedOut::class, static function () use ($marker): void {
             $marker->write(self::TIMEOUT);
         });

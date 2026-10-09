@@ -220,6 +220,13 @@ impl ForkServer {
             })
     }
 
+    /// Read the events available now. A late reply to a request this master
+    /// gave up on stops its stray only when somebody reads it, and nothing
+    /// polls a server none of whose workers is tracked.
+    pub(crate) fn tick(&mut self) {
+        let _ = self.poll();
+    }
+
     /// The raw wait status of an exited worker, or None while it runs.
     pub(crate) fn exit_status(&mut self, pid: u32) -> Option<i32> {
         let _ = self.poll();
@@ -375,14 +382,24 @@ impl WorkerProcess {
                 if status.is_none() {
                     let mut server = server.borrow_mut();
                     *status = server.exit_status(*pid).map(ExitStatus::from_raw);
-                    // SAFETY: signal 0 only checks that the process exists.
-                    if status.is_none()
-                        && !server.is_alive()
-                        && unsafe { libc::kill(*pid as i32, 0) } != 0
-                    {
-                        // The server is gone and so is the worker: its exit
-                        // status went with the server.
-                        *status = Some(ExitStatus::from_raw(0));
+                    if status.is_none() && !server.is_alive() {
+                        // The server is gone. Its worker came to this master
+                        // when the master is the nearest subreaper, as PID 1
+                        // in a container: reaped here, with its real status,
+                        // instead of staying a zombie. Otherwise it is
+                        // init's, and once gone its status went with the
+                        // server.
+                        let mut raw = 0;
+                        // SAFETY: waitpid on a pid this master tracks, and
+                        // WNOHANG never blocks.
+                        let reaped = unsafe { libc::waitpid(*pid as i32, &mut raw, libc::WNOHANG) };
+                        if reaped == *pid as i32 {
+                            *status = Some(ExitStatus::from_raw(raw));
+                        } else if reaped != 0 && unsafe { libc::kill(*pid as i32, 0) } != 0 {
+                            // SAFETY (above): signal 0 only checks that the
+                            // process exists.
+                            *status = Some(ExitStatus::from_raw(0));
+                        }
                     }
                 }
                 Ok(*status)
@@ -618,6 +635,97 @@ mod tests {
         server.borrow_mut().close(Duration::from_secs(5));
         let _ = std::fs::remove_file(late);
         let _ = std::fs::remove_file(exited);
+    }
+
+    /// The late reply stopped its stray only when exit_status() of another
+    /// worker read it: a master that gave up on its first fork and spawns
+    /// since tracks no forked worker.
+    #[test]
+    fn a_tick_stops_a_stray_when_no_worker_is_polled() {
+        let Some(config) = fixture_config() else {
+            return;
+        };
+        let server = Rc::new(RefCell::new(
+            ForkServer::start(&config, &AtomicBool::new(true)).unwrap(),
+        ));
+        server.borrow_mut().fork_timeout = Duration::ZERO;
+        let late = (1..=5)
+            .find_map(|_| {
+                let late = report();
+                let argv = ["sleep".to_owned(), late.to_str().unwrap().to_owned()];
+                match server.borrow_mut().request_fork(&argv, &[]) {
+                    Err(_) => Some(late),
+                    Ok(pid) => {
+                        // SAFETY: plain signal delivery to the worker just forked.
+                        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                        None
+                    }
+                }
+            })
+            .expect("the fork never timed out");
+        let stray = u32::try_from(wait_for_report(&late)["pid"].as_u64().unwrap()).unwrap();
+        // SAFETY: signal 0 only checks that the process exists.
+        assert_eq!(unsafe { libc::kill(stray as i32, 0) }, 0);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // SAFETY: as above.
+        while unsafe { libc::kill(stray as i32, 0) } == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the stray worker was not stopped"
+            );
+            server.borrow_mut().tick();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        server.borrow_mut().close(Duration::from_secs(5));
+        let _ = std::fs::remove_file(late);
+    }
+
+    /// With the server SIGKILLed (the OOM killer's choice: it holds the
+    /// booted heap), its workers live on. Where this master is the nearest
+    /// subreaper, PID 1 in a container, they come to it: a worker that exits
+    /// then is reaped here, with its status, instead of staying a zombie that
+    /// kill(pid, 0) keeps finding.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_worker_of_a_dead_server_is_reaped_by_the_master_it_came_to() {
+        let Some(config) = fixture_config() else {
+            return;
+        };
+        // SAFETY: makes this process the parent of the orphans among its descendants.
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
+        let server = Rc::new(RefCell::new(
+            ForkServer::start(&config, &AtomicBool::new(true)).unwrap(),
+        ));
+        let sleeping = report();
+        let mut worker = forked(&server, &["sleep", sleeping.to_str().unwrap()], &[]);
+        wait_for_report(&sleeping);
+        let server_pid = server.borrow().child.id();
+        // SAFETY: SIGKILL to the server this test started: its fence never runs.
+        unsafe { libc::kill(server_pid as i32, libc::SIGKILL) };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while server.borrow_mut().is_alive() {
+            assert!(Instant::now() < deadline, "the server did not die");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            matches!(worker.try_wait(), Ok(None)),
+            "the worker outlives its server"
+        );
+
+        // SAFETY: SIGTERM to the worker this test forked.
+        unsafe { libc::kill(worker.id() as i32, libc::SIGTERM) };
+        let status = loop {
+            if let Ok(Some(status)) = worker.try_wait() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "the worker was never reaped");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
+        // SAFETY: undoes the flag set above.
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0) };
+        let _ = std::fs::remove_file(sleeping);
     }
 
     #[test]

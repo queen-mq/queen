@@ -52,6 +52,11 @@ sourceOfTruth:
 # do not change; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (locks): Queen.php gained lock(), semaphore() and locks(); the connector
 # and its configuration do not use them. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): a pool's environment settings
+# reach the worked connection alone, a pool without queues or consumer_group takes its
+# connection's, a connection's url is not replaced by the default urls, every switch variable
+# takes 1; the failed-job provider leaves other drivers' records to Laravel. The bullets, the urls
+# row and the pool table say so.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. Since PHP client 2.1.0 the
@@ -133,23 +138,25 @@ A few more variables are read outside `config/queen.php`, from the environment o
   `queen` entry in `config/queue.php` overrides any of them, and another connection with
   `'driver' => 'queen'` starts from the same values.
 - A supervised worker takes its consumer group and `retry_after` from its pool, not from the
-  connection, and a pool with `balance` `off` gives it `block_for` 0. Both engines do this.
-- A pool that sets no `queues` or `consumer_group` takes the top-level `queue` and
-  `consumer_group`, so `QUEEN_QUEUE` and `QUEEN_CONSUMER_GROUP` reach it too. The other keys a pool
-  leaves out take the defaults of the [pool table](#pools).
+  connection, and a pool with `balance` `off` gives it `block_for` 0. Both engines do this, for
+  the connection the pool works alone: another Queen connection the worker resolves, to dispatch
+  onto it from a job, keeps its own configuration (PHP client 2.4.1).
+- A pool that sets no `queues` or `consumer_group` takes its connection's `queue` and
+  `consumer_group`; for a pool on `queen` those are the top-level ones, so `QUEEN_QUEUE` and
+  `QUEEN_CONSUMER_GROUP` reach it too. The other keys a pool leaves out take the defaults of the
+  [pool table](#pools).
 - Write switches as `true` or `false`. The connector and the supervisor accept only a real boolean,
   and a `1` or an `'on'` is refused (`Queen Laravel after_commit must be a boolean.`). The
-  dashboard, job metrics and tags are on only for `true`. Of the variables,
-  `QUEEN_SUPERVISOR_REMOTE_STATUS` and `QUEEN_DASHBOARD_ENABLED` take only `true` and `false`, which
-  `env()` turns into booleans; `QUEEN_SUPERVISOR_PREFORK`, `QUEEN_SUPERVISOR_COORDINATION` and
-  `QUEEN_METRICS_ENABLED` also take `1`, `yes` and `on`.
+  dashboard, job metrics and tags are on only for `true`. The switch variables
+  (`QUEEN_SUPERVISOR_PREFORK`, `QUEEN_SUPERVISOR_REMOTE_STATUS`, `QUEEN_SUPERVISOR_COORDINATION`,
+  `QUEEN_DASHBOARD_ENABLED` and `QUEEN_METRICS_ENABLED`) take `true`, `1`, `yes` and `on`.
 
 ## Connection and client
 
 | Config key | Default | Meaning |
 | --- | --- | --- |
 | `url` | `http://localhost:6632` | The broker's address, used while `urls` is empty. Variable: `QUEEN_URL`. |
-| `urls` | unset | Several broker addresses, comma-separated in the variable; they replace `url`. Variable: `QUEEN_URLS`. |
+| `urls` | unset | Several broker addresses, comma-separated in the variable; they replace `url`. A connection with a `url` of its own and no `urls` is not on this cluster. Variable: `QUEEN_URLS`. |
 | `bearer_token` | unset | Sent as `Authorization: Bearer <token>` on every request. Variable: `QUEEN_BEARER_TOKEN`. |
 | `headers` | `[]` | Extra HTTP headers on every request, as a PHP array. |
 | `timeout` | `30000` | How long one broker request may take, in milliseconds. |
@@ -292,8 +299,8 @@ Each entry of `supervisor.supervisors` is a pool. The file ships one, `default`,
 | Config key | Default | Meaning |
 | --- | --- | --- |
 | `connection` | `queen` | The Laravel queue connection the workers use; it must use the `queen` driver. |
-| `consumer_group` | the top-level `consumer_group` (`QUEEN_CONSUMER_GROUP`) | The consumer group of the pool's workers. |
-| `queues` | the top-level `queue` (`QUEEN_QUEUE`) | The queues the pool serves, as an array or a comma-separated string. |
+| `consumer_group` | the connection's `consumer_group`; for `queen`, the top-level one (`QUEEN_CONSUMER_GROUP`) | The consumer group of the pool's workers. |
+| `queues` | the connection's `queue`; for `queen`, the top-level one (`QUEEN_QUEUE`) | The queues the pool serves, as an array or a comma-separated string. |
 | `balance` | `auto` | `auto` follows the backlog, `simple` runs a fixed count, `off` gives every worker the whole queue list. |
 | `strategy` | `size` | How `auto` sizes the pool: `size` from the backlog, `time` from the backlog times the job runtime. |
 | `min_processes` | `1` | Fewest workers of the pool. |

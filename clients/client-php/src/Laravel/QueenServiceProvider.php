@@ -101,6 +101,9 @@ class QueenServiceProvider extends ServiceProvider
                             );
                         }
                     },
+                    // A failure on another driver, or a record of a connection
+                    // since removed, is Laravel's alone: no lock, no snapshot.
+                    fn (string $connection): bool => $app['config']->get("queue.connections.{$connection}.driver") === 'queen',
                 );
             });
         }

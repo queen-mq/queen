@@ -74,6 +74,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-09 (two fixed workers): SupervisorConfiguration resolves two
 # workers with a two-slot budget, or four slots when lease renewal reserves helper fallbacks.
+# sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): both engines read their fork
+# servers' events once per loop, start a fork server again at queue:restart when prefork has none,
+# reap a dead server's workers when the master is PID 1, and close a circuit only with the probe;
+# the PHP engine drains on SIGHUP and runs quiet by default. The queue:restart and init paragraphs
+# say so.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
@@ -439,7 +444,9 @@ without killing its renewal helper early, and systemd still SIGKILLs the whole c
 deadline. Keep `TimeoutStopSec` above `shutdown_grace`. For the PHP engine, the `ExecStart` is
 `/usr/bin/php artisan queen:supervise`. In a container whose entrypoint is the supervisor, run a
 real init process (`docker run --init`, Compose `init: true`, tini): a renewal helper can be
-orphaned for a moment after a forced kill and something has to reap it.
+orphaned for a moment after a forced kill and something has to reap it. A forked worker outlives a
+fork server the OOM killer took; a master that is PID 1 reaps that worker itself when it exits
+(PHP client 2.4.1).
 
 ## Inspect and control either engine
 
@@ -540,7 +547,9 @@ master spawns its workers instead.
 `php artisan queue:restart` stops every worker after its job. A forked worker says it stopped for
 the restart signal, and the master then starts a new fork server, so the workers forked from then
 on boot nothing and run the deployed code; the old server closes with the last worker it forked. A
-change to `config/queen.php` still needs the master restarted (`php artisan queen:supervisor
+worker forked between the restart and that first exit leaves at once with the restart marker, and a
+master whose fork server had failed to boot, or to fork, starts one again at the next
+`queue:restart` (PHP client 2.4.1). A change to `config/queen.php` still needs the master restarted (`php artisan queen:supervisor
 terminate`, then your process manager starts it again), as it does without prefork. Prefork needs
 PHP client 1.7.0 (supervisor 0.4.0); the restart and the checks above need PHP client 2.1.0.
 

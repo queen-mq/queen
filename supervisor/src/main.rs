@@ -605,6 +605,12 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         if !running.load(Ordering::SeqCst) {
             break;
         }
+        // A server's events are read whether or not a worker of its is
+        // polled: the late reply to a fork request this master gave up on
+        // stops its stray only when read.
+        for server in fork_server.iter().chain(retired_forks.iter()) {
+            server.borrow_mut().tick();
+        }
         // command() verifies the pinned state generation before any reap can
         // remove telemetry or any reconcile can spawn a worker into it.
         let restarted = reap(
@@ -3441,11 +3447,14 @@ fn worker_invocation(
             config.exit_markers.clone(),
         ),
     ];
-    if o.balance == "off" {
-        // A blocking reserve on the first queue in Laravel's ordered list
-        // would prevent lower-priority queues from ever being checked.
-        environment.push(("QUEEN_LARAVEL_BLOCK_FOR".to_owned(), Some("0".to_owned())));
-    }
+    // A blocking reserve on the first queue in Laravel's ordered list would
+    // prevent lower-priority queues from ever being checked. Any other pool
+    // reads block_for from its connection: a value in this master's own
+    // environment is not inherited, as a forked worker never had it.
+    environment.push((
+        "QUEEN_LARAVEL_BLOCK_FOR".to_owned(),
+        (o.balance == "off").then(|| "0".to_owned()),
+    ));
     (arguments, environment)
 }
 
@@ -3489,7 +3498,9 @@ fn reap(
             Ok(Some(status)) => {
                 let pid = worker.child.id();
                 let announced = announced_exit(config, pid, status);
-                if announced == Some(AnnouncedExit::QueueRestart) && worker.child.forked_by(forks) {
+                if announced == Some(AnnouncedExit::QueueRestart)
+                    && (worker.child.forked_by(forks) || prefork_wants_a_server(config, forks))
+                {
                     restarted = true;
                 }
                 record_worker_exit(key, worker, status, announced, options, restart);
@@ -3508,6 +3519,13 @@ fn reap(
         });
     }
     restarted
+}
+
+/// Prefork is configured and no server forks: its boot failed, or a fork did
+/// since. `queue:restart` is the moment to try again; until then the workers
+/// are spawned and nothing says so twice.
+fn prefork_wants_a_server(config: &Config, forks: Option<&Rc<RefCell<ForkServer>>>) -> bool {
+    config.prefork && forks.is_none_or(|server| server.borrow().disabled)
 }
 
 /// After `queue:restart`, boot a new fork server, so the workers forked from
@@ -3802,8 +3820,13 @@ fn observe_stable_workers(config: &Config, pools: &mut Pools, restarts: &mut Res
                 && worker.started_at.elapsed() >= Duration::from_secs(options.stable_after)
             {
                 worker.stability_reported = true;
-                let authoritative =
-                    !matches!(restart.phase, RestartPhase::Probe) || worker.restart_probe;
+                // Only the probe closes a circuit: a sibling started just
+                // before a slot began to crash-loop proves nothing about it.
+                let authoritative = match restart.phase {
+                    RestartPhase::Probe => worker.restart_probe,
+                    RestartPhase::Closed => true,
+                    RestartPhase::Backoff { .. } | RestartPhase::Open { .. } => false,
+                };
                 worker.restart_probe = false;
                 if authoritative {
                     restart.record_healthy();
@@ -4310,9 +4333,15 @@ mod tests {
             "high",
             &auto_config.supervisors["default"],
         );
-        assert!(auto_command
+        // Removed, not left alone: a balancing pool does not inherit the
+        // master's own block_for, as a forked worker never had it.
+        let removed = auto_command
             .get_envs()
-            .all(|(name, _)| name != std::ffi::OsStr::new("QUEEN_LARAVEL_BLOCK_FOR")));
+            .find(|(name, _)| *name == std::ffi::OsStr::new("QUEEN_LARAVEL_BLOCK_FOR"));
+        assert_eq!(
+            removed,
+            Some((std::ffi::OsStr::new("QUEEN_LARAVEL_BLOCK_FOR"), None))
+        );
     }
 
     #[test]
@@ -5417,6 +5446,83 @@ mod tests {
             let _ = worker.child.kill();
             let _ = worker.child.wait();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_young_sibling_does_not_close_a_circuit_in_backoff() {
+        let resolved = config(options("auto"));
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut sibling = sleeping_worker(false);
+        sibling.started_at = Instant::now() - Duration::from_secs(61);
+        let mut pools = Pools::from([(key.clone(), vec![sibling])]);
+        let mut restarts = RestartStates::from([(
+            key.clone(),
+            RestartGuard {
+                consecutive_failures: 2,
+                phase: RestartPhase::Backoff {
+                    until: Instant::now() + Duration::from_secs(30),
+                },
+            },
+        )]);
+
+        observe_stable_workers(&resolved, &mut pools, &mut restarts);
+
+        assert!(pools[&key][0].stability_reported);
+        assert!(matches!(restarts[&key].phase, RestartPhase::Backoff { .. }));
+        assert_eq!(restarts[&key].consecutive_failures, 2);
+        for mut worker in pools.remove(&key).unwrap() {
+            let _ = worker.child.kill();
+            let _ = worker.child.wait();
+        }
+    }
+
+    /// A config whose fork server is the Laravel package's protocol fixture,
+    /// with its state directory, or None without PHP and the package.
+    #[cfg(unix)]
+    fn fixture_fork_server_config(name: &str) -> Option<(Config, PathBuf)> {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../clients/client-php/tests/Fixtures/Prefork/fork_server.php");
+        let autoload =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../clients/client-php/vendor/autoload.php");
+        let php = Command::new("php")
+            .args([
+                "-r",
+                "exit(function_exists('pcntl_fork') && function_exists('posix_setsid') ? 0 : 1);",
+            ])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !php || !fixture.exists() || !autoload.exists() {
+            eprintln!("skipped: PHP with pcntl/posix and the Laravel package are required");
+            return None;
+        }
+        let (mut resolved, state_directory) = exit_marker_config(name);
+        resolved.prefork = true;
+        resolved.php_binary = "php".to_owned();
+        resolved.artisan = fixture.to_string_lossy().into_owned();
+        resolved.cwd = fixture.parent().unwrap().to_string_lossy().into_owned();
+        Some((resolved, state_directory))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_queue_restart_asks_for_a_fork_server_only_when_prefork_has_none() {
+        let mut resolved = config(options("auto"));
+        assert!(!prefork_wants_a_server(&resolved, None));
+        resolved.prefork = true;
+        assert!(prefork_wants_a_server(&resolved, None));
+
+        let Some((fixture, state_directory)) = fixture_fork_server_config("fork-server-wanted")
+        else {
+            return;
+        };
+        let running = AtomicBool::new(true);
+        let server = Rc::new(RefCell::new(ForkServer::start(&fixture, &running).unwrap()));
+        assert!(!prefork_wants_a_server(&resolved, Some(&server)));
+        server.borrow_mut().disabled = true;
+        assert!(prefork_wants_a_server(&resolved, Some(&server)));
+        server.borrow_mut().close(Duration::from_secs(5));
+        fs::remove_dir_all(state_directory).unwrap();
     }
 
     #[test]
@@ -7315,5 +7421,75 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
             "php".into(),
         ])
         .is_err());
+    }
+
+    /// The PHP client pins the same file in its tests: what Laravel exports
+    /// for a pool, and the arguments and environment the pool's worker gets,
+    /// whether this master spawns it or the fork server forks it.
+    #[test]
+    fn worker_invocation_matches_the_php_client_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../clients/client-php/tests/Fixtures/Supervisor/worker-invocation.json"
+        );
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut config = config(options("auto"));
+        config.state_directory = "/state".into();
+        config.lease_socket = Some("/state/lease.sock".into());
+        config.exit_markers = Some("/state/exits".into());
+        // What the fixture marks `true`: a path this master decides.
+        let decided = HashMap::from([
+            ("QUEEN_SUPERVISOR_TELEMETRY_DIR", "/state/telemetry"),
+            ("QUEEN_SUPERVISOR_LEASE_SOCKET", "/state/lease.sock"),
+        ]);
+
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let supervisor = case["supervisor"].as_str().unwrap();
+            let queue = case["queue"].as_str().unwrap();
+            // deny_unknown_fields: a field Laravel exports and this master
+            // does not read fails here.
+            let pool: SupervisorConfig = serde_json::from_value(case["pool"].clone())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+
+            let (arguments, environment) = worker_invocation(&config, supervisor, queue, &pool);
+
+            let expected: Vec<String> = serde_json::from_value(case["arguments"].clone()).unwrap();
+            assert_eq!(arguments, expected, "{name}: arguments");
+            let expected = case["environment"].as_object().unwrap();
+            for (variable, value) in &environment {
+                match (expected.get(variable), value.as_deref()) {
+                    (None, None) => {}
+                    (None, Some(value)) if variable == "QUEEN_SUPERVISOR_EXITS_DIR" => {
+                        assert_eq!(value, "/state/exits", "{name}: {variable}");
+                    }
+                    (None, Some(value)) => {
+                        panic!("{name}: {variable}={value} is sent and not in the fixture")
+                    }
+                    (Some(serde_json::Value::String(expected)), value) => {
+                        assert_eq!(value, Some(expected.as_str()), "{name}: {variable}");
+                    }
+                    (Some(serde_json::Value::Bool(true)), value) => {
+                        assert_eq!(
+                            value,
+                            Some(decided[variable.as_str()]),
+                            "{name}: {variable}"
+                        );
+                    }
+                    (Some(other), value) => {
+                        panic!("{name}: {variable}: fixture {other} against {value:?}")
+                    }
+                }
+            }
+            for variable in expected.keys() {
+                assert!(
+                    environment
+                        .iter()
+                        .any(|(sent, value)| sent == variable && value.is_some()),
+                    "{name}: {variable} is in the fixture and not sent"
+                );
+            }
+        }
     }
 }

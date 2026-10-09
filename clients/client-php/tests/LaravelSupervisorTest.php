@@ -343,4 +343,31 @@ class LaravelSupervisorTest extends TestCase
             'default_runtime_seconds' => 1.0,
         ];
     }
+
+    /** The string form was trimmed; an array of names was exported as given. */
+    public function testQueueNamesGivenAsAnArrayAreTrimmedLikeTheStringForm(): void
+    {
+        $config = SupervisorConfiguration::resolve([
+            'url' => 'http://queen.test:6632',
+            'supervisor' => ['supervisors' => ['jobs' => ['queues' => ['  high ', 'high', 'default '], 'balance' => 'off', 'processes' => 1]]],
+        ], '/app');
+
+        $this->assertSame(['high', 'default'], $config['supervisors']['jobs']['queues']);
+    }
+
+    /**
+     * config/queen.php's urls, a cluster, replaced the single url of a
+     * connection on another broker, so its pool was watched on the wrong one.
+     */
+    public function testAConnectionsOwnUrlIsNotReplacedByTheDefaultUrls(): void
+    {
+        $config = SupervisorConfiguration::resolve([
+            'url' => 'http://a:6632',
+            'urls' => ['http://a:6632', 'http://b:6632'],
+            'supervisor' => ['supervisors' => ['orders' => ['connection' => 'orders', 'queues' => 'orders', 'balance' => 'simple', 'processes' => 1]]],
+        ], '/app', null, ['orders' => ['driver' => 'queen', 'url' => 'http://orders:6632']]);
+
+        $this->assertSame(['http://orders:6632'], $config['connections']['orders']['urls']);
+        $this->assertSame(['orders'], array_keys($config['connections']));
+    }
 }

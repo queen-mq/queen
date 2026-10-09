@@ -342,6 +342,83 @@ final class WorkerExitMarkerTest extends TestCase
         }
     }
 
+    /**
+     * A fork server that missed its boot timeout, or that failed a fork,
+     * left the master spawning until it was restarted: only a worker of the
+     * current server could ask for a new one. A `queue:restart` announced by
+     * any worker now does.
+     */
+    public function testAQueueRestartStartsAForkServerAgainWhenPreforkHadFailed(): void
+    {
+        if (!function_exists('pcntl_fork') || !function_exists('posix_setsid')) {
+            $this->markTestSkipped('ext-pcntl and ext-posix are required.');
+        }
+        $stateDirectory = $this->privateDirectory();
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            [
+                'state_directory' => $stateDirectory,
+                'supervisors' => ['orders' => self::OPTIONS],
+                'prefork' => true,
+                'php_binary' => PHP_BINARY,
+                'artisan' => __DIR__ . '/Fixtures/Prefork/fork_server.php',
+                'cwd' => __DIR__,
+            ],
+            output: function (string $buffer): void {
+                $this->output[] = $buffer;
+            },
+        );
+        (new ReflectionMethod(PhpSupervisor::class, 'prepareExitMarkers'))->invoke($supervisor);
+        $exits = realpath($stateDirectory) . '/exits';
+        // As after a failed boot: the workers are spawned.
+        $this->setProperty($supervisor, 'forkServer', false);
+        $this->writeMarker($exits, 4250, 'restart');
+        $this->track($supervisor, $this->exited(0), 4250);
+
+        try {
+            $this->reap($supervisor);
+            $this->assertTrue($this->property($supervisor, 'forkServerStale'));
+            (new ReflectionMethod(PhpSupervisor::class, 'refreshForkServer'))->invoke($supervisor);
+
+            $this->assertInstanceOf(ForkServerClient::class, $this->property($supervisor, 'forkServer'));
+            $this->assertSame([], $this->property($supervisor, 'retiredForkServers'));
+            $this->assertFalse($this->property($supervisor, 'preforkFailed'));
+        } finally {
+            (new ReflectionMethod(PhpSupervisor::class, 'closeForkServer'))->invoke($supervisor);
+        }
+    }
+
+    /** Without prefork a restart announced by a spawned worker asks for no server. */
+    public function testAQueueRestartAsksForNoForkServerWhenPreforkIsOff(): void
+    {
+        [$supervisor, $exits] = $this->supervisor();
+        $this->writeMarker($exits, 4251, 'restart');
+        $this->track($supervisor, $this->exited(0), 4251);
+
+        $this->reap($supervisor);
+
+        $this->assertFalse($this->property($supervisor, 'forkServerStale'));
+    }
+
+    /** The Rust master drains on SIGHUP; the PHP engine died hard and left its workers and its lock behind. */
+    public function testTheEngineDrainsOnHangupLikeTheRustMaster(): void
+    {
+        [$supervisor] = $this->supervisor();
+        $signals = [SIGINT, SIGTERM, SIGQUIT, SIGHUP];
+        $previous = array_map(static fn (int $signal): mixed => pcntl_signal_get_handler($signal), $signals);
+        try {
+            (new ReflectionMethod(PhpSupervisor::class, 'installSignalHandlers'))->invoke($supervisor);
+
+            foreach ($signals as $signal) {
+                $this->assertInstanceOf(\Closure::class, pcntl_signal_get_handler($signal), "signal {$signal}");
+            }
+        } finally {
+            foreach ($signals as $index => $signal) {
+                pcntl_signal($signal, $previous[$index]);
+            }
+        }
+    }
+
     public function testATimedOutProbeIsReplacedAtOnceAndLeavesTheCircuitAsItWas(): void
     {
         [$supervisor, $exits] = $this->supervisor();
