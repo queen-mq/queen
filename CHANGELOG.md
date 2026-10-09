@@ -3,6 +3,54 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Server: a queue's memory no longer grows with the messages it keeps.** Every push left a row in
+the memory of every node (about 200 bytes: where the append begins and ends, when it was written,
+the hash of each `transactionId`), and the row stayed until retention removed the message. A queue
+with retention off, or with days of it, held a row for its whole history in RAM, on each node, and
+a restart loaded them all again. A row now leaves the store when the queue's dedup window has
+passed (`dedupWindowSeconds`, 3,600 s by default, or `completedRetentionSeconds` if longer, and
+never less than `QUEEN_RAFT_TXN_WINDOW_MIN_S`, 900 s), whatever the retention. Messages older than
+that are read from the queue log, which always held them: a consumer far behind, a group that
+subscribes at a past instant, a lookup by timestamp, and retention itself. Memory now follows the
+push rate times the window, not the size of the queue. On one 16-core VM, 20,000 single pushes a
+second for five minutes with retention off and a 60-second window: 2.1.0 ended with 5.95 million
+rows and 1.8 GB, and still held 1.4 GB after the pushes stopped; this build stayed at 1.2 million
+rows while they ran and held no row and 0.3 GB 75 seconds after. Consumers at the tail are served
+from memory as before: at 300,000 messages a second the push p50 was 6.4 to 6.7 ms on both builds.
+The backlog of that run, 5.9 million messages with no row left, was read back by 16 consumers at
+about 500,000 messages a second, against about 590,000 on 2.1.0, which read it from memory. While
+it was being read, the traffic at the tail kept its 300,000 messages a second, with a push p50 of
+about 21 ms for those seconds on both builds.
+The change needs cluster version 6, which the leader raises by itself once every node runs this
+release; from then on 2.1.0 and older refuse to start on that data, and
+`QUEEN_RAFT_CLUSTER_VERSION_MS=0` keeps the way back open while the release bakes. Until the
+version is 6, rows stay as long as their messages, as before. `QUEEN_RAFT_ROWS_WINDOW=0` does the
+same on purpose. New metric: `queen_consume_cold_claims_total`, the claims served from the queue
+log.
+
+**Server: reading an old message no longer asks every log file.** A read by offset asked the
+sealed log files one after the other, oldest first, so its cost grew with what the queue retained.
+It now asks the newest first, where consumers usually are, and for the rest reads a directory of
+the sealed files: small sorted files beside the log (`dirx-*.qdx`) that say which file holds which
+offsets of which partition. They are built in the background once 16 sealed files have none,
+merged as they pile up, checked when the log is opened, and built again if lost; a node without
+them answers the same, more slowly. `QUEEN_QLOG_DIRX=0` turns the building off. New metric:
+`queen_raft_qlog_dirx`, the directory files and the sealed files none of them covers yet.
+
+**Server: retention keeps up with a busy partition.** One retention round moved a partition by at
+most 1,000 pushes (`RETENTION_BATCH_SIZE`), and a round starts every `RETENTION_INTERVAL` (5 s):
+a partition written faster than 200 pushes a second fell behind retention for good, and its rows
+piled up in memory. A partition that has more due is now judged again 40 ms later, until it has
+caught up.
+
+**Server: an ack repeated long after its message was pushed.** A `completed` ack of a message that
+was already acked is still a no-op. The broker recognises it while the message's row exists (the
+dedup window), and after that while the message is among the last 65,536 its group consumed from
+that partition; an older one is answered as not found. On a queue without retention, 2.1.0
+recognised it for as long as the queue existed.
+
 ## 2.1.0 - 2026-10-09
 
 **Server: a standby cluster.** A second cluster can now replay the first one's log and take over

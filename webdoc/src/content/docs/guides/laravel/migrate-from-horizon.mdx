@@ -48,6 +48,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (broker supervisor dashboard): config/queen.php documents publication groups; main.rs adds optional runtime metadata and negotiated client-version export. The migration mappings, scaling and drain behavior are unchanged.
 # sourceOfTruth re-read 2026-10-08 (locks): proxy/src/routes.rs puts POST /api/v1/locks behind the KV plan
 # flag, never quota-blocked. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): apply_shard.rs
+# applies a watermark that removes a push's row while its message stays. Nothing this page states
+# changes.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place

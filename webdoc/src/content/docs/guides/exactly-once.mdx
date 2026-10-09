@@ -26,6 +26,9 @@ sidebar:
 # gained check; planner/kv.rs gained the `check` op and states that a key's versions only rise; facade/real.rs
 # refuses a transaction's KV `check` below cluster version 5. putIfAbsent with required is unchanged. Nothing
 # this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): facade/real.rs
+# exports queen_consume_cold_claims_total and queen_raft_qlog_dirx. Nothing this page states
+# changes.
 ---
 
 A consumer that charges cards will see some orders twice: a lease runs out while the card network

@@ -38,6 +38,8 @@ verifiedBy:
 # main.rs declares the locks module; facade/real.rs refuses a transaction's KV `check` below cluster version
 # 5.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; replicator/mod.rs names that refusal (`Unwritable`) and the call that drops a pipeline, node.rs forwards it; phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). "What each failure costs" gains the row for a leader no quorum has acknowledged for 1.5 s. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): the upgrade notes
+# name cluster version 6 and what it turns on.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They
@@ -335,6 +337,12 @@ that data. To keep the way back open while a new release bakes, set
 `QUEEN_RAFT_CLUSTER_VERSION_MS=0` on every node: the leader then never raises the version, and
 removing the setting later raises it within a second. While the version stays at 4, a call that
 carries a `check` answers 503, and locks can be taken and released but not used as a guard.
+
+The release after 2.1.0 moves the cluster from 5 to 6. From then on a push's row leaves the
+store's memory when its dedup window has passed, even while its message is retained, and such
+messages are read from the queue log ([storage](/internals/storage/#limits)); 2.1.0 and older
+refuse to start on that data. While the version stays at 5, the rows stay until retention removes
+their messages, as in 2.1.0.
 
 ## Ephemeral queues in a cluster
 

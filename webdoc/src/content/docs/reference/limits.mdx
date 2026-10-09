@@ -38,6 +38,8 @@ sourceOfTruth:
 # below version 5. No existing limit or default changes.
 # sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only. No limit or default changes.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader; phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). No limit or default changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): a row for what a push
+# costs in memory, and for how long.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -101,6 +103,7 @@ default: an option you leave out keeps its value, and `null` restores its defaul
 |---|---|---|---|
 | Dedup window, per queue, checked per partition | 3600 s; `0` turns dedup off; no upper bound | `dedupWindowSeconds` on `configure` | `server/src/rsm/planner/push.rs` |
 | How long the hashes behind it are kept | the largest of the window, `completedRetentionSeconds` and 900 s | `QUEEN_RAFT_TXN_WINDOW_MIN_S` | `server/src/rsm/maintenance.rs` |
+| How long a push keeps its index row in memory | the same time, then the row goes even if the message stays (cluster version 6) | `QUEEN_RAFT_ROWS_WINDOW` | `server/src/rsm/maintenance.rs` |
 | A committed command answers a retry of its request id | 60 s | `QUEEN_RAFT_REQUEST_ID_WINDOW_S` | `server/src/rsm/batcher.rs` |
 
 Two items with the same `(queue, partition, transactionId)` in one request store one message,

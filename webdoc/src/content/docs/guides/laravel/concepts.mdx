@@ -75,6 +75,10 @@ sourceOfTruth:
 # version 5. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-09 (worker count and prefetch): QueenQueue leases one batch per
 # worker and runs its jobs sequentially; available partitions determine concurrent execution.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/pop.rs reads
+# messages whose rows are gone from the queue log, apply_shard.rs applies the watermark that removes
+# those rows, facade/real.rs exports two metric families. Claims, leases, retries and the DLQ are as
+# described.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,

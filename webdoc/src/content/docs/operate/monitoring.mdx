@@ -45,6 +45,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-09 (supervisors restyle): Supervisors.vue and its two card components use the
 # dashboard's shared card, stats and table; the card still shows workers against the target, pools needing
 # attention, heartbeat age, the queue list and its history. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): facade/real.rs
+# exports queen_consume_cold_claims_total and queen_raft_qlog_dirx (in the generated metrics table).
+# The /health examples are 2.1.0's (cluster version 5); the release with this change reports 6.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at

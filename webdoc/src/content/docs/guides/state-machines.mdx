@@ -27,6 +27,9 @@ sidebar:
 # sourceOfTruth re-read 2026-10-08 (locks): TransactionBuilder.js gained guard(lock) and kv.check, Kv.js
 # gained check; facade/real.rs refuses a transaction's KV `check` below cluster version 5. The section on
 # locks now points at the Locks page for work that has no entity.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): facade/real.rs
+# exports queen_consume_cold_claims_total and queen_raft_qlog_dirx. Nothing this page states
+# changes.
 ---
 
 Give every entity its own partition, keep its state in one KV entry, and commit each transition as

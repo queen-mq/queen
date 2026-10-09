@@ -18,6 +18,10 @@ sourceOfTruth:
   - test/jepsen/src/jepsen/queen/workload/failover.clj
   - test/jepsen/src/jepsen/queen/db.clj
   - test/jepsen/run-campaign.sh
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): core.clj gained
+# --dedup-window, the dedupWindowSeconds of the test queues, and db.clj passes it to the queues it
+# configures. The default is the 24 hours every campaign on this page ran with. Nothing this page
+# states changes.
 ---
 
 A million messages a second is worth nothing if one of them can go missing. We check that with

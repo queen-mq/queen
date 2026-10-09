@@ -61,6 +61,9 @@ sourceOfTruth:
 # queue driver and Horizon; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-09 (PHP client 2.4.0): 2.4.0 adds locks, semaphores, the transaction guard and
 # the KV check to the client and pins supervisor 0.8.0, as 2.3.1 does. The Versions section says so.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/pop.rs reads
+# messages whose rows are gone from the queue log; facade/real.rs exports two metric families.
+# Nothing this page states changes.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and

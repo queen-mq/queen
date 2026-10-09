@@ -32,6 +32,8 @@ sourceOfTruth:
 # makes it read-write (the generated route table lists it); the status-code table now names the lock
 # verdict. A new node reports clusterVersion 5. main.rs, facade/mod.rs, facade/real.rs and
 # proxy_embed.rs only carry the new module and the `check` refusal below version 5.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): the timestamp lookup
+# names the queue log's index for messages older than the rows.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no
@@ -233,8 +235,9 @@ Turns a time into an offset: for each entry, the first offset appended at or aft
 `offset` and `ts` are `null` when nothing was appended that late, and you start at
 `highWatermark`; a time older than the log answers its first retained offset. "Appended" means the
 broker's clock when the leader planned the write, never a time inside your payload. The lookup is a
-binary search over the partition's per-append rows, about log2(partition length) seeks, with no
-payload read.
+binary search over the partition's per-append rows, about log2(partition length) seeks, and, for
+messages older than the rows the store still holds, over the queue log's index; no payload is
+read.
 
 ### `POST /api/v1/partitions/changed`
 

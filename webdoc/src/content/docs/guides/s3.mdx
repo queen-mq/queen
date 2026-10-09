@@ -32,6 +32,9 @@ sidebar:
   label: "S3 sink"
   order: 7.9
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): trace expiry runs in bounded steps. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): maintenance.rs lets a
+# push's row expire while the sink's retention hold still keeps its message; the sink reads the
+# queue log, not the rows, so the hold and the export are as described.
 ---
 
 The broker can mirror its queues into an S3-compatible bucket, as JSONL or Parquet files in a Hive

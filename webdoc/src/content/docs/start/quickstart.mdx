@@ -40,6 +40,9 @@ verifiedBy:
 # clusterVersion 5, which the /health example now shows.
 # sourceOfTruth re-read 2026-10-09 (8c6239d2): Dockerfile changes compilation cache layers;
 # the runtime stage, embedded dashboard, queenctl, paths and startup commands are unchanged.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): facade/real.rs
+# exports two metric families. The /health line is 2.1.0's (cluster version 5); the release with
+# this change reports 6.
 ---
 
 You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the

@@ -26,6 +26,9 @@ sourceOfTruth:
 # refuses one below cluster version 5 with a 503; the KV operations table, the result row and the
 # reasons table now carry both. TransactionBuilder.js gained guard(lock), named in the same section.
 # handlers/raft.rs registers POST /api/v1/locks, which is not this route.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/frames.rs
+# recognises a repeated ack of a message without a row among the last 65,536 its group consumed; the
+# lease-less ack paragraph says so.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step
@@ -117,7 +120,9 @@ transaction rolls back with `reason: "rejected_ack"`.
 if another worker holds it. It still rolls back with `rejected_ack` when the message is not found
 after the group's cursor, or was already acked with a `failed`, `retry` or `dlq` status. A
 `completed` ack of a message that was already acked is a no-op, and the rest of the transaction
-commits.
+commits. The broker recognises such a message for the queue's dedup window after its push (15
+minutes at least), and after that while it is among the last 65,536 messages the group consumed
+from that partition; an older one is not found.
 
 `requiredLeases` fences nothing on its own: it only supplies the lease of the acks in the same
 body. Every SDK puts each acked message's `leaseId` on its ack as well as in `requiredLeases`, so a

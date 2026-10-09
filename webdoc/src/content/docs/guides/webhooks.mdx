@@ -36,6 +36,8 @@ sidebar:
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (optional client supervision): QueueBuilder and ConsumerManager add off-by-default observations; the webhook handler, retries and partition behavior described here are unchanged.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/pop.rs reads
+# messages whose rows are gone from the queue log. Nothing this page states changes.
 ---
 
 Put every delivery in the partition of the endpoint it is for, let the broker's retry budget do the

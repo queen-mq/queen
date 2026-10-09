@@ -43,6 +43,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only. No setting was added or changed. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader. No setting was added or changed. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a seed's hold): raft/link.rs leaves a seeded standby's first hold when its snapshot is asked for, kept for QUEEN_LINK_HOLD_S like any other. No variable is added and no default changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window):
+# QUEEN_RAFT_ROWS_WINDOW and QUEEN_QLOG_DIRX join the table.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no
@@ -94,6 +96,8 @@ on by default turns off only with `0`, `false`, `off` or `no`.
 | `QUEEN_RAFT_REQUEST_ID_WINDOW_S` | `60` | How long a committed command's outcome answers a retry under the same request id. |
 | `QUEEN_RAFT_ANSWER_AT_COMMIT` | on | Answer pushes and acks when their entry commits, without waiting for it to apply on the leader. |
 | `QUEEN_RAFT_DEDUP_INDEX` | `txns` | How each append's `transactionId` hashes are indexed: `txns` (one row per append), `segment` (read back from the queue log) or `rows`. |
+| `QUEEN_RAFT_ROWS_WINDOW` | on | A push's index row leaves memory when it leaves the queue's dedup window (never before 900 s), whether or not the message is still retained; older messages are read through the queue log's own index. Needs cluster version 6. Off: a row stays for as long as its message. |
+| `QUEEN_QLOG_DIRX` | on | Keep the directory that says which file of a queue log holds a partition's offsets, so a read of an old message does not ask every file. Off: no new directory file is built. |
 
 ### Admission
 

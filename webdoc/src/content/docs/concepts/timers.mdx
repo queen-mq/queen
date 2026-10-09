@@ -22,6 +22,9 @@ verifiedBy:
 # they were. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only; timers are as they were. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader; timers are as they were. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): batcher.rs reads
+# QUEEN_RAFT_ROWS_WINDOW and QUEEN_QLOG_DIRX and hands the retention scanner the queue-log reader.
+# The timer tick and the fire step are untouched.
 ---
 
 A timer schedules a message for later. When it fires, the broker pushes the message into a real

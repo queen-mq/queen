@@ -50,6 +50,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (standby cluster): a standby cluster answers pops and acks 503 `standby`; the route and the facade serve an ordinary cluster as described. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks; facade/real.rs
 # refuses a transaction's KV `check` below cluster version 5. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/pop.rs reads
+# the frames of messages whose rows are gone from the queue log, outside the consume lock, and
+# consume/state.rs keeps where a partition's rows begin; facade/real.rs exports two metric families.
+# Order, leases, subscription modes and acks are as described.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers

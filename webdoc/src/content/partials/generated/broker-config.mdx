@@ -27,7 +27,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/s3_inproc.rs
 */}
 
-The broker is configured entirely through environment variables: 110 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 112 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set.
 
@@ -80,6 +80,7 @@ The broker is configured entirely through environment variables: 110 of them, li
 | `QUEEN_DASH_QUEUE_RETENTION_H` | integer | `24` |  |
 | `QUEEN_PARTITION_CLEANUP_ENABLED` | boolean | `true` |  |
 | `QUEEN_RAFT_RETENTION_VISIT` | integer | `8192` |  |
+| `QUEEN_RAFT_ROWS_WINDOW` | boolean | `true` |  |
 | `QUEEN_RAFT_TRACE_RETENTION_S` | integer | `604800 (7 days)` |  |
 | `QUEEN_RAFT_TXN_WINDOW_MIN_S` | integer | `900` |  |
 | `RETENTION_BATCH_SIZE` | integer | `1000` |  |
@@ -89,6 +90,7 @@ The broker is configured entirely through environment variables: 110 of them, li
 
 | Variable | Type | Default | Also read as |
 | --- | --- | --- | --- |
+| `QUEEN_QLOG_DIRX` | boolean | `true` |  |
 | `QUEEN_QLOG_SHARDS` | integer | `0 (one log per queue; at most 4096)` |  |
 | `QUEEN_RAFT_DIR` | string | `/var/lib/queen/raft` |  |
 | `QUEEN_RAFT_DISK_HIGH_PCT` | number (percent) | `85.0` |  |

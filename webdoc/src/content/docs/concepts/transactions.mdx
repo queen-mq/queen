@@ -32,6 +32,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (locks): the KV part gained `check`, and TransactionBuilder.js gained
 # guard(lock); the parts table, the lease section and the kv_precondition row now say so. handlers/raft.rs
 # registers POST /api/v1/locks, which this page does not list.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): facade/real.rs
+# exports queen_consume_cold_claims_total and queen_raft_qlog_dirx. Nothing this page states
+# changes.
 ---
 
 A transaction is one call that writes one step. It acks what the worker took, pushes the next

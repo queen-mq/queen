@@ -28,6 +28,8 @@ sourceOfTruth:
 # /api/v1/locks; proxy_embed.rs maps the new KV refusal to its 503. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (promotion's answer): facade/real/phase2/link.rs changes two comments of the promote route, no metric family and no help text. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a standby's leader changes): facade/real/phase2/link.rs gains a `#[cfg(test)]` door to the leader's intake, which is not in the binary: no metric family and no help text. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): facade/real.rs
+# exports queen_consume_cold_claims_total and queen_raft_qlog_dirx; both are in the generated table.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node
