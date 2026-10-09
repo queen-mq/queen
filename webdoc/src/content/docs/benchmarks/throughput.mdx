@@ -17,7 +17,9 @@ Two hundred partitions in one queue is the shape that suits a broker with a log 
 best: few logs, full batches, little state to keep. So that is where we raised the rate, from
 300,000 to 4,000,000 messages a second, to find each system's ceiling and to see what latency it
 paid on the way up. Queen holds a million messages a second here, and it is not the fastest system
-on this page.
+on this page. At 1,000,000 msg/s Queen's e2e p99 was 146 ms, and at 1,500,000 its consumers fell
+behind; Kafka carried 4,000,000 at 75 ms and Pulsar 2,000,000 at 21 ms (2026-09-30 and 10-01).
+[Compare](/start/compare/) explains where each system is better.
 
 ## The shape
 
@@ -27,7 +29,7 @@ asynchronously. Each point ran for 60 seconds and the figures cover its last 30.
 2.0.0-beta.2 ran on 2026-10-01 with deduplication off and pops of up to 10 partitions; Kafka 4.3.1
 ran on 2026-09-30, Redpanda 26.2.3 and Pulsar 4.2.4 on 2026-10-01, on the same brokers and load
 machines. Runs and scripts: `benchmark-queen/2026-09-30-stage03-3node/` (Queen, tags `mb2c-q1-t200-*`)
-and `benchmark-queen/2026-09-30-kafka-pulsar/runs/` (the others).
+and [`benchmark-queen/2026-09-30-kafka-pulsar/runs/`](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-09-30-kafka-pulsar/runs) (the others).
 
 ## Latency by rate
 
@@ -109,8 +111,8 @@ Cores used by each system's own processes, summed over the three brokers (48 vCP
 <Figure id="benchmarks/throughput-cpu" />
 
 Redpanda's column is its own count of busy shard time. Its reactors poll, so the operating system
-counts more: 39 cores at 1M msg/s. In this shape Queen spends two to three times the CPU of Kafka
-and Pulsar for each message. At 100,000 partitions the picture turns around; see
+counts more: 39 cores at 1M msg/s. In this shape Queen spends about twice the CPU of Kafka for
+each message (1.8 to 2.5 times) and two and a half to three times Pulsar's (2.4 to 3.3 times). At 100,000 partitions the picture turns around; see
 [partition count](/benchmarks/partitions/).
 
 ## Deduplication

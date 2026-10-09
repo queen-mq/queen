@@ -11,7 +11,9 @@ sidebar:
 A minute at full speed shows a ceiling. A broker you trust has to hold its latency for hours, with
 retention deleting underneath it, while its nodes die. So on the night before 2.0.0-beta.1 we ran
 Queen at half a million messages a second, in three runs that lasted from 1 h 40 min to 3 h 23 min,
-and killed a node every ninety minutes.
+and killed a node every ninety minutes. The longest run, 3 h 23 min, held an e2e p99 of 86 ms in
+the median steady window through a kill -9 of the leader, a SIGTERM of the leader and a kill -9 of
+a follower.
 
 ## The shape
 

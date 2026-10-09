@@ -173,7 +173,7 @@ anyone else.
 
 A JWT without `exp` is accepted, so issue tokens that expire. Changing `QUEEN_ENCRYPTION_KEY` makes
 the encrypted payloads unreadable, and consumers then receive the ciphertext envelope as data with
-no error; restoring the key restores the plaintext. In 2.0.0-beta.6 the messages a stream's sink
+no error; restoring the key restores the plaintext. As of 2.0.4 the messages a stream's sink
 pushes are stored in clear even in a queue with `encryptionEnabled`.
 
 There is no TLS between nodes: the raft port and the HTTP calls between nodes are plaintext, and so

@@ -132,7 +132,7 @@ or a reducer.
 
 ## A complete program
 
-A rate limiter built from a stream. Each API key's requests land in its own partition, a 2-second
+A rate limiter built from a stream ([the rate-limiter example](/examples/rate-limiter/)). Each API key's requests land in its own partition, a 2-second
 tumbling window counts them, and a consumer turns every window over the quota into a throttle
 decision on another queue. The program checks that the quiet key and the noisy key are counted
 exactly, that the noisy one is throttled and that the quiet one never is. It runs in four

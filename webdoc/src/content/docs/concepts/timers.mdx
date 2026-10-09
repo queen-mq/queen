@@ -120,7 +120,7 @@ await queen.transaction()
 - The standalone route (`POST /api/v1/timers`) refuses a delay beyond 90 days
   (`QUEEN_TIMERS_MAX_HORIZON_S`, 403) and a payload above 1 MiB (`QUEEN_TIMERS_MAX_PAYLOAD_BYTES`),
   takes at most 256 operations per call, and spends one token of the tenant's KV write rate per
-  call. In 2.0.0-beta.6 a timer scheduled inside a transaction is not checked against the horizon
+  call. As of 2.0.4 a timer scheduled inside a transaction is not checked against the horizon
   or the payload ceiling; only the body and entry sizes bound it.
 - One call holds one operation per queue and `timerKey`.
 - Timer firing is Jepsen-tested (W10, in the P26 campaign on 2.0.0-beta.3): a timer fires at most

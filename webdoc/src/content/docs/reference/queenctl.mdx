@@ -35,10 +35,10 @@ an HTTP call you could make with `curl`, so its output always tells you what the
 
 ## Install
 
-There is no `queenctl` release built for Queen 2.0 yet: the newest published tag,
-`clients/client-cli/v1.3.0`, predates it, and so does what `go install ...@latest` resolves to.
-Build it from a checkout of the repository, where the Go workspace (`go.work`, which declares
-Go 1.26) links the CLI to the SDK in the same tree:
+`queenctl` 2.0.0 is built for Queen 2.0, and its archives are attached to the
+[v2.0.0 release](https://github.com/queen-mq/queen/releases/tag/v2.0.0). To build it from a checkout
+of the repository instead, where the Go workspace (`go.work`, which declares Go 1.26) links the CLI
+to the SDK in the same tree:
 
 ```bash
 cd clients/client-cli && make build    # ./bin/queenctl

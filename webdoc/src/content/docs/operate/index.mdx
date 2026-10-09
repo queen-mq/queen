@@ -50,6 +50,8 @@ digest: >-
 # transaction's KV `check` below cluster version 5. A new node reports clusterVersion 5, which the /health
 # example now shows.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; replicator/mod.rs and node.rs carry the new error and call. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (Dockerfile build cache, 8c6239d2): the Rust stage compiles in
+# cached layers; the image, its port, its data directory and the queenctl it carries are unchanged.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its

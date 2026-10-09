@@ -232,7 +232,8 @@ knew, and an empty node that never applied an entry reports `lag` 0 (`F8` and `F
 Probe liveness with a TCP connect, never with `/health`. A `503` during an election is no reason to
 restart a node ([Kubernetes](/operate/kubernetes/#the-probes)).
 
-In 2.0.0-beta.6 the `queen_timers_*` and `queen_sweeper_*` series are exported but nothing updates
-them, so they always read 0; do not alert on them. The Kafka facade and the proxy export no
+As of 2.0.4 every `queen_sweeper_*` series, and every `queen_timers_*` series except
+`queen_timers_schedule_rejected_total`, is exported but nothing updates it, so it reads 0; do not
+alert on them ([metrics](/reference/metrics/)). The Kafka facade and the proxy export no
 Prometheus series of their own. The facade reports its state in the `kafka` block of `GET /status`,
 and the proxy in its logs under the `limits` and `meter` targets.

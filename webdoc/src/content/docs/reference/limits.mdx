@@ -116,6 +116,14 @@ whatever the window.
 
 A pop that finds nothing before its timeout answers `204`.
 
+Through the proxy built into the binary, three timers in one process bound a pop with `wait=true`.
+The broker waits at most 60 s (300 s for an ephemeral pop) and answers `204`. The proxy waits
+`min(timeout, QUEEN_PROXY_LONGPOLL_MAX_MS)` plus `QUEEN_PROXY_LONGPOLL_MARGIN_MS`, 100 s at most by
+default, then answers 504 `upstream_timeout`. The edge waits `timeout` plus
+`QUEEN_EDGE_LONG_POLL_GRACE_MS`, at most `QUEEN_EDGE_LONG_POLL_MAX_MS` (310 s), then answers 504
+`request_timeout`. A durable pop always ends at the broker. An ephemeral pop that asks for more than
+100 s ends at the proxy with a 504, unless `QUEEN_PROXY_LONGPOLL_MAX_MS` is raised to `300000`.
+
 ## Reads by offset
 
 | Limit | `POST /api/v1/fetch` | `POST /api/v1/fetch/offsets` | `POST /api/v1/partitions/changed` |

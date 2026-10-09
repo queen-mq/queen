@@ -181,7 +181,7 @@ Give that system an idempotency key derived from the message. See
   (`QUEEN_RAFT_ENTRY_MAX_BYTES`).
 - Throughput has a ceiling per raft group. In our 2026-10-01 runs on three 16-vCPU nodes,
   2.0.0-beta.2 committed up to about 7,200 transactions a second of 10 messages each on 200
-  partitions (8,900 in a tuned run), with a commit p99 of 4 ms at 900 a second
+  partitions (8,900 in a tuned run), with a commit p99 of 4 ms at 900 transactions (9,000 messages) a second
   (`benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/`; see [transactions](/benchmarks/transactions/)).
   Each raft group is a whole state machine with its own leader, so tenants in other groups have a
   ceiling of their own.

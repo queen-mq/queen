@@ -294,5 +294,5 @@ export const start: { title: string; body: string; href: string }[] = [
   { title: "Quickstart", body: "Run a node and commit your first step with curl.", href: "/start/quickstart/" },
   { title: "Pick a client", body: "Six SDKs, curl, queenctl and the broker embedded in Rust.", href: "/start/clients/" },
   { title: "Examples", body: "Whole programs: a chat backend, a saga, webhooks, rate limits.", href: "/examples/" },
-  { title: "Compare", body: "Against Kafka, SQS and Temporal, and when to pick them.", href: "/start/compare/" },
+  { title: "Compare", body: "Against Kafka, RabbitMQ, SQS and Temporal, and when to pick them.", href: "/start/compare/" },
 ];

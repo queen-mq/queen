@@ -33,6 +33,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (8c6239d23): the Dockerfile compiles the broker in three layers (dependencies,
 # path crates, broker) instead of over cache mounts; the image and what it runs are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-08 (Dockerfile build cache, 8c6239d2): the Rust stage compiles in
+# cached layers; the image, its port, its data directory and the queenctl it carries are unchanged.
 ---
 
 Queen is one repository with one Rust binary at its center: the broker, which links the proxy and

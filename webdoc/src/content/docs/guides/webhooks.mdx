@@ -112,6 +112,7 @@ statuses.
 
 ## The verified programs
 
+The [webhook sender example](/examples/webhooks/) shows the whole program and what it printed.
 Each program queues three events for three endpoints, one of which answers 500 to everything. It
 checks that the two healthy endpoints received their events in order, that the dead one was tried
 the full budget and never skipped, and that its three deliveries sit in the dead-letter queue with

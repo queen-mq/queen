@@ -49,8 +49,8 @@ system stands on, stay on Kafka.
 
 ## Your transactions are the bottleneck
 
-With 10 messages per transaction, Pulsar reached 17,600 transactions a second over 1,800
-partitions; Queen's best was 8,900, in one raft group. One leader orders every write of a raft
+With 10 messages per transaction, Pulsar sustained 14,400 transactions a second over 900
+partitions (17,600 over 1,800, while falling behind); Queen's best was 8,900, in one raft group. One leader orders every write of a raft
 group, so one tenant's write rate is what one leader can plan. Queen scales out with more raft
 groups and more clusters, and a single tenant does not span them. A Queen commit was faster at low
 rates: 3 ms at p50 and 4 ms at p99 with 10 messages per transaction at 9,000 messages a second,
