@@ -191,7 +191,8 @@ const list = routeSupport.guard('kv', async (body, config) => (await kv.list(bod
 let activityRefusal = null
 const activityReader = createSupervisorActivityReader(async (queue, signal) => {
   if (activityRefusal) throw activityRefusal
-  const now = Date.now()
+  // Queued reads still belong to the same refresh window as the aggregate.
+  const now = readAt.value
   try {
     const result = await system.getQueueOps({ queue, from: new Date(now - 3_600_000).toISOString(), to: new Date(now).toISOString() }, { signal, probe: true })
     return supervisorActivity(result.data, queue, now)

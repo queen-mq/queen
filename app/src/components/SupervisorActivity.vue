@@ -1,20 +1,44 @@
 <template>
   <!--
-    The queue chart and the queues an application reports, side by side. The
-    history is the queue's on this cluster, for all of its consumers: the
+    The reported queues filter the chart to their right. By default it sums
+    all of them on this cluster, for all of their consumers: the
     heading's title says so, once, instead of small print under every block.
   -->
   <section class="supervisor-activity" aria-label="Queue activity on the current cluster">
+    <div class="activity-queues">
+      <div class="sect-head">
+        <h3>Reported queues</h3>
+        <span>{{ queues.length }}</span>
+        <RouterLink v-if="queue" class="activity-open" :to="{ name: 'QueueDetail', params: { queueName: queue } }">Open queue →</RouterLink>
+      </div>
+      <div v-if="queues.length" class="queue-table">
+        <table class="t">
+          <thead><tr><th>Queue</th><th class="right">Workers</th></tr></thead>
+          <tbody>
+            <tr :class="{ selected: queue === null }">
+              <td colspan="2"><button class="row-open" :aria-pressed="queue === null" aria-label="Show activity for all reported queues" @click="queue = null">All queues</button></td>
+            </tr>
+            <tr v-for="item in queues" :key="item.name" :class="{ selected: queue === item.name }">
+              <td>
+                <button class="row-open" :aria-pressed="queue === item.name" :aria-label="`Show activity for ${item.name}`" :title="item.name" @click="queue = item.name"><span v-if="item.tone === 'warn' || item.tone === 'bad'" class="g" :class="item.tone" aria-hidden="true" />{{ item.name }}</button>
+              </td>
+              <td class="num right">{{ number(item.running) }} <span class="of">/ {{ number(item.desired) }}</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p v-else class="queue-list-empty">Queue allocation unavailable</p>
+    </div>
     <div class="activity-chart">
       <div class="sect-head">
         <h3>Queue activity</h3>
-        <span v-if="queue" class="activity-scope" :title="scopeTitle"><span class="mono">{{ queue }}</span> · last 60 min · all consumers</span>
+        <span v-if="queues.length" class="activity-scope" :title="scopeTitle"><span :class="{ mono: queue }">{{ scopeLabel }}</span> · last 60 min · all consumers</span>
         <div class="seg activity-mode" role="group" aria-label="Chart metric">
           <button :class="{ on: mode === 'traffic' }" :aria-pressed="mode === 'traffic'" @click="mode = 'traffic'">Traffic</button>
           <button :class="{ on: mode === 'backlog' }" :aria-pressed="mode === 'backlog'" @click="mode = 'backlog'">Backlog</button>
         </div>
       </div>
-      <template v-if="queue">
+      <template v-if="queues.length">
         <div v-if="loading" class="activity-placeholder" role="status">Reading queue history…</div>
         <div v-else-if="error" class="activity-placeholder" role="status"><strong>Queue history unavailable</strong><span>{{ error }}</span></div>
         <template v-else-if="metrics">
@@ -45,34 +69,13 @@
       </template>
       <div v-else class="activity-placeholder">No named queue reported. Dynamic consumers show their scope in the instance details.</div>
     </div>
-    <div class="activity-queues">
-      <div class="sect-head">
-        <h3>Reported queues</h3>
-        <span>{{ queues.length }}</span>
-        <RouterLink v-if="queue" class="activity-open" :to="{ name: 'QueueDetail', params: { queueName: queue } }">Open queue →</RouterLink>
-      </div>
-      <div v-if="queues.length" class="queue-table">
-        <table class="t">
-          <thead><tr><th>Queue</th><th class="right">Workers</th></tr></thead>
-          <tbody>
-            <tr v-for="item in queues" :key="item.name" :class="{ selected: queue === item.name }">
-              <td>
-                <button class="row-open" :aria-pressed="queue === item.name" :aria-label="`Show activity for ${item.name}`" :title="item.name" @click="queue = item.name"><span v-if="item.tone === 'warn' || item.tone === 'bad'" class="g" :class="item.tone" aria-hidden="true" />{{ item.name }}</button>
-              </td>
-              <td class="num right">{{ number(item.running) }} <span class="of">/ {{ number(item.desired) }}</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p v-else class="queue-list-empty">Queue allocation unavailable</p>
-    </div>
   </section>
 </template>
 
 <script setup>
 import { computed, inject, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import BaseChart from '@/components/BaseChart.vue'
-import { supervisorActivityKey } from '@/composables/supervisorActivity'
+import { aggregateSupervisorActivity, supervisorActivityKey } from '@/composables/supervisorActivity'
 import { chartTheme } from '@/composables/useChartTheme'
 import { describeApiError } from '@/api'
 import { useIdentity } from '@/stores/identity'
@@ -82,16 +85,18 @@ const { actingClusterSlug } = useIdentity()
 const queue = ref(null), mode = ref('traffic'), metrics = shallowRef(null), loading = ref(false), error = ref('')
 let sequence = 0
 watch(() => props.queues, queues => {
-  if (!queues.some(item => item.name === queue.value)) queue.value = queues[0]?.name || null
+  if (!queues.some(item => item.name === queue.value)) queue.value = null
 }, { immediate: true })
-watch([queue, () => props.readAt], async () => {
+const selectedQueues = computed(() => queue.value ? [queue.value] : props.queues.map(item => item.name))
+watch([selectedQueues, () => props.readAt], async () => {
   const turn = ++sequence
   metrics.value = null; error.value = ''; loading.value = false
-  if (!queue.value || !props.readAt) return
+  const selected = queue.value
+  if (!selectedQueues.value.length || !props.readAt) return
   loading.value = true
   try {
-    const result = await reader.load(queue.value)
-    if (turn === sequence) metrics.value = result
+    const results = await Promise.all(selectedQueues.value.map(name => reader.load(name)))
+    if (turn === sequence) metrics.value = selected ? results[0] : aggregateSupervisorActivity(results)
   } catch (failure) {
     if (turn === sequence && failure.name !== 'AbortError') error.value = describeApiError(failure)
   } finally { if (turn === sequence) loading.value = false }
@@ -111,8 +116,9 @@ const chartData = computed(() => ({
   ] : [{ label: 'Pending', data: metrics.value?.points.map(point => point.pending), fill: true, pointRadius: isolatedPoint }],
 }))
 const chartOptions = computed(() => ({ scales: { x: { grid: { display: false }, ticks: { color: chartTheme.tick, maxTicksLimit: 5, maxRotation: 0, font: { size: 9 } } }, y: { ticks: { color: chartTheme.tick, maxTicksLimit: 3, precision: 0, font: { size: 9 } } } } }))
-const chartDescription = computed(() => `${mode.value === 'traffic' ? 'Incoming and delivered messages per minute' : 'Pending messages'} over the last hour for ${queue.value}, all consumers on ${actingClusterSlug.value || 'the current cluster'}. Missing samples appear as gaps.`)
-const scopeTitle = 'History covers this queue on the current cluster, for all of its consumers. A supervisor may use a different connection.'
+const scopeLabel = computed(() => queue.value || `All queues (${props.queues.length})`)
+const chartDescription = computed(() => `${mode.value === 'traffic' ? 'Incoming and delivered messages per minute' : 'Pending messages'} over the last hour for ${queue.value || `all ${props.queues.length} reported queues`}, all consumers on ${actingClusterSlug.value || 'the current cluster'}. Missing samples appear as gaps.`)
+const scopeTitle = computed(() => `History covers ${queue.value ? 'this queue' : 'all reported queues'} on the current cluster, for all consumers. A supervisor may use a different connection.`)
 const sampleNote = computed(() => {
   if (!metrics.value) return 'Queue metrics are independent of the supervisor heartbeat.'
   if (mode.value === 'backlog') return `Latest depth ${metrics.value.pendingAt ? time(metrics.value.pendingAt) : 'unavailable'} · Δ across available samples`
@@ -122,7 +128,7 @@ const sampleNote = computed(() => {
 </script>
 
 <style scoped>
-.supervisor-activity { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(220px, 1fr); gap: 24px; padding-top: 14px; min-width: 0; }
+.supervisor-activity { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(0, 1.6fr); gap: 24px; padding-top: 14px; min-width: 0; }
 .activity-chart, .activity-queues { min-width: 0; }
 .sect-head { align-items: center; margin-bottom: 10px; min-height: 26px; }
 .activity-scope { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
