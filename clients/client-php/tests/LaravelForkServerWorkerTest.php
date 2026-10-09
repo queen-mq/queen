@@ -8,6 +8,7 @@ use Illuminate\Queue\Connectors\ConnectorInterface;
 use Illuminate\Queue\NullQueue;
 use Orchestra\Testbench\TestCase;
 use PHPUnit\Framework\Attributes\TestWith;
+use Psr\Log\NullLogger;
 use Queen\Laravel\Commands\ForkServerCommand;
 use Queen\Laravel\QueenServiceProvider;
 use Symfony\Component\Console\Input\ArrayInput;
@@ -71,6 +72,20 @@ final class LaravelForkServerWorkerTest extends TestCase
 
         $this->assertSame(0, $code);
         $this->assertSame([['queen-batch', $expected]], $this->pops);
+    }
+
+    /**
+     * An application may bind a logger of its own as `log`; the server
+     * forgets channels only from a LogManager, which has them.
+     */
+    public function testTheServerLeavesALoggerThatIsNotALogManagerAlone(): void
+    {
+        $this->app->instance('log', new NullLogger());
+        $server = $this->server();
+
+        (new \ReflectionMethod($server, 'releaseBootResources'))->invoke($server);
+
+        $this->assertInstanceOf(NullLogger::class, $this->app['log']);
     }
 
     /** @param list<string> $argv */

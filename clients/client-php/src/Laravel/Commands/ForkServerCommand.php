@@ -3,6 +3,7 @@
 namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Log\LogManager;
 use Illuminate\Queue\Console\WorkCommand;
 use Queen\Laravel\Supervisor\Prefork\ForkSafety;
 use Queen\Laravel\Supervisor\Prefork\ForkServer;
@@ -141,9 +142,11 @@ class ForkServerCommand extends Command
                 $this->laravel['redis']->purge($name);
             }
         }
-        if ($this->laravel->resolved('log')) {
-            foreach (array_keys($this->laravel['log']->getChannels()) as $name) {
-                $this->laravel['log']->forgetChannel($name);
+        // An application may bind a logger of its own as `log`, with no
+        // channels to forget.
+        if ($this->laravel->resolved('log') && ($log = $this->laravel['log']) instanceof LogManager) {
+            foreach (array_keys($log->getChannels()) as $name) {
+                $log->forgetChannel($name);
             }
         }
         if ($this->laravel->resolved('mail.manager')) {
