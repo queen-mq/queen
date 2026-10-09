@@ -23,6 +23,10 @@ sourceOfTruth:
   - server/src/obs/panic_policy.rs
   - app/src/router/index.js
   - app/src/views/Supervisors.vue
+  - app/src/components/SupervisorGroupCard.vue
+  - app/src/components/SupervisorActivity.vue
+  - app/src/composables/supervisorGroups.js
+  - app/src/composables/supervisorActivity.js
   - app/src/composables/supervisorStatus.js
   - app/src/composables/consumerStatus.js
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): health examples now show 2.0.1 at cluster version 4; the memory row names anonBytes and container_memory_rss, plus rows for the engine parts and the trace store gauges.
@@ -62,13 +66,20 @@ the same dashboard sits behind the console login: admins also get Members and AP
 
 ### Published supervisors
 
-**Supervisors** reads the acting cluster's `queen-supervisor` KV namespace. It groups instances by
-publication group and shows an overview card for each: distinct queues, pools, reported workers
-against the target, pools needing attention and heartbeat age. Groups with issues come first.
-Cards from all groups share a two-column grid on wide screens
-and stack on narrow screens; each card keeps its publication group and loaded instance count
-above it.
-Click a card to open the instance's drawer, then search and filter its queue/pool table, ten rows
+**Supervisors** reads the acting cluster's `queen-supervisor` KV namespace. It combines loaded
+instances into one horizontal card per publication group, including SDK consumers and PHP/Rust
+process supervisors. Each card shows reported workers against the target, pools needing
+attention, heartbeat age and worker allocations by queue. Groups with issues come first;
+search and engine filters retain all the instances of a matching group.
+
+Select a reported queue to view its last hour of traffic or sampled backlog. This history covers
+all consumers of that queue on the acting cluster, not just the application in the card; a
+supervisor may use another connection. Missing samples appear as gaps. SDK cards also show busy
+workers and cumulative handler failures; process supervisor cards show draining workers and
+free process slots. The [status reference](/reference/supervisor-status/#application-overview)
+describes how the counts and history are combined.
+
+Expand **Instances**, then select a host to open its drawer and search or filter its queue/pool table, ten rows
 per page. The drawer separates readiness from target capacity and shows worker shortfall,
 draining, process headroom, master PID, versions and uptime at the heartbeat when published.
 Expand a pool for diagnostic evidence, effective scaling and lease settings, consumer group,
