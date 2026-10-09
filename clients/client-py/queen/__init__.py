@@ -23,11 +23,14 @@ from .errors import (
     EphemeralError,
     EphemeralQueueNotFoundError,
     KvError,
+    LockError,
+    LockNotHeldError,
     QueenError,
     QueenHttpError,
     TimerError,
 )
 from .kv import KV, KvResult
+from .locks import Lock, LockResult, Locks
 from .streams.stream import Stream
 from .streams.helpers.rate_limiter import token_bucket_gate, sliding_window_gate
 from .timers import TimerBuilder, TimerResult, Timers
@@ -40,13 +43,16 @@ from .utils.defaults import (
     BUFFER_DEFAULTS,
 )
 
-__version__ = "2.0.3"
+__version__ = "2.1.0"
 
 __all__ = [
     "Queen",
     "Admin",
     "KV",
     "KvResult",
+    "Lock",
+    "Locks",
+    "LockResult",
     "Ephemeral",
     "EPHEMERAL_UNSUPPORTED",
     "EPHEMERAL_UNSUPPORTED_MESSAGE",
@@ -58,6 +64,8 @@ __all__ = [
     "QueenError",
     "QueenHttpError",
     "KvError",
+    "LockError",
+    "LockNotHeldError",
     "TimerError",
     "EphemeralError",
     "EphemeralQueueNotFoundError",

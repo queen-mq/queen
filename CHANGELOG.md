@@ -3,6 +3,96 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 2.1.0
+
+**Server: a standby cluster.** A second cluster can now replay the first one's log and take over
+when the first is lost. The standby's leader reads the source's committed entries over the raft
+port and proposes each one into its own log, so the standby holds the source's messages, cursors,
+leases, KV, timers and dedup window, a moment behind. It answers reads, refuses
+writes with `503` and `"code": "standby"` on every node, and becomes an ordinary cluster with
+`POST /api/v1/system/link/promote`. An empty standby follows a young source from the start of its
+log (`QUEEN_LINK_STANDBY`); a source with a history seeds the standby's first node with its
+snapshot (`QUEEN_LINK_SEED`). Replication is asynchronous: a promotion after a crash loses at most
+what the standby had not read yet, and a planned switch loses nothing. On one laptop, with both
+clusters and the load generator sharing a disk, a standby stayed within 0.25 s of a source taking
+200,000 messages a second. The source keeps its log for the standby on every node and across
+restarts, and gives it up when its own disk fills (`QUEEN_LINK_HOLD_S`,
+`QUEEN_LINK_HOLD_DISK_PCT`). `GET /api/v1/system/link`, the `link` block of `/health` and the
+`queen_link_*` series say where a standby is. The source needs `QUEEN_LINK_TOKEN`, the standby
+`QUEEN_LINK_SOURCE` and `QUEEN_LINK_SOURCE_TOKEN`; a cluster with none of them behaves as before.
+See [Standby cluster](https://queenmq.com/operate/standby/).
+
+**Server: the last node of a cluster to stop no longer hangs.** A node that led a cluster whose
+other nodes were already down, with an entry in its log that could no longer commit, waited for
+that entry for ever while it shut down, and used a whole core doing it. A stopping node now leaves
+once every caller of its entries in flight has an answer; an entry that timed out had already
+answered `retry`.
+
+**Server: a leader that no majority has acknowledged for two seconds no longer stops for good.**
+A leader cut off for two or three seconds and not replaced, or one whose majority needs a
+follower with a slow disk, had its next write refused by raft, took the refusal for a lost
+leadership and stopped planning. It still led, so nothing started it again: every request ran
+into its deadline until the leadership changed or the node restarted. Every release since 2.0.0
+has it. Such a leader now keeps its entries and logs them, in order, when a majority answers
+again, and a leader that finds itself stopped while it leads starts again after 5 s. Found by
+Jepsen on a five-node cluster with two slow disks. With the leader of five nodes cut off for
+2.4 s, the build before the fix took no write afterwards in 11 of the 12 trials where the leader
+kept its leadership, and this one took the next write in all 10. The log lines that say when it
+happens are on [Monitoring](https://queenmq.com/operate/monitoring/).
+
+**Server: locks and semaphores.** A lock is a lease: one holder at a time, for a lifetime the holder
+declares and renews, with a token that fences a holder that outlived it. A semaphore is the same
+lease with up to 1,024 permits. One route, `POST /api/v1/locks`, carries `acquire`, `renew`,
+`release` and `get`, up to 64 locks a call, and answers a verdict per operation with HTTP 200
+(`acquired: false, reason: "held"` is not an error). A permit is one KV row in the namespace
+`queen-locks` (key `<name>#<slot>`, the owner as its value, the lifetime as its TTL), so the route
+adds nothing to the log's format: an acquire is a `putIfAbsent`, a renew a `put` with `expect`, a
+release a `delete` with `expect`. The token is the row's version and changes at every renew.
+An `owner` makes a call safe to send again: the same owner is answered the permit it has. Locks
+count against the tenant's KV quota and KV write rate, need a read-write token, and behind the
+proxy are part of the KV plan and never quota-blocked. New metrics: `queen_locks_ops_total` and
+`queen_locks_op_duration_milliseconds`. A lock expires; a holder that crashed keeps it until its
+lifetime ends, a waiter polls, and there are no read/write locks.
+
+**Server: KV `check`, a precondition that writes nothing.** `{"op":"check","ns","key","expect"}` asserts
+that a key is at a version, or absent with `expect: 0`. With `required: true` it gates a KV call or
+a transaction on a key the call does not write. It is what guards a transaction with a lock: every
+acquire and renew answers a `guard`, a `check` of the permit's row at its token, and a transaction
+that carries it commits only while the lock is still the caller's.
+
+**Server: KV versions are a fencing token.** On one key, a later write always has a higher version than
+every earlier one, across a delete and a re-create, an expiry, a restart and a change of leader.
+The planner always assigned them that way; it is now the documented contract, with a test, and the
+docs no longer say not to rely on their order.
+
+**Clients: `lock`, `semaphore`, `check` and `guard`, in all six SDKs.** `queen.lock(name)` and
+`queen.semaphore(name, limit)`, each with a lifetime, return a handle that acquires (with an
+optional wait), keeps the current token, renews and releases; `transaction().guard(lock)` puts the guard in the
+commit and reads the token when the commit is sent. The JavaScript, Python, Go and Rust handles
+renew in the background every third of the lifetime and signal a lost lock. The PHP and C++
+handles have no background renewal: `keepAlive()` (`keep_alive()` in C++) renews at a checkpoint
+in the work loop. A guarded commit that lost only to its own handle's renewal is sent again with
+the new token. `kv.check` is on the KV client and the transaction's KV builder of each SDK. In the
+JavaScript, Python, Go, Rust and C++ clients 2.1.0 and the PHP client 2.4.0.
+
+**Dashboard: a Locks page.** Every held lock and semaphore permit with its holder, since when it
+is held, its last renewal and when it expires. It reads the permits as KV rows, so a viewer can
+open it, and it writes nothing: the drawer shows the guard a transaction carries and the call
+that releases the lease period on screen. `get` answers the same `since` for each holder: a
+renewal does not move it.
+
+**Server: a KV call that mixed a read with writes that all lost no longer hangs.** A batch on
+`POST /api/v1/kv` such as a `putIfAbsent` that lost beside a `get` wrote nothing, so it had no log
+position, and its read waited for one until the statement timeout (30 s) and answered 503. Such a
+call now takes a position of its own and answers at once.
+
+**Server: the upgrade is one-way.** A node forwards a `check` to the leader only when every member can
+read it. Once every member runs this release the leader raises the cluster version to 5, and
+from then on 2.0.4 or older refuses to start on the data directory. Until then a call that carries a `check` answers 503
+(`kv_check_needs_cluster_version_5`); acquire, renew and release need no new format and work as
+soon as the node you call runs this release. To keep the way back open while the release bakes,
+set `QUEEN_RAFT_CLUSTER_VERSION_MS=0`.
+
 ## 2.0.4 - 2026-10-08
 
 **Dashboard, sign-in page and docs: the logo is a yellow sunflower.** A new drawing replaces the
@@ -563,8 +653,8 @@ so a queue read to its end and idle lags by about the guard and one discovery in
 growing; a node exports a queue's gauges only while it runs the queue. The commit pointer's `tEnd` is now an
 ISO-8601 timestamp: 1.5.0 wrote integer microseconds, which the retention hold could not read,
 so `retentionSinkHold` always sat at its cap; it now follows the sink. Running it is
-[deploy/s3](https://queenmq.com/deploy/s3); what it writes is
-[reference/s3](https://queenmq.com/reference/s3).
+[deploy/s3](https://queenmq.com/guides/s3/); what it writes is
+[reference/s3](https://queenmq.com/guides/s3/).
 
 **Every broker tenant can have an S3 sink and a bucket of its own.** The default tenant's sink is
 configured by `QUEEN_S3_*` and turned on by `QUEEN_S3_QUEUES`: without it the default tenant has no

@@ -18,6 +18,7 @@
     "/concepts/dedup",
     "/concepts/guarantees",
     "/concepts/kv",
+    "/concepts/locks",
     "/concepts/partitions",
     "/concepts/timers",
     "/concepts/transactions",
@@ -64,8 +65,10 @@
     "/operate/recovery",
     "/operate/recovery-backups",
     "/operate/security",
+    "/operate/standby",
     "/operate/tenants",
     "/reference",
+    "/reference/changelog",
     "/reference/configuration",
     "/reference/errors",
     "/reference/http",
@@ -76,10 +79,12 @@
     "/reference/supervisor-status",
     "/reference/transaction",
     "/start",
+    "/start/about",
     "/start/ai-agents",
     "/start/clients",
     "/start/compare",
-    "/start/quickstart"
+    "/start/quickstart",
+    "/start/when-not-to-use"
   ],
   "opaqueNamespaces": []
 }

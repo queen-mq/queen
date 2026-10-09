@@ -180,6 +180,9 @@ pub mod timing;
 
 /// The consumption engine: the one writer of every group's cursors and leases.
 pub mod consume;
+/// The cluster link: a standby cluster replays a source cluster's committed
+/// entries until it is promoted.
+pub mod link;
 /// TEMPORARY claim-scarcity diagnostics (2026-09-21). Not for merge.
 pub mod dbgctr;
 

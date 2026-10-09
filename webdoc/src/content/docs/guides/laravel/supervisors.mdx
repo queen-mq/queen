@@ -1,10 +1,11 @@
 ---
-title: Worker supervisors
+title: "Laravel worker supervisors that follow the backlog"
 description: "Run Laravel worker pools that follow the backlog, with the PHP engine or the low-memory Rust engine, from one configuration: pools and scaling, event-driven wake-up, prefork, lease renewal in the master, replicas and the controls."
 type: how-to
 tier: operate
 status: preview
 sidebar:
+  label: "Worker supervisors"
   order: 5
 sourceOfTruth:
   - clients/client-php/config/queen.php
@@ -65,6 +66,14 @@ sourceOfTruth:
 # every queen connection from config/queen.php, as QueenConnector does and as the configuration page
 # already says; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): only message browsing changes; supervisor depth reads, scaling and coordination are unchanged.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): phase2.rs gains the two /api/v1/system/link routes; the routes this page reads are as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): auth.rs makes /api/v1/locks read-write; handlers/kv.rs counts a
+# `check` as a write and answers 503 for one below cluster version 5; planner/kv.rs gained the `check` op and
+# states that a key's versions only rise. The supervisor's KV calls are unchanged. Nothing this page states
+# changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (two fixed workers): SupervisorConfiguration resolves two
+# workers with a two-slot budget, or four slots when lease renewal reserves helper fallbacks.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
@@ -161,6 +170,57 @@ supervisor: a set of workers with one configuration (every key is in the
     ],
 ],
 ```
+
+### Two fixed workers for slow jobs
+
+For a queue that calls external services, two workers keep execution capacity available while
+one waits for a response. Put these settings in the published `config/queen.php`:
+
+```php
+'prefetch' => 1,
+'ack_batch' => 1,
+'pop_ahead' => false,
+'lease_renewal' => false,
+'supervisor' => [
+    'process_limit' => 2,
+    'supervisors' => [
+        'default' => [
+            'connection' => 'queen',
+            'consumer_group' => 'laravel',
+            'queues' => ['default'],
+            'balance' => 'simple',
+            'processes' => 2,
+            'min_processes' => 2,
+            'max_processes' => 2,
+            'timeout' => 60,
+            'retry_after' => 90,
+            'tries' => 3,
+        ],
+    ],
+],
+```
+
+`simple` keeps this fixed target even with an empty queue. Keep `processes`, `min_processes`
+and `max_processes` aligned for a fixed pool: `processes` is clamped to the min/max bounds.
+The master starts ordinary PHP workers; it does not execute the jobs itself. Each worker
+claims one job at a time here, so a busy worker holds no prefetched tail. Spare workers can
+advance on other partitions; jobs in the [same partition](/guides/laravel/concepts/#queues-and-stripes)
+still wait in order.
+
+The process budget must cover every pool's maximum and its renewal reservation:
+
+| Two-worker pool | Minimum `process_limit` | Why |
+| --- | ---: | --- |
+| `lease_renewal=false`, `prefetch=1`, `pop_ahead=false` | 2 | One child slot per worker |
+| `lease_renewal=true`, including when `prefetch` is above 1 | 4 | One worker slot and one renewal-helper slot per worker |
+
+The four-slot budget remains required when the Rust master renews leases on Linux. The helper
+slot is reserved for fallback; it does not mean four PHP processes normally run. Without renewal,
+keep the worker timeout and every job's timeout below `retry_after`. Turning on renewal keeps
+leases safe during a long wait; the [prefetch tradeoff](/guides/laravel/concepts/#worker-count-and-prefetch)
+still applies.
+
+### Master settings and startup checks
 
 The keys outside `supervisors` apply to the whole master. Two of them read an environment variable,
 named in parentheses; set the others in the file:
@@ -483,6 +543,9 @@ on boot nothing and run the deployed code; the old server closes with the last w
 change to `config/queen.php` still needs the master restarted (`php artisan queen:supervisor
 terminate`, then your process manager starts it again), as it does without prefork. Prefork needs
 PHP client 1.7.0 (supervisor 0.4.0); the restart and the checks above need PHP client 2.1.0.
+
+The [prefork example](/examples/laravel/prefork/) prints the process tree and each worker's private
+memory, forked and spawned.
 
 ### Prefork for some pools only
 

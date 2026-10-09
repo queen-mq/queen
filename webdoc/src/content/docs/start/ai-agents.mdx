@@ -1,13 +1,17 @@
 ---
-title: AI agents
+title: "Build with AI coding agents through MCP"
 description: "Connect Claude Code, Cursor, VS Code, Codex or Claude to Queen's MCP server, so your coding agent builds on Queen from the model, tested code and the list of known traps."
 type: how-to
 tier: use
 sidebar:
-  order: 5
+  label: "AI agents"
+  order: 6
 sourceOfTruth:
   - mcp/src/mcp.mjs
   - mcp/src/tools.mjs
+# sourceOfTruth re-read 2026-10-09 (locks in the MCP): tools.mjs lists locks and semaphores among the
+# setup features, and example now answers with the asked language's snippet when the same task in another
+# language matches the question better. The setup bullet names locks; the rest of the page is as described.
 ---
 
 Queen runs an MCP server for coding agents at `https://queenmq.com/mcp`. Connect your agent and it
@@ -115,10 +119,10 @@ The server gives your agent six tools, which it calls on its own as it works:
   `code` or a transaction `reason` from a response body, or a Kafka error name or number.
 - `kafka_client(client, version?)` says whether a Kafka client library works against Queen, which
   versions we tested, the configuration it needs and where it falls short.
-- `setup(feature, language?)` walks through setting up one feature: KV state, timers, stream
-  processing, ephemeral queues, Kafka clients, the Postgres source and sink, or the S3 sink. It
-  answers with the docs for that feature, the calls in your SDK when you name a language, and the
-  traps that apply.
+- `setup(feature, language?)` walks through setting up one feature: KV state, timers, locks and
+  semaphores, stream processing, ephemeral queues, Kafka clients, the Postgres source and sink, or
+  the S3 sink. It answers with the docs for that feature, the calls in your SDK when you name a
+  language, and the traps that apply.
 
 It also offers three prompts, which you run yourself:
 

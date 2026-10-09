@@ -1,4 +1,4 @@
-This project talks to Kafka through {{client}}. Bring it to Queen MQ 2.0. Goal: {{goal}}.
+This project talks to Kafka through {{client}}. Bring it to Queen MQ 2. Goal: {{goal}}.
 
 There are two paths.
 

@@ -1,9 +1,10 @@
 ---
-title: Consuming
+title: "Consumer groups, leases, retries and dead letters"
 description: "Consumer groups read partitions through leases: one cursor and one leased batch per partition and group, acks that move the cursor, a retry budget and a dead-letter queue."
 type: concept
 tier: use
 sidebar:
+  label: "Consuming"
   order: 3
 sourceOfTruth:
   - server/src/rsm/consume/pop.rs
@@ -46,6 +47,9 @@ verifiedBy:
 # paragraph on stopping consume says so.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): a claim nobody received is handed back at once
 # and takes back its delivery attempt; the lease paragraph says so.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): a standby cluster answers pops and acks 503 `standby`; the route and the facade serve an ordinary cluster as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks; facade/real.rs
+# refuses a transaction's KV `check` below cluster version 5. Nothing this page states changes.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers

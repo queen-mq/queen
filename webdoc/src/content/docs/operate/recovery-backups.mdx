@@ -1,9 +1,10 @@
 ---
-title: Backups and restore
+title: "Backups and restore of a node or cluster"
 description: "What a backup of Queen holds, how to copy a node's data directory while it runs, and how to restore one node or a whole cluster from that copy, rehearsed on 2.0.0-beta.6."
 type: how-to
 tier: operate
 sidebar:
+  label: "Backups and restore"
   order: 8
 sourceOfTruth:
   - server/src/rsm/replicator/raft/repair.rs
@@ -15,6 +16,8 @@ sourceOfTruth:
 verifiedBy:
   - test/recovery/sc12-restore-backup.sh
   - test/recovery/k8s-K4-restore.sh
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the purge also keeps the log for a standby cluster; a paragraph and a card point at the standby as the way to lose a moment and not everything since the last copy. Backups and restores are as described.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned. Nothing this page states changes.
 ---
 
 Three replicas protect you from losing a machine. They do not protect you from a mistake: a
@@ -211,6 +214,11 @@ running cluster: a node whose log went backwards is not repaired by the others a
 clients hang. To rebuild one node, let it copy from its peers ([replace a
 node](/operate/recovery/#replace-a-node)). Ephemeral messages are never in a backup.
 
+To lose a moment instead of everything since the last copy, run a
+[standby cluster](/operate/standby/): it replays the log as the first cluster writes it. Keep the
+backups too. A standby replays a mistake as faithfully as a backup predates it.
+
 <CardGrid>
   <LinkCard title="Recovery" href="/operate/recovery/" description="How to tell what broke, and the procedures for every case, each rehearsed under load." />
+  <LinkCard title="Standby cluster" href="/operate/standby/" description="A second cluster that replays the first one's log, to take over on when the whole first one is lost." />
 </CardGrid>

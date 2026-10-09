@@ -1,9 +1,10 @@
 ---
-title: Monitoring
+title: "Monitoring: health checks, Prometheus, alerts"
 description: "The dashboard in the binary, what /health reports and why to pair it with a write probe, the Prometheus series worth an alert, and the log lines that mean something is wrong."
 type: how-to
 tier: operate
 sidebar:
+  label: "Monitoring"
   order: 6
 sourceOfTruth:
   - server/src/handlers/raft.rs
@@ -22,6 +23,10 @@ sourceOfTruth:
   - server/src/obs/panic_policy.rs
   - app/src/router/index.js
   - app/src/views/Supervisors.vue
+  - app/src/components/SupervisorGroupCard.vue
+  - app/src/components/SupervisorActivity.vue
+  - app/src/composables/supervisorGroups.js
+  - app/src/composables/supervisorActivity.js
   - app/src/composables/supervisorStatus.js
   - app/src/composables/consumerStatus.js
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): health examples now show 2.0.1 at cluster version 4; the memory row names anonBytes and container_memory_rss, plus rows for the engine parts and the trace store gauges.
@@ -29,6 +34,17 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-07 (78970a242, 2.0.2): both /health examples show 2.0.2; nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): /health gains `raft.link`, the exposition
+# gains the queen_link_* families, and two log lines name a standby that stopped and a source
+# that gave up its log; a row or a pointer for each, to operate/standby.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks; facade/mod.rs names
+# that refusal (KvFailure::NotYet); facade/real.rs refuses a transaction's KV `check` below cluster version 5;
+# metrics.rs gained queen_locks_ops_total, queen_locks_op_duration_milliseconds and the KV op label `check`
+# (the generated metrics table lists them). The health examples show clusterVersion 5.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned, and logs it. "Log lines to alert on" gains three lines: a leader's entries waiting to be logged, a pipeline restarted without a change of leadership, a standby's driver that plans none of the link's entries. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-09 (supervisors restyle): Supervisors.vue and its two card components use the
+# dashboard's shared card, stats and table; the card still shows workers against the target, pools needing
+# attention, heartbeat age, the queue list and its history. Nothing this page states changes.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -53,13 +69,20 @@ the same dashboard sits behind the console login: admins also get Members and AP
 
 ### Published supervisors
 
-**Supervisors** reads the acting cluster's `queen-supervisor` KV namespace. It groups instances by
-publication group and shows an overview card for each: distinct queues, pools, reported workers
-against the target, pools needing attention and heartbeat age. Groups with issues come first.
-Cards from all groups share a two-column grid on wide screens
-and stack on narrow screens; each card keeps its publication group and loaded instance count
-above it.
-Click a card to open the instance's drawer, then search and filter its queue/pool table, ten rows
+**Supervisors** reads the acting cluster's `queen-supervisor` KV namespace. It combines loaded
+instances into one horizontal card per publication group, including SDK consumers and PHP/Rust
+process supervisors. Each card shows reported workers against the target, pools needing
+attention, heartbeat age and worker allocations by queue. Groups with issues come first;
+search and engine filters retain all the instances of a matching group.
+
+Select a reported queue to view its last hour of traffic or sampled backlog. This history covers
+all consumers of that queue on the acting cluster, not just the application in the card; a
+supervisor may use another connection. Missing samples appear as gaps. SDK cards also show busy
+workers and cumulative handler failures; process supervisor cards show draining workers and
+free process slots. The [status reference](/reference/supervisor-status/#application-overview)
+describes how the counts and history are combined.
+
+Expand **Instances**, then select a host to open its drawer and search or filter its queue/pool table, ten rows
 per page. The drawer separates readiness from target capacity and shows worker shortfall,
 draining, process headroom, master PID, versions and uptime at the heartbeat when published.
 Expand a pool for diagnostic evidence, effective scaling and lease settings, consumer group,
@@ -95,7 +118,7 @@ curl -s http://queen-1:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.4","raft":{"role":"follower","leader":true,"term":5,"applied":112,"commit":112,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}}
+{"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"follower","leader":true,"term":5,"applied":112,"commit":112,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"apply":{"failure":null,"skipped":[]}}}
 ```
 
 It answers `200 healthy` when the node knows a leader and its `lag` is at most
@@ -113,6 +136,7 @@ commit index, which it reads every second. A node that restarted far behind ther
 | `apply.failure` | The entry that stopped apply on this node: its index, term, digest, class and error. `null` while apply runs. Cluster nodes only |
 | `apply.skipped` | Entries an operator told the node to step over |
 | `clusterVersion`, `kinds` | The data format the cluster writes, and the highest this build reads |
+| `link` | Only on a cluster that is a [standby](/operate/standby/#watch-it), was one, or is read by one: its role, its position in the source's log, and who reads this node |
 
 With several raft groups, the node is ready only when every group is.
 
@@ -127,7 +151,7 @@ curl -s http://queen-1:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.4","raft":{"role":"leader","leader":true,"term":4,"applied":111,"commit":111,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}}
+{"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"leader","leader":true,"term":4,"applied":111,"commit":111,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"apply":{"failure":null,"skipped":[]}}}
 ```
 
 ```bash
@@ -145,6 +169,10 @@ or takes longer than a few seconds. A KV write with a short `ttlSeconds` goes th
 replicated log as a push, leaves nothing behind once it expires, and on a healthy cluster answers
 `200` in a few tens of milliseconds. Recovery has the
 [procedures](/operate/recovery/) for the states this catches.
+
+A [standby cluster](/operate/standby/) answers this probe `503` with `"code": "standby"` for as
+long as it is one, which is what it should do. Probe its link instead, with the series on that
+page.
 
 ## Metrics
 
@@ -166,6 +194,7 @@ the families in [metrics](/reference/metrics/). These are the series worth an al
 | Ephemeral memory nears its ceiling (`503` above it) | `queen_ephemeral_bytes` against `QUEEN_EPHEMERAL_MAX_BYTES` (256 MiB) |
 | Ephemeral messages are dropped | `rate(queen_ephemeral_dropped_total[5m])` by `cause`: `bounds`, `ttl` or `retry` |
 | An ephemeral hand-over failed | `increase(queen_ephemeral_wipes_total[15m]) > 0` |
+| A standby stopped replaying its source, or fell behind | The `queen_link_*` series, with the thresholds under [standby](/operate/standby/#watch-it) |
 
 Pop lag is measured per process from deliveries, so a consumer that stopped popping altogether
 shows no lag at all; watch the dead letters and the dashboard's pending counts as well. With
@@ -185,11 +214,16 @@ with `QUEEN_LOG_JSON=true`. `LOG_LEVEL` and `RUST_LOG` take the full filter synt
 | `APPLY FAILED at entry N (term T), a NODE-LOCAL failure` (ERROR, `rsm`) | This node's disk, space or files. Repair the node; do not skip the entry |
 | `raft log writer poisoned; node stops` (ERROR, `rsm`) | A log write, fsync or truncation failed (`why=` says which). The process stays up with role `stopped` |
 | `raft storage pressure changed` with `full=true` (WARN, `rsm`) | The disk gate closed |
+| `raft: this leader's entries wait to be logged` (WARN, `rsm`) | No quorum has acknowledged the leader for 1.5 s (`quorum_ack_age_ms`), so it holds its writes until one does or another node leads: a partition, or followers that answer slowly. `raft: an entry waited to be logged` follows, with `waited_ms` |
 | `raft: no quorum acknowledgement: handing leadership to another voter` (WARN, `rsm`) | The leader has not heard from a majority and is trying to step down |
+| `this node still leads: the pipeline restarts from the log's end` (WARN, `rsm`) | The leader's planner dropped what it had in flight and started again with no change of leadership (`why=` says what stopped it). Harmless once; report it when it repeats |
 | `refused this node's QUEEN_RAFT_TOKEN`, inside a replication error (WARN) | The nodes do not share one raft token. The node that refuses logs nothing |
 | `raft: the process exits to load a received snapshot` (ERROR, `rsm`) | Exit code 75 after a long absence. Normal once, trouble when it repeats |
 | `core panic: aborting` or `poisoned lock: aborting` (ERROR, `panic`, `fatal=true`) | The process aborts and replays from its durable state on restart |
 | `hand-over failed; the partition's contents are dropped` (WARN, `ephemeral`) | Ephemeral messages were lost while a partition moved |
+| `rsm link: the standby stopped following its source` (ERROR, `rsm`) | A [standby](/operate/standby/) can no longer replay (`why=` says which way) and needs a new seed |
+| `rsm link: the driver does not plan the link's entries` (WARN, `rsm`) | A standby's leader is not replaying, or cannot take a promotion. `what=` and the fields say what its planner waits for |
+| `rsm link: this node's data volume is too full to keep its log for a standby` (ERROR, `rsm`) | A source node purges without regard for its standby, which may then need a new seed |
 | `QUEEN_ENCRYPTION_KEY must be 64 hex chars; encryption DISABLED` (WARN, `encryption`) | Queues flagged for encryption are being stored in plaintext |
 
 ## Limits
@@ -201,7 +235,8 @@ knew, and an empty node that never applied an entry reports `lag` 0 (`F8` and `F
 Probe liveness with a TCP connect, never with `/health`. A `503` during an election is no reason to
 restart a node ([Kubernetes](/operate/kubernetes/#the-probes)).
 
-In 2.0.0-beta.6 the `queen_timers_*` and `queen_sweeper_*` series are exported but nothing updates
-them, so they always read 0; do not alert on them. The Kafka facade and the proxy export no
+As of 2.0.4 every `queen_sweeper_*` series, and every `queen_timers_*` series except
+`queen_timers_schedule_rejected_total`, is exported but nothing updates it, so it reads 0; do not
+alert on them ([metrics](/reference/metrics/)). The Kafka facade and the proxy export no
 Prometheus series of their own. The facade reports its state in the `kafka` block of `GET /status`,
 and the proxy in its logs under the `limits` and `meter` targets.

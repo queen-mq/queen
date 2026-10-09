@@ -416,3 +416,43 @@ async fn a_request_id_hit_never_reads_later_state() {
         Err(e) => panic!("unexpected failure: {e:?}"),
     }
 }
+
+/// A call that reads beside a write that loses (a lost `putIfAbsent`: nothing
+/// is logged, so there is no entry for apply to render the call at) is still
+/// answered: the verdict the planner gave, and the read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_call_whose_writes_all_lose_still_answers_its_reads() {
+    let dir = scratch("lost-read");
+    let f = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+    let first = one(
+        &f,
+        json!({"op":"putIfAbsent","ns":"lr","key":"k","value":1,"ttlSeconds":60}),
+    )
+    .await;
+    assert!(applied(&first), "{first}");
+
+    let t0 = Instant::now();
+    let got = f
+        .kv(
+            ReqCtx::new("default", Deadline::after(Duration::from_secs(3))),
+            KvReq {
+                ops: json!([
+                    {"op":"putIfAbsent","ns":"lr","key":"k","value":2,"ttlSeconds":60},
+                    {"op":"get","ns":"lr","key":"k"},
+                ])
+                .as_array()
+                .expect("ops")
+                .clone(),
+            },
+        )
+        .await;
+    let took = t0.elapsed();
+    let got = got.unwrap_or_else(|e| panic!("the call failed after {took:?}: {e:?}"));
+    assert_eq!(got.results[0]["applied"], false, "{:?}", got.results);
+    assert_eq!(got.results[0]["reason"], "exists");
+    assert_eq!(got.results[1]["found"], true, "{:?}", got.results);
+    assert_eq!(got.results[1]["value"], 1);
+    assert!(took < Duration::from_secs(1), "answered late: {took:?}");
+    f.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -282,12 +282,18 @@ function example(args) {
   const withClient = (result) => (client && !result.isError ? { ...result, content: [{ type: "text", text: `${result.content[0].text}\n\n${client}` }] } : result);
   const here = candidates(task, (x) => x.language === language);
   const anywhere = candidates(task, null);
-  const best = here[0];
-  if (best && best.coverage >= (anywhere[0]?.coverage ?? 0)) {
+  // A snippet shown on a docs page carries that page's title in its label, so
+  // the same task in another language can cover more of the question than the
+  // asked language's snippet does. That snippet is still the answer.
+  const top = anywhere[0];
+  const twin = top?.tested ? here.find((h) => h.tested && h.doc.task === top.doc.task) : undefined;
+  const best = twin ?? here[0];
+  if (best && (twin || best.coverage >= (top?.coverage ?? 0))) {
+    const rest = here.filter((h) => h !== best);
     const parts = [render(best, full)];
-    const next = here[1];
+    const next = rest[0];
     if (!full && next && next.tested === best.tested && next.coverage === best.coverage && next.doc.code.length < 3_500) parts.push(render(next, false));
-    const others = [...new Set(here.slice(parts.length).filter((h) => h.tested && h.coverage > 0).map((h) => h.doc.task))].slice(0, 4);
+    const others = [...new Set(rest.slice(parts.length - 1).filter((h) => h.tested && h.coverage > 0).map((h) => h.doc.task))].slice(0, 4);
     let out = parts.join("\n\n---\n\n");
     if (others.length) out += `\n\nAlso tested in ${LABEL[language]}: ${others.join(", ")}.`;
     if (!best.tested) out += `\n\nNo tested ${LABEL[language]} snippet covers "${task}". ${catalog}`;
@@ -329,7 +335,7 @@ function check(args) {
   traps = [...traps].sort((a, b) => (rank.get(b.id) ?? 0) - (rank.get(a.id) ?? 0) || SEVERITY[a.severity] - SEVERITY[b.severity]);
   const order = topic ? `those about "${topic}" first` : "most damaging first";
   return ok(
-    `Queen 2.0 checklist for ${LABEL[language]} code: ${traps.length} items, ${order}. Check every item against the code, fix what applies, and cite the id.\n\n` +
+    `Queen 2 checklist for ${LABEL[language]} code: ${traps.length} items, ${order}. Check every item against the code, fix what applies, and cite the id.\n\n` +
       traps.map((t, i) => formatTrap(t, language, i + 1)).join("\n\n"),
   );
 }
@@ -500,7 +506,7 @@ const TOOLS = [
     name: "guide",
     title: "Queen docs",
     description:
-      "Answer a question about Queen MQ 2.0 from its documentation: concepts (partitions, consumer groups, subscription modes, transactions, timers, KV, dedup, ephemeral queues), guides, limits, configuration and the HTTP API. Pass `topic` for the best-matching sections, or `page` (a slug like `concepts/transactions` from an earlier answer) to read a whole page, optionally narrowed to one `section`.",
+      "Answer a question about Queen MQ 2 from its documentation: concepts (partitions, consumer groups, subscription modes, transactions, timers, KV, locks, dedup, ephemeral queues), guides, limits, configuration and the HTTP API. Pass `topic` for the best-matching sections, or `page` (a slug like `concepts/transactions` from an earlier answer) to read a whole page, optionally narrowed to one `section`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -533,7 +539,7 @@ const TOOLS = [
     name: "check",
     title: "Queen trap checklist",
     description:
-      "The checklist of known Queen 2.0 traps for code in one language: mistakes that lose, stall or duplicate messages, and behaviour that looks like a bug but is not. Call it before you finish writing or reviewing Queen code and check every item against the code. `language: \"kafka\"` lists the traps for Kafka clients pointed at Queen. `topic` puts the matching items first.",
+      "The checklist of known Queen 2 traps for code in one language: mistakes that lose, stall or duplicate messages, and behaviour that looks like a bug but is not. Call it before you finish writing or reviewing Queen code and check every item against the code. `language: \"kafka\"` lists the traps for Kafka clients pointed at Queen. `topic` puts the matching items first.",
     inputSchema: {
       type: "object",
       properties: {
@@ -578,7 +584,7 @@ const TOOLS = [
     name: "setup",
     title: "Set up a Queen feature",
     description:
-      "Step-by-step setup for one Queen feature: KV state, timers, stream processing, ephemeral queues (request/reply), Kafka clients through the Kafka facade, the Postgres source (tables into queues), the Postgres sink (queues into tables), and the S3 sink (queues into object storage). Returns the docs for it, the exact calls in the given language's SDK, and the traps that apply. Call with no feature to list them.",
+      "Step-by-step setup for one Queen feature: KV state, timers, locks and semaphores, stream processing, ephemeral queues (request/reply), Kafka clients through the Kafka facade, the Postgres source (tables into queues), the Postgres sink (queues into tables), and the S3 sink (queues into object storage). Returns the docs for it, the exact calls in the given language's SDK, and the traps that apply. Call with no feature to list them.",
     inputSchema: {
       type: "object",
       properties: {
@@ -674,7 +680,7 @@ export function agentsMd() {
 export function listResources() {
   return {
     resources: [
-      { uri: AGENTS_URI, name: "AGENTS.md", title: "Queen primer for coding agents", description: "The Queen 2.0 model and its traps, for an AGENTS.md file.", mimeType: "text/markdown" },
+      { uri: AGENTS_URI, name: "AGENTS.md", title: "Queen primer for coding agents", description: "The Queen 2 model and its traps, for an AGENTS.md file.", mimeType: "text/markdown" },
       ...bundle.pages.map((p) => ({ uri: p.url, name: p.slug || "home", title: p.title, description: p.description, mimeType: "text/markdown" })),
     ],
   };

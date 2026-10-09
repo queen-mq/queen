@@ -87,6 +87,14 @@ pub(super) async fn submit_here(
     command: Command,
     deadline: Instant,
 ) -> Result<Reply, RsmError> {
+    // A standby takes no client command (`crate::rsm::link`): neither its
+    // engine nor its planner runs, so the answer is given here, at once. The
+    // one command it takes is its own promotion, which is the batcher's.
+    if engine.is_standby()
+        && !matches!(&command, Command::Effects(c) if crate::rsm::link::is_promote_command(c))
+    {
+        return Ok(Reply::Refused(crate::rsm::link::standby_refusal()));
+    }
     let command = match command {
         // A retry of a transaction that committed (its reply lost, or the
         // leader changed under it): the batcher answers it from the record

@@ -205,6 +205,11 @@ pub enum RsmError {
     /// a retry (an ack the consumption engine served from memory,
     /// [`crate::rsm::batcher::Command::runs_once`]) → `503 outcome_unknown`.
     InDoubt,
+    /// This cluster is a standby ([`crate::rsm::link`]): it replays its
+    /// source and takes no client write until it is promoted → `503 standby`
+    /// + `Retry-After`. Retryable on purpose: a client that keeps retrying
+    /// through a switch-over is served the moment the standby is promoted.
+    Standby,
     /// A non-retryable, whole-command refusal from the planner (§5.4, I14): a
     /// bad request the client must fix, not retry — rendered `400` with the
     /// planner's own `code`. Distinct from [`RsmError::Internal`] (a broker
@@ -228,6 +233,7 @@ impl RsmError {
             RsmError::Overloaded { .. } => "overloaded",
             RsmError::Timeout => "timeout",
             RsmError::InDoubt => "outcome_unknown",
+            RsmError::Standby => crate::rsm::link::STANDBY_CODE,
             RsmError::Rejected { .. } => "rejected",
             RsmError::Internal(_) => "internal",
         }
@@ -260,6 +266,11 @@ impl std::fmt::Display for RsmError {
                 f,
                 "the leader changed while this change was being made durable: it may or may not \
                  have applied"
+            ),
+            RsmError::Standby => write!(
+                f,
+                "this cluster is a standby: it replays its source and takes no writes until it \
+                 is promoted"
             ),
             RsmError::Rejected { message, .. } => write!(f, "{message}"),
             RsmError::Internal(m) => write!(f, "{m}"),
@@ -725,6 +736,11 @@ pub enum KvFailure {
     /// 23514): nothing was written, and the answer is a 200 built from this
     /// DETAIL JSON (cut at 4096 characters like the SP's).
     Precondition { detail: String },
+    /// An op the cluster cannot take YET (D20): it was minted at a catalogue
+    /// version above the cluster's, so a member still runs a release that
+    /// cannot decode it. Nothing ran. 503 with this `reason`, retryable: the
+    /// version rises by itself when the last member is upgraded.
+    NotYet { reason: String, detail: String },
     /// Anything the facade itself answers (retry, no leader, timeout, …).
     Rsm(RsmError),
 }
@@ -759,6 +775,11 @@ pub struct RaftHealth {
     /// The highest catalogue version this node reads (`kinds`): what it tells
     /// the leader the cluster version may rise to.
     pub kinds: Option<u32>,
+    /// The cluster link ([`crate::rsm::link`]), `{"role":"standby", ...}`:
+    /// present on a cluster that is or was a standby, and on a node that has
+    /// a source configured. `None` on every other node, so an ordinary
+    /// cluster's `/health` is what it always was.
+    pub link: Option<serde_json::Value>,
 }
 
 impl RaftHealth {
@@ -775,8 +796,12 @@ impl RaftHealth {
         if let Some(k) = self.kinds {
             versions.push_str(&format!(",\"kinds\":{k}"));
         }
+        let link = match &self.link {
+            Some(l) => format!(",\"link\":{l}"),
+            None => String::new(),
+        };
         format!(
-            "{{\"role\":\"{}\",\"leader\":{},\"term\":{},\"applied\":{},\"commit\":{},\"lag\":{},\"storageReady\":{}{versions}{apply}}}",
+            "{{\"role\":\"{}\",\"leader\":{},\"term\":{},\"applied\":{},\"commit\":{},\"lag\":{},\"storageReady\":{}{versions}{apply}{link}}}",
             self.role, self.leader_known, self.term, self.applied, self.commit, self.lag_ms, self.storage_ready
         )
     }
@@ -1108,6 +1133,7 @@ impl Rsm for NotReady {
             apply: None,
             cluster_version: None,
             kinds: None,
+            link: None,
         }
     }
 

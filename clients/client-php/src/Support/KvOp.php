@@ -138,6 +138,33 @@ final class KvOp
     }
 
     /**
+     * A precondition that writes nothing: the key is at version `expect`, or —
+     * `expect: 0` — is not there. It takes no expiry.
+     *
+     * `expect` is MANDATORY here: a check without one says nothing, and the
+     * broker's `applied: true` to it would read as a guard that held. With
+     * `required: true` it is the gate of a whole batch or transaction on a key
+     * that call does not write, which is how a step is tied to a lock
+     * (Lock::guard() is exactly this operation).
+     *
+     * @param array $opts expect (required), required.
+     */
+    public static function check(string $ns, string $key, array $opts = []): array
+    {
+        if (!array_key_exists('expect', $opts)) {
+            throw new \InvalidArgumentException(
+                'kv check needs `expect`: the version the key must be at, or 0 for a key that must not exist'
+            );
+        }
+
+        return self::withOpts(
+            ['op' => 'check', 'ns' => $ns, 'key' => $key],
+            $opts,
+            ['expect', 'required']
+        );
+    }
+
+    /**
      * The way OUT of compare-and-swap, which is why it takes no `expect`.
      *
      * With `max`, `applied` IS the admission decision: the ceilings do not

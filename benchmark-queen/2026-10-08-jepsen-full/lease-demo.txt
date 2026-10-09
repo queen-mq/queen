@@ -1,0 +1,89 @@
+== 2026-10-09T05:58:46Z binary /root/bin/queen-r21 (39c84ffec2a8), 8 trials, cut 2400 ms
+leader n2 term 1
+trial 1: leader n2 term 1 kept leading (leader term 1 now): STUCK, writes answered 000 and 000
+trial 2: leader n2 term 2 -> follower term 3: deposed
+trial 3: leader n5 term 3 kept leading (leader term 3 now): STUCK, writes answered 000 and 000
+trial 4: leader n5 term 4 -> follower term 5: deposed
+trial 5: leader n4 term 5 -> follower term 6: deposed
+trial 6: leader n3 term 6 kept leading: ok
+trial 7: leader n3 term 6 -> follower term 7: deposed
+trial 8: leader n5 term 7 -> follower term 8: deposed
+== /root/bin/queen-r21: 8 trials, cut 2400 ms: deposed 5, kept leading and took writes 1, kept leading and STUCK 2
+n1: gate waits 0, restarts 0
+n2: gate waits 0, restarts 0
+n3: gate waits 0, restarts 0
+n4: gate waits 0, restarts 0
+n5: gate waits 0, restarts 0
+== 2026-10-09T06:00:42Z binary /root/bin/queen-r21-final (abacb65678ad), 8 trials, cut 2400 ms
+leader n5 term 1
+trial 1: leader n5 term 1 -> follower term 2: deposed
+trial 2: leader n4 term 2 -> follower term 3: deposed
+trial 3: leader n5 term 3 -> follower term 4: deposed
+trial 4: leader n4 term 4 kept leading: ok
+trial 5: leader n4 term 4 -> follower term 5: deposed
+trial 6: leader n5 term 5 -> follower term 6: deposed
+trial 7: leader n4 term 6 kept leading: ok
+trial 8: leader n4 term 6 -> follower term 7: deposed
+== /root/bin/queen-r21-final: 8 trials, cut 2400 ms: deposed 6, kept leading and took writes 2, kept leading and STUCK 0
+n1: gate waits 0, restarts 0
+n2: gate waits 0, restarts 0
+n3: gate waits 0, restarts 0
+n4: gate waits 5, restarts 0
+n5: gate waits 3, restarts 0
+
+== 2026-10-09T06:03:58Z binary /root/bin/queen-r21 (39c84ffec2a8), 20 trials, cut 2400 ms
+leader n5 term 1
+trial 1: leader n5 term 1 -> follower term 2: deposed
+trial 2: leader n3 term 2 -> follower term 3: deposed
+trial 3: leader n5 term 3 -> follower term 4: deposed
+trial 4: leader n4 term 4 kept leading (leader term 4 now): STUCK, writes answered 000 and 000
+trial 5: leader n4 term 5 kept leading (leader term 5 now): STUCK, writes answered 000 and 000
+trial 6: leader n4 term 6 kept leading (leader term 6 now): STUCK, writes answered 000 and 000
+trial 7: leader n4 term 7 -> follower term 8: deposed
+trial 8: leader n5 term 8 kept leading (leader term 8 now): STUCK, writes answered 000 and 000
+trial 9: leader n5 term 9 kept leading (leader term 9 now): STUCK, writes answered 000 and 000
+trial 10: leader n5 term 10 kept leading (leader term 10 now): STUCK, writes answered 000 and 000
+trial 11: leader n5 term 11 kept leading (leader term 11 now): STUCK, writes answered 000 and 000
+trial 12: leader n5 term 12 -> follower term 13: deposed
+trial 13: leader n4 term 13 -> follower term 14: deposed
+trial 14: leader n5 term 14 kept leading (leader term 14 now): STUCK, writes answered 000 and 000
+trial 15: leader n5 term 15 kept leading (leader term 15 now): STUCK, writes answered 000 and 000
+trial 16: leader n5 term 16 -> follower term 17: deposed
+trial 17: leader n4 term 17 -> follower term 18: deposed
+trial 18: leader n5 term 18 -> follower term 19: deposed
+trial 19: leader n1 term 19 -> follower term 20: deposed
+trial 20: leader n5 term 20 -> follower term 21: deposed
+== /root/bin/queen-r21: 20 trials, cut 2400 ms: deposed 11, kept leading and took writes 0, kept leading and STUCK 9
+n1: gate waits 0, restarts 0
+n2: gate waits 0, restarts 0
+n3: gate waits 0, restarts 0
+n4: gate waits 0, restarts 0
+n5: gate waits 0, restarts 0
+== 2026-10-09T06:09:24Z binary /root/bin/queen-r21-final (abacb65678ad), 20 trials, cut 2400 ms
+leader n2 term 1
+trial 1: leader n2 term 1 -> follower term 2: deposed
+trial 2: leader n5 term 2 -> follower term 3: deposed
+trial 3: leader n4 term 3 kept leading: ok
+trial 4: leader n4 term 3 kept leading: ok
+trial 5: leader n4 term 3 -> follower term 4: deposed
+trial 6: leader n1 term 4 kept leading: ok
+trial 7: leader n1 term 4 kept leading: ok
+trial 8: leader n1 term 4 kept leading: ok
+trial 9: leader n1 term 4 kept leading: ok
+trial 10: leader n1 term 4 -> follower term 5: deposed
+trial 11: leader n5 term 5 -> follower term 6: deposed
+trial 12: leader n1 term 6 -> follower term 7: deposed
+trial 13: leader n5 term 7 -> follower term 8: deposed
+trial 14: leader n4 term 8 kept leading: ok
+trial 15: leader n4 term 8 -> follower term 9: deposed
+trial 16: leader n5 term 9 -> follower term 10: deposed
+trial 17: leader n4 term 10 kept leading: ok
+trial 18: leader n4 term 10 -> follower term 11: deposed
+trial 19: leader n5 term 11 -> follower term 12: deposed
+trial 20: leader n4 term 12 -> follower term 13: deposed
+== /root/bin/queen-r21-final: 20 trials, cut 2400 ms: deposed 12, kept leading and took writes 8, kept leading and STUCK 0
+n1: gate waits 6, restarts 0
+n2: gate waits 1, restarts 0
+n3: gate waits 0, restarts 0
+n4: gate waits 8, restarts 0
+n5: gate waits 5, restarts 0

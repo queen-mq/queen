@@ -1,15 +1,17 @@
 ---
-title: Scale on Kubernetes
-description: "Laravel worker pods that share one worker target, fork cheap workers from one booted Laravel, wake when jobs arrive and change their replica count with the backlog."
+title: "Scale Laravel workers on Kubernetes"
+description: "Laravel worker pods that share one worker target, fork cheap workers from one booted Laravel, wake when jobs arrive and autoscale with the backlog through KEDA or an HPA."
 type: how-to
 tier: operate
 status: preview
 sidebar:
+  label: "Scale on Kubernetes"
   order: 8
 sourceOfTruth:
   - clients/client-php/config/queen.php
   - clients/client-php/src/Laravel/Commands/SupervisorControlCommand.php
   - clients/client-php/src/Laravel/Commands/SupervisorInstallCommand.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
   - clients/client-php/src/Laravel/Supervisor/ReplicaCoordinator.php
   - clients/client-php/src/Laravel/Supervisor/QueueWatcher.php
   - clients/client-php/src/Laravel/Dashboard/PrometheusMetrics.php
@@ -37,6 +39,12 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (prefork per pool): config/queen.php and main.rs read a pool's own prefork;
 # QUEEN_SUPERVISOR_PREFORK still turns it on for every pool, so nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): only message browsing changes; depth reads, autoscaling inputs and supervisor coordination are unchanged.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): phase2.rs gains the two /api/v1/system/link routes; the routes this page reads are as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/kv.rs counts a `check` as a write and answers 503 for one
+# below cluster version 5. The supervisor sends no `check`. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (worker count and memory): main.rs reports running worker
+# PIDs separately from renewal reservations; prefork.rs starts an additional PHP fork server.
 ---
 
 This page puts the supervisor features together for the setup most teams end up with: Laravel
@@ -225,6 +233,32 @@ pod's share within seconds, while KEDA changes the number of pods over minutes.
    matches the replica count.
 4. The pod log says `event-driven: watching N partition(s)`. If watching is off, the line says why,
    such as a token that may not consume.
+
+## Read worker count and memory
+
+A worker pod contains the Rust master and ordinary PHP workers. The master starts and monitors
+them; each worker runs one job at a time. With [prefork](/guides/laravel/supervisors/#prefork-workers)
+on, a PHP fork server also holds the booted application. Use the local status to read
+`pool_status[].running` and `pool_status[].pids`, and container metrics to measure the pod:
+
+```bash
+kubectl exec deploy/queen-workers -- php artisan queen:supervisor status --json
+kubectl top pods -l app=queen-workers --containers
+```
+
+`process_limit` is a child-process budget, including reserved renewal-helper slots, rather than
+a count of PHP workers currently running. A [fixed two-worker pool](/guides/laravel/supervisors/#two-fixed-workers-for-slow-jobs)
+runs two jobs in parallel when their partitions are available; prefetch adds leased jobs waiting
+inside those processes.
+
+Measure memory with your own application and job classes. The Rust master's benchmark memory
+covers the master alone; every PHP worker also holds its booted application and the allocations
+of the job it is running. Kubernetes' container working set includes active file cache and kernel
+memory, while PHP's allocation counter covers PHP-managed memory. Process RSS also includes mapped
+libraries and shared pages, so summing worker RSS can count the same pages twice, especially with
+prefork. File copies in the entrypoint can warm the file cache, and exec probes that run Artisan
+start temporary PHP processes. Account for those when choosing memory requests and limits; use the [memory benchmark](/benchmarks/laravel/#where-the-difference-comes-from) for the
+measurement method and the prefork comparison.
 
 ## What to expect
 

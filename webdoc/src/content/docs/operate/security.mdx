@@ -1,9 +1,10 @@
 ---
-title: Security
+title: "Security: authentication, TLS and encryption"
 description: "Which port serves what, broker JWT and proxy API keys, access levels, the raft token, TLS and payload encryption at rest, with the defaults and the gaps stated plainly."
 type: how-to
 tier: operate
 sidebar:
+  label: "Security"
   order: 5
 sourceOfTruth:
   - server/src/main.rs
@@ -21,6 +22,10 @@ sourceOfTruth:
   - protocols/queen-kafka/src/boot.rs
   - SECURITY.md
 # sourceOfTruth re-read 2026-10-03 (4e2bd24a): SECURITY.md supports 2.x only (the page says so); auth.rs lets the ephemeral hand-over calls in on the cluster token since 892e7d81 (the JWT sentence says so).
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the raft port serves two more routes under /link/v1/ (network.rs), outside the raft token and under QUEEN_LINK_TOKEN (cluster.rs): the port table, a paragraph under the raft token and the no-TLS limit say so.
+# sourceOfTruth re-read 2026-10-08 (locks): main.rs declares the locks module; auth.rs makes /api/v1/locks
+# read-write, which the level table now names; proxy_embed.rs maps the new KV refusal to its 503.
+# sourceOfTruth re-read 2026-10-08 (a seed's hold): network.rs's snapshot route under /link/v1/ now reads a JSON body that names the standby and leaves that standby's hold on the node's log, as a read already did. The two routes, their token and what its holder cannot do are as described.
 ---
 
 Out of the box a node authenticates nobody: its HTTP port is plain HTTP, and every route answers
@@ -34,7 +39,7 @@ on a private network, and encrypt the queues whose payloads must not sit on disk
 | Port | Set by | Serves | Protected by |
 |---|---|---|---|
 | `6632` | `PORT`, `QUEEN_BIND_ADDR` (`0.0.0.0`) | The HTTP API, the dashboard, `/health`, the metrics | Broker JWT, off by default. Plain HTTP. When the proxy shares this port, the proxy's keys and TLS |
-| `7400` by convention | the raft address in `QUEEN_RAFT_PEERS`; `QUEEN_RAFT_LISTEN` (default `0.0.0.0` on that port) | Votes, log entries, snapshots, membership changes, the commands followers send the leader | `QUEEN_RAFT_TOKEN`. Plain HTTP |
+| `7400` by convention | the raft address in `QUEEN_RAFT_PEERS`; `QUEEN_RAFT_LISTEN` (default `0.0.0.0` on that port) | Votes, log entries, snapshots, membership changes, the commands followers send the leader. With `QUEEN_LINK_TOKEN` set, also what a [standby cluster](/operate/standby/) reads, under `/link/v1/` | `QUEEN_RAFT_TOKEN`, and `QUEEN_LINK_TOKEN` for the standby's reads. Plain HTTP |
 | raft port + N | `QUEEN_RAFT_GROUPS` | Raft group N | The same token |
 | `QUEEN_PROXY_PORT`, e.g. `6711` | when set and different from `PORT` | The proxy: the data plane for keys and sessions, the console, `/api/cp/*` | API keys and sessions; `/api/cp/*` by `QUEEN_PROXY_CP_TOKEN`. TLS with `QUEEN_TLS_CERT` / `QUEEN_TLS_KEY` |
 | `9092` | `QUEEN_KAFKA_ADDR`, with `QUEEN_KAFKA_EMBEDDED=true` | The Kafka facade | `QUEEN_KAFKA_SASL=plain`, off by default. TLS with `QUEEN_KAFKA_TLS_CERT` / `QUEEN_KAFKA_TLS_KEY` |
@@ -75,7 +80,7 @@ read-write rather than below it.
 | public | `/health`, `/metrics`, `/metrics/prometheus`, the dashboard's files, `/auth/*`, and whatever `JWT_SKIP_PATHS` adds | none needed |
 | read-only | `GET` listings, status, messages, consumer groups, the DLQ, traces, KV and timer reads; the batched reads by offset | `read-only`, `read-write`, `admin` |
 | write-only | `POST /api/v1/push`, `POST /api/v1/timers`, the ephemeral push | `write-only`, `read-write`, `admin` |
-| read-write | everything else: pop, ack, transaction, KV writes, configure | `read-write`, `admin` |
+| read-write | everything else: pop, ack, transaction, KV writes, locks, configure | `read-write`, `admin` |
 | admin | `/api/v1/system/*` (raft membership, kill switches), `/internal/*`, queue, consumer-group and DLQ deletes | `admin` |
 
 The role names are settings as well (`JWT_ROLE_ADMIN`, `JWT_ROLE_READ_WRITE`,
@@ -123,6 +128,14 @@ token still travels in clear, so keep the raft port on a private network and all
 the other nodes. Rotating it is a rolling restart: nodes with the new token form the quorum once a
 majority of them has restarted.
 
+A [standby cluster](/operate/standby/) reads its source on the same port with a token of its own,
+`QUEEN_LINK_TOKEN`, sent in `x-queen-link-token`. It opens two routes under `/link/v1/`, the log
+and the snapshot, and nothing else: its holder cannot vote, append or change the membership. But
+the log and the snapshot are everything the cluster holds, every payload and every KV value, so
+guard that token as you guard the data, and open the raft port only to the standby's nodes. A node
+without `QUEEN_LINK_TOKEN` answers `404` on those routes whatever is presented, and a wrong token
+gets `401`.
+
 ## Payload encryption at rest
 
 ```bash
@@ -160,10 +173,11 @@ anyone else.
 
 A JWT without `exp` is accepted, so issue tokens that expire. Changing `QUEEN_ENCRYPTION_KEY` makes
 the encrypted payloads unreadable, and consumers then receive the ciphertext envelope as data with
-no error; restoring the key restores the plaintext. In 2.0.0-beta.6 the messages a stream's sink
+no error; restoring the key restores the plaintext. As of 2.0.4 the messages a stream's sink
 pushes are stored in clear even in a queue with `encryptionEnabled`.
 
-There is no TLS between nodes: the raft port and the HTTP calls between nodes are plaintext. With the
+There is no TLS between nodes: the raft port and the HTTP calls between nodes are plaintext, and so
+is what a standby cluster reads from its source, which may cross sites. With the
 broker's JWT on, the nodes' ephemeral hand-over calls (`_adopt`, `_leaving`, `_ready`) prove
 themselves with the cluster token, never a JWT, so set `QUEEN_RAFT_TOKEN`: without it they are
 refused, and ephemeral partitions that move lose their contents

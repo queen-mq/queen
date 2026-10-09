@@ -112,7 +112,16 @@ const PROXY_ROUTES = "proxy/src/routes.rs";
 // under `/api/cp/*` are the proxy's OWN routes, served before `classify` is
 // ever consulted, so they are not broker routes and are not in this table.
 // 2026-10-03: re-read for 2.0.0 — the connectors rule (892e7d81d).
-const CLASSIFY_FINGERPRINT = "f108fbdfae4f8ef5";
+// 2026-10-08: `classify` grew ONE arm, for `POST /api/v1/locks` (locks and
+// semaphores, whose permits are KV rows). It sits between the KV and the timer
+// arms and answers `Gated(Kv, Open)`: the plan gate is KV's, and the quota half
+// is `Open` because a storage block that refused a lock would stop the workers
+// that drain the tenant back under its quota. POST on the exact path (and its
+// trailing-slash spelling) only; every other method is `Blocked`. Not `Mixed`:
+// that op half stays `POST /api/v1/kv` alone, which `kafka_kv` keys on. Re-read
+// in full: nothing else in the function moved, and `is_operator_route` is
+// untouched.
+const CLASSIFY_FINGERPRINT = "0664a0b2249f9d44";
 const OPERATOR_FINGERPRINT = "0eca43d77dc8c6f2";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -244,6 +253,13 @@ function classify(m, p) {
   if (p.startsWith("/api/v1/kv/")) {
     return ["GET", "PUT", "DELETE"].includes(m) ? "gated (kv)" : "blocked";
   }
+  // Locks: the KV plan gate, since a permit is a KV row. The op half in the
+  // Rust is `Open` (never quota-blocked), which the class meaning states.
+  // POST on the exact path only; anything else under the prefix reaches the
+  // `/api/` fail-closed default at the bottom.
+  if (p === "/api/v1/locks" || p === "/api/v1/locks/") {
+    return m === "POST" ? "gated (kv)" : "blocked";
+  }
   if (p === "/api/v1/timers" || p === "/api/v1/timers/") {
     return m === "POST" ? "gated (timers)" : "blocked";
   }
@@ -318,7 +334,7 @@ const CLASS_MEANING = [
   ["gated (traces)", "Writing a trace is available when the plan enables the traces feature."],
   [
     "gated (kv)",
-    "Available when the plan enables the KV feature, which a plan that has never heard of it does not. A `PUT` is the half a storage quota blocks; a `GET` is read level; a `DELETE` is how a tenant at its cap gets back under it and is never quota-blocked. The batch `POST` carries both halves in one array, so a quota refuses the whole call with a named reason and never drops part of it. One exception is decided on the body, which this table cannot show: a batch that addresses only the Kafka facade's own consumer-group keys (namespace `queen-kafka`, keys `qk:`) is classified consume, so a Kafka client needs neither the KV feature nor room under the storage quota to commit offsets.",
+    "Available when the plan enables the KV feature, which a plan that has never heard of it does not. A `PUT` is the half a storage quota blocks; a `GET` is read level; a `DELETE` is how a tenant at its cap gets back under it and is never quota-blocked. The batch `POST` carries both halves in one array, so a quota refuses the whole call with a named reason and never drops part of it. One exception is decided on the body, which this table cannot show: a batch that addresses only the Kafka facade's own consumer-group keys (namespace `queen-kafka`, keys `qk:`) is classified consume, so a Kafka client needs neither the KV feature nor room under the storage quota to commit offsets. The locks route (`POST /api/v1/locks`) is behind the same plan flag, because a permit is a KV row, and is never quota-blocked: the workers that drain a tenant back under its quota are the ones holding the locks.",
   ],
   [
     "gated (timers)",

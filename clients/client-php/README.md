@@ -229,6 +229,14 @@ connection in `config/queue.php` win over them.
 | `ack_async` | `false` | sends each ACK without waiting; the answer is read after the next job |
 | `pop_ahead` | `false` | pops the next batch while the last job of a full batch runs |
 
+Prefetch applies to each worker. Two workers with the default `prefetch=1` can execute two jobs
+at once, each holding one job. For one queue, with `pop_ahead` off and `prefetch=4`, they can
+lease up to eight jobs but still execute only two at once; a slow worker also holds its unstarted
+batch. Other workers can proceed on available partitions, while jobs in the same partition
+remain ordered. See
+[worker count and prefetch](https://queenmq.com/guides/laravel/concepts/#worker-count-and-prefetch)
+and the [fixed two-worker pool](https://queenmq.com/guides/laravel/supervisors/#two-fixed-workers-for-slow-jobs).
+
 Raising prefetch trades round trips for a wider redelivery window: a crash can redeliver the
 unflushed batch, and a paused worker can sit on prefetched jobs until the lease expires. So the
 connector **rejects `prefetch` above 1 unless `lease_renewal` is `true`**, however the worker was
@@ -528,6 +536,50 @@ key/value state, timers, the DLQ, the admin API, tracing and wildcard consumptio
 with every option in the [PHP client reference](REFERENCE.md).
 
 ---
+
+### Locks and semaphores
+
+A lock is a lease: one holder at a time, for a lifetime the holder renews, with a
+token that fences a holder that outlived it. `$queen->semaphore($name, $n, $opts)`
+is the same with `$n` permits. Locks are in 2.4.0 and need a 2.1 broker.
+
+```php
+$lock = $queen->lock('daily-report', ['ttlSeconds' => 30]);
+if (!$lock->acquire(5.0)) {            // up to 5 s for our turn
+    return;                            // somebody else holds it
+}
+try {
+    foreach ($pages as $page) {
+        if (!$lock->keepAlive()) {     // renews when a third of the lifetime has passed
+            break;                     // lost: stop
+        }
+        importPage($page);
+    }
+    $queen->transaction()
+        ->guard($lock)                 // commits only while the lock is ours
+        ->queue('reports')->push([['data' => $report]])
+        ->commit();
+} finally {
+    $lock->release();
+}
+```
+
+It is a lease, not a mutex: it expires, and nobody tells the holder. A paused or
+partitioned process carries on past its lifetime while somebody else acquires, so
+the lock alone never makes two holders impossible. The guard is what keeps the
+old holder's work out: a guarded transaction rolls back with `kv_precondition`
+once the lock is no longer this handle's. Outside Queen, fence with the token,
+which only rises on a lock. The token changes at every renew, so read it when you
+use it.
+
+**PHP has no background renewal.** A handle that never calls `keepAlive()` (or
+`renew()`) holds the lock for one lifetime only. Call `keepAlive()` at a checkpoint
+inside the work loop: it sends nothing until a third of the lifetime has passed,
+and returns `false` once the lock is gone.
+
+`$queen->locks()` is the wire, with no state kept: `acquire`, `renew`, `release`,
+`get($name)` and `batch`. `$queen->kv()->check($ns, $key, ['expect' => $version])`
+is the precondition on its own.
 
 ## Configuration
 

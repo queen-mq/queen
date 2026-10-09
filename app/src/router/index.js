@@ -125,6 +125,20 @@ const routes = [
     }
   },
   {
+    // Who holds each lock and semaphore permit. 'read' because a permit is a
+    // KV row and the page reads it through the console's KV listing (Read at
+    // the proxy by prefix), not through POST /api/v1/locks, which is
+    // read-write even for a `get`. The page writes nothing.
+    path: '/locks',
+    name: 'Locks',
+    component: () => import('@/views/Locks.vue'),
+    meta: {
+      title: 'Locks', subtitle: 'Who holds each lock and semaphore, and until when',
+      requires: 'read', scope: 'tenant',
+      nav: { group: 'Routing', icon: 'locks', order: 7 },
+    }
+  },
+  {
     path: '/traces',
     name: 'Traces',
     component: () => import('@/views/Traces.vue'),

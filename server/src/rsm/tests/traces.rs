@@ -735,9 +735,11 @@ mod facade {
         v["partitionId"].as_str().expect("partitionId").to_string()
     }
 
+    /// Until the cluster version admits `want`. A node alone raises it to
+    /// what this build reads, which is at or above every version a test names.
     async fn until_version(f: &RaftFacade, want: u32) {
         let end = Instant::now() + Duration::from_secs(20);
-        while f.cluster_version() != want {
+        while f.cluster_version() < want {
             assert!(
                 Instant::now() < end,
                 "the cluster version never reached {want}"

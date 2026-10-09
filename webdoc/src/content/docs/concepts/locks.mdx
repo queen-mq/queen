@@ -1,0 +1,223 @@
+---
+title: "Locks and semaphores with fencing tokens"
+description: "A lock in Queen is a lease with a fencing token: one holder at a time, a lifetime the holder renews, and a guard that lets a transaction commit only while the lock is still held. A semaphore is the same lease with N permits."
+type: concept
+tier: use
+sidebar:
+  label: "Locks"
+  order: 7
+sourceOfTruth:
+  - server/src/locks.rs
+  - server/src/handlers/locks.rs
+  - server/src/rsm/planner/kv.rs
+  - server/src/rsm/facade/real/kv.rs
+  - server/src/rsm/effect.rs
+  - server/src/auth.rs
+  - server/src/quota.rs
+  - proxy/src/routes.rs
+  - clients/client-js/client-v2/locks/Locks.js
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+verifiedBy:
+  - clients/client-js/test-v2/locks.js
+  - server/src/rsm/tests/facade_locks.rs
+---
+
+A lock in Queen is a lease: one holder at a time, for a lifetime the holder declares and keeps
+renewing, with a token that fences the work of a holder that outlived it. A semaphore is the same
+lease with N permits. Use one when a job must run in one place at a time (a nightly report, a
+migration, a sync against an API that allows one session) or in at most N.
+
+```js
+const lock = queen.lock('daily-report', { ttl: '30s' })
+if (!(await lock.acquire())) return   // somebody else holds it
+
+try {
+  await queen.transaction()
+    .guard(lock)                      // commits only while the lock is ours
+    .queue('reports').push([{ data: report }])
+    .commit()
+} finally {
+  await lock.release()
+}
+```
+
+Over HTTP it is one route, `POST /api/v1/locks`, with a list of operations and one result per
+operation, in order:
+
+```bash
+curl -s -X POST http://localhost:6632/api/v1/locks \
+  -H 'content-type: application/json' -d '{"operations":[
+  {"op":"acquire","name":"daily-report","ttlSeconds":30,"owner":"cron-7"}]}'
+```
+
+```json
+{"results":[{
+  "index":0, "op":"acquire", "name":"daily-report", "acquired":true,
+  "slot":0, "token":90101, "owner":"cron-7",
+  "guard":{"op":"check", "ns":"queen-locks", "key":"daily-report#0",
+           "expect":90101, "required":true}}]}
+```
+
+A lock somebody else holds is not an error. It answers HTTP 200 with `acquired: false`,
+`reason: "held"` and the `holders`, so a waiter that polls stays out of your error metrics.
+
+## A lease, not a mutex
+
+A lock here expires, and nobody tells its holder. A process that is paused, cut off from the
+network or simply slow carries on past its lifetime, while somebody else acquires the lock it
+believes it has. No lock service can prevent that, whatever it is built on, and we would rather
+say so than let you find out: for a while, two processes can both believe they hold the lock.
+
+What Queen prevents is two of them doing the work. Every acquire answers a `token`, and a later
+holder of the same lock always has a higher one. The token is what you fence with:
+
+<Figure id="concepts/lock-fence" />
+
+- **Inside Queen**, `.guard(lock)` on a transaction. The acks, pushes, KV writes and timers of the
+  step commit only if the lock is still this holder's, checked in the same log entry that writes
+  them. A holder that was replaced gets `success: false` with `reason: "kv_precondition"`, and
+  nothing of its step exists.
+- **Outside Queen**, the token itself. A resource that remembers the highest token it has accepted
+  and refuses a lower one refuses the holder that was replaced:
+  `UPDATE report SET body = $1, fence = $2 WHERE id = $3 AND fence <= $2`. Accept an equal one,
+  because a holder writes many times under one token.
+
+Work that goes through neither is protected only by the lifetime being longer than the work. That
+is enough for a job whose second run is merely wasteful, and not for one whose second run is wrong.
+
+## The four operations
+
+| Op | Fields | Answers |
+|---|---|---|
+| `acquire` | `name`, `ttlSeconds`, `owner`?, `limit`? | `acquired`, and with it `slot`, `token`, `guard`; or `reason` (`held`, `contended`) and `holders` |
+| `renew` | `name`, `token`, `ttlSeconds`, `slot`?, `owner`? | `renewed`, and with it a new `token` and `guard`; or `reason: "lost"` and `holders` |
+| `release` | `name`, `token`, `slot`? | `released`; or `reason: "lost"` and `holders` |
+| `get` | `name` | `held`, and `holders` with `slot`, `owner`, `token`, `since`, `renewedAt`, `expiresAt` |
+
+One call carries up to 64 operations, each on a different lock. The operations are independent:
+one that loses does not stop the others. `ttlSeconds` is a whole number above 0 and there is no
+`forever`, because a lock that never expires is one nobody can take back from a holder that died.
+
+**The token changes at every renew.** A renew rewrites the lock, so it answers a new token and
+the one before stops working: for the guard, for the next renew and for the release. Always use
+the token of the last answer. The SDK handles do: read `lock.token` when you send it, and do not
+keep a copy across an `await`.
+
+## Renewing, and knowing you lost
+
+A holder that needs longer than its lifetime renews. The JavaScript, Python, Go and Rust handles
+do it in the background, every third of the lifetime, and tell you when the lock is gone:
+
+```js
+const lock = queen.lock('sync:crm', { ttl: '30s' })
+lock.onLost((reason) => console.warn('lost the lock:', reason))  // 'renew', 'guard', 'expired'
+
+const { acquired } = await lock.run(async () => {
+  for (const page of pages) {
+    if (lock.signal.aborted) return   // stop: somebody else may be working now
+    await importPage(page, { signal: lock.signal })
+  }
+}, { wait: '10s' })                   // wait up to 10 s for our turn
+```
+
+"Gone" means the broker said so, or the lifetime passed on the client's own clock without a renew
+getting through. A client that cannot reach the broker must assume the worst, and the handle does.
+PHP and C++ have no background thread to renew from, so their handle has a checkpoint instead:
+call `keepAlive()` (`keep_alive()` in C++) inside the work loop, and it renews once a third of the
+lifetime has passed and returns `false` when the lock is lost.
+
+Nothing stops your code when the lock is lost. Pass `lock.signal` to what the work awaits, and
+guard what it commits.
+
+## The owner makes a retry safe
+
+`owner` names the holder: a string of your choosing, unique per holder. The SDKs mint one per
+handle (`host:pid:random`). It is what makes a call safe to send again when its answer was lost:
+
+- an `acquire` by an owner that already holds the lock answers the same permit, with
+  `already: true` and the same token;
+- a `renew` with a token that is stale because the owner's own earlier renew landed is carried
+  through, and answers the current token.
+
+Two callers that send the same owner are one holder, by definition. An operation without an owner
+works, but its retry cannot be told from a stranger: it answers `held`, or `lost`.
+
+## Semaphores
+
+```js
+const gpu = queen.semaphore('gpu', 4, { ttl: '2m' })      // at most four holders
+await gpu.run(() => train(job), { wait: '30s' })
+```
+
+A semaphore of N has N slots, and each holder has one: `acquire` answers the `slot`, and `renew`
+and `release` name it (the handles do it for you). A full semaphore answers `reason: "held"`. One
+with free permits and a crowd on them can answer `reason: "contended"` after a few tries, which
+means the same thing to the caller: come back.
+
+The limit is the caller's and is stored nowhere, so every holder of one name passes the same one.
+While you change it, the larger limit rules: callers with the old, smaller limit share the low
+slots and do not see the others.
+
+## What a lock is made of
+
+A permit is one [KV](/concepts/kv/) row and nothing else: namespace `queen-locks`, key
+`<name>#<slot>`, the owner as its value, the lifetime as its TTL. `acquire` is a `putIfAbsent`,
+`renew` a `put` with `expect`, `release` a `delete` with `expect`, and the token is the row's
+version. The route does that turning on the node you called, so there is one implementation for
+every client and none of it is new machinery in the log.
+
+That has consequences you can use:
+
+- Exactly one `acquire` wins because exactly one `putIfAbsent` wins, which is
+  [Jepsen-tested](/concepts/guarantees/).
+- The guard is a plain KV operation, `check`: it asserts a key's version and writes nothing. You
+  can put the `guard` of an answer in the `kv` array of any transaction yourself.
+- A lock counts against the tenant's KV quota and KV write rate, and an operator who pauses KV
+  pauses locks.
+- The dashboard's Locks page lists every held lock with its holder, since when, its last renewal
+  and its expiry, and a viewer can open it. A lock that is stuck is released by hand: a `release`
+  with the token the page shows, or a delete of the row through the KV routes. The holder is not
+  told; it finds out at its next renew or guard.
+
+## What it is not
+
+- **Not instant on a crash.** A holder that dies keeps the lock until its lifetime ends. Choose
+  the lifetime as the longest wait you accept after a crash, and let the handle renew.
+- **Not a queue of waiters.** A waiting `acquire` polls, every 100 ms to 1 s with jitter, and
+  whoever asks first after the release wins. There is no fairness and no wake-up.
+- **Not a database lock.** It does not join your database's transaction. To protect rows in
+  Postgres, fence the write with the token, as above.
+- **Not read/write.** There is one kind of permit.
+
+And often you need no lock at all. Work on one entity is already serial: a partition is leased to
+one worker at a time, and the ack fences a worker that lost it (see
+[one state machine per entity](/guides/state-machines/)). Locks are for what has no message to
+hang on: a cron job, a singleton, a pool of N.
+
+## Limits
+
+- A name is 1 to 256 bytes, with no control character and no `#`. An owner is at most 256 bytes.
+- A semaphore has at most 1,024 permits, and one call names at most 64 locks and 4,096 slots.
+- A lifetime is counted on the leader's clock from the moment it writes the lock. The handles
+  count theirs from the moment they sent the request, so they give up first.
+- The route is read-write for every operation, `get` included. A read-only token reads locks as KV
+  rows.
+- A call that fails with 503 may have applied some of its operations. Send it again with the same
+  owners and it converges.
+- `check`, and so the guard, needs every node of the cluster on a version that has it. The cluster
+  moves to format version 5 by itself once they all are, and until then a call that carries a
+  `check` answers 503 with `kv_check_needs_cluster_version_5`. Acquire, renew and release work
+  before that.
+- Locks are [Jepsen-tested](/benchmarks/jepsen/) (W11, on 2026-10-08): under kill, partition,
+  pause, restart, power loss, membership changes and clock jumps, no guarded commit of a replaced
+  holder got through. With the nodes' clocks left alone, no lock was handed over before its lease
+  could have ended; under clock jumps that is not judged, since a jump changes how long a lease
+  lasts. That is what was tested: not that only one client believes it holds the lock, which a
+  lease cannot promise.
+
+## Next
+
+<CardGrid>
+  <LinkCard title="KV" href="/concepts/kv/" description="Versions, expect and check: what a lock is made of." />
+  <LinkCard title="Transactions" href="/concepts/transactions/" description="The one commit a guard decides." />
+</CardGrid>

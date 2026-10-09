@@ -1,0 +1,10 @@
+2026-10-08T20:20:01Z start fo-repro-primaries-1: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T20:24:21Z done  fo-repro-primaries-1: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T20:20:19.221748861Z log=/root/runs-fix7pre/fo-repro-primaries-1.log
+2026-10-08T20:24:21Z start fo-repro-primaries-2: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T20:28:32Z done  fo-repro-primaries-2: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T20:24:35.59156324Z log=/root/runs-fix7pre/fo-repro-primaries-2.log
+2026-10-08T20:28:32Z start fo-repro-primaries-3: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T20:32:37Z done  fo-repro-primaries-3: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T20:28:45.701473664Z log=/root/runs-fix7pre/fo-repro-primaries-3.log
+2026-10-08T20:32:37Z start fo-repro-primaries-4: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T20:36:47Z done  fo-repro-primaries-4: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T20:32:50.277642668Z log=/root/runs-fix7pre/fo-repro-primaries-4.log
+2026-10-08T20:36:47Z start fo-repro-primaries-5: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T20:37:02Z stopped by hand: the next campaign is /root/runs-final on /root/bin/queen-r21-final

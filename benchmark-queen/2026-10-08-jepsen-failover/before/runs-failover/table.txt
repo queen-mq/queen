@@ -1,0 +1,7 @@
+test                   verdict      acked replayed     lost  lost-ms    older  pl-lost   diverg      own  refused late-ref  late-ms  1st-own  anomalies
+fo-crash-smoke         valid         8083     8083        0      nil        0        0        0     7278     7423        0      nil        6  
+fo-planned-smoke       valid         8240     8240        0      nil        0        0        0     6351     8263        0      nil        4  
+fo-crash-kill          valid         9255     9256        0      nil        0        0        0     6322     8340        0      nil        9  
+fo-crash-part          UNKNOWN/:unknown        -        -        -        -        -        -        -        -        -        -        -        -  
+fo-crash-pause         valid        12514    12514        0      nil        0        0        0     8545    11700        4   139542        4  
+fo-crash-lz-kill       UNKNOWN/:unknown        -        -        -        -        -        -        -        -        -        -        -        -  

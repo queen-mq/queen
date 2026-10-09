@@ -660,5 +660,99 @@
       "clients/client-go/transaction_builder.go:36",
       "server/src/rsm/facade/real.rs:4040"
     ]
+  },
+  {
+    "id": "lock-is-a-lease-guard-the-commit",
+    "title": "A lock is a lease: without a guard on the commit, two holders can both do the work",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "A job that must run in one place runs twice: after a pause, a long GC stop or a network cut, the old holder carries on while a new one already has the lock.",
+    "cause": "A lock expires, and nobody tells its holder. A process that is paused or cut off keeps running past its lifetime while somebody else acquires the lock, so for a while two processes both believe they hold it. Holding the lock (lock.held) is a belief with a deadline, and by itself it stops no write.",
+    "fix": "Put the lock on the transaction that commits the work: .guard(lock) makes the acks, pushes, KV writes and timers commit only while the lock is still this holder's, in the same log entry. A replaced holder gets success: false with reason kv_precondition and writes nothing. For a resource outside Queen, send lock.token with the write and have the resource refuse a token lower than the highest it accepted. Stop the work when the handle reports the lock lost (lock.signal in JS, lock.lost in Python, lock.Lost() in Go, lock.lost() in Rust, a false keepAlive() in PHP and C++).",
+    "code": {
+      "js": "const lock = queen.lock('daily-report', { ttl: '30s' })\nif (!(await lock.acquire())) return\ntry {\n  const res = await queen.transaction()\n    .guard(lock)\n    .queue('reports').push([{ data: report }])\n    .commit()\n  if (res.success === false) return // replaced: nothing was written\n} finally {\n  await lock.release()\n}",
+      "python": "res = await queen.transaction().guard(lock).queue(\"reports\").push([{\"data\": report}]).commit()\nif res.get(\"success\") is False:\n    return  # replaced: nothing was written",
+      "go": "res, err := client.Transaction().Guard(lock).\n\tQueue(\"reports\").Partition(\"daily\").Push(report).Commit(ctx)\nif err == nil && res.IsKVPrecondition() {\n\t// replaced: nothing was written\n}",
+      "php": "$result = $queen->transaction()->guard($lock)\n    ->queue('reports')->push([['data' => $report]])->commit();\nif ($result['success'] === false) { return; } // replaced: nothing was written",
+      "http": "POST /api/v1/transaction\n{\"operations\":[{\"type\":\"push\",\"items\":[{\"queue\":\"reports\",\"payload\":{\"day\":\"2026-10-09\"}}]}],\n \"kv\":[{\"op\":\"check\",\"ns\":\"queen-locks\",\"key\":\"daily-report#0\",\"expect\":90101,\"required\":true}]}"
+    },
+    "source": [
+      "https://queenmq.com/concepts/locks/",
+      "clients/client-js/client-v2/builders/TransactionBuilder.js:272",
+      "server/src/locks.rs"
+    ]
+  },
+  {
+    "id": "lock-token-changes-on-renew",
+    "title": "A lock's token changes at every renew: a saved copy stops working",
+    "applies": [
+      "all"
+    ],
+    "severity": "breaks",
+    "symptom": "A guarded transaction rolls back with kv_precondition, or a renew or release answers reason lost, while the lock is still held by the same process.",
+    "cause": "The token is the version of the lock's row, and a renew rewrites the row: it answers a new token, and the one before stops working for the guard, for the next renew and for the release. The SDK handles renew in the background every third of the lifetime (JS, Python, Go, Rust), so a token copied into a variable goes stale without any call of yours.",
+    "fix": "Pass the handle, not the token: .guard(lock) reads the token when the commit is sent, and sends the commit again when it lost only to this handle's own renewal. When you need the number (to fence a resource outside Queen), read lock.token at the moment you send it and do not keep a copy across an await. Over HTTP, always use the token and the guard of the last acquire or renew answer.",
+    "code": {
+      "js": "await db.query('UPDATE report SET body = $1, fence = $2 WHERE id = $3 AND fence <= $2',\n  [body, lock.token, id])   // read lock.token here, not earlier",
+      "http": "POST /api/v1/locks\n{\"operations\":[{\"op\":\"renew\",\"name\":\"daily-report\",\"token\":90101,\"ttlSeconds\":30,\"owner\":\"cron-7\"}]}\n-> {\"results\":[{\"renewed\":true,\"token\":90117,\"guard\":{\"op\":\"check\",\"ns\":\"queen-locks\",\"key\":\"daily-report#0\",\"expect\":90117,\"required\":true}}]}"
+    },
+    "source": [
+      "https://queenmq.com/concepts/locks/",
+      "clients/client-js/client-v2/locks/Locks.js:320"
+    ]
+  },
+  {
+    "id": "php-cpp-lock-needs-keepalive",
+    "title": "PHP and C++ locks are not renewed in the background: call keepAlive() in the work loop",
+    "applies": [
+      "php",
+      "cpp"
+    ],
+    "severity": "breaks",
+    "symptom": "A lock taken for long work expires in the middle of it: another worker acquires the same lock, and the first one's guarded commits start failing with kv_precondition.",
+    "cause": "The JavaScript, Python, Go and Rust handles renew from a background task. PHP and C++ have none, so their handle renews only when the code asks, and a lock nobody renews ends after its lifetime however busy its holder is.",
+    "fix": "Call $lock->keepAlive() (lock.keep_alive() in C++) at every checkpoint of the work loop. It renews once a third of the lifetime has passed, sends nothing before then, and returns false when the lock is lost: stop there. Choose a lifetime longer than the longest stretch between two checkpoints, and keep the guard on every commit.",
+    "code": {
+      "php": "foreach ($pages as $page) {\n    if (!$lock->keepAlive()) {\n        break; // lost: stop\n    }\n    importPage($page);\n}",
+      "cpp": "for (const auto& page : pages) {\n    if (!lock.keep_alive()) break;   // lost: stop\n    import_page(page);\n}"
+    },
+    "source": [
+      "https://queenmq.com/concepts/locks/",
+      "clients/client-php/src/Lock.php:234",
+      "clients/client-cpp/queen_client.hpp:3204"
+    ]
+  },
+  {
+    "id": "locks-need-broker-2-1",
+    "title": "Locks, semaphores and the KV check need broker 2.1.0, and the guard needs the whole cluster on it",
+    "applies": [
+      "all"
+    ],
+    "severity": "surprise",
+    "symptom": "Lock calls fail against a 2.0.x broker, which has no /api/v1/locks route, or a transaction with a guard or a kv check answers 503 kv_check_needs_cluster_version_5 in the middle of an upgrade. A 2.0.x broker answers a KV check with 400 kv_unknown_op.",
+    "cause": "The lock route and the KV check operation exist from broker 2.1.0. A guard is a check, and a check needs the cluster at format version 5, which the cluster reaches by itself once every node runs 2.1.0. Until then acquire, renew and release work, and a call that carries a check answers 503.",
+    "fix": "Run broker 2.1.0 or later on every node before the code that takes locks goes out (GET /health shows version and raft.clusterVersion). Treat the 503 as a retry: it stops once the last node is upgraded. Use an SDK that has locks: 2.1.0 for JavaScript, Python, Go, Rust and C++, 2.4.0 for PHP.",
+    "source": [
+      "https://queenmq.com/concepts/locks/",
+      "https://queenmq.com/reference/errors/",
+      "clients/client-js/client-v2/kv/Kv.js:448"
+    ]
+  },
+  {
+    "id": "no-lock-for-one-entity",
+    "title": "Work on one entity needs no lock: its partition is already serial",
+    "applies": [
+      "all"
+    ],
+    "severity": "perf",
+    "symptom": "Every step takes a lock named after the order or the customer before it works, and throughput drops by the lock round trips while nothing gets safer.",
+    "cause": "A partition is leased to one worker of a group at a time, and the ack fences a worker that lost the lease, so one entity's events are already processed one step at a time. A lock on top of that repeats the guarantee and adds two calls per step.",
+    "fix": "Key the partition by the entity and commit the step as one transaction: that is the mutual exclusion. Keep locks for work that has no message to hang on: a cron job, a singleton, a migration, a pool of N holders (a semaphore).",
+    "source": [
+      "https://queenmq.com/concepts/locks/",
+      "https://queenmq.com/guides/state-machines/"
+    ]
   }
 ]

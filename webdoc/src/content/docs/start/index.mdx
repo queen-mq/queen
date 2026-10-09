@@ -1,5 +1,5 @@
 ---
-title: Overview
+title: "Queen MQ overview: a transactional event broker"
 description: "Queen MQ is a transactional event broker: every entity gets its own ordered partition, and every step a service takes on an event commits as one entry."
 type: overview
 tier: use
@@ -25,6 +25,9 @@ digest: >-
   broker. PostgreSQL tables stream in and out through built-in connectors, and an S3 sink writes
   queues to a bucket as JSONL or Parquet. Apache 2.0; the image is ghcr.io/queen-mq/queen:latest,
   built for linux/amd64 and linux/arm64.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): cluster.rs reads QUEEN_LINK_TOKEN, the token of a standby cluster's reads. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): TransactionBuilder.js gained guard(lock) and kv.check. Nothing
+# this page states changes.
 ---
 
 **A message queue is the smallest thing Queen MQ does.**
@@ -92,13 +95,16 @@ ZooKeeper or sidecar beside it. For availability you run three or five nodes as 
 every entry is written to a majority of them before you get an answer, any node takes any request
 (a follower forwards writes to the leader), and the cluster keeps serving while a majority is up.
 
+Releases before 2.0.0 (2026-10-03) kept their data in PostgreSQL. 2.0 replaced it with this log,
+and a 2.0 node does not read a 1.x database: see the [changelog](/reference/changelog/).
+
 We keep each tenant inside one raft group, and that is what lets a transaction be a single log
 entry, with no coordinator and no two-phase commit. The price is that one leader orders all of a
 tenant's writes. A cluster can run several raft groups (`QUEEN_RAFT_GROUPS`), each with its own
 leader, so tenants spread their load over the nodes. See [cluster](/operate/cluster/).
 
 You talk to it in JSON over HTTP, so curl is a complete client, or through the SDKs for JavaScript,
-Python, Go, Rust, C++ and PHP, the last with a Laravel queue driver. Existing Kafka producers and
+Python, Go, Rust, C++ and PHP, the last with a [Laravel queue driver](/guides/laravel/). Existing Kafka producers and
 consumers can connect, unchanged, to a Kafka wire-protocol facade that runs inside the same process
 once you turn it on, PostgreSQL tables stream in and out through built-in connectors, and an S3
 sink writes queues to a bucket. The binary serves the dashboard and Prometheus metrics too, and, when you
@@ -114,8 +120,10 @@ pushed and consumed 1,000,000 messages a second through one queue at every parti
 tried, from 200 to ten million, with an end-to-end p99 between 103 and 163 ms. An exactly-once step
 of 10 messages committed in 3 ms at the median, and one raft group topped out between 7,000 and
 9,000 such transactions a second (2026-10-01, with Kafka, Redpanda and Pulsar measured on the same
-machines). The latest Jepsen campaign, on 2.0.0-beta.3, ran 65 tests under kill -9, partitions,
-pauses, clock jumps and power loss, and all 65 were valid. Every number, with its conditions and
+machines). The latest full Jepsen campaign, on the code of 2.1.0, ran 153 tests under kill -9,
+partitions, pauses, clock jumps and power loss: 152 were valid, and the other, judged invalid on
+test nodes whose clocks had drifted apart, was valid when it ran again
+([Jepsen](/benchmarks/jepsen/)). Every number, with its conditions and
 the places where other systems did better, is on [benchmarks](/benchmarks/), and what the
 guarantees cover is on [guarantees](/concepts/guarantees/).
 
@@ -132,6 +140,9 @@ guarantees cover is on [guarantees](/concepts/guarantees/).
   the partition.
 - Ephemeral queues lose what a node held when it crashes, because their contents are not in the
   log.
+
+When one of these rules Queen out, [when not to use Queen MQ](/start/when-not-to-use/) names what
+to use instead.
 
 ## Next
 

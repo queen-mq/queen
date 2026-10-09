@@ -1,9 +1,10 @@
 ---
-title: Kafka clients
-description: "Kafka clients producing and consuming through the facade inside Queen, beside Queen's own clients and Kafka 4.3.1 on the same machines: rate, partition count, CPU, what made the facade fast, and what is still open."
+title: "Benchmark: Kafka clients through Queen's facade"
+description: "Kafka clients (franz-go) producing and consuming through the facade inside Queen, beside Queen's own clients and Kafka 4.3.1 on the same machines: rate, partition count, CPU, what made the facade fast, and what is still open."
 type: reference
 tier: operate
 sidebar:
+  label: "Kafka clients"
   order: 6
 sourceOfTruth:
   - protocols/queen-kafka/src/conn.rs
@@ -15,7 +16,9 @@ Queen speaks the Kafka wire protocol from inside the broker process (`QUEEN_KAFK
 so an existing producer or consumer can point at Queen and keep its code. We measured what that
 costs with the same load generator, built on franz-go, that drove Kafka itself. After a night of
 work on the facade, Kafka clients see the latency Queen's own clients see, and at a million
-messages a second a little better.
+messages a second a little better. At 1,000,000 msg/s on 200 partitions the facade's e2e p99 was
+91 ms on the final build, against 146 ms for Queen's own clients (2.0.0-beta.2) and 18 ms for Kafka
+4.3.1 itself; the facade ran the code of 2.0.0-beta.5 on 2026-10-02.
 
 ## The shape
 
@@ -25,7 +28,7 @@ clients were nine franz-go processes on three load machines, with `acks=all`, id
 producers, lz4, a 5 ms linger and classic consumer groups. The Queen cluster ran the facade on
 every node, with the broker settings of the native runs. The builds are those of the facade work
 that was merged as `b51e4419` (2.0.0-beta.5): `qk3` on 2026-10-01, and the final build on
-2026-10-02 for the row marked so. Runs: `benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/`
+2026-10-02 for the row marked so. Runs: [`benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka/`](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-09-30-kafka-pulsar/runs/queen-kafka)
 (`README-c3.txt` there maps tags to builds).
 
 ## Rate

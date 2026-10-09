@@ -1,0 +1,68 @@
+# W12 failover: a standby cluster is promoted (workload/failover.clj).
+# Six nodes: n1 to n3 are the source, n4 to n6 the standby.
+#
+#   cd /root/jepsen-failover && NODES=n1,n2,n3,n4,n5,n6 RUNS=/root/runs-failover \
+#     BIN=/root/bin/queen ./run-campaign.sh matrix-failover.txt
+#
+# Every test: the standby follows for half the time limit while the other
+# faults run on both clusters, then the failover, then the promoted cluster
+# serves under the same faults. What is judged: no write answered by a standby
+# before its promotion; the promoted log is a prefix of the source's, record
+# for record; a transaction whole or absent; a planned switch loses nothing;
+# after a crash no acknowledged write is missing while a later one is there;
+# the promoted cluster keeps its own writes.
+#
+# 1. Smoke, no other fault, 3 minutes each. Read both results before the rest
+#    runs: `replayed` and `own-acked` must be above 0 (the checker answers
+#    unknown, not valid, when they are not), and a crash must show a
+#    `lost-count` that fits `link-before-stop`.
+# 2. A crash of the source while faults run.
+# 3. A planned switch, with faults before and after it.
+# 4. Transactions across partitions: one log entry each.
+# 5. The same again, for the tests whose outcome depends most on timing.
+# 6. A crash that finds the standby 10 s behind (--failover crash-behind: the
+#    two clusters cannot hear each other for 10 s, then the source dies). On a
+#    healthy pair the standby is milliseconds behind and sections 2 to 5 lose
+#    nothing; these lose about 10 s of writes, and what is judged is that
+#    nothing older is lost and that a transaction is lost whole.
+#
+# 2 tests of 180 s and 25 of 300 s: about 2 hours 30.
+
+# --- 1. smoke
+fo-crash-smoke          --workload failover --standby-nodes 3 --failover crash --nemesis none --time-limit 180 --rate 200
+fo-planned-smoke        --workload failover --standby-nodes 3 --failover planned --nemesis none --time-limit 180 --rate 200
+
+# --- 2. crash
+fo-crash-kill           --workload failover --standby-nodes 3 --failover crash --nemesis kill --time-limit 300 --rate 200
+fo-crash-part           --workload failover --standby-nodes 3 --failover crash --nemesis partition --time-limit 300 --rate 200
+fo-crash-pause          --workload failover --standby-nodes 3 --failover crash --nemesis pause --time-limit 300 --rate 200
+fo-crash-lz-kill        --workload failover --standby-nodes 3 --failover crash --lazyfs --nemesis kill --time-limit 300 --rate 200
+fo-crash-restart        --workload failover --standby-nodes 3 --failover crash --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+fo-crash-clock          --workload failover --standby-nodes 3 --failover crash --nemesis clock --time-limit 300 --rate 200
+fo-crash-all            --workload failover --standby-nodes 3 --failover crash --nemesis all --time-limit 300 --rate 200
+
+# --- 3. planned
+fo-planned-kill         --workload failover --standby-nodes 3 --failover planned --nemesis kill --time-limit 300 --rate 200
+fo-planned-part         --workload failover --standby-nodes 3 --failover planned --nemesis partition --time-limit 300 --rate 200
+fo-planned-pause        --workload failover --standby-nodes 3 --failover planned --nemesis pause --time-limit 300 --rate 200
+fo-planned-lz-kill      --workload failover --standby-nodes 3 --failover planned --lazyfs --nemesis kill --time-limit 300 --rate 200
+fo-planned-restart      --workload failover --standby-nodes 3 --failover planned --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+
+# --- 4. transactions
+fo-crash-txn-kill       --workload failover --standby-nodes 3 --failover crash --txn --nemesis kill --time-limit 300 --rate 200
+fo-crash-txn-part       --workload failover --standby-nodes 3 --failover crash --txn --nemesis partition --time-limit 300 --rate 200
+fo-crash-txn-lz-kill    --workload failover --standby-nodes 3 --failover crash --txn --lazyfs --nemesis kill --time-limit 300 --rate 200
+fo-planned-txn-kill     --workload failover --standby-nodes 3 --failover planned --txn --nemesis kill --time-limit 300 --rate 200
+fo-planned-txn-part     --workload failover --standby-nodes 3 --failover planned --txn --nemesis partition --time-limit 300 --rate 200
+
+# --- 5. again
+fo-crash-kill-2         --workload failover --standby-nodes 3 --failover crash --nemesis kill --time-limit 300 --rate 200
+fo-crash-part-2         --workload failover --standby-nodes 3 --failover crash --nemesis partition --time-limit 300 --rate 200
+fo-crash-lz-kill-2      --workload failover --standby-nodes 3 --failover crash --lazyfs --nemesis kill --time-limit 300 --rate 200
+fo-crash-txn-kill-2     --workload failover --standby-nodes 3 --failover crash --txn --nemesis kill --time-limit 300 --rate 200
+
+# --- 6. the standby is behind
+fo-behind               --workload failover --standby-nodes 3 --failover crash-behind --nemesis none --time-limit 300 --rate 200
+fo-behind-txn           --workload failover --standby-nodes 3 --failover crash-behind --txn --nemesis none --time-limit 300 --rate 200
+fo-behind-kill          --workload failover --standby-nodes 3 --failover crash-behind --nemesis kill --time-limit 300 --rate 200
+fo-behind-txn-part      --workload failover --standby-nodes 3 --failover crash-behind --txn --nemesis partition --time-limit 300 --rate 200

@@ -1,5 +1,5 @@
 ---
-title: Reference
+title: "Reference: HTTP API, configuration, limits"
 description: "The exact contract: every HTTP route, the transaction body, configuration, metrics, errors, limits, the Kafka API window and queenctl."
 type: reference
 tier: use
@@ -18,7 +18,8 @@ digest: >-
   top-level `kv`, `timers` and `positions` arrays and answers HTTP 200 both for a commit
   (`success: true`) and for a rollback (`success: false` with a `reason`). Engine errors are
   `{"error", "code"}`: 503 `retry`, `no_leader` or `timeout` mean retry, 503 `outcome_unknown`
-  means an ack may or may not have applied, 429 `overloaded` and 507 `storage_full` mean wait. The
+  means an ack may or may not have applied, 503 `standby` means the cluster is a standby that
+  replays another cluster and takes no writes, 429 `overloaded` and 507 `storage_full` mean wait. The
   broker is configured only by environment variables, exposes Prometheus metrics on GET
   /metrics/prometheus, accepts Kafka clients through a built-in wire-protocol facade
   (QUEEN_KAFKA_EMBEDDED=true), streams PostgreSQL tables in and out through connectors
@@ -27,6 +28,10 @@ digest: >-
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the digest names 503 `standby`.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks; facade/real.rs
+# refuses a transaction's KV `check` below cluster version 5; facade/mod.rs names that refusal
+# (KvFailure::NotYet). Nothing this page states changes.
 ---
 
 This section is the contract written down: what every route takes and answers, what each status

@@ -1,9 +1,10 @@
 ---
-title: Configuration reference
+title: "Laravel configuration reference: config/queen.php"
 description: "Every key of config/queen.php and the queen queue connection: the 20 values read from the environment, the default the code applies, what each key does, the settings refused at start, and the upgrade from 2.0.0."
 type: reference
 tier: use
 sidebar:
+  label: "Configuration reference"
   order: 9
 sourceOfTruth:
   - clients/client-php/config/queen.php
@@ -49,6 +50,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-07 (no nack without --auto-ack): ConsumeCommand nacks a throw only with
 # --auto-ack. This page names queen:consume only for its --lease default and the lease renewal keys, which
 # do not change; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): Queen.php gained lock(), semaphore() and locks(); the connector
+# and its configuration do not use them. Nothing this page states changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. Since PHP client 2.1.0 the

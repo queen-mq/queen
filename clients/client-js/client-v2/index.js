@@ -16,6 +16,11 @@
 
 export { Queen } from './Queen.js'
 export { Admin } from './admin/Admin.js'
+// Locks and semaphores. Reached as `queen.lock()`, `queen.semaphore()` and
+// `queen.locks`; the classes are exported for typing. `LOCK_NOT_HELD` is the
+// `.code` of the error a guard throws for a handle that holds nothing, and of
+// the reason `lock.signal` aborts with.
+export { Lock, Locks, LOCK_NOT_HELD } from './locks/Locks.js'
 // RAM-class queues (EPHEMERAL_QUEUES.md §4). Reached as `queen.ephemeral`; the
 // class is exported for typing and for embedding it on a client of your own.
 // The two `.code`s the family's 404s carry, which are NOT the same fact:

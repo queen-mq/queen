@@ -66,6 +66,7 @@ mod http;
 mod inner;
 pub mod kv;
 pub mod lb;
+pub mod locks;
 pub mod queue;
 pub mod streams;
 pub mod supervision;
@@ -85,6 +86,7 @@ pub use ephemeral::{Ephemeral, EphemeralBatch, EphemeralPushed};
 pub use error::{Error, Result};
 pub use kv::{Kv, KvOutcome};
 pub use lb::Strategy;
+pub use locks::{Lock, LockOptions, Locks};
 pub use queue::{PopOutcome, QueueBuilder};
 pub use supervision::SupervisionConfig;
 pub use timers::Timers;
@@ -96,9 +98,10 @@ pub use queen_protocol::{
     AckResult, AckStatus, AutopilotEcho, DlqParams, DlqResponse, EphemeralAck, EphemeralAckResult,
     EphemeralDelivered, EphemeralOptions, EphemeralOutcome, EphemeralPolicy, EphemeralStatus,
     EphemeralWindowBuffer, Expiry, KvOpKind, KvOperation, KvPrecondition, KvReason, KvResult,
-    KvRow, Message, PushItem, PushResult, PushStatus, QueueOptions, SeekRequest, SubscriptionMode,
-    TimerListRow, TimerOpKind, TimerOperation, TimerPage, TimerPeek, TimerResult, TimerStatus,
-    TraceRequest, TransactionResponse, TxnPushItem, TxnResultItem,
+    KvRow, LockHolder, LockOpKind, LockOperation, LockReason, LockResult, Message, PushItem,
+    PushResult, PushStatus, QueueOptions, SeekRequest, SubscriptionMode, TimerListRow, TimerOpKind,
+    TimerOperation, TimerPage, TimerPeek, TimerResult, TimerStatus, TraceRequest,
+    TransactionResponse, TxnPushItem, TxnResultItem,
 };
 
 use crate::buffer::BufferManager;
@@ -174,6 +177,44 @@ impl Queen {
     /// [`Queen::transaction`].
     pub fn kv(&self) -> Kv {
         Kv::new(Arc::clone(&self.inner))
+    }
+
+    /// A lock: one holder at a time, held as a lease of `ttl`, with a fencing
+    /// token.
+    ///
+    /// Creating the handle sends nothing. [`Lock::acquire`] answers a `bool`;
+    /// while the permit is held the handle renews it in the background and
+    /// [`Lock::lost`] resolves if it is lost.
+    ///
+    /// It is a lease, not a mutex: it expires, and a holder that outlived it
+    /// keeps running. [`TransactionBuilder::guard`] is what makes the WORK
+    /// exclusive — see [`locks`] for the whole argument.
+    pub fn lock(&self, name: impl Into<String>, ttl: Duration) -> Lock {
+        Lock::new(Arc::clone(&self.inner), name, LockOptions::new(ttl))
+    }
+
+    /// A lock with its own options: an owner, manual renewal, a renew period.
+    /// With [`LockOptions::limit`] above 1 it is one permit of a semaphore.
+    pub fn lock_with(&self, name: impl Into<String>, options: LockOptions) -> Lock {
+        Lock::new(Arc::clone(&self.inner), name, options)
+    }
+
+    /// A semaphore: at most `limit` holders at a time. One handle is ONE
+    /// permit; make a handle per holder. Every holder of one name passes the
+    /// same limit — it is the caller's and is stored nowhere.
+    pub fn semaphore(&self, name: impl Into<String>, limit: u32, ttl: Duration) -> Lock {
+        Lock::new(
+            Arc::clone(&self.inner),
+            name,
+            LockOptions::new(ttl).limit(limit),
+        )
+    }
+
+    /// The four lock operations as the broker speaks them, with no state
+    /// kept: for [`Locks::get`] (who holds it?) and for a caller that carries
+    /// the token itself.
+    pub fn locks(&self) -> Locks {
+        Locks::new(Arc::clone(&self.inner))
     }
 
     /// Scheduled deliveries: a message that becomes real later.

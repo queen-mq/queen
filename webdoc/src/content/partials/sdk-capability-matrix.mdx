@@ -1,11 +1,11 @@
 ---
 params: []
-description: "What each of the six Queen SDKs implements, and the sixteen rows where they diverge."
+description: "What each of the six Queen SDKs implements, and the eighteen rows where they diverge."
 ---
 
 Parity here is a claim about the surface, not about shared code: each client is written natively
-in its own idiom. These sixteen rows are that surface, read out of `clients/` on this tree. Seven
-of them are full parity across all six clients; the other nine are where a client stops.
+in its own idiom. These eighteen rows are that surface, read out of `clients/` on this tree. Eight
+of them are full parity across all six clients; the other ten are where a client stops.
 
 | Capability | JavaScript | Python | Go | Rust | PHP | C++ |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -15,9 +15,11 @@ of them are full parity across all six clients; the other nine are where a clien
 | Dead-letter reader | yes | yes | yes | yes | yes | yes |
 | HTTP 429 policy, separate from the retry counter | yes | yes | yes | yes | yes | yes |
 | `kv` and `timers` riders on a transaction | yes | yes | yes | yes | yes | yes |
-| Key/value: the seven operations | yes | yes | yes | yes | yes | five of seven |
+| Key/value: the eight operations | yes | yes | yes | yes | yes | six of eight |
 | Timers: `schedule`, `cancel`, `peek`, `list` | yes | yes | yes | yes | yes | two of four |
 | `once`, the idempotency marker in one call | yes | yes | no | no | no | no |
+| Locks and semaphores, with `guard` on a transaction | yes | yes | yes | yes | yes | yes |
+| Lock renewal in the background | yes | yes | yes | yes | no | no |
 | `Admin` facade | yes | yes | yes | yes | yes | no |
 | `affinity` load-balancing strategy | yes | yes | yes | yes | yes | no |
 | Streams DSL over `/streams/v1/*` | yes | yes | yes | yes | no | no |
@@ -26,10 +28,10 @@ of them are full parity across all six clients; the other nine are where a clien
 | `Host` override independent of the address dialled | yes | no | no | yes | no | no |
 | `pop` reports a failure instead of an empty result | no | no | yes | yes | yes | no |
 
-The nine divergent rows, with their conditions:
+The ten divergent rows, with their conditions:
 
-- **Key/value.** The seven operations are `get`, `getMany`, `getPrefix`, `put`, `putIfAbsent`,
-  `delete` and `incr`. C++ wraps five of them: `getMany` and `getPrefix` have no method, and both
+- **Key/value.** The eight operations are `get`, `getMany`, `getPrefix`, `put`, `putIfAbsent`,
+  `delete`, `incr` and `check`. C++ wraps six of them: `getMany` and `getPrefix` have no method, and both
   remain reachable through `POST /api/v1/kv` on the shared `HttpClient`. `getPrefix` inside a
   transaction is refused by the broker in every client, which is its rule and not a client's gap.
 - **Timers.** C++ has `schedule` and `cancel` only; `peek` and `list` are reads and stay on
@@ -40,6 +42,12 @@ The nine divergent rows, with their conditions:
   `transaction().once`) fold `putIfAbsent` plus `required` into the question people actually ask,
   "did I win?". The other four write the `putIfAbsent` themselves, which is the same wire and one
   line longer.
+- **Lock renewal.** A lock is a lease its holder renews. The JavaScript, Python, Go and Rust
+  handles renew by themselves, every third of the lifetime, and signal a lock that was lost. PHP
+  and C++ have no background task to renew from: their handle has `keepAlive()` (`keep_alive()` in
+  C++), a checkpoint to call inside the work loop, which renews when a third of the lifetime has
+  passed and returns false once the lock is gone. A PHP or C++ holder that never calls it keeps
+  the lock for one lifetime only.
 - **`kv` on a streams operator context.** No client has it, so it is not a row. Inside a stream the
   state primitive is `state_ops`, which commits with the sink and the ack in the cycle's own
   transaction; a key/value write from an operator would not, and that atomicity is the thing the

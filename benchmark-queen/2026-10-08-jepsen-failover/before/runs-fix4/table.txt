@@ -1,0 +1,12 @@
+test                   verdict      acked replayed     lost  lost-ms    older  pl-lost   diverg      own  refused late-ref  late-ms  1st-own  anomalies
+fo-repro-primaries-1   valid         6688     6581      115     1096        0        0        0     3862    10281        0      nil        4  
+fo-repro-primaries-2   valid         5659     5663        0      nil        0        0        0     4030    11441        2     5461       12  
+fo-repro-primaries-3   valid         6676     6676        0      nil        0        0        0     4520    10118        0      nil       27  
+fo-repro-primaries-4   valid         6098     6102        0      nil        0        0        0     3321    11098        0      nil       26  
+fo-repro-primaries-5   valid         6141     6142        0      nil        0        0        0     4498    10301        0      nil       39  
+fo-repro-primaries-6   INVALID/false     4701     4707        0      nil        0        0        0     3547    12273        1    12105       23  refused-but-present
+fo-repro-one-1         valid         8683     8691        0      nil        0        0        0     6987     8372        0      nil        8  
+fo-repro-one-2         valid         7039     7043        0      nil        0        0        0     6783     9954        0      nil       17  
+fo-repro-planned-1     valid         7497     7497        0      nil        0        0        0     3321    10968      204     3202        8  
+fo-repro-planned-2     valid         6843     6846        0      nil        0        0        0     4282    12136       26    52693       14  
+fo-crash-smoke         valid         8038     8038        0      nil        0        0        0     7152     7358        0      nil        7  

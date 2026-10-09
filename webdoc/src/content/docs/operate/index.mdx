@@ -1,5 +1,5 @@
 ---
-title: Run a node
+title: "Run a Queen node with Docker or from source"
 description: "Start one Queen node with Docker or from source: what it needs, what lives in its data directory, what it survives, and how to upgrade it. The front door of the Operate section."
 type: how-to
 tier: operate
@@ -29,7 +29,11 @@ digest: >-
   authentication is off by default; the proxy built into the same binary
   (`QUEEN_PROXY_EMBEDDED=true`, its own `QUEEN_PROXY_PORT`) adds tenants, API keys, quotas, TLS
   and a control plane over `/api/cp/*`. `GET /health` answers 200 `healthy` or 503 `settling`,
-  `GET /metrics/prometheus` serves the metrics, and the dashboard is served by the same binary.
+  `GET /metrics/prometheus` serves the metrics, and the dashboard is served by the same binary. A
+  second cluster can run as a standby of the first (`QUEEN_LINK_SOURCE` on the standby,
+  `QUEEN_LINK_TOKEN` on the source): it replays the first cluster's committed log asynchronously,
+  answers reads, refuses writes with 503 `standby`, and becomes an ordinary cluster on
+  `POST /api/v1/system/link/promote`, without the writes it had not read yet.
 # sourceOfTruth re-read 2026-10-03 (cb0329f74): the Dockerfile's queenctl -X paths moved to the /v2 module path; the image and what it runs are unchanged. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the /health example shows 2.0.1 at cluster version 4 (a new node starts there); the test stack gained the QUEEN_TEST_IDLE_UNLOAD_S knob, nothing this page states.
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/ephemeral.rs reads the pop's commit at delivery from commitOnDelivery or from autoAck, its deprecated alias. Nothing this page states changes.
@@ -41,6 +45,19 @@ digest: >-
 # sourceOfTruth re-read 2026-10-08 (8c6239d23): the Dockerfile compiles the broker in three layers (dependencies,
 # path crates, broker) instead of over cache mounts; the image and what it runs are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): a cluster can have a standby: the digest says so, and the section's list names the new page. The node and replicator code a single node runs is as described.
+# sourceOfTruth re-read 2026-10-08 (locks): main.rs declares the locks module; facade/real.rs refuses a
+# transaction's KV `check` below cluster version 5. A new node reports clusterVersion 5, which the /health
+# example now shows.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; replicator/mod.rs and node.rs carry the new error and call. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (Dockerfile build cache, 8c6239d2): the Rust stage compiles in
+# cached layers; the image, its port, its data directory and the queenctl it carries are unchanged.
+# sourceOfTruth re-read 2026-10-09 (8c6239d2): Dockerfile changes compilation cache layers;
+# the runtime stage, embedded dashboard, queenctl, paths and startup commands are unchanged.
+# sourceOfTruth re-read 2026-10-09 (2.1.0): server/Cargo.toml moves the broker to 2.1.0, which the /health
+# example now shows.
+# sourceOfTruth re-read 2026-10-09 (queen-protocol 1.4.0): server/Cargo.toml requires queen-protocol 1.4.0, the
+# wire-types crate with the lock types; the broker's version and build are unchanged. Nothing this page states changes.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its
@@ -93,7 +110,7 @@ curl -s localhost:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.4","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4}}
+{"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5}}
 ```
 
 The dashboard is at `http://localhost:6632/`, and the image carries the CLI, so
@@ -194,3 +211,5 @@ broker's port is plain HTTP; TLS is on the proxy's listener or in front of the n
 - [Monitoring](/operate/monitoring/): the dashboard, `/health`, the metrics and the log lines worth
   an alert.
 - [Recovery](/operate/recovery/): what to do when a node, a disk or the majority is gone.
+- [Standby cluster](/operate/standby/): a second cluster that replays the first one's log, to take
+  over on when the whole first one is gone.

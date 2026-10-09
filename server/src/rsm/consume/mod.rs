@@ -259,6 +259,10 @@ pub struct Engine {
     /// Test override of the dedup authority (`None`: the process's).
     mode_override: RwLock<Option<IndexMode>>,
     pub(crate) leader: AtomicBool,
+    /// This node leads a STANDBY cluster ([`crate::rsm::link`]): it takes no
+    /// client command, and this engine is not told it leads until the cluster
+    /// is promoted. Set by the batcher, read by the leader's intake.
+    standby: AtomicBool,
     /// Bumped at every leadership change: work begun under an older one is
     /// dropped.
     pub(crate) gen: AtomicU64,
@@ -349,6 +353,7 @@ impl Engine {
             seg: RwLock::new(None),
             mode_override: RwLock::new(None),
             leader: AtomicBool::new(false),
+            standby: AtomicBool::new(false),
             gen: AtomicU64::new(0),
             serve_after_us: AtomicI64::new(0),
             drain_until_us: AtomicI64::new(0),
@@ -434,6 +439,18 @@ impl Engine {
     /// The skew grace a foreign lease is held for.
     pub(crate) fn grace(&self) -> i64 {
         self.k.skew_us
+    }
+
+    /// The batcher read this cluster's place in a link
+    /// ([`crate::rsm::link`]): a standby (`true`) or not.
+    pub fn set_standby(&self, on: bool) {
+        self.standby.store(on, Ordering::Release);
+    }
+
+    /// Whether this node leads a standby cluster: the leader's intake then
+    /// answers every client command with the standby refusal.
+    pub fn is_standby(&self) -> bool {
+        self.standby.load(Ordering::Acquire)
     }
 
     /// The batcher planned a cycle under committed cluster version `version`

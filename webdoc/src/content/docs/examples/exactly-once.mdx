@@ -1,9 +1,10 @@
 ---
-title: Charge each order once
+title: "Exactly-once order charger, full example"
 description: "A card charger that survives redelivery: the charge marker and the ack commit in one transaction, so five orders, a failure and a full replay still make five charges."
 type: example
 tier: use
 sidebar:
+  label: "Charge each order once"
   order: 4
 sourceOfTruth:
   - examples/apps/js/exactly-once.mjs
@@ -15,6 +16,8 @@ verifiedBy:
   - examples/apps/py/exactly_once.py
   - examples/apps/http/exactly-once.sh
 # sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): TransactionBuilder.js gained guard(lock) and kv.check, Kv.js
+# gained check. The example uses neither. Nothing this page states changes.
 ---
 
 A consumer that charges cards will see some orders twice: a lease runs out while the card network

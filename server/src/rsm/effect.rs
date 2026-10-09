@@ -77,7 +77,9 @@
 //! same rule: a node sends a new shape only when the cluster version, read
 //! from its own committed state, says every member decodes it. The receiver
 //! of a payload it cannot decode answers a retryable error, never a panic
-//! (`facade/remote.rs`), so a shape sent too early degrades to a retry.
+//! (`facade/remote.rs`), so a shape sent too early degrades to a retry. The
+//! first shape minted this way is the KV `check` op ([`VERSION_5`]): a
+//! catalogue version with no effect kind of its own.
 //!
 //! # What is modelled here
 //!
@@ -117,11 +119,22 @@ pub const VERSION_3: u16 = 3;
 /// [`Kind::TraceAppend`] and [`Kind::TraceExpire`], which keep their old apply.
 pub const VERSION_4: u16 = 4;
 
+/// The fifth catalogue version: the KV `check` op
+/// ([`crate::rsm::planner::kv::KvOp::Check`]), a precondition that writes
+/// nothing. No effect kind is minted at it and no entry ever reports it: a
+/// check logs nothing, so the log a version-5 leader writes is byte for byte
+/// a version-4 log. What is new is a FORWARDED COMMAND SHAPE — a follower's
+/// prepared KV call or transaction that carries the op — and a release before
+/// this one, leading, cannot decode it. A receiver therefore takes a `check`
+/// only where [`cluster_allows`]`(cluster, VERSION_5)`; below it the call is
+/// refused, retryable (`kv_check_needs_cluster_version_5`).
+pub const VERSION_5: u16 = 5;
+
 /// The highest catalogue version this build can decode and apply. The
 /// replicated cluster version (§12.8) may be lower; it never rises above the
 /// minimum of every member's value (D20). A node reports it to the leader on
 /// every append it answers.
-pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_4 as u32;
+pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_5 as u32;
 
 /// The cluster version of a store that holds none, and of a member that
 /// reports none: 3. Every node of a 2.0.0-beta.1 cluster or later reads it

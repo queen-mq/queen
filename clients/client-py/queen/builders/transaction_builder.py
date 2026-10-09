@@ -58,6 +58,10 @@ class TransactionBuilder:
         # index -> thunk, for the kv ops whose expiry was given as an INSTANT
         # (`until=`). See _materialize_kv().
         self._kv_deferred: Dict[int, Any] = {}
+        # Lock handles whose permit this bundle commits under (`guard(lock)`).
+        # Kept as handles, not as ops: the token is read at SEND time, because
+        # a lock's own renewal changes it.
+        self._guards: List[Any] = []
 
     def ack(
         self,
@@ -182,6 +186,51 @@ class TransactionBuilder:
             _rebuilder(kv_ops.put_if_absent, ns, key, value, ttl_seconds=ttl_seconds, forever=forever, ttl=ttl, until=until, required=True),
         )
 
+    def guard(self, lock: Any) -> "TransactionBuilder":
+        """Commit this bundle only while ``lock`` is held.
+
+            lock = client.lock("daily-report", ttl_seconds=30)
+            if not await lock.acquire():
+                return
+            res = await client.transaction().guard(lock).queue("reports").push([...]).commit()
+            if not res:        # the lock is somebody else's now; nothing was pushed
+                return
+
+        The guard is a ``check`` of the permit's row at the lock's token, with
+        ``required``: the broker judges it in the same log entry as the acks,
+        pushes, keys and timers beside it. A holder that was paused past its
+        lifetime and replaced commits NOTHING -- which the lock by itself
+        cannot promise, since nobody stops an expired holder from running.
+
+        The token is read when ``commit()`` sends, and a lock's own background
+        renewal moves it. A guard that lost to this handle's own renewal is
+        sent again with the new token; one that lost to another holder is the
+        verdict, returned like ``once``'s (``success: False``,
+        ``reason: "kv_precondition"``), and the handle then reports the lock
+        lost.
+
+        ``commit()`` raises ``LockNotHeldError`` when the handle holds nothing:
+        a step that asked for a guard must not go out without one.
+        """
+        if not callable(getattr(lock, "guard", None)) or not callable(getattr(lock, "_settled", None)):
+            raise TypeError("guard() takes a lock from client.lock() or client.semaphore()")
+        self._guards.append(lock)
+        return self
+
+    def _failed_guard(self, result: Dict[str, Any]) -> Any:
+        """The lock whose guard is the precondition a rolled-back bundle
+        names, if it is one of this bundle's. ``failedIndex`` is in the FLAT
+        space of ``results[]``: every pushed item and every ack first, then
+        the ``kv`` rider, whose first ops are the guards."""
+        index = result.get("failedIndex")
+        if not self._guards or isinstance(index, bool) or not isinstance(index, int):
+            return None
+        flat_operations = sum(
+            len(op.get("items") or []) if op.get("type") == "push" else 1 for op in self._operations
+        )
+        at = index - flat_operations
+        return self._guards[at] if 0 <= at < len(self._guards) else None
+
     def timer(self, queue: str) -> "TransactionTimerBuilder":
         """Schedule or cancel a timer as part of this transaction."""
         return TransactionTimerBuilder(self, queue)
@@ -229,7 +278,7 @@ class TransactionBuilder:
             Exception: If the transaction failed for any reason other than a
                 lost KV precondition.
         """
-        if not self._operations and not self._kv_ops and not self._timer_ops:
+        if not self._operations and not self._kv_ops and not self._timer_ops and not self._guards:
             logger.error("TransactionBuilder.commit", "No operations to commit")
             raise Exception("Transaction has no operations to commit")
 
@@ -239,24 +288,58 @@ class TransactionBuilder:
                 "operation_count": len(self._operations),
                 "required_leases": len(self._required_leases),
                 "kv_count": len(self._kv_ops),
+                "guard_count": len(self._guards),
                 "timer_count": len(self._timer_ops),
             },
         )
 
-        body: Dict[str, Any] = {
-            "operations": self._operations,
-            "requiredLeases": list(set(self._required_leases)),  # Unique leases
-        }
-        # Omitted entirely when unused, not sent as [] or null: a bundle that
-        # carries neither rider must put exactly today's bytes on the wire, or
-        # the compatibility argument of §6.3 is only half made.
-        if self._kv_ops:
-            body["kv"] = self._materialize_kv()
-        if self._timer_ops:
-            body["timers"] = self._timer_ops
+        def build() -> Dict[str, Any]:
+            body: Dict[str, Any] = {
+                "operations": self._operations,
+                "requiredLeases": list(set(self._required_leases)),  # Unique leases
+            }
+            # Omitted entirely when unused, not sent as [] or null: a bundle
+            # that carries neither rider must put exactly today's bytes on the
+            # wire, or the compatibility argument of §6.3 is only half made.
+            # The guards go first: guard i is op i of the rider.
+            if self._guards or self._kv_ops:
+                body["kv"] = [lock.guard() for lock in self._guards] + self._materialize_kv()
+            if self._timer_ops:
+                body["timers"] = self._timer_ops
+            return body
 
         try:
-            result = await self._http_client.post("/api/v1/transaction", body)
+            # A bundle is sent again in ONE case: its guard lost to the lock's
+            # own background renewal, which moved the token between the moment
+            # the body was built and the moment the broker judged it. The row
+            # still names this owner, so the lock is held; nothing committed (a
+            # lost required precondition rolls the whole bundle back), so
+            # sending it again with the new token is the same step, not a
+            # second one.
+            attempt = 0
+            while True:
+                for lock in self._guards:
+                    await lock._settled()
+                result = await self._http_client.post("/api/v1/transaction", build())
+                if result.get("success") or result.get("reason") != "kv_precondition":
+                    break
+                lock = self._failed_guard(result)
+                if lock is None:
+                    break
+                value = result.get("value")
+                own_renewal = (
+                    result.get("kvReason") == "version"
+                    and isinstance(value, dict)
+                    and value.get("owner") == lock.owner
+                )
+                if not own_renewal:
+                    # Expired, released, or another holder's: the lock is gone.
+                    lock._mark_lost("guard")
+                    break
+                await lock._settled()
+                if attempt >= 3 or not lock.held:
+                    break
+                attempt += 1
 
             if not result.get("success"):
                 # §8.3: the ONE outcome that comes back instead of being
@@ -331,6 +414,11 @@ class TransactionKvBuilder:
 
     def delete(self, ns: str, key: str, **kwargs: Any) -> TransactionBuilder:
         return self._add(kv_ops.delete(ns, key, **kwargs))
+
+    def check(self, ns: str, key: str, **kwargs: Any) -> TransactionBuilder:
+        """A precondition on a key the bundle does not write. With
+        ``required=True`` it is the bundle's gate; without, only a look."""
+        return self._add(kv_ops.check(ns, key, **kwargs))
 
     def incr(self, ns: str, key: str, **kwargs: Any) -> TransactionBuilder:
         return self._add(kv_ops.incr(ns, key, **kwargs), _rebuilder(kv_ops.incr, ns, key, **kwargs))

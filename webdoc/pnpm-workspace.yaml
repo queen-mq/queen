@@ -7,3 +7,12 @@ allowBuilds: # pnpm 11
 ignoredBuiltDependencies: # pnpm 10
   - esbuild
   - sharp
+# One patch to Nimbus's head component: on the homepage the WebSite JSON-LD
+# node is named "Queen MQ" (it carried the page title, which search engines
+# read as the site name), and the WebSite and every WebPage's isPartOf carry
+# the @id the site-wide graph in astro.config.ts declares. The key is pinned
+# to 0.8.2: bumping nimbus-docs fails the install until the patch is redone
+# with `pnpm patch @cloudflare/nimbus-docs@<new>` (or dropped, if upstream
+# names the WebSite node itself). scripts/check-seo.mjs checks the name.
+patchedDependencies:
+  '@cloudflare/nimbus-docs@0.8.2': patches/@cloudflare__nimbus-docs@0.8.2.patch

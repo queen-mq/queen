@@ -1,9 +1,10 @@
 ---
-title: Contributing
+title: "Contributing: build, test and change the broker"
 description: "The repository layout, how to build and test the broker, and the rules a change to the engine, the docs or a benchmark claim follows, with the reason for each."
 type: concept
 tier: internals
 sidebar:
+  label: "Contributing"
   order: 4
 sourceOfTruth:
   - CONTRIBUTING.md
@@ -31,6 +32,15 @@ sourceOfTruth:
 # is still 1.88. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (8c6239d23): the Dockerfile compiles the broker in three layers (dependencies,
 # path crates, broker) instead of over cache mounts; the image and what it runs are unchanged. Nothing this page
+# states changes.
+# sourceOfTruth re-read 2026-10-08 (Dockerfile build cache, 8c6239d2): the Rust stage compiles in
+# cached layers; the image, its port, its data directory and the queenctl it carries are unchanged.
+# sourceOfTruth re-read 2026-10-09 (8c6239d2): Dockerfile changes compilation cache layers;
+# the runtime stage, embedded dashboard, queenctl, paths and startup commands are unchanged.
+# sourceOfTruth re-read 2026-10-09 (2.1.0): server/Cargo.toml moves the broker to 2.1.0; its toolchain,
+# features and build commands are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (queen-protocol 1.4.0): server/Cargo.toml requires queen-protocol 1.4.0, the
+# wire-types crate with the lock types; toolchain, features and build commands are unchanged. Nothing this page
 # states changes.
 ---
 

@@ -210,6 +210,24 @@ impl Kv {
         }
     }
 
+    /// Is the key still at `version`? Writes nothing.
+    ///
+    /// `0` asks the opposite: the key must not exist. `applied()` is "the
+    /// precondition held"; when it did not, `reason`, `value` and `version`
+    /// are what a reader would see.
+    ///
+    /// On its own it is a linearizable look. Where it earns its place is
+    /// beside writes, as `KvOperation::check(..).required()` in a
+    /// [`Kv::batch`] or in a transaction
+    /// ([`crate::TransactionBuilder::kv_check`]): everything else then commits
+    /// only if a key the call does not write is unchanged, which is how a
+    /// step is tied to a lock.
+    ///
+    /// Needs a broker at cluster version 5, the first with this operation.
+    pub async fn check(&self, ns: &str, key: &str, version: i64) -> Result<KvResult> {
+        self.one(KvOperation::check(ns, key, version)).await
+    }
+
     // ------------------------------------------------------------ batch
 
     /// Send a batch of operations built by hand.

@@ -44,6 +44,8 @@
 //!   the tenant purge, two nodes to one digest, a snapshot's catch-up, the
 //!   legacy RAM rows beside them, every read route through the facade, and
 //!   the catalogue-version gate in a mixed cluster.
+//! - [`link`] the cluster link (`rsm/link`): a standby proposed the source's
+//!   entries through the mirror holds the source's state.
 
 mod apply;
 mod apply_crash;
@@ -55,6 +57,7 @@ mod delete_race;
 mod edge;
 mod facade;
 mod facade_kv;
+mod facade_locks;
 mod fetch_offsets;
 mod fuzz;
 mod gates;
@@ -62,6 +65,8 @@ mod golden;
 mod keep_overlay;
 mod kv;
 mod kv_crash;
+mod link;
+mod link_cluster;
 mod multipush;
 mod partitions_changed;
 pub(super) mod planner_harness;

@@ -1,5 +1,5 @@
 ---
-title: Guides
+title: "Guides: state machines, webhooks, streams, Kafka"
 description: "Things to build with Queen MQ: state machines, exactly-once charges, webhooks, streams, ephemeral request/reply, Kafka clients and Laravel queues, each with code that runs and the edges it has."
 type: overview
 tier: use
@@ -18,13 +18,15 @@ digest: >-
   window state and sink push as one entry. Ephemeral queues keep messages in memory only: every
   node of a cluster serves every partition through one owner per (queue, partition), a graceful
   stop (SIGTERM) hands the contents to the next owner, and a crash loses what the crashed node
-  held; behind the proxy they are tenant-safe on a single node only in 2.0.0-beta.6. Kafka
+  held. Kafka
   clients connect through the Kafka wire protocol built into the broker
   (QUEEN_KAFKA_EMBEDDED=true), where a topic is a queue; Laravel uses the PHP client as a queue
   connection.
 sidebar:
   order: 1
 # sourceOfTruth re-read 2026-10-03 (cb0329f74): the JS transaction builder now puts each acked message's leaseId on its ack as well as in requiredLeases (every SDK does in 2.0.0). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): TransactionBuilder.js gained guard(lock) and kv.check. Nothing
+# this page states changes.
 ---
 
 Queen commits a few things together that usually live in different systems: the ack of a message,

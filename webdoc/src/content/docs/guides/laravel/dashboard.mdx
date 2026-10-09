@@ -1,10 +1,11 @@
 ---
-title: Supervisor dashboard
+title: "Laravel supervisor dashboard at /queen"
 description: "Turn on and authorize the Laravel panel at /queen: supervisors on every host, what each queue holds now, jobs per class, failed jobs with a one-click retry, tuning advice, and fenced pause, continue and terminate."
 type: how-to
 tier: operate
 status: preview
 sidebar:
+  label: "Supervisor dashboard"
   order: 6
 sourceOfTruth:
   - clients/client-php/config/queen.php
@@ -67,6 +68,11 @@ sourceOfTruth:
 # every queen connection from config/queen.php, as QueenConnector does and as the configuration page
 # already says; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps the queue and status filters used by the dashboard links; depth, lag and analytics reads are unchanged.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): phase2.rs gains the two /api/v1/system/link routes; the routes this page reads are as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): planner/kv.rs gained the `check` op and states that a key's
+# versions only rise. The supervisor's KV reads and writes are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (dashboard store tests): dashboard/store.rs changes how its own tests name their scratch directories, no code the broker runs. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). Nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the

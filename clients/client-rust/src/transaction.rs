@@ -64,6 +64,10 @@ pub struct TransactionBuilder {
     operations: Vec<TxnOperation>,
     leases: Vec<String>,
     kv: Vec<KvOperation>,
+    /// Lock handles whose permit this bundle commits under. Kept as handles,
+    /// not as operations: the token is read when `commit` sends, because a
+    /// lock's own renewal changes it.
+    guards: Vec<crate::locks::Lock>,
     timers: Vec<TimerOperation>,
 }
 
@@ -74,6 +78,7 @@ impl TransactionBuilder {
             operations: Vec::new(),
             leases: Vec::new(),
             kv: Vec::new(),
+            guards: Vec::new(),
             timers: Vec::new(),
         }
     }
@@ -238,6 +243,37 @@ impl TransactionBuilder {
         self.kv(KvOperation::delete(ns, key))
     }
 
+    /// Stage a `check` that **rolls the bundle back** unless the key is still
+    /// at `version` (`0`: unless the key is absent).
+    ///
+    /// The gate on a key the bundle does not write. Like the marker's, its
+    /// failure is a verdict and not an error:
+    /// [`TransactionResponse::lost_precondition`] reports it.
+    pub fn kv_check(self, ns: &str, key: &str, version: i64) -> Self {
+        self.kv(KvOperation::check(ns, key, version).required())
+    }
+
+    /// Commit this bundle only while `lock` is held.
+    ///
+    /// The guard is a `check` of the permit's row at the lock's token,
+    /// `required`: the broker judges it in the same log entry as the acks,
+    /// pushes, keys and timers beside it. A holder that was paused past its
+    /// lifetime and replaced commits NOTHING — which the lock by itself
+    /// cannot promise, since nobody stops an expired holder from running.
+    ///
+    /// The token is read when [`Self::commit`] sends, and the lock's own
+    /// background renewal moves it. A guard that lost to that renewal is sent
+    /// again with the new token; one that lost to another holder is the
+    /// verdict ([`TransactionResponse::lost_precondition`]), and the handle
+    /// then reports the lock lost.
+    ///
+    /// `commit` fails with [`Error::Invalid`] when the handle holds nothing: a
+    /// step that asked for a guard must not go out without one.
+    pub fn guard(mut self, lock: &crate::locks::Lock) -> Self {
+        self.guards.push(lock.clone());
+        self
+    }
+
     // ---------------------------------------------------- timer riders
 
     /// Stage a timer operation, built with [`crate::timers`] or by hand.
@@ -282,7 +318,10 @@ impl TransactionBuilder {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.operations.is_empty() && self.kv.is_empty() && self.timers.is_empty()
+        self.operations.is_empty()
+            && self.kv.is_empty()
+            && self.guards.is_empty()
+            && self.timers.is_empty()
     }
 
     /// Send it.
@@ -321,17 +360,78 @@ impl TransactionBuilder {
             ));
         }
 
-        let req = TransactionRequest::new(self.operations)
+        // Where the `kv` rider starts in the flat `results` space: one slot
+        // per pushed item and one per ack come first.
+        let ops_flat: usize = self
+            .operations
+            .iter()
+            .map(|op| match op {
+                TxnOperation::Push { items } => items.len(),
+                TxnOperation::Ack(_) => 1,
+            })
+            .sum();
+        let base = TransactionRequest::new(self.operations)
             .with_required_leases(self.leases)
             .with_kv(self.kv)
             .with_timers(self.timers);
-        let resp: Option<TransactionResponse> = self
-            .inner
-            .http
-            .post_json("/api/v1/transaction", &req, &Opts::default())
-            .await?;
-        let resp =
-            resp.ok_or_else(|| Error::Decode("transaction returned an empty body".into()))?;
+        let guards = self.guards;
+
+        // A bundle is sent again in ONE case: its guard lost to the lock's
+        // own background renewal, which moved the token between the moment
+        // the body was built and the moment the broker judged it. The row
+        // still names this owner, so the lock is held; nothing committed (a
+        // lost required precondition rolls the whole bundle back), so sending
+        // it again with the new token is the same step, not a second one.
+        let mut attempt = 0;
+        let resp = loop {
+            let mut req = base.clone();
+            if !guards.is_empty() {
+                // The guards go first in `kv`: guard `i` is op `i` of the rider.
+                let mut kv = Vec::with_capacity(guards.len() + req.kv.len());
+                for lock in &guards {
+                    lock.settled().await;
+                    kv.push(lock.guard().ok_or_else(|| {
+                        Error::Invalid(format!(
+                            "lock '{}' is not held; there is nothing to guard with",
+                            lock.name()
+                        ))
+                    })?);
+                }
+                kv.append(&mut req.kv);
+                req.kv = kv;
+            }
+            let resp: Option<TransactionResponse> = self
+                .inner
+                .http
+                .post_json("/api/v1/transaction", &req, &Opts::default())
+                .await?;
+            let resp =
+                resp.ok_or_else(|| Error::Decode("transaction returned an empty body".into()))?;
+            let lost_guard = resp.lost_precondition().and_then(|lost| {
+                let i = lost.failed_index?.checked_sub(ops_flat)?;
+                guards.get(i).map(|lock| (lock, lost))
+            });
+            let Some((lock, lost)) = lost_guard else {
+                break resp;
+            };
+            let own_renewal = lost.reason == Some(queen_protocol::KvReason::Version)
+                && lost
+                    .value
+                    .as_ref()
+                    .and_then(|v| v.get("owner"))
+                    .and_then(|o| o.as_str())
+                    == Some(lock.owner());
+            if !own_renewal {
+                // Expired, released, or another holder's: the lock is gone.
+                lock.mark_lost();
+                break resp;
+            }
+            lock.settled().await;
+            if attempt >= 3 || !lock.held() {
+                break resp;
+            }
+            attempt += 1;
+        };
 
         if !resp.success && resp.lost_precondition().is_none() {
             return Err(Error::Invalid(format!(

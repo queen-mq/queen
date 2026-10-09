@@ -180,7 +180,12 @@
 
 /* Wide tables scroll within this box at all widths instead of overflowing the
    page; short tables still fill it via the inner `width: 100%`. */
+/* `position: relative` makes the scroller the containing block of the
+   absolutely positioned `.sr-only` text inside its cells. Without it those
+   spans were placed against the page and pushed /benchmarks/laravel/ 42px
+   wider than a 320-360px screen. */
 .docs-content :where(.nb-table-scroll) {
+  position: relative;
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;

@@ -1,9 +1,10 @@
 ---
-title: How we measure
+title: "Benchmark methodology: machines, settings, commands"
 description: "The machines, the load generators and what they count, each system's settings and durability, Queen's non-default settings, the commands that ran every benchmark in this section, and the archive the runs live in."
 type: reference
 tier: operate
 sidebar:
+  label: "How we measure"
   order: 9
 sourceOfTruth:
   - server/src/rsm/replicator/raft/log_store.rs
@@ -11,6 +12,7 @@ sourceOfTruth:
   - server/src/rsm/qlog/set.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): trace expiry runs in bounded steps. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): the added QLog index read leaves the benchmark settings, write path and durability contract unchanged.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): log_store.rs gains what a standby cluster's reads and its seed need (the purged log id, a vote written at a seed); the write path these runs measure is as it was. Nothing this page states changes.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one
@@ -131,7 +133,7 @@ BIN=/root/qr/queen-b1 SECS=36000 ./soak.sh soak6   # 10 hours, a fault every 90 
 ./soak-collect.sh soak6                            # fetch everything into runs/soak6
 ```
 
-Kafka, Redpanda, Pulsar and the transactions, from `benchmark-queen/2026-09-30-kafka-pulsar/`:
+Kafka, Redpanda, Pulsar and the transactions, from [`benchmark-queen/2026-09-30-kafka-pulsar/`](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-09-30-kafka-pulsar):
 
 ```bash
 (cd mqload && GOWORK=off ./build.sh)

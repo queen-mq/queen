@@ -44,6 +44,17 @@ import { config } from "virtual:nimbus/config";
 // belongs to its enforcer, `scripts/check-brief.mjs`, so there is one number and
 // one place to argue with it.
 
+/**
+ * The facts an agent needs before any other, printed under the one-line
+ * definition at the top of `/llms.txt` and of this brief: what kind of
+ * software it is, its licence, its language and where the source lives. The
+ * definition says what Queen does; without this line an agent that stops at
+ * the header cannot tell an open-source broker from a hosted product.
+ */
+export const IDENTITY_LINE =
+  "Open source under Apache 2.0, written in Rust, one binary per node with no database beside it. " +
+  "Source: https://github.com/queen-mq/queen";
+
 interface SidebarGroupish {
   label?: unknown;
   autogenerate?: { directory?: unknown };
@@ -193,6 +204,8 @@ export async function buildBrief(): Promise<string> {
     `# ${config.title}, complete summary`,
     "",
     `> ${config.description ?? ""}`,
+    "",
+    IDENTITY_LINE,
     "",
     "This is the whole product in one document, for an agent that has a question",
     "about Queen MQ rather than about one page of its documentation. Every figure",

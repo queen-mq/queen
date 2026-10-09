@@ -1,9 +1,10 @@
 ---
-title: Timers
+title: "Timers: scheduled and delayed messages"
 description: "A timer is a message promised now and delivered later: an upsert by queue and timerKey that fires a real message into a real queue, through the log."
 type: concept
 tier: use
 sidebar:
+  label: "Timers"
   order: 6
 sourceOfTruth:
   - server/src/rsm/planner/timers.rs
@@ -16,6 +17,11 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-js/test-v2/timers.js
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): TraceRecord is refused below cluster version 4. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the batcher gains a standby mode, in which no timer fires (the source's fires arrive as entries), and a stopping driver no longer waits on an entry that timed out; timers on an ordinary cluster are as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): auth.rs makes /api/v1/locks read-write; the timer levels are as
+# they were. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only; timers are as they were. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader; timers are as they were. Nothing this page states changes.
 ---
 
 A timer schedules a message for later. When it fires, the broker pushes the message into a real
@@ -114,7 +120,7 @@ await queen.transaction()
 - The standalone route (`POST /api/v1/timers`) refuses a delay beyond 90 days
   (`QUEEN_TIMERS_MAX_HORIZON_S`, 403) and a payload above 1 MiB (`QUEEN_TIMERS_MAX_PAYLOAD_BYTES`),
   takes at most 256 operations per call, and spends one token of the tenant's KV write rate per
-  call. In 2.0.0-beta.6 a timer scheduled inside a transaction is not checked against the horizon
+  call. As of 2.0.4 a timer scheduled inside a transaction is not checked against the horizon
   or the payload ceiling; only the body and entry sizes bound it.
 - One call holds one operation per queue and `timerKey`.
 - Timer firing is Jepsen-tested (W10, in the P26 campaign on 2.0.0-beta.3): a timer fires at most

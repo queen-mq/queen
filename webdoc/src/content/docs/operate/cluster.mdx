@@ -1,9 +1,10 @@
 ---
-title: Run a cluster
+title: "Run a three or five node Raft cluster"
 description: "Three or five Queen nodes as one Raft cluster: a Compose file to try it on a laptop, how the leader and the followers share the work, what each failure costs, rolling upgrades, and what to set in production."
 type: how-to
 tier: operate
 sidebar:
+  label: "Run a cluster"
   order: 2
 sourceOfTruth:
   - deploy/compose/three-node/compose.yaml
@@ -31,6 +32,12 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-07 (image platforms): compose.yaml no longer pins linux/amd64, because the images are published for linux/arm64 too. On an Apple-silicon laptop the three arm64 nodes of 2.0.2 passed their healthchecks 5.8 s after `docker compose up -d --wait`, in two runs; the page says six seconds.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the raft port also answers a standby cluster's reads, under a token of its own (QUEEN_LINK_TOKEN, cluster.rs), and the purge keeps the log for a standby too: two lines under Limits. Membership, the hold for followers, the engine and the routes are as described.
+# sourceOfTruth re-read 2026-10-08 (locks): effect.rs adds catalogue version 5 (the KV `check` op, a forwarded
+# shape and no effect kind); the upgrade section names the raise from 4 to 5 and the health example shows 5.
+# main.rs declares the locks module; facade/real.rs refuses a transaction's KV `check` below cluster version
+# 5.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; replicator/mod.rs names that refusal (`Unwritable`) and the call that drops a pipeline, node.rs forwards it; phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). "What each failure costs" gains the row for a leader no quorum has acknowledged for 1.5 s. Nothing else this page states changes.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They
@@ -111,7 +118,7 @@ curl -s localhost:36632/health | jq -c .raft
 ```
 
 ```json
-{"role":"follower","leader":true,"term":3,"applied":13,"commit":13,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4,"apply":{"failure":null,"skipped":[]}}
+{"role":"follower","leader":true,"term":3,"applied":13,"commit":13,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"apply":{"failure":null,"skipped":[]}}
 ```
 
 `applied` equal to `commit`, the same 13 the leader reports, means node 3 has applied everything
@@ -244,6 +251,7 @@ above.
 | A follower stops or crashes | The other two keep committing, and its clients move to another URL. When it starts again it catches up from the leader. |
 | The leader gets SIGTERM | It hands leadership over first: under a second to a new leader in the run above. |
 | The leader crashes (kill -9, OOM, a lost host) | The followers wait out the election timeout (1 to 2 s, `QUEEN_RAFT_ELECTION_MS`) and elect a new leader: 3.7 s in the Compose cluster under emulation, at most 4 s in the recovery rehearsals. |
+| A leader hears from no quorum for 1.5 s | It keeps new writes waiting, in order, instead of logging them, until a quorum answers again or another node leads. Raft takes no write from a leader that no quorum has acknowledged for 2 s, so a client sees a slower answer, or `503` with code `timeout` when its deadline comes first. |
 | A leader hears from no quorum for 3 s | It hands leadership to the most caught-up voter, so a leader that can send but not receive does not hold every write hostage. |
 | A majority is down | Nothing commits. Requests wait out their deadline and fail with `503`, code `no_leader` or `timeout`, and `Retry-After: 1`, until a majority is back. |
 | A node was away more than 10 minutes (`QUEEN_RAFT_PURGE_HOLD_S`, 600) | The leader stops holding its log for it. If the entries it missed are purged, the node receives a snapshot, exits with code 75 and loads it on its next start, and a restart policy brings it back. |
@@ -320,9 +328,13 @@ exists from 2.0.0-beta.2 on; the move to beta.1 was a stop-all upgrade.
 
 2.0.1 is such a release: once every node runs it, the cluster moves from version 3 to 4 and
 traces start going to their own file on disk. From then on 2.0.0 and 2.0.1-beta refuse to start
-on that data, so going back means an empty data directory. To keep the way back open while a new
-release bakes, set `QUEEN_RAFT_CLUSTER_VERSION_MS=0` on every node: the leader then never raises
-the version, and removing the setting later raises it within a second.
+on that data, so going back means an empty data directory. 2.1.0 is the
+next one: it moves the cluster from 4 to 5, which turns on the KV `check` operation that
+[locks](/concepts/locks/) are guarded with, and from then on 2.0.4 and older refuse to start on
+that data. To keep the way back open while a new release bakes, set
+`QUEEN_RAFT_CLUSTER_VERSION_MS=0` on every node: the leader then never raises the version, and
+removing the setting later raises it within a second. While the version stays at 4, a call that
+carries a `check` answers 503, and locks can be taken and released but not used as a guard.
 
 ## Ephemeral queues in a cluster
 
@@ -341,10 +353,10 @@ through node 1. When node 3 came back, nodes 1 and 2 shipped 13 partitions back 
 
 The messages live in one node's memory, so a crash (kill -9, OOM, a lost host) loses what that node
 owned. Of six messages spread over the cluster, a SIGKILL of node 3 left the two that node 2 owned.
-Two issues are still open in 2.0.0-beta.6. A hand-over to a node that is still restarting can drop
-the partition's messages, which we have seen during rolling restarts. And through the
-[proxy](/operate/tenants/), a request forwarded to the owning node does not keep its tenant, so
-ephemeral queues behind the proxy are safe on a single node only, for now.
+Since 2.0.0 a restarting node takes partitions only once its listener answers, and a hand-over
+that does not land is tried again for up to 30 seconds. Through the [proxy](/operate/tenants/), a
+request forwarded to the owning node keeps its tenant, which the owner trusts only with the cluster
+token, so every node needs the same `QUEEN_RAFT_TOKEN`.
 
 ## In production
 
@@ -409,7 +421,7 @@ on `PORT`:
 The leader checks every change before it writes it. One change runs at a time, a live majority has
 to exist before and after (`409 no_quorum` otherwise), the last voter cannot be removed, and a
 learner is promoted only within 1,000 entries of the leader (`QUEEN_RAFT_PROMOTE_MAX_LAG`;
-`409 learner_behind`, or `"force": true`). On a cluster at version 4, a learner is added only once
+`409 learner_behind`, or `"force": true`). On a cluster at version 4 or later, a learner is added only once
 its node is running and answering, so start the new node first. Every change is idempotent, so a
 lost answer is safe to repeat. To replace node 3 after its disk is gone:
 
@@ -455,16 +467,18 @@ wrong), and [Backups and restore](/operate/recovery-backups/) covers snapshots o
 
 ## Limits
 
-- Three containers on one host, as in the Compose file, all go down with that host.
+- Three containers on one host, as in the Compose file, all go down with that host. So does a
+  cluster whose machines share a zone or a Kubernetes cluster, when that goes: a
+  [standby cluster](/operate/standby/) elsewhere replays this one and takes over.
 - Losing a majority stops writes, and losing a majority of the disks for good can lose acknowledged
   data.
 - `/health` can stay 200 on a node that lost its quorum, and on an empty node that never caught up
   (F8 and F2 in `test/recovery/FINDINGS.md`). Alert on the write probe.
-- The raft port is plain HTTP with a shared token: keep it on a private network.
+- The raft port is plain HTTP with a shared token: keep it on a private network. A standby cluster
+  reads this one on that port, with a token of its own.
 - Peer addresses are fixed at the first boot. Changing them on a live cluster is a forced recovery.
 - Ephemeral messages live in their owner's memory: a crash loses that node's share, and a hand-over
-  to a node that is still restarting can drop a partition's messages. Behind the proxy they are
-  safe on a single node only (2.0.0-beta.6).
+  that has not landed after 30 seconds is dropped.
 - One leader orders every write of a group. Adding nodes to a group adds no write throughput.
 
 [Kubernetes](/operate/kubernetes/) turns this cluster into a StatefulSet, and

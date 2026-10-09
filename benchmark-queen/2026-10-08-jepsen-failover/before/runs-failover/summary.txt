@@ -1,0 +1,15 @@
+2026-10-08T17:01:31Z start fo-crash-smoke: --workload failover --standby-nodes 3 --failover crash --nemesis none --time-limit 180 --rate 200
+2026-10-08T17:05:22Z done  fo-crash-smoke: valid store=/root/jepsen-failover/store/queen-failover-none_standby=3_crash_offload=on_lanes=16/2026-10-08T17:01:45.056320241Z log=/root/runs-failover/fo-crash-smoke.log
+2026-10-08T17:05:22Z start fo-planned-smoke: --workload failover --standby-nodes 3 --failover planned --nemesis none --time-limit 180 --rate 200
+2026-10-08T17:09:12Z done  fo-planned-smoke: valid store=/root/jepsen-failover/store/queen-failover-none_standby=3_planned_offload=on_lanes=16/2026-10-08T17:05:36.937185655Z log=/root/runs-failover/fo-planned-smoke.log
+2026-10-08T17:09:12Z start fo-crash-kill: --workload failover --standby-nodes 3 --failover crash --nemesis kill --time-limit 300 --rate 200
+2026-10-08T17:15:02Z done  fo-crash-kill: valid store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_crash_offload=on_lanes=16/2026-10-08T17:09:27.216677067Z log=/root/runs-failover/fo-crash-kill.log
+2026-10-08T17:15:02Z start fo-crash-part: --workload failover --standby-nodes 3 --failover crash --nemesis partition --time-limit 300 --rate 200
+2026-10-08T17:20:58Z done  fo-crash-part: UNKNOWN store=/root/jepsen-failover/store/queen-failover-partition_p=one,primaries,majority,majorities-ring_standby=3_crash_offload=on_lanes=16/2026-10-08T17:15:22.555152062Z log=/root/runs-failover/fo-crash-part.log
+2026-10-08T17:20:58Z start fo-crash-pause: --workload failover --standby-nodes 3 --failover crash --nemesis pause --time-limit 300 --rate 200
+2026-10-08T17:26:53Z done  fo-crash-pause: valid store=/root/jepsen-failover/store/queen-failover-pause_t=one,primaries,majority,all_standby=3_crash_offload=on_lanes=16/2026-10-08T17:21:13.101005408Z log=/root/runs-failover/fo-crash-pause.log
+2026-10-08T17:26:53Z start fo-crash-lz-kill: --workload failover --standby-nodes 3 --failover crash --lazyfs --nemesis kill --time-limit 300 --rate 200
+2026-10-08T17:34:43Z done  fo-crash-lz-kill: UNKNOWN store=/root/jepsen-failover/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_crash_lazyfs_offload=on_lanes=16/2026-10-08T17:27:07.105361709Z log=/root/runs-failover/fo-crash-lz-kill.log
+2026-10-08T17:34:43Z start fo-crash-restart: --workload failover --standby-nodes 3 --failover crash --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-08T17:34:49Z stopped by hand after fo-crash-lz-kill:: the narrower matrix runs first
+2026-10-08T17:58:10Z matrix matrix-failover-rest.txt finished

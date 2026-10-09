@@ -1,9 +1,10 @@
 ---
-title: Quickstart
+title: "Quickstart: run a node and commit a transaction"
 description: "Run one Queen MQ node with Docker, push and consume an order with curl, then commit the ack, a receipt and the order's new state as one transaction."
 type: quickstart
 tier: use
 sidebar:
+  label: "Quickstart"
   order: 2
 sourceOfTruth:
   - Dockerfile
@@ -32,6 +33,13 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (8c6239d23): the Dockerfile compiles the broker in three layers (dependencies,
 # path crates, broker) instead of over cache mounts; the image and what it runs are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): /health gains a `link` block only on a cluster that is part of a standby pair, which the example's node is not. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks; facade/real.rs
+# refuses a transaction's KV `check` below cluster version 5; planner/kv.rs gained the `check` op and states
+# that a key's versions only rise; TransactionBuilder.js gained guard(lock) and kv.check. A new node reports
+# clusterVersion 5, which the /health example now shows.
+# sourceOfTruth re-read 2026-10-09 (8c6239d2): Dockerfile changes compilation cache layers;
+# the runtime stage, embedded dashboard, queenctl, paths and startup commands are unchanged.
 ---
 
 You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the
@@ -49,7 +57,7 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
    ```
 
    ```json
-   {"status":"healthy","engine":"raft","version":"2.0.4","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":4,"kinds":4}}
+   {"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5}}
    ```
 
    That is the whole installation. There is no database to start first, because the node keeps
@@ -307,5 +315,6 @@ docker rm -f queen && docker volume rm queen-data
 <CardGrid>
   <LinkCard title="The model" href="/concepts/" description="Partitions, consumer groups, state, time and identity, and the one commit that holds them together." />
   <LinkCard title="Run a cluster" href="/operate/cluster/" description="Three nodes on your laptop with Docker Compose: replication, a leader hand-off and a rolling upgrade." />
+  <LinkCard title="Laravel: keep your jobs" href="/guides/laravel/" description="Run your Laravel jobs on Queen: the same job classes and queue:work, without Redis and Horizon." />
   <LinkCard title="Build with an AI agent" href="/start/ai-agents/" description="Connect Claude Code, Cursor, VS Code or Codex to Queen's MCP server: the model, tested code and the traps, while you build." />
 </CardGrid>

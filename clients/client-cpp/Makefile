@@ -49,7 +49,7 @@ else
 endif
 
 # Targets
-.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers conflation run-conflation buffer run-buffer ephemeral run-ephemeral autopilot run-autopilot consumer run-consumer unit run-unit clean help
+.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers locks run-locks conflation run-conflation buffer run-buffer ephemeral run-ephemeral autopilot run-autopilot consumer run-consumer unit run-unit clean help
 
 all: test
 
@@ -93,6 +93,21 @@ bin/test_kv_timers: test_kv_timers.cpp queen_client.hpp ../server/vendor/json.hp
 
 run-kvtimers: bin/test_kv_timers
 	./bin/test_kv_timers
+
+# Locks, semaphores, `check` and guard(lock): the exact request bodies and what
+# the handle does with the answers, against an in-process httplib server. No
+# broker needed; give the binary a server URL to run the live half as well.
+locks: bin/test_locks
+	@echo "Lock wire test suite built successfully!"
+	@echo "Run with: ./bin/test_locks            (wire only)"
+	@echo "      or: ./bin/test_locks <url>      (wire + a live broker)"
+
+bin/test_locks: test_locks.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(INCLUDES) test_locks.cpp -o bin/test_locks $(LIBS)
+
+run-locks: bin/test_locks
+	./bin/test_locks
 
 # Build the conflation wire-contract suite (PLAN_CONFLATION.md §4, §3.1). Also
 # broker-free, and it has to be: the two things it pins -- that an old broker's
@@ -178,9 +193,9 @@ run-consumer: bin/test_consumer
 	./bin/test_consumer
 
 # Every suite that needs no broker, in one command.
-unit: retry429 kvtimers conflation buffer ephemeral autopilot consumer
+unit: retry429 kvtimers locks conflation buffer ephemeral autopilot consumer
 
-run-unit: run-retry429 run-kvtimers run-conflation run-buffer run-ephemeral run-autopilot run-consumer
+run-unit: run-retry429 run-kvtimers run-locks run-conflation run-buffer run-ephemeral run-autopilot run-consumer
 
 # Run tests (requires Queen server running)
 run-test: bin/test_client
@@ -234,6 +249,8 @@ help:
 	@echo "  make run-retry429 - Build and run proxy contract tests (no server needed)"
 	@echo "  make kvtimers     - Build KV/timer wire contract tests"
 	@echo "  make run-kvtimers - Build and run KV/timer wire tests (no server needed)"
+	@echo "  make locks        - Build lock/semaphore wire contract tests"
+	@echo "  make run-locks    - Build and run lock wire tests (no server needed)"
 	@echo "  make conflation   - Build conflation wire contract tests"
 	@echo "  make run-conflation - Build and run conflation wire tests (no server needed)"
 	@echo "  make buffer       - Build buffer contract tests (backpressure/lossless retry)"

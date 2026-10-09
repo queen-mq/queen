@@ -589,6 +589,15 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     if path.starts_with("/api/v1/kv") || path.starts_with("/api/v1/timers") {
         return ReadWrite;
     }
+    // Locks: one route, POST only, and its body may take, renew or give back
+    // a permit — a KV write each. A `get` in that body is a read, and it is
+    // ReadWrite all the same, as a `get` in `POST /api/v1/kv` is: the level
+    // belongs to the route, which cannot be opened to a read-only token for
+    // one of its four operations. The console reads the same rows through
+    // `POST /api/v1/resources/kv/list`, which a read-only token may call.
+    if path.starts_with("/api/v1/locks") {
+        return ReadWrite;
+    }
     // EPHEMERAL_QUEUES.md §3.9 — everything else on the family: pop, ack,
     // configure, reset and the queue delete. They already land on the
     // fallthrough, and the whole point of writing them is that the fallthrough
@@ -1121,6 +1130,22 @@ mod tests {
         // And POST /api/v1/kv — the batch that can write — is untouched by it.
         assert_eq!(
             route_access_level(&post, "/api/v1/kv"),
+            AccessLevel::ReadWrite
+        );
+    }
+
+    /// The locks route takes and gives back permits: a read-write token, and
+    /// neither a read-only one (its `get` shares a body with `acquire`) nor a
+    /// produce-only one.
+    #[test]
+    fn the_locks_route_is_read_write() {
+        assert_eq!(
+            route_access_level(&Method::POST, "/api/v1/locks"),
+            AccessLevel::ReadWrite
+        );
+        // Nothing is served under it; whatever is asked there is not a read.
+        assert_eq!(
+            route_access_level(&Method::GET, "/api/v1/locks/daily-report"),
             AccessLevel::ReadWrite
         );
     }

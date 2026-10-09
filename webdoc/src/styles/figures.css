@@ -37,11 +37,21 @@
 .qf {
 	margin: 1.75rem 0;
 }
+/* A figure keeps a min-width so its labels stay legible, which on a phone
+   makes the frame scroll sideways. The two `local` covers scroll with the
+   figure and the two `scroll` shadows stay on the frame's edges, so a shadow
+   shows only on a side that has more to see: a scroll cue with no script. */
 .qf-frame {
+	--qf-cue: color-mix(in oklab, var(--nb-foreground) 32%, transparent);
 	overflow-x: auto;
 	border: 1px solid var(--nb-border);
 	border-radius: 0.625rem;
-	background: var(--nb-card);
+	background:
+		linear-gradient(to right, var(--nb-card) 30%, transparent) left / 2.5rem 100% no-repeat local,
+		linear-gradient(to left, var(--nb-card) 30%, transparent) right / 2.5rem 100% no-repeat local,
+		radial-gradient(farthest-side at 0 50%, var(--qf-cue), transparent) left / 1rem 100% no-repeat scroll,
+		radial-gradient(farthest-side at 100% 50%, var(--qf-cue), transparent) right / 1rem 100% no-repeat scroll,
+		var(--nb-card);
 	padding: 1rem 0.75rem;
 }
 .qf-svg {

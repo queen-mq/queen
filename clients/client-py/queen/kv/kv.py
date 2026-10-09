@@ -284,6 +284,31 @@ class KV:
             _ops.incr(ns, key, delta=delta, min=min, max=max, ttl_seconds=ttl_seconds, forever=forever, ttl=ttl, until=until, required=required)
         )
 
+    async def check(
+        self,
+        ns: str,
+        key: str,
+        *,
+        expect: Any = _ops.UNSET,
+        required: bool = False,
+    ) -> KvResult:
+        """Is the key still at version ``expect``? Writes nothing.
+
+        ``expect=0`` asks the opposite: the key must not exist. ``applied`` is
+        "the precondition held"; when it did not, ``reason`` (``version``,
+        ``absent`` or ``exists``), ``value`` and ``version`` are what a reader
+        would see.
+
+        On its own it is a linearizable look. Where it earns its place is
+        beside writes, with ``required=True``: in ``batch``, or as
+        ``tx.kv.check(...)``, it makes everything else commit only if a key the
+        call does not write is unchanged -- which is how a step is tied to a
+        lock (``client.lock``).
+
+        Needs a broker at cluster version 5, the first with this operation.
+        """
+        return await self._one(_ops.check(ns, key, expect=expect, required=required))
+
     # -----------------------------------------------------------------
     # The gate (§18.8).
     # -----------------------------------------------------------------

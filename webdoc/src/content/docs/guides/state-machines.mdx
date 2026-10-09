@@ -23,6 +23,10 @@ sidebar:
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): facade/real.rs reads traces from the new on-disk trace store and exports queen_consume_engine, queen_consume_parts_total and queen_raft_traces_*. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the facade can open a node as a member of a standby cluster, which takes no writes until it is promoted; a step on an ordinary cluster is as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): TransactionBuilder.js gained guard(lock) and kv.check, Kv.js
+# gained check; facade/real.rs refuses a transaction's KV `check` below cluster version 5. The section on
+# locks now points at the Locks page for work that has no entity.
 ---
 
 Give every entity its own partition, keep its state in one KV entry, and commit each transition as
@@ -162,13 +166,16 @@ transaction, and `payment_timeout` arrives in state `paid`, where the table says
 nothing. If the timeout lands first, the order is cancelled and the payment behind it is refunded.
 Every worker sees one sequence of events per order, so every worker decides the same way.
 
+Work that has no entity to hang on is the exception: a nightly job that must run in one place has
+no partition to serialize it. That is what [locks](/concepts/locks/) are for.
+
 That is what we mean by no outbox and no scheduler. The events a step emits are pushed in the
 same commit as its state, so they exist exactly when the state changed, and the timeout is a timer
 in that same commit, so it exists exactly when the order is waiting for a payment.
 
 ## A full program
 
-The booking saga below runs the same pattern with three states (`held`, `confirmed`, `expired`),
+The booking saga below ([the saga example](/examples/saga/)) runs the same pattern with three states (`held`, `confirmed`, `expired`),
 end to end, in the examples suite. Its timer fires into a separate `expiries` queue, so its
 compensator reads the state again before it acts, which is the check the order above gets for free
 by firing into the entity's own partition.
@@ -218,10 +225,11 @@ redelivery. Emit it as an event and handle it with a marker, as in
 [charge a card once](/guides/exactly-once/).
 
 The state is one KV value, 64 KiB by default (`QUEEN_KV_MAX_VALUE_BYTES`). `POST /api/v1/timers`
-refuses a timer more than 90 days out (`QUEEN_TIMERS_MAX_HORIZON_S`), but in 2.0.0-beta.6 a timer
+refuses a timer more than 90 days out (`QUEEN_TIMERS_MAX_HORIZON_S`), but as of 2.0.4 a timer
 scheduled inside a transaction is not checked against that horizon, so keep your own delays
 sensible.
 
-The transaction, the queue and timer firing are all covered by Jepsen: the P26 campaign on
-2.0.0-beta.3 ran them under kills, partitions, clock faults and power loss, 65 tests, all valid
+The transaction, the queue and timer firing are all covered by Jepsen: the full campaign on the
+code of 2.1.0 ran them under kills, partitions, clock faults and power loss, 153 tests, 152 valid
+and the other valid when run again
 ([guarantees](/concepts/guarantees/), [Jepsen](/benchmarks/jepsen/)).

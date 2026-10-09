@@ -1,9 +1,10 @@
 ---
-title: HTTP API
+title: "HTTP API reference and OpenAPI"
 description: "Base URL, which node to call, authentication, status codes, every route the broker serves, reads by offset, the control-plane API and the OpenAPI documents."
 type: reference
 tier: use
 sidebar:
+  label: "HTTP API"
   order: 2
 sourceOfTruth:
   - server/src/handlers/raft.rs
@@ -26,6 +27,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (commitOnDelivery): handlers/data.rs and handlers/ephemeral.rs name the pop's commit at delivery commitOnDelivery; the parameter example names it, and the OpenAPI document lists it on every pop route, with the old name marked deprecated.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): 503 `standby` joins the status codes, /health gains `raft.link` on a linked cluster, and two /api/v1/system/link routes join the generated table: a row, a clause and a paragraph.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks and auth.rs
+# makes it read-write (the generated route table lists it); the status-code table now names the lock
+# verdict. A new node reports clusterVersion 5. main.rs, facade/mod.rs, facade/real.rs and
+# proxy_embed.rs only carry the new module and the `check` refusal below version 5.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no
@@ -46,7 +52,7 @@ curl -s http://localhost:6632/health
 |---|---|---|
 | `PORT` | `6632` | The HTTP port. |
 | `QUEEN_BIND_ADDR` | `0.0.0.0` | The address the listener binds. |
-| `QUEEN_MAX_BODY_BYTES` | `67108864` (64 MiB) | A larger request body is refused with 413 before it is parsed. |
+| `QUEEN_MAX_BODY_BYTES` | `67108864` (64 MiB) | A larger request body is refused with 413 before it is parsed. This 413 is plain text, not the JSON `{error, code}` body. |
 
 The broker's own listener is plain HTTP. TLS is served by the proxy built into the same binary
 (`QUEEN_PROXY_EMBEDDED=true`), from `QUEEN_TLS_CERT` and `QUEEN_TLS_KEY`, two PEM file paths that
@@ -101,8 +107,9 @@ the role names themselves are settings (`JWT_ROLE_ADMIN` and its siblings):
 
 Write-only is deliberately not a step on a ladder: a producer token can push into a queue it can
 never read. A missing or invalid token answers 401, a valid one with too little access 403. The
-paths in `JWT_SKIP_PATHS` (default `/health,/metrics/prometheus,/metrics,/`) skip authentication;
-an entry ending in `/` skips the paths under it as well.
+paths in `JWT_SKIP_PATHS` (default `/health,/metrics/prometheus,/metrics,/`) skip authentication.
+An entry longer than `/` that ends in `/` skips the paths under it as well; `/` alone matches only
+the root path, so the default does not open the API.
 
 ### Tenancy header
 
@@ -126,16 +133,17 @@ read it there:
 |---|---|
 | `201` from `POST /api/v1/push` | The request was handled. Each item has its own `status`: `queued`, `duplicate` (its `transactionId` is already in the partition's dedup window, or repeated in the request) or `error`. |
 | `200` from `POST /api/v1/transaction` with `success: false` | Rolled back: nothing was written. `reason` says why. See [transaction](/reference/transaction/). |
-| `200` from the KV and timer routes | A business verdict: `applied: false` (a lost `putIfAbsent`, a version mismatch) or `ok: false` (cancelling a timer that is not pending). |
+| `200` from the KV, lock and timer routes | A business verdict: `applied: false` (a lost `putIfAbsent`, a version mismatch), `acquired: false` (a lock somebody else holds) or `ok: false` (cancelling a timer that is not pending). |
 | `204` from a pop | No message was available before the long-poll ended. |
 | `503` `outcome_unknown` | The leader changed while an ack, nack or DLQ move was being made durable. It may or may not have applied. |
 | `503` `retry`, `no_leader`, `timeout` | The call did not complete. Retry after `Retry-After` (1 s); a write may still have applied, so make it safe to repeat. |
+| `503` `standby` | The cluster is a [standby](/operate/standby/) and takes no writes until it is promoted. Nothing was applied. |
 | `429` `overloaded` | The node's admission budget for writes (pushes, transactions, KV writes, timer schedules) stayed full for the whole hold. Retry after `Retry-After`. |
 | `507` `storage_full` | A node is above its disk high-water mark (`QUEEN_RAFT_DISK_HIGH_PCT`, 85%). Writes that grow storage are refused; acks and deletes still work. |
 
 An engine error body is `{"error": "<message>", "code": "<code>"}`, plus `"leader"` on a 503
-`retry` when the leader is known. The KV and timer routes, the transaction route, the ephemeral
-routes and the authentication layer have shapes of their own. Every code, and what a client does
+`retry` when the leader is known. The KV, lock and timer routes, the transaction route, the
+ephemeral routes and the authentication layer have shapes of their own. Every code, and what a client does
 with it, is on [errors](/reference/errors/).
 
 ## Health
@@ -143,7 +151,8 @@ with it, is on [errors](/reference/errors/).
 `GET /health` answers `200` with `"status": "healthy"` when this node knows a leader and its apply
 lag is within `QUEEN_RAFT_READY_LAG_MS` (2000 ms), and `503` with `"status": "settling"` otherwise.
 The body carries `engine`, `version` and a `raft` block (`role`, `leader`, `term`, `applied`,
-`commit`, `lag`, `storageReady`, `clusterVersion`). Those two conditions are the whole check: the
+`commit`, `lag`, `storageReady`, `clusterVersion`, and `link` on a cluster that is part of a
+[standby](/operate/standby/) pair). Those two conditions are the whole check: the
 node does not contact the other members to answer, so a probe sees what this node believes. What
 that means during a quorum loss is on [recovery](/operate/recovery/).
 
@@ -154,6 +163,11 @@ that means during a quorum loss is on [recovery](/operate/recovery/).
 `POST /api/v1/ephemeral/_adopt` and `_leaving` are broker-to-broker hand-over calls: they also
 require the forward mark that only another node sets (and the cluster token when one is
 configured), and the proxy never lets a tenant reach them.
+
+`GET /api/v1/system/link` and `POST /api/v1/system/link/promote` are the two calls of a
+[standby cluster](/operate/standby/): where it is in its source's log, and the switch that makes
+it an ordinary cluster. What a standby reads from its source is not on this port: it is served on
+the source's raft port, under `/link/v1/`, to the holder of the source's `QUEEN_LINK_TOKEN`.
 
 ## Message browsing
 

@@ -1,9 +1,10 @@
 ---
-title: Storage
+title: "Storage engine: write-ahead log and LMDB"
 description: "What a node keeps on disk: queue log files that are the write-ahead log, a store held in RAM and checkpointed to LMDB, the recovery rules, the damage a node refuses to boot on, and reclaim."
 type: concept
 tier: internals
 sidebar:
+  label: "Storage"
   order: 3
 sourceOfTruth:
   - server/src/rsm/qlog/mod.rs
@@ -22,6 +23,9 @@ sourceOfTruth:
   - server/src/rsm/replicator/raft/log_store.rs
   - server/src/rsm/replicator/raft/snapshot.rs
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): traces moved to their own LMDB file (traces/), expiry in bounded steps, snapshots carry traces/; the store, the checkpoint and the replay rules are otherwise unchanged.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the layout names raft/link_holds.json and link.seed, and the snapshot paragraph says a standby's first node takes the same snapshot. snapshot.rs splits the stream's writer and its stager out of the install path, which behaves as described; log_store.rs and the purge are as described, with a standby holding the log as a follower that is behind does.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a seed's hold): snapshot.rs tells whoever asked for a streamed snapshot where its checkpoint is and that the stream is still being read, which is how a source node keeps its log for the standby it seeds. The snapshot paragraph now says which node keeps its log from when; the stream's content, the staging and the swap are as described.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are
@@ -45,8 +49,10 @@ $QUEEN_RAFT_DIR                    default /var/lib/queen/raft
     q0/                            the system log: entries that touch no queue
     q<queue id>/r00000001.qlog     a queue's log files, rolling
                 r00000001.qidx     the index of a sealed file
-  raft/                            openraft only: vote, commit point, purge point, membership
+  raft/                            openraft only: vote, commit point, purge point, membership,
+                                   and what the node keeps for a standby (link_holds.json)
   snapshots/                       a snapshot received from the leader, staged for the next boot
+  link.seed                        on a standby's first node: the record of the seed it took
   local.db  dash.db                node-local metrics and dashboard rows (not replicated)
   groups/g1/ ...                   the same layout for each extra raft group (QUEEN_RAFT_GROUPS)
 ```
@@ -137,7 +143,11 @@ applied.
 In a cluster a restarted node then catches up from the leader. A node that was away longer than
 `QUEEN_RAFT_PURGE_HOLD_S` (600), or a new one, receives a snapshot instead: a copy of the leader's
 store checkpoint, its trace file and its queue log files. The node stages it under `snapshots/`, exits, and swaps
-it in at the next boot, never while it serves.
+it in at the next boot, never while it serves. The first node of a
+[standby cluster](/operate/standby/) takes the same snapshot from a node of its source, once. That
+node keeps its log from the snapshot's position on from the moment it is asked, and the source's
+other nodes from wherever the standby has got to once it reads, as they do for a follower that is
+behind.
 
 ## Refused at boot
 

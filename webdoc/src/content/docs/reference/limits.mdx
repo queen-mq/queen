@@ -1,9 +1,10 @@
 ---
-title: Limits
+title: "Limits, defaults and name rules"
 description: "Sizes, name rules, windows and defaults of the broker, each with the setting that moves it and the file that applies it."
 type: reference
 tier: use
 sidebar:
+  label: "Limits"
   order: 7
 sourceOfTruth:
   - server/src/config.rs
@@ -30,6 +31,13 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps its existing limit and offset handling; the listed request limits are unchanged.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): a row under Retention for when a node stops keeping its log for a standby cluster; the batcher's and the facade's other limits are as described.
+# sourceOfTruth re-read 2026-10-08 (locks): a Locks section lists the constants of server/src/locks.rs,
+# and the KV table names `check` (planner/kv.rs, handlers/kv.rs: a write for the rate, needs cluster
+# version 5). handlers/raft.rs registers the route; facade/mod.rs and facade/real.rs carry the refusal
+# below version 5. No existing limit or default changes.
+# sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only. No limit or default changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader; phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). No limit or default changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -108,6 +116,14 @@ whatever the window.
 
 A pop that finds nothing before its timeout answers `204`.
 
+Through the proxy built into the binary, three timers in one process bound a pop with `wait=true`.
+The broker waits at most 60 s (300 s for an ephemeral pop) and answers `204`. The proxy waits
+`min(timeout, QUEEN_PROXY_LONGPOLL_MAX_MS)` plus `QUEEN_PROXY_LONGPOLL_MARGIN_MS`, 100 s at most by
+default, then answers 504 `upstream_timeout`. The edge waits `timeout` plus
+`QUEEN_EDGE_LONG_POLL_GRACE_MS`, at most `QUEEN_EDGE_LONG_POLL_MAX_MS` (310 s), then answers 504
+`request_timeout`. A durable pop always ends at the broker. An ephemeral pop that asks for more than
+100 s ends at the proxy with a 504, unless `QUEEN_PROXY_LONGPOLL_MAX_MS` is raised to `300000`.
+
 ## Reads by offset
 
 | Limit | `POST /api/v1/fetch` | `POST /api/v1/fetch/offsets` | `POST /api/v1/partitions/changed` |
@@ -130,10 +146,29 @@ Applied in `server/src/rsm/facade/real/phase2/reads.rs` and `offsets.rs`.
 | Bytes read per call | 4 MiB | 4 MiB | |
 | Writes of one key per call | 1 | 1 | |
 | Expiry | `ttlSeconds` above 0 or `forever: true`, required on every `put`, `putIfAbsent` and `incr` | the same | |
+| `check` | needs cluster format version 5 (503 below it) | the same | |
 | Calls per tenant | reads 200/s (burst 400), writes 100/s (burst 200) | not counted | `QUEEN_KV_READ_RATE`, `QUEEN_KV_READ_BURST`, `QUEEN_KV_WRITE_RATE`, `QUEEN_KV_WRITE_BURST` |
 
 A call over a tenant's rate answers 429 `rate_limited`. A tenant's quota row can set its own rates
 and row and byte caps; see [tenants](/operate/tenants/).
+
+## Locks
+
+A lock is a KV row in the namespace `queen-locks`, so the KV value, rate and quota limits above
+apply to it. The route's own limits are constants in `server/src/locks.rs`.
+
+| Limit | `POST /api/v1/locks` |
+|---|---|
+| Operations per call | 64, each on a different lock |
+| Permits of one semaphore (`limit`) | 1 by default (a lock), at most 1,024 |
+| Slots named per call | 4,096 (an `acquire` counts its `limit`, a `get` 1,000) |
+| Lock name | 1 to 256 bytes, no control character, no `#` |
+| `owner` | at most 256 bytes, no control character |
+| Lifetime | `ttlSeconds`, a whole number above 0, required on every `acquire` and `renew`; there is no `forever` |
+| Calls per tenant | a call with an `acquire`, `renew` or `release` spends one token of the KV write rate; a call of `get`s alone, one of the read rate |
+
+A waiting `acquire` in the SDKs comes back every 100 ms to 1 s, with jitter, and the handles that
+renew in the background do so every third of the lifetime.
 
 ## Timers
 
@@ -180,3 +215,4 @@ The last three are constants in `server/src/handlers/ephemeral.rs`.
 | Message traces (on disk, expired at most 512 per step) | 7 days | `QUEEN_RAFT_TRACE_RETENTION_S` |
 | A trace whose `transactionId` or one of its names makes a store key over 511 bytes is answered `400` | 511 bytes | none |
 | Disk high-water mark: writes that grow storage answer 507 | 85% | `QUEEN_RAFT_DISK_HIGH_PCT` (released at `QUEEN_RAFT_DISK_LOW_PCT`, 80%) |
+| A node stops keeping its log for a [standby cluster](/operate/standby/) that is behind | when its disk is 80% full, or the standby was silent for 3600 s | `QUEEN_LINK_HOLD_DISK_PCT`, `QUEEN_LINK_HOLD_S` |

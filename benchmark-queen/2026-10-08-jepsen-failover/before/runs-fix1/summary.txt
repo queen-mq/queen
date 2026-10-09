@@ -1,0 +1,8 @@
+2026-10-08T18:12:46Z start fo-repro-primaries-1: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T18:17:26Z done  fo-repro-primaries-1: UNKNOWN store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T18:13:00.615274384Z log=/root/runs-fix1/fo-repro-primaries-1.log
+2026-10-08T18:17:26Z start fo-repro-primaries-2: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T18:21:31Z done  fo-repro-primaries-2: valid store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T18:17:40.53222797Z log=/root/runs-fix1/fo-repro-primaries-2.log
+2026-10-08T18:21:31Z start fo-repro-primaries-3: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T18:25:57Z done  fo-repro-primaries-3: UNKNOWN store=/root/jepsen-failover/store/queen-failover-partition_p=primaries_standby=3_crash_offload=on_lanes=16/2026-10-08T18:21:45.353801136Z log=/root/runs-fix1/fo-repro-primaries-3.log
+2026-10-08T18:25:57Z start fo-repro-one-1: --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets one --nemesis-interval 3 --time-limit 200 --rate 200
+2026-10-08T18:27:39Z stopped by hand: the next campaign is /root/runs-fix2 on /root/bin/queen-r21-fix2

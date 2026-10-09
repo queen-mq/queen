@@ -40,6 +40,10 @@ export class TransactionBuilder {
   // was queued would ship a TTL already stale by however long the bundle took
   // to assemble. Materialized in commit(), which is send time.
   #kvEntries = []
+  // Lock handles whose permit this bundle commits under (`.guard(lock)`).
+  // Kept as handles, not as ops: the token is read at SEND time, because a
+  // lock's own renewal changes it.
+  #guards = []
   #timerOps = []
   #kvApi = null
 
@@ -202,6 +206,9 @@ export class TransactionBuilder {
       putIfAbsent: (ns, key, value, opts = {}) => add(kvOp.putIfAbsent(ns, key, value, opts)),
       delete: (ns, key, opts = {}) => add(kvOp.delete(ns, key, opts)),
       incr: (ns, key, delta = 1, opts = {}) => add(kvOp.incr(ns, key, delta, opts)),
+      // A precondition on a key the bundle does not write. With
+      // `required: true` it is the bundle's gate; without, only a look.
+      check: (ns, key, opts = {}) => add(kvOp.check(ns, key, opts)),
       getPrefix: () => {
         throw new Error(
           'kv: getPrefix is not available inside a transaction — unbounded read work under the outermost ' +
@@ -236,6 +243,40 @@ export class TransactionBuilder {
     return this.kv.putIfAbsent(ns, key, value, { ...opts, ...required })
   }
 
+  /**
+   * Commit this bundle only while a lock is held.
+   *
+   *     const lock = queen.lock('daily-report', { ttl: '30s' })
+   *     if (!(await lock.acquire())) return
+   *     const res = await queen.transaction()
+   *       .guard(lock)
+   *       .queue('reports').push([{ data: report }])
+   *       .commit()
+   *     if (res.success === false) return    // the lock is somebody else's now
+   *
+   * The guard is a `check` of the permit's row at the lock's token, with
+   * `required: true`: the broker judges it in the same log entry as the acks,
+   * pushes, keys and timers beside it. A holder that was paused past its
+   * lifetime and replaced commits NOTHING — which the lock by itself cannot
+   * promise, since nobody stops an expired holder from running.
+   *
+   * The token is read when `commit()` sends, and a lock's own background
+   * renewal moves it. A guard that lost to this handle's own renewal is sent
+   * again with the new token; one that lost to another holder is the verdict,
+   * returned like `once`'s (`success: false, reason: 'kv_precondition'`), and
+   * the handle then reports the lock lost.
+   *
+   * Throws at `commit()`, with `.code === 'LOCK_NOT_HELD'`, when the handle
+   * holds nothing: a step that asked for a guard must not go out without one.
+   */
+  guard(lock) {
+    if (!lock || typeof lock.guard !== 'function' || typeof lock._settled !== 'function') {
+      throw new Error('transaction: guard() takes a lock from queen.lock() or queen.semaphore()')
+    }
+    this.#guards.push(lock)
+    return this
+  }
+
   // ===========================
   // Timer rider (§4, §9.6)
   // ===========================
@@ -266,8 +307,46 @@ export class TransactionBuilder {
     })
   }
 
+  /**
+   * The request body, built at send time. The guards go first in `kv`, so
+   * guard `i` is op `i` of the rider.
+   */
+  #body() {
+    // Byte-identity when the riders are absent (§6.3): the keys are added only
+    // when there is something in them, so a bundle that uses neither feature
+    // produces exactly the body it produced before this feature existed.
+    const body = {
+      operations: this.#operations,
+      requiredLeases: [...new Set(this.#requiredLeases)] // Unique leases
+    }
+    if (this.#guards.length + this.#kvEntries.length > 0) {
+      const now = Date.now()
+      body.kv = [
+        ...this.#guards.map(lock => lock.guard()),
+        ...this.#kvEntries.map(e => materializeKvOp(e, now))
+      ]
+    }
+    if (this.#timerOps.length > 0) {
+      body.timers = this.#timerOps
+    }
+    return body
+  }
+
+  /**
+   * The lock whose guard is the precondition a rolled-back bundle names, if
+   * it is one of this bundle's. `failedIndex` is in the FLAT space of
+   * `results[]`: every pushed item and every ack first, then the `kv` rider.
+   */
+  #failedGuard(result) {
+    if (this.#guards.length === 0 || !Number.isInteger(result.failedIndex)) return null
+    const flatOperations = this.#operations.reduce(
+      (n, op) => n + (op.type === 'push' ? op.items.length : 1), 0
+    )
+    return this.#guards[result.failedIndex - flatOperations] ?? null
+  }
+
   async commit() {
-    const riderCount = this.#kvEntries.length + this.#timerOps.length
+    const riderCount = this.#guards.length + this.#kvEntries.length + this.#timerOps.length
     if (this.#operations.length === 0 && riderCount === 0) {
       logger.error('TransactionBuilder.commit', 'No operations to commit')
       throw new Error('Transaction has no operations to commit')
@@ -277,26 +356,35 @@ export class TransactionBuilder {
       operationCount: this.#operations.length,
       requiredLeases: this.#requiredLeases.length,
       kv: this.#kvEntries.length,
+      guards: this.#guards.length,
       timers: this.#timerOps.length
     })
 
-    // Byte-identity when the riders are absent (§6.3): the keys are added only
-    // when there is something in them, so a bundle that uses neither feature
-    // produces exactly the body it produced before this feature existed.
-    const body = {
-      operations: this.#operations,
-      requiredLeases: [...new Set(this.#requiredLeases)] // Unique leases
-    }
-    if (this.#kvEntries.length > 0) {
-      const now = Date.now()
-      body.kv = this.#kvEntries.map(e => materializeKvOp(e, now))
-    }
-    if (this.#timerOps.length > 0) {
-      body.timers = this.#timerOps
-    }
-
     try {
-      const result = await this.#httpClient.post('/api/v1/transaction', body)
+      // A bundle is sent again in ONE case: its guard lost to the lock's own
+      // background renewal, which moved the token between the moment the body
+      // was built and the moment the broker judged it. The row still names
+      // this owner, so the lock is held; nothing committed (a lost required
+      // precondition rolls the whole bundle back), so sending it again with
+      // the new token is the same step, not a second one.
+      let result
+      for (let attempt = 0; ; attempt++) {
+        await Promise.all(this.#guards.map(lock => lock._settled()))
+        result = await this.#httpClient.post('/api/v1/transaction', this.#body())
+        if (result.success || result.reason !== 'kv_precondition') break
+        const lock = this.#failedGuard(result)
+        if (!lock) break
+        const ownRenewal = result.kvReason === 'version' && result.value?.owner === lock.owner
+        if (!ownRenewal) {
+          // Expired, released, or another holder's: the lock is gone.
+          lock._lost('guard')
+          break
+        }
+        if (attempt >= 3) break
+        await lock._settled()
+        if (!lock.held) break
+        logger.log('TransactionBuilder.commit', { status: 'guard_renewed', lock: lock.name, attempt })
+      }
 
       if (!result.success) {
         // THE ONE OUTCOME THAT RETURNS INSTEAD OF THROWING (§8.3).

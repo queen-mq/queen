@@ -1,9 +1,10 @@
 ---
-title: Queues and partitions
+title: "Per-key ordering: one partition per entity"
 description: "A queue holds one ordered partition per entity, created by the first push that names it. Order holds inside a partition, and a slow partition delays only itself."
 type: concept
 tier: use
 sidebar:
+  label: "Queues and partitions"
   order: 2
 sourceOfTruth:
   - server/src/rsm/planner/push.rs
@@ -24,6 +25,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-07 (optional client supervision): QueueBuilder adds opt-in consumer supervision only; push routing, pop sizing and partition ordering described here are unchanged.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the facade can open a node as a member of a standby cluster, and phase2.rs gains the two /api/v1/system/link routes; partitions are as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): facade/real.rs refuses a transaction's KV `check` below cluster
+# version 5. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). Nothing this page states changes.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a
@@ -53,8 +58,9 @@ offset). The 201 says the request was taken, so read the `status` of each item.
 
 Most brokers order messages per shard. You pick a number of partitions when you create a topic,
 your keys are hashed onto them, and every entity shares its shard with whoever else hashed there.
-A slow customer holds up the customers behind it in the same shard, and changing the count later
-moves keys from one shard to another. So you guess the count early, and you live with the guess.
+A slow customer holds up the customers behind it in the same shard, which is head-of-line
+blocking, and changing the count later moves keys from one shard to another. So you guess the count early, and you live with the guess.
+[Compare](/start/compare/) shows how Kafka, RabbitMQ and SQS each keep order per key.
 
 We made the partition the entity because in Queen it costs almost nothing. A partition is a few
 rows in the broker's state, about 2 KB of the leader's memory, plus one cursor for each consumer

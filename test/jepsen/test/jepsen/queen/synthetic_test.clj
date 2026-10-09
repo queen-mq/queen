@@ -1,16 +1,22 @@
 (ns jepsen.queen.synthetic-test
-  "Synthetic histories for the checkers of W3-W6: one clean history each, and
-  one per anomaly the checker must flag. Run with `lein test` (no cluster)."
+  "Synthetic histories for the checkers of W3-W6 and W11: one clean history
+  each, and one per anomaly the checker must flag. Run with `lein test` (no
+  cluster)."
   (:require [clojure.test :refer :all]
             [jepsen [checker :as checker]
+                    [generator :as gen]
                     [history :as h]
                     [independent :as independent]
                     [nemesis :as n]
                     [util :as util]]
             [jepsen.queen [membership :as qm]
                           [nemesis :as qn]]
+            [jepsen.generator.context :as gctx]
+            [jepsen.queen [db :as qdb]]
             [jepsen.queen.workload [dedup :as dedup]
                                    [elle :as elle]
+                                   [failover :as failover]
+                                   [locks :as locks]
                                    [pipeline :as pipeline]
                                    [register :as register]]))
 
@@ -279,6 +285,392 @@
     (let [r (w6 (w6-history {:recs (assoc-in w6-recs [0 :n] 1)}))]
       (is (false? (:valid? r)))
       (is (= 1 (count (:stored-n-not-queued r)))))))
+
+;; ---------------------------------------------------------------------------
+;; W11: locks and semaphores
+
+(defn w11
+  "Runs the locks checker. One second between ops, because check 6 compares
+  completion times with lifetimes in seconds."
+  ([ops] (w11 1 {} ops))
+  ([limit test ops]
+   (let [r (checker/check (locks/checker limit) (merge test-map test)
+                          (h/history (map-indexed (fn [i op] (assoc op :time (* 1000000000 i)))
+                                                  ops))
+                          {})]
+     (println (pr-str r))
+     r)))
+
+(defn acq
+  "An acquire of lock l by owner o (process p), answered with `token`."
+  [p l o token & kvs]
+  [(inv p :acquire l)
+   (with {:process p, :type :ok, :f :acquire, :value l, :owner o, :ttl 2
+          :token token, :slot 0, :already? false}
+         kvs)])
+
+(defn step
+  [p l o token id type & kvs]
+  [(inv p :step l)
+   (with {:process p, :type type, :f :step, :value l, :owner o, :token token, :slot 0, :id id}
+         kvs)])
+
+(defn renew
+  [p l o from token & kvs]
+  [(inv p :renew l)
+   (with {:process p, :type :ok, :f :renew, :value l, :owner o, :from from, :token token
+          :slot 0, :ttl 2}
+         kvs)])
+
+(defn release
+  [p l o token type]
+  [(inv p :release l)
+   {:process p, :type type, :f :release, :value l, :owner o, :token token, :slot 0}])
+
+(defn rec [l token o id offset & kvs]
+  (with {:l l, :slot 0, :token token, :owner o, :id id, :offset offset} kvs))
+
+(def w11-records
+  {0 [(rec 0 10 "A" "s1" 0) (rec 0 11 "A" "s2" 1) (rec 0 20 "B" "s3" 2)]
+   1 [(rec 1 30 "D" "s5" 0)]})
+
+(defn w11-history
+  "A holds lock 0 (token 10), steps, renews (11), steps, releases; B is
+  refused while A holds, then takes it (20) and steps; C's step with a token
+  that is no longer the lock's rolls back; a get shows B; on lock 1, D's
+  acquire is unknown and its retry is answered `already`. Options replace
+  parts."
+  [{:keys [b-token get-token records extra]}]
+  (flat
+    [(acq 0 0 "A" 10)
+     (step 0 0 "A" 10 "s1" :ok)
+     (renew 0 0 "A" 10 11)
+     (step 0 0 "A" 11 "s2" :ok)
+     [(inv 1 :acquire 0)
+      {:process 1, :type :fail, :f :acquire, :value 0, :owner "B", :ttl 2
+       :error [:not-acquired "held"]}]
+     (release 0 0 "A" 11 :ok)
+     (acq 1 0 "B" (or b-token 20))
+     (step 1 0 "B" (or b-token 20) "s3" :ok)
+     (step 2 0 "C" 11 "s4" :fail :error [:rolled-back "kv_precondition" "version" 20])
+     [(inv 2 :step 0) {:process 2, :type :fail, :f :step, :value 0, :error [:not-held]}]
+     [(inv 3 :get 0)
+      {:process 3, :type :ok, :f :get, :value 0
+       :holders [{:slot 0, :owner "B", :token (or get-token b-token 20)}]}]
+     [(inv 4 :acquire 1)
+      {:process 4, :type :info, :f :acquire, :value 1, :owner "D", :ttl 2
+       :error [:acquire :timeout nil]}]
+     (acq 4 1 "D" 30 :already? true)
+     (step 4 1 "D" 30 "s5" :ok)
+     (or extra [])
+     [(inv 0 :final-read nil) (ok 0 :final-read (or records w11-records))]]))
+
+(deftest w11-locks
+  (testing "clean"
+    (let [r (w11 (w11-history {}))]
+      (is (true? (:valid? r)))
+      (is (= 1 (:takeovers r)))
+      (is (= 1 (:steps-fenced r)))
+      (is (= 4 (:records r)))
+      (is (true? (:early-judged? r)))))
+  (testing "fencing: a replaced holder's record lands after the new holder's"
+    (let [r (w11 (w11-history {:records (assoc w11-records 0
+                                               [(rec 0 10 "A" "s1" 0) (rec 0 20 "B" "s3" 1)
+                                                (rec 0 11 "A" "s2" 2)])}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (:token-went-back-count r)))))
+  (testing "one token, two owners"
+    (let [r (w11 (w11-history {:records (assoc w11-records 0
+                                               [(rec 0 10 "A" "s1" 0) (rec 0 10 "B" "s2" 1)
+                                                (rec 0 20 "B" "s3" 2)])}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:two-owners r))))))
+  (testing "a record carries a token its owner was never answered"
+    (let [r (w11 (w11-history {:records (assoc-in w11-records [0 2 :token] 99)}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:token-from-nowhere r))))))
+  (testing "phantom: the record of a step whose guard lost"
+    (let [r (w11 (w11-history {:records (update w11-records 0 conj (rec 0 11 "C" "s4" 3))}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (:phantom-count r)))))
+  (testing "phantom: a record no step wrote"
+    (let [r (w11 (w11-history {:records (assoc-in w11-records [0 2 :id] "zzz")}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (:phantom-count r)))
+      (is (= ["s3"] (map :id (:ok-step-missing r))))))
+  (testing "a later grant with a lower token"
+    (let [r (w11 (w11-history {:b-token 9
+                               :records (assoc-in w11-records [0 2 :token] 9)}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:token-not-rising r))))))
+  (testing "one token granted twice"
+    (let [r (w11 (w11-history {:b-token 11
+                               :records (assoc-in w11-records [0 2 :token] 11)}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:token-granted-twice r))))))
+  (testing "`already` for an owner that never had the permit"
+    (let [r (w11 (w11-history {:extra (acq 5 1 "E" 30 :already? true)}))]
+      (is (false? (:valid? r)))
+      (is (= ["E"] (map :owner (:already-from-nowhere r))))))
+  (testing "a get shows a token older than one already granted"
+    (let [r (w11 (w11-history {:get-token 11}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:stale-gets r))))))
+  (testing "a lock answers a slot it does not have"
+    (let [r (w11 (w11-history {:extra (acq 5 2 "E" 40 :slot 1)}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:slot-out-of-range r))))))
+  (testing "nothing committed under a guard shows nothing"
+    (is (= :unknown (:valid? (w11 [(inv 0 :final-read nil) (ok 0 :final-read {0 [], 1 []})]))))
+    (is (= :unknown (:valid? (w11 (flat (acq 0 0 "A" 10))))))))
+
+(defn w11-takeover
+  "A takes lock 0 for `ttl` seconds; `between` happens; B takes it and steps.
+  One second per op, so B's acquire completes a few seconds after A's began."
+  [ttl between]
+  (flat
+    [(acq 0 0 "A" 10 :ttl ttl)
+     between
+     (acq 1 0 "B" 20)
+     (step 1 0 "B" 20 "s1" :ok)
+     [(inv 1 :final-read nil) (ok 1 :final-read {0 [(rec 0 20 "B" "s1" 0)]})]]))
+
+(deftest w11-exclusive-leases
+  (testing "taken over after the lease ended"
+    (is (true? (:valid? (w11 (w11-takeover 2 []))))))
+  (testing "taken over while the lease cannot have ended"
+    (let [r (w11 (w11-takeover 30 []))]
+      (is (false? (:valid? r)))
+      (is (= 1 (:taken-early-count r)))
+      (is (= {:holder "A", :taken-by "B"}
+             (select-keys (first (:taken-early r)) [:holder :taken-by])))))
+  (testing "the holder released first"
+    (is (true? (:valid? (w11 (w11-takeover 30 (release 0 0 "A" 10 :ok))))))
+    (is (true? (:valid? (w11 (w11-takeover 30 (release 0 0 "A" 10 :info)))))))
+  (testing "a release that was refused released nothing"
+    (is (false? (:valid? (w11 (w11-takeover 30 (release 0 0 "A" 10 :fail)))))))
+  (testing "the holder's state is unknown: a renew that may have shortened the lease"
+    (is (true? (:valid? (w11 (w11-takeover
+                               30
+                               [(inv 0 :renew 0)
+                                {:process 0, :type :info, :f :renew, :value 0, :owner "A"
+                                 :from 10, :slot 0, :ttl 2}]))))))
+  (testing "not judged under clock faults"
+    (let [r (w11 1 {:faults #{:clock}} (w11-takeover 30 []))]
+      (is (true? (:valid? r)))
+      (is (false? (:early-judged? r))))))
+
+(deftest w11b-semaphore
+  (let [history (fn [records]
+                  (flat
+                    [(acq 0 0 "A" 10)
+                     (acq 1 0 "B" 12 :slot 1)
+                     (step 0 0 "A" 10 "s1" :ok)
+                     (step 1 0 "B" 12 "s2" :ok :slot 1)
+                     (step 0 0 "A" 10 "s3" :ok)
+                     [(inv 2 :get 0)
+                      {:process 2, :type :ok, :f :get, :value 0
+                       :holders [{:slot 0, :owner "A", :token 10}
+                                 {:slot 1, :owner "B", :token 12}]}]
+                     [(inv 0 :final-read nil) (ok 0 :final-read {0 records})]]))
+        clean   [(rec 0 10 "A" "s1" 0) (rec 0 12 "B" "s2" 1 :slot 1) (rec 0 10 "A" "s3" 2)]]
+    (testing "clean: two slots interleave on one resource, each with its own tokens"
+      (let [r (w11 2 {} (history clean))]
+        (is (true? (:valid? r)))
+        (is (= 0 (:gets-with-an-owner-in-two-slots r)))))
+    (testing "the same records on a lock are a slot it does not have"
+      (is (false? (:valid? (w11 1 {} (history clean))))))
+    (testing "fencing is per slot"
+      (let [r (w11 2 {} (history (conj clean (rec 0 11 "B" "s2" 3 :slot 1))))]
+        (is (false? (:valid? r)))
+        (is (= 1 (:token-went-back-count r)))))))
+
+;; ---------------------------------------------------------------------------
+;; W12: a standby is promoted
+
+(defn w12
+  ([ops] (w12 {} ops))
+  ([test ops]
+   (let [r (checker/check (failover/checker)
+                          (merge test-map {:w12-partitions 2, :failover :crash} test)
+                          (hist ops) {})]
+     (println (pr-str r))
+     r)))
+
+(defn snd
+  "A send of `pairs` by process p, a thread of `cluster`, answered `type`."
+  [p cluster pairs type & kvs]
+  [(inv p :send pairs)
+   (with {:process p, :type type, :f :send, :value pairs, :cluster cluster
+          :node (name cluster)}
+         kvs)])
+
+(defn nem
+  "A nemesis op and its answer."
+  [f answer]
+  [{:process :nemesis, :type :info, :f f, :value nil}
+   {:process :nemesis, :type :info, :f f, :value answer}])
+
+(defn fin
+  [p cluster logs]
+  [(inv p :final-read nil)
+   {:process p, :type :ok, :f :final-read, :value logs, :cluster cluster
+    :node (name cluster), :gaps {}}])
+
+(defn w12-history
+  "The source takes 1, 3 and 4 on partition 0 and 2 on partition 1; a standby
+  node refuses 100 and reads the source's first record; the source dies with
+  4 not yet read; the promoted cluster takes 101 and 102. `over` replaces
+  steps by name."
+  [over]
+  (let [steps (merge
+                {:s1      (snd 0 :source [[0 1]] :ok :offsets {1 0})
+                 :s2      (snd 0 :source [[1 2]] :ok :offsets {2 0})
+                 :probe   (snd 1 :standby [[0 100]] :fail :error [:standby])
+                 :read    [(inv 1 :read nil)
+                           {:process 1, :type :ok, :f :read, :value {0 [[0 1]]}
+                            :cluster :standby, :node "standby"}]
+                 :s3      (snd 0 :source [[0 3]] :ok :offsets {3 1})
+                 :s4      (snd 0 :source [[0 4]] :ok :offsets {4 2})
+                 :stop    (nem :stop-source {:killed {}})
+                 :promote (nem :promote {:promoted? true, :position 7})
+                 :o1      (snd 1 :standby [[0 101]] :ok :offsets {101 2})
+                 :o2      (snd 1 :standby [[1 102]] :ok :offsets {102 1})
+                 :p       (fin 1 :standby {0 [1 3 101], 1 [2 102]})
+                 :s       (fin 0 :source {0 [1 3 4], 1 [2]})}
+                over)]
+    (flat (map steps [:s1 :s2 :probe :read :s3 :s4 :stop :promote :o1 :o2 :p :s]))))
+
+(deftest w12-failover
+  (testing "clean: a prefix of the source, then the promoted cluster's own writes"
+    (let [r (w12 (w12-history {}))]
+      (is (true? (:valid? r)))
+      (is (= 1 (:lost-count r)))
+      (is (= 3 (:replayed r)))
+      (is (= {0 2, 1 1} (:replayed-per-partition r)))
+      (is (= 2 (:own-acked r)))
+      (is (= 1 (:standby-refusals r)))
+      (is (= 0 (:standby-refusals-after-promote r)))))
+  (testing "a standby that answers a send before its promotion"
+    (let [r (w12 (w12-history {:probe (snd 1 :standby [[0 100]] :ok :offsets {100 9})}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:standby-wrote-early r))))))
+  (testing "the promoted cluster has the source's records in another order"
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [3 1 101], 1 [2 102]})}))]
+      (is (false? (:valid? r)))
+      (is (= 2 (:diverged-count r)))))
+  (testing "a record the source never had"
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [1 3 101 999], 1 [2 102]})}))]
+      (is (false? (:valid? r)))
+      (is (= :never-sent (:why (first (:phantom r)))))))
+  (testing "a record twice"
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [1 3 101 101], 1 [2 102]})}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:duplicate r))))))
+  (testing "an acknowledged send is missing while a send invoked after it is there"
+    ; 2 was answered before 3 was sent, and 3 is in the promoted cluster.
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [1 3 101], 1 [102]})
+                               :o2 (snd 1 :standby [[1 102]] :ok :offsets {102 0})}))]
+      (is (false? (:valid? r)))
+      (is (= [2] (map :value (:lost-before-a-survivor r))))))
+  (testing "the last moment may be lost: nothing sent after 4 survived"
+    (is (empty? (:lost-before-a-survivor (w12 (w12-history {}))))))
+  (testing "a refused send that is there"
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [1 3 100 101], 1 [2 102]})
+                               :o1 (snd 1 :standby [[0 101]] :ok :offsets {101 3})}))]
+      (is (false? (:valid? r)))
+      (is (= [100] (map :v (:refused-but-present r))))))
+  (testing "a send the promoted cluster acknowledged and does not hold"
+    (let [r (w12 (w12-history {:p (fin 1 :standby {0 [1 3 101], 1 [2]})}))]
+      (is (false? (:valid? r)))
+      (is (= [102] (map :v (:own-lost r))))))
+  (testing "a send acknowledged at another offset than it has"
+    (let [r (w12 (w12-history {:o1 (snd 1 :standby [[0 101]] :ok :offsets {101 5})}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:ack-offset-mismatch r))))))
+  (testing "a standby's read before the promotion that the source does not confirm"
+    (let [r (w12 (w12-history {:read [(inv 1 :read nil)
+                                      {:process 1, :type :ok, :f :read, :value {0 [[0 3]]}
+                                       :cluster :standby, :node "standby"}]}))]
+      (is (false? (:valid? r)))
+      (is (= 1 (count (:standby-read-diverged r))))))
+  (testing "a transaction of the source that arrived in part"
+    (let [txn (snd 0 :source [[0 3] [1 5]] :ok)
+          r   (w12 (w12-history {:s3 txn
+                                 :s  (fin 0 :source {0 [1 3 4], 1 [2 5]})}))]
+      (is (false? (:valid? r)))
+      (is (= [3] (:present (first (:torn-transaction r)))))))
+  (testing "a whole transaction is fine"
+    (let [txn (snd 0 :source [[0 3] [1 5]] :ok)
+          r   (w12 (w12-history {:s3 txn
+                                 :o2 (snd 1 :standby [[1 102]] :ok :offsets {102 2})
+                                 :p  (fin 1 :standby {0 [1 3 101], 1 [2 5 102]})
+                                 :s  (fin 0 :source {0 [1 3 4], 1 [2 5]})}))]
+      (is (true? (:valid? r)))))
+  (testing "planned: nothing may be lost"
+    (let [planned {:failover :planned}
+          await   (nem :await-standby {:caught-up? true})
+          lossy   (w12 planned (w12-history {:stop (into await (nem :stop-source {}))}))
+          whole   (w12 planned (w12-history {:stop (into await (nem :stop-source {}))
+                                             :o1 (snd 1 :standby [[0 101]] :ok :offsets {101 3})
+                                             :p  (fin 1 :standby {0 [1 3 4 101], 1 [2 102]})}))
+          behind  (w12 planned (w12-history {:stop (into (nem :await-standby {:caught-up? false})
+                                                         (nem :stop-source {}))}))]
+      (is (false? (:valid? lossy)))
+      (is (= 1 (:planned-lost-count lossy)))
+      (is (true? (:valid? whole)))
+      (is (= 0 (:lost-count whole)))
+      ; The standby never caught up: the switch was not the planned one.
+      (is (= :unknown (:valid? behind)))))
+  (testing "a node of the promoted cluster that is behind is fine; one that differs is not"
+    (let [behind (w12 (w12-history {:p (into (fin 1 :standby {0 [1 3 101], 1 [2 102]})
+                                             (fin 2 :standby {0 [1 3], 1 [2 102]}))}))
+          split  (w12 (w12-history {:p (into (fin 1 :standby {0 [1 3 101], 1 [2 102]})
+                                             (fin 2 :standby {0 [1 101], 1 [2 102]}))}))]
+      (is (true? (:valid? behind)))
+      (is (false? (:valid? split)))
+      (is (= 1 (:first-difference (first (:nodes-of-one-cluster-disagree split)))))))
+  (testing "nothing to judge"
+    (is (= :unknown (:valid? (w12 (w12-history {:promote (nem :promote {:promoted? false})})))))
+    (is (= :unknown (:valid? (w12 (w12-history {:s []})))))
+    (is (= :unknown (:valid? (w12 (w12-history {:p []})))))))
+
+(deftest w12-offline
+  (testing "the last nodes are the standby, each cluster with ids from 1"
+    (let [test {:nodes ["n1" "n2" "n3" "n4" "n5"], :standby-nodes 2}]
+      (is (= ["n1" "n2" "n3"] (qdb/source-nodes test)))
+      (is (= ["n4" "n5"] (qdb/standby-nodes test)))
+      (is (= [1 2 3 1 2] (map #(qdb/node-id test %) (:nodes test))))
+      (is (qdb/standby? test "n5"))
+      (is (not (qdb/standby? test "n3")))))
+  (testing "without a standby every node is in the one cluster"
+    (let [test {:nodes ["n1" "n2" "n3"]}]
+      (is (= ["n1" "n2" "n3"] (qdb/source-nodes test)))
+      (is (empty? (qdb/standby-nodes test)))
+      (is (= [1 2 3] (map #(qdb/node-id test %) (:nodes test))))))
+  (testing "the failover's steps, the first at its own time"
+    (let [steps (fn [mode] (:generator (failover/package (atom {}) {:mode mode, :at 150})))]
+      (is (= [:stop-source :heal-standby :promote] (map :f (steps :crash))))
+      (is (= [:cut-link :stop-source :heal-standby :promote] (map :f (steps :crash-behind))))
+      (is (= [:heal-all :quiesce :await-standby :stop-source :promote]
+             (map :f (steps :planned))))
+      (is (= 150000000000 (:time (first (steps :crash)))))
+      (is (every? nil? (map :time (rest (steps :planned)))))))
+  (testing "the first step is held until its time, and other faults go first until then"
+    (let [test  {:concurrency 2, :nodes ["n1" "n2"]}
+          ctx   (gctx/context test)
+          steps (:generator (failover/package (atom {}) {:mode :crash, :at 150}))
+          both  (gen/nemesis (gen/any (repeat {:type :info, :f :kill, :value :one}) steps))
+          [alone _]  (gen/op (gen/nemesis steps) test ctx)
+          [before _] (gen/op both test ctx)
+          [after _]  (gen/op both test (assoc ctx :time 151000000000))]
+      (is (= [:stop-source 150000000000 :nemesis] ((juxt :f :time :process) alone)))
+      (is (= [:kill 0] ((juxt :f :time) before)))
+      (is (= [:stop-source 150000000000] ((juxt :f :time) after)))))
+  (testing "the failover nemesis offers its ops"
+    (is (= #{:heal-all :heal-standby :cut-link :quiesce :await-standby :stop-source
+             :promote :start-source}
+           (n/fs (failover/nemesis (atom {})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Nemeses that need no cluster to check

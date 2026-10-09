@@ -1,20 +1,25 @@
 ---
-title: Transactions
+title: "Exactly-once transaction benchmark vs Kafka"
 description: "Exactly-once consume-transform-produce on Queen, Kafka, Redpanda and Pulsar on the same machines: commit and end-to-end latency, each system's ceiling, what partition count does to it, and the one thread that sets Queen's limit."
 type: reference
 tier: operate
 sidebar:
+  label: "Transactions"
   order: 4
 sourceOfTruth:
   - server/src/rsm/batcher_lanes.rs
+# sourceOfTruth re-read 2026-10-08 (standby cluster): batcher_lanes.rs fills one new field of a cycle's output and plans as before. Nothing this page states changes.
 ---
 
-A transaction is the step Queen is built around: take a message, do the work, then ack it and
+A [transaction](/concepts/transactions/) is the step Queen is built around: take a message, do the work, then ack it and
 write what comes next, all of it or none of it. So we built a transactional benchmark and ran it on
 all four systems. A pipeline reads an input, transforms each batch and commits the ack and the
 output together, and at the end a verifier reads every output and checks that every input appears
 in it exactly once. It passed on every point that ran to the end, on all four systems; one Pulsar
-point needed a second run because our verifier stopped reading too early.
+point needed a second run because our verifier stopped reading too early. At 9,000 messages a
+second in transactions of 10, a Queen commit took 3 ms at p50 and 4 ms at p99, Kafka's 12 and 34 ms
+and Pulsar's 22 and 32 ms (2.0.0-beta.2, 2026-10-01). [Compare](/start/compare/) shows what one
+commit covers in each system.
 
 ## The pipeline
 
@@ -33,9 +38,9 @@ with the consumer offsets inside the transaction, transactions v2, `read_committ
 classic consumer groups. Pulsar 4.2.4 runs with its transaction coordinator on (16 coordinators)
 and batched writes of the transaction log and the pending acks.
 
-All four ran on 2026-10-01 on the rig of the other pages, with the durability of each system
+All four ran on 2026-10-01 on the [rig of the other pages](/benchmarks/methodology/), with the durability of each system
 unchanged: Queen, Redpanda and Pulsar acknowledge after two of three copies are fsynced, Kafka
-after three replicas have the data in page cache. Runs: `benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/`.
+after three replicas have the data in page cache. Runs: [`benchmark-queen/2026-09-30-kafka-pulsar/runs/txn/`](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-09-30-kafka-pulsar/runs/txn).
 
 ## Latency at 9,000 messages a second
 

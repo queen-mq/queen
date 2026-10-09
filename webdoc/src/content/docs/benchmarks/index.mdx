@@ -1,5 +1,5 @@
 ---
-title: Benchmarks
+title: "Benchmarks against Kafka, Redpanda and Pulsar"
 description: "Queen MQ 2.0 on three 16-vCPU nodes, with Kafka, Redpanda and Pulsar run on the same machines: throughput, partition count, transactions, Kafka clients, hours under faults and Jepsen, every number with the run it came from."
 type: overview
 tier: operate
@@ -15,8 +15,8 @@ digest: >-
   partitions (e2e p99 18 ms against 146 ms) and fell behind at 100,000 partitions. Exactly-once
   consume-transform-produce transactions of 10 messages committed in 3 ms at the median and peaked
   between 7,000 and 9,000 transactions a second. A soak at 500,000 msg/s held e2e p99 near 86 ms
-  for 3 h 23 min through kill -9 and graceful restarts of the leader. Jepsen: 65 of 65 tests valid
-  on 2.0.0-beta.3.
+  for 3 h 23 min through kill -9 and graceful restarts of the leader. Jepsen: 153 tests on the code
+  of 2.1.0, 152 valid and the other valid when run again.
 ---
 
 Queen 2.0 replicates every write through raft, so we measured it as a cluster: three nodes, every
@@ -36,7 +36,7 @@ true, including the places where another system did better.
 | Kafka clients at 1,000,000 msg/s through the facade inside the broker, e2e p99 91 ms | franz-go, `acks=all`, idempotent; the code of 2.0.0-beta.5, 2026-10-02 | [Kafka clients](/benchmarks/kafka-clients/) |
 | 2,753 Laravel jobs/s with 32 workers on Queen's driver and supervisor, against 1,124 for Horizon on Redis | one raft node, 2.0.0-beta.2, 2026-10-01; 10 ms jobs, Redis fsyncing every write; medians of 3 runs | [Laravel workers](/benchmarks/laravel/) |
 | 500,000 msg/s for 3 h 23 min over 1,000,000 partitions, e2e p50 20 ms and p99 86 ms in the median window, through a kill -9 of the leader, a graceful leader restart and a kill -9 of a follower | deduplication and retention on; the builds that became 2.0.0-beta.1, 2026-10-01 | [Soak and failover](/benchmarks/soak/) |
-| 65 of 65 Jepsen tests valid: no acknowledged message lost, no lease held twice, KV linearizable, transactions atomic | 2.0.0-beta.3, 2026-10-01; five nodes, kill -9, pauses, partitions, clock jumps, power loss | [Jepsen](/benchmarks/jepsen/) |
+| 153 Jepsen tests, 152 valid and the other valid when run again: no acknowledged message lost, no lease held twice, KV linearizable, transactions atomic | the code of 2.1.0, 2026-10-08 and 09; five nodes, kill -9, pauses, partitions, clock jumps, power loss. The one invalid result came from test nodes whose clocks had drifted apart | [Jepsen](/benchmarks/jepsen/) |
 
 ## Where Queen leads, and where it does not
 
@@ -77,7 +77,8 @@ the instant a consumer received it, before the ack. Unless a page says otherwise
 worst of the load processes over the last 30 seconds of a 60-second run, and a system "fell behind"
 when it consumed less than 97% of the offered rate or its e2e p99 passed 5 seconds. Every number
 names its build and date, and the engine moves fast: read a figure as what that build did on this
-rig. The full method, each system's settings and the commands to run it again are in
+rig. Every performance figure here was measured on a pre-release broker build of 2.0.0, and releases
+since 2.0.0 have not been measured again; the Jepsen campaign ran on the code of 2.1.0. The full method, each system's settings and the commands to run it again are in
 [how we measure](/benchmarks/methodology/).
 
 Results measured on Queen 1.x, whose storage was PostgreSQL, stay in the git history of this site.

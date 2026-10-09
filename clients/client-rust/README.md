@@ -5,7 +5,7 @@ its data in its own replicated log.
 
 ```toml
 [dependencies]
-queen-mq = "2.0.3"
+queen-mq = "2.1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde_json = "1"
 ```
@@ -136,6 +136,48 @@ Two behaviours worth reading before using them:
   landed.
 * Nothing else on these surfaces turns a verdict into an error. A lost `putIfAbsent`, a missing
   key, a cancel that found nothing: all `Ok`, with `applied()`, `found()` or `ok` saying so.
+
+## Locks and semaphores
+
+A lock is a lease: one holder at a time, for a lifetime the holder renews, with a
+token that fences a holder that outlived it. `queen.semaphore(name, n, ttl)` is the
+same with `n` permits.
+
+```rust
+let lock = queen.lock("daily-report", Duration::from_secs(30));
+if !lock.acquire_within(Duration::from_secs(5)).await? {
+    return Ok(()); // somebody else holds it
+}
+
+let res = queen
+    .transaction()
+    .guard(&lock) // commits only while the lock is ours
+    .push("reports", json!({ "report": 1 }))?
+    .commit()
+    .await?;
+
+lock.release().await?;
+```
+
+It is a lease, not a mutex: it expires, and nobody tells the holder. A paused or
+partitioned process carries on past its lifetime while somebody else acquires, so
+the lock alone never makes two holders impossible. The guard is what keeps the
+old holder's work out: a guarded transaction rolls back with `kv_precondition`
+once the lock is no longer this handle's. Outside Queen, fence with the token,
+which only rises on a lock. The token changes at every renew, so read it when you
+use it.
+
+The handle renews in the background, every third of the lifetime
+(`LockOptions::new(ttl).manual_renew()` with `queen.lock_with` to call
+`lock.renew()` yourself), and says when the lock is gone: `lock.lost().await`
+resolves and `lock.is_lost()` is true. Nothing stops your code: select on it in a
+long loop. Dropping the handle stops the renewal; the lock then ends with its
+lifetime, so release it.
+
+`queen.locks()` is the wire, with no state kept: `send`, `batch` and `get`.
+`queen.kv().check(ns, key, version)` is the precondition on its own, and
+`transaction().kv_check(ns, key, version)` is the same, `required`, in a
+transaction.
 
 ## Pop autopilot: the broker sizes the pop (broker >= 1.2)
 

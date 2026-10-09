@@ -1,5 +1,5 @@
 ---
-title: Kafka clients
+title: "Kafka-compatible API for unchanged Kafka clients"
 description: "Connect an unchanged Kafka producer, consumer or admin tool to Queen: how topics, partitions, consumer groups, transactions and compaction map onto queues, what it measured, and where it stops."
 type: how-to
 tier: use
@@ -25,6 +25,7 @@ verifiedBy:
   - protocols/queen-kafka/compat/go/interop_test.go
   - protocols/queen-kafka/compat/transactions/run.sh
 sidebar:
+  label: "Kafka clients"
   order: 7
 ---
 
@@ -401,3 +402,7 @@ open are on [Kafka clients](/benchmarks/kafka-clients/) in the benchmarks.
   where the facade differs from Apache Kafka, and what each client library needs.
 - [Kafka Streams, Connect and Flink](/guides/kafka-frameworks/): what the frameworks ask of a broker
   and what runs today.
+- [Kafka to Queen bridge](/examples/kafka-bridge/): a Kafka producer, a Queen worker with one
+  transaction per order, and a Kafka consumer, on the same queues.
+- [Compare](/start/compare/#kafka): how Kafka and Queen each keep order per entity, and what one
+  commit covers.

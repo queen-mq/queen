@@ -1,0 +1,255 @@
+{:faults {:corrupt-outcomes {},
+          :corrupt-not-back [],
+          :valid? true,
+          :member-final nil,
+          :member-removals {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? false,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches ()},
+ :lazyfs {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3],
+                    "n2" [1 2 3],
+                    "n3" [1 2 3],
+                    "n4" [1 2 3],
+                    "n5" [1 2 3],
+                    "n6" [1 2 3]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:link-before-stop {:node "n5",
+                               :role "standby",
+                               :position 4865,
+                               :follower {:lagEntries 0,
+                                          :lastAnswerMs 1678,
+                                          :state "following",
+                                          :source "10.114.0.11:7400",
+                                          :lagMs 0,
+                                          :sourceApplied 4865,
+                                          :error nil,
+                                          :scanned 4865}},
+            :duplicate (),
+            :last-refusal-after-promote-ms 31886,
+            :planned-lost-count 0,
+            :source-record-after-own (),
+            :valid? false,
+            :diverged-count 0,
+            :lost-count 0,
+            :standby-reads-judged 1431,
+            :first-own-write-ms 30,
+            :lost-before-a-survivor (),
+            :nodes-of-one-cluster-disagree (),
+            :phantom (),
+            :source-lost (),
+            :standby-read-diverged (),
+            :standby-wrote-early (),
+            :standby-send-in-source (),
+            :replayed 4863,
+            :mode :crash,
+            :lost-before-a-survivor-count 0,
+            :source-acked 4853,
+            :ack-offset-mismatch (),
+            :standby-refusals-after-promote 20,
+            :source-final-read? true,
+            :final-read-gaps {},
+            :own-lost (),
+            :diverged (),
+            :planned-lost (),
+            :await-standby nil,
+            :own-records 4033,
+            :refused-but-present ({:k 5,
+                                   :v 65481,
+                                   :index 52996,
+                                   :cluster :standby,
+                                   :retired? false,
+                                   :in [:promoted]}
+                                  {:k 0,
+                                   :v 65490,
+                                   :index 52997,
+                                   :cluster :standby,
+                                   :retired? false,
+                                   :in [:promoted]}),
+            :own-acked 4028,
+            :torn-transaction (),
+            :lost-over-ms nil,
+            :standby-refusals 12628,
+            :promote {:role "promoted",
+                      :promoted? true,
+                      :attempts 2,
+                      :node "n6",
+                      :first-answers [["n5" 503 "timeout" 5005]],
+                      :answers {["n5" 503 "timeout"] 1},
+                      :position 4865,
+                      :ms 5283,
+                      :views [[5005
+                               {"n4" {:raft {:role "follower",
+                                             :leader true,
+                                             :term 7,
+                                             :applied 4866,
+                                             :commit 4866,
+                                             :lag 0},
+                                      :link {:role "standby",
+                                             :leader false,
+                                             :position 4865,
+                                             :follower {:state "idle",
+                                                        :lagEntries 0,
+                                                        :error nil}},
+                                      :gauges ["queen_raft_plan_deferred{quantile=\"0.5\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.9\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.99\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.999\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"1\"} 0"
+                                               "queen_raft_plan_deferred_count 0"
+                                               "queen_raft_plan_deferred_sum 0"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.5\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.9\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.99\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.999\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"1\"} 1"
+                                               "queen_raft_apply_channel_depth_count 4866"
+                                               "queen_raft_apply_channel_depth_sum 4866"
+                                               "queen_raft_index{kind=\"log\"} 4866"
+                                               "queen_raft_index{kind=\"committed\"} 4866"
+                                               "queen_raft_index{kind=\"applied\"} 4866"
+                                               "queen_raft_index{kind=\"durable\"} 4866"
+                                               "queen_raft_inflight 0"
+                                               "queen_raft_proposals_total 212"
+                                               "queen_link_role{role=\"primary\"} 0"
+                                               "queen_link_role{role=\"standby\"} 1"
+                                               "queen_link_role{role=\"promoted\"} 0"
+                                               "queen_link_position_index 4865"
+                                               "queen_link_follower_state{state=\"idle\"} 1"
+                                               "queen_link_follower_state{state=\"following\"} 0"
+                                               "queen_link_follower_state{state=\"waiting\"} 0"
+                                               "queen_link_follower_state{state=\"halted\"} 0"
+                                               "queen_link_lag_entries 0"
+                                               "queen_link_lag_seconds 0.000"
+                                               "queen_link_last_answer_seconds 58.404"
+                                               "queen_link_entries_total 211"]},
+                                "n5" {:raft {:role "leader",
+                                             :leader true,
+                                             :term 6,
+                                             :applied 4865,
+                                             :commit 4865,
+                                             :lag 0},
+                                      :link {:role "standby",
+                                             :leader true,
+                                             :position 4865,
+                                             :follower {:state "waiting",
+                                                        :lagEntries 0,
+                                                        :error "http://10.114.0.13:7400/link/v1/read: client error (Connect): tcp connect error: deadline has elapsed"}},
+                                      :gauges ["queen_raft_plan_deferred{quantile=\"0.5\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.9\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.99\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.999\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"1\"} 0"
+                                               "queen_raft_plan_deferred_count 0"
+                                               "queen_raft_plan_deferred_sum 0"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.5\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.9\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.99\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.999\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"1\"} 1"
+                                               "queen_raft_apply_channel_depth_count 4865"
+                                               "queen_raft_apply_channel_depth_sum 4865"
+                                               "queen_raft_index{kind=\"log\"} 4866"
+                                               "queen_raft_index{kind=\"committed\"} 4865"
+                                               "queen_raft_index{kind=\"applied\"} 4865"
+                                               "queen_raft_index{kind=\"durable\"} 4865"
+                                               "queen_raft_inflight 1"
+                                               "queen_raft_proposals_total 3490"
+                                               "queen_link_role{role=\"primary\"} 0"
+                                               "queen_link_role{role=\"standby\"} 1"
+                                               "queen_link_role{role=\"promoted\"} 0"
+                                               "queen_link_position_index 4865"
+                                               "queen_link_follower_state{state=\"idle\"} 0"
+                                               "queen_link_follower_state{state=\"following\"} 0"
+                                               "queen_link_follower_state{state=\"waiting\"} 1"
+                                               "queen_link_follower_state{state=\"halted\"} 0"
+                                               "queen_link_lag_entries 0"
+                                               "queen_link_lag_seconds 0.000"
+                                               "queen_link_last_answer_seconds 7.104"
+                                               "queen_link_entries_total 3489"]},
+                                "n6" {:raft {:role "leader",
+                                             :leader true,
+                                             :term 7,
+                                             :applied 4866,
+                                             :commit 4866,
+                                             :lag 0},
+                                      :link {:role "standby",
+                                             :leader true,
+                                             :position 4865,
+                                             :follower {:state "waiting",
+                                                        :lagEntries 0,
+                                                        :error "http://10.114.0.13:7400/link/v1/read: client error (Connect): tcp connect error: Connection refused (os error 111)"}},
+                                      :gauges ["queen_raft_plan_deferred{quantile=\"0.5\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.9\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.99\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"0.999\"} 0"
+                                               "queen_raft_plan_deferred{quantile=\"1\"} 0"
+                                               "queen_raft_plan_deferred_count 0"
+                                               "queen_raft_plan_deferred_sum 0"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.5\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.9\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.99\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"0.999\"} 1"
+                                               "queen_raft_apply_channel_depth{quantile=\"1\"} 1"
+                                               "queen_raft_apply_channel_depth_count 4866"
+                                               "queen_raft_apply_channel_depth_sum 4866"
+                                               "queen_raft_index{kind=\"log\"} 4866"
+                                               "queen_raft_index{kind=\"committed\"} 4866"
+                                               "queen_raft_index{kind=\"applied\"} 4866"
+                                               "queen_raft_index{kind=\"durable\"} 4866"
+                                               "queen_raft_inflight 0"
+                                               "queen_raft_proposals_total 1158"
+                                               "queen_link_role{role=\"primary\"} 0"
+                                               "queen_link_role{role=\"standby\"} 1"
+                                               "queen_link_role{role=\"promoted\"} 0"
+                                               "queen_link_position_index 4865"
+                                               "queen_link_follower_state{state=\"idle\"} 0"
+                                               "queen_link_follower_state{state=\"following\"} 0"
+                                               "queen_link_follower_state{state=\"waiting\"} 1"
+                                               "queen_link_follower_state{state=\"halted\"} 0"
+                                               "queen_link_lag_entries 0"
+                                               "queen_link_lag_seconds 0.000"
+                                               "queen_link_last_answer_seconds 83.457"
+                                               "queen_link_entries_total 1157"]}}]]},
+            :replayed-per-partition {0 608,
+                                     1 593,
+                                     2 570,
+                                     3 620,
+                                     4 613,
+                                     5 633,
+                                     6 635,
+                                     7 591}},
+ :stats {:valid? true,
+         :count 38371,
+         :ok-count 11359,
+         :fail-count 26899,
+         :info-count 113,
+         :by-f {:final-read {:valid? true,
+                             :count 12,
+                             :ok-count 12,
+                             :fail-count 0,
+                             :info-count 0},
+                :read {:valid? true,
+                       :count 3923,
+                       :ok-count 2466,
+                       :fail-count 1457,
+                       :info-count 0},
+                :send {:valid? true,
+                       :count 34436,
+                       :ok-count 8881,
+                       :fail-count 25442,
+                       :info-count 113}}}}

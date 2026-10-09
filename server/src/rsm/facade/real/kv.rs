@@ -65,6 +65,30 @@ fn invalid(e: KvInvalid) -> KvFailure {
 }
 
 impl RaftFacade {
+    /// D20: an op minted at a catalogue version the cluster is not at yet is
+    /// not sent — a member on an older release, should it lead, cannot decode
+    /// the command that carries it. The window is a rolling upgrade (the
+    /// leader raises the version once its last member runs this release), so
+    /// the answer is the retryable one, with the reason spelled out.
+    pub(crate) fn kv_ops_admitted(&self, ops: &[KvOp]) -> Result<(), KvFailure> {
+        let need = ops
+            .iter()
+            .map(KvOp::min_cluster_version)
+            .max()
+            .unwrap_or(crate::rsm::effect::VERSION_1);
+        if self.cluster_allows(need) {
+            return Ok(());
+        }
+        Err(KvFailure::NotYet {
+            reason: format!("kv_check_needs_cluster_version_{need}"),
+            detail: format!(
+                "the check op needs cluster version {need} and this cluster is at {}: a member \
+                 still runs an older release. It rises by itself once every member is upgraded",
+                self.cluster_version()
+            ),
+        })
+    }
+
     /// `POST /api/v1/kv` and the path routes (024 `kv_apply_v1`, HTTP surface).
     pub(super) async fn kv_impl(&self, ctx: ReqCtx, req: KvReq) -> Result<KvOut, KvFailure> {
         let max_key = self.store.max_key_len();
@@ -81,11 +105,12 @@ impl RaftFacade {
                 results: Vec::new(),
             });
         }
+        self.kv_ops_admitted(&ops)?;
 
-        let pre: Vec<KvOpOutcome> = if ops.iter().any(KvOp::is_write) {
+        let pre: Vec<KvOpOutcome> = if ops.iter().any(KvOp::is_planned) {
             let registered = ops
                 .iter()
-                .any(|op| !op.is_write())
+                .any(KvOp::is_read)
                 .then(|| crate::rsm::kv_reads::global().register(ctx.request_id, &ctx.tenant, &ops))
                 .flatten();
             let cmd = Command::Kv(KvCommand {
@@ -149,7 +174,7 @@ impl RaftFacade {
                     None => Err(KvFailure::Rsm(RsmError::Timeout)),
                 };
             }
-            if ops.iter().any(|op| !op.is_write()) {
+            if ops.iter().any(KvOp::is_read) {
                 // Registered ids are unique (minted here per call, D6).
                 return Err(KvFailure::Rsm(RsmError::Internal(
                     "kv read: the call's id was already registered".into(),

@@ -1,9 +1,10 @@
 ---
-title: Life of a step
+title: "Life of a step: from HTTP request to commit"
 description: "One push, one pop, one ack and one transaction followed from the HTTP edge to the answer: where dedup, leases and refusals happen, and when you are answered."
 type: concept
 tier: internals
 sidebar:
+  label: "Life of a step"
   order: 2
 sourceOfTruth:
   - server/src/handlers/raft.rs
@@ -23,6 +24,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): the added QLog index read leaves append, fsync, apply, pop and ack behavior unchanged.
 # sourceOfTruth re-read 2026-10-07 (unanswered pop): the engine and the facade take back the
 # delivery attempt of a claim nobody received; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): on a standby cluster a command is refused before it is queued (intake.rs, batcher.rs) and the route answers 503 `standby` (handlers/raft.rs, remote.rs); the path of a step on an ordinary cluster is as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): handlers/raft.rs registers POST /api/v1/locks; facade/real.rs
+# refuses a transaction's KV `check` below cluster version 5. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only; a command that waited out a standby's election is refused by the node that wins. The path of a step on an ordinary cluster is as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader. Nothing this page states changes.
 ---
 
 A worker's step in Queen is three calls at most: it pops a batch, does its work, and commits a

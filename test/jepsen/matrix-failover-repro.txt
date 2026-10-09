@@ -1,0 +1,28 @@
+# W12 failover, a narrower matrix: a failover while a partition isolates the
+# leaders every 3 s, so that it often begins just after the standby's leader
+# was cut off from every other node for a second or two. Two things were
+# first seen here on 2026-10-08, on release2.1 at e2f7236bd:
+#
+#   - a standby whose new leader planned a client's command that had waited
+#     out the election, and then stopped for good on the next replayed entry
+#     (fo-repro-primaries-1, fo-repro-planned-1);
+#   - a standby that could not be promoted for 120 s although its three nodes
+#     were up, its leader still led and nothing was in flight: every request
+#     ended "the request deadline elapsed" (fo-crash-part, and two of three
+#     primaries runs once the first was fixed).
+#
+# A promotion that needs more than one request records what each node
+# answered and what each showed.
+#
+#   cd /root/jepsen-failover && NODES=n1,n2,n3,n4,n5,n6 RUNS=/root/runs-failover-repro \
+#     BIN=/root/bin/queen ./run-campaign.sh matrix-failover-repro.txt
+fo-repro-primaries-1    --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-primaries-2    --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-primaries-3    --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-primaries-4    --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-primaries-5    --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-primaries-6    --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-one-1          --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets one --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-one-2          --workload failover --standby-nodes 3 --failover crash --nemesis partition --partition-targets one --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-planned-1      --workload failover --standby-nodes 3 --failover planned --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200
+fo-repro-planned-2      --workload failover --standby-nodes 3 --failover planned --nemesis partition --partition-targets primaries --nemesis-interval 3 --time-limit 200 --rate 200

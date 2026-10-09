@@ -1,9 +1,11 @@
 ---
-title: Laravel
+title: "Laravel queue driver: install and run your jobs"
 description: "Run your Laravel jobs on Queen: install the queue connection, keep your job classes and workers, order jobs per entity, pick a delivery profile, and choose who runs the workers."
 type: how-to
 tier: use
 sidebar:
+  group:
+    label: "Laravel"
   order: 8
 sourceOfTruth:
   - clients/client-php/src/Laravel/Contracts/QueenPartitionable.php
@@ -51,6 +53,14 @@ sourceOfTruth:
 # delivery attempt of a claim nobody received; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (PHP client 2.3.1): 2.3.0 is on Packagist, and 2.3.1 adds the opt-in
 # supervision of a fluent consumer with the same supervisor pin (0.8.0). The Versions section says so.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): the facade can open a node as a member of a standby cluster, which answers 503 `standby` until it is promoted; the queue connection is as described. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (locks): facade/real.rs refuses a transaction's KV `check` below cluster
+# version 5; proxy/src/routes.rs puts POST /api/v1/locks behind the KV plan flag, never quota-blocked. Nothing
+# this page states changes.
+# sourceOfTruth re-read 2026-10-08 (composer description): composer.json's description names the Laravel
+# queue driver and Horizon; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (PHP client 2.4.0): 2.4.0 adds locks, semaphores, the transaction guard and
+# the KV check to the client and pins supervisor 0.8.0, as 2.3.1 does. The Versions section says so.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and
@@ -59,10 +69,13 @@ running the workers, which Horizon's master does. Your job classes stay ordinary
 majority of nodes) before `dispatch()` returns, an ordered lane per entity when you want one, and
 workers that do more with less. In our runs of 2026-10-01 on one 16-vCPU Linux server, with every
 write fsynced on both sides, 32 workers completed 2,753 jobs/s of 10 ms jobs against 1,124 for
-Horizon, and an application with 64 forked workers fit in 183 MiB against 1,892. Prefork saves
-the booted framework, about 27 MiB per worker, while the memory a job allocates stays the same on
-both ([benchmark](/benchmarks/laravel/)). These results are diagnostic: each comes from one host, with
-a protocol written by the Queen team.
+Horizon, and an application with 64 forked workers fit in 183 MiB against 1,892
+([memory](/benchmarks/laravel/#memory)). Prefork saves the booted framework, about 27 MiB per
+worker, while the memory a job allocates stays the same on both
+([where the difference comes from](/benchmarks/laravel/#where-the-difference-comes-from)). These results are diagnostic: each comes from one host, with
+a protocol written by the Queen team. If you run Horizon today,
+[Queen or Horizon](/guides/laravel/queen-vs-horizon/) compares the two stacks, and
+[migrate from Horizon](/guides/laravel/migrate-from-horizon/) moves a running application step by step.
 
 ## Install
 
@@ -163,7 +176,8 @@ final class RebuildCustomer implements ShouldQueue, QueenPartitionable
 Every `RebuildCustomer` of one customer now runs in dispatch order, one at a time, and customers
 never wait for each other. You need no lock or version column for it, because the broker leases a
 partition to one worker at a time, and the partition is created by the first job that names it
-([how it works](/guides/laravel/concepts/#queues-and-stripes)).
+([how it works](/guides/laravel/concepts/#queues-and-stripes)). The
+[ordering example](/examples/laravel/ordering/) runs it on four workers and checks the order.
 
 ## Choose a delivery profile
 
@@ -315,8 +329,8 @@ class, monitored tags, long-wait alerts and the Prometheus endpoint. Read the
 ## Versions
 
 The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a separate binary
-whose version each client release pins. These pages describe PHP client 2.3.1, which pins
-supervisor 0.8.0, as 2.3.0 does. That supervisor is published for Linux (amd64 and arm64, static
+whose version each client release pins. These pages describe PHP client 2.4.0, which pins
+supervisor 0.8.0, as 2.3.0 and 2.3.1 do. That supervisor is published for Linux (amd64 and arm64, static
 musl builds) and macOS with a signed manifest.
 Everything not listed here works from 1.6.0 on.
 
@@ -330,6 +344,7 @@ Everything not listed here works from 1.6.0 on.
 | 2.2.0 | 0.7.0 | `prefetch` `'auto'` sizes each pop from the jobs' runtime; the safe, balanced and fast profiles |
 | 2.3.0 | 0.8.0 | a pool's own `prefork` ([prefork for some pools only](/guides/laravel/supervisors/#prefork-for-some-pools-only)); `queen:consume` sets and renews its lease, stops on `--idle-timeout`, and reports refused acks ([consume Queen messages](/guides/laravel/consume/)) |
 | 2.3.1 | 0.8.0 | `->supervision([...])` on a fluent `consume()->execute()` reports that consumer to the dashboard, off by default ([consumer status](/reference/supervisor-status/#optional-sdk-consumer-supervision)) |
+| 2.4.0 | 0.8.0 | `$queen->lock()` and `$queen->semaphore()`, `->guard($lock)` on a transaction and `kv()->check()` ([locks](/concepts/locks/)); they need a 2.1 broker |
 
 ## Limits
 
@@ -347,12 +362,9 @@ coordination: the state directory's lock only excludes a second master on the sa
 supervisors and the dashboard are previews and run on Unix only. The Rust engine's Linux builds are
 static and their release qualification is still pending, and there is no Windows build.
 
-In 2.0.0-beta.6 the broker's depth read does not decode a percent-encoded queue name, so a queue
-named with a space, a colon or a slash looks empty to the supervisor, which then never scales it
-up. Keep queue names to letters, digits, `-`, `_` and `.`.
-
 Horizon still does some things Queen does not: silenced jobs, job lists, batches in its dashboard,
 Slack and SMS alert routes, per-supervisor controls, and clearing a queue.
+[When not to use Queen](/start/when-not-to-use/) lists the cases where another system fits better.
 
 Messages that other services push to Queen, and that are not Laravel jobs, go to a class of yours
 with `php artisan queen:consume` ([consume Queen messages](/guides/laravel/consume/)).

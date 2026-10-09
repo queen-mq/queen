@@ -17,9 +17,12 @@ export const IMAGE = "ghcr.io/queen-mq/queen:latest";
 
 /**
  * The `<title>`. NimbusHead appends " | Queen MQ" because this differs from
- * the site title, so the brand stays out of the string.
+ * the site title, so the brand stays out of the string. It leads with the
+ * words a reader searches for ("message broker"); the page itself says "event
+ * broker" too, so both reach the index. 54 characters: with the suffix it is
+ * the 65 that scripts/check-seo.mjs allows before results cut it.
  */
-export const HOME_TITLE = "A transactional event broker with one ordered partition per entity";
+export const HOME_TITLE = "Transactional message broker with per-entity ordering";
 
 /** One line describing the page, for the index and corpus rows that list it. */
 export const HOME_SUMMARY =
@@ -30,6 +33,8 @@ export const HOME_SUMMARY =
 export const hero = {
   eyebrow: "Queen MQ 2.0 · open source, Apache 2.0",
   headline: "Nothing happens halfway.",
+  /** Second line of the `<h1>`: what the product is, under the line that says why. */
+  subline: "A transactional message broker, one ordered partition per entity.",
   lead:
     "Queen MQ is a transactional event broker. When a worker handles an event, the ack, the " +
     "state it changes, the events it emits and the timer it sets commit as one entry of a " +
@@ -206,8 +211,8 @@ export const dashboardSection = {
   image: "dashboard-overview",
   alt:
     "The dashboard's overview of a broker under load: messages pushed and consumed per second, " +
-    "queues, partitions and consumer groups, the backlog and its trend, and per-queue rows with " +
-    "throughput and lag.",
+    "queues, partitions and consumer groups, the backlog and its trend, the partitions drawn as a " +
+    "sunflower, and tiles for throughput, lag and errors.",
 };
 
 export const proofSection = {
@@ -241,9 +246,9 @@ export const proof: { figure: string; unit: string; body: string; href: string }
     href: "/benchmarks/transactions/",
   },
   {
-    figure: "65 of 65",
-    unit: "Jepsen tests valid",
-    body: "On 2.0.0-beta.3, five nodes under kill -9, pauses, network partitions, clock jumps and power loss: no acknowledged message lost, no lease held twice. Testing, not proof.",
+    figure: "153",
+    unit: "Jepsen tests on the code of 2.1.0",
+    body: "Five nodes under kill -9, pauses, network partitions, clock jumps and power loss: 152 valid, and the other valid when run again with the test nodes' clocks set. No acknowledged message lost, no lease held twice. Testing, not proof.",
     href: "/benchmarks/jepsen/",
   },
 ];
@@ -289,5 +294,5 @@ export const start: { title: string; body: string; href: string }[] = [
   { title: "Quickstart", body: "Run a node and commit your first step with curl.", href: "/start/quickstart/" },
   { title: "Pick a client", body: "Six SDKs, curl, queenctl and the broker embedded in Rust.", href: "/start/clients/" },
   { title: "Examples", body: "Whole programs: a chat backend, a saga, webhooks, rate limits.", href: "/examples/" },
-  { title: "Compare", body: "Against Kafka, SQS and Temporal, and when to pick them.", href: "/start/compare/" },
+  { title: "Compare", body: "Against Kafka, RabbitMQ, SQS and Temporal, and when to pick them.", href: "/start/compare/" },
 ];

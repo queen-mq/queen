@@ -16,6 +16,11 @@ sourceOfTruth:
   - app/src/composables/supervisorStatus.js
   - app/src/composables/supervisorQueueMetrics.js
   - app/src/views/Supervisors.vue
+  - app/src/components/SupervisorGroupCard.vue
+  - app/src/components/SupervisorActivity.vue
+  - app/src/composables/supervisorActivity.js
+  - app/src/composables/supervisorGroups.js
+  - server/src/rsm/dashboard/queue_views.rs
   - app/src/composables/consumerStatus.js
   - clients/client-js/client-v2/consumer/ConsumerManager.js
   - clients/client-js/client-v2/consumer/Supervision.js
@@ -35,6 +40,7 @@ verifiedBy:
   - clients/client-php/tests/RemoteStatusPublisherTest.php
   - app/test/supervisor-status.test.js
   - app/test/supervisor-queue-metrics.test.js
+  - app/test/supervisor-activity.test.js
   - clients/client-php/tests/LaravelSupervisorCommandTest.php
   - clients/client-php/tests/LaravelSupervisorTest.php
   - clients/client-js/test-v2/consumer-unit/supervision.test.js
@@ -48,6 +54,13 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (shared supervisor grid): Supervisors.vue lays out instances
 # from all publication groups in one grid. Slot identity, group filtering, pagination,
 # publication decoding and health interpretation described here are unchanged.
+# sourceOfTruth re-read 2026-10-08 (locks): queen_client.hpp gains the lock, semaphore, check and
+# guard helpers. Its consumer supervision and what it publishes are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (application cards): the dashboard groups
+# loaded instances by publication group. Slot identity and decoding are unchanged.
+# sourceOfTruth re-read 2026-10-09 (supervisors restyle): Supervisors.vue, SupervisorGroupCard.vue and SupervisorActivity.vue
+# are rebuilt from the dashboard's shared card, stats, table and segmented control; a healthy application is a grey
+# dot and the per-instance marks are gone. The colours paragraph says so; what is read and how it is combined is unchanged.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.
@@ -56,6 +69,52 @@ of the Laravel process supervisor use `queen.supervisor.status/v1`; all six SDKs
 use the [consumer document](#optional-sdk-consumer-supervision), `queen.consumer.status/v1`.
 An application-owned scheduler can publish the consumer contract without a new dashboard
 integration.
+
+## Application overview
+
+The dashboard shows one horizontal card per publication group, across all SDK languages
+and the PHP/Rust process supervisors. Each card includes current worker capacity, pools
+needing attention, heartbeat age and runtime-specific diagnostics: busy workers and cumulative
+handler failures for SDK consumers, or draining workers and free process slots for process
+supervisors. Expand the instances line to see every loaded instance, then
+select an instance to open its queues and diagnostics. Search and engine filters select
+whole groups: a matching healthy host never hides an unhealthy sibling. Display pagination
+counts applications, while **Load more publications** extends the bounded KV scan.
+
+A grey dot before the application's name means no issue was reported by the loaded
+instances, as a healthy state is marked on every other page. An amber mark means attention
+or incomplete status and a red one a critical issue, each with its label in the header; a
+hollow dot means the instances are not running. The line under the card counts the instances
+in each state: expand it to inspect all of them. A partial KV scan marks summaries as partial, even if the loaded instances
+report no problems. The dashboard cannot infer missing replicas after their publications
+have expired and disappeared.
+
+Worker totals are available only when every loaded instance in the group has a fresh,
+running observation and supplies the count. Shortfalls add per instance; excess workers
+elsewhere do not cancel them. Queue names are deduplicated across replicas, dynamic consumer
+scopes are identified separately, and shared backlog is never added. This aggregation
+requires no publisher or broker protocol change.
+
+Each card also reads the last hour of broker history for one selected, named queue through
+`/api/v1/analytics/queue-ops`. **Traffic** shows incoming and delivered messages per minute;
+**Backlog** shows sampled pending-message depth. Select another reported queue to change
+the chart. The queue list deduplicates names and sums worker allocations across loaded
+instances, while queue history and backlog are never multiplied by replica count.
+
+These charts describe **all consumers of the selected queue on the current cluster**,
+not the individual application's throughput. A supervisor may use another connection;
+its publication does not establish that it consumes from this broker. No named queue or
+unavailable analytics produces an explicit empty state. Missing samples remain gaps,
+including incomplete traffic buckets, rather than implied zeroes. Current rates use the
+most recent complete time bucket; ACK failures and backlog deltas use the available
+samples in the hour. SDK handler failures are separate cumulative counters since each
+instance started, not broker ACK failures or a historical error rate.
+
+History reads are limited to the selected queues of displayed cards, with at most three
+concurrent requests and one shared request per queue per refresh. Stable endpoint refusals
+stop automatic analytics retries until an explicit refresh or a source/cluster switch.
+The supervisor KV publication itself still contains only the latest observation, not
+historical worker counts or per-instance throughput.
 
 ## Identity and keys
 

@@ -1,5 +1,5 @@
 ---
-title: Architecture
+title: "Broker architecture: Raft log, planner, store"
 description: "One process per node: an HTTP edge, a planner on the leader that turns commands into effects, one replicated log per raft group, a deterministic apply and an in-memory store checkpointed to disk."
 type: concept
 tier: internals
@@ -32,6 +32,9 @@ digest: >-
   is one log entry with no coordinator and no two-phase commit; one tenant's writes go through one
   leader and one log, and more raft groups and clusters add capacity across tenants.
 # sourceOfTruth re-read 2026-10-05 (bc1b5bfb6, 2.0.1): the engine drops idle parts (QUEEN_CONSUME_IDLE_UNLOAD_S) and loads them back on the next append; traces live in their own LMDB file.
+# sourceOfTruth re-read 2026-10-08 (standby cluster): rsm gains the link module, the batcher a standby mode and a rule for stopping (a closing driver no longer waits on an entry that timed out), the engine a standby flag, the replicator what a standby reads and the hold on its log. A paragraph under Replication says what a standby cluster is; the planner, the lanes, the pipeline and the engine are as described.
+# sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only (a standby that had just elected a leader planned a client's command that had waited out the election). That a standby plans nothing of its own until it is promoted now holds across its leader changes too; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader; node.rs forwards the new call. Replication now says how the planner's entries reach openraft and when they wait. Nothing else this page states changes.
 ---
 
 Queen is one process per node, built around one idea: decide every write once, on the leader, and
@@ -153,6 +156,21 @@ files. The leader streams entries to each follower over one long-lived connectio
 appends in flight, and an entry commits once a majority has written and fsynced it. A node reports
 itself leader only after it has applied an entry of its own term, so it always plans over complete
 committed state.
+
+The planner hands its entries to openraft through one task, in plan order, several before the
+first is answered. openraft takes a write only from a leader that a quorum has acknowledged within
+its lease (the longer election timeout, 2 s), and it refuses one entry at a time. A refused entry
+is not in the log, while the next one, planned on top of it, could be: an offset its partition
+never reached. So that task does not let openraft refuse. Once the newest acknowledgement is 1.5 s
+old it keeps the entries, in order, until a quorum answers or the node stops leading, and it drops
+what is left of a pipeline the planner has abandoned.
+
+A second cluster can follow the first from outside its raft group. A
+[standby cluster](/operate/standby/) has a leader of its own, which reads the first cluster's
+committed entries from any of its nodes and proposes each one into its own log, with the position
+it has reached written in the same entry. An entry is self-contained (it carries the time, the ids
+and the offsets its planner chose), so replaying it builds the same state, and the standby plans
+nothing of its own until it is promoted.
 
 Every node applies every committed entry, so a follower holds a full copy of its raft groups. With
 `QUEEN_RAFT_CLIENT_OFFLOAD` (on by default) it also serves its own clients: it parses and prepares

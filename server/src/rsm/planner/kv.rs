@@ -25,7 +25,12 @@
 //!    which sees the call's own writes in the same apply order as pass 2.
 //!    The one read that must NOT see them — a `get` of a key the SAME call
 //!    writes later in apply order — is answered at plan time
-//!    ([`KvOpOutcome::Got`]). A call with no write never enters the planner.
+//!    ([`KvOpOutcome::Got`]). A call of reads alone never enters the planner.
+//! 4. **`check` is a precondition and nothing else**: judged here like a
+//!    write's `expect`, at the same serial point and against the same merged
+//!    row, and it writes nothing. With `required: true` it is the gate of a
+//!    whole call or transaction on a key the call does not touch — a lock's
+//!    row, say ([`crate::locks`]).
 //!
 //! # Time (D5, I2) and versions (I18)
 //!
@@ -35,9 +40,16 @@
 //! boundary for readers and for the sweep ([`KvRow::live`]).
 //!
 //! Versions are `kv_version_base + ordinal` (I18): unique across the store and
-//! never re-issued — that uniqueness is the only guarantee. They are also
-//! monotone as a side effect of how they are assigned, but nothing may rely
-//! on that.
+//! never re-issued. THE FENCING CONTRACT: on one key, a later write carries a
+//! higher version than every earlier one — across a delete and a re-create,
+//! an expiry, a restart, a snapshot and a change of leader. It holds because
+//! this planner is the one serial point that assigns them, from a counter
+//! that only moves forward ([`Overlay::next_kv_version`]; apply refuses an
+//! entry whose base is not exactly the next one). So the version a writer was
+//! handed is a fencing token: whatever is guarded by "the key is still at
+//! this version" refuses a holder that was replaced. Between two DIFFERENT
+//! keys the order of versions is the order the planner met the writes in and
+//! is promised to nobody.
 //!
 //! # The transaction reuse seam
 //!
@@ -312,8 +324,12 @@ impl KvExpiry {
     }
 }
 
-/// One validated op of a KV call (seven wire names, five code paths:
+/// One validated op of a KV call (eight wire names, six code paths:
 /// `putIfAbsent` is `Put` with `if_absent`, which desugars to `expect: 0`).
+///
+/// A prepared command crosses to the leader as postcard, which names a
+/// variant by its position: a new one goes LAST, and is sent only where the
+/// cluster version admits it (D20; [`KvOp::min_cluster_version`]).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub enum KvOp {
     Get {
@@ -360,6 +376,14 @@ pub enum KvOp {
         expiry: KvExpiry,
         required: bool,
     },
+    /// A precondition that writes nothing: the key is live at version
+    /// `expect`, or — `expect: 0` — is not there. Catalogue version 5.
+    Check {
+        ns: String,
+        key: String,
+        expect: u64,
+        required: bool,
+    },
 }
 
 impl KvOp {
@@ -375,14 +399,40 @@ impl KvOp {
             KvOp::Put { .. } => "put",
             KvOp::Delete { .. } => "delete",
             KvOp::Incr { .. } => "incr",
+            KvOp::Check { .. } => "check",
         }
     }
 
+    /// Can create, change or remove a row.
     pub fn is_write(&self) -> bool {
         matches!(
             self,
             KvOp::Put { .. } | KvOp::Delete { .. } | KvOp::Incr { .. }
         )
+    }
+
+    /// Answered from applied state by the receiver, never by the planner.
+    pub fn is_read(&self) -> bool {
+        matches!(
+            self,
+            KvOp::Get { .. } | KvOp::GetMany { .. } | KvOp::GetPrefix { .. }
+        )
+    }
+
+    /// Judged by the planner, at its serial point: every write, and `check`.
+    /// A call with one of these is a command; a call with none never is.
+    pub fn is_planned(&self) -> bool {
+        !self.is_read()
+    }
+
+    /// The catalogue version a cluster must be at before this op may be sent
+    /// to its leader (D20, `effect.rs`): below it some member still runs a
+    /// release that cannot decode the op.
+    pub fn min_cluster_version(&self) -> u16 {
+        match self {
+            KvOp::Check { .. } => crate::rsm::effect::VERSION_5,
+            _ => crate::rsm::effect::VERSION_1,
+        }
     }
 
     pub fn ns(&self) -> &str {
@@ -392,7 +442,8 @@ impl KvOp {
             | KvOp::GetPrefix { ns, .. }
             | KvOp::Put { ns, .. }
             | KvOp::Delete { ns, .. }
-            | KvOp::Incr { ns, .. } => ns,
+            | KvOp::Incr { ns, .. }
+            | KvOp::Check { ns, .. } => ns,
         }
     }
 
@@ -402,7 +453,8 @@ impl KvOp {
             KvOp::Get { key, .. }
             | KvOp::Put { key, .. }
             | KvOp::Delete { key, .. }
-            | KvOp::Incr { key, .. } => Some(key),
+            | KvOp::Incr { key, .. }
+            | KvOp::Check { key, .. } => Some(key),
             _ => None,
         }
     }
@@ -411,7 +463,8 @@ impl KvOp {
         match self {
             KvOp::Put { required, .. }
             | KvOp::Delete { required, .. }
-            | KvOp::Incr { required, .. } => *required,
+            | KvOp::Incr { required, .. }
+            | KvOp::Check { required, .. } => *required,
             _ => false,
         }
     }
@@ -611,15 +664,17 @@ pub fn parse_ops(
     }
 
     // §6.1 point 3, LOAD-BEARING here (a key's
-    // verdict is decided once per call): at most one WRITE per key.
+    // verdict is decided once per call): at most one WRITE per key — and a
+    // `check` is that key's one verdict too, so a key is checked or written,
+    // never both (a write's own `expect` is the check of the key it writes).
     let mut seen: HashSet<(&str, &str)> = HashSet::new();
     for op in &out {
-        if let (true, Some(k)) = (op.is_write(), op.key()) {
+        if let (true, Some(k)) = (op.is_planned(), op.key()) {
             if !seen.insert((op.ns(), k)) {
                 return Err(bad(
                     "kv_duplicate_key_in_call",
-                    "a key may be written at most once per kv_apply_v1 call; it is what makes \
-                     the intra-space lock order total",
+                    "a key may be written or checked at most once per kv_apply_v1 call; it is \
+                     what makes the intra-space lock order total",
                 ));
             }
         }
@@ -665,9 +720,10 @@ fn parse_one(
     };
     let kind = text_of(o.get("op"));
     let kind = match kind.as_deref() {
-        Some(k @ ("get" | "getMany" | "getPrefix" | "put" | "putIfAbsent" | "delete" | "incr")) => {
-            k.to_string()
-        }
+        Some(
+            k @ ("get" | "getMany" | "getPrefix" | "put" | "putIfAbsent" | "delete" | "incr"
+            | "check"),
+        ) => k.to_string(),
         other => {
             return Err(bad(
                 "kv_unknown_op",
@@ -791,7 +847,18 @@ fn parse_one(
 
     // ---- expect (§5.3): an explicit null is a client bug, not a downgrade
     let mut expect: Option<u64> = None;
-    if matches!(kind.as_str(), "put" | "putIfAbsent" | "delete") {
+    if matches!(kind.as_str(), "put" | "putIfAbsent" | "delete" | "check") {
+        // A check IS its expect: one without says nothing, and answering
+        // `applied: true` to it would read as a guard that held.
+        if kind == "check" && !o.contains_key("expect") {
+            return Err(bad(
+                "kv_bad_expect",
+                format!(
+                    "op at index {i}: check needs an expect (a version, or 0 for a key that \
+                     must not exist)"
+                ),
+            ));
+        }
         if let Some(e) = o.get("expect") {
             let n = int_of(e).filter(|n| *n >= 0).ok_or_else(|| {
                 bad(
@@ -922,6 +989,12 @@ fn parse_one(
             ns,
             key,
             expect,
+            required,
+        },
+        "check" => KvOp::Check {
+            ns,
+            key,
+            expect: expect.unwrap_or(0),
             required,
         },
         _ => KvOp::Incr {
@@ -1112,6 +1185,12 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                         &mut next_version,
                     )
                 }
+                KvOp::Check {
+                    ns, key, expect, ..
+                } => {
+                    let cur = self.kv_row(ov, tenant, ns, key)?;
+                    check_verdict(*expect, cur, now)
+                }
             };
             match verdict {
                 Verdict::Applied(eff, w) => {
@@ -1299,9 +1378,18 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// call is logged.
     ///
     /// A call that writes nothing — every write lost a non-required
-    /// precondition, or a `required` one aborted it — is [`Plan::Empty`]:
-    /// answered from the overlay's view once the entries it read have applied
-    /// (§7.2), never logged, its id never recorded (§5.4).
+    /// precondition, every `check` only looked, or a `required` one aborted
+    /// it — is [`Plan::Empty`]: answered from the overlay's view once the
+    /// entries it read have applied (§7.2), never logged, its id never
+    /// recorded (§5.4).
+    ///
+    /// Unless it also reads. A call's reads are answered at the call's own
+    /// position in the log ([`crate::rsm::kv_reads`]), and a call nothing is
+    /// logged for has none: its receiver waited for a rendering that never
+    /// came and answered 503 at the deadline (a lost `putIfAbsent` beside a
+    /// `get`, 2.0.3). So such a call logs one no-op, which is its position —
+    /// the verdicts and the reads are then one point in the log, as they are
+    /// for a call that wrote.
     pub fn plan_kv(&self, ov: &mut Overlay, cmd: &KvCommand) -> Planned {
         let plan = self.plan_kv_writes(ov, &cmd.tenant, &cmd.ops)?;
         if let Some(failed) = plan.failed {
@@ -1315,6 +1403,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             failed: None,
         });
         if plan.effects.is_empty() {
+            if cmd.ops.iter().any(KvOp::is_read) {
+                let position = [Effect::Noop];
+                ov.apply_effects(&position);
+                return Ok(Plan::logged(position.to_vec(), outcome));
+            }
             return Ok(Plan::Empty(outcome));
         }
         // §5.1 413: the planned size of one command.
@@ -1383,6 +1476,43 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             }
         }
         Ok(effects)
+    }
+}
+
+/// The check verdict: the precondition a write's `expect` is, on a key the
+/// call does not write. Nothing is ever logged for it. Held, it answers the
+/// version it was asked about and no value (the caller named the version it
+/// holds; copying the row into every transaction that guards on it would put
+/// the value in the log once per step). Lost, it answers what a reader would
+/// see, like every other loser (§5.7).
+fn check_verdict(expect: u64, cur: Option<KvRow>, now: i64) -> Verdict {
+    let live = cur.as_ref().filter(|r| r.live(now));
+    let held = match (expect, live) {
+        (0, None) => Ok(0),
+        (0, Some(_)) => Err(KvReason::Exists),
+        (n, Some(r)) if r.version == n => Ok(n),
+        (_, Some(_)) => Err(KvReason::Version),
+        (_, None) => Err(KvReason::Absent),
+    };
+    match held {
+        Ok(version) => Verdict::Applied(
+            None,
+            KvWrite {
+                applied: true,
+                reason: None,
+                value: None,
+                version,
+            },
+        ),
+        Err(reason) => Verdict::Lost(
+            None,
+            KvWrite {
+                applied: false,
+                reason: Some(reason),
+                value: live.map(|r| r.value.clone()),
+                version: live.map(|r| r.version).unwrap_or(0),
+            },
+        ),
     }
 }
 
@@ -1558,7 +1688,12 @@ pub fn write_json(index: usize, op: &KvOp, w: &KvWrite) -> Value {
         pairs.push(("reason", Value::String(r.as_str().to_string())));
     }
     pairs.push(("key", Value::String(op.key().unwrap_or("").to_string())));
-    pairs.push(("value", value));
+    // A check that held has no value to hand back (see `check_verdict`), and
+    // `"value": null` beside `applied: true` would read as "the key holds
+    // null". A check that lost answers the current value, like every loser.
+    if !(w.applied && matches!(op, KvOp::Check { .. })) {
+        pairs.push(("value", value));
+    }
     pairs.push(("version", Value::from(w.version)));
     obj(pairs)
 }
