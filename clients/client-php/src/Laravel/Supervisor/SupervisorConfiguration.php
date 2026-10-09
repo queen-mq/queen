@@ -80,15 +80,21 @@ final class SupervisorConfiguration
             }
 
             $connection = (string) ($options['connection'] ?? 'queen');
-            $consumerGroup = (string) ($options['consumer_group'] ?? $queen['consumer_group'] ?? 'laravel');
             self::identifier($connection, "supervisor [{$name}] connection");
+            // The settings the pool's workers run with: the connection's own
+            // keys over config/queen.php. A pool that names no consumer group
+            // or queues works the connection's, as `queue:work <connection>`
+            // run by hand does.
+            $connectionConfig = self::connectionConfig($connection, $queen, $queueConnections, $raw);
+            $consumerGroup = (string) ($options['consumer_group'] ?? $connectionConfig['consumer_group'] ?? 'laravel');
             self::identifier($consumerGroup, "supervisor [{$name}] consumer_group");
 
-            $queues = $options['queues'] ?? $options['queue'] ?? [$queen['queue'] ?? 'default'];
-            $queues = is_string($queues) ? array_map('trim', explode(',', $queues)) : $queues;
+            $queues = $options['queues'] ?? $options['queue'] ?? [$connectionConfig['queue'] ?? 'default'];
+            $queues = is_string($queues) ? explode(',', $queues) : $queues;
             if (!is_array($queues)) {
                 throw new InvalidArgumentException("Queen supervisor [{$name}] queues must be an array or comma-separated string.");
             }
+            $queues = array_map(static fn (mixed $queue): mixed => is_string($queue) ? trim($queue) : $queue, $queues);
             foreach ($queues as $queue) {
                 if (!is_string($queue) || trim($queue) === '') {
                     throw new InvalidArgumentException("Queen supervisor [{$name}] queues must contain only non-empty strings.");
@@ -166,7 +172,6 @@ final class SupervisorConfiguration
             }
 
             $timeout = self::positiveDuration($options['timeout'] ?? 60, "supervisor [{$name}] timeout");
-            $connectionConfig = self::connectionConfig($connection, $queen, $queueConnections, $raw);
             $retryAfter = self::positiveDuration(
                 $options['retry_after'] ?? $connectionConfig['retry_after'] ?? $queen['retry_after'] ?? 90,
                 "supervisor [{$name}] retry_after",
@@ -356,6 +361,16 @@ final class SupervisorConfiguration
             $maximumControlLoopSeconds += $coordinationBudget;
         }
         $eventDriven = self::boolean($raw['event_driven'] ?? false, 'event_driven');
+        if ($eventDriven && ($raw['read_bearer_token'] ?? null) !== null) {
+            // The watcher parks on POST /api/v1/fetch with the connection's
+            // exported token, and read_bearer_token replaces that token in
+            // every exported connection: the broker would refuse the fetch,
+            // and the master would fall back to polling for the whole run.
+            throw new InvalidArgumentException(
+                'Queen supervisor event_driven needs a token that may consume on every watched connection, '
+                . 'and read_bearer_token replaces it with a read-only one: set one of the two.',
+            );
+        }
         if ($eventDriven) {
             // The PHP engine parks on one fetch per watched connection within
             // a loop iteration, trying each endpoint: the wait plus one
@@ -671,7 +686,11 @@ final class SupervisorConfiguration
 
         // As QueenConnector builds every queen connection: config/queen.php
         // first, the connection's own keys over it. The supervisor checks
-        // the settings its workers will run with.
+        // the settings its workers will run with. A connection that names
+        // its own url, and no urls, is not on the default cluster.
+        if (array_key_exists('url', $connection) && !array_key_exists('urls', $connection)) {
+            unset($queen['urls']);
+        }
         $resolved = array_replace($queen, $connection);
         if (array_key_exists('read_bearer_token', $supervisor) && $supervisor['read_bearer_token'] !== null) {
             $resolved['bearer_token'] = $supervisor['read_bearer_token'];

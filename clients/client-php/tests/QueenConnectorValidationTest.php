@@ -303,4 +303,21 @@ class QueenConnectorValidationTest extends TestCase
             'block_for' => 0,
         ];
     }
+
+    /**
+     * config/queen.php's urls, a cluster, are the defaults of every queen
+     * connection; a connection that names its own url, and no urls, is on
+     * another broker and must not inherit them.
+     */
+    public function testAConnectionsOwnUrlWinsOverTheDefaultUrls(): void
+    {
+        $connector = new QueenConnector(['urls' => ['http://a:6632', 'http://b:6632']]);
+
+        $own = $connector->connect(['driver' => 'queen', 'url' => 'http://orders:6632']);
+        $inherited = $connector->connect(['driver' => 'queen']);
+
+        $urls = fn (\Queen\Laravel\Queue\QueenQueue $queue): array => (new \ReflectionProperty(\Queen\Queen::class, 'config'))->getValue($queue->getQueen())['urls'];
+        $this->assertSame(['http://orders:6632'], $urls($own));
+        $this->assertSame(['http://a:6632', 'http://b:6632'], $urls($inherited));
+    }
 }

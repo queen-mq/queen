@@ -48,6 +48,11 @@
                     "queues": "default",
                     "balance": "simple",
                     "processes": 2
+                },
+                "orders": {
+                    "connection": "queen-orders",
+                    "balance": "simple",
+                    "processes": 1
                 }
             }
         }
@@ -55,7 +60,8 @@
     "queue_connections": {
         "queen": {"driver": "queen", "queue": "default"},
         "queen-batch": {"driver": "queen", "queue": "batch", "lease": 360},
-        "queen-interactive": {"driver": "queen", "queue": "interactive", "lease_renewal": true}
+        "queen-interactive": {"driver": "queen", "queue": "interactive", "lease_renewal": true},
+        "queen-orders": {"driver": "queen", "queue": "orders", "consumer_group": "orders-group"}
     },
     "cases": [
         {
@@ -223,6 +229,61 @@
                 "QUEEN_LARAVEL_CONSUMER_GROUP": "workers",
                 "QUEEN_LARAVEL_CONNECTION": "queen",
                 "QUEEN_LARAVEL_SUPERVISOR": "default",
+                "QUEEN_LARAVEL_RETRY_AFTER": "90"
+            }
+        },
+        {
+            "name": "a pool that names only its connection works that connection's queue and consumer group",
+            "supervisor": "orders",
+            "queue": "orders",
+            "pool": {
+                "connection": "queen-orders",
+                "consumer_group": "orders-group",
+                "queues": ["orders"],
+                "balance": "simple",
+                "strategy": "size",
+                "processes": 1,
+                "min_processes": 1,
+                "max_processes": 10,
+                "target_jobs_per_process": 10,
+                "target_clear_seconds": 60.0,
+                "default_runtime_seconds": 1.0,
+                "balance_cooldown": 3,
+                "balance_max_shift": 1,
+                "scale_down_delay": 10,
+                "restart_backoff": 1,
+                "restart_backoff_max": 30,
+                "stable_after": 60,
+                "sleep": 1,
+                "timeout": 60,
+                "retry_after": 90,
+                "lease_renewal": false,
+                "tries": 3,
+                "memory": 128,
+                "backoff": 0,
+                "max_jobs": 0,
+                "max_time": 0,
+                "rest": 0,
+                "force": false,
+                "quiet": true
+            },
+            "arguments": [
+                "queen-orders",
+                "--queue=orders",
+                "--sleep=1",
+                "--timeout=60",
+                "--tries=3",
+                "--memory=128",
+                "--backoff=0",
+                "--max-jobs=0",
+                "--max-time=0",
+                "--rest=0",
+                "--quiet"
+            ],
+            "environment": {
+                "QUEEN_LARAVEL_CONSUMER_GROUP": "orders-group",
+                "QUEEN_LARAVEL_CONNECTION": "queen-orders",
+                "QUEEN_LARAVEL_SUPERVISOR": "orders",
                 "QUEEN_LARAVEL_RETRY_AFTER": "90"
             }
         }

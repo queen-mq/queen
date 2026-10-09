@@ -343,4 +343,52 @@ class LaravelSupervisorTest extends TestCase
             'default_runtime_seconds' => 1.0,
         ];
     }
+
+    /**
+     * The watcher parks on POST /api/v1/fetch with the connection's exported
+     * token, which read_bearer_token replaces with a read-only one: the
+     * broker refused it and the master polled for the whole run, in silence.
+     */
+    public function testEventDrivenRefusesAReadOnlyToken(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('event_driven needs a token that may consume');
+
+        SupervisorConfiguration::resolve([
+            'url' => 'http://queen.test:6632',
+            'bearer_token' => 'workers',
+            'supervisor' => [
+                'event_driven' => true,
+                'read_bearer_token' => 'read-only',
+                'supervisors' => ['jobs' => ['queues' => 'default', 'balance' => 'simple', 'processes' => 1]],
+            ],
+        ], '/app');
+    }
+
+    /** The string form was trimmed; an array of names was exported as given. */
+    public function testQueueNamesGivenAsAnArrayAreTrimmedLikeTheStringForm(): void
+    {
+        $config = SupervisorConfiguration::resolve([
+            'url' => 'http://queen.test:6632',
+            'supervisor' => ['supervisors' => ['jobs' => ['queues' => ['  high ', 'high', 'default '], 'balance' => 'off', 'processes' => 1]]],
+        ], '/app');
+
+        $this->assertSame(['high', 'default'], $config['supervisors']['jobs']['queues']);
+    }
+
+    /**
+     * config/queen.php's urls, a cluster, replaced the single url of a
+     * connection on another broker, so its pool was watched on the wrong one.
+     */
+    public function testAConnectionsOwnUrlIsNotReplacedByTheDefaultUrls(): void
+    {
+        $config = SupervisorConfiguration::resolve([
+            'url' => 'http://a:6632',
+            'urls' => ['http://a:6632', 'http://b:6632'],
+            'supervisor' => ['supervisors' => ['orders' => ['connection' => 'orders', 'queues' => 'orders', 'balance' => 'simple', 'processes' => 1]]],
+        ], '/app', null, ['orders' => ['driver' => 'queen', 'url' => 'http://orders:6632']]);
+
+        $this->assertSame(['http://orders:6632'], $config['connections']['orders']['urls']);
+        $this->assertSame(['orders'], array_keys($config['connections']));
+    }
 }

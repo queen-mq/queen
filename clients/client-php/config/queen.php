@@ -144,7 +144,7 @@ return [
         // poll_interval; a null TTL keeps the document for twice the
         // heartbeat timeout (minimum 300s).
         'remote_status' => [
-            'enabled' => env('QUEEN_SUPERVISOR_REMOTE_STATUS', false),
+            'enabled' => filter_var(env('QUEEN_SUPERVISOR_REMOTE_STATUS', false), FILTER_VALIDATE_BOOL),
             'connection' => 'queen',
             'namespace' => 'queen-supervisor',
             'key' => Str::slug(env('APP_NAME', 'laravel') . ' ' . env('APP_ENV', 'production')),
@@ -227,7 +227,7 @@ return [
     // until an application opts in. Production access remains denied unless
     // the application defines the `viewQueenDashboard` Gate ability.
     'dashboard' => [
-        'enabled' => env('QUEEN_DASHBOARD_ENABLED', false),
+        'enabled' => filter_var(env('QUEEN_DASHBOARD_ENABLED', false), FILTER_VALIDATE_BOOL),
         'path' => env('QUEEN_DASHBOARD_PATH', 'queen'),
         'domain' => env('QUEEN_DASHBOARD_DOMAIN'),
         // The web group is always retained by the package so state-changing

@@ -197,4 +197,24 @@ final class LaravelConfigFileTest extends TestCase
             }
         }
     }
+
+    /** `=1` turned prefork on but left remote status and the dashboard off, and made the supervisor refuse its config. */
+    public function testEveryBooleanFlagReadsOneAsTrue(): void
+    {
+        $config = $this->evaluate([
+            'QUEEN_SUPERVISOR_PREFORK' => '1',
+            'QUEEN_SUPERVISOR_REMOTE_STATUS' => '1',
+            'QUEEN_SUPERVISOR_COORDINATION' => '1',
+            'QUEEN_DASHBOARD_ENABLED' => '1',
+            'QUEEN_METRICS_ENABLED' => '1',
+        ]);
+
+        $this->assertSame([true, true, true, true, true], [
+            $config['supervisor']['prefork'],
+            $config['supervisor']['remote_status']['enabled'],
+            $config['supervisor']['coordination']['enabled'],
+            $config['dashboard']['enabled'],
+            $config['metrics']['enabled'],
+        ]);
+    }
 }

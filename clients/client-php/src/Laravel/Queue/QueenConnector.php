@@ -24,7 +24,13 @@ class QueenConnector implements ConnectorInterface
 
     public function connect(array $config): QueenQueue
     {
-        $config = array_replace($this->defaults, $config);
+        $defaults = $this->defaults;
+        // A connection that names its own url, and no urls, is not on the
+        // default cluster: config/queen.php's urls would win below.
+        if (array_key_exists('url', $config) && !array_key_exists('urls', $config)) {
+            unset($defaults['urls']);
+        }
+        $config = array_replace($defaults, $config);
 
         $workerConsumerGroup = getenv('QUEEN_LARAVEL_CONSUMER_GROUP');
         $workerRetryAfter = getenv('QUEEN_LARAVEL_RETRY_AFTER');
