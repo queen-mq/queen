@@ -4,6 +4,7 @@ namespace Queen\Tests;
 
 use Illuminate\Console\OutputStyle;
 use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Log\LogManager;
 use Illuminate\Queue\Connectors\ConnectorInterface;
 use Illuminate\Queue\NullQueue;
@@ -39,16 +40,34 @@ final class LaravelForkServerWorkerTest extends TestCase
         $app['config']->set('queue.connections.queen-batch', ['driver' => 'spy', 'queue' => 'batch']);
     }
 
+    private string|false $savedExitsDirectory = false;
+
+    private ?string $exitsDirectory = null;
+
     protected function setUp(): void
     {
         parent::setUp();
 
+        $this->savedExitsDirectory = getenv('QUEEN_SUPERVISOR_EXITS_DIR');
         $this->pops = [];
         $this->app['queue']->extend('spy', fn (): ConnectorInterface => new SpyQueueConnector(
             function (string $connection, string $queue): void {
                 $this->pops[] = [$connection, $queue];
             },
         ));
+    }
+
+    protected function tearDown(): void
+    {
+        putenv($this->savedExitsDirectory === false ? 'QUEEN_SUPERVISOR_EXITS_DIR' : "QUEEN_SUPERVISOR_EXITS_DIR={$this->savedExitsDirectory}");
+        if ($this->exitsDirectory !== null) {
+            foreach (glob($this->exitsDirectory . '/*') ?: [] as $path) {
+                @unlink($path);
+            }
+            @rmdir($this->exitsDirectory);
+        }
+
+        parent::tearDown();
     }
 
     /**
@@ -123,6 +142,105 @@ final class LaravelForkServerWorkerTest extends TestCase
         $this->assertInstanceOf(NullLogger::class, $this->app['log']);
     }
 
+
+    /**
+     * `php artisan queue:restart` after this server booted: the code on disk
+     * is newer than the code a child of this server carries. Laravel's worker
+     * would read the restart signal only now, as its baseline, and never stop
+     * for it. The child says why it leaves, and leaves: the master replaces
+     * the server, and the replacement runs the code on disk.
+     */
+    public function testAWorkerForkedAfterAQueueRestartLeavesWithTheRestartMarker(): void
+    {
+        $this->app['cache.store']->forever('illuminate:queue:restart', 1000);
+        $server = $this->server();
+        (new \ReflectionMethod($server, 'rememberRestartSignal'))->invoke($server);
+        $work = $this->recordingWork();
+        putenv('QUEEN_SUPERVISOR_EXITS_DIR=' . $this->exitsDirectory());
+
+        $before = (new \ReflectionMethod($server, 'runWorker'))->invoke($server, $work, ['queen-batch', '--queue=x', '--once']);
+        $this->app['cache.store']->forever('illuminate:queue:restart', 2000);
+        $after = (new \ReflectionMethod($server, 'runWorker'))->invoke($server, $work, ['queen-batch', '--queue=x', '--once']);
+
+        $this->assertSame([0, 0], [$before, $after]);
+        $this->assertSame(1, $work->runs, 'the worker ran before the restart and not after it');
+        $this->assertSame('restart', file_get_contents($this->exitsDirectory() . '/' . getmypid()));
+    }
+
+    /**
+     * The queue manager keeps every connection it resolved. One the boot
+     * resolved carries the server's environment, not the pool's, and its
+     * socket would be shared by every worker: the server lets it go.
+     */
+    public function testTheServerForgetsTheQueueConnectionsTheBootResolved(): void
+    {
+        $this->app['queue']->connection('queen-batch');
+        $this->assertTrue($this->app['queue']->connected('queen-batch'));
+        $server = $this->server();
+
+        $forgotten = (new \ReflectionMethod($server, 'releaseBootResources'))->invoke($server);
+
+        $this->assertSame(['queen-batch'], $forgotten);
+        $this->assertFalse($this->app['queue']->connected('queen-batch'));
+    }
+
+    /**
+     * A spawned worker's exception reaches the console kernel, which reports
+     * it to the application's handler; a forked worker has no kernel above
+     * it, and its exception went to stderr alone.
+     */
+    public function testAForkedWorkersExceptionIsReportedToTheApplication(): void
+    {
+        $handler = new RecordingExceptionHandler();
+        $this->app->instance(ExceptionHandler::class, $handler);
+        $server = $this->server();
+        $work = $this->recordingWork(new \RuntimeException('the broker is unreachable'));
+
+        $code = (new \ReflectionMethod($server, 'runWorker'))->invoke($server, $work, ['queen-batch', '--queue=x']);
+
+        $this->assertSame(1, $code);
+        $this->assertSame(['the broker is unreachable'], array_map(fn (\Throwable $e): string => $e->getMessage(), $handler->reported));
+    }
+
+    private function exitsDirectory(): string
+    {
+        if ($this->exitsDirectory === null) {
+            $this->exitsDirectory = sys_get_temp_dir() . '/queen-exits-' . bin2hex(random_bytes(6));
+            mkdir($this->exitsDirectory, 0700);
+        }
+
+        return $this->exitsDirectory;
+    }
+
+    /** A stand-in for queue:work that counts its runs, or throws. */
+    private function recordingWork(?\Throwable $throws = null): \Symfony\Component\Console\Command\Command
+    {
+        $work = new class($throws) extends \Symfony\Component\Console\Command\Command {
+            public int $runs = 0;
+
+            public function __construct(private ?\Throwable $throws)
+            {
+                parent::__construct('queue:work');
+                $this->ignoreValidationErrors();
+            }
+
+            protected function execute(
+                \Symfony\Component\Console\Input\InputInterface $input,
+                \Symfony\Component\Console\Output\OutputInterface $output,
+            ): int {
+                ++$this->runs;
+                if ($this->throws !== null) {
+                    throw $this->throws;
+                }
+
+                return 0;
+            }
+        };
+        $work->setApplication(new \Symfony\Component\Console\Application());
+
+        return $work;
+    }
+
     /** @param list<string> $argv */
     private function runWorker(array $argv): int
     {
@@ -168,5 +286,30 @@ final class SpyQueue extends NullQueue
         ($this->onPop)((string) $this->getConnectionName(), (string) $queue);
 
         return null;
+    }
+}
+
+final class RecordingExceptionHandler implements ExceptionHandler
+{
+    /** @var list<\Throwable> */
+    public array $reported = [];
+
+    public function report(\Throwable $e): void
+    {
+        $this->reported[] = $e;
+    }
+
+    public function shouldReport(\Throwable $e): bool
+    {
+        return true;
+    }
+
+    public function render($request, \Throwable $e)
+    {
+        throw $e;
+    }
+
+    public function renderForConsole($output, \Throwable $e): void
+    {
     }
 }
