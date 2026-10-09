@@ -35,6 +35,8 @@ sourceOfTruth:
 # states changes.
 # sourceOfTruth re-read 2026-10-08 (Dockerfile build cache, 8c6239d2): the Rust stage compiles in
 # cached layers; the image, its port, its data directory and the queenctl it carries are unchanged.
+# sourceOfTruth re-read 2026-10-09 (8c6239d2): Dockerfile changes compilation cache layers;
+# the runtime stage, embedded dashboard, queenctl, paths and startup commands are unchanged.
 ---
 
 Queen is one repository with one Rust binary at its center: the broker, which links the proxy and

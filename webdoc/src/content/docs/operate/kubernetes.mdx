@@ -32,6 +32,8 @@ sourceOfTruth:
 # (KvFailure::NotYet); facade/real.rs refuses a transaction's KV `check` below cluster version 5. Nothing this
 # page states changes.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (8c6239d2): Dockerfile changes compilation cache layers;
+# the runtime stage, embedded dashboard, queenctl, paths and startup commands are unchanged.
 ---
 
 On Kubernetes a Queen cluster is a StatefulSet of three (or five) pods. Each pod gets its own
