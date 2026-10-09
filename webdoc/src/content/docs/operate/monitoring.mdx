@@ -42,6 +42,9 @@ sourceOfTruth:
 # metrics.rs gained queen_locks_ops_total, queen_locks_op_duration_milliseconds and the KV op label `check`
 # (the generated metrics table lists them). The health examples show clusterVersion 5.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned, and logs it. "Log lines to alert on" gains three lines: a leader's entries waiting to be logged, a pipeline restarted without a change of leadership, a standby's driver that plans none of the link's entries. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-09 (supervisors restyle): Supervisors.vue and its two card components use the
+# dashboard's shared card, stats and table; the card still shows workers against the target, pools needing
+# attention, heartbeat age, the queue list and its history. Nothing this page states changes.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at

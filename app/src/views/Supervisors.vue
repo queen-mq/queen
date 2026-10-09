@@ -1,14 +1,16 @@
 <template>
-  <div class="view-container supervisors-page">
-    <header class="supervisor-heading">
-      <div><p class="supervisor-eyebrow">Observability / Runtime</p><h1>Supervisors</h1><p class="supervisor-intro">Application health, across every instance.</p></div>
-      <div class="supervisor-actions"><span class="supervisor-stamp">{{ loading ? 'Reading…' : readAt ? `Last read ${time(readAt)}` : 'Not read yet' }}</span><button class="btn btn-ghost supervisor-refresh" :disabled="loading" @click="refresh(true)"><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M16 8a6 6 0 1 0-1 6M16 3v5h-5" stroke-linecap="round" stroke-linejoin="round" /></svg>Refresh</button></div>
-    </header>
-
-    <div class="supervisor-brief" aria-label="Summary of loaded publications">
-      <p class="fleet-finding" :class="`fleet-${fleetTone}`"><span aria-hidden="true" />{{ fleetLabel }}<small v-if="stale && !error">{{ stale }} {{ stale === 1 ? 'instance' : 'instances' }} with unconfirmed health</small></p>
-      <p class="fleet-inventory"><span><strong>{{ metric(groups.length) }}</strong> applications</span><span><strong>{{ metric(rows.length) }}</strong> instances</span><span><strong>{{ metric(workers) }}</strong> workers reporting</span></p>
-    </div>
+  <div class="view-container">
+    <PageHead title="Supervisors">
+      <template #sub>
+        <template v-if="readAt && !error"><b>{{ metric(groups.length) }}</b> applications · <b>{{ metric(rows.length) }}</b> instances · <b>{{ metric(workers) }}</b> workers reporting<template v-if="stale"> · {{ stale }} with unconfirmed health</template></template>
+        <template v-else>{{ fleetLabel }}</template>
+      </template>
+      <template #actions>
+        <span v-if="readAt && (fleetTone === 'warn' || fleetTone === 'bad')" class="chip" :class="fleetTone === 'bad' ? 'chip-bad' : 'chip-warn'"><span class="dot" />{{ fleetLabel }}</span>
+        <span class="supervisor-stamp">{{ loading ? 'Reading…' : readAt ? `Read at ${time(readAt)}` : 'Not read yet' }}</span>
+        <button class="btn" :disabled="loading" @click="refresh(true)">Refresh</button>
+      </template>
+    </PageHead>
 
     <div v-if="error" class="panel-err" role="status">
       <strong>{{ errorTitle }}</strong><p>{{ errorDetail }}</p>
@@ -18,12 +20,23 @@
 
     <section class="supervisor-list" aria-labelledby="supervisor-list-title">
       <h2 id="supervisor-list-title" class="sr-only">Applications</h2>
-      <div class="supervisor-tools">
-        <label class="supervisor-search"><span class="sr-only">Search group, host or queue</span><input v-model="search" class="input" type="search" placeholder="Search group, host or queue…" /></label>
-        <label><span class="sr-only">Filter supervisors</span><select v-model="filter" class="input"><option value="all">All applications</option><option value="attention">Needs attention</option><option value="stale">Stale / unreadable</option><option v-for="engine in engines" :key="engine" :value="`engine:${engine}`">{{ engine }} engine</option></select></label>
-        <label><span class="sr-only">Filter group</span><select v-model="groupFilter" class="input"><option :value="null">All loaded groups</option><option v-for="group in groups" :key="group.name" :value="group.name">{{ group.name }} · {{ group.count }}</option></select></label>
-        <span class="muted">Issues first</span>
-      </div>
+      <PageTools>
+        <div class="filter-search">
+          <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+          </svg>
+          <input v-model="search" class="input" type="search" aria-label="Search group, host or queue" placeholder="Search group, host or queue…" />
+        </div>
+        <label class="tool-field">
+          <span class="tool-label">Show</span>
+          <select v-model="filter" class="input"><option value="all">All applications</option><option value="attention">Needs attention</option><option value="stale">Stale / unreadable</option><option v-for="engine in engines" :key="engine" :value="`engine:${engine}`">{{ engine }} engine</option></select>
+        </label>
+        <label class="tool-field">
+          <span class="tool-label">Group</span>
+          <select v-model="groupFilter" class="input"><option :value="null">All loaded</option><option v-for="group in groups" :key="group.name" :value="group.name">{{ group.name }} · {{ group.count }}</option></select>
+        </label>
+        <template #view><span class="tool-note">Issues first</span></template>
+      </PageTools>
       <div v-if="loading && !readAt" class="supervisor-empty" role="status">Reading published supervisor status…</div>
       <div v-else-if="!rows.length && !error && readAt" class="supervisor-empty">
         <h3>No published supervisors in this source</h3>
@@ -157,6 +170,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from 'vue'
 import SupervisorQueueContext from '@/components/SupervisorQueueContext.vue'
 import SupervisorGroupCard from '@/components/SupervisorGroupCard.vue'
+import PageHead from '@/components/PageHead.vue'
+import PageTools from '@/components/PageTools.vue'
 import { supervisorGroups, filterSupervisorGroups } from '@/composables/supervisorGroups'
 import { createSupervisorActivityReader, supervisorActivity, supervisorActivityKey } from '@/composables/supervisorActivity'
 import { kv, system, describeApiError } from '@/api'
@@ -326,33 +341,15 @@ function onDrawerClick(event) { if (backdropDown && outside(event)) closeDrawer(
 </script>
 
 <style scoped>
-.supervisors-page { max-width: 1500px; margin: 0 auto; padding: 24px 28px 40px; }
-.supervisor-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding-bottom: 32px; }
-.supervisor-eyebrow { margin: 0 0 15px; font-family: var(--font-mono); color: var(--text-low); text-transform: uppercase; letter-spacing: .12em; font-size: 10px; }
-.supervisor-heading h1 { margin: 0; color: var(--text-hi); font-size: 36px; line-height: 1.1; font-weight: 450; letter-spacing: -.045em; }
-.supervisor-intro { font-size: 13px; color: var(--text-mid); margin: 12px 0 0; }
-.supervisor-actions { display: flex; align-items: center; gap: 18px; padding-bottom: 2px; }.supervisor-stamp { font-size: 11px; color: var(--text-low); font-variant-numeric: tabular-nums; }
-.supervisor-refresh { display: flex; align-items: center; gap: 7px; font-size: 11px; }
-.supervisor-brief { display: flex; align-items: center; justify-content: space-between; gap: 20px; border-top: 1px solid var(--bd-hi); padding: 22px 0 30px; }
-.fleet-finding { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0; font-size: 12px; color: var(--text-hi); }
-.fleet-finding > span { width: 5px; height: 5px; background: var(--fleet-color); border-radius: 50%; margin-right: 2px; }
-.fleet-finding small { flex-basis: 100%; margin-left: 15px; color: var(--text-low); font-size: 11px; }
-.fleet-good { --fleet-color: #85bba4; }.fleet-warn { --fleet-color: var(--warn-400); }.fleet-bad { --fleet-color: var(--ember-400); }.fleet-idle { --fleet-color: var(--text-low); }
-:global(html.light .fleet-good) { --fleet-color: #287a57; }
-.fleet-inventory { display: flex; flex-wrap: wrap; gap: 24px; margin: 0; color: var(--text-low); font-size: 11px; }.fleet-inventory strong { font-weight: 500; font-size: 13px; color: var(--text-hi); margin-right: 5px; font-variant-numeric: tabular-nums; }
-.supervisor-tools { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 0 0 18px; border-bottom: 1px solid var(--bd-hi); }
-.supervisor-tools > label { min-width: 0; }.supervisor-tools > label:not(.supervisor-search) { max-width: 240px; }
-.supervisor-tools select { max-width: 100%; }.supervisor-tools .input { background-color: transparent; border-color: var(--bd); font-size: 11px; }
-.supervisor-search { flex: 1; max-width: 340px; }.supervisor-search input { width: 100%; }
-.supervisor-tools > span { margin-left: auto; font-size: 10px; }
+.supervisor-stamp { font-size: 12px; color: var(--text-low); font-variant-numeric: tabular-nums; }
 .supervisor-empty { padding: 32px 0; color: var(--text-mid); font-size: 13px; line-height: 1.7; }
 .supervisor-empty h3 { color: var(--text-hi); font-size: 17px; margin: 0 0 10px; }
 .supervisor-command { display: inline-block; background: var(--ink-3); border: 1px solid var(--bd); padding: 12px 16px; margin: 8px 0; overflow-wrap: anywhere; }
-.supervisor-overviews { padding: 20px 0 0; }.supervisor-cards { display: grid; grid-template-columns: minmax(0, 1fr); list-style: none; gap: 22px; padding: 0; margin: 0; }.supervisor-cards > li { min-width: 0; }
+.supervisor-cards { display: grid; grid-template-columns: minmax(0, 1fr); list-style: none; gap: 12px; padding: 0; margin: 0; }.supervisor-cards > li { min-width: 0; }
 .supervisor-partial { color: var(--warn-400); font-size: 12px; margin-top: 14px; }
-.supervisor-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; align-items: baseline; padding-top: 22px; }
-.supervisor-note { color: var(--text-low); font-size: 10px; line-height: 1.7; margin: 0; max-width: 620px; }
-.supervisor-source { color: var(--text-low); font-size: 10px; }.supervisor-source summary { cursor: pointer; overflow-wrap: anywhere; }.supervisor-source summary code { margin-left: 8px; font-size: 10px; }
+.supervisor-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; align-items: baseline; padding-top: 16px; }
+.supervisor-note { color: var(--text-low); font-size: 12px; line-height: 1.6; margin: 0; max-width: 620px; }
+.supervisor-source { color: var(--text-low); font-size: 12px; }.supervisor-source summary { cursor: pointer; overflow-wrap: anywhere; }.supervisor-source summary code { margin-left: 8px; font-size: 11px; }
 .supervisor-source summary > .muted { display: none; }.supervisor-source[open] { flex-basis: 100%; }
 .supervisor-source form { display: flex; flex-wrap: wrap; align-items: end; gap: 14px; padding: 20px 0; }
 .supervisor-source label { flex: 1; min-width: 200px; font-size: 12px; color: var(--text-mid); }.supervisor-source input { display: block; width: 100%; margin-top: 7px; }
@@ -419,13 +416,8 @@ function onDrawerClick(event) { if (backdropDown && outside(event)) closeDrawer(
 .supervisor-publication dd { margin: 3px 0; font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; }
 .bad { color: var(--ember-400); }.warn { color: var(--warn-400); }
 @media (max-width: 1100px) {
-  .supervisor-brief { align-items: start; }.fleet-inventory { gap: 10px 18px; justify-content: end; }
 }
 @media (max-width: 760px) {
-  .supervisors-page { padding: 18px 16px 28px; }.supervisor-heading { flex-wrap: wrap; gap: 18px; padding-bottom: 24px; }.supervisor-heading h1 { font-size: 32px; }
-  .supervisor-eyebrow { font-size: 9px; }.supervisor-actions { gap: 14px; }.supervisor-brief { flex-wrap: wrap; padding: 18px 0 26px; gap: 16px; }.fleet-inventory { justify-content: start; gap: 16px; }
-  .supervisor-tools { gap: 10px; }.supervisor-search { flex-basis: 100%; max-width: none; }.supervisor-tools > span { display: none; }
-  .supervisor-tools > label:not(.supervisor-search) { flex: 1; max-width: none; }.supervisor-tools select { width: 100%; }
   .supervisor-runtime, .supervisor-pool-settings { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .supervisor-evidence { grid-template-columns: 1fr 1fr; }.supervisor-evidence > div:nth-child(3) { border-left: 0; }.supervisor-evidence > div:nth-child(n+3) { border-top: 1px solid var(--bd); }
   .supervisor-drawer-body { padding: 20px; }

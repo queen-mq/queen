@@ -58,6 +58,9 @@ verifiedBy:
 # guard helpers. Its consumer supervision and what it publishes are unchanged. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (application cards): the dashboard groups
 # loaded instances by publication group. Slot identity and decoding are unchanged.
+# sourceOfTruth re-read 2026-10-09 (supervisors restyle): Supervisors.vue, SupervisorGroupCard.vue and SupervisorActivity.vue
+# are rebuilt from the dashboard's shared card, stats, table and segmented control; a healthy application is a grey
+# dot and the per-instance marks are gone. The colours paragraph says so; what is read and how it is combined is unchanged.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.
@@ -73,16 +76,16 @@ The dashboard shows one horizontal card per publication group, across all SDK la
 and the PHP/Rust process supervisors. Each card includes current worker capacity, pools
 needing attention, heartbeat age and runtime-specific diagnostics: busy workers and cumulative
 handler failures for SDK consumers, or draining workers and free process slots for process
-supervisors. Expand **Instances** to see every loaded instance, then
+supervisors. Expand the instances line to see every loaded instance, then
 select an instance to open its queues and diagnostics. Search and engine filters select
 whole groups: a matching healthy host never hides an unhealthy sibling. Display pagination
 counts applications, while **Load more publications** extends the bounded KV scan.
 
-Green means no issue was reported by the loaded instances; amber means attention or
-incomplete status; red means a critical issue; grey means the instances are not running.
-Labels accompany the colours in the application header. Small marks next to the instance
-count show individual instance states (up to twelve marks, with an overflow count). Expand
-the application to inspect all instances. A partial KV scan marks summaries as partial, even if the loaded instances
+A grey dot before the application's name means no issue was reported by the loaded
+instances, as a healthy state is marked on every other page. An amber mark means attention
+or incomplete status and a red one a critical issue, each with its label in the header; a
+hollow dot means the instances are not running. The line under the card counts the instances
+in each state: expand it to inspect all of them. A partial KV scan marks summaries as partial, even if the loaded instances
 report no problems. The dashboard cannot infer missing replicas after their publications
 have expired and disappeared.
 
