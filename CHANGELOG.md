@@ -3,6 +3,25 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the
+fork server the arguments after `queue:work`, the connection first, and the fork server bound them
+as a command line of their own: Symfony took the connection for the command's name, `connection`
+stayed empty, and the worker fell back to `queue.default`. A forked pool therefore popped from the
+application's default connection, with the pool's `--queue`. A default connection that only
+dispatches threw on every pop, every 2 s per worker, and the pool worked no job; a default that is
+a Queen connection worked, with the default's settings instead of the pool's. Spawned workers
+(`prefork` off) were never affected, and `ps` showed `queue:work <connection>` all along, because
+the process title is set by hand. Since the PHP client 1.7.0, where prefork arrived. The fork
+server now binds the arguments after the command's name, and a test runs Laravel's `queue:work`
+from an application whose default connection is not the pool's.
+
+**Laravel prefork: the fork server accepts a `log` service that is not Laravel's.** Before each
+fork it forgot the log channels through `getChannels()`, which an application's own PSR-3 logger
+bound as `log` does not have: the server failed as it started, and the supervisor spawned the
+workers instead, without prefork. It now forgets channels only from a `LogManager`.
+
 ## 2.1.0 - 2026-10-09
 
 **Server: a standby cluster.** A second cluster can now replay the first one's log and take over
