@@ -345,6 +345,64 @@ fn a_small_index_is_read_and_a_large_one_mapped_and_both_answer_alike() {
     }
 }
 
+/// At `vm.max_map_count` the kernel refuses the next map. The index is then
+/// held in memory, and the log goes on: it seals, reads and reopens. Failing
+/// there left the sealed file without an index (its messages unreadable until
+/// a restart) and then failed every start the same way, since a start opens
+/// every sealed file's index.
+#[test]
+fn an_index_the_kernel_refuses_to_map_is_held_in_memory_and_the_log_goes_on() {
+    use super::index::{self, Probe, REFUSE_MAPS, SMALL_INDEX};
+    struct Refuse;
+    impl Drop for Refuse {
+        fn drop(&mut self) {
+            REFUSE_MAPS.with(|r| r.set(false));
+        }
+    }
+    let td = TmpDir::new("qidx-refused");
+    // A large index, mapped; the same one with maps refused: held in memory.
+    let mut records: Vec<_> = (0..500u64).map(|i| rec(7, i * 2, 2, 1_000 + i)).collect();
+    index::sort_records(&mut records);
+    let bytes = index::encode(5, 1 << 20, &records);
+    assert!(bytes.len() > SMALL_INDEX);
+    let path = td.path().join("big.qidx");
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(index::View::open(&path, Some(1 << 20)).unwrap().is_mapped());
+    let refused_before = index::refused_maps();
+    let _reset = Refuse;
+    REFUSE_MAPS.with(|r| r.set(true));
+    let v = index::View::open(&path, Some(1 << 20)).expect("a refused map is not an error");
+    assert!(!v.is_mapped());
+    assert!(index::refused_maps() > refused_before);
+    assert_eq!(v.records().collect::<Vec<_>>(), records);
+    for r in &records {
+        assert!(matches!(v.probe(7, r.base_offset + 1), Probe::Hit(hit) if hit == *r));
+    }
+
+    // A log whose every map is refused: it rolls, reads back and reopens.
+    let dir = td.path().join("log");
+    let opts = QLogOptions::testing(64 * 1024);
+    let (mut q, _) = QLog::open(&dir, 9, opts).unwrap();
+    let n = 2_000u64;
+    for i in 0..n {
+        append_one(&mut q, i + 1, 3, i, 10_000 + i as i64);
+    }
+    assert!(q.file_count() >= 3, "{} files", q.file_count());
+    let read_all = |q: &QLog| {
+        for i in 0..n {
+            assert_eq!(
+                q.read_payload(3, i).unwrap(),
+                Some(payload(i + 1, 96)),
+                "offset {i}"
+            );
+        }
+    };
+    read_all(&q);
+    drop(q);
+    let (q, _) = QLog::open(&dir, 9, opts).unwrap();
+    read_all(&q);
+}
+
 #[test]
 fn timestamp_predecessors_match_a_scan_in_active_and_sealed_indexes() {
     use super::index::{self, ActiveIndex};
@@ -1483,6 +1541,28 @@ fn write_one(set: &mut super::set::QLogSet, log: u64, seq: u64, pid: u64, base: 
     .unwrap();
 }
 
+/// What a node does with log `log` once every partition in it is gone and its
+/// data has aged: retention asks for the active file, the idle pass seals it,
+/// retention frees it. The idle pass after this one removes the empty log.
+fn drain_gone(set: &mut super::set::QLogSet, log: u64, now: i64) -> usize {
+    let reader = set.reader();
+    reader.forget_active_rests();
+    let gone = std::collections::HashMap::new();
+    let mut asked = Vec::new();
+    per_file_pass(&reader, log, &gone, &mut asked, true);
+    set.idle_pass(now, std::time::Duration::from_secs(600))
+        .unwrap();
+    let mut changed = 0;
+    loop {
+        let p = per_file_pass(&reader, log, &gone, &mut asked, true);
+        changed += p.changed;
+        if !p.more {
+            break;
+        }
+    }
+    changed
+}
+
 #[test]
 fn idle_pass_seals_quiet_logs_and_removes_empty_ones() {
     use super::set::QLogSet;
@@ -1498,25 +1578,36 @@ fn idle_pass_seals_quiet_logs_and_removes_empty_ones() {
     }
     set.sync().unwrap();
     assert!(root.join(format!("q{log}")).is_dir());
-    // The data is an hour old: the pass seals the active file.
+    let files = |set: &QLogSet| set.log(log).unwrap().read().unwrap().file_count();
+    // The data is an hour old, the file is small and nothing in it is dead:
+    // sealing it would only make a file. It stays, pass after pass.
     let now = 1_000 + 3_600_000_000;
-    set.idle_pass(now, std::time::Duration::from_secs(600))
-        .unwrap();
-    // Retention: the queue's partition is gone (no watermark) -> dead.
+    let age = std::time::Duration::from_secs(600);
+    set.idle_pass(now, age).unwrap();
+    assert_eq!(
+        files(&set),
+        1,
+        "nothing to free: the aged file is not sealed"
+    );
     let reader = set.reader();
-    let starts = std::collections::HashMap::new();
-    let mut changed = 0;
-    loop {
-        let p = reader.reclaim_below_txns(log, &starts, 1).unwrap();
-        changed += p.changed;
-        if !p.more {
-            break;
-        }
-    }
-    assert!(changed > 0, "the sealed file was reclaimed");
+    let alive: std::collections::HashMap<u64, u64> = [(10, 0)].into();
+    let mut asked = Vec::new();
+    per_file_pass(&reader, log, &alive, &mut asked, true);
+    assert_eq!(asked, vec![10], "retention looked at the active file");
+    set.idle_pass(now, age).unwrap();
+    assert_eq!(files(&set), 1, "its messages are live: still not sealed");
+    // A look that found nothing rests: the next pass asks nothing.
+    let mut asked = Vec::new();
+    per_file_pass(&reader, log, &alive, &mut asked, true);
+    assert!(asked.is_empty(), "{asked:?}");
+    // The queue's partition is gone: retention asks for the file, the idle
+    // pass seals it, retention frees it.
+    assert!(
+        drain_gone(&mut set, log, now) > 0,
+        "the sealed file was reclaimed"
+    );
     // Nothing left: the next pass closes the log and removes its directory.
-    set.idle_pass(now, std::time::Duration::from_secs(600))
-        .unwrap();
+    set.idle_pass(now, age).unwrap();
     assert!(
         !root.join(format!("q{log}")).exists(),
         "the empty queue log is removed"
@@ -1526,6 +1617,94 @@ fn idle_pass_seals_quiet_logs_and_removes_empty_ones() {
     // A later write re-creates it.
     write_one(&mut set, log, 9, 10, 3, now);
     assert!(root.join(format!("q{log}")).is_dir());
+}
+
+/// An aged active file is sealed for retention when one of its messages is
+/// dead, and without that once it holds an eighth of a full file. Age alone
+/// seals nothing: a queue that got a message now and then made 144 files a
+/// day, and one without retention kept them all.
+#[test]
+fn an_aged_file_is_sealed_for_retention_or_for_its_size_never_for_its_age() {
+    use super::set::{QLogSet, SEAL_MIN_FRACTION};
+    use std::collections::HashMap;
+    let td = TmpDir::new("seal-helps");
+    let root = td.path().join("qlog");
+    let full = 64 * 1024u64;
+    let mut set = QLogSet::new(root.clone(), QLogOptions::testing(full));
+    set.reopen_all().unwrap();
+    set.set_recovery_floor(u64::MAX);
+    let log = set.log_id_for(QLogSet::queue_id_of("t", "trickle"), 10);
+    let files = |set: &QLogSet, log: u64| set.log(log).unwrap().read().unwrap().file_count();
+    let age = std::time::Duration::from_secs(600);
+    let hour = 3_600_000_000i64;
+    let reader = set.reader();
+    let look = |reader: &super::set::QLogReader, starts: &HashMap<u64, u64>| {
+        reader.forget_active_rests();
+        let mut asked = Vec::new();
+        per_file_pass(reader, log, starts, &mut asked, true);
+        asked
+    };
+    let (mut seq, mut next) = (0u64, HashMap::<u64, u64>::new());
+    let mut push = |set: &mut QLogSet, log: u64, pid: u64, at: i64| {
+        seq += 1;
+        let base = next.entry(pid).or_insert(0u64);
+        write_one(set, log, seq, pid, *base, at);
+        *base += 1;
+        set.sync().unwrap();
+    };
+
+    // A message now and then over ten "hours", three partitions, all live:
+    // a retention pass and an idle pass after each, as on a node.
+    let live: HashMap<u64, u64> = [(10, 0), (11, 0), (12, 0)].into();
+    for h in 0..10i64 {
+        push(&mut set, log, 10 + (h as u64 % 3), 1_000 + h * hour);
+        look(&reader, &live);
+        set.idle_pass(1_000 + (h + 1) * hour, age).unwrap();
+    }
+    assert_eq!(files(&set, log), 1, "ten quiet hours made no file");
+
+    // Partition 11's first message expires: its watermark passes the record.
+    let mut starts = live.clone();
+    starts.insert(11, 1);
+    let asked = look(&reader, &starts);
+    assert!(asked.contains(&11), "{asked:?}");
+    set.idle_pass(1_000 + 11 * hour, age).unwrap();
+    assert_eq!(
+        files(&set, log),
+        2,
+        "one dead message: sealed for retention"
+    );
+    // The request went with the file: the new active one is not sealed for it.
+    push(&mut set, log, 12, 1_000 + 11 * hour);
+    look(&reader, &live);
+    set.idle_pass(1_000 + 13 * hour, age).unwrap();
+    assert_eq!(files(&set, log), 2, "a new file, nothing dead in it");
+
+    // Size, on a log of its own: live messages of one instant, until the
+    // file holds an eighth of a full one. Young, it is never sealed; aged, it
+    // is sealed once it has that much, and not before.
+    let steady = set.log_id_for(QLogSet::queue_id_of("t", "steady"), 20);
+    let at = 1_000 + 20 * hour;
+    let bytes = |set: &QLogSet| set.log(steady).unwrap().read().unwrap().bytes();
+    let mut small_and_aged_stayed = false;
+    loop {
+        push(&mut set, steady, 20, at);
+        set.idle_pass(at + 1_000_000, age).unwrap();
+        assert_eq!(files(&set, steady), 1, "a young file is never sealed");
+        if bytes(&set) >= full / SEAL_MIN_FRACTION {
+            break;
+        }
+        if !small_and_aged_stayed {
+            set.idle_pass(at + hour, age).unwrap();
+            assert_eq!(files(&set, steady), 1, "aged, small, nothing dead");
+            small_and_aged_stayed = true;
+        }
+    }
+    assert!(small_and_aged_stayed);
+    set.idle_pass(at + hour, age).unwrap();
+    assert_eq!(files(&set, steady), 2, "aged, an eighth of a file: sealed");
+    // And the trickle log next to it, still small, was left alone.
+    assert_eq!(files(&set, log), 2);
 }
 
 /// How many retired log directories (`q<id>.dead...`) `root` holds.
@@ -1562,11 +1741,7 @@ fn a_stop_in_the_middle_of_removing_an_empty_log_leaves_a_node_that_starts() {
         write_one(&mut set, keep, 4, 11, 0, 1_000);
         set.sync().unwrap();
         let now = 1_000 + 3_600_000_000;
-        set.idle_pass(now, std::time::Duration::from_secs(600))
-            .unwrap();
-        let reader = set.reader();
-        let starts = std::collections::HashMap::new();
-        while reader.reclaim_below_txns(log, &starts, 1).unwrap().more {}
+        assert!(drain_gone(&mut set, log, now) > 0);
         (log, keep)
     };
     // The process stops right after the rename: the directory has its
@@ -1593,11 +1768,8 @@ fn a_stop_in_the_middle_of_removing_an_empty_log_leaves_a_node_that_starts() {
     set.sync().unwrap();
     std::fs::create_dir(root.join(format!("q{log}.dead"))).unwrap();
     let now = 2_000 + 3_600_000_000;
-    set.idle_pass(now, std::time::Duration::from_secs(600))
-        .unwrap();
+    assert!(drain_gone(&mut set, log, now) > 0);
     let reader = set.reader();
-    let starts = std::collections::HashMap::new();
-    while reader.reclaim_below_txns(log, &starts, 1).unwrap().more {}
     set.idle_pass(now, std::time::Duration::from_secs(600))
         .unwrap();
     assert!(!root.join(format!("q{log}")).exists());
@@ -1629,17 +1801,9 @@ fn idle_pass_never_removes_shared_logs() {
     let log = set.log_id_for(q, 1);
     write_one(&mut set, log, 1, 1, 0, 1_000);
     set.sync().unwrap();
-    set.idle_pass(1_000 + 3_600_000_000, std::time::Duration::from_secs(1))
-        .unwrap();
+    // The queue is gone and its data aged: sealed, reclaimed, the log empty.
+    assert!(drain_gone(&mut set, log, 1_000 + 3_600_000_000) > 0);
     let reader = set.reader();
-    loop {
-        let p = reader
-            .reclaim_below_txns(log, &std::collections::HashMap::new(), 1)
-            .unwrap();
-        if !p.more {
-            break;
-        }
-    }
     set.idle_pass(1_000 + 3_600_000_000, std::time::Duration::from_secs(1))
         .unwrap();
     assert!(root.join(format!("q{log}")).is_dir(), "a shared log stays");
@@ -1713,11 +1877,15 @@ fn per_file_set(
     set.reopen_all().unwrap();
     set.set_recovery_floor(u64::MAX);
     let log = set.log_id_for(QLogSet::queue_id_of("t", "per-file"), pids[0]);
+    // Stamped now: the active file is young, so a retention pass looks only
+    // at the sealed files (an aged active file is looked at as well,
+    // `QLogReader::judge_active`), and these tests count its lookups.
+    let now = super::wall_now_us();
     let mut next = std::collections::HashMap::new();
     for i in 0..n {
         let pid = pids[i as usize % pids.len()];
         let base = next.entry(pid).or_insert(0u64);
-        write_one(&mut set, log, i + 1, pid, *base, 1_000 + i as i64);
+        write_one(&mut set, log, i + 1, pid, *base, now + i as i64);
         *base += 1;
     }
     set.sync().unwrap();
@@ -2440,6 +2608,61 @@ fn the_directory_answers_exactly_what_the_files_answer() {
             "pid 3 offset {off} after the directory caught up"
         );
     }
+}
+
+/// A log that seals more than a build's worth of files between two passes
+/// still merges its runs. With one step a pass every pass built a run and
+/// none merged: the runs a lookup steps through grew by one a pass for as
+/// long as the load lasted (a 4 KiB-file run on a VM: 79 runs after 80 s).
+#[test]
+fn a_log_that_seals_many_files_between_two_passes_still_merges_its_runs() {
+    use super::dirx::{BATCH, FANOUT};
+    use super::set::QLogSet;
+    let td = TmpDir::new("dirx-busy");
+    let root = td.path().join("qlog");
+    let mut set = QLogSet::new(root, QLogOptions::testing(300));
+    set.reopen_all().unwrap();
+    set.set_recovery_floor(u64::MAX);
+    let log = set.log_id_for(QLogSet::queue_id_of("t", "busy"), 10);
+    let reader = set.reader();
+    // The log's files so far (none before its first write).
+    let files = |set: &QLogSet| {
+        set.log(log)
+            .map_or(0, |l| l.read().expect("qlog poisoned").file_count())
+    };
+    let (mut seq, mut most, mut passes_with_a_build) = (0u64, 0usize, 0usize);
+    for _ in 0..40 {
+        let before = files(&set);
+        for _ in 0..(6 * BATCH) {
+            seq += 1;
+            write_one(&mut set, log, seq, 10, seq - 1, 1_000 + seq as i64);
+        }
+        set.sync().unwrap();
+        if files(&set) - before >= BATCH {
+            passes_with_a_build += 1;
+        }
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        assert!(reader.dirx_maintain(far) >= 1);
+        let (runs, uncovered) = reader.dirx_totals();
+        assert!(uncovered < BATCH, "{uncovered} files outside any run");
+        most = most.max(runs);
+    }
+    assert_eq!(passes_with_a_build, 40, "every pass had a build due");
+    assert!(
+        most < 2 * FANOUT,
+        "the runs piled up to {most}: a pass built and never merged"
+    );
+    // Nothing is lost on the way: every message is still found.
+    {
+        let l = set.log(log).expect("the log");
+        let l = l.read().unwrap();
+        for off in 0..seq {
+            assert!(l.read_payload(10, off).unwrap().is_some(), "offset {off}");
+        }
+    }
+    // A pass with nothing due takes no step.
+    let far = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    assert_eq!(reader.dirx_maintain(far), 0);
 }
 
 /// A sealed file a run covers can be cut back and opened for appends again:

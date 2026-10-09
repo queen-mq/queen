@@ -1600,10 +1600,13 @@ impl QLogSet {
     /// The writer's housekeeping over every open log — the writer is the single
     /// writer of every log, so rolling one here races no append:
     ///
-    /// - SEAL an active file whose data is older than `seal_age` (0 = never).
-    ///   A log rolls only on size, and retention never touches the active
-    ///   file, so a queue that went quiet kept its last file (up to the roll
-    ///   size) forever, however long ago its messages expired.
+    /// - SEAL an active file whose data is older than `seal_age` (0 = never)
+    ///   when that is worth a file ([`QLog::seal_helps`]): retention found a
+    ///   dead message in it, or it holds an eighth of a full file. A log rolls
+    ///   only on size, and retention never touches the active file, so a queue
+    ///   that went quiet kept its last file (up to the roll size) forever,
+    ///   however long ago its messages expired. The system log is sealed on
+    ///   age alone.
     /// - REMOVE a per-queue log with nothing left (no sealed file, an empty
     ///   active file): close it and delete its directory. A deleted queue ends
     ///   here once retention has unlinked its files; a later write re-creates
@@ -1612,6 +1615,7 @@ impl QLogSet {
     /// Logs written since the last sync are skipped (they are busy anyway).
     pub fn idle_pass(&mut self, now_us: i64, seal_age: std::time::Duration) -> io::Result<()> {
         let seal_age_us = i64::try_from(seal_age.as_micros()).unwrap_or(i64::MAX);
+        let seal_min_bytes = (self.opts.segment_bytes / SEAL_MIN_FRACTION).max(1);
         let next_seq = self.written_seq.saturating_add(1);
         let per_queue = self.shards() == 0;
         // Resume after the last log this pass acted on: a roll costs a few
@@ -1640,8 +1644,12 @@ impl QLogSet {
             }
             let (seal, empty) = {
                 let g = log.read().expect("qlog poisoned");
-                let seal =
-                    seal_age_us > 0 && g.active_age_us(now_us).is_some_and(|a| a >= seal_age_us);
+                // Aged, and worth a file: the system log's entries follow the
+                // recovery floor, a queue log is sealed for retention or for
+                // its size ([`QLog::seal_helps`]).
+                let seal = seal_age_us > 0
+                    && g.active_age_us(now_us).is_some_and(|a| a >= seal_age_us)
+                    && (id == SYSTEM_QUEUE_ID || g.seal_helps(seal_min_bytes));
                 (seal, g.is_removable())
             };
             if seal {
@@ -1778,15 +1786,29 @@ pub(crate) struct ReclaimState {
     cursors: std::collections::HashMap<u64, u64>,
     /// Per `(log, file)`: how far the file is known dead.
     files: std::collections::HashMap<(u64, u64), FileProgress>,
+    /// Per log: the partition the next look at its ACTIVE file starts from,
+    /// and when a look that found nothing dead in the whole file may start
+    /// over ([`QLogReader::judge_active`]).
+    active_from: std::collections::HashMap<u64, (u64, Option<std::time::Instant>)>,
 }
+
+/// How many partitions of a log's active file one retention pass looks up to
+/// find a dead message in it ([`QLogReader::judge_active`]).
+const ACTIVE_LOOK: usize = 32;
+
+/// An aged active file is sealed without a dead message in it once it holds
+/// this fraction of a full file ([`QLog::seal_helps`]): what a start scans of
+/// a quiet log, and what its index keeps in memory, stay an eighth of a file.
+pub const SEAL_MIN_FRACTION: u64 = 8;
 
 /// One sealed file's retention progress. A sealed `.qidx` lists its records
 /// sorted by `(pid, base_offset)`, so each pid is one contiguous run and costs
 /// one watermark lookup.
 struct FileProgress {
-    /// The file's index, mapped on its own so the judging holds no queue lock.
-    /// A sealed index never changes; a rewrite of the file drops this entry.
-    view: super::index::View,
+    /// The file's index, the log's own view of it ([`QLog::sealed_view`]): the
+    /// judging holds no queue lock, and the file has one map, not two. A
+    /// sealed index never changes; a rewrite of the file drops this entry.
+    view: Arc<super::index::View>,
     /// Index records `[0, pos)` are known dead. Deadness never reverses while
     /// the process runs: a `txns_start` never moves back (the apply refuses
     /// it), a pid is never handed out twice, and a partition's log does not
@@ -2136,52 +2158,54 @@ impl QLogReader {
         }
     }
 
-    /// Per-file retention for log `log_id`: judge its sealed files one at a
-    /// time from their own `.qidx`, looking up only the partitions that have
-    /// records in them, and remember how far each file is known dead.
+    /// One pass of directory maintenance over every log ([`super::dirx`]):
+    /// one step per log — a run built for sealed files that have none, or
+    /// adjacent runs merged — and then again over the logs that have more to
+    /// do, until none has or `deadline`. Returns the steps taken.
     ///
-    /// `live_start(pid)` answers `Some(txns_start)` when the partition still
-    /// exists AND its records go to this log, `None` otherwise (its records here
-    /// are dead): the rule the whole-map walk applied, at the cost of the files
-    /// judged instead of every partition on the node.
-    ///
-    /// The judging holds no lock on the log. Only the unlink, and the one
-    /// rewrite a pass allows, take its write lock, and only when it is free
-    /// (`try_write`): an append never queues behind retention.
-    /// One pass of directory maintenance over every log ([`super::dirx`]): at
-    /// most one step per log — a run built for sealed files that have none,
-    /// or adjacent runs merged — until `deadline`. Returns the steps taken.
+    /// One step a pass was not enough for a log that seals a build's worth of
+    /// files between two passes (16 files: about 200 MB a second at 64 MiB a
+    /// file): every pass built, none merged, and the runs a lookup steps
+    /// through piled up by one a pass for as long as the load lasted.
     ///
     /// A step reads only sealed, immutable files and is written and verified
     /// with NO lock on the log; taking the finished run is a swap under the
     /// log's write lock.
     pub(crate) fn dirx_maintain(&self, deadline: std::time::Instant) -> usize {
         let mut done = 0;
-        for id in self.log_ids() {
-            if std::time::Instant::now() >= deadline {
-                break;
-            }
-            let Some(log) = self.log(id) else { continue };
-            let plan = log.read().expect("qlog poisoned").dirx_plan();
-            if let Some(plan) = plan {
-                // A sealed file that went away under the step (retention)
-                // fails it: the next pass plans it again.
-                match plan.run().and_then(|b| super::dirx::Run::open(&b.path)) {
-                    Ok(run) => {
-                        log.write().expect("qlog poisoned").dirx_install(run);
-                        done += 1;
+        let mut ids = self.log_ids();
+        let mut first_round = true;
+        while !ids.is_empty() {
+            let mut more = Vec::new();
+            for id in ids {
+                if std::time::Instant::now() >= deadline {
+                    return done;
+                }
+                let Some(log) = self.log(id) else { continue };
+                let plan = log.read().expect("qlog poisoned").dirx_plan();
+                if let Some(plan) = plan {
+                    // A sealed file that went away under the step (retention)
+                    // fails it: the next pass plans it again.
+                    match plan.run().and_then(|b| super::dirx::Run::open(&b.path)) {
+                        Ok(run) => {
+                            log.write().expect("qlog poisoned").dirx_install(run);
+                            done += 1;
+                            more.push(id);
+                        }
+                        Err(e) => tracing::debug!(
+                            target: "rsm",
+                            log = id,
+                            error = %e,
+                            "rsm qlog directory step failed; it is planned again",
+                        ),
                     }
-                    Err(e) => tracing::debug!(
-                        target: "rsm",
-                        log = id,
-                        error = %e,
-                        "rsm qlog directory step failed; it is planned again",
-                    ),
+                }
+                if first_round && log.read().expect("qlog poisoned").dirx_has_dead_runs() {
+                    log.write().expect("qlog poisoned").dirx_gc();
                 }
             }
-            if log.read().expect("qlog poisoned").dirx_has_dead_runs() {
-                log.write().expect("qlog poisoned").dirx_gc();
-            }
+            first_round = false;
+            ids = more;
         }
         done
     }
@@ -2200,6 +2224,90 @@ impl QLogReader {
         out
     }
 
+    /// Tests: let the next look at every active file start now.
+    #[cfg(test)]
+    pub(crate) fn forget_active_rests(&self) {
+        let mut state = self
+            .reclaim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for at in state.active_from.values_mut() {
+            at.1 = None;
+        }
+    }
+
+    /// Retention's look at log `log_id`'s ACTIVE file. Retention never frees
+    /// an active file, and the writer's idle pass seals an aged one only when
+    /// that lets retention free something ([`QLog::seal_helps`]): here the
+    /// file is asked for when one of its messages is dead (its partition is
+    /// gone, or its watermark has passed the record).
+    ///
+    /// A pass looks up at most [`ACTIVE_LOOK`] partitions, the first record of
+    /// each, and the next pass goes on from there; a look that went through
+    /// the whole file and found nothing dead starts over a quarter of the
+    /// seal age later, so a queue without retention costs a few lookups every
+    /// few minutes. Only an aged file is looked at (a younger one is not
+    /// sealed whatever it holds), and only until it is asked for.
+    fn judge_active(
+        log_id: u64,
+        log: &Arc<RwLock<QLog>>,
+        state: &mut ReclaimState,
+        live_start: &mut dyn FnMut(u64) -> io::Result<Option<u64>>,
+        budget: &mut ReclaimBudget,
+    ) -> io::Result<()> {
+        let seal_age = seal_age_from_env();
+        let max = ACTIVE_LOOK.min(budget.lookups);
+        if seal_age.is_zero() || max == 0 {
+            return Ok(());
+        }
+        let seal_age_us = i64::try_from(seal_age.as_micros()).unwrap_or(i64::MAX);
+        let (from, rest_until) = state.active_from.get(&log_id).copied().unwrap_or((0, None));
+        if rest_until.is_some_and(|until| std::time::Instant::now() < until) {
+            return Ok(());
+        }
+        let looked = {
+            let g = log.read().expect("qlog poisoned");
+            let aged = g
+                .active_age_us(super::wall_now_us())
+                .is_some_and(|a| a >= seal_age_us);
+            if !aged || !g.seal_undecided() {
+                return Ok(());
+            }
+            g.active_firsts(from, max)
+        };
+        let Some((file_id, firsts)) = looked else {
+            return Ok(());
+        };
+        // Fewer than asked for: the look reached the file's last partition.
+        // The next one starts over, after a rest.
+        let mut next = match firsts.last() {
+            Some((pid, _)) if firsts.len() >= max => (pid.saturating_add(1), None),
+            _ => (0, Some(std::time::Instant::now() + seal_age / 4)),
+        };
+        for (pid, end) in firsts {
+            budget.lookups = budget.lookups.saturating_sub(1);
+            if live_start(pid)?.is_none_or(|start| end <= start) {
+                log.read().expect("qlog poisoned").want_seal(file_id);
+                next = (0, None);
+                break;
+            }
+        }
+        state.active_from.insert(log_id, next);
+        Ok(())
+    }
+
+    /// Per-file retention for log `log_id`: judge its sealed files one at a
+    /// time from their own `.qidx`, looking up only the partitions that have
+    /// records in them, and remember how far each file is known dead.
+    ///
+    /// `live_start(pid)` answers `Some(txns_start)` when the partition still
+    /// exists AND its records go to this log, `None` otherwise (its records here
+    /// are dead): the rule the whole-map walk applied, at the cost of the files
+    /// judged instead of every partition on the node.
+    ///
+    /// The judging holds no lock on the log. Only the unlink, and the one
+    /// rewrite a pass allows, take its write lock, and only when it is free
+    /// (`try_write`): an append never queues behind retention.
     pub(crate) fn reclaim_log(
         &self,
         log_id: u64,
@@ -2219,8 +2327,10 @@ impl QLogReader {
         let Some(log) = self.log(log_id) else {
             state.files.retain(|(l, _), _| *l != log_id);
             state.cursors.remove(&log_id);
+            state.active_from.remove(&log_id);
             return Ok(out);
         };
+        Self::judge_active(log_id, &log, state, live_start, budget)?;
         let cand = log.read().expect("qlog poisoned").reclaim_candidates();
         state
             .files
@@ -2244,21 +2354,10 @@ impl QLogReader {
             let progress = match state.files.entry((log_id, id)) {
                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::hash_map::Entry::Vacant(v) => {
-                    let path = super::qidx_path(&cand.dir, id);
-                    let view = match super::index::View::open(&path, Some(bytes)) {
-                        Ok(view) => view,
-                        Err(e) => {
-                            // Gone since the listing, or an index the log
-                            // rebuilds at its next open: judge it later.
-                            tracing::debug!(
-                                target: "rsm",
-                                log = log_id,
-                                file = id,
-                                error = %e,
-                                "rsm qlog retention skips a file it cannot map",
-                            );
-                            continue;
-                        }
+                    // Gone or rewritten since the listing: judged later.
+                    let view = log.read().expect("qlog poisoned").sealed_view(id, bytes);
+                    let Some(view) = view else {
+                        continue;
                     };
                     let msg_bytes = view
                         .records()

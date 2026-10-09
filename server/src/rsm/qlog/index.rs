@@ -241,13 +241,12 @@ pub struct View {
     file_bytes: u64,
 }
 
-/// An index at most this long is read into the heap and not mapped. The
+/// An index at most this long is read into memory and not mapped. The
 /// kernel caps the memory maps of a process (`vm.max_map_count`, 65,530
-/// unless raised), every sealed file has an index, and a quiet queue's log
-/// is sealed every `QUEEN_QLOG_SEAL_AGE_S` for as long as it gets a message
-/// now and then: a node with many such queues holds far more small files than
-/// it may hold maps, and at the cap it could not seal its next file. A page's
-/// worth of index (about 80 records) costs less on the heap than a map does.
+/// unless raised) and every sealed file has an index, so a node with many
+/// small sealed files (retention seals a quiet queue's file to free what
+/// expired in it) would spend its maps on them. A page's worth of index
+/// (about 80 records) costs less in memory than a map does.
 pub const SMALL_INDEX: usize = 4096;
 
 /// Sealed-file indexes this process holds mapped ([`mapped_views`]).
@@ -256,6 +255,15 @@ static MAPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(
 /// How many sealed-file indexes are memory-mapped right now, in every log.
 pub fn mapped_views() -> u64 {
     MAPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Maps the kernel refused since the start ([`refused_maps`]).
+static REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many index maps the kernel has refused since the start: each of those
+/// indexes is held in memory instead.
+pub fn refused_maps() -> u64 {
+    REFUSED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// `vm.max_map_count`: how many memory maps the kernel allows this process
@@ -296,13 +304,15 @@ impl Drop for Bytes {
 }
 
 impl Bytes {
-    /// The whole of `f` (`len` bytes): read when it is small, mapped otherwise.
+    /// The whole of `f` (`len` bytes): read when it is small, mapped otherwise,
+    /// and read as well when the kernel refuses the map.
     fn of(f: &File, path: &Path, len: usize) -> io::Result<Bytes> {
         if len <= SMALL_INDEX {
-            use std::os::unix::fs::FileExt;
-            let mut b = vec![0u8; len];
-            f.read_exact_at(&mut b, 0)?;
-            return Ok(Bytes::Heap(b.into_boxed_slice()));
+            return Bytes::read(f, len);
+        }
+        #[cfg(test)]
+        if REFUSE_MAPS.with(|r| r.get()) {
+            return Bytes::refused(f, path, len, &io::Error::from_raw_os_error(12));
         }
         // SAFETY: a sealed file's index is created by a temp-file rename and
         // never modified; unlink keeps its pages alive for this mapping on unix.
@@ -311,17 +321,51 @@ impl Bytes {
                 MAPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(Bytes::Mapped(m))
             }
-            Err(e) => Err(io::Error::new(
-                e.kind(),
-                format!(
-                    "cannot map the index {}: {e} (this process holds {} mapped indexes; the \
-                     kernel's limit is vm.max_map_count)",
-                    path.display(),
-                    mapped_views()
-                ),
-            )),
+            Err(e) => Bytes::refused(f, path, len, &e),
         }
     }
+
+    fn read(f: &File, len: usize) -> io::Result<Bytes> {
+        use std::os::unix::fs::FileExt;
+        let mut b = vec![0u8; len];
+        f.read_exact_at(&mut b, 0)?;
+        Ok(Bytes::Heap(b.into_boxed_slice()))
+    }
+
+    /// The kernel refused a map: the process is at `vm.max_map_count`, or out
+    /// of address space. The index is held in memory instead, and the node says
+    /// so. Failing here stopped the node for good: a roll that cannot open the
+    /// index of the file it just sealed leaves that file without one, and a
+    /// start opens every sealed file's index, so it failed the same way until
+    /// someone raised the limit.
+    fn refused(f: &File, path: &Path, len: usize, e: &io::Error) -> io::Result<Bytes> {
+        static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+        REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut last = LAST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if last.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(60)) {
+            *last = Some(std::time::Instant::now());
+            tracing::warn!(
+                target: "rsm",
+                index = %path.display(),
+                bytes = len,
+                error = %e,
+                mapped = mapped_views(),
+                refused = refused_maps(),
+                "rsm qlog: the kernel refused to map a log file's index, so it is held in \
+                 memory instead (the limit is vm.max_map_count: raise it, or \
+                 QUEEN_RAFT_SEGMENT_BYTES)",
+            );
+        }
+        Bytes::read(f, len)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: this thread's maps are refused, as at `vm.max_map_count`.
+    pub(crate) static REFUSE_MAPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl std::fmt::Debug for View {
@@ -563,6 +607,34 @@ impl ActiveIndex {
     /// Publish one active record's index entry.
     pub fn insert(&mut self, rec: Record) {
         self.recs.insert(rec.key(), rec);
+    }
+
+    /// Of up to `max` partitions with messages in the active file, from
+    /// partition `from` on: the end of the first message record each has
+    /// here, as `(pid, end)`. Entry records (`count == 0`) are passed over.
+    pub fn firsts(&self, from: u64, max: usize) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        let mut next = Some(from);
+        while let Some(pid) = next {
+            if out.len() >= max {
+                break;
+            }
+            let mut run = self.recs.range((pid, 0)..);
+            let Some((&(found, _), first)) = run.next() else {
+                break;
+            };
+            // The partition's first MESSAGE record: its entry records, if it
+            // has any, sort among them by the same key.
+            let rec = std::iter::once(first)
+                .chain(run.map(|(_, r)| r))
+                .take_while(|r| r.pid == found)
+                .find(|r| r.count > 0);
+            if let Some(r) = rec {
+                out.push((found, r.end));
+            }
+            next = found.checked_add(1);
+        }
+        out
     }
 
     /// Take the whole index of the active file and forget the file: what a roll

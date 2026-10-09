@@ -651,8 +651,10 @@ pub struct QLog {
     active: Option<File>,
     /// The active file's index, in RAM.
     active_index: index::ActiveIndex,
-    /// Sealed files' immutable indexes, mmap'd, keyed by file id.
-    sealed: BTreeMap<u64, index::View>,
+    /// Sealed files' immutable indexes, keyed by file id: mapped, or in memory
+    /// when small ([`index::SMALL_INDEX`]). Shared with retention, which judges
+    /// a file from the same view with no lock on the log ([`QLog::sealed_view`]).
+    sealed: BTreeMap<u64, Arc<index::View>>,
     /// The cross-file directory ([`dirx`]): runs saying which sealed file
     /// holds a partition's offsets, ascending by the files they cover and
     /// disjoint. A sealed file no run covers is probed directly.
@@ -691,6 +693,10 @@ pub struct QLog {
     /// Wall clock (µs) when the active file was created or reopened: the age of
     /// an active file that holds only entry records ([`QLog::active_age_us`]).
     active_opened_us: i64,
+    /// Retention found a dead message in the ACTIVE file
+    /// ([`set::QLogReader::reclaim_log`]): sealing it lets retention free
+    /// something ([`QLog::seal_helps`]). Cleared with every new active file.
+    seal_wanted: std::sync::atomic::AtomicBool,
     /// Retention rewrites a sealed file that mixes live and dead messages only
     /// once at least this percent of its message bytes is dead
     /// ([`QLog::set_compact_min_dead_pct`]); 0 = on the first dead message.
@@ -771,7 +777,7 @@ impl SeqPoints {
 }
 
 /// Wall clock in µs, for file ages. Never part of replicated state.
-fn wall_now_us() -> i64 {
+pub(crate) fn wall_now_us() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as i64)
@@ -970,7 +976,7 @@ impl QLog {
         }
 
         let mut files: Vec<FileMeta> = Vec::new();
-        let mut sealed: BTreeMap<u64, index::View> = BTreeMap::new();
+        let mut sealed: BTreeMap<u64, Arc<index::View>> = BTreeMap::new();
         let mut active_index = index::ActiveIndex::new();
         let mut active: Option<File> = None;
 
@@ -1073,7 +1079,7 @@ impl QLog {
                     meta.absorb(r.created_at_us);
                 }
                 files.push(meta);
-                sealed.insert(id, view);
+                sealed.insert(id, Arc::new(view));
             }
         }
 
@@ -1119,6 +1125,7 @@ impl QLog {
             reclaim_checked: HashMap::new(),
             reclaim_cursor: FIRST_FILE_ID,
             active_opened_us: wall_now_us(),
+            seal_wanted: std::sync::atomic::AtomicBool::new(false),
             compact_min_dead_pct: compact_min_dead_pct_from_env().unwrap_or(0),
             drop_mark: Mutex::new((0, 0)),
             seq_points: Mutex::new(SeqPoints::default()),
@@ -1600,6 +1607,7 @@ impl QLog {
             self.files.push(FileMeta::empty(id, first_seq));
             self.active_index.open(id);
             self.active_opened_us = wall_now_us();
+            self.seal_wanted.store(false, Ordering::Release);
             return Ok(());
         }
         let path = file_path(&self.dir, id);
@@ -1627,6 +1635,7 @@ impl QLog {
         self.files.push(FileMeta::empty(id, first_seq));
         self.active_index.open(id);
         self.active_opened_us = wall_now_us();
+        self.seal_wanted.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -1655,6 +1664,67 @@ impl QLog {
             self.active_opened_us
         };
         Some(now_us.saturating_sub(since))
+    }
+
+    /// Whether sealing the active file now is worth a file: it holds no
+    /// message (entry records follow the recovery floor, not a partition's
+    /// watermark), retention found a dead message in it
+    /// ([`QLog::want_seal`]), or it has reached `min_bytes`.
+    ///
+    /// Age alone used to seal it. A queue that got a message now and then made
+    /// a new file every `QUEEN_QLOG_SEAL_AGE_S` for as long as it lived, with
+    /// nothing in those files retention could free: 144 files a day for a
+    /// queue, each with its index, its entry in every pass of retention and of
+    /// the directory, and its share of a start. A queue without retention
+    /// kept them all.
+    pub(crate) fn seal_helps(&self, min_bytes: u64) -> bool {
+        let Some(meta) = self.files.last() else {
+            return false;
+        };
+        meta.records == 0
+            || meta.min_created_at_us == i64::MAX
+            || meta.bytes >= min_bytes
+            || self.seal_wanted.load(Ordering::Acquire)
+    }
+
+    /// Retention's word that active file `file_id` holds a dead message; a
+    /// file that rolled since retention looked is not asked for.
+    pub(crate) fn want_seal(&self, file_id: u64) {
+        if self.active_index.file_id() == Some(file_id) {
+            self.seal_wanted.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether retention has yet to look at the active file for a dead
+    /// message: it holds messages and nobody asked for its seal.
+    pub(crate) fn seal_undecided(&self) -> bool {
+        self.active.is_some()
+            && !self.seal_wanted.load(Ordering::Acquire)
+            && self
+                .files
+                .last()
+                .is_some_and(|m| m.records > 0 && m.min_created_at_us != i64::MAX)
+    }
+
+    /// For retention's look at the ACTIVE file: of up to `max` partitions with
+    /// messages in it, from partition `from` on, the end of the first record
+    /// each has here, as `(pid, end)`. A partition's watermark only grows, so
+    /// if that record is live every later one of the partition is.
+    /// With the active file's id, for [`QLog::want_seal`].
+    pub(crate) fn active_firsts(&self, from: u64, max: usize) -> Option<(u64, Vec<(u64, u64)>)> {
+        let file_id = self.active_index.file_id()?;
+        Some((file_id, self.active_index.firsts(from, max)))
+    }
+
+    /// The index of sealed file `id` while it is still the `bytes` long file
+    /// retention listed ([`QLog::reclaim_candidates`]); `None` once the file
+    /// is gone or was rewritten.
+    pub(crate) fn sealed_view(&self, id: u64, bytes: u64) -> Option<Arc<index::View>> {
+        let at = self.files.partition_point(|m| m.id < id);
+        self.files
+            .get(at)
+            .filter(|m| m.id == id && m.sealed && m.bytes == bytes)?;
+        self.sealed.get(&id).cloned()
     }
 
     /// Seal a QUIET active file so retention can reclaim it: an active file is
@@ -1743,7 +1813,7 @@ impl QLog {
         write_qidx_lazy(&self.dir, old_id, old_bytes, &recs)?;
         self.files.last_mut().expect("active meta").sealed = true;
         let view = index::View::open(&qidx_path(&self.dir, old_id), Some(old_bytes))?;
-        self.sealed.insert(old_id, view);
+        self.sealed.insert(old_id, Arc::new(view));
         self.active = None;
         self.create_active(old_id + 1, first_seq)?;
         Ok(())
@@ -3370,7 +3440,7 @@ impl QLog {
         self.cache.forget_file(id);
         self.cache.clear_hashes();
         self.seq_points.lock_unpoisoned().forget_file(id);
-        self.sealed.insert(id, view);
+        self.sealed.insert(id, Arc::new(view));
         if let Some(meta) = self.files.iter_mut().find(|meta| meta.id == id) {
             meta.bytes = at;
             meta.records = records.len() as u64;
@@ -3448,7 +3518,7 @@ impl QLog {
         self.cache.forget_file(id);
         self.cache.clear_hashes();
         self.seq_points.lock_unpoisoned().forget_file(id);
-        self.sealed.insert(id, view);
+        self.sealed.insert(id, Arc::new(view));
         if let Some(meta) = self.files.iter_mut().find(|meta| meta.id == id) {
             meta.bytes = at;
             meta.records = records.len() as u64;

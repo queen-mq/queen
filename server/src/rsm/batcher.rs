@@ -326,8 +326,8 @@ fn qlog_reclaim_from_env() -> bool {
 
 /// Say so, at most every ten minutes, while the sealed-file indexes this
 /// process maps are past 70% of what the kernel allows it
-/// (`vm.max_map_count`): at the cap the next large file cannot be sealed and
-/// the node stops. Small indexes are not mapped
+/// (`vm.max_map_count`): past the cap an index is held in memory instead,
+/// megabytes for a full file. Small indexes are not mapped
 /// ([`crate::rsm::qlog::index::SMALL_INDEX`]), so this is about a node that
 /// retains a great deal: about 4 TB of log at 64 MiB a file and 65,530 maps.
 fn warn_near_map_limit() {
@@ -352,8 +352,8 @@ fn warn_near_map_limit() {
         mapped,
         limit,
         "rsm qlog: the sealed log files' indexes use most of the memory maps the kernel allows \
-         this process (vm.max_map_count); raise it, or QUEEN_RAFT_SEGMENT_BYTES, before a node \
-         cannot seal its next file",
+         this process (vm.max_map_count); raise it, or QUEEN_RAFT_SEGMENT_BYTES: past the limit \
+         an index is held in memory instead",
     );
 }
 
