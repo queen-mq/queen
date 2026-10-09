@@ -29,6 +29,77 @@ fork it forgot the log channels through `getChannels()`, which an application's 
 bound as `log` does not have: the server failed as it started, and the supervisor spawned the
 workers instead, without prefork. It now forgets channels only from a `LogManager`.
 
+**Laravel: a pool's settings reach the worked connection alone.** A supervisor starts a worker
+with its pool's consumer group, `retry_after` and `block_for` in the environment, and the
+connector applied them to every Queen connection the worker resolved. A job on connection A that
+dispatched onto connection B built B with A's group and lease: `size()` answered the wrong group's
+depth, and a B with an explicit lease renewal interval, sized for its longer lease, failed its
+timing check and the dispatch threw. The supervisor also names the worked connection, and the
+settings now apply to that one; another connection keeps its own configuration.
+
+**Laravel: a pool works its connection's queue and consumer group.** A pool that named only its
+connection took `consumer_group` and the default queue from `config/queen.php`, not from that
+connection, so under the supervisor its workers consumed another group and another queue than
+`queue:work <connection>` run by hand. The connection's own settings are the defaults now, and the
+worker-invocation record pins a pool that names only its connection.
+
+**Laravel prefork: a worker forked after `queue:restart` leaves at once.** The master replaces the
+fork server when a worker leaves with the restart marker, and a scale-up in between forked from
+the old server. Laravel's worker reads the restart signal once, as its baseline, so such a worker
+never stopped and ran the old code until it was removed. The fork server remembers the signal at
+boot, and a child forked after it changed leaves with the restart marker: the master replaces the
+server, and the replacement runs the code on disk. Since the PHP client 1.7.0.
+
+**Laravel prefork: the fork server lets go of the queue connections the boot resolved, and a
+child reports its exception.** The queue manager keeps every connection it resolved. One a
+provider or a health check resolved at boot was shared by every forked worker, with the server's
+environment instead of the pool's settings and with one socket for all; the server now forgets
+them before each fork and warns at boot which ones it found. And a forked worker's exception went
+to stderr alone, where a spawned worker's reaches the application's exception handler through the
+console kernel: the child reports it the same way and exits 1.
+
+**Laravel: a connection's own `url` is not replaced by the default `urls`.** `QUEEN_URLS`, a
+cluster, is the default of every Queen connection, and it replaced the single `url` of a
+connection on another broker, in the connector and in the supervisor's export alike.
+
+**Laravel: failed jobs of other drivers stay Laravel's.** With `sync_failed_jobs` on, the default,
+every failed job on redis, database or sync took the cache lock, waited up to
+`failed_jobs_lock_wait` under contention and threw on a store without locks; and `queue:forget`,
+`queue:flush` and `queue:prune` resolved every record's connection, so a record of a connection
+since removed made them throw. A failure on another driver goes to Laravel's provider now, and such
+records are removed without resolving their connection.
+
+**Laravel: `event_driven` refuses `read_bearer_token`.** The watcher parks on
+`POST /api/v1/fetch` with the connection's exported token, which `read_bearer_token` made
+read-only: the broker refused it, and the master polled for the whole run after one stderr line.
+A supervisor configured with both now refuses to start and says why.
+
+**Laravel: `QUEEN_SUPERVISOR_REMOTE_STATUS=1` and `QUEEN_DASHBOARD_ENABLED=1` turn their features
+on,** as `=1` turns prefork, coordination and metrics on. Queue names given as an array are trimmed
+like the comma-separated form.
+
+**Laravel PHP engine: SIGHUP drains, prefork is tried again at `queue:restart`, strays are
+stopped, a dead server's workers are reaped.** The engine died hard on SIGHUP, with its workers
+and its lock behind it; it drains, as the Rust master does. A fork server that missed its boot
+timeout, or failed a fork, left the engine spawning until it was restarted; a `queue:restart`
+announced by any worker asks for a new server. The late reply to a fork request the engine gave up
+on stopped its stray only when another forked worker was polled; every server's events are read
+once per loop. A forked worker whose server died was taken for exited 0 once gone; where the
+engine is the nearest subreaper its real status is read, instead of a zombie. A request line over
+the limit no longer ends the server, and every worker with it. A document without `quiet` runs
+quiet, as the Rust master reads it.
+
+**Supervisor: strays are stopped, prefork is tried again at `queue:restart`, a dead server's
+workers are reaped, and only the probe closes a circuit.** The Rust master has the same four
+changes as the PHP engine above: a late fork reply is read once per loop whether or not a worker
+of that server is polled; a `queue:restart` announced by a spawned worker starts a fork server
+when prefork has none; a forked worker whose server died is reaped by the master when the master
+is the nearest subreaper (PID 1 in a container), with its real status, instead of staying a zombie
+that kept its pool slot; and a sibling that reached `stable_after` while the pool's circuit was in
+backoff no longer closes it, which only the probe does, as in the PHP engine. The master also no
+longer lets a pool that balances inherit its own `QUEEN_LARAVEL_BLOCK_FOR`. These changes need a
+supervisor release; the worker-invocation record pins them.
+
 ## 2.1.0 - 2026-10-09
 
 **Server: a standby cluster.** A second cluster can now replay the first one's log and take over
