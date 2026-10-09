@@ -1,7 +1,7 @@
 # Queen MCP server
 
 `https://queenmq.com/mcp`: Queen MQ's MCP server for coding agents. Connected once, it teaches the
-agent the Queen 2.0 model and hands it tested code, the trap checklist, error meanings and Kafka client
+agent the Queen 2 model and hands it tested code, the trap checklist, error meanings and Kafka client
 compatibility while the developer builds. It holds no state, needs no sign-in, and never receives the
 developer's code. The install page for every agent is [start/ai-agents](https://queenmq.com/start/ai-agents/).
 

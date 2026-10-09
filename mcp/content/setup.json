@@ -16,6 +16,14 @@
     "words": "timer timers delay schedule reminder timeout deadline cancel"
   },
   {
+    "feature": "locks",
+    "title": "Locks and semaphores",
+    "pages": ["concepts/locks"],
+    "related": ["concepts/kv", "concepts/transactions"],
+    "card": "locks",
+    "words": "lock locks semaphore mutex lease fencing token guard singleton cron exclusive permit"
+  },
+  {
     "feature": "streams",
     "title": "Stream processing",
     "pages": ["guides/streams"],

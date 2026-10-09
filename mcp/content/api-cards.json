@@ -2234,6 +2234,422 @@
       "notes": "No SDK has a request() helper: request/reply is a push to a requests queue carrying a replyTo inbox name, then a long-poll pop on that inbox with autoAck (at-most-once is right for a reply). Contents live in the RAM of the partition's owner node: a crash loses them, a SIGTERM hands them to the next owner. A queue is created by the first push or pop that names it, and an idle implicit queue is collected after 300 s. No transactions (an ephemeral push cannot ride a transaction), no DLQ, no replay, no subscriptionMode. Unacked messages come back after the 30 s lease with attempts+1, up to retryLimit (5), then they are dropped. Ack with the same group the pop used; outcome 'stale' (message from a previous owner incarnation) is an answer, not an error. A message whose object has a 'data' or 'payload' key is read as the push sugar: wrap it as {payload: obj} when that object IS the payload. C++ differences: option structs, json results, delete is del, and push is unbuffered (the JS, Python and PHP buffered push is not wired here). The requester side is eph.push(\"rpc-requests\", ...) with a replyTo inbox, then eph.pop(inbox, reply_wait)."
     }
   },
+  "locks": {
+    "js": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "queen.lock(name, { ttl: '30s' })",
+          "does": "A lock handle: one holder at a time. Creating it sends nothing. A lifetime is mandatory: ttl (a duration string) or ttlSeconds (integer). Also owner, autoRenew (default true) and renewEvery.",
+          "source": "clients/client-js/client-v2/Queen.js:332"
+        },
+        {
+          "call": "queen.semaphore(name, limit, { ttl: '2m' })",
+          "does": "A handle on one permit of a semaphore of limit permits (at most 1,024). Same class and methods as a lock.",
+          "source": "clients/client-js/client-v2/Queen.js:353"
+        },
+        {
+          "call": "await lock.acquire({ wait: '10s' })",
+          "does": "Take the permit: resolves true or false, never throws for a lock somebody else holds. Without wait there is one attempt; with it the handle comes back every 100 ms to 1 s until the wait is over.",
+          "source": "clients/client-js/client-v2/locks/Locks.js:364"
+        },
+        {
+          "call": "lock.signal / lock.onLost((reason) => ...)",
+          "does": "How you learn the lock is gone: signal is an AbortSignal that aborts, and onLost handlers run with 'renew', 'guard' or 'expired'. Nothing stops your code: pass lock.signal to what the work awaits.",
+          "source": "clients/client-js/client-v2/locks/Locks.js:333"
+        },
+        {
+          "call": "lock.held / lock.token / lock.slot",
+          "does": "held is a belief with a deadline, not a proof. token is the fencing token of the current lease period (null when not held) and changes at every renew: read it when you send it, never keep a copy across an await.",
+          "source": "clients/client-js/client-v2/locks/Locks.js:315"
+        },
+        {
+          "call": "await lock.renew()",
+          "does": "Extend the lease now: true with a new token, false when the permit is gone. The handle already renews in the background every third of the lifetime; call it yourself with autoRenew: false.",
+          "source": "clients/client-js/client-v2/locks/Locks.js:398"
+        },
+        {
+          "call": "await lock.release()",
+          "does": "Give the permit back: true when the broker removed it, false when it was no longer this handle's. Put it in finally.",
+          "source": "clients/client-js/client-v2/locks/Locks.js:432"
+        },
+        {
+          "call": "await lock.run(fn, { wait: '10s' })",
+          "does": "Acquire, run fn(lock), release whatever fn does. Resolves {acquired: false}, or {acquired: true, value}.",
+          "source": "clients/client-js/client-v2/locks/Locks.js:452"
+        },
+        {
+          "call": "await queen.locks.get(name)",
+          "does": "Who holds it: {held, holders: [{slot, owner, token, since, renewedAt, expiresAt}]}. queen.locks also has acquire, renew, release and batch for a caller that carries the token itself.",
+          "source": "clients/client-js/client-v2/locks/Locks.js:225"
+        },
+        {
+          "call": "await queen.kv.check(ns, key, { expect, required })",
+          "does": "Assert that a key is at version expect (0: absent) and write nothing. This is the operation a guard is made of.",
+          "source": "clients/client-js/client-v2/kv/Kv.js:448"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": ".guard(lock)",
+          "does": "The transaction commits only while the lock is still this handle's, judged in the same log entry as its acks, pushes, KV writes and timers. A replaced holder gets success: false with reason 'kv_precondition' and writes nothing. commit() throws with code LOCK_NOT_HELD when the handle holds nothing.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:272"
+        },
+        {
+          "call": ".kv.check(ns, key, { expect, required: true })",
+          "does": "Gate the transaction on a key it does not write.",
+          "source": "clients/client-js/client-v2/builders/TransactionBuilder.js:211"
+        }
+      ],
+      "usage": "const lock = queen.lock('daily-report', { ttl: '30s' })\nif (!(await lock.acquire({ wait: '10s' }))) return   // somebody else holds it\ntry {\n  const res = await queen.transaction()\n    .guard(lock)                                    // commits only while the lock is ours\n    .queue('reports').push([{ data: report }])\n    .commit()\n  if (res.success === false) return                 // replaced: nothing was written\n} finally {\n  await lock.release()\n}\n\nconst gpu = queen.semaphore('gpu', 4, { ttl: '2m' })  // at most four holders\nawait gpu.run(() => train(job), { wait: '30s' })",
+      "notes": "It is a lease, not a mutex: it expires, and a holder that outlived it keeps running. Only the guard on the transaction (or the token, for a resource outside Queen) makes the work exclusive. A semaphore handle is ONE permit: make a handle per holder, and pass the same limit from every holder of one name (it is stored nowhere). Needs broker 2.1.0. The guard and kv check also need the cluster at format version 5, which it reaches by itself once every node runs 2.1.0; until then they answer 503 kv_check_needs_cluster_version_5 and acquire, renew and release already work."
+    },
+    "python": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "queen.lock(name, ttl_seconds=30)",
+          "does": "A lock handle: one holder at a time. Creating it sends nothing. A lifetime is mandatory: ttl_seconds (int) or ttl (timedelta). Also owner, auto_renew, renew_every and wait.",
+          "source": "clients/client-py/queen/client.py:379"
+        },
+        {
+          "call": "queen.semaphore(name, limit, ttl_seconds=120)",
+          "does": "A handle on one permit of a semaphore of limit permits. Same class and methods as a lock.",
+          "source": "clients/client-py/queen/client.py:410"
+        },
+        {
+          "call": "await lock.acquire(wait=10)",
+          "does": "Take the permit: True or False. wait is seconds or a timedelta; without it, the wait the handle was created with (one attempt by default).",
+          "source": "clients/client-py/queen/locks/locks.py:399"
+        },
+        {
+          "call": "lock.lost / lock.on_lost(fn)",
+          "does": "How you learn the lock is gone: lost is an asyncio.Event that is set, and on_lost handlers run with 'renew', 'guard' or 'expired'. Nothing stops your code: watch lock.lost in the work.",
+          "source": "clients/client-py/queen/locks/locks.py:382"
+        },
+        {
+          "call": "lock.held / lock.token / lock.slot",
+          "does": "Properties. token is the fencing token of the current lease period (None when not held) and changes at every renew: read it when you send it.",
+          "source": "clients/client-py/queen/locks/locks.py:365"
+        },
+        {
+          "call": "await lock.renew()",
+          "does": "Extend the lease now: True with a new token, False when the permit is gone. The handle already renews in the background every third of the lifetime.",
+          "source": "clients/client-py/queen/locks/locks.py:428"
+        },
+        {
+          "call": "await lock.release()",
+          "does": "Give the permit back: True when the broker removed it, False when it was no longer this handle's. Put it in finally.",
+          "source": "clients/client-py/queen/locks/locks.py:473"
+        },
+        {
+          "call": "await lock.run(fn, wait=10)",
+          "does": "Acquire, await fn(lock), release whatever fn does. Returns {'acquired': False}, or {'acquired': True, 'value': ...}.",
+          "source": "clients/client-py/queen/locks/locks.py:490"
+        },
+        {
+          "call": "await queen.locks.get(name)",
+          "does": "Who holds it: held and holders. queen.locks also has acquire, renew, release and batch for a caller that carries the token itself.",
+          "source": "clients/client-py/queen/locks/locks.py:262"
+        },
+        {
+          "call": "await queen.kv.check(ns, key, expect=version, required=False)",
+          "does": "Assert that a key is at version expect (0: absent) and write nothing. This is the operation a guard is made of.",
+          "source": "clients/client-py/queen/kv/kv.py:287"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": ".guard(lock)",
+          "does": "The transaction commits only while the lock is still this handle's, judged in the same log entry as everything else in it. A replaced holder gets success False with reason 'kv_precondition' and writes nothing. Raises LockNotHeldError when the handle holds nothing.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:189"
+        },
+        {
+          "call": ".kv.check(ns, key, expect=version, required=True)",
+          "does": "Gate the transaction on a key it does not write.",
+          "source": "clients/client-py/queen/builders/transaction_builder.py:418"
+        }
+      ],
+      "usage": "lock = queen.lock(\"daily-report\", ttl_seconds=30)\nif not await lock.acquire(wait=10):\n    return                                  # somebody else has it\ntry:\n    res = await queen.transaction().guard(lock).queue(\"reports\").push([{\"data\": report}]).commit()\n    if res.get(\"success\") is False:\n        return                              # replaced: nothing was written\nfinally:\n    await lock.release()",
+      "notes": "It is a lease, not a mutex: it expires, and a holder that outlived it keeps running. Only the guard on the transaction (or the token, for a resource outside Queen) makes the work exclusive. A semaphore handle is ONE permit: make a handle per holder, and pass the same limit from every holder of one name (it is stored nowhere). Needs broker 2.1.0. The guard and kv check also need the cluster at format version 5, which it reaches by itself once every node runs 2.1.0; until then they answer 503 kv_check_needs_cluster_version_5 and acquire, renew and release already work."
+    },
+    "go": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "client.Lock(name, 30*time.Second)",
+          "does": "A lock handle: one holder at a time, held as a lease of ttl. Creating it sends nothing. An optional queen.LockOptions sets Owner, ManualRenew, RenewEvery, RetryMin and RetryMax.",
+          "source": "clients/client-go/locks.go:366"
+        },
+        {
+          "call": "client.Semaphore(name, limit, ttl)",
+          "does": "A handle on one permit of a semaphore of limit permits. Same type and methods as a lock.",
+          "source": "clients/client-go/locks.go:374"
+        },
+        {
+          "call": "ok, err := lock.TryAcquire(ctx)",
+          "does": "Take the permit, once. false with a nil error when somebody else holds it.",
+          "source": "clients/client-go/locks.go:440"
+        },
+        {
+          "call": "err := lock.Acquire(ctx)",
+          "does": "Take the permit, coming back until it is free or ctx is done: the context is the wait. nil means held; ctx.Err() means the wait ended first.",
+          "source": "clients/client-go/locks.go:464"
+        },
+        {
+          "call": "<-lock.Lost()",
+          "does": "A channel that closes when the lock is gone. Nothing stops your code: select on it in the work.",
+          "source": "clients/client-go/locks.go:433"
+        },
+        {
+          "call": "lock.Held() / lock.Token() / lock.Slot()",
+          "does": "Token is the fencing token of the current lease period and changes at every renew: read it when you send it.",
+          "source": "clients/client-go/locks.go:398"
+        },
+        {
+          "call": "ok, err := lock.Renew(ctx)",
+          "does": "Extend the lease now: true with a new token, false when the permit is gone. The handle already renews in the background every third of the lifetime, unless ManualRenew is set.",
+          "source": "clients/client-go/locks.go:492"
+        },
+        {
+          "call": "ok, err := lock.Release(ctx)",
+          "does": "Give the permit back: true when the broker removed it. Defer it.",
+          "source": "clients/client-go/locks.go:532"
+        },
+        {
+          "call": "client.Locks().Get(ctx, name)",
+          "does": "Who holds it. client.Locks() also has Send and Batch with queen.LockAcquireOp, LockRenewOp, LockReleaseOp and LockGetOp, for a caller that carries the token itself.",
+          "source": "clients/client-go/locks.go:260"
+        },
+        {
+          "call": "client.KV().Check(ctx, ns, key, version)",
+          "does": "Assert that a key is at version (0: absent) and write nothing. This is the operation a guard is made of.",
+          "source": "clients/client-go/kv.go:920"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": ".Guard(lock)",
+          "does": "The transaction commits only while the lock is still this handle's, judged in the same log entry as everything else in it. A replaced holder is a result, not an error: res.IsKVPrecondition() is true and nothing was written. Commit fails with queen.ErrLockNotHeld when the handle holds nothing.",
+          "source": "clients/client-go/transaction_builder.go:123"
+        },
+        {
+          "call": ".KV(queen.KVCheckOp(ns, key, version, queen.KVWriteOptions{Required: true}))",
+          "does": "Gate the transaction on a key it does not write.",
+          "source": "clients/client-go/kv.go:340"
+        }
+      ],
+      "usage": "lock := client.Lock(\"daily-report\", 30*time.Second)\nok, err := lock.TryAcquire(ctx)            // once; lock.Acquire(ctx) waits until ctx is done\nif err != nil || !ok {\n\treturn err                             // somebody else holds it\n}\ndefer lock.Release(ctx)\n\nres, err := client.Transaction().\n\tGuard(lock).                           // commits only while the lock is ours\n\tQueue(\"reports\").Partition(\"daily\").Push(report).\n\tCommit(ctx)\nif err == nil && res.IsKVPrecondition() {\n\t// replaced: nothing was written\n}",
+      "notes": "It is a lease, not a mutex: it expires, and a holder that outlived it keeps running. Only the guard on the transaction (or the token, for a resource outside Queen) makes the work exclusive. A semaphore handle is ONE permit: make a handle per holder, and pass the same limit from every holder of one name (it is stored nowhere). Needs broker 2.1.0. The guard and kv check also need the cluster at format version 5, which it reaches by itself once every node runs 2.1.0; until then they answer 503 kv_check_needs_cluster_version_5 and acquire, renew and release already work."
+    },
+    "php": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "$queen->lock($name, ['ttlSeconds' => 30])",
+          "does": "A lock handle: one holder at a time. Creating it sends nothing. ttlSeconds is required; also owner, retryMinMs and retryMaxMs.",
+          "source": "clients/client-php/src/Queen.php:113"
+        },
+        {
+          "call": "$queen->semaphore($name, $limit, ['ttlSeconds' => 120])",
+          "does": "A handle on one permit of a semaphore of $limit permits. Same class and methods as a lock.",
+          "source": "clients/client-php/src/Queen.php:130"
+        },
+        {
+          "call": "$lock->acquire(5.0)",
+          "does": "Take the permit: true or false. The argument is how many seconds to keep trying; 0.0, the default, is one attempt.",
+          "source": "clients/client-php/src/Lock.php:163"
+        },
+        {
+          "call": "$lock->keepAlive()",
+          "does": "NOTHING renews a lock in the background in PHP. Call this at every checkpoint of long work: it renews once a third of the lifetime has passed, sends nothing before then, and returns false when the lock is lost, which means stop.",
+          "source": "clients/client-php/src/Lock.php:234"
+        },
+        {
+          "call": "$lock->held() / $lock->token() / $lock->slot() / $lock->expiresIn()",
+          "does": "token() is the fencing token of the current lease period (null when not held) and changes at every renew: read it when you send it. expiresIn() is the seconds left on this machine's clock.",
+          "source": "clients/client-php/src/Lock.php:117"
+        },
+        {
+          "call": "$lock->renew()",
+          "does": "Extend the lease now: true with a new token, false when the permit is gone.",
+          "source": "clients/client-php/src/Lock.php:200"
+        },
+        {
+          "call": "$lock->release()",
+          "does": "Give the permit back: true when the broker removed it. Put it in finally.",
+          "source": "clients/client-php/src/Lock.php:255"
+        },
+        {
+          "call": "$lock->run($fn, 5.0)",
+          "does": "Acquire, call $fn($lock), release whatever $fn does. Returns ['acquired' => false], or ['acquired' => true, 'value' => ...].",
+          "source": "clients/client-php/src/Lock.php:274"
+        },
+        {
+          "call": "$queen->locks()->get($name)",
+          "does": "Who holds it. $queen->locks() also has acquire, renew, release and batch for a caller that carries the token itself.",
+          "source": "clients/client-php/src/Locks.php:114"
+        },
+        {
+          "call": "$queen->kv()->check($ns, $key, ['expect' => $version])",
+          "does": "Assert that a key is at version expect (0: absent) and write nothing. This is the operation a guard is made of.",
+          "source": "clients/client-php/src/Kv.php:158"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": "->guard($lock)",
+          "does": "The transaction commits only while the lock is still this handle's, judged in the same log entry as everything else in it. A replaced holder gets ['success'] === false with ['reason'] === 'kv_precondition' and writes nothing. commit() throws LockNotHeldException when the handle holds nothing.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:164"
+        },
+        {
+          "call": "->kv($ns)->check($key, ['expect' => $version, 'required' => true])",
+          "does": "Gate the transaction on a key it does not write.",
+          "source": "clients/client-php/src/Builders/TransactionBuilder.php:396"
+        }
+      ],
+      "usage": "$lock = $queen->lock('daily-report', ['ttlSeconds' => 30]);\nif (!$lock->acquire(5.0)) {                // up to 5 s for our turn\n    return;                                // somebody else holds it\n}\ntry {\n    foreach ($pages as $page) {\n        if (!$lock->keepAlive()) {         // renews when a third of the lifetime has passed\n            break;                         // lost: stop\n        }\n        $result = $queen->transaction()\n            ->guard($lock)                 // commits only while the lock is ours\n            ->queue('reports')->push([['data' => $page]])\n            ->commit();\n        if ($result['success'] === false) {\n            break;                         // replaced: nothing was written\n        }\n    }\n} finally {\n    $lock->release();\n}",
+      "notes": "It is a lease, not a mutex: it expires, and a holder that outlived it keeps running. Only the guard on the transaction (or the token, for a resource outside Queen) makes the work exclusive. The PHP handle has no background renewal: without keepAlive() in the work loop the lock expires after ttlSeconds, however busy the holder is. Choose a lifetime longer than the longest stretch between two checkpoints. In PHP client 2.4.0. A semaphore handle is ONE permit: make a handle per holder, and pass the same limit from every holder of one name (it is stored nowhere). Needs broker 2.1.0. The guard and kv check also need the cluster at format version 5, which it reaches by itself once every node runs 2.1.0; until then they answer 503 kv_check_needs_cluster_version_5 and acquire, renew and release already work."
+    },
+    "rust": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "q.lock(name, Duration::from_secs(30))",
+          "does": "A lock handle: one holder at a time, held as a lease of ttl. Creating it sends nothing.",
+          "source": "clients/client-rust/src/lib.rs:192"
+        },
+        {
+          "call": "q.lock_with(name, LockOptions::new(ttl).owner(\"cron-7\").manual_renew())",
+          "does": "A lock with its own options: owner, manual_renew, renew_every, retry, and limit for one permit of a semaphore.",
+          "source": "clients/client-rust/src/lib.rs:198"
+        },
+        {
+          "call": "q.semaphore(name, limit, ttl)",
+          "does": "A handle on one permit of a semaphore of limit permits. Same type and methods as a lock.",
+          "source": "clients/client-rust/src/lib.rs:205"
+        },
+        {
+          "call": "lock.acquire().await?",
+          "does": "Take the permit, once: Ok(true) or Ok(false).",
+          "source": "clients/client-rust/src/locks.rs:317"
+        },
+        {
+          "call": "lock.acquire_within(Duration::from_secs(10)).await?",
+          "does": "Keep trying until the permit is free or the wait is over.",
+          "source": "clients/client-rust/src/locks.rs:322"
+        },
+        {
+          "call": "lock.lost().await / lock.is_lost()",
+          "does": "lost() resolves when the lock is gone. Nothing stops your code: select on it in the work.",
+          "source": "clients/client-rust/src/locks.rs:418"
+        },
+        {
+          "call": "lock.held() / lock.token() / lock.slot()",
+          "does": "token() is Option<u64>, the fencing token of the current lease period, and changes at every renew: read it when you send it.",
+          "source": "clients/client-rust/src/locks.rs:294"
+        },
+        {
+          "call": "lock.renew().await?",
+          "does": "Extend the lease now: true with a new token, false when the permit is gone. The handle already renews in the background every third of the lifetime, unless manual_renew is set.",
+          "source": "clients/client-rust/src/locks.rs:355"
+        },
+        {
+          "call": "lock.release().await?",
+          "does": "Give the permit back: true when the broker removed it.",
+          "source": "clients/client-rust/src/locks.rs:395"
+        },
+        {
+          "call": "q.locks().get(name).await?",
+          "does": "Who holds it. q.locks() also has send and batch, for a caller that carries the token itself.",
+          "source": "clients/client-rust/src/locks.rs:123"
+        },
+        {
+          "call": "q.kv().check(ns, key, version).await?",
+          "does": "Assert that a key is at version (0: absent) and write nothing. This is the operation a guard is made of.",
+          "source": "clients/client-rust/src/kv.rs:227"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": ".guard(&lock)",
+          "does": "The transaction commits only while the lock is still this handle's, judged in the same log entry as everything else in it. A replaced holder is a verdict, not an error: resp.lost_precondition() is Some and nothing was written. commit fails with Error::Invalid when the handle holds nothing.",
+          "source": "clients/client-rust/src/transaction.rs:272"
+        },
+        {
+          "call": ".kv_check(ns, key, version)",
+          "does": "Gate the transaction on a key it does not write: it rolls back unless the key is still at version.",
+          "source": "clients/client-rust/src/transaction.rs:252"
+        }
+      ],
+      "usage": "let lock = q.lock(\"daily-report\", Duration::from_secs(30));\nif !lock.acquire_within(Duration::from_secs(10)).await? {\n    return Ok(());                          // somebody else holds it\n}\nlet resp = q\n    .transaction()\n    .guard(&lock)                           // commits only while the lock is ours\n    .push(\"reports\", serde_json::json!({ \"day\": day }))?\n    .commit()\n    .await?;\nif resp.lost_precondition().is_some() { /* replaced: nothing was written */ }\nlock.release().await?;",
+      "notes": "It is a lease, not a mutex: it expires, and a holder that outlived it keeps running. Only the guard on the transaction (or the token, for a resource outside Queen) makes the work exclusive. A semaphore handle is ONE permit: make a handle per holder, and pass the same limit from every holder of one name (it is stored nowhere). Needs broker 2.1.0. The guard and kv check also need the cluster at format version 5, which it reaches by itself once every node runs 2.1.0; until then they answer 503 kv_check_needs_cluster_version_5 and acquire, renew and release already work."
+    },
+    "cpp": {
+      "status": "full",
+      "calls": [
+        {
+          "call": "Lock lock = client.lock(name, 30)",
+          "does": "A lock handle: one holder at a time; the second argument is the lifetime in seconds. Creating it sends nothing. An optional LockOptions sets owner, retry_min_millis and retry_max_millis.",
+          "source": "clients/client-cpp/queen_client.hpp:4865"
+        },
+        {
+          "call": "Lock permit = client.semaphore(name, limit, 120)",
+          "does": "A handle on one permit of a semaphore of limit permits. Same class and methods as a lock.",
+          "source": "clients/client-cpp/queen_client.hpp:4876"
+        },
+        {
+          "call": "lock.acquire(5000)",
+          "does": "Take the permit: true or false. The argument is how many milliseconds to keep trying; 0, the default, is one attempt.",
+          "source": "clients/client-cpp/queen_client.hpp:3151"
+        },
+        {
+          "call": "lock.keep_alive()",
+          "does": "NOTHING renews a lock in the background in C++. Call this at every checkpoint of long work: it renews once a third of the lifetime has passed and returns false when the lock is lost, which means stop.",
+          "source": "clients/client-cpp/queen_client.hpp:3204"
+        },
+        {
+          "call": "lock.held() / lock.token() / lock.slot()",
+          "does": "token() is the fencing token of the current lease period (0 when not held) and changes at every renew: read it when you send it.",
+          "source": "clients/client-cpp/queen_client.hpp:3125"
+        },
+        {
+          "call": "lock.renew()",
+          "does": "Extend the lease now: true with a new token, false when the permit is gone.",
+          "source": "clients/client-cpp/queen_client.hpp:3184"
+        },
+        {
+          "call": "lock.release()",
+          "does": "Give the permit back: true when the broker removed it.",
+          "source": "clients/client-cpp/queen_client.hpp:3220"
+        },
+        {
+          "call": "client.locks().get(name)",
+          "does": "Who holds it, as json. client.locks() also has acquire, renew and release for a caller that carries the token itself.",
+          "source": "clients/client-cpp/queen_client.hpp:3013"
+        },
+        {
+          "call": "client.kv(ns).check(key, version)",
+          "does": "Assert that a key is at version (0: absent) and write nothing. This is the operation a guard is made of.",
+          "source": "clients/client-cpp/queen_client.hpp:3714"
+        }
+      ],
+      "inTransaction": [
+        {
+          "call": ".guard(lock)",
+          "does": "The transaction commits only while the lock is still this handle's, judged in the same log entry as everything else in it. commit() throws LockNotHeldError when the handle holds nothing, and the lock must outlive the commit.",
+          "source": "clients/client-cpp/queen_client.hpp:3500"
+        },
+        {
+          "call": ".kv(ns).check(key, version)",
+          "does": "Gate the transaction on a key it does not write. required defaults to true here.",
+          "source": "clients/client-cpp/queen_client.hpp:3363"
+        }
+      ],
+      "usage": "Lock lock = client.lock(\"daily-report\", 30);       // 30 s lifetime\nif (!lock.acquire(5000)) return;                    // up to 5 s for our turn\nfor (const auto& page : pages) {\n    if (!lock.keep_alive()) break;                  // lost: stop\n    client.transaction()\n        .guard(lock)                                // commits only while the lock is ours\n        .kv(\"reports\").put(page.id, page.body, KvTtl::seconds(86400))\n        .commit();\n}\nlock.release();",
+      "notes": "It is a lease, not a mutex: it expires, and a holder that outlived it keeps running. Only the guard on the transaction (or the token, for a resource outside Queen) makes the work exclusive. The C++ handle has no background renewal: without keep_alive() in the work loop the lock expires after its lifetime. Choose a lifetime longer than the longest stretch between two checkpoints. A semaphore handle is ONE permit: make a handle per holder, and pass the same limit from every holder of one name (it is stored nowhere). Needs broker 2.1.0. The guard and kv check also need the cluster at format version 5, which it reaches by itself once every node runs 2.1.0; until then they answer 503 kv_check_needs_cluster_version_5 and acquire, renew and release already work."
+    }
+  },
   "client": {
     "go": {
       "status": "full",

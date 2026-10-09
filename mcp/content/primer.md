@@ -1,13 +1,13 @@
-# Queen MQ 2.0
+# Queen MQ 2
 
-Queen MQ 2.0 is a transactional event broker: one binary per node,
+Queen MQ 2 is a transactional event broker: one binary per node,
 state in a raft-replicated log on local disk, no external database.
 Apps speak JSON over HTTP on port 6632 (SDKs: JS, Python, Go, Rust, PHP, C++);
 Kafka clients can use the built-in facade.
-From 2.0.0-beta.7, in-broker connectors stream PostgreSQL 17+ tables into queues and queues into tables,
+In-broker connectors stream PostgreSQL 17+ tables into queues and queues into tables,
 configured on the broker (`PUT /api/v1/connectors/:name`), not in app code.
 
-These rules describe Queen 2.0 (broker {{broker}}).
+These rules describe Queen 2 (broker {{broker}}).
 Code from older posts, 1.x docs or Kafka habits is likely wrong here.
 Run `ghcr.io/queen-mq/queen:{{broker}}`, published for linux/amd64 and linux/arm64; `latest` is the current release.
 
@@ -24,6 +24,9 @@ Run `ghcr.io/queen-mq/queen:{{broker}}`, published for linux/amd64 and linux/arm
   (KV has no queries; searchable records stay in your database).
 - Use timers, not cron, for waiting: keyed by queue and `timerKey`,
   replaced by scheduling again, fired as a real message. Give a timer the entity's partition to keep order.
+- Work no message triggers (a cron job, a singleton, a pool of N) takes `queen.lock(name)` or
+  `queen.semaphore(name, n)`, from broker 2.1.0. A lock is a lease and stops no write by itself:
+  put `.guard(lock)` on the transaction.
 
 ## Consuming
 
