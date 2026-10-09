@@ -1,9 +1,10 @@
 ---
-title: Locks
+title: "Locks and semaphores with fencing tokens"
 description: "A lock in Queen is a lease with a fencing token: one holder at a time, a lifetime the holder renews, and a guard that lets a transaction commit only while the lock is still held. A semaphore is the same lease with N permits."
 type: concept
 tier: use
 sidebar:
+  label: "Locks"
   order: 7
 sourceOfTruth:
   - server/src/locks.rs
