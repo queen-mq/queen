@@ -335,10 +335,12 @@
               </div>
             </div>
 
+            <RouterLink v-if="selectedConsumer.queueName" class="btn btn-ghost" :to="queueLocation(selectedConsumer.queueName, route, 'supervisors')">Supervisors for this queue →</RouterLink>
             <ul class="detail-list">
               <li>
                 <span class="detail-note">Queue</span>
-                <span>{{ selectedConsumer.queueName || '—' }}</span>
+                <RouterLink v-if="selectedConsumer.queueName" :to="queueLocation(selectedConsumer.queueName, route)">{{ selectedConsumer.queueName }} →</RouterLink>
+                <span v-else>—</span>
               </li>
               <li v-for="topic in selectedConsumer.topics || []" :key="topic">
                 <span class="detail-note">Topic</span>
@@ -456,6 +458,8 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useRouteState } from '@/composables/useRouteState'
+import { queueLocation } from '@/composables/navigation'
 
 import ConsumerHealthGrid from '@/components/ConsumerHealthGrid.vue'
 import { consumers as consumersApi, describeApiError } from '@/api'
@@ -506,8 +510,13 @@ const filterNamespace = ref('')
 const filterTask = ref('')
 const filterQueue = ref('')
 const sortBy = ref('health')
+const selectedGroup = ref('')
+const { restoring: restoringRoute } = useRouteState({ search: searchQuery, queue: filterQueue, namespace: filterNamespace, task: filterTask, sort: sortBy, lagging: showLaggingOnly, group: selectedGroup })
 
-const selectedConsumer = ref(null)
+const selectedConsumer = computed({
+  get: () => selectedGroup.value ? consumers.value.find(g => g.name === selectedGroup.value && (!filterQueue.value || g.queueName === filterQueue.value)) || null : null,
+  set: group => { selectedGroup.value = group?.name || ''; if (group?.queueName) filterQueue.value = group.queueName },
+})
 const consumerToDelete = ref(null)
 const deleteMetadata = ref(true)
 const deleteError = ref('')
@@ -645,7 +654,7 @@ const filteredConsumers = computed(() => {
 // Clear queue filter when it falls out of the namespace/task scope, so
 // the user doesn't end up with an empty result set after narrowing.
 watch([filterNamespace, filterTask], () => {
-  if (filterQueue.value && !scopedQueueNames.value.includes(filterQueue.value)) {
+  if (!restoringRoute.value && filterQueue.value && !scopedQueueNames.value.includes(filterQueue.value)) {
     filterQueue.value = ''
   }
 })
@@ -863,7 +872,6 @@ watch(showLaggingSection, (shown) => {
 useRefresh(refreshAll)
 
 onMounted(() => {
-  if (route.query.search) searchQuery.value = route.query.search
   // Reuse the shared queue cache when possible — if the Queues page recently
   // populated it, this returns immediately without a network round-trip.
   // (The consumer and lagging lists are already in flight via useApi.)

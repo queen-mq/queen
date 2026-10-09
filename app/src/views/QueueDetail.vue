@@ -34,20 +34,13 @@
             <template v-else>{{ describeApiError(detailError) }}</template>
           </p>
           <button class="btn btn-ghost" @click="fetchAll">Retry</button>
-          <button class="btn btn-ghost" @click="$router.push('/queues')">Back to queues</button>
+          <button class="btn btn-ghost" @click="router.push(safeReturnTo(route.query.returnTo) || '/queues')">Back to results</button>
         </div>
       </div>
     </div>
 
     <template v-else-if="statusData">
       <PageHead :title="queueName" :live="refreshAgo">
-        <template #lead>
-          <button @click="$router.push('/queues')" class="detail-back" title="Back to queues" aria-label="Back to queues">
-            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
-          </button>
-        </template>
         <template #title><span class="qd-ns">{{ nameParts.ns }}</span>{{ nameParts.rest }}</template>
         <template #sub>
           <span v-if="queueData?.namespace">Namespace <b>{{ queueData.namespace }}</b> · </span>
@@ -60,9 +53,9 @@
             <button
               v-for="r in timeRanges"
               :key="r.value"
-              :class="{ on: selectedRange === r.value }"
-              :aria-pressed="selectedRange === r.value ? 'true' : 'false'"
-              @click="selectedRange = r.value"
+              :class="{ on: !linkedWindow && selectedRange === r.value }"
+              :aria-pressed="!linkedWindow && selectedRange === r.value ? 'true' : 'false'"
+              @click="contextFrom = ''; contextTo = ''; selectedRange = r.value"
             >{{ r.label }}</button>
           </div>
         </template>
@@ -74,18 +67,6 @@
           <button v-if="can('produce')" @click="pushOpen = true" class="btn btn-primary">Push message</button>
         </template>
       </PageHead>
-
-      <!-- The queue's other views, one click away. A dead-letter depth is a
-           standing to-do list, not something failing now: the count beside
-           the label is the signal. -->
-      <PageTools>
-        <button class="btn btn-ghost" @click="goMessages">Messages</button>
-        <button class="btn btn-ghost" @click="goDLQ">
-          Dead letter
-          <span v-if="totalMessages.deadLetter > 0" class="qd-badge">{{ formatNumber(totalMessages.deadLetter) }}</span>
-        </button>
-        <button class="btn btn-ghost" @click="goTraces">Traces</button>
-      </PageTools>
 
       <!-- ====================================================================
            What needs you on this queue — a failed refresh first, then the
@@ -278,7 +259,7 @@
         <div class="card-header">
           <h3 id="qd-focus-title">{{ focus.title }}</h3>
           <span class="card-sub">{{ focus.sub }}</span>
-          <span class="muted">last {{ selectedRange }}</span>
+          <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
           <div v-if="opsError" class="panel-err">{{ describeApiError(opsError) }}</div>
@@ -449,6 +430,9 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useRouteState } from '@/composables/useRouteState'
+import { queueLocation, safeReturnTo, validWindow } from '@/composables/navigation'
+import { rangeMinutes } from '@/composables/useRouteRange'
 import {
   analytics, queues as queuesApi, system as systemApi,
   consumers as consumersApi, describeApiError,
@@ -472,7 +456,6 @@ import MetricTile from '@/components/MetricTile.vue'
 import PartitionSunflower, { MAX_SEEDS } from '@/components/PartitionSunflower.vue'
 import { routeSupport } from '@/stores/routeSupport'
 import PageHead from '@/components/PageHead.vue'
-import PageTools from '@/components/PageTools.vue'
 import RowChart from '@/components/RowChart.vue'
 import PushMessageModal from '@/components/PushMessageModal.vue'
 import QueueConfigModal from '@/components/QueueConfigModal.vue'
@@ -517,14 +500,17 @@ const pushOpen = ref(false)
 const configOpen = ref(false)
 
 const selectedRange = ref('1h')
+const contextFrom = ref(''), contextTo = ref('')
+useRouteState({ range: selectedRange, from: contextFrom, to: contextTo })
+const linkedWindow = computed(() => validWindow(contextFrom.value, contextTo.value))
 const timeRanges = [
   { label: '1h',  value: '1h',  minutes: 60 },
   { label: '6h',  value: '6h',  minutes: 360 },
   { label: '24h', value: '24h', minutes: 1440 },
 ]
-// The resolved window, restated once in the scope strip. There is no custom
-// range on this page, so it is always a quick range.
+// Preserve an investigation window received from another view.
 const rangeLabel = computed(() => {
+  if (linkedWindow.value) return `${formatTimestamp(linkedWindow.value.from)} → ${formatTimestamp(linkedWindow.value.to)}`
   const r = timeRanges.find(t => t.value === selectedRange.value)
   return `last ${r ? r.label : selectedRange.value}`
 })
@@ -548,11 +534,10 @@ const selectedMetric = ref('throughput')
 // Time range helpers
 // ---------------------------------------------------------------------------
 const getTimeRangeParams = () => {
-  const r = timeRanges.find(x => x.value === selectedRange.value) || timeRanges[0]
   const now = new Date()
   return {
-    from: new Date(now.getTime() - r.minutes * 60 * 1000).toISOString(),
-    to: now.toISOString(),
+    from: (linkedWindow.value?.from || new Date(now.getTime() - rangeMinutes(selectedRange.value) * 60_000)).toISOString(),
+    to: (linkedWindow.value?.to || now).toISOString(),
     queue: queueName.value,
   }
 }
@@ -971,7 +956,7 @@ const banners = computed(() => {
     out.push({
       tone: errorsSeverity.value,
       title: 'Ack failures in window',
-      detail: `${formatNumber(errorsTotal.value)} ack failure${errorsTotal.value === 1 ? '' : 's'} across the last ${selectedRange.value}${deliveredTotal.value ? ` — ${((errorsTotal.value / deliveredTotal.value) * 100).toFixed(2)}% of deliveries` : ''}.`,
+      detail: `${formatNumber(errorsTotal.value)} ack failure${errorsTotal.value === 1 ? '' : 's'} across ${rangeLabel.value}${deliveredTotal.value ? ` — ${((errorsTotal.value / deliveredTotal.value) * 100).toFixed(2)}% of deliveries` : ''}.`,
     })
   }
   // Four outcomes, not two: 'none' below the floor, 'hold' while the conflation
@@ -1113,19 +1098,11 @@ const partitionSeeds = computed(() => partitions.value.map(p => {
   return { name, partitions: 1, pending, lag, sev: pending > 0 ? queueSev.value : 'ok' }
 }))
 
-function goMessages() {
-  router.push({ path: '/messages', query: { queue: queueName.value } })
-}
 function goDLQ() {
-  router.push({ path: '/dlq', query: { queue: queueName.value } })
-}
-function goTraces() {
-  router.push({ path: '/traces', query: { queue: queueName.value } })
+  router.push(queueLocation(queueName.value, route, 'failed'))
 }
 function goConsumers() {
-  // Consumers reads `search` off the query on mount and matches it against both
-  // the group and the queue name.
-  router.push({ path: '/consumers', query: { search: queueName.value } })
+  router.push(queueLocation(queueName.value, route, 'consumers'))
 }
 
 // ---------------------------------------------------------------------------
@@ -1221,7 +1198,7 @@ const deleteQueue = async () => {
 // is hidden); a private setInterval here would keep spending the tenant's
 // metered request budget off screen.
 useAutoRefresh(fetchAll)
-watch(selectedRange, fetchOps)
+watch([selectedRange, contextFrom, contextTo], fetchOps)
 watch(queueName, () => {
   loading.value = true
   detailError.value = null

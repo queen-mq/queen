@@ -86,8 +86,8 @@
       </div>
       <div v-if="!detailUnavailable && (selected || selectedTenant)" class="modal-foot triage-drawer-footer">
         <template v-if="selected">
-          <RouterLink class="btn" :to="`/queues/${encodeURIComponent(selected.name)}`">Inspect queue →</RouterLink>
-          <RouterLink class="btn btn-ghost" :to="{ path: '/consumers', query: { search: selected.name } }">Inspect consumer groups →</RouterLink>
+          <RouterLink class="btn" :to="queueLocation(selected.name, route)">Inspect queue →</RouterLink>
+          <RouterLink class="btn btn-ghost" :to="queueLocation(selected.name, route, 'consumers')">Inspect consumer groups →</RouterLink>
         </template>
         <RouterLink v-else class="btn" :to="selectedTenant.to">Inspect failures →</RouterLink>
       </div>
@@ -96,6 +96,9 @@
 </template>
 
 <script setup>
+import { queueLocation } from '@/composables/navigation'
+const route = useRoute()
+import { useRoute } from 'vue-router'
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { formatNumber } from '@/composables/useApi'
 import { buildQueueTriage, filterQueueTriage, observePending } from '@/composables/queueTriage'

@@ -49,7 +49,7 @@
       <div class="sect-head">
         <h3>Reported queues</h3>
         <span>{{ queues.length }}</span>
-        <RouterLink v-if="queue" class="activity-open" :to="{ name: 'QueueDetail', params: { queueName: queue } }">Open queue →</RouterLink>
+        <RouterLink v-if="queue" class="activity-open" :to="queueLocation(queue, route)">Open queue →</RouterLink>
       </div>
       <div v-if="queues.length" class="queue-table">
         <table class="t">
@@ -70,6 +70,9 @@
 </template>
 
 <script setup>
+import { queueLocation } from '@/composables/navigation'
+const route = useRoute()
+import { useRoute } from 'vue-router'
 import { computed, inject, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import BaseChart from '@/components/BaseChart.vue'
 import { supervisorActivityKey } from '@/composables/supervisorActivity'

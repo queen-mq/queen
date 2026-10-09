@@ -167,6 +167,7 @@
 </template>
 
 <script setup>
+import { useRouteState } from '@/composables/useRouteState'
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from 'vue'
 import SupervisorQueueContext from '@/components/SupervisorQueueContext.vue'
 import SupervisorGroupCard from '@/components/SupervisorGroupCard.vue'
@@ -274,17 +275,18 @@ const workers = computed(() => {
   return recent.some(row => row.workers === null) ? null : recent.reduce((n, row) => n + row.workers, 0)
 })
 const search = ref(''), filter = ref('all'), groupFilter = ref(null), page = ref(1)
+const queueFilter = ref('')
 const groups = computed(() => supervisorGroups(rows.value, { partial: Boolean(after.value) }))
 const fleetTone = computed(() => error.value || after.value ? 'warn' : groups.value.some(group => group.tone === 'bad') ? 'bad' : attention.value ? 'warn' : groups.value.length && groups.value.every(group => group.tone === 'good') ? 'good' : 'idle')
 const fleetLabel = computed(() => error.value ? 'Current status unconfirmed' : !readAt.value ? 'Waiting for publications' : after.value ? 'Partial view · more publications available' : attention.value ? `${attention.value} ${attention.value === 1 ? 'application needs' : 'applications need'} attention` : !groups.value.length ? 'No publications loaded' : fleetTone.value === 'good' ? 'No issues reported' : 'Some instances are not running')
 const engines = computed(() => [...new Set(rows.value.map(row => row.engine).filter(Boolean))].sort())
-const filtered = computed(() => filterSupervisorGroups(groups.value, {
+const filtered = computed(() => filterSupervisorGroups(queueFilter.value ? groups.value.filter(group => group.queues.some(queue => queue.name === queueFilter.value)) : groups.value, {
   search: search.value, filter: filter.value, group: groupFilter.value,
 }))
 const pages = computed(() => Math.max(1, Math.ceil(filtered.value.length / 10)))
 const pageGroups = computed(() => filtered.value.slice((page.value - 1) * 10, page.value * 10))
 
-watch([search, filter, groupFilter], () => { page.value = 1 })
+watch([search, filter, groupFilter, queueFilter], () => { if (!restoringRoute.value) page.value = 1 })
 watch(pages, n => { page.value = Math.min(page.value, n) })
 const errorTitle = computed(() => verdict.value === 'transient' ? 'Cannot read supervisor publications' : describeVerdict(verdict.value, 'Supervisor discovery').title)
 const errorDetail = computed(() => verdict.value === 'transient' ? kvRefusalText(error.value) || describeApiError(error.value) : describeVerdict(verdict.value, 'Supervisor discovery').detail)
@@ -297,6 +299,7 @@ const time = value => new Date(value).toLocaleTimeString()
 const ageLabel = age => age === null ? 'Age unknown' : age < -5 ? 'Timestamp is in the future' : age < 60 ? `${Math.max(0, age)}s before read` : age < 3600 ? `${Math.floor(age / 60)}m ${age % 60}s before read` : `${Math.floor(age / 3600)}h before read`
 
 const selectedSlot = ref(null), drawer = ref(null), poolSearch = ref(''), poolFilter = ref('all'), poolPage = ref(1), expandedPool = ref(null)
+const { restoring: restoringRoute } = useRouteState({ queue: queueFilter, search, filter, group: groupFilter, page, instance: selectedSlot })
 const POOLS_PER_PAGE = 10
 const selected = computed(() => rows.value.find(row => row.slot === selectedSlot.value))
 const canDiagnosePools = computed(() => selected.value?.affectedPools !== null && selected.value?.fresh && selected.value?.state === 'running' && !error.value)
@@ -330,7 +333,7 @@ watch(selectedSlot, async slot => {
   if (slot && selectedSlot.value === slot && drawer.value && !drawer.value.open) {
     drawer.value.dataset.drawerMotion = 'enter'; drawer.value.showModal()
   } else if (!selectedSlot.value) drawer.value?.close()
-})
+}, { immediate: true })
 const onDialogClose = () => { if (!drawer.value?.open) selectedSlot.value = null }
 let backdropDown = false
 function outside(event) {

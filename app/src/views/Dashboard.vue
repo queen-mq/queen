@@ -379,7 +379,7 @@
             v-for="q in topPendingQueues"
             :key="q.name"
             class="entity-row"
-            @click="$router.push(`/queues/${encodeURIComponent(q.name)}`)"
+            @click="$router.push(queueLocation(q.name, route))"
           >
             <div class="entity-head">
               <span class="g" :class="queueGlyph(q)" aria-hidden="true" />
@@ -428,7 +428,7 @@
             v-for="g in sortedConsumers.slice(0, 6)"
             :key="g.name + '@' + g.queueName"
             class="entity-row"
-            @click="$router.push('/consumers')"
+            @click="$router.push(consumerLocation(g, route))"
           >
             <div class="entity-head">
               <span class="g" :class="groupGlyph(g)" aria-hidden="true" />
@@ -482,6 +482,9 @@
 </template>
 
 <script setup>
+import { queueLocation, consumerLocation } from '@/composables/navigation'
+const route = useRoute()
+import { useRoute } from 'vue-router'
 import { ref, computed, onMounted, watch } from 'vue'
 import {
   resources,
@@ -1270,7 +1273,7 @@ const focus = computed(() => {
 // The first three are composables/useAttention — the sidebar, Queues and
 // Consumer groups read the same function, so none of them can disagree.
 // ---------------------------------------------------------------------------
-const queuePath = (name) => `/queues/${encodeURIComponent(name)}`
+const queuePath = (name) => queueLocation(name, route)
 const issues = computed(() => {
   if (queuesFailed.value || consumersFailed.value) return []
   const out = []

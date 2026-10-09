@@ -115,6 +115,7 @@
           <label class="tool-field" for="timers-limit">
             <span class="tool-label">Show</span>
             <select id="timers-limit" v-model.number="limit" class="input">
+              <option :value="25">25</option>
               <option :value="50">50</option>
               <option :value="100">100</option>
               <option :value="250">250</option>
@@ -428,6 +429,7 @@
 </template>
 
 <script setup>
+import { useRouteState } from '@/composables/useRouteState'
 // Timers — the scheduled-message family, per queue (PLAN_KV_TIMERS.md §4,
 // PLAN_DASHBOARD_ACTIONS.md §2.6).
 //
@@ -452,7 +454,6 @@
 //   · the page              exactly the rows on screen; the keyset walk has no
 //                           total, by construction
 import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
 
 import Autocomplete from '@/components/Autocomplete.vue'
 import PageHead from '@/components/PageHead.vue'
@@ -477,8 +478,6 @@ import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { routeSupport } from '@/stores/routeSupport'
 
-const route = useRoute()
-const router = useRouter()
 const { can, epoch } = useIdentity()
 const { notifySuccess } = useToast()
 
@@ -497,8 +496,9 @@ const {
   timerRows, timerBytes, fetchQueues,
 } = queuesStore
 
-const queue = ref(typeof route.query.queue === 'string' ? route.query.queue : '')
-const limit = ref(100)
+const queue = ref('')
+const limit = ref(25)
+useRouteState({ queue, limit })
 
 const queueOptions = computed(() => allQueues.value.map((q) => q.name).filter(Boolean).sort())
 const queuesUnavailable = computed(() => Boolean(queuesError.value) && queueOptions.value.length === 0)
@@ -654,17 +654,11 @@ const probeAgain = async () => {
 
 // The queue and the page size each start a NEW sequence: the cursors on the
 // stack address the old one and would silently page through it.
-watch(queue, (q) => {
+watch(queue, () => {
   pager.reset()
   closeDrawer()
   countResult.value = null
   countError.value = null
-  // The URL carries the queue so the page can be linked to; replace, never
-  // push, so Back leaves the page instead of walking the picker's history.
-  const current = typeof route.query.queue === 'string' ? route.query.queue : ''
-  if (current !== q) {
-    router.replace({ query: { ...route.query, queue: q || undefined } })
-  }
   reload()
 })
 watch(limit, () => { pager.reset(); reload() })

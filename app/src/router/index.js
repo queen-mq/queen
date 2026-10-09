@@ -36,9 +36,9 @@ const routes = [
     name: 'QueueOperations',
     component: () => import('@/views/QueueOperations.vue'),
     meta: {
-      title: 'Queue operations', subtitle: 'Per-queue throughput, lag, and consumer health',
+      title: 'Performance · Operations', subtitle: 'Per-queue throughput, lag, and consumer health',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'operations', order: 1 },
+      navParent: '/analytics',
     }
   },
   {
@@ -48,7 +48,7 @@ const routes = [
     meta: {
       title: 'Queues', subtitle: 'Manage message queues and partitions',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'queues', order: 1 },
+      nav: { group: 'Messaging', icon: 'queues', order: 1 },
     }
   },
   {
@@ -73,7 +73,7 @@ const routes = [
     meta: {
       title: 'Ephemeral queues', subtitle: 'RAM-class queues — contents survive nothing',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'ephemeral', order: 2 },
+      nav: { group: 'Messaging', icon: 'ephemeral', order: 2 },
     }
   },
   {
@@ -83,7 +83,7 @@ const routes = [
     meta: {
       title: 'Consumer groups', subtitle: 'Monitor consumer lag and status',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'consumers', order: 3 },
+      nav: { group: 'Workers', icon: 'consumers', order: 1 },
     }
   },
   {
@@ -93,21 +93,18 @@ const routes = [
     meta: {
       title: 'Messages', subtitle: 'Browse, inspect and push messages',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'messages', order: 4 },
+      nav: { group: 'Messaging', icon: 'messages', order: 4 },
     }
   },
   {
-    // Routing, beside the queues it is used with (Alice, 2026-09-28; it had
-    // its own "State" group). Read-class and tenant-scoped — the console list
-    // is `Read` at the proxy by prefix (/api/v1/resources), so a Viewer may
-    // browse it, which the batch route /api/v1/kv would never allow.
+    // Tenant-scoped read access to the key-value store.
     path: '/kv',
     name: 'Kv',
     component: () => import('@/views/Kv.vue'),
     meta: {
       title: 'KV', subtitle: 'Browse the key-value store, namespace by namespace',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'kv', order: 5 },
+      nav: { group: 'State', icon: 'kv', order: 1 },
     }
   },
   {
@@ -121,7 +118,7 @@ const routes = [
     meta: {
       title: 'Timers', subtitle: 'Scheduled messages waiting to fire, per queue',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'timers', order: 6 },
+      nav: { group: 'Messaging', icon: 'timers', order: 6 },
     }
   },
   {
@@ -135,7 +132,7 @@ const routes = [
     meta: {
       title: 'Locks', subtitle: 'Who holds each lock and semaphore, and until when',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'locks', order: 7 },
+      nav: { group: 'State', icon: 'locks', order: 2 },
     }
   },
   {
@@ -145,7 +142,7 @@ const routes = [
     meta: {
       title: 'Traces', subtitle: 'Track message flows across queues',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'traces', order: 2 },
+      nav: { group: 'Analysis', icon: 'traces', order: 3 },
     }
   },
   {
@@ -155,7 +152,7 @@ const routes = [
     meta: {
       title: 'Supervisors', subtitle: 'Published supervisor status and worker pool health',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'system', order: 6 },
+      nav: { group: 'Workers', icon: 'system', order: 2 },
     }
   },
   {
@@ -163,9 +160,9 @@ const routes = [
     name: 'Analytics',
     component: () => import('@/views/Analytics.vue'),
     meta: {
-      title: 'Analytics', subtitle: 'Throughput and performance trends',
+      title: 'Performance', subtitle: 'Throughput and performance trends',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'analytics', order: 3 },
+      nav: { group: 'Analysis', icon: 'analytics', order: 1 },
     }
   },
   {
@@ -178,7 +175,7 @@ const routes = [
     meta: {
       title: 'Workload', subtitle: 'Who is doing the work, how much, and what is stuck',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'workload', order: 4 },
+      nav: { group: 'Analysis', icon: 'workload', order: 2 },
     }
   },
   {
@@ -188,7 +185,7 @@ const routes = [
     meta: {
       title: 'Dead letter', subtitle: 'Inspect, replay and purge failed messages',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'dlq', order: 5 },
+      nav: { group: 'Messaging', icon: 'dlq', order: 5 },
     }
   },
   {
@@ -227,17 +224,14 @@ const routes = [
     }
   },
   {
-    // Cell-level: every account on the cell. Not a row of its own: a live
-    // operator is an admin on every cluster, so Members is always in their nav
-    // too, and the two lists are the same people at two scopes. Members'
-    // "Every tenant" switch opens this page (components/AccessScope.vue).
+    // Accounts across the cell. Keep this scope explicit in the operator group.
     path: '/users',
     name: 'Users',
     component: () => import('@/views/Users.vue'),
     meta: {
       title: 'Users', subtitle: 'Cell-level: user accounts and cluster access',
       requires: 'operator', scope: 'cell', proxyOnly: true,
-      navParent: '/members',
+      nav: { group: 'Cell', icon: 'members', order: 2 },
     }
   },
   {

@@ -2,7 +2,7 @@
   <div class="view-container">
 
     <!-- This page does not poll, so it carries no live tick. -->
-    <PageHead title="Traces" :sub="currentTraceName ? `events named ${currentTraceName}` : ''" />
+    <PageHead title="Traces" :sub="messageTarget ? `message ${messageTarget.transactionId}` : currentTraceName ? `events named ${currentTraceName}` : ''" />
 
     <!-- Page banners: the failure first, then the broker-capability caveat. -->
     <div v-if="error" class="status-banner banner-bad view-banner">
@@ -13,7 +13,7 @@
     <!-- A broker capability, like the same note on the dead-letter page:
          information, not a condition — so it is not amber. -->
     <div
-      v-if="currentTraceName && traces.length > 0 && !serverPaginates"
+      v-if="hasTraceTarget && traces.length > 0 && !serverPaginates"
       class="status-banner banner-info view-banner"
     >
       <span>This broker returned every trace in one response — the page controls would page nothing, so they are hidden.</span>
@@ -27,9 +27,9 @@
         <input v-model="searchTraceName" type="text" placeholder="A trace name" class="input" @keyup.enter="searchTraces" />
       </div>
       <button class="btn btn-primary" :disabled="!searchTraceName || loading" @click="searchTraces">Search</button>
-      <button v-if="currentTraceName" class="btn btn-ghost" @click="clearSearch">Clear</button>
+      <button v-if="hasTraceTarget" class="btn btn-ghost" @click="clearSearch">Clear</button>
       <!-- Quick examples: real trace names for this tenant, or nothing. -->
-      <template v-if="!currentTraceName && exampleTraceNames.length > 0">
+      <template v-if="!hasTraceTarget && exampleTraceNames.length > 0">
         <span class="tool-label">Recent</span>
         <div class="pill-row">
           <button
@@ -42,11 +42,16 @@
       </template>
     </PageTools>
 
+    <p v-if="route.query.queue && !hasTraceTarget" class="tool-note">
+      Open a message to inspect its traces.
+      <RouterLink :to="queueLocation(route.query.queue, route, 'messages')">Messages of {{ route.query.queue }} →</RouterLink>
+    </p>
+
     <!-- Summary -->
-    <div v-if="currentTraceName && traces.length > 0" class="card" style="margin-bottom:16px;">
+    <div v-if="hasTraceTarget && traces.length > 0" class="card" style="margin-bottom:16px;">
       <div class="card-header">
         <h3>Trace summary</h3>
-        <span class="card-sub">events carrying the trace name {{ currentTraceName }}</span>
+        <span class="card-sub">{{ messageTarget ? `events for message ${messageTarget.transactionId}` : `events carrying the trace name ${currentTraceName}` }}</span>
         <span class="muted">{{ stamp(tracePanel) }}</span>
       </div>
       <div class="card-body">
@@ -74,7 +79,7 @@
     </div>
 
     <!-- Trace events -->
-    <div v-if="currentTraceName" class="card">
+    <div v-if="hasTraceTarget" class="card">
       <div class="card-header">
         <h3>Trace events</h3>
         <span class="muted">{{ stamp(tracePanel) }}</span>
@@ -116,7 +121,7 @@
               <td colspan="8">
                 <div class="empty-state empty-state-failed">
                   <h3>Nothing loaded</h3>
-                  <p>This is a failure, not an absence of events for <span class="font-mono">{{ currentTraceName }}</span>.</p>
+                  <p>Could not read events for <span class="font-mono">{{ messageTarget?.transactionId || currentTraceName }}</span>.</p>
                 </div>
               </td>
             </tr>
@@ -128,7 +133,7 @@
                     <path stroke-linecap="round" stroke-linejoin="round" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                   <h3>No traces found</h3>
-                  <p>No events carry the trace name <span class="font-mono">{{ currentTraceName }}</span>.</p>
+                  <p>{{ messageTarget ? 'No events were recorded for this message.' : `No events carry the trace name ${currentTraceName}.` }}</p>
                 </div>
               </td>
             </tr>
@@ -337,8 +342,8 @@
 
       <template #footer>
         <router-link
-          v-if="selectedTrace"
-          :to="`/messages?partitionId=${selectedTrace.partition_id}&transactionId=${selectedTrace.transaction_id}`"
+          v-if="selectedTrace?.partition_id && selectedTrace?.transaction_id"
+          :to="{ path: '/messages', query: { ...contextQuery(route), queue: selectedTrace.queue_name || route.query.queue, partitionId: selectedTrace.partition_id, transactionId: selectedTrace.transaction_id } }"
           class="btn"
           @click="selectedTrace = null"
         >
@@ -350,7 +355,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { contextQuery, queueLocation, readRouteValue, textParam } from '@/composables/navigation'
+const route = useRoute(), router = useRouter()
 import { traces as tracesApi, describeApiError } from '@/api'
 import { useApi } from '@/composables/useApi'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
@@ -366,8 +374,13 @@ const searchTraceName = ref('')
 const currentTraceName = ref('')
 const selectedTrace = ref(null)
 const offset = ref(0)
-const limit = ref(50)
+const limit = ref(25)
 const totalTraces = ref(0)
+const messageTarget = computed(() => {
+  const partitionId = textParam(route.query.partitionId), transactionId = textParam(route.query.transactionId)
+  return partitionId && transactionId ? { partitionId, transactionId } : null
+})
+const hasTraceTarget = computed(() => Boolean(messageTarget.value || currentTraceName.value))
 // Our own verdict on an unusable page, kept apart from the transport error.
 const pageError = ref(null)
 
@@ -375,7 +388,9 @@ const pageError = ref(null)
 // belongs to a cluster we have since left. The panel object is kept whole so
 // the card headers can stamp their freshness from it.
 const tracePanel = useApi(
-  (name, params, config) => tracesApi.getByName(name, params, config),
+  (name, params, config) => messageTarget.value
+    ? tracesApi.getForMessage(messageTarget.value.partitionId, messageTarget.value.transactionId, params, config)
+    : tracesApi.getByName(name, params, config),
   { immediate: false },
 )
 const {
@@ -452,20 +467,11 @@ async function fetchTraces() {
 // Search traces by name
 async function searchTraces() {
   if (!searchTraceName.value.trim()) return
-
-  offset.value = 0
-  currentTraceName.value = searchTraceName.value.trim()
-  totalTraces.value = 0
-  // A new name is a first load, not a refresh: drop the previous result so the
-  // table skeletons rather than showing the old name's rows under the new one.
-  traceData.value = null
-  await fetchTraces()
+  await router.push({ path: '/traces', query: { ...contextQuery(route), trace: searchTraceName.value.trim() } })
 }
 
-// Load page of traces
 async function loadPage() {
-  if (!currentTraceName.value) return
-  await fetchTraces()
+  if (hasTraceTarget.value) await fetchTraces()
 }
 
 async function loadExampleTraceNames() {
@@ -483,27 +489,24 @@ async function loadExampleTraceNames() {
 }
 
 function previousPage() {
-  if (offset.value > 0) {
-    offset.value = Math.max(0, offset.value - limit.value)
-    loadPage()
-  }
+  if (offset.value > 0) router.replace({ query: { ...route.query, offset: Math.max(0, offset.value - limit.value) || undefined } })
 }
-
 function nextPage() {
-  if (shownTo.value >= totalTraces.value) return
-  offset.value += traces.value.length || limit.value
-  loadPage()
+  if (shownTo.value < totalTraces.value) router.replace({ query: { ...route.query, offset: offset.value + traces.value.length } })
+}
+function clearSearch() {
+  router.replace({ query: { ...contextQuery(route) } })
 }
 
-function clearSearch() {
-  searchTraceName.value = ''
-  currentTraceName.value = ''
-  traceData.value = null
-  totalTraces.value = 0
-  offset.value = 0
-  pageError.value = null
-  apiError.value = null
-}
+watch(() => [route.query.trace, route.query.partitionId, route.query.transactionId, route.query.offset], () => {
+  currentTraceName.value = textParam(route.query.trace)
+  searchTraceName.value = currentTraceName.value
+  tracePanel.abort()
+  loading.value = false; apiError.value = null
+  offset.value = readRouteValue(route.query.offset, 0)
+  selectedTrace.value = null; traceData.value = null; totalTraces.value = 0; pageError.value = null
+  if (hasTraceTarget.value) fetchTraces()
+}, { immediate: true })
 
 function viewTrace(trace) {
   selectedTrace.value = trace
@@ -536,7 +539,7 @@ function formatTraceData(data) {
 
 // Refresh function — only refreshes when there's an active search
 const refreshCurrentView = async () => {
-  if (currentTraceName.value) {
+  if (hasTraceTarget.value) {
     await loadPage()
   }
 }

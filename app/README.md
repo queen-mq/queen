@@ -49,8 +49,57 @@ and persist on this device; choosing System clears that override.
 There is **no pop inspector**, and there will not be one: a pop from a console takes a lease,
 steals from a real consumer and burns a retry attempt with nobody to ack it.
 
-The sidebar groups the views the way the router does: Overview, Routing, **State** (KV and
-Timers, the two surfaces that read stored state belonging to no queue), Observability, Cell.
+The sidebar groups the views by activity: Overview; **Messaging** (Queues, Ephemeral,
+Messages, Dead letter, Timers); **Workers** (Consumer groups, Supervisors); **Analysis**
+(Performance, Workload, Traces); **State** (KV, Locks); **Access** (Members, API keys);
+and **Cell** (System, Users). Performance has Trends and Operations tabs.
+
+## Navigation paths
+
+The sidebar opens each section's general view. Opening a queue starts a contextual
+journey: the queue stays visible above the page, and its tabs switch between views
+of that same queue. The return link leads to the original list or analysis, with its
+filters intact. A direct queue URL returns to Queues.
+
+```mermaid
+flowchart TD
+  overview[Overview] --> queues[Queues and filtered lists]
+  search[Global search] --> queue[Queue overview]
+  search --> consumer[Exact consumer group and queue]
+  queues --> queue
+  overview --> consumer
+  queue <-->|Queue tabs| messages[Messages]
+  queue <-->|Queue tabs| failed[Failed messages]
+  queue <-->|Queue tabs| timers[Scheduled messages]
+  queue <-->|Queue tabs| consumer
+  queue <-->|Queue tabs| supervisors[Supervisors]
+  queue <-->|Queue tabs| trends[Performance: Trends]
+  trends <-->|Same queue and period| operations[Performance: Operations]
+  operations -->|Inspect queue| queue
+  workload[Workload] -->|Selected queue and period| queue
+  workload -->|Selected queue| consumer
+  consumer -->|Queue's workers| supervisors
+  supervisors -->|Reported queue| queue
+  messages --> message[Message detail]
+  message <-->|Partition and transaction IDs| traces[Message trace events]
+  named[Trace-name search] --> traces
+  failed -->|Replay destination| messages
+  queue -->|Push result| messages
+  locks[Locks] -->|queen-locks namespace| kv[KV]
+```
+
+Ephemeral queues, access management and cell administration remain separate sidebar
+destinations because they describe different resources or scopes. Trace-name searches
+can span multiple queues; queue investigations reach traces through an actual message.
+Operations labels its tenant/cell panels separately from the selected queue's charts.
+
+Links use `composables/navigation.js` for encoded identities, the investigation period
+and a dashboard-only `returnTo`. `useRouteState` restores list filters on initial load,
+same-page navigation and browser Back/Forward. Page-local filters such as status and
+pagination stay local; queue tabs carry the queue, applied period and origin. Analysis
+pages use `useRouteRange` so custom inputs enter the URL only after Apply. KV prefixes
+and keyset cursors are deliberately not stored in the URL. Paged record lists start at
+25 items; the Queues count distinguishes matching queues from the loaded total.
 
 ## Tech Stack
 

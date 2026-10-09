@@ -111,6 +111,7 @@
           <label class="tool-field" for="kv-limit">
             <span class="tool-label">Show</span>
             <select id="kv-limit" v-model.number="limit" class="input">
+              <option :value="25">25</option>
               <option :value="50">50</option>
               <option :value="100">100</option>
               <option :value="250">250</option>
@@ -333,6 +334,7 @@
 </template>
 
 <script setup>
+import { useRouteState } from '@/composables/useRouteState'
 // KV browser — the tenant's key-value store, namespace by namespace
 // (PLAN_DASHBOARD_ACTIONS.md §2.5, PLAN_KV_TIMERS.md §5).
 //
@@ -376,7 +378,6 @@
 // version CAS in the form, an audit trail). The page says so rather than
 // leaving an operator to conclude the button is missing.
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
 
 import DataTable from '@/components/DataTable.vue'
 import PageHead from '@/components/PageHead.vue'
@@ -400,8 +401,6 @@ import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import { routeSupport } from '@/stores/routeSupport'
 
-const route = useRoute()
-const router = useRouter()
 const { epoch } = useIdentity()
 const { notifyError } = useToast()
 
@@ -448,11 +447,14 @@ const { kvRows, kvBytes, fetchQueues } = queuesStore
 // page size. Each of the three starts a NEW sequence — the cursors on the
 // pager's stack address the old one and would silently page through it.
 // ---------------------------------------------------------------------------
-const namespace = ref(typeof route.query.ns === 'string' ? route.query.ns : '')
+const namespace = ref('')
 const namespaceDraft = ref(namespace.value)
 const prefixDraft = ref('')
 const appliedPrefix = ref('')
-const limit = ref(100)
+const limit = ref(25)
+useRouteState({ ns: namespace, limit })
+namespaceDraft.value = namespace.value
+prefixDraft.value = appliedPrefix.value
 
 /** What the rows on screen answer. A change here invalidates them, which is
  *  why it is compared rather than assumed: without it, switching namespaces
@@ -670,13 +672,9 @@ const probeAgain = async () => {
 watch(namespace, (ns) => {
   resetQuery()
   namespaceDraft.value = ns
-  const current = typeof route.query.ns === 'string' ? route.query.ns : ''
-  // Replace, never push, so Back leaves the page instead of walking the
-  // picker's history.
-  if (current !== ns) router.replace({ query: { ...route.query, ns: ns || undefined } })
   reload()
 })
-watch(appliedPrefix, () => { resetQuery(); reload() })
+watch(appliedPrefix, value => { prefixDraft.value = value; resetQuery(); reload() })
 watch(limit, () => { resetQuery(); reload() })
 
 // ---------------------------------------------------------------------------

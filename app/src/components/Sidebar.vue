@@ -358,7 +358,7 @@ const isActive = (path) => {
 // is last and named for what it covers, because its pages answer for the
 // CELL and not for the acting tenant. The first group carries no label.
 // ---------------------------------------------------------------------------
-const GROUP_ORDER = ['Overview', 'Routing', 'Observability', 'Access', 'Cell']
+const GROUP_ORDER = ['Overview', 'Messaging', 'Workers', 'Analysis', 'State', 'Access', 'Cell']
 const OPERATOR_GROUP = 'Cell'
 
 const navGroups = computed(() => {
