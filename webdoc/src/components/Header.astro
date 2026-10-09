@@ -8,7 +8,7 @@ import { config } from "virtual:nimbus/config";
 import mark from "../assets/q.svg?raw";
 import wordmark from "../assets/queen.svg?raw";
 import { getSidebarSections } from "@cloudflare/nimbus-docs";
-import { SITE_NAV, CLOUD_LINK, activeNavHref } from "@/lib/site-nav";
+import { SITE_NAV, CLOUD_LINK, isOutsideDocs } from "@/lib/site-nav";
 
 interface Props {
   /** Astro collection id for the current page, forwarded from DocsLayout. */
@@ -37,9 +37,10 @@ const { collection, showSidebar = true, transparentTop = false } = Astro.props;
 const currentSlug = Astro.url.pathname.replace(/\/$/, "") || "/";
 const sections = await getSidebarSections(currentSlug, { collection });
 const showSections = sections.length >= 2;
-// With the full sidebar there are no sections to list, so the bar carries the
-// site's own links instead (src/lib/site-nav.ts).
-const activeHref = activeNavHref(Astro.url.pathname);
+// Inside the docs the sidebar is the navigation, so the bar stays empty there.
+// On the pages outside them, the homepage and the 404 page, it carries the
+// site's own links (src/lib/site-nav.ts).
+const showSiteNav = isOutsideDocs(Astro.url.pathname);
 const navLink =
   "px-2 py-1 rounded-md text-[0.8125rem] font-medium no-underline transition-colors";
 const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent/60";
@@ -95,14 +96,10 @@ const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent/60"
             </a>
           ))}
         </nav>
-      ) : (
+      ) : showSiteNav && (
         <nav aria-label="Main" class="hidden md:flex items-center gap-1 ml-4 pl-4 border-l border-border h-6">
           {SITE_NAV.map((link) => (
-            <a
-              href={link.href}
-              aria-current={link.href === activeHref ? "page" : undefined}
-              class:list={[navLink, link.href === activeHref ? "text-foreground bg-accent" : navIdle]}
-            >
+            <a href={link.href} class:list={[navLink, navIdle]}>
               {link.label}
             </a>
           ))}
@@ -169,8 +166,7 @@ const navIdle = "text-muted-foreground hover:text-foreground hover:bg-accent/60"
             {[...SITE_NAV, CLOUD_LINK].map((link) => (
               <a
                 href={link.href}
-                aria-current={link.href === activeHref ? "page" : undefined}
-                class="flex items-center justify-between rounded-lg px-3 py-2.5 text-[0.9375rem] font-medium text-foreground no-underline transition-colors hover:bg-accent aria-[current=page]:bg-accent"
+                class="flex items-center justify-between rounded-lg px-3 py-2.5 text-[0.9375rem] font-medium text-foreground no-underline transition-colors hover:bg-accent"
               >
                 {link.label}
                 {link.external && <Icon name="ph:arrow-up-right" class="h-4 w-4 text-muted-foreground" aria-hidden="true" />}
