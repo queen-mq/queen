@@ -34,9 +34,12 @@ sourceOfTruth:
 # directory by a rename before it deletes it, and sweeps retired directories at a start (the reclaim
 # paragraph says so); qlog/mod.rs lowers the first seq of an empty file to a log cut; snapshot.rs
 # leaves retired directories out of a snapshot. The refusals at boot are as listed.
-# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): qlog/index.rs reads
-# an index that fits a page into memory, qlog/set.rs gives the kernel a read-ahead hint for old
-# records; the limits paragraph says both.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age, a failed roll leaves the file whole):
+# qlog/index.rs reads an index that fits a page into memory, and one the kernel refuses to map;
+# qlog/set.rs gives the kernel a read-ahead hint for old records and seals an aged active file only
+# for retention or its size; qlog/mod.rs makes a roll change nothing in memory until the sealed
+# file's index is open. The paragraphs on rolling, reclaim and limits say so.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are
@@ -102,7 +105,9 @@ decompresses at one point.
 
 The active file rolls at `QUEEN_RAFT_SEGMENT_BYTES` (64 MiB). A sealed file is immutable and gets a
 `.qidx` index beside it, while the active file's index lives in RAM; a stale or missing `.qidx` is
-rebuilt by scanning its file. Both indexes carry append timestamps and offset ranges, so message
+rebuilt by scanning its file. A roll writes and opens that index before it changes anything in
+memory: one that fails (no file descriptor, a write error) leaves the file active, with every
+message in it still found, and the next roll seals it whole. Both indexes carry append timestamps and offset ranges, so message
 browsing can seek a historical window and select its page before reading payloads. Only appends
 containing a selected message need to be read and decompressed, once per append for that page.
 
@@ -226,7 +231,10 @@ Retention is decided once, on the leader, and executed on every node, like every
 Reclaim never touches the active file, nor a file holding a record above the last store checkpoint
 or, in a cluster, above the raft purge point. One pass examines at most 256 files, spends at most
 200 ms and rewrites at most one file. An active file that holds data older than
-`QUEEN_QLOG_SEAL_AGE_S` (600) is sealed so that reclaim can reach it. A queue's log with nothing left
+`QUEEN_QLOG_SEAL_AGE_S` (600) is sealed so that reclaim can reach it, when that is worth a file:
+reclaim found a dead message in it (it looks at 32 partitions of an aged active file a pass), or
+it holds an eighth of a full file. Age alone seals nothing, so a queue without retention gets a
+new file every 64 MiB and no other. A queue's log with nothing left
 in it is closed and its directory removed: renamed to `q<id>.dead` first and deleted after, so a
 stop in between leaves a retired directory, which the next start sweeps, and never a log with no
 file in it, which a start refuses.
@@ -240,11 +248,12 @@ Messages are not in that list: a push costs a row in RAM (about 200 bytes, measu
 for the queue's dedup window, 15 minutes at least, and nothing after it, so memory follows the
 push rate times that window and not the retention. Until the cluster is at version 6 the row
 stays as long as the message. A sealed log file's `.qidx` is memory-mapped, unless it fits one
-page (about 80 records): then it is read into memory, so that the many small files of quiet
-queues take no mapping. Linux allows a process 65,530 mappings by default (`vm.max_map_count`),
-which is about 4 TB of log per node at 64 MiB per file; `queen_raft_qlog_index_maps` shows the
-mapped indexes against that limit, the node warns in its log past 70% of it, and raising it, or
-`QUEEN_RAFT_SEGMENT_BYTES`, gives more.
+page (about 80 records): then it is read into memory and takes no mapping. Linux allows a
+process 65,530 mappings by default (`vm.max_map_count`), which is about 4 TB of log per node at
+64 MiB per file; `queen_raft_qlog_index_maps` shows the mapped indexes against that limit and
+the node warns in its log past 70% of it. Past the limit the kernel refuses a mapping and the
+index is held in memory instead (megabytes for a full file, counted in the same series), so
+raise the limit, or `QUEEN_RAFT_SEGMENT_BYTES`, before a node gets there.
 Traces are the exception: the trace file is page cache, a trace costs its row on disk and no RAM,
 and expiry (`QUEEN_RAFT_TRACE_RETENTION_S`, 7 days) deletes at most 512 of them per step.
 Replication protects against losing a minority of disks; losing a majority for good can lose

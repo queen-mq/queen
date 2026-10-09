@@ -49,8 +49,9 @@ sourceOfTruth:
 # exports queen_consume_cold_claims_total and queen_raft_qlog_dirx (in the generated metrics table).
 # Nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-09 (2.2.0): both /health examples name 2.2.0 and cluster version 6.
-# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): a row for the log
-# files' mapped indexes against the kernel's limit (queen_raft_qlog_index_maps, and the warning
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): a row for the log files' mapped indexes
+# against the kernel's limit (queen_raft_qlog_index_maps with its refused count, and the warning
 # batcher.rs logs past 70%).
 ---
 
@@ -198,7 +199,7 @@ the families in [metrics](/reference/metrics/). These are the series worth an al
 | Memory grows | The process's anonymous memory against the container limit: `container_memory_rss` in Kubernetes, or the dashboard's memory meter (`anonBytes` in `/api/v1/raft/members`). `queen_process_resident_memory_bytes` and the pod's working set also count the store's LMDB file and the queue logs, page cache the kernel drops before it kills anything |
 | The leader holds many consumer parts | `queen_consume_engine{kind="parts"}`, on the leader; idle ones leave after `QUEEN_CONSUME_IDLE_UNLOAD_S` (600 s), counted in `queen_consume_parts_total{kind="unloaded"}` |
 | Traces pile up | `queen_raft_traces_stored` and `queen_raft_traces_map_bytes{kind="used"}`, against `QUEEN_RAFT_TRACE_RETENTION_S` |
-| The log files' indexes near the kernel's map limit | `queen_raft_qlog_index_maps{kind="mapped"}` against `{kind="limit"}` (`vm.max_map_count`); the node warns in its log past 70%, and at the limit it cannot seal its next file |
+| The log files' indexes near the kernel's map limit | `queen_raft_qlog_index_maps{kind="mapped"}` against `{kind="limit"}` (`vm.max_map_count`); the node warns in its log past 70%. Past the limit an index is held in memory instead: `{kind="refused"}` counts them, and the node's memory grows by megabytes for each full file |
 | Ephemeral memory nears its ceiling (`503` above it) | `queen_ephemeral_bytes` against `QUEEN_EPHEMERAL_MAX_BYTES` (256 MiB) |
 | Ephemeral messages are dropped | `rate(queen_ephemeral_dropped_total[5m])` by `cause`: `bounds`, `ttl` or `retry` |
 | An ephemeral hand-over failed | `increase(queen_ephemeral_wipes_total[15m]) > 0` |

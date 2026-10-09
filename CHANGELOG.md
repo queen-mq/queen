@@ -55,14 +55,37 @@ dedup window), and after that while the message is among the last 65,536 its gro
 that partition; an older one is answered as not found. On a queue without retention, 2.1.0
 recognised it for as long as the queue existed.
 
-**Server: small log files take no memory map.** Every sealed log file kept its index
-memory-mapped, and the kernel allows a process 65,530 maps unless `vm.max_map_count` is raised. A
-quiet queue's log is sealed ten minutes after its oldest message for as long as the queue gets
-one now and then, so a node with many quiet queues holds far more small files than it may hold
-maps, and at the limit it could not seal its next file. An index that fits one page (about 80
-records) is now read into memory instead of mapped. For the files that are mapped there is a
-series, `queen_raft_qlog_index_maps` (mapped, and the limit), and a warning in the log past 70%
-of the limit.
+**Server: a quiet queue no longer makes a log file every ten minutes.** A log file is sealed when
+it is full (64 MiB), and a quiet one by age, so that retention can free what expired in it: every
+`QUEEN_QLOG_SEAL_AGE_S` (600 s) the file of any queue that had a message in it was sealed, whether
+or not retention had anything to free. A queue that got a message now and then made 144 files a
+day, each with its index, and a queue without retention kept them all. An aged file is now sealed
+only when that is worth a file: retention found a message in it that has expired or whose queue
+is gone, or it holds an eighth of a full file. A queue without retention gets a new file every
+64 MiB and no other.
+
+**Server: the kernel's limit on memory maps cannot stop a node.** Every sealed log file kept its
+index memory-mapped, twice (the log's own map and retention's), and the kernel allows a process
+65,530 maps unless `vm.max_map_count` is raised: about 32,700 sealed files. Past that the next
+file could not be sealed (see the entry below for what that did), and with twice as many files
+no start succeeded, since a start maps every index. Reached by size, the first is 2 TB of log on
+a node; reached by quiet queues at 144 files a day each, it is 227 days of one queue, or ten days
+of 23. Three changes. An index that fits one page (about 80 records) is read into memory
+and takes no map. Retention judges a file from the log's own index, so a file has one map: 65,530
+of them is 4 TB of log at 64 MiB a file. And an index the kernel refuses to map is held in memory
+instead, with a warning, so the limit costs memory and never the node. New series
+`queen_raft_qlog_index_maps` (`mapped`, `limit`, `refused`), and a warning in the log past 70% of
+the limit. Every release since 2.0.0 has the limit; a node on one of them is as close to it as
+twice its `queen_raft_log_storage{kind="files"}`.
+
+**Server: a log file that could not be sealed keeps its messages.** Sealing a file writes its
+index and opens it. When that failed (the process out of memory maps or file descriptors, a write
+error) the file was left marked as sealed with no index in memory: its messages, and those
+written to it afterwards, could not be found until a restart. The next attempt then wrote the
+index again from what memory still held, a part of the file or nothing, and a restart trusted
+that index, so those messages stayed on disk and out of reach. A seal now changes nothing until
+the index is written and open: a failed one leaves the file as it was, and the next one seals it
+whole. Every release since 2.0.0 has this.
 
 **Server: an entry written after a log cut can be read.** A log file is created for a sequence
 number: by a roll, for the group about to be written, and by the idle pass, which seals a quiet

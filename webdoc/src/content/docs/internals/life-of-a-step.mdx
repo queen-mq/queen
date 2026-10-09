@@ -37,10 +37,12 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-09 (two housekeeping fixes): qlog/mod.rs lowers the first seq of an
 # empty log file to a log cut, so the entry written next is found by its seq. Nothing this page
 # states changes.
-# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): facade/real.rs
-# exports queen_raft_qlog_index_maps, batcher.rs warns when the mapped indexes pass 70% of the
-# kernel's limit, and qlog/mod.rs gives the kernel a read-ahead hint for the records a walk over old
-# messages will read. The pipeline and its answers are as described.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps, batcher.rs warns when the mapped indexes pass 70% of the kernel's
+# limit, and qlog/mod.rs gives the kernel a read-ahead hint for the records a walk over old messages
+# will read, shares a sealed file's index with retention and seals an aged file only when that frees
+# something. The pipeline and its answers are as described.
 ---
 
 A worker's step in Queen is three calls at most: it pops a batch, does its work, and commits a

@@ -64,9 +64,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/pop.rs reads
 # messages whose rows are gone from the queue log; facade/real.rs exports two metric families.
 # Nothing this page states changes.
-# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): facade/real.rs
-# exports queen_raft_qlog_index_maps, the mapped log-file indexes and the kernel's limit. Nothing
-# this page states changes.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
+# Nothing this page states changes.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and

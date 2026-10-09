@@ -121,7 +121,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_raft_qlog_dirx` | gauge | The queue logs' cross-file directory: runs on disk, and sealed files no run covers yet (a lookup probes those one by one) |
 | `queen_raft_qlog_early_codec_hits_total` | counter | Append blobs whose compression the facade started before planning |
 | `queen_raft_qlog_early_codec_waiting` | gauge | Early compression jobs not yet taken by a proposal |
-| `queen_raft_qlog_index_maps` | gauge | Sealed log files whose index is memory-mapped (small indexes are held on the heap), and the maps the kernel allows this process (vm.max_map_count, 0 when unknown) |
+| `queen_raft_qlog_index_maps` | gauge | Sealed log files whose index is memory-mapped (small indexes are held in memory), the maps the kernel allows this process (vm.max_map_count, 0 when unknown), and the maps it has refused since the start (those indexes are held in memory too) |
 | `queen_raft_queue_wait_seconds` | summary | Command arrival to the cycle that drained it (PERF-G leg 1) |
 | `queen_raft_slow_commands_total` | counter | Commands over QUEEN_RAFT_SLOW_COMMAND_MS |
 | `queen_raft_traces_map_bytes` | gauge | Trace store (LMDB) map capacity and use |

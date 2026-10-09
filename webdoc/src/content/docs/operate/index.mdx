@@ -62,9 +62,10 @@ digest: >-
 # exports queen_consume_cold_claims_total and queen_raft_qlog_dirx. Nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-09 (2.2.0): server/Cargo.toml moves the broker to 2.2.0; the /health
 # example is a fresh 2.2.0 node's (cluster version 6, one entry applied).
-# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): facade/real.rs
-# exports queen_raft_qlog_index_maps, the mapped log-file indexes and the kernel's limit. Nothing
-# this page states changes.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
+# Nothing this page states changes.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its

@@ -42,9 +42,10 @@ verifiedBy:
 # name cluster version 6 and what it turns on.
 # sourceOfTruth re-read 2026-10-09 (2.2.0): the release that moves the cluster to version 6 has its
 # number, and the rejoin example shows 6.
-# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): facade/real.rs
-# exports queen_raft_qlog_index_maps, the mapped log-file indexes and the kernel's limit. Nothing
-# this page states changes.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
+# Nothing this page states changes.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They

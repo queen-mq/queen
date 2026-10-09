@@ -30,9 +30,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (a standby's leader changes): facade/real/phase2/link.rs gains a `#[cfg(test)]` door to the leader's intake, which is not in the binary: no metric family and no help text. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): facade/real.rs
 # exports queen_consume_cold_claims_total and queen_raft_qlog_dirx; both are in the generated table.
-# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): facade/real.rs
-# exports queen_raft_qlog_index_maps (the mapped log-file indexes and the kernel's limit); it is in
-# the generated table.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused);
+# it is in the generated table.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node

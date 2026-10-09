@@ -29,9 +29,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/frames.rs
 # recognises a repeated ack of a message without a row among the last 65,536 its group consumed; the
 # lease-less ack paragraph says so.
-# sourceOfTruth re-read 2026-10-10 (small log-file indexes take no memory map): facade/real.rs
-# exports queen_raft_qlog_index_maps, the mapped log-file indexes and the kernel's limit. Nothing
-# this page states changes.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
+# Nothing this page states changes.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step
