@@ -59,6 +59,8 @@ sourceOfTruth:
 # this page states changes.
 # sourceOfTruth re-read 2026-10-08 (composer description): composer.json's description names the Laravel
 # queue driver and Horizon; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (PHP client 2.4.0): 2.4.0 adds locks, semaphores, the transaction guard and
+# the KV check to the client and pins supervisor 0.8.0, as 2.3.1 does. The Versions section says so.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and
@@ -327,8 +329,8 @@ class, monitored tags, long-wait alerts and the Prometheus endpoint. Read the
 ## Versions
 
 The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a separate binary
-whose version each client release pins. These pages describe PHP client 2.3.1, which pins
-supervisor 0.8.0, as 2.3.0 does. That supervisor is published for Linux (amd64 and arm64, static
+whose version each client release pins. These pages describe PHP client 2.4.0, which pins
+supervisor 0.8.0, as 2.3.0 and 2.3.1 do. That supervisor is published for Linux (amd64 and arm64, static
 musl builds) and macOS with a signed manifest.
 Everything not listed here works from 1.6.0 on.
 
@@ -342,6 +344,7 @@ Everything not listed here works from 1.6.0 on.
 | 2.2.0 | 0.7.0 | `prefetch` `'auto'` sizes each pop from the jobs' runtime; the safe, balanced and fast profiles |
 | 2.3.0 | 0.8.0 | a pool's own `prefork` ([prefork for some pools only](/guides/laravel/supervisors/#prefork-for-some-pools-only)); `queen:consume` sets and renews its lease, stops on `--idle-timeout`, and reports refused acks ([consume Queen messages](/guides/laravel/consume/)) |
 | 2.3.1 | 0.8.0 | `->supervision([...])` on a fluent `consume()->execute()` reports that consumer to the dashboard, off by default ([consumer status](/reference/supervisor-status/#optional-sdk-consumer-supervision)) |
+| 2.4.0 | 0.8.0 | `$queen->lock()` and `$queen->semaphore()`, `->guard($lock)` on a transaction and `kv()->check()` ([locks](/concepts/locks/)); they need a 2.1 broker |
 
 ## Limits
 

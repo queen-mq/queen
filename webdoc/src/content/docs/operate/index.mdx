@@ -54,6 +54,8 @@ digest: >-
 # cached layers; the image, its port, its data directory and the queenctl it carries are unchanged.
 # sourceOfTruth re-read 2026-10-09 (8c6239d2): Dockerfile changes compilation cache layers;
 # the runtime stage, embedded dashboard, queenctl, paths and startup commands are unchanged.
+# sourceOfTruth re-read 2026-10-09 (2.1.0): server/Cargo.toml moves the broker to 2.1.0, which the /health
+# example now shows.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its
@@ -106,7 +108,7 @@ curl -s localhost:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.0.4","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5}}
+{"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5}}
 ```
 
 The dashboard is at `http://localhost:6632/`, and the image carries the CLI, so

@@ -541,7 +541,7 @@ with every option in the [PHP client reference](REFERENCE.md).
 
 A lock is a lease: one holder at a time, for a lifetime the holder renews, with a
 token that fences a holder that outlived it. `$queen->semaphore($name, $n, $opts)`
-is the same with `$n` permits.
+is the same with `$n` permits. Locks are in 2.4.0 and need a 2.1 broker.
 
 ```php
 $lock = $queen->lock('daily-report', ['ttlSeconds' => 30]);

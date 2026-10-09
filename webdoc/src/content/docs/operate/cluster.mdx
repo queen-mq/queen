@@ -328,7 +328,7 @@ exists from 2.0.0-beta.2 on; the move to beta.1 was a stop-all upgrade.
 
 2.0.1 is such a release: once every node runs it, the cluster moves from version 3 to 4 and
 traces start going to their own file on disk. From then on 2.0.0 and 2.0.1-beta refuse to start
-on that data, so going back means an empty data directory. The release that follows 2.0.4 is the
+on that data, so going back means an empty data directory. 2.1.0 is the
 next one: it moves the cluster from 4 to 5, which turns on the KV `check` operation that
 [locks](/concepts/locks/) are guarded with, and from then on 2.0.4 and older refuse to start on
 that data. To keep the way back open while a new release bakes, set

@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 2.1.0
 
 **Server: a standby cluster.** A second cluster can now replay the first one's log and take over
 when the first is lost. The standby's leader reads the source's committed entries over the raft
@@ -60,7 +60,8 @@ commit and reads the token when the commit is sent. The JavaScript, Python, Go a
 renew in the background every third of the lifetime and signal a lost lock. The PHP and C++
 handles have no background renewal: `keepAlive()` (`keep_alive()` in C++) renews at a checkpoint
 in the work loop. A guarded commit that lost only to its own handle's renewal is sent again with
-the new token. `kv.check` is on the KV client and the transaction's KV builder of each SDK.
+the new token. `kv.check` is on the KV client and the transaction's KV builder of each SDK. In the
+JavaScript, Python, Go, Rust and C++ clients 2.1.0 and the PHP client 2.4.0.
 
 **Dashboard: a Locks page.** Every held lock and semaphore permit with its holder, since when it
 is held, its last renewal and when it expires. It reads the permits as KV rows, so a viewer can
