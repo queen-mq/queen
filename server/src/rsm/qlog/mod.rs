@@ -3623,6 +3623,15 @@ impl ReadStep {
     }
 }
 
+impl WalkStep {
+    /// Have the kernel start reading this step's whole record
+    /// ([`fadvise_willneed`]): its ids for the walk, its payload for the pop
+    /// that renders it next.
+    pub(crate) fn will_need(&self) {
+        fadvise_willneed(&self.file, self.rec.offset, u64::from(self.rec.len));
+    }
+}
+
 /// The hash block of a planned walk step, read with no lock held.
 pub(crate) fn read_walk_hashes(
     dir: &Path,
@@ -4432,6 +4441,31 @@ pub fn drop_behind_bytes() -> u64 {
         (env_usize("QUEEN_QLOG_DROP_BEHIND_MB").unwrap_or(DROP_BEHIND_DEFAULT_MB) as u64)
             .saturating_mul(1 << 20)
     })
+}
+
+/// Ask the kernel to start reading `len` bytes of `f` at `from` into the page
+/// cache (`POSIX_FADV_WILLNEED`). It returns at once: the reads it starts
+/// overlap, and a `pread` of those bytes then finds them or waits for them. A
+/// hint only, so a failure is ignored. Linux; a no-op elsewhere.
+pub(crate) fn fadvise_willneed(f: &File, from: u64, len: u64) {
+    if len == 0 {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: a plain syscall on an fd `f` keeps open for the call.
+        let _ = unsafe {
+            libc::posix_fadvise(
+                f.as_raw_fd(),
+                from as libc::off_t,
+                len as libc::off_t,
+                libc::POSIX_FADV_WILLNEED,
+            )
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (f, from);
 }
 
 /// Ask the kernel to drop `[from, to)` of `f` from the page cache

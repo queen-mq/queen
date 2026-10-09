@@ -303,6 +303,48 @@ fn qidx_encode_open_probe() {
     assert!(matches!(v2.probe(1, 50), Probe::Before));
 }
 
+/// A small index is read into the heap and a large one mapped (the kernel
+/// caps a process's maps, and a node with many quiet queues holds far more
+/// small sealed files than that): both answer every probe alike.
+#[test]
+fn a_small_index_is_read_and_a_large_one_mapped_and_both_answer_alike() {
+    use super::index::{self, Probe, SMALL_INDEX};
+    let td = TmpDir::new("qidx-small");
+    for n in [1u64, 40, 84, 85, 86, 400, 3_000] {
+        // Three partitions, appends of two messages, a hole every seventh.
+        let mut records = Vec::new();
+        for i in 0..n {
+            let (pid, k) = (1 + i % 3, i / 3);
+            if k % 7 == 6 {
+                continue;
+            }
+            records.push(rec(pid, k * 2, 2, 1_000 + i));
+        }
+        index::sort_records(&mut records);
+        let bytes = index::encode(5, 1 << 20, &records);
+        let path = td.path().join(format!("n{n}.qidx"));
+        std::fs::write(&path, &bytes).unwrap();
+        let v = index::View::open(&path, Some(1 << 20)).expect("open");
+        assert_eq!(
+            v.is_mapped(),
+            bytes.len() > SMALL_INDEX,
+            "{n} records, {} bytes",
+            bytes.len()
+        );
+        assert_eq!(v.len(), records.len());
+        assert_eq!(v.records().collect::<Vec<_>>(), records);
+        for r in &records {
+            for off in [r.base_offset, r.base_offset + 1] {
+                match v.probe(r.pid, off) {
+                    Probe::Hit(hit) => assert_eq!(hit, *r),
+                    other => panic!("pid {} offset {off}: {other:?}", r.pid),
+                }
+            }
+        }
+        assert!(matches!(v.probe(9, 0), Probe::Missing));
+    }
+}
+
 #[test]
 fn timestamp_predecessors_match_a_scan_in_active_and_sealed_indexes() {
     use super::index::{self, ActiveIndex};

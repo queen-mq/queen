@@ -229,15 +229,99 @@ pub enum Probe {
     Missing,
 }
 
-/// A `.qidx` mapped into memory and binary-searched in place.
+/// A `.qidx` held in memory and binary-searched in place: mapped, or, when it
+/// is small, read whole ([`SMALL_INDEX`]).
 ///
-/// The map is read-only and the file is immutable, so a view may be shared by
-/// any number of readers without a lock. Opening verifies both checksums.
+/// The bytes are read-only and the file is immutable, so a view may be shared
+/// by any number of readers without a lock. Opening verifies both checksums.
 pub struct View {
-    map: Mmap,
+    map: Bytes,
     file_id: u64,
     count: usize,
     file_bytes: u64,
+}
+
+/// An index at most this long is read into the heap and not mapped. The
+/// kernel caps the memory maps of a process (`vm.max_map_count`, 65,530
+/// unless raised), every sealed file has an index, and a quiet queue's log
+/// is sealed every `QUEEN_QLOG_SEAL_AGE_S` for as long as it gets a message
+/// now and then: a node with many such queues holds far more small files than
+/// it may hold maps, and at the cap it could not seal its next file. A page's
+/// worth of index (about 80 records) costs less on the heap than a map does.
+pub const SMALL_INDEX: usize = 4096;
+
+/// Sealed-file indexes this process holds mapped ([`mapped_views`]).
+static MAPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many sealed-file indexes are memory-mapped right now, in every log.
+pub fn mapped_views() -> u64 {
+    MAPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `vm.max_map_count`: how many memory maps the kernel allows this process
+/// (Linux, read once). `None` elsewhere, or when it cannot be read.
+pub fn max_map_count() -> Option<u64> {
+    static V: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::fs::read_to_string("/proc/sys/vm/max_map_count")
+            .ok()?
+            .trim()
+            .parse::<u64>()
+            .ok()
+    })
+}
+
+/// An index's bytes.
+enum Bytes {
+    Mapped(Mmap),
+    Heap(Box<[u8]>),
+}
+
+impl std::ops::Deref for Bytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Bytes::Mapped(m) => m,
+            Bytes::Heap(b) => b,
+        }
+    }
+}
+
+impl Drop for Bytes {
+    fn drop(&mut self) {
+        if matches!(self, Bytes::Mapped(_)) {
+            MAPPED.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+impl Bytes {
+    /// The whole of `f` (`len` bytes): read when it is small, mapped otherwise.
+    fn of(f: &File, path: &Path, len: usize) -> io::Result<Bytes> {
+        if len <= SMALL_INDEX {
+            use std::os::unix::fs::FileExt;
+            let mut b = vec![0u8; len];
+            f.read_exact_at(&mut b, 0)?;
+            return Ok(Bytes::Heap(b.into_boxed_slice()));
+        }
+        // SAFETY: a sealed file's index is created by a temp-file rename and
+        // never modified; unlink keeps its pages alive for this mapping on unix.
+        match unsafe { Mmap::map(f) } {
+            Ok(m) => {
+                MAPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(Bytes::Mapped(m))
+            }
+            Err(e) => Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "cannot map the index {}: {e} (this process holds {} mapped indexes; the \
+                     kernel's limit is vm.max_map_count)",
+                    path.display(),
+                    mapped_views()
+                ),
+            )),
+        }
+    }
 }
 
 impl std::fmt::Debug for View {
@@ -264,9 +348,7 @@ impl View {
             }
             .into());
         }
-        // SAFETY: a sealed file's index is created by a temp-file rename and
-        // never modified; unlink keeps its pages alive for this mapping on unix.
-        let map = unsafe { Mmap::map(&f)? };
+        let map = Bytes::of(&f, path, len)?;
         let head = &map[..HEADER_LEN];
         if head[..8] != MAGIC {
             return Err(IndexError::Magic.into());
@@ -305,6 +387,12 @@ impl View {
             count,
             file_bytes,
         })
+    }
+
+    /// Whether the index is memory-mapped (a small one is on the heap).
+    #[cfg(test)]
+    pub fn is_mapped(&self) -> bool {
+        matches!(self.map, Bytes::Mapped(_))
     }
 
     /// Refuse a view whose header names another file id.

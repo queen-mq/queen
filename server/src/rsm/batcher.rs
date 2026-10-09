@@ -324,6 +324,39 @@ fn qlog_reclaim_from_env() -> bool {
     })
 }
 
+/// Say so, at most every ten minutes, while the sealed-file indexes this
+/// process maps are past 70% of what the kernel allows it
+/// (`vm.max_map_count`): at the cap the next large file cannot be sealed and
+/// the node stops. Small indexes are not mapped
+/// ([`crate::rsm::qlog::index::SMALL_INDEX`]), so this is about a node that
+/// retains a great deal: about 4 TB of log at 64 MiB a file and 65,530 maps.
+fn warn_near_map_limit() {
+    use crate::rsm::qlog::index::{mapped_views, max_map_count};
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let Some(limit) = max_map_count() else {
+        return;
+    };
+    let mapped = mapped_views();
+    if mapped.saturating_mul(10) < limit.saturating_mul(7) {
+        return;
+    }
+    let mut last = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.is_some_and(|at| at.elapsed() < Duration::from_secs(600)) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    tracing::warn!(
+        target: "rsm",
+        mapped,
+        limit,
+        "rsm qlog: the sealed log files' indexes use most of the memory maps the kernel allows \
+         this process (vm.max_map_count); raise it, or QUEEN_RAFT_SEGMENT_BYTES, before a node \
+         cannot seal its next file",
+    );
+}
+
 /// `QUEEN_QLOG_DIRX` (default on): whether the node keeps the cross-file
 /// directory of its queue logs (`qlog/dirx.rs`). Off: no run is built, and a
 /// lookup probes the sealed files one by one, newest first (runs already on
@@ -2532,6 +2565,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     "rsm qlog retention will retry"
                 ),
             }
+            warn_near_map_limit();
             // The cross-file directory of each log (`qlog/dirx.rs`): runs for
             // the files sealed since the last pass, merged as they pile up.
             if qlog_dirx_from_env() {

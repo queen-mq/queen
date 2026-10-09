@@ -2039,6 +2039,10 @@ fn sweep_retired_dirs(root: &std::path::Path) {
 /// queue's lock ([`QLogReader::walk_frames`]).
 const WALK_CHUNK: usize = 128;
 
+/// A read of a few hundred bytes that took this long waited for the disk: the
+/// page cache answers in a few microseconds.
+const COLD_READ: std::time::Duration = std::time::Duration::from_micros(50);
+
 impl QLogReader {
     /// Pause retention (no file is unlinked or rewritten) until the guard is
     /// dropped: a snapshot links every file and needs them to stay put. A
@@ -2602,6 +2606,15 @@ impl QLogReader {
         let mut cur = from_offset;
         let mut hint: Option<u64> = None;
         let mut scratch: Vec<u8> = Vec::new();
+        // Old messages are in files the page cache no longer holds (a node
+        // drops written pages behind its tail). Read one by one, every record
+        // waits for the disk in turn, and twice: here for its ids, then in
+        // the pop's render for its payload. So once a read has waited
+        // ([`COLD_READ`]), the kernel is asked for every record of a chunk,
+        // whole, before the chunk is read: the disk reads overlap, and the
+        // render finds its payloads in memory. A read that did not wait
+        // turns it off again.
+        let mut cold = false;
         loop {
             let steps = l.read().expect("qlog poisoned").walk_plan(
                 pid,
@@ -2611,8 +2624,23 @@ impl QLogReader {
                 WALK_CHUNK,
             )?;
             let planned = steps.len();
-            for step in &steps {
+            let advised = cold;
+            if advised {
+                for step in &steps {
+                    step.will_need();
+                }
+            }
+            for (i, step) in steps.iter().enumerate() {
+                let began = std::time::Instant::now();
                 let hashes = super::read_walk_hashes(&dir, step, &mut scratch)?;
+                if i == 0 {
+                    cold = began.elapsed() >= COLD_READ;
+                    if cold && !advised {
+                        for step in &steps {
+                            step.will_need();
+                        }
+                    }
+                }
                 let r = &step.rec;
                 cur = r.end;
                 if !cb(r.base_offset, r.end - 1, r.created_at_us, Some(hashes)) {

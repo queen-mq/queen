@@ -5304,6 +5304,12 @@ impl Rsm for RaftFacade {
             "queen_consume_cold_claims_total {}\n",
             es.cold_claims_total
         ));
+        out.push_str("# HELP queen_raft_qlog_index_maps Sealed log files whose index is memory-mapped (small indexes are held on the heap), and the maps the kernel allows this process (vm.max_map_count, 0 when unknown)\n# TYPE queen_raft_qlog_index_maps gauge\n");
+        out.push_str(&format!(
+            "queen_raft_qlog_index_maps{{kind=\"mapped\"}} {}\nqueen_raft_qlog_index_maps{{kind=\"limit\"}} {}\n",
+            crate::rsm::qlog::index::mapped_views(),
+            crate::rsm::qlog::index::max_map_count().unwrap_or(0)
+        ));
         if let Some(q) = self.qlog_reader.as_ref() {
             let (runs, uncovered) = q.dirx_totals();
             out.push_str("# HELP queen_raft_qlog_dirx The queue logs' cross-file directory: runs on disk, and sealed files no run covers yet (a lookup probes those one by one)\n# TYPE queen_raft_qlog_dirx gauge\n");
