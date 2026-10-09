@@ -229,6 +229,7 @@ refuses a timer more than 90 days out (`QUEEN_TIMERS_MAX_HORIZON_S`), but as of 
 scheduled inside a transaction is not checked against that horizon, so keep your own delays
 sensible.
 
-The transaction, the queue and timer firing are all covered by Jepsen: the P26 campaign on
-2.0.0-beta.3 ran them under kills, partitions, clock faults and power loss, 65 tests, all valid
+The transaction, the queue and timer firing are all covered by Jepsen: the full campaign on the
+code of 2.1.0 ran them under kills, partitions, clock faults and power loss, 153 tests, 152 valid
+and the other valid when run again
 ([guarantees](/concepts/guarantees/), [Jepsen](/benchmarks/jepsen/)).

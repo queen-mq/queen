@@ -246,9 +246,9 @@ export const proof: { figure: string; unit: string; body: string; href: string }
     href: "/benchmarks/transactions/",
   },
   {
-    figure: "65 of 65",
-    unit: "Jepsen tests valid",
-    body: "On 2.0.0-beta.3, five nodes under kill -9, pauses, network partitions, clock jumps and power loss: no acknowledged message lost, no lease held twice. Testing, not proof.",
+    figure: "153",
+    unit: "Jepsen tests on the code of 2.1.0",
+    body: "Five nodes under kill -9, pauses, network partitions, clock jumps and power loss: 152 valid, and the other valid when run again with the test nodes' clocks set. No acknowledged message lost, no lease held twice. Testing, not proof.",
     href: "/benchmarks/jepsen/",
   },
 ];
