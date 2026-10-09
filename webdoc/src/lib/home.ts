@@ -211,8 +211,8 @@ export const dashboardSection = {
   image: "dashboard-overview",
   alt:
     "The dashboard's overview of a broker under load: messages pushed and consumed per second, " +
-    "queues, partitions and consumer groups, the backlog and its trend, and per-queue rows with " +
-    "throughput and lag.",
+    "queues, partitions and consumer groups, the backlog and its trend, the partitions drawn as a " +
+    "sunflower, and tiles for throughput, lag and errors.",
 };
 
 export const proofSection = {
