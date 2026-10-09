@@ -1480,9 +1480,97 @@ fn idle_pass_seals_quiet_logs_and_removes_empty_ones() {
         "the empty queue log is removed"
     );
     assert!(!reader.log_ids().contains(&log));
+    assert_eq!(retired_dirs(&root), 0, "and nothing of it is left behind");
     // A later write re-creates it.
     write_one(&mut set, log, 9, 10, 3, now);
     assert!(root.join(format!("q{log}")).is_dir());
+}
+
+/// How many retired log directories (`q<id>.dead...`) `root` holds.
+fn retired_dirs(root: &std::path::Path) -> usize {
+    std::fs::read_dir(root)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".dead"))
+        .count()
+}
+
+/// An empty log's directory leaves its name in one step, so a stop between
+/// that and the deletion leaves nothing a start can take for a log that lost
+/// its records. (Jepsen, rows matrix, power loss: the deletion in place
+/// stopped half-way on the test's filesystem, the directory stayed with no
+/// file in it, and every node refused to start: "it ends at seq 0, below seq
+/// 5, which this node fsync'd and applied".)
+#[test]
+fn a_stop_in_the_middle_of_removing_an_empty_log_leaves_a_node_that_starts() {
+    use super::set::QLogSet;
+    let td = TmpDir::new("idle-retire");
+    let root = td.path().join("qlog");
+    let q = QLogSet::queue_id_of("t", "quiet");
+    let other = QLogSet::queue_id_of("t", "busy");
+    let (log, keep) = {
+        let mut set = QLogSet::new(root.clone(), QLogOptions::testing(1 << 20));
+        set.reopen_all().unwrap();
+        set.set_recovery_floor(u64::MAX);
+        let log = set.log_id_for(q, 10);
+        let keep = set.log_id_for(other, 11);
+        for i in 0..3u64 {
+            write_one(&mut set, log, i + 1, 10, i, 1_000);
+        }
+        write_one(&mut set, keep, 4, 11, 0, 1_000);
+        set.sync().unwrap();
+        let now = 1_000 + 3_600_000_000;
+        set.idle_pass(now, std::time::Duration::from_secs(600))
+            .unwrap();
+        let reader = set.reader();
+        let starts = std::collections::HashMap::new();
+        while reader.reclaim_below_txns(log, &starts, 1).unwrap().more {}
+        (log, keep)
+    };
+    // The process stops right after the rename: the directory has its
+    // retired name and still holds its (empty) active file.
+    let dir = root.join(format!("q{log}"));
+    assert!(dir.is_dir(), "the empty log is still there");
+    std::fs::rename(&dir, root.join(format!("q{log}.dead"))).unwrap();
+
+    // The store recorded seq 3 for that log at its last durable point.
+    let recorded =
+        |id: u64| -> std::io::Result<Option<u64>> { Ok(if id == log { Some(3) } else { None }) };
+    let mut set = QLogSet::new(root.clone(), QLogOptions::testing(1 << 20));
+    set.reopen_all().unwrap();
+    set.check_tails(recorded)
+        .expect("a retired log is not a truncated one");
+    assert_eq!(retired_dirs(&root), 0, "the start swept it");
+    let ids = set.reader().log_ids();
+    assert!(!ids.contains(&log) && ids.contains(&keep), "{ids:?}");
+
+    // The queue is written again, goes quiet again, and its log is retired
+    // while an older retired directory of it is still on disk.
+    set.set_recovery_floor(u64::MAX);
+    write_one(&mut set, log, 9, 10, 3, 2_000);
+    set.sync().unwrap();
+    std::fs::create_dir(root.join(format!("q{log}.dead"))).unwrap();
+    let now = 2_000 + 3_600_000_000;
+    set.idle_pass(now, std::time::Duration::from_secs(600))
+        .unwrap();
+    let reader = set.reader();
+    let starts = std::collections::HashMap::new();
+    while reader.reclaim_below_txns(log, &starts, 1).unwrap().more {}
+    set.idle_pass(now, std::time::Duration::from_secs(600))
+        .unwrap();
+    assert!(!root.join(format!("q{log}")).exists());
+    assert!(!reader.log_ids().contains(&log));
+    drop(set);
+
+    // A directory emptied IN PLACE is not one of these: it is what a log
+    // that lost its files looks like, and the guard still refuses it.
+    std::fs::create_dir(root.join(format!("q{log}"))).unwrap();
+    let mut set = QLogSet::new(root.clone(), QLogOptions::testing(1 << 20));
+    set.reopen_all().unwrap();
+    let err = set
+        .check_tails(recorded)
+        .expect_err("an emptied log is refused");
+    assert!(err.to_string().contains("it ends at seq 0"), "{err}");
 }
 
 #[test]
@@ -2395,4 +2483,109 @@ fn a_run_never_answers_for_a_file_that_was_cut_back_and_written_again() {
     drop(q);
     let (q, _) = QLog::open(td.path(), 78, opts).unwrap();
     check(&q, &truth, "after a reopen");
+}
+
+/// A raft cut can fall below the first seq of an active file that holds
+/// nothing yet: the idle pass sealed the file before it and created this one
+/// for the writer's next seq, and the entries from the cut on were then
+/// dropped (a follower's conflicting tail after a leader change). The log's
+/// next entry carries a seq below the one the file was created for, and must
+/// still be found by its seq, before and after a reopen. (Jepsen, rows
+/// matrix, retention under kills: a node refused to start with "raft log
+/// entries 10215..10216 are not all in the queue logs".)
+#[test]
+fn an_entry_written_after_a_cut_below_an_empty_files_first_seq_is_found() {
+    use super::{EntryInput, WriteRecord};
+    for across in [false, true] {
+        let td = TmpDir::new("cut-first-seq");
+        let opts = QLogOptions::testing(1 << 20);
+        let (mut q, _) = QLog::open(td.path(), 31, opts).unwrap();
+        let entry = |q: &mut QLog, seq: u64| {
+            let e = entry_bytes(seq);
+            q.write_mixed(&[WriteRecord::Entry(EntryInput {
+                seq,
+                now_us: seq as i64,
+                copies: 1,
+                term: 4,
+                entry: &e,
+            })])
+            .unwrap();
+        };
+        let seqs = |q: &QLog| -> Vec<u64> {
+            q.entry_parts_between(7, 9)
+                .unwrap()
+                .iter()
+                .map(|p| p.seq())
+                .collect()
+        };
+        for seq in 1..=5 {
+            entry(&mut q, seq);
+        }
+        q.sync().unwrap();
+        // Quiet for long enough: the file is sealed, and the next one is
+        // created for seq 9 (the writer put 6, 7 and 8 in other logs).
+        assert!(q.seal_active(9).unwrap());
+        assert_eq!(q.file_count(), 2);
+        // The cluster's log is cut back to 7, and this log takes 7 and 8.
+        let dropped = if across {
+            q.truncate_seq_from_across(7).unwrap()
+        } else {
+            q.truncate_seq_from(7).unwrap()
+        };
+        assert_eq!(dropped, 0, "this log held nothing at or above the cut");
+        entry(&mut q, 7);
+        entry(&mut q, 8);
+        q.sync().unwrap();
+        assert_eq!(seqs(&q), [7, 8], "across={across}");
+        assert_eq!(q.durable_tail(), 8);
+        drop(q);
+        let (q, _) = QLog::open(td.path(), 31, opts).unwrap();
+        assert_eq!(seqs(&q), [7, 8], "after a reopen, across={across}");
+        assert_eq!(q.durable_tail(), 8);
+    }
+
+    // The cut can also empty a SEALED file whose first record was above it:
+    // that file becomes the active one again, with the seq it began with.
+    let td = TmpDir::new("cut-first-seq-sealed");
+    let opts = QLogOptions::testing(1 << 20);
+    let (mut q, _) = QLog::open(td.path(), 31, opts).unwrap();
+    let entry = |q: &mut QLog, seq: u64| {
+        let e = entry_bytes(seq);
+        q.write_mixed(&[WriteRecord::Entry(EntryInput {
+            seq,
+            now_us: seq as i64,
+            copies: 1,
+            term: 4,
+            entry: &e,
+        })])
+        .unwrap();
+    };
+    for seq in 1..=5 {
+        entry(&mut q, seq);
+    }
+    assert!(q.seal_active(9).unwrap());
+    entry(&mut q, 9);
+    entry(&mut q, 10);
+    q.sync().unwrap();
+    assert!(q.seal_active(11).unwrap());
+    assert_eq!(q.file_count(), 3);
+    assert!(q.truncate_seq_from_across(7).unwrap() > 0, "9 and 10 go");
+    assert_eq!(q.file_count(), 2, "the file created for 11 is gone");
+    entry(&mut q, 7);
+    entry(&mut q, 8);
+    entry(&mut q, 9);
+    q.sync().unwrap();
+    // Asked for exactly as a restart asks for them: one seq at a time, so a
+    // file that claims to begin above the seq is not read.
+    let seqs = |q: &QLog| -> Vec<u64> {
+        (6..12u64)
+            .flat_map(|seq| q.entry_parts_between(seq, seq + 1).unwrap())
+            .map(|p| p.seq())
+            .collect()
+    };
+    assert_eq!(seqs(&q), [7, 8, 9]);
+    drop(q);
+    let (q, _) = QLog::open(td.path(), 31, opts).unwrap();
+    assert_eq!(seqs(&q), [7, 8, 9], "after a reopen");
+    assert_eq!(q.durable_tail(), 9);
 }

@@ -324,6 +324,9 @@ pub struct QLogSet {
     idle_at: Option<std::time::Instant>,
     /// Where the next [`QLogSet::idle_pass`] resumes (a log id).
     idle_cursor: u64,
+    /// Directories of logs the idle pass retired ([`retire_dir`]) and could
+    /// not delete at once: tried again at each pass.
+    retired: Vec<PathBuf>,
     /// The fsync'd tail of every log a sync covered, for the applier to record
     /// ([`QLogSet::track_tails`]); `None` when nobody records them.
     tails: Option<Arc<QlogTails>>,
@@ -800,6 +803,7 @@ impl QLogSet {
             shards: Arc::new(AtomicU64::new(0)),
             idle_at: None,
             idle_cursor: 0,
+            retired: Vec::new(),
             tails: None,
         }
     }
@@ -1125,6 +1129,7 @@ impl QLogSet {
     pub fn reopen_all_guarded(&mut self, durable: u64) -> io::Result<u64> {
         self.load_lanes()?;
         self.load_shards()?;
+        sweep_retired_dirs(&self.root);
         let rd = match std::fs::read_dir(&self.root) {
             Ok(rd) => rd,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -1657,21 +1662,65 @@ impl QLogSet {
                     replace_total(&self.totals.files, g.file_count() as u64, 0);
                     replace_total(&self.totals.bytes, g.bytes(), 0);
                 }
-                match std::fs::remove_dir_all(&dir) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
+                // Closed before its files go (a reader that still holds the
+                // log keeps them open a moment longer, and loses nothing).
+                drop(log);
+                // The directory leaves its NAME in one step, and its content
+                // goes after that is durable. Deleting it in place can stop
+                // half-way (a crash; a filesystem that keeps a deleted file
+                // while it is open and then refuses the rmdir, as FUSE and
+                // NFS do), and what it leaves, `q<id>` with no file in it, is
+                // what a log that lost its records looks like: the next start
+                // refused it ("it ends at seq 0, below seq N"). A start now
+                // finds either the whole log or a retired directory to sweep.
+                match retire_dir(&self.root, &dir) {
+                    Ok(Some(dead)) => {
+                        self.retired.push(dead);
+                        removed += 1;
+                    }
+                    Ok(None) => removed += 1,
+                    Err(e) => {
+                        // Still a whole, empty log under its name: a later
+                        // write or the next start opens it as it is.
+                        tracing::warn!(
+                            target: "rsm",
+                            queue = id,
+                            error = %e,
+                            "qlog idle pass could not retire an empty log's directory",
+                        );
+                    }
                 }
-                removed += 1;
             }
         }
         if removed > 0 {
             std::fs::File::open(&self.root)?.sync_all()?;
         }
+        self.sweep_retired();
         if sealed + removed > 0 {
             tracing::debug!(target: "rsm", sealed, removed, "qlog idle pass");
         }
         Ok(())
+    }
+
+    /// Delete the directories the idle pass retired. One that cannot go yet
+    /// (a reader still has a file of it open, on a filesystem that keeps the
+    /// file in the directory until then) stays on the list for the next pass;
+    /// a restart sweeps whatever is left ([`sweep_retired_dirs`]).
+    fn sweep_retired(&mut self) {
+        self.retired
+            .retain(|dead| match std::fs::remove_dir_all(dead) {
+                Ok(()) => false,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    tracing::debug!(
+                        target: "rsm",
+                        dir = %dead.display(),
+                        error = %e,
+                        "qlog idle pass: a retired log directory is not gone yet",
+                    );
+                    true
+                }
+            });
     }
 
     /// The open log for a queue id, for the read-match / reopen tests. Test-only:
@@ -1924,6 +1973,65 @@ pub struct ReclaimPause(Arc<AtomicU64>);
 impl Drop for ReclaimPause {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// What a retired log directory's name ends with (`q<id>.dead`,
+/// `q<id>.dead.<n>`): never a log's own name, so a start does not open it.
+const RETIRED_MARK: &str = ".dead";
+
+/// Take an empty log's directory `dir` (`<root>/q<id>`) out of the way: one
+/// rename to a retired name in `root`. `None` when it is already gone. The
+/// caller makes the rename durable and deletes the content afterwards.
+fn retire_dir(root: &std::path::Path, dir: &std::path::Path) -> io::Result<Option<PathBuf>> {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return Err(io::Error::other("a queue log directory has no name"));
+    };
+    for n in 0..1_000u32 {
+        let dead = if n == 0 {
+            root.join(format!("{name}{RETIRED_MARK}"))
+        } else {
+            root.join(format!("{name}{RETIRED_MARK}.{n}"))
+        };
+        if dead.exists() {
+            // An earlier retirement of this queue's log that could not be
+            // deleted yet: this one gets its own name.
+            continue;
+        }
+        return match std::fs::rename(dir, &dead) {
+            Ok(()) => Ok(Some(dead)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        };
+    }
+    Err(io::Error::other(
+        "too many retired directories of one queue log",
+    ))
+}
+
+/// Remove every retired log directory under `root` (a start, before the logs
+/// are opened): what an idle pass renamed and did not get to delete.
+fn sweep_retired_dirs(root: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !(name.starts_with('q') && name.contains(RETIRED_MARK)) {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+            tracing::warn!(
+                target: "rsm",
+                dir = %entry.path().display(),
+                error = %e,
+                "rsm qlog: a retired log directory could not be removed",
+            );
+        }
     }
 }
 

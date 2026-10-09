@@ -2856,6 +2856,9 @@ impl QLog {
         let (mut fresh, _) = QLog::open(&root, self.queue_id, self.opts)?;
         fresh.set_recovery_floor(floor);
         *self = fresh;
+        // The file that was cut may hold nothing now and still carry the seq
+        // of the record it began with, above the cut.
+        self.lower_empty_first_seq(cut)?;
         tracing::warn!(
             target: "rsm",
             queue = self.queue_id,
@@ -2882,6 +2885,49 @@ impl QLog {
     /// first record at or above `cut`; every record after it must be at or above
     /// `cut` too (refused otherwise). Returns the bytes dropped.
     pub fn truncate_seq_from(&mut self, cut: u64) -> io::Result<u64> {
+        let dropped = self.cut_active_from(cut)?;
+        self.lower_empty_first_seq(cut)?;
+        Ok(dropped)
+    }
+
+    /// After a cut at `cut`: an active file that holds no record does not keep
+    /// a first seq above the cut. A file is created FOR a seq (a roll, for
+    /// the group about to be written; the idle pass, for the writer's next
+    /// seq: [`QLog::seal_active`]), and once the entries from `cut` on are
+    /// dropped, the next record this log takes may carry any seq from `cut`
+    /// up. Left as it was, the header says the file holds nothing below a seq
+    /// that its first record is below, and a search by seq skips the file
+    /// ([`QLog::entry_parts_between`]): the entry is on disk and cannot be
+    /// read, by this node when it restarts or for a follower that needs it.
+    /// Durable before a record reuses those seqs, as the cut is.
+    fn lower_empty_first_seq(&mut self, cut: u64) -> io::Result<()> {
+        let Some(last) = self.files.last().copied() else {
+            return Ok(());
+        };
+        if last.sealed || last.bytes > FILE_HEADER_LEN || last.first_seq <= cut {
+            return Ok(());
+        }
+        {
+            let f = OpenOptions::new()
+                .write(true)
+                .open(file_path(&self.dir, last.id))?;
+            f.write_all_at(&cut.to_le_bytes(), 16)?;
+            fsync_file(&f, self.opts.fsync)?;
+        }
+        self.files.last_mut().expect("active meta").first_seq = cut;
+        tracing::info!(
+            target: "rsm",
+            queue = self.queue_id,
+            file = last.id,
+            was = last.first_seq,
+            cut,
+            "rsm qlog: an empty file created for a later seq starts at the cut",
+        );
+        Ok(())
+    }
+
+    /// [`QLog::truncate_seq_from`]'s cut of the active file.
+    fn cut_active_from(&mut self, cut: u64) -> io::Result<u64> {
         if self.files.iter().all(|m| m.max_seq < cut) {
             return Ok(0);
         }
