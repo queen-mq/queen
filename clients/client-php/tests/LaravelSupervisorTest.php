@@ -344,27 +344,6 @@ class LaravelSupervisorTest extends TestCase
         ];
     }
 
-    /**
-     * The watcher parks on POST /api/v1/fetch with the connection's exported
-     * token, which read_bearer_token replaces with a read-only one: the
-     * broker refused it and the master polled for the whole run, in silence.
-     */
-    public function testEventDrivenRefusesAReadOnlyToken(): void
-    {
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('event_driven needs a token that may consume');
-
-        SupervisorConfiguration::resolve([
-            'url' => 'http://queen.test:6632',
-            'bearer_token' => 'workers',
-            'supervisor' => [
-                'event_driven' => true,
-                'read_bearer_token' => 'read-only',
-                'supervisors' => ['jobs' => ['queues' => 'default', 'balance' => 'simple', 'processes' => 1]],
-            ],
-        ], '/app');
-    }
-
     /** The string form was trimmed; an array of names was exported as given. */
     public function testQueueNamesGivenAsAnArrayAreTrimmedLikeTheStringForm(): void
     {

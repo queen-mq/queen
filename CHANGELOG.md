@@ -69,11 +69,6 @@ every failed job on redis, database or sync took the cache lock, waited up to
 since removed made them throw. A failure on another driver goes to Laravel's provider now, and such
 records are removed without resolving their connection.
 
-**Laravel: `event_driven` refuses `read_bearer_token`.** The watcher parks on
-`POST /api/v1/fetch` with the connection's exported token, which `read_bearer_token` made
-read-only: the broker refused it, and the master polled for the whole run after one stderr line.
-A supervisor configured with both now refuses to start and says why.
-
 **Laravel: `QUEEN_SUPERVISOR_REMOTE_STATUS=1` and `QUEEN_DASHBOARD_ENABLED=1` turn their features
 on,** as `=1` turns prefork, coordination and metrics on. Queue names given as an array are trimmed
 like the comma-separated form.

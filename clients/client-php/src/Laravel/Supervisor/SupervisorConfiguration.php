@@ -361,16 +361,6 @@ final class SupervisorConfiguration
             $maximumControlLoopSeconds += $coordinationBudget;
         }
         $eventDriven = self::boolean($raw['event_driven'] ?? false, 'event_driven');
-        if ($eventDriven && ($raw['read_bearer_token'] ?? null) !== null) {
-            // The watcher parks on POST /api/v1/fetch with the connection's
-            // exported token, and read_bearer_token replaces that token in
-            // every exported connection: the broker would refuse the fetch,
-            // and the master would fall back to polling for the whole run.
-            throw new InvalidArgumentException(
-                'Queen supervisor event_driven needs a token that may consume on every watched connection, '
-                . 'and read_bearer_token replaces it with a read-only one: set one of the two.',
-            );
-        }
         if ($eventDriven) {
             // The PHP engine parks on one fetch per watched connection within
             // a loop iteration, trying each endpoint: the wait plus one
