@@ -99,10 +99,12 @@ final class CompatParityCommand extends CompatScenarioCommand
         // Laravel docs, Queues > Job Middleware > Preventing Job Overlaps: each
         // release by WithoutOverlapping counts as an attempt. o1 holds the lock
         // for 15 s; o2 (tries 3) is released each second meanwhile, so its
-        // fourth pickup exceeds tries and fails before it ever runs.
+        // fourth pickup exceeds tries and fails before it ever runs. o2 goes to
+        // the pool's next queue: a pool balanced by backlog keeps a worker
+        // there, while the first queue's may be o1's alone.
         CompatOverlapJob::dispatch($this->run, 'o1', 'ok', 15_000, 1)->onConnection($this->connection)->onQueue($this->queue);
         $this->waitFor(fn (): bool => $this->count('o1', 'started') > 0);
-        CompatOverlapJob::dispatch($this->run, 'o2', 'ok', 0, 3)->onConnection($this->connection)->onQueue($this->queue);
+        CompatOverlapJob::dispatch($this->run, 'o2', 'ok', 0, 3)->onConnection($this->connection)->onQueue($this->nextQueue());
         $this->waitFor(fn (): bool => $this->count('o1', 'completed') > 0
             && ($this->count('o2', 'failed_hook') > 0 || $this->count('o2', 'completed') > 0));
         $this->settle(3);
@@ -144,6 +146,20 @@ final class CompatParityCommand extends CompatScenarioCommand
     }
 
     // -------------------------------------------------------------- helpers
+
+    /** The queue after this command's in its pool, or this one when the pool has no other. */
+    private function nextQueue(): string
+    {
+        $queues = (array) config('benchmark.queues');
+        foreach (config('benchmark.routed') ? (array) config('benchmark.routed_pools') : [] as $pool) {
+            if (in_array($this->queue, $pool['queues'], true)) {
+                $queues = $pool['queues'];
+            }
+        }
+        $at = array_search($this->queue, $queues, true);
+
+        return $at === false ? $this->queue : (string) ($queues[$at + 1] ?? $this->queue);
+    }
 
     private function scripted(string $job, string $script, int $tries, ?int $maxExceptions = null): void
     {
