@@ -2,7 +2,10 @@
 
 namespace Queen\Laravel\Commands;
 
+use Illuminate\Cache\CacheManager;
+use Illuminate\Cache\MemcachedStore;
 use Illuminate\Console\Command;
+use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Log\LogManager;
 use Illuminate\Queue\Console\WorkCommand;
@@ -224,11 +227,36 @@ class ForkServerCommand extends Command
         if ($this->laravel->resolved('mail.manager')) {
             $this->laravel['mail.manager']->forgetMailers();
         }
+        // The boot reads queue:restart's signal from the cache store, at
+        // least: a memcached socket shared by every worker mixes their
+        // restart-signal reads, unique and overlap locks and maxExceptions
+        // counters. The manager builds each store again when next used.
+        if ($this->laravel->resolved('cache') && ($cache = $this->laravel['cache']) instanceof CacheManager) {
+            self::forgetCacheStores($cache);
+            $this->laravel->forgetInstance('cache.store');
+        }
         if ($this->laravel->resolved('queue') && ($queue = $this->laravel['queue']) instanceof QueueManager) {
             return self::forgetQueueConnections($queue);
         }
 
         return [];
+    }
+
+    /**
+     * The manager forgets a store only by name, and does not say which ones
+     * it resolved. A memcached connection is closed as well: one opened with
+     * a persistent ID outlives its store.
+     */
+    private static function forgetCacheStores(CacheManager $cache): void
+    {
+        $stores = new \ReflectionProperty(CacheManager::class, 'stores');
+        foreach ($stores->getValue($cache) as $repository) {
+            $store = $repository instanceof Repository ? $repository->getStore() : null;
+            if ($store instanceof MemcachedStore) {
+                $store->getMemcached()->quit();
+            }
+        }
+        $stores->setValue($cache, []);
     }
 
     /**
