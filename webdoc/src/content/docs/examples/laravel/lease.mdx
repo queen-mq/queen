@@ -30,6 +30,9 @@ verifiedBy:
 # delivery that carries no Laravel job in the dead-letter queue at once, and a job timeout its lease
 # cannot cover throws UnsafeJobTimeoutException, the same message; this page's lease, expiry and
 # refusal are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
+# supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
+# Nothing this page states changes.
 ---
 
 Without lease renewal, a job that runs longer than `retry_after` goes to a second worker while the
