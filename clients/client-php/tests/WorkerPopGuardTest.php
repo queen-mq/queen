@@ -343,6 +343,46 @@ final class WorkerPopGuardTest extends TestCase
         $this->assertSame(1, $this->popFailures()['failures']);
     }
 
+    /**
+     * A worker of --queue=high,low pops both queues each loop. Any pop that
+     * worked, an empty one of high too, cleared the failure of low, so a
+     * queue whose every pop failed stayed hidden behind one that worked.
+     * Each queue keeps its own failure, and the file says since when the
+     * oldest one fails.
+     */
+    public function testAQueueWhosePopsFailIsNotHiddenByOneThatWorks(): void
+    {
+        $now = 1_000;
+        $this->app->instance(WorkerPopGuard::class, new WorkerPopGuard(
+            'batch',
+            'queen-batch',
+            new WorkerExitMarker($this->exitsDirectory),
+            function () use (&$now): int {
+                return $now;
+            },
+        ));
+        $this->broker->answer(fn () => str_contains($this->broker->lastPath, '/low') ? 503 : 204);
+        $queue = $this->app['queue']->connection('queen-batch');
+
+        foreach (range(0, 70, 10) as $elapsed) {
+            $now = 1_000 + $elapsed;
+            $this->assertNull($queue->pop('high'));
+            try {
+                $queue->pop('low');
+                $this->fail('the pop of low worked');
+            } catch (HttpException) {
+            }
+        }
+
+        $this->assertSame(1_000, $this->popFailures()['failing_since'], 'an empty pop of high hid low');
+        $this->assertSame(8, $this->popFailures()['failures']);
+
+        // Low works again: nothing fails any more.
+        $this->broker->answer(204);
+        $this->assertNull($queue->pop('low'));
+        $this->assertNull($this->popFailures());
+    }
+
     /** The pool's QueenQueue tells the guard when each pop begins. */
     public function testThePoolsQueueReportsWhenItsFailedPopBegan(): void
     {
@@ -730,6 +770,9 @@ final class BrokerScript
     /** @var list<RequestInterface> */
     public array $requests = [];
 
+    /** The path of the request being answered. */
+    public string $lastPath = '';
+
     /**
      * Answer the next $times requests so, with a status, a failure or a JSON
      * body; without $times, every one after the plan.
@@ -752,6 +795,7 @@ final class BrokerScript
     public function __invoke(RequestInterface $request, array $options): PromiseInterface
     {
         $this->requests[] = $request;
+        $this->lastPath = $request->getUri()->getPath();
         $answer = array_shift($this->plan) ?? $this->default;
         if ($answer instanceof \Closure) {
             $answer = $answer();

@@ -556,10 +556,10 @@ class QueenQueue extends BaseQueue implements QueueContract
         } catch (\Throwable $error) {
             // Laravel's worker reports it and pops again; the guard decides
             // whether the worker should leave or say it is not consuming.
-            $this->popGuard->popFailed($error);
+            $this->popGuard->popFailed($error, $this->getQueue($queue));
             throw $error;
         }
-        $this->popGuard->popped();
+        $this->popGuard->popped($this->getQueue($queue));
 
         return $job;
     }
