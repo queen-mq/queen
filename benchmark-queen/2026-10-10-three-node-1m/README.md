@@ -113,9 +113,10 @@ A step is carried when nothing is shed, nothing errs and the consumers keep up.
 | 1,600,000 | 1,497,648 / 1,497,965 | 3,251,700 messages | 1,524 / 3,277 | 1,819 / 3,506 | 12.3, 6.6 |
 
 2.2.0 carries 1,400,000 messages a second on these machines, and offered 1,600,000 it pushes and
-delivers about 1,500,000 and sheds the rest. The steps between were not run. The leader is what
-gives way: its raft thread is at a whole core at every rate, and the followers use about half of
-what it does. The loaders were at 30.5 of their 48 cores in the last step.
+delivers about 1,500,000 and sheds the rest. The steps between were not run. Which thread gives
+way was not measured: the sampler adds the threads of a name (see "The threads"), the leader's
+raft runtime uses one core in all at every rate, and the followers use about half of what the
+leader does. The loaders were at 30.5 of their 48 cores in the last step.
 
 The p99s of the first step are one event. In the fifth 10 s window of the cluster's first
 minute under load, the consumers fell to 1,105,000 a second, and they caught up in the sixth; the
@@ -151,9 +152,14 @@ first minute, in which the consumers fell behind by a tenth and caught up.
 
 ## The threads
 
-In September the followers' apply thread ran at 93 to 97% at this rate and was what gave way
-first. In these runs it is at 39 to 58%, and the leader's at 47 to 65%. The thread nearest to a
-whole core is the leader's raft thread, at 98 to 103% in every run, on both builds.
+The percentages of this file are by thread name, and the threads of a pool share one: `/proc`
+cuts a name at 15 characters. "The apply thread" is the apply thread and its shard workers
+together, and `queen-raft` is the four workers of openraft's runtime with its blocking threads.
+No figure here is one thread's, and none says that a thread is full.
+
+In September the followers' apply ran at 93 to 97% at this rate and was what gave way first. In
+these runs the apply threads together are at 39 to 58% on a follower and 47 to 65% on the leader.
+The leader's raft runtime uses 98 to 103% of a core in all, in every run and on both builds.
 
 ## What these runs do not show
 
