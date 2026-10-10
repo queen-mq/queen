@@ -293,13 +293,11 @@ struct ScaleGuard {
 struct RestartGuard {
     consecutive_failures: u32,
     phase: RestartPhase,
-    /// Workers of the pool that exited since its last reconcile, owed a
-    /// replacement. Refilling the pool to the size it had is no scale-up, so
-    /// balance_max_shift does not throttle it; see reconcile.
+    /// Workers of the pool that left as expected since its last reconcile
+    /// (record_worker_exit), owed a replacement that neither balance_max_shift
+    /// nor the circuit holds back: refilling the pool to the size it had is no
+    /// scale-up, and the circuit is about crashes. Other exits wait for both.
     vacancies: usize,
-    /// Of those, the ones that did not crash: replaced whatever the circuit
-    /// says, which only holds back the replacement of a crash.
-    clean_vacancies: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3332,10 +3330,10 @@ fn reconcile(
             .entry((name.to_owned(), queue.clone()))
             .or_default();
         while process_slots >= worker_process_cost && target > pool.len() {
-            // A worker that exited cleanly is replaced whatever the circuit
-            // says, and never by its probe: the circuit is about crashes.
-            let clean = restart.clean_vacancies > 0;
-            let permission = if clean {
+            // A worker that left as expected is replaced whatever the circuit
+            // says, never by its probe, and outside the budget.
+            let replaces = restart.vacancies > 0;
+            let permission = if replaces {
                 SpawnPermission::Normal
             } else {
                 restart.spawn_permission(Instant::now())
@@ -3343,7 +3341,6 @@ fn reconcile(
             if permission == SpawnPermission::Blocked {
                 break;
             }
-            let replaces = restart.vacancies > 0;
             if !replaces && budget == 0 {
                 break;
             }
@@ -3360,7 +3357,6 @@ fn reconcile(
                     pool.push(worker);
                     if replaces {
                         restart.vacancies -= 1;
-                        restart.clean_vacancies -= usize::from(clean);
                     } else {
                         budget -= 1;
                     }
@@ -3384,7 +3380,6 @@ fn reconcile(
         // A replacement is owed only up to the target: one the circuit holds
         // back starts once it allows, one the pool no longer wants never.
         restart.vacancies = restart.vacancies.min(target.saturating_sub(pool.len()));
-        restart.clean_vacancies = restart.clean_vacancies.min(restart.vacancies);
     }
     Ok(())
 }
@@ -3662,10 +3657,8 @@ fn reap(
                 {
                     restarted = true;
                 }
-                let crashed = record_worker_exit(key, worker, status, announced, options, restart);
-                restart.vacancies = restart.vacancies.saturating_add(1);
-                if !crashed {
-                    restart.clean_vacancies = restart.clean_vacancies.saturating_add(1);
+                if record_worker_exit(key, worker, status, announced, options, restart) {
+                    restart.vacancies = restart.vacancies.saturating_add(1);
                 }
                 schedule_telemetry_cleanup(config, &key.0, pid, pending);
                 false
@@ -3856,8 +3849,8 @@ fn close_retired_forks(retired: &mut Vec<Rc<RefCell<ForkServer>>>) {
 }
 
 /// `announced`: what the worker said about this exit; see announced_exit.
-/// Returns whether the exit counts as a crash: a young worker's exit that
-/// neither a clean status nor an announcement explains.
+/// Returns whether the worker left as expected, owed a replacement outside the
+/// budget and the circuit (RestartGuard::vacancies).
 fn record_worker_exit(
     key: &PoolKey,
     worker: &Worker,
@@ -3868,12 +3861,20 @@ fn record_worker_exit(
 ) -> bool {
     let uptime = worker.started_at.elapsed();
     let long_lived = !worker.restart_probe && uptime >= Duration::from_secs(options.stable_after);
-    let crashed = !(status.success()
-        || long_lived
+    // Whether it left as expected, owed a replacement outside the budget and the
+    // circuit (RestartGuard::vacancies): after queue:restart, at its memory
+    // limit, after Laravel's job timeout, or having run stable_after. A young
+    // exit is not, even with status 0: Laravel's worker exits 0 when it loses
+    // its database or cache connection, every second through an outage.
+    let expected = long_lived
         || matches!(
             announced,
-            Some(AnnouncedExit::MemoryLimit | AnnouncedExit::JobTimeout)
-        ));
+            Some(
+                AnnouncedExit::QueueRestart
+                    | AnnouncedExit::MemoryLimit
+                    | AnnouncedExit::JobTimeout
+            )
+        );
     if matches!(restart.phase, RestartPhase::Probe) && !worker.restart_probe {
         eprintln!(
             "[{}:{}] pid={} exited with {status} after {:.3}s while restart probe is active; circuit unchanged",
@@ -3882,7 +3883,7 @@ fn record_worker_exit(
             worker.child.id(),
             uptime.as_secs_f64(),
         );
-        return crashed;
+        return expected;
     }
     if status.success() {
         restart.record_healthy();
@@ -3893,7 +3894,7 @@ fn record_worker_exit(
             worker.child.id(),
             uptime.as_secs_f64(),
         );
-        return false;
+        return expected;
     }
     if announced == Some(AnnouncedExit::MemoryLimit) {
         // A deliberate stop after a job, like --max-jobs: it made progress.
@@ -3904,7 +3905,7 @@ fn record_worker_exit(
             key.1,
             worker.child.id(),
         );
-        return false;
+        return expected;
     }
     // Backoff is for short-lived exits. A worker that ran this long is not
     // crash-looping: queue:work exits 12 at --memory, and a job timeout kills
@@ -3918,7 +3919,7 @@ fn record_worker_exit(
             worker.child.id(),
             uptime.as_secs_f64(),
         );
-        return false;
+        return expected;
     }
     if announced == Some(AnnouncedExit::JobTimeout) {
         // The job failed, not the worker, however soon it came. A probe
@@ -3932,7 +3933,7 @@ fn record_worker_exit(
             key.1,
             worker.child.id(),
         );
-        return false;
+        return expected;
     }
     let (delay, circuit_open) = restart.record_failure(options, Instant::now());
     eprintln!(
@@ -3948,7 +3949,7 @@ fn record_worker_exit(
         },
         delay.as_secs(),
     );
-    true
+    expected
 }
 
 /// Laravel SIGKILLs a worker whose job outlives its timeout, which looks like
@@ -4218,7 +4219,6 @@ fn drain_all(
     // A pause empties every pool on purpose: nothing is owed after it.
     for restart in restarts.values_mut() {
         restart.vacancies = 0;
-        restart.clean_vacancies = 0;
     }
     for (pool, workers) in pools.iter_mut() {
         for worker in workers.drain(..) {
@@ -4490,8 +4490,10 @@ mod tests {
     /// ready.<pid>, exits 0 on SIGTERM, as --max-jobs, --max-time and
     /// queue:restart end a worker, and 1 on SIGUSR1, a crash.
     #[cfg(unix)]
+    // `wait` returns at once for a trapped signal, and the loop forks once a
+    // second: several tests run pools of these at the same time.
     const FAKE_WORKER: &str = "trap 'exit 0' TERM\ntrap 'exit 1' USR1\n: > \"ready.$$\"\n\
-                               while :; do sleep 0.05; done\n";
+                               while :; do sleep 1 & wait $!; done\n";
 
     /// A configuration whose artisan is the shell `script`, run by /bin/sh as
     /// its PHP binary, in a private temporary directory that is also its cwd
@@ -4511,11 +4513,17 @@ mod tests {
     /// Wait until every worker of `pool` running FAKE_WORKER is ready.
     #[cfg(unix)]
     fn await_fake_workers(directory: &Path, pool: &[Worker]) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         for worker in pool {
             let ready = directory.join(format!("ready.{}", worker.child.id()));
             while !ready.exists() {
-                assert!(Instant::now() < deadline, "a fake worker never started");
+                // SAFETY: signal 0 only asks whether the pid exists.
+                let alive = unsafe { libc::kill(worker.child.id() as i32, 0) } == 0;
+                assert!(
+                    Instant::now() < deadline,
+                    "fake worker {} never said it was ready (alive: {alive})",
+                    worker.child.id(),
+                );
                 thread::sleep(Duration::from_millis(10));
             }
         }
@@ -4683,7 +4691,32 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_pool_that_lost_most_workers_at_once_is_refilled_in_one_reconcile() {
-        let (resolved, directory) = fake_php_config("mass-exit", FAKE_WORKER);
+        assert_eq!(
+            refill_after_nine_exits("mass-exit", true),
+            10,
+            "9 exits were replaced as a scale-up"
+        );
+    }
+
+    /// Laravel's worker exits 0 when it loses its database or cache connection,
+    /// every second through an outage: young exits stay on the budget.
+    #[cfg(unix)]
+    #[test]
+    fn young_exits_are_replaced_within_the_budget() {
+        assert_eq!(refill_after_nine_exits("young-exit", false), 2);
+    }
+
+    /// Fill a pool of ten fake workers, stop nine of them, cleanly, once they
+    /// have run stable_after (1 s) or at once, and reconcile once: the size of
+    /// the pool after it.
+    #[cfg(unix)]
+    fn refill_after_nine_exits(label: &str, long_lived: bool) -> usize {
+        let (mut resolved, directory) = fake_php_config(label, FAKE_WORKER);
+        resolved
+            .supervisors
+            .get_mut("default")
+            .unwrap()
+            .stable_after = if long_lived { 1 } else { 60 };
         let options = &resolved.supervisors["default"];
         let key = ("default".to_owned(), "high".to_owned());
         let desired = || HashMap::from([("high".to_owned(), 10), ("default".to_owned(), 0)]);
@@ -4708,6 +4741,9 @@ mod tests {
         }
         assert_eq!(pools[&key].len(), 10);
         await_fake_workers(&directory, &pools[&key]);
+        if long_lived {
+            thread::sleep(Duration::from_millis(1_200));
+        }
 
         for worker in pools.get_mut(&key).unwrap().iter_mut().skip(1) {
             signal_worker(&mut worker.child, libc::SIGTERM);
@@ -4728,7 +4764,7 @@ mod tests {
         let refilled = pools[&key].len();
         kill_pools(&mut pools);
         fs::remove_dir_all(directory).unwrap();
-        assert_eq!(refilled, 10, "9 exits were replaced as a scale-up");
+        refilled
     }
 
     /// One reconcile of the "default" pool towards `high` workers on its
@@ -4763,11 +4799,9 @@ mod tests {
     #[test]
     fn a_clean_exit_is_replaced_while_a_restart_probe_runs() {
         let (mut resolved, directory) = fake_php_config("probe-siblings", FAKE_WORKER);
-        resolved
-            .supervisors
-            .get_mut("default")
-            .unwrap()
-            .restart_backoff = 0;
+        let options = resolved.supervisors.get_mut("default").unwrap();
+        options.restart_backoff = 0;
+        options.stable_after = 1;
         let key = ("default".to_owned(), "high".to_owned());
         let mut pools = Pools::new();
         let mut restarts = RestartStates::new();
@@ -4784,6 +4818,8 @@ mod tests {
         assert_eq!(pools[&key].len(), 5);
         await_fake_workers(&directory, &pools[&key]);
 
+        // Two of the first workers stop, as at --max-time, having run stable_after.
+        thread::sleep(Duration::from_millis(1_200));
         for worker in pools.get_mut(&key).unwrap().iter_mut().take(2) {
             signal_worker(&mut worker.child, libc::SIGTERM);
         }
@@ -4795,11 +4831,14 @@ mod tests {
             restarts[&key].consecutive_failures,
         );
 
-        // A sibling's crash still waits for the probe.
+        // A young sibling's crash still waits for the probe: one of the
+        // replacements, once it handles signals.
+        await_fake_workers(&directory, &pools[&key]);
         let crashed = pools
             .get_mut(&key)
             .unwrap()
             .iter_mut()
+            .rev()
             .find(|worker| !worker.restart_probe)
             .map(|worker| signal_worker(&mut worker.child, libc::SIGUSR1));
         if crashed.is_some() {
