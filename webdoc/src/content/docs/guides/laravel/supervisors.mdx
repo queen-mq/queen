@@ -429,7 +429,8 @@ that already belongs to another user: run it as that user. `chown -R www-data` o
 directory also works. For container images, see
 [build the image](/guides/laravel/kubernetes/#build-the-image).
 
-PHP client 2.3.0 pins supervisor 0.8.0. Its GitHub release, `supervisor/v0.8.0`, publishes static
+PHP client 2.4.3 pins supervisor 0.8.1, and 2.3.0 to 2.4.2 pin 0.8.0. Its GitHub release,
+`supervisor/v0.8.1`, publishes static
 (musl) Linux builds and macOS builds for amd64 and arm64, with a manifest and its Sigstore bundle,
 so the online install works on those hosts. On any other
 host the installer fails closed; run the PHP engine there.
@@ -443,7 +444,7 @@ needs a local manifest:
 ```bash
 php artisan queen:supervisor-install \
   --manifest=/srv/mirror/queen-supervisor-manifest.json \
-  --archive=/srv/mirror/queen-supervisor-0.8.0-linux-amd64.tar.gz
+  --archive=/srv/mirror/queen-supervisor-0.8.1-linux-amd64.tar.gz
 ```
 
 A mirror can serve both over HTTPS from one base URL (`QUEEN_SUPERVISOR_RELEASE_BASE_URL`), and a
