@@ -174,6 +174,11 @@ class Jobs:
         spans = sorted(self.attempts(job))
         return any(end is not None and later[0] < end for (_, end), later in zip(spans, spans[1:]))
 
+    def codes(self, job: str) -> list[str | None]:
+        """The code each run of the job ran (DeployedCode, as its worker loaded it at boot)."""
+        return [(e[5] or {}).get("code") if len(e) > 5 else None
+                for e in self.raw["jobs"].get(job, {}).get("events", []) if e[0] == "started"]
+
     def attempts_of(self, job: str, event: str) -> list[int | None]:
         """The attempt each `event` of the job was logged with, in order."""
         return [e[1] for e in self.raw["jobs"].get(job, {}).get("events", []) if e[0] == event]
@@ -1046,12 +1051,20 @@ def routed_parity(lane: Lane) -> list[Check]:
 def queue_restart(lane: Lane) -> list[Check]:
     """A deploy that runs only `php artisan queue:restart`, as Forge and Envoyer do. Every worker
     stops after its job and is replaced. With prefork the replacements must come from a fork server
-    booted after the signal; from the one booted before it, they would keep its code."""
+    booted after the signal; from the one booted before it, they would keep its code. The deploy
+    changes DeployedCode in the supervisor's container first: the jobs dispatched after the restart
+    must run the new value, and a job that started before the deploy the old one, which shows the
+    value is the one loaded at boot."""
     first, later = ids(0, 4), ids(4, 4)
+    deployed = f"deployed-{lane.run_id[-8:]}"
     old_workers = set(lane.workers())
     old_servers = {pid for pid, _, args in lane.processes() if "queen:fork-server" in args}
     lane.dispatch("ok", 4, sleep_ms=3_000, tries=1)
-    lane.wait_until(lambda r: any(r.count(j, "started") for j in first), 60, "a job started")
+    early = lane.wait_until(lambda r: any(r.count(j, "started") for j in first), 60, "a job started")
+    started_early = [j for j in first if early.count(j, "started")]
+    lane.docker("exec", lane.container(lane.profile.engine), "sed", "-i", f"s/VERSION = 'build'/VERSION = '{deployed}'/",
+                "app/Support/DeployedCode.php")
+    lane.note(f"deployed {deployed}")
     lane.artisan("queue:restart")
     lane.note("queue:restart")
     deadline = time.monotonic() + 120
@@ -1071,12 +1084,20 @@ def queue_restart(lane: Lane) -> list[Check]:
     lane.extra["queue_restart"] = {"old_workers": sorted(old_workers), "old_fork_servers": sorted(old_servers),
                                    "workers": workers, "fork_servers": sorted(servers)}
     replaced = bool(workers) and not set(workers) & old_workers
+    codes = {j: jobs.codes(j) for j in first + later}
+    lane.extra["queue_restart"]["codes"] = codes
+    new_code = all(codes[j] == [deployed] for j in later)
     lane.outcome["queue-restart"] = {"same": {
         **{f"job {j}": jobs.outcome(j) for j in first + later},
         "every worker was replaced": replaced,
+        "the jobs after the restart ran the deployed code": new_code,
     }, "near": {}}
     checks = [
         Check("every worker was replaced", replaced, f"before {sorted(old_workers)}, after {sorted(workers)}"),
+        Check("the jobs after the restart ran the deployed code", new_code, f"{codes}"),
+        Check("a job started before the deploy ran the code its worker booted with",
+              bool(started_early) and all(codes[j] == ["build"] for j in started_early),
+              f"started before the deploy: {started_early}; {codes}"),
         *completed_once(jobs, first + later),
     ]
     if old_servers:

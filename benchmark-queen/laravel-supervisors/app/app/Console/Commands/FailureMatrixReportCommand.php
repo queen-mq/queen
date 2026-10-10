@@ -25,8 +25,9 @@ final class FailureMatrixReportCommand extends Command
         foreach ($log->read($runId) as $event) {
             $job = $event['job_id'];
             $jobs[$job] ??= ['events' => [], 'pids' => [], 'hosts' => []];
-            // The pid last, so readers of the first four fields are unchanged.
-            $jobs[$job]['events'][] = [$event['event'], $event['attempt'], round($event['at'], 3), $event['exception'], $event['pid']];
+            // The pid and the event's detail last, so readers of the first four fields are unchanged.
+            $jobs[$job]['events'][] = [$event['event'], $event['attempt'], round($event['at'], 3), $event['exception'], $event['pid'],
+                $event['detail'] ?? null];
             $jobs[$job]['pids'][$event['pid']] = true;
             $jobs[$job]['hosts'][(string) ($event['host'] ?? '')] = true;
         }
