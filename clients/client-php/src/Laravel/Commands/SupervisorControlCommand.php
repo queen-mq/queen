@@ -3,6 +3,7 @@
 namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
+use Queen\Laravel\Supervisor\ProcessIdentity;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
 use Queen\Laravel\Supervisor\SupervisorState;
 use RuntimeException;
@@ -32,7 +33,10 @@ class SupervisorControlCommand extends Command
             return self::INVALID;
         }
         try {
-            return $this->handleState(new SupervisorState($directory));
+            // Run as root, as a Kubernetes exec probe often is, status reads a
+            // state that another user owns as that user; pause, continue and
+            // terminate still require the owner.
+            return $this->handleState(new SupervisorState($directory, $this->laravel->make(ProcessIdentity::class)));
         } catch (RuntimeException $error) {
             $this->components->error($error->getMessage());
 

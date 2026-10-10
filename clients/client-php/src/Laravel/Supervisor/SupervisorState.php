@@ -35,22 +35,39 @@ final class SupervisorState
     /** @var array{dev:int,ino:int,uid:int,mode:int}|null */
     private ?array $generationDirectory = null;
 
-    public function __construct(private string $directory)
+    private ProcessIdentity $identity;
+
+    /**
+     * Set when root reads the state of a supervisor that runs as another
+     * user: that user, whom every read acts as (see asStateOwner()).
+     *
+     * @var array{uid:int,name:string,gid:int}|null
+     */
+    private ?array $stateOwner = null;
+
+    private bool $actingAsStateOwner = false;
+
+    public function __construct(private string $directory, ?ProcessIdentity $identity = null)
     {
         if (!extension_loaded('posix') || !function_exists('posix_geteuid')) {
             throw new RuntimeException('Queen supervisor state requires ext-posix for filesystem ownership checks.');
         }
+        $this->identity = $identity ?? new ProcessIdentity();
         $this->assertSafeDirectoryPath();
         $requested = rtrim($this->directory, DIRECTORY_SEPARATOR);
-        $visitedLinks = [];
-        $this->assertRequestedAncestorChain($requested, $visitedLinks);
-        $this->directory = $this->canonicalDirectoryPath($requested);
-        $this->assertTrustedAncestorChain();
+        $this->stateOwner = $this->foreignStateOwner($requested);
+        $this->asStateOwner(function () use ($requested): void {
+            $visitedLinks = [];
+            $this->assertRequestedAncestorChain($requested, $visitedLinks);
+            $this->directory = $this->canonicalDirectoryPath($requested);
+            $this->assertTrustedAncestorChain();
+        });
     }
 
     /** @return resource */
     public function acquireLock()
     {
+        $this->assertWritable();
         $this->ensureDirectory();
         $candidate = $this->existingDirectoryMetadata()
             ?? throw new RuntimeException("Queen supervisor state directory [{$this->directory}] is unavailable.");
@@ -111,6 +128,7 @@ final class SupervisorState
         ?int $controlTtlSeconds = null,
     ): string
     {
+        $this->assertWritable();
         if (!in_array($command, ['pause', 'continue', 'terminate'], true)) {
             throw new RuntimeException("Unknown Queen supervisor command [{$command}].");
         }
@@ -153,6 +171,7 @@ final class SupervisorState
 
     public function command(?string $lastNonce, string $instanceId): ?array
     {
+        $this->assertWritable();
         $this->assertInstanceId($instanceId);
 
         return $this->withControlLock(function () use ($lastNonce, $instanceId): ?array {
@@ -202,13 +221,13 @@ final class SupervisorState
 
     public function isOwned(): bool
     {
-        return $this->lockedOwner() !== null;
+        return $this->asStateOwner(fn (): bool => $this->lockedOwner() !== null);
     }
 
     public function isOwnedBy(string $instanceId): bool
     {
         $this->assertInstanceId($instanceId);
-        $owner = $this->lockedOwner();
+        $owner = $this->asStateOwner(fn (): ?array => $this->lockedOwner());
 
         return ($owner['instance_id'] ?? null) === $instanceId;
     }
@@ -218,7 +237,7 @@ final class SupervisorState
         if (!$this->isFresh($status, $staleAfterSeconds)) {
             return false;
         }
-        $owner = $this->lockedOwner();
+        $owner = $this->asStateOwner(fn (): ?array => $this->lockedOwner());
 
         return ($owner['instance_id'] ?? null) === $status['instance_id']
             && ($owner['pid'] ?? null) === $status['pid'];
@@ -277,6 +296,14 @@ final class SupervisorState
      */
     public function readiness(array $status, ?bool $live = null): array
     {
+        // Whatever readiness reads from the state directory, root reads as
+        // the state's owner, like status() and isLive().
+        return $this->asStateOwner(fn (): array => $this->evaluateReadiness($status, $live));
+    }
+
+    /** @return array{ready:bool,issues:list<array{code:string,supervisor?:string,queue?:string}>} */
+    private function evaluateReadiness(array $status, ?bool $live): array
+    {
         $issues = [];
         $live ??= $this->isLive($status);
         if (!$live) {
@@ -327,6 +354,12 @@ final class SupervisorState
      */
     public function capacityHealth(array $status, ?bool $live = null): array
     {
+        return $this->asStateOwner(fn (): array => $this->evaluateCapacityHealth($status, $live));
+    }
+
+    /** @return array{healthy:bool,issues:list<array{code:string,supervisor?:string,queue?:string}>} */
+    private function evaluateCapacityHealth(array $status, ?bool $live): array
+    {
         $readiness = $this->readiness($status, $live);
         $issues = $readiness['issues'];
         $pools = $status['pool_status'] ?? [];
@@ -365,6 +398,7 @@ final class SupervisorState
      */
     public function writeStatus(array $status): array
     {
+        $this->assertWritable();
         $updatedAtEpoch = time();
         $state = is_string($status['state'] ?? null) ? $status['state'] : 'unknown';
         // Tells apart the hosts or pods that publish to one remote status key.
@@ -392,11 +426,13 @@ final class SupervisorState
 
     public function status(): ?array
     {
-        return $this->readJson('status.json');
+        return $this->asStateOwner(fn (): ?array => $this->readJson('status.json'));
     }
 
     public function telemetryDirectory(): string
     {
+        $this->assertWritable();
+
         return $this->privateChildDirectory('telemetry');
     }
 
@@ -407,6 +443,7 @@ final class SupervisorState
      */
     public function resetExitMarkers(): string
     {
+        $this->assertWritable();
         $path = $this->privateChildDirectory('exits');
         $names = [];
         foreach (new \FilesystemIterator($path, \FilesystemIterator::SKIP_DOTS) as $entry) {
@@ -431,6 +468,7 @@ final class SupervisorState
      */
     public function takeExitMarker(int $pid): ?string
     {
+        $this->assertWritable();
         $path = $this->exitMarkerPath($pid);
         if ($path === null) {
             return null;
@@ -449,6 +487,7 @@ final class SupervisorState
     /** Remove a worker's marker, and its temporary file, unread. */
     public function removeExitMarker(int $pid): void
     {
+        $this->assertWritable();
         $path = $this->exitMarkerPath($pid);
         if ($path !== null) {
             $this->removeExitMarkerEntry($path);
@@ -458,6 +497,7 @@ final class SupervisorState
 
     public function removeTelemetryForPid(int $pid): void
     {
+        $this->assertWritable();
         if ($pid < 1) {
             return;
         }
@@ -533,7 +573,7 @@ final class SupervisorState
     {
         if (($metadata['mode'] & 0170000) !== 0100000
             || ($metadata['mode'] & 07777) !== 0600
-            || ($metadata['uid'] ?? null) !== posix_geteuid()
+            || ($metadata['uid'] ?? null) !== $this->identity->effectiveUid()
             || $metadata['size'] < 1
             || $metadata['size'] > self::MAX_EXIT_MARKER_BYTES) {
             return null;
@@ -678,9 +718,10 @@ final class SupervisorState
         if ($metadata === false || ($metadata['mode'] & 0170000) !== 0040000) {
             throw new RuntimeException("Queen supervisor state directory [{$this->directory}] must not be a symbolic link.");
         }
-        if (($metadata['uid'] ?? null) !== posix_geteuid()) {
+        if (($metadata['uid'] ?? null) !== $this->identity->effectiveUid()) {
             throw new RuntimeException(
-                "Queen supervisor state directory [{$this->directory}] must be owned by the current user.",
+                "Queen supervisor state directory [{$this->directory}] must be owned by the current user."
+                . $this->ownershipDetail($metadata['uid'] ?? null),
             );
         }
         if ($created) {
@@ -701,6 +742,127 @@ final class SupervisorState
             );
         }
         $this->assertTrustedAncestorChain();
+    }
+
+    /**
+     * The owner of the state directory when root opens the state of a
+     * supervisor that runs as another user, as a Kubernetes exec probe does
+     * in a container that starts as root. Root then reads that state as its
+     * owner and may not write to it. Null in every other case, and when the
+     * owner has no entry in the user database to switch to.
+     *
+     * Reading as the owner is what makes this safe. PHP cannot open a file
+     * with O_NOFOLLOW, so the checks in this class notice a symbolic link
+     * only after open() has followed it. For the owner that is harmless; for
+     * root it is not, because the owner can swap a link in between a check
+     * and the open and make root open any path. As the owner, every open
+     * stays within what the owner could open itself, and the checks apply
+     * exactly as they do when the owner runs them.
+     *
+     * @return array{uid:int,name:string,gid:int}|null
+     */
+    private function foreignStateOwner(string $requested): ?array
+    {
+        if ($this->identity->effectiveUid() !== 0) {
+            return null;
+        }
+        clearstatcache(true, $requested);
+        $metadata = @lstat($requested);
+        if (!is_array($metadata) || ($metadata['mode'] & 0170000) !== 0040000) {
+            return null;
+        }
+        $owner = $metadata['uid'] ?? null;
+        if (!is_int($owner) || $owner === 0) {
+            return null;
+        }
+        $account = $this->identity->account($owner);
+
+        return $account === null ? null : ['uid' => $owner, ...$account];
+    }
+
+    /**
+     * Run a read as the state's owner when root reads another user's state,
+     * and as this process otherwise. Reads nest: readiness() calls isLive().
+     */
+    private function asStateOwner(\Closure $read): mixed
+    {
+        $owner = $this->stateOwner;
+        if ($owner === null || $this->actingAsStateOwner) {
+            return $read();
+        }
+        try {
+            $restore = $this->identity->assume($owner['uid'], $owner['name'], $owner['gid']);
+        } catch (RuntimeException $error) {
+            throw new RuntimeException(
+                "Queen supervisor state ancestor [{$this->directory}] must be owned by root or the current user."
+                . $this->ownershipDetail($owner['uid']) . ' ' . $error->getMessage(),
+                0,
+                $error,
+            );
+        }
+        $this->actingAsStateOwner = true;
+        try {
+            return $read();
+        } finally {
+            $this->actingAsStateOwner = false;
+            $restore();
+        }
+    }
+
+    /**
+     * Root may read another user's state but not write to it: the supervisor,
+     * pause, continue and terminate keep requiring the owner. Without this,
+     * a write would run as root and the ownership checks would refuse it
+     * anyway; this says why, and what to run instead.
+     */
+    private function assertWritable(): void
+    {
+        $owner = $this->stateOwner;
+        if ($owner === null) {
+            return;
+        }
+
+        throw new RuntimeException(
+            "Queen supervisor state ancestor [{$this->directory}] must be owned by root or the current user."
+            . $this->describeOwnership($owner['uid'])
+            . " Root may only read another user's supervisor state; run the supervisor, pause, continue and"
+            . " terminate as that user, for example su -s /bin/sh {$owner['name']} -c"
+            . ' "php artisan queen:supervisor pause".',
+        );
+    }
+
+    /**
+     * Appended to each refusal of a path that another user owns: who owns
+     * it, who is asking, and how to run as the owner. The start of each
+     * refusal stays as it was, for the applications and log searches that
+     * match it.
+     */
+    private function ownershipDetail(mixed $owner): string
+    {
+        if (!is_int($owner)) {
+            return '';
+        }
+        $name = $this->identity->account($owner)['name'] ?? null;
+        $su = $name === null
+            ? ''
+            : "su -s /bin/sh {$name} -c \"php artisan queen:supervisor status --check\", or ";
+
+        return $this->describeOwnership($owner)
+            . " Run the supervisor and its probes as that user, for example {$su}securityContext.runAsUser: {$owner}"
+            . ' on the container.';
+    }
+
+    private function describeOwnership(int $owner): string
+    {
+        return ' It is owned by ' . $this->describeUser($owner)
+            . ' and this process runs as ' . $this->describeUser($this->identity->effectiveUid()) . '.';
+    }
+
+    private function describeUser(int $uid): string
+    {
+        $name = $this->identity->account($uid)['name'] ?? null;
+
+        return $name === null ? "uid {$uid}" : "uid {$uid} ({$name})";
     }
 
     private function assertSafeDirectoryPath(): void
@@ -790,9 +952,10 @@ final class SupervisorState
                 }
                 if ($parentWasSticky
                     && ($metadata['uid'] ?? null) !== 0
-                    && ($metadata['uid'] ?? null) !== posix_geteuid()) {
+                    && ($metadata['uid'] ?? null) !== $this->identity->effectiveUid()) {
                     throw new RuntimeException(
-                        "Queen supervisor state child [{$path}] below a sticky directory must be owned by the current user.",
+                        "Queen supervisor state child [{$path}] below a sticky directory must be owned by the current user."
+                        . $this->ownershipDetail($metadata['uid'] ?? null),
                     );
                 }
                 $identity = ($metadata['dev'] ?? '?') . ':' . ($metadata['ino'] ?? '?');
@@ -868,11 +1031,12 @@ final class SupervisorState
         bool $stateLeaf,
         bool $parentWasSticky,
     ): bool {
-        $effectiveUid = posix_geteuid();
+        $effectiveUid = $this->identity->effectiveUid();
         $owner = $metadata['uid'] ?? null;
         if ($parentWasSticky && $owner !== 0 && $owner !== $effectiveUid) {
             throw new RuntimeException(
-                "Queen supervisor state child [{$path}] below a sticky directory must be owned by the current user.",
+                "Queen supervisor state child [{$path}] below a sticky directory must be owned by the current user."
+                . $this->ownershipDetail($owner),
             );
         }
         // A foreign owner can chmod and then rename children even when the
@@ -880,7 +1044,8 @@ final class SupervisorState
         // are trusted owners for path components.
         if ($owner !== 0 && $owner !== $effectiveUid) {
             throw new RuntimeException(
-                "Queen supervisor state ancestor [{$path}] must be owned by root or the current user.",
+                "Queen supervisor state ancestor [{$path}] must be owned by root or the current user."
+                . $this->ownershipDetail($owner),
             );
         }
 
@@ -957,9 +1122,10 @@ final class SupervisorState
                 "Queen supervisor state directory [{$this->directory}] must be a private real directory.",
             );
         }
-        if (($metadata['uid'] ?? null) !== posix_geteuid()) {
+        if (($metadata['uid'] ?? null) !== $this->identity->effectiveUid()) {
             throw new RuntimeException(
-                "Queen supervisor state directory [{$this->directory}] must be owned by the current user.",
+                "Queen supervisor state directory [{$this->directory}] must be owned by the current user."
+                . $this->ownershipDetail($metadata['uid'] ?? null),
             );
         }
         if ($this->generationDirectory !== null) {
@@ -989,7 +1155,7 @@ final class SupervisorState
     {
         if (($current['mode'] & 0170000) !== 0040000
             || ($current['mode'] & 07777) !== 0700
-            || ($current['uid'] ?? null) !== posix_geteuid()
+            || ($current['uid'] ?? null) !== $this->identity->effectiveUid()
             || ($current['dev'] ?? null) !== ($expected['dev'] ?? null)
             || ($current['ino'] ?? null) !== ($expected['ino'] ?? null)) {
             throw new RuntimeException('Queen supervisor state directory changed after generation acquisition.');
