@@ -15,7 +15,7 @@ On three nodes it carries 1M msg/s in and out of one queue of 10M partitions.
 
 Queen speaks HTTP but is also compatible with Kafka clients.
 
-[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/start/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.1
+[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/start/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.2
 
 </div>
 
@@ -124,6 +124,15 @@ Cursor, VS Code, Codex and Claude Desktop: [AI agents](https://queenmq.com/start
 See [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [contributing guide](https://queenmq.com/internals/contributing/). Benchmark claims need an archived
 artifact under `benchmark-queen/`, and doc pages name the source files they describe.
+
+## Built on
+
+Queen stands on open-source work. Thank you to the maintainers of:
+
+- [openraft](https://github.com/databendlabs/openraft): the raft consensus that replicates the log
+- [heed](https://github.com/meilisearch/heed): LMDB storage for the raft log
+- [tokio](https://tokio.rs) and [axum](https://github.com/tokio-rs/axum): the async runtime and HTTP
+- [Jepsen](https://jepsen.io): the fault-injection tests the broker runs against
 
 ## License
 
