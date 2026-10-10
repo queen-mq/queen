@@ -228,12 +228,17 @@ final class SupervisorConfiguration
                     throw new InvalidArgumentException("Queen supervisor [{$name}] lease renewal request budget is too large.");
                 }
                 $requestBudget = $requestTimeout * $backendCount;
-                if (!self::sumIsBelow(
-                    [$interval, $requestBudget, $requestBudget, 1, $killGrace, $safetyMargin],
-                    $retryAfter,
-                )) {
+                $budget = [$interval, $requestBudget, $requestBudget, 1, $killGrace, $safetyMargin];
+                if (!self::sumIsBelow($budget, $retryAfter)) {
+                    // Each renewal may try every URL, so the budget grows with
+                    // the cluster: say what it is made of and what shrinks it.
+                    $urls = $backendCount === 1 ? '1 URL' : "{$backendCount} URLs";
                     throw new InvalidArgumentException(
-                        "Queen supervisor [{$name}] lease renewal timing budget must be shorter than retry_after.",
+                        "Queen supervisor [{$name}] lease renewal timing budget [" . array_sum($budget) . ' s] must be '
+                        . "shorter than retry_after [{$retryAfter} s]. It is the renewal interval [{$interval} s], twice a "
+                        . "renewal that tries every broker URL [{$requestTimeout} s x {$urls}], the kill grace "
+                        . "[{$killGrace} s], the safety margin [{$safetyMargin} s] and 1 s. Raise retry_after, or lower "
+                        . 'lease_renewal_timeout or lease_renewal_interval.',
                     );
                 }
             }

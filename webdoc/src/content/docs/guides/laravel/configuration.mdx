@@ -429,7 +429,7 @@ checks when either engine starts, and `php artisan queen:supervisor-config` show
 | `pop_ahead` needs `lease_renewal` | connector | `Queen Laravel pop_ahead requires lease_renewal so the batch it pops ahead remains fenced.` |
 | `ack_async` needs `ack_batch` 1 | connector | `Queen Laravel ack_async requires ack_batch 1: a batch already defers its ACKs.` |
 | The renewal timing fits in `retry_after` | connector | `Queen Laravel lease_renewal timing is unsafe: interval + two request budgets + retry + kill grace + safety margin must be shorter than retry_after.` |
-| The same rule for a pool | supervisor | `Queen supervisor [default] lease renewal timing budget must be shorter than retry_after.` |
+| The same rule for a pool, where a renewal may try every broker URL | supervisor | `Queen supervisor [default] lease renewal timing budget [44 s] must be shorter than retry_after [30 s]. It is the renewal interval [10 s], twice a renewal that tries every broker URL [5 s x 3 URLs], the kill grace [2 s], the safety margin [1 s] and 1 s. Raise retry_after, or lower lease_renewal_timeout or lease_renewal_interval.` (three URLs; the budget and its parts since PHP client 2.4.4) |
 | A pool's `retry_after` exceeds its `timeout` | supervisor | `Queen supervisor [default] retry_after must be longer than timeout.` |
 | `shutdown_grace` exceeds every pool's `timeout` | supervisor | `Queen supervisor shutdown_grace must be longer than every worker timeout.` |
 | The pools fit `process_limit`, two slots per worker with lease renewal | supervisor | `Queen supervisor [default] exceeds process_limit [256].` |
