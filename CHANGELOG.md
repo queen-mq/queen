@@ -180,6 +180,19 @@ first queue the application reports. It now opens on the sum of all of them, eac
 whatever the number of replicas, and the list of queues, now to the left of the chart, filters it
 to one.
 
+**Kubernetes: an operator runs a cluster from one object.** `deploy/operator` is an operator and
+its `QueenCluster` definition (`queenmq.com/v1alpha1`). It creates the StatefulSet, the Services
+and the disruption budget of the Kubernetes page and does what a StatefulSet cannot. It restarts
+the pods one at a time with the leader last, each behind a write that commits. It adds and removes
+voters through the membership API, a node leaving the membership before its pod stops. It replaces
+a pod whose volume is lost (the annotation `queenmq.com/replace-pod`), and it grows the volumes. It
+restarts nothing while a voter is behind and does not catch up, and says so. It uses the broker's
+HTTP API as it is and keeps no state outside the object. It takes no backups, it does not take
+over a cluster applied by hand, and its API may still change. These steps ran on k3s against 2.0.3
+on 2026-10-08, under a write load of 6,100 pushes of which none was lost; on this release its unit
+tests ran, and those runs were not repeated. The image is `ghcr.io/queen-mq/queen-operator`, built
+by the `Operator` workflow. Docs: `operate/operator`.
+
 ## PHP client 2.4.1 - 2026-10-09
 
 **Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the
