@@ -334,6 +334,26 @@ struct Control {
     expires_at_epoch: u64,
 }
 
+/// A control document State::command refused and removed: a bad request,
+/// such as one whose timestamps a clock step put in the future, not a fault
+/// of the state directory.
+#[derive(Debug)]
+struct RejectedControl(String);
+
+impl RejectedControl {
+    fn error(reason: impl std::fmt::Display) -> Box<dyn std::error::Error> {
+        Box::new(Self(reason.to_string()))
+    }
+}
+
+impl std::fmt::Display for RejectedControl {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RejectedControl {}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum ControlCommand {
@@ -486,6 +506,9 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(Instant::now);
     let mut paused = false;
     let mut last_command_nonce: Option<String> = None;
+    // Said once while the same bad request stays, as one that cannot be
+    // removed does.
+    let mut last_rejected_control: Option<String> = None;
     let mut status_failure: Option<String> = None;
     let mut remote_status = config
         .remote_status
@@ -554,7 +577,11 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     remote_status::publish_unless_stopped(&mut remote_status, &client, &status, &running);
     while running.load(Ordering::SeqCst) {
-        match state.command(last_command_nonce.as_deref()) {
+        let control = state.command(last_command_nonce.as_deref());
+        if control.is_ok() {
+            last_rejected_control = None;
+        }
+        match control {
             Ok(Some(control)) => {
                 last_command_nonce = Some(control.nonce);
                 let control_state = match control.command {
@@ -622,9 +649,18 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Ok(None) => {}
+            // A bad request, already removed: the state directory passed
+            // its generation check, so supervision goes on without it.
+            Err(error) if error.is::<RejectedControl>() => {
+                let reason = error.to_string();
+                if last_rejected_control.as_ref() != Some(&reason) {
+                    eprintln!("control request discarded: {reason}");
+                }
+                last_rejected_control = Some(reason);
+            }
             Err(error) => {
                 // command() owns both the control document and the pinned
-                // generation fence. Treat any failure as infrastructure
+                // generation fence. Treat any other failure as infrastructure
                 // corruption: continuing could orchestrate workers after the
                 // state path was replaced and another master acquired it.
                 status_failure = Some(format!("state control read failed: {error}"));
@@ -1941,12 +1977,16 @@ impl State {
                 || metadata.len() > MAX_CONTROL_BYTES
             {
                 let _ = fs::remove_file(&path);
-                return Err("control command must be a small regular file".into());
+                return Err(RejectedControl::error(
+                    "control command must be a small regular file",
+                ));
             }
             #[cfg(unix)]
             if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o777 != 0o600 {
                 let _ = fs::remove_file(&path);
-                return Err("control command must be a private owned regular file".into());
+                return Err(RejectedControl::error(
+                    "control command must be a private owned regular file",
+                ));
             }
             let control: Control = match read_limited(&path, MAX_CONTROL_BYTES)
                 .and_then(|body| Ok(serde_json::from_str(&body)?))
@@ -1954,7 +1994,7 @@ impl State {
                 Ok(control) => control,
                 Err(error) => {
                     let _ = fs::remove_file(&path);
-                    return Err(error);
+                    return Err(RejectedControl::error(error));
                 }
             };
             if control.nonce.is_empty()
@@ -1965,7 +2005,7 @@ impl State {
                 || control.instance_id.chars().any(char::is_control)
             {
                 let _ = fs::remove_file(&path);
-                return Err("control nonce is invalid".into());
+                return Err(RejectedControl::error("control nonce is invalid"));
             }
             let now = now_epoch();
             if control.requested_at_epoch > now.saturating_add(CONTROL_CLOCK_SKEW_SECONDS)
@@ -1973,7 +2013,9 @@ impl State {
                 || control.expires_at_epoch < now
             {
                 let _ = fs::remove_file(&path);
-                return Err("control command is expired or has an invalid timestamp".into());
+                return Err(RejectedControl::error(
+                    "control command is expired or has an invalid timestamp",
+                ));
             }
             if Some(control.nonce.as_str()) == last_nonce || control.instance_id != self.instance_id
             {
@@ -8308,6 +8350,63 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
             replaced && !log.contains("wait failed"),
             "the killed worker's exit was not the master's to classify:\n{log}"
         );
+    }
+
+    /// A pause requested just before the clock stepped back reads as
+    /// requested in the future. The request is discarded; supervision, and
+    /// every worker, carries on.
+    #[cfg(unix)]
+    #[test]
+    fn a_control_request_from_the_future_is_discarded_and_supervision_goes_on() {
+        let directory = temporary_directory("control-clock-step");
+        write_fake_artisan(
+            &directory,
+            "trap ': > \"terminated.$$\"; exit 0' TERM\n: > \"ready.$$\"\n\
+             while :; do sleep 0.05; done\n",
+        );
+        let document = supervisor_document(&directory, &closing_broker());
+        let mut supervisor = start_supervisor(&directory, &document, &[]);
+        let worker = await_pid_file(&directory, "ready.", Duration::from_secs(20));
+        let state = directory.join("state");
+        let status = || -> serde_json::Value {
+            fs::read_to_string(state.join("status.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default()
+        };
+        let now = now_epoch();
+        let request = state.join("control.json.tmp");
+        write_private_file(
+            &request,
+            &serde_json::to_vec(&serde_json::json!({
+                "command": "pause",
+                "nonce": "request-from-the-future",
+                "instance_id": status()["instance_id"],
+                "requested_at_epoch": now + 10,
+                "expires_at_epoch": now + 40,
+            }))
+            .unwrap(),
+        );
+        fs::rename(&request, state.join("control.json")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state.join("control.json").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        // A few control-loop iterations after the request was read.
+        thread::sleep(Duration::from_millis(1_500));
+        let alive = matches!(supervisor.try_wait(), Ok(None));
+        let consumed = !state.join("control.json").exists();
+        let drained = count_files(&directory, "terminated.");
+        let reported = status()["state"].clone();
+        terminate_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(worker.is_some(), "the worker never started:\n{log}");
+        assert!(consumed, "the request was never read:\n{log}");
+        assert!(alive, "the supervisor stopped:\n{log}");
+        assert_eq!(drained, 0, "the workers were drained:\n{log}");
+        assert_eq!(reported, "running", "{log}");
     }
 
     /// The broker calls of a stop (coordination leave, remote status) may
