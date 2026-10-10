@@ -27,6 +27,7 @@ use crate::remote_status::post_kv;
 use crate::{validate_connection, validate_identifier, QueenConfig, MAX_CONTROL_TTL_SECONDS};
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) const PREFIX: &str = "coordination/v1/";
@@ -123,12 +124,29 @@ impl<'a> Coordinator<'a> {
     }
 
     /// Renew this instance in every scope and read the replicas of each.
-    pub(crate) fn heartbeat(&mut self, client: &reqwest::blocking::Client, scopes: &[String]) {
-        let connection = &self.config.connection;
+    /// Nothing is sent once a stop is asked for, and a stop abandons a
+    /// request in flight: see unless_stopped.
+    pub(crate) fn heartbeat(
+        &mut self,
+        client: &reqwest::blocking::Client,
+        scopes: &[String],
+        running: &AtomicBool,
+    ) {
+        if !running.load(Ordering::SeqCst) {
+            return;
+        }
+        let config = self.config;
         self.heartbeat_at(Instant::now(), scopes, |body, operations| {
-            post_kv(client, connection, body, |response| {
-                results(response, operations).map(|_| ())
+            let (client, connection, body) =
+                (client.clone(), config.connection.clone(), body.to_vec());
+            crate::unless_stopped(running, move || {
+                post_kv(&client, &connection, &body, |response| {
+                    results(response, operations).map(|_| ())
+                })
+                .map_err(|error| error.to_string())
             })
+            .unwrap_or_else(|| Err("abandoned: the supervisor is stopping".to_owned()))
+            .map_err(Into::into)
         });
     }
 
@@ -186,12 +204,30 @@ impl<'a> Coordinator<'a> {
 
     /// Leave every scope at once, so the other replicas take over this share
     /// without waiting for the TTL. Best effort: a key left behind expires.
-    pub(crate) fn leave(&mut self, client: &reqwest::blocking::Client, scopes: &[String]) {
+    /// With `running`, a stop abandons the request, as it does a heartbeat's;
+    /// the stop leaves on its own once every worker has its SIGTERM.
+    pub(crate) fn leave(
+        &mut self,
+        client: &reqwest::blocking::Client,
+        scopes: &[String],
+        running: Option<&AtomicBool>,
+    ) {
         for scope in scopes {
             self.views.remove(scope);
         }
-        if let Some(body) = self.leave_body(scopes) {
-            let _ = post_kv(client, &self.config.connection, &body, |_| Ok(()));
+        let Some(body) = self.leave_body(scopes) else {
+            return;
+        };
+        match running {
+            None => {
+                let _ = post_kv(client, &self.config.connection, &body, |_| Ok(()));
+            }
+            Some(running) => {
+                let (client, connection) = (client.clone(), self.config.connection.clone());
+                let _ = crate::unless_stopped(running, move || {
+                    post_kv(&client, &connection, &body, |_| Ok(())).is_ok()
+                });
+            }
         }
     }
 

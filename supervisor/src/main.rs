@@ -539,7 +539,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             replicas: &replica_counts,
         },
     )?;
-    remote_status::publish(&mut remote_status, &client, &status);
+    remote_status::publish_unless_stopped(&mut remote_status, &client, &status, &running);
     while running.load(Ordering::SeqCst) {
         match state.command(last_command_nonce.as_deref()) {
             Ok(Some(control)) => {
@@ -550,7 +550,11 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         // A paused replica serves nothing; the others take
                         // over its share.
                         if let Some(coordinator) = coordinator.as_mut() {
-                            coordinator.leave(&client, &scope_list(&coordinated_scopes));
+                            coordinator.leave(
+                                &client,
+                                &scope_list(&coordinated_scopes),
+                                Some(&running),
+                            );
                         }
                         replica_counts.clear();
                         last_depths.clear();
@@ -592,7 +596,12 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         replicas: &replica_counts,
                     },
                 ) {
-                    Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
+                    Ok(status) => remote_status::publish_unless_stopped(
+                        &mut remote_status,
+                        &client,
+                        &status,
+                        &running,
+                    ),
                     Err(error) => {
                         status_failure = Some(format!("state status write failed: {error}"));
                         running.store(false, Ordering::SeqCst);
@@ -660,7 +669,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         if poll_due || !event_due.is_empty() {
             if poll_due {
                 if let (Some(coordinator), false) = (coordinator.as_mut(), paused) {
-                    coordinator.heartbeat(&client, &scope_list(&coordinated_scopes));
+                    coordinator.heartbeat(&client, &scope_list(&coordinated_scopes), &running);
                 }
                 if !paused {
                     replica_counts =
@@ -725,8 +734,13 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         running.as_ref(),
                         MAX_DEPTH_POLL_CONCURRENCY,
                         |queue| {
-                            queue_depth(&client, queen, queue, &options.consumer_group)
-                                .map_err(|error| error.to_string())
+                            let (client, queen) = (client.clone(), queen.clone());
+                            let (queue, group) = (queue.to_owned(), options.consumer_group.clone());
+                            unless_stopped(&running, move || {
+                                queue_depth(&client, &queen, &queue, &group)
+                                    .map_err(|error| error.to_string())
+                            })
+                            .unwrap_or_else(|| Err("abandoned: the supervisor is stopping".into()))
                         },
                     ) {
                         Ok(ordered_depths) => depths.extend(ordered_depths),
@@ -850,7 +864,12 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     replicas: &replica_counts,
                 },
             ) {
-                Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
+                Ok(status) => remote_status::publish_unless_stopped(
+                    &mut remote_status,
+                    &client,
+                    &status,
+                    &running,
+                ),
                 Err(error) => {
                     status_failure = Some(format!("state status write failed: {error}"));
                     running.store(false, Ordering::SeqCst);
@@ -907,7 +926,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             }
             // The other replicas take over this share while it drains.
             if let Some(coordinator) = coordinator.as_mut() {
-                coordinator.leave(&client, &scope_list(&coordinated_scopes));
+                coordinator.leave(&client, &scope_list(&coordinated_scopes), None);
             }
         },
     );
@@ -2267,6 +2286,43 @@ fn new_instance_id() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("{nanos:032x}{:08x}", std::process::id())
+}
+
+/// Run a blocking broker request on a thread of its own and wait for its
+/// answer while `running` holds; None once a stop is asked for. A stop does
+/// not wait for the request, which may take http_timeout per endpoint on a
+/// broker that does not answer: it is abandoned, and ends on its thread.
+/// Without a thread to spare, the request runs here, as before.
+pub(crate) fn unless_stopped<T, F>(running: &AtomicBool, request: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if !running.load(Ordering::SeqCst) {
+        return None;
+    }
+    let request = Arc::new(Mutex::new(Some(request)));
+    let (sender, answer) = mpsc::channel();
+    let shared = Arc::clone(&request);
+    let spawned = thread::Builder::new()
+        .name("queen-broker-request".into())
+        .spawn(move || {
+            let taken = shared.lock().ok().and_then(|mut request| request.take());
+            if let Some(request) = taken {
+                let _ = sender.send(request());
+            }
+        });
+    if spawned.is_err() {
+        let taken = request.lock().ok().and_then(|mut request| request.take());
+        return taken.map(|request| request());
+    }
+    loop {
+        match answer.recv_timeout(Duration::from_millis(50)) {
+            Ok(value) => return Some(value),
+            Err(mpsc::RecvTimeoutError::Timeout) if running.load(Ordering::SeqCst) => {}
+            Err(_) => return None,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -7066,6 +7122,68 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
+    /// A request to a broker that does not answer takes http_timeout per
+    /// endpoint: a stop does not wait for it.
+    #[test]
+    fn a_stop_abandons_a_broker_request_in_flight() {
+        let running = Arc::new(AtomicBool::new(true));
+        assert_eq!(unless_stopped(&running, || 7), Some(7));
+
+        let stop = Arc::clone(&running);
+        let stopper = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            stop.store(false, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let answer = unless_stopped(&running, || {
+            thread::sleep(Duration::from_secs(10));
+            7
+        });
+        stopper.join().unwrap();
+
+        assert_eq!(answer, None);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(unless_stopped(&running, || 7), None, "sent after a stop");
+    }
+
+    /// The same for the remote status a control-loop iteration publishes.
+    #[test]
+    fn a_stop_abandons_a_remote_status_publish_in_flight() {
+        let (hung, accepted) = hung_broker();
+        let settings: RemoteStatusConfig = serde_json::from_value(serde_json::json!({
+            "connection": {"urls": [&hung, &hung]},
+            "namespace": "queen-supervisor",
+            "key": "workers",
+            "interval": 1,
+            "ttl": 3_600,
+        }))
+        .unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let mut publisher = Some(RemoteStatusPublisher::new(&settings));
+        let running = Arc::new(AtomicBool::new(true));
+        let stop = Arc::clone(&running);
+        let stopper = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while accepted.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            stop.store(false, Ordering::SeqCst);
+        });
+        let document = serde_json::json!({
+            "state": "running",
+            "instance_id": "0123456789abcdef0123456789abcdef",
+        });
+        let started = Instant::now();
+
+        remote_status::publish_unless_stopped(&mut publisher, &client, &document, &running);
+        stopper.join().unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
     #[test]
     fn depth_http_request_is_scoped_authenticated_and_strict() {
         let (endpoint, request) =
@@ -7533,6 +7651,187 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
             .unwrap();
         let response = client.get(url.to_str().unwrap()).send().unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper: the supervisor of the process tests"]
+    fn run_helper() {
+        let Some(path) = std::env::var_os("QUEEN_RUN_HELPER_CONFIG") else {
+            return;
+        };
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("QUEEN_RUN_HELPER_SUBREAPER").is_some() {
+            // SAFETY: makes this helper the parent of its descendants' orphans,
+            // as PID 1 of a container is.
+            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
+        }
+        run(&CliOptions {
+            config: Some(PathBuf::from(path)),
+            php: "php".into(),
+            artisan: "artisan".into(),
+        })
+        .unwrap();
+    }
+
+    /// A supervisor process, run_helper, on the resolved configuration
+    /// `document`, logging to supervisor.log in `directory`.
+    #[cfg(unix)]
+    fn start_supervisor(
+        directory: &Path,
+        document: &serde_json::Value,
+        environment: &[(&str, &str)],
+    ) -> Child {
+        let path = directory.join("config.json");
+        write_private_file(&path, &serde_json::to_vec(document).unwrap());
+        let log = File::create(directory.join("supervisor.log")).unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "tests::run_helper", "--ignored", "--nocapture"])
+            .env("QUEEN_RUN_HELPER_CONFIG", &path)
+            .envs(environment.iter().copied())
+            .stdout(Stdio::null())
+            .stderr(log);
+        command.spawn().unwrap()
+    }
+
+    /// A resolved configuration for start_supervisor: one auto pool on
+    /// queue "high", whose PHP binary is the script `php` in `directory`,
+    /// against the broker at `broker`.
+    #[cfg(unix)]
+    fn supervisor_document(directory: &Path, broker: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": 2,
+            "cwd": directory,
+            "php_binary": directory.join("php"),
+            "artisan": "artisan",
+            "state_directory": directory.join("state"),
+            "poll_interval": 1,
+            "http_timeout": 2,
+            "shutdown_grace": 5,
+            "telemetry_ttl": 300,
+            "process_limit": 8,
+            "queen": {"url": broker},
+            "supervisors": {"default": {
+                "connection": "queen", "consumer_group": "workers", "queues": ["high"],
+                "balance": "auto", "strategy": "size", "processes": 1, "min_processes": 1,
+                "max_processes": 2, "target_jobs_per_process": 10, "target_clear_seconds": 60.0,
+                "default_runtime_seconds": 1.0, "balance_cooldown": 1, "balance_max_shift": 1,
+                "sleep": 1, "timeout": 2, "tries": 1, "memory": 128, "backoff": 0,
+                "max_jobs": 0, "max_time": 0, "rest": 0, "force": false
+            }}
+        })
+    }
+
+    /// Write the fake PHP binary `php` of `directory`.
+    #[cfg(unix)]
+    fn write_fake_php(directory: &Path, script: &str) {
+        let php = directory.join("php");
+        fs::write(&php, format!("#!/bin/sh\n{script}")).unwrap();
+        fs::set_permissions(&php, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// A broker that accepts every connection and never answers: its URL,
+    /// and how many connections it accepted so far.
+    fn hung_broker() -> (String, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        (url, accepted)
+    }
+
+    /// A broker that closes every connection at once.
+    fn closing_broker() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || listener.incoming().for_each(drop));
+        url
+    }
+
+    /// Wait for a file named `prefix` and a pid in `directory`; returns the pid.
+    #[cfg(unix)]
+    fn await_pid_file(directory: &Path, prefix: &str, timeout: Duration) -> Option<u32> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let found = fs::read_dir(directory).unwrap().find_map(|entry| {
+                entry
+                    .ok()?
+                    .file_name()
+                    .to_str()?
+                    .strip_prefix(prefix)?
+                    .parse()
+                    .ok()
+            });
+            if found.is_some() || Instant::now() >= deadline {
+                return found;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn stop_supervisor(mut supervisor: Child) {
+        let _ = supervisor.kill();
+        let _ = supervisor.wait();
+    }
+
+    /// A broker that accepts and never answers holds every coordination
+    /// heartbeat for http_timeout per endpoint. A SIGTERM then must reach the
+    /// workers at once: the platform's stop deadline counts from it, and
+    /// shutdown_grace only starts once the workers have their SIGTERM.
+    #[cfg(unix)]
+    #[test]
+    fn a_sigterm_during_a_hung_broker_call_reaches_the_workers_at_once() {
+        let directory = temporary_directory("hung-broker");
+        write_fake_php(
+            &directory,
+            "trap ': > \"terminated.$$\"; exit 0' TERM\n: > \"ready.$$\"\n\
+             while :; do sleep 0.05; done\n",
+        );
+        let (hung, accepted) = hung_broker();
+        let mut document = supervisor_document(&directory, &closing_broker());
+        document["coordination"] = serde_json::json!({
+            "connection": {"urls": [&hung, &hung]},
+            "namespace": "queen-supervisor",
+            "ttl": 60,
+        });
+        let supervisor = start_supervisor(&directory, &document, &[]);
+
+        let worker = await_pid_file(&directory, "ready.", Duration::from_secs(20));
+        // The next heartbeat, from its first endpoint on.
+        let before = accepted.load(Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while accepted.load(Ordering::SeqCst) == before && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let heartbeat_hung = accepted.load(Ordering::SeqCst) > before;
+        // SAFETY: plain signal delivery to the supervisor this test started.
+        unsafe { libc::kill(supervisor.id() as i32, libc::SIGTERM) };
+        let signalled = Instant::now();
+        let terminated = await_pid_file(&directory, "terminated.", Duration::from_secs(15));
+        let delay = signalled.elapsed();
+
+        stop_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+        assert!(worker.is_some(), "the worker never started:\n{log}");
+        assert!(heartbeat_hung, "no heartbeat reached the broker:\n{log}");
+        assert_eq!(
+            terminated, worker,
+            "the worker never had its SIGTERM:\n{log}"
+        );
+        assert!(
+            delay < Duration::from_millis(1_500),
+            "the workers had their SIGTERM {delay:?} after the master's"
+        );
     }
 
     /// The broker calls of a stop (coordination leave, remote status) may

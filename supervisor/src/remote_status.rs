@@ -29,6 +29,7 @@ use crate::{
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) const FORMAT: &str = "queen.supervisor.remote-status/v1";
@@ -115,6 +116,31 @@ impl<'a> RemoteStatusPublisher<'a> {
         });
     }
 
+    /// As publish, from the control loop: nothing is sent once a stop is
+    /// asked for, and a stop abandons a request in flight (see
+    /// unless_stopped). The stop publishes its own state once every worker
+    /// has its SIGTERM.
+    pub(crate) fn publish_unless_stopped(
+        &mut self,
+        client: &reqwest::blocking::Client,
+        document: &serde_json::Value,
+        running: &AtomicBool,
+    ) {
+        if !running.load(Ordering::SeqCst) {
+            return;
+        }
+        let config = self.config;
+        self.publish_at(Instant::now(), document, |body, operations| {
+            let (client, connection, body) =
+                (client.clone(), config.connection.clone(), body.to_vec());
+            crate::unless_stopped(running, move || {
+                send(&client, &connection, &body, operations).map_err(|error| error.to_string())
+            })
+            .unwrap_or_else(|| Err("abandoned: the supervisor is stopping".to_owned()))
+            .map_err(Into::into)
+        });
+    }
+
     fn publish_at<F>(&mut self, now: Instant, document: &serde_json::Value, send: F)
     where
         F: FnOnce(&[u8], usize) -> Result<(), Box<dyn std::error::Error>>,
@@ -168,6 +194,18 @@ pub(crate) fn publish(
 ) {
     if let Some(publisher) = publisher {
         publisher.publish(client, document);
+    }
+}
+
+/// publish_unless_stopped through the optional publisher.
+pub(crate) fn publish_unless_stopped(
+    publisher: &mut Option<RemoteStatusPublisher<'_>>,
+    client: &reqwest::blocking::Client,
+    document: &serde_json::Value,
+    running: &AtomicBool,
+) {
+    if let Some(publisher) = publisher {
+        publisher.publish_unless_stopped(client, document, running);
     }
 }
 
