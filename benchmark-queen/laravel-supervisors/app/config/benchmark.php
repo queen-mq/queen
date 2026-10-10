@@ -156,8 +156,23 @@ if (!is_string($failedPath)
     );
 }
 
+// The routed lanes: cb3's layout. queue.default is the `routed` connection,
+// which only dispatches, to the pool that owns each queue: `queen-<pool>` on
+// Queen lanes, `redis-<pool>` on Horizon lanes. Timeouts, leases (retry_after),
+// tries and partitions are cb3's; the first pool runs BENCH_WORKERS workers,
+// the others one each, over their queues in order, instead of cb3's
+// auto-scaled ranges.
+$routed = filter_var(env('BENCH_ROUTED', false), FILTER_VALIDATE_BOOL);
+$routedPools = [
+    'interactive' => ['queues' => ['default', 'notifications'], 'timeout' => 60, 'retry_after' => 180, 'tries' => 2, 'partitions' => 64, 'processes' => $workers],
+    'batch' => ['queues' => ['compliance', 'ical', 'background'], 'timeout' => 300, 'retry_after' => 360, 'tries' => 1, 'partitions' => 64, 'processes' => 1],
+    'ordered' => ['queues' => ['ordered-sync'], 'timeout' => 60, 'retry_after' => 120, 'tries' => 1, 'partitions' => 1, 'processes' => 1],
+];
+
 return [
     'profile' => $profile,
+    'routed' => $routed,
+    'routed_pools' => $routedPools,
     'connection' => $oneOf('BENCH_CONNECTION', 'redis', ['redis', 'queen']),
     // BENCH_QUEUE remains the one-queue compatibility input. When
     // BENCH_QUEUES is present its first entry becomes the default dispatch

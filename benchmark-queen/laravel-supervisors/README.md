@@ -408,6 +408,37 @@ Every lane also records `configuration.json` after explicitly setting
 lanes, and disabling lease renewal. This prevents caller environment leakage
 and makes those three feature toggles auditable.
 
+### Horizon parity
+
+`scripts/failure_matrix.py` checks each lane against what Laravel documents.
+The scenarios of `--scenarios parity` also record an outcome: the attempt of
+every run and pickup, `failed()` calls and their exception, failed-job rows,
+batch callbacks and states, and times such as a backoff or a release delay.
+Every lane's outcome is compared with the Horizon lane of the same scenario:
+values must be equal, times within the larger of the two tolerances (1.5 s
+where Laravel's Redis queue rounds due times to whole seconds). The
+comparison goes to `parity.md` and `parity.json`; a difference fails the run.
+
+| Scenario | What Horizon and Queen must share |
+| --- | --- |
+| `laravel-parity` | 22 compatibility scenarios: `release()` and middleware releases counted as attempts (`bench:compat-parity`), `tries`, `backoff`, `retryUntil()` fixed at dispatch and taking precedence over `tries`, `maxExceptions`, `failOnTimeout`, `WithoutOverlapping`, `RateLimited`, unique jobs, chains, batches and their callbacks, `failed()` and failed-job rows, also for a queued closure |
+| `job-timeout`, `memory-limit`, `queue-restart` | a job timeout counted as an attempt and retried no sooner than `retry_after`; a worker over `--memory` replaced; every worker replaced after `queue:restart` |
+| `stop-short`, `stop-lease` | SIGTERM with a job in flight: shorter than the lease, and longer, where only renewals during the drain keep the lease while a second replica waits |
+| `routed-parity` | cb3's layout: `queue.default` is `routed` ([`RoutedQueue`](app/app/Queue/RoutedQueue.php)), which only dispatches, to `queen-<pool>` (or `redis-<pool>`) with the pool's lease, partitions and `after_commit`; the routing scenarios (`bench:compat-routed`), then the 22 scenarios, all dispatched through it |
+
+`--prefork on,off` runs every Queen profile with prefork on and off; the
+second lane of a profile is named `<profile>-prefork-off`. `--only` limits a
+compatibility lane to some of its scenarios. `BENCH_BROKER_IMAGE` runs a
+released broker, such as `ghcr.io/queen-mq/queen:2.0.4`, instead of the local
+Raft build:
+
+```console
+BENCH_APP_IMAGE=queen-laravel-supervisor-bench:parity \
+BENCH_BROKER_IMAGE=ghcr.io/queen-mq/queen:2.0.4 \
+python3 scripts/failure_matrix.py --output results/parity-$(date -u +%Y%m%dT%H%M%SZ) \
+  --scenarios parity --profiles horizon,queen-php,queen-rust --prefork on,off
+```
+
 ## Requirements
 
 - Docker Engine with Compose v2, profiles, health-condition dependencies and

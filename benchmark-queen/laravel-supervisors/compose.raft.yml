@@ -12,6 +12,9 @@ x-app-environment: &app-environment
   BENCH_DB_DATABASE: ${BENCH_DB_DATABASE:-:memory:}
   # Several supervisor replicas share one target through the broker.
   QUEEN_SUPERVISOR_COORDINATION: ${BENCH_QUEEN_COORDINATION:-false}
+  # queue.default is a connection that only dispatches, to one connection
+  # per worker pool, as in cb3 (config/benchmark.php).
+  BENCH_ROUTED: ${BENCH_ROUTED:-false}
   SESSION_DRIVER: array
   BENCH_PROFILE: ${BENCH_PROFILE:-fixed}
   BENCH_QUEUE: ${BENCH_QUEUE:-benchmark}
@@ -131,8 +134,9 @@ services:
 
   broker:
     # Raft storage: one node on a local data directory, no external database.
-    # Built outside this compose file from the raft branch.
-    image: queen-laravel-supervisor-broker:raft
+    # Built outside this compose file from the raft branch; BENCH_BROKER_IMAGE
+    # runs a released server instead, such as ghcr.io/queen-mq/queen:2.0.4.
+    image: ${BENCH_BROKER_IMAGE:-queen-laravel-supervisor-broker:raft}
     profiles: [queen-php, queen-rust]
     environment:
       QUEEN_RAFT_DIR: /var/lib/queen/data

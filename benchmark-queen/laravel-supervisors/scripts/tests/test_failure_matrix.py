@@ -96,6 +96,17 @@ class FailureMatrixChecksTest(unittest.TestCase):
         self.assertTrue(all(c.passed for c in lenient))
         self.assertIn("000000", lenient[2].detail)
 
+    def test_a_job_outcome_has_its_runs_its_failure_and_its_row(self) -> None:
+        raw = report({"000000": ["started", "threw", "started", "threw", "failed_hook"], "000001": ["started", "completed"]},
+                     failed=["000000"])
+        raw["jobs"]["000000"]["events"][-1][3] = "Illuminate\\Queue\\TimeoutExceededException"
+        jobs = matrix.Jobs(raw)
+
+        self.assertEqual({"runs": 2, "completed": 0, "failed": 1, "failed_with": "Illuminate\\Queue\\TimeoutExceededException",
+                          "failed_row": True}, jobs.outcome("000000"))
+        self.assertEqual({"runs": 1, "completed": 1, "failed": 0, "failed_with": None, "failed_row": False},
+                         jobs.outcome("000001"))
+
     def test_the_summary_lists_failed_checks_and_errors(self) -> None:
         text = matrix.summary([
             {"scenario": "a", "profile": "queen", "passed": True, "checks": [{"name": "x", "passed": True}]},
@@ -131,17 +142,116 @@ class FailureMatrixChecksTest(unittest.TestCase):
         self.assertTrue(matrix.soak_drained(report(93, {}), 93))
         self.assertTrue(matrix.soak_drained(report(93, {"late-0000001": "completed 2 times"}), 93))
 
-    def test_the_compat_lane_runs_every_scenario_of_both_commands(self) -> None:
+    def test_the_compat_lanes_run_every_scenario_of_their_commands(self) -> None:
         commands = Path(__file__).resolve().parents[2] / "app" / "app" / "Console" / "Commands"
 
         for scenarios, php in ((matrix.COMPAT_SCENARIOS, "CompatCommand.php"),
-                               (matrix.COMPAT_MORE_SCENARIOS, "CompatMoreCommand.php")):
+                               (matrix.COMPAT_MORE_SCENARIOS, "CompatMoreCommand.php"),
+                               (matrix.COMPAT_PARITY_SCENARIOS, "CompatParityCommand.php"),
+                               (matrix.COMPAT_ROUTED_SCENARIOS, "CompatRoutedCommand.php")):
             constant = re.search(r"SCENARIOS = \[(.*?)\];", (commands / php).read_text(), re.S)
             assert constant is not None
             self.assertEqual(list(scenarios), re.findall(r"'([a-z-]+)'", constant.group(1)), php)
-        self.assertFalse(set(matrix.COMPAT_SCENARIOS) & set(matrix.COMPAT_MORE_SCENARIOS))
+        names = [*matrix.COMPAT_SCENARIOS, *matrix.COMPAT_MORE_SCENARIOS, *matrix.COMPAT_PARITY_SCENARIOS,
+                 *matrix.COMPAT_ROUTED_SCENARIOS]
+        self.assertEqual(len(names), len(set(names)), "an outcome is kept by scenario name")
         self.assertEqual(("prune-failed", "fork-in-job"), matrix.COMPAT_MORE_SCENARIOS[-2:],
                          "prune-failed empties the failed-job store; fork-in-job can leave retries behind")
+
+    def test_the_parity_runs_name_known_scenarios_and_never_empty_the_failed_store(self) -> None:
+        known = {"bench:compat": matrix.COMPAT_SCENARIOS, "bench:compat-more": matrix.COMPAT_MORE_SCENARIOS,
+                 "bench:compat-parity": matrix.COMPAT_PARITY_SCENARIOS,
+                 "bench:compat-routed": matrix.COMPAT_ROUTED_SCENARIOS}
+
+        for command, name in matrix.ROUTED_RUNS:
+            self.assertIn(name, known[command], f"{command} {name}")
+        self.assertNotIn(("bench:compat-more", "prune-failed"), matrix.PARITY_RUNS)
+        self.assertNotIn(("bench:compat-more", "fork-in-job"), matrix.PARITY_RUNS)
+        self.assertEqual(set(matrix.PARITY_SCENARIOS), set(matrix.PARITY_SCENARIOS) & {s.name for s in matrix.SCENARIOS})
+
+
+class LaneProfilesTest(unittest.TestCase):
+    def test_prefork_off_adds_a_named_variant_of_each_queen_profile_and_none_of_horizon(self) -> None:
+        profiles = matrix.lane_profiles(["horizon", "queen-php", "queen-rust"], ["on", "off"])
+
+        self.assertEqual(["horizon", "queen-php", "queen-php-prefork-off", "queen-rust", "queen-rust-prefork-off"],
+                         [p.name for p in profiles])
+        off = {p.name: p for p in profiles}["queen-rust-prefork-off"]
+        self.assertEqual("false", off.env["BENCH_QUEEN_PREFORK"])
+        self.assertEqual("queen-rust", off.engine)
+        self.assertEqual(matrix.PROFILES["queen-rust"].env["QUEEN_PREFETCH"], off.env["QUEEN_PREFETCH"])
+
+    def test_prefork_on_keeps_the_historical_profiles(self) -> None:
+        profiles = matrix.lane_profiles(["horizon", "queen-php"], ["on"])
+
+        self.assertEqual([matrix.PROFILES["horizon"], matrix.PROFILES["queen-php"]], profiles)
+
+    def test_a_lane_sets_prefork_on_unless_its_profile_turns_it_off(self) -> None:
+        on, off = matrix.lane_profiles(["queen-php"], ["on", "off"])
+
+        self.assertEqual("true", matrix.Lane("s", on, {}, Path("/tmp")).env["BENCH_QUEEN_PREFORK"])
+        self.assertEqual("false", matrix.Lane("s", off, {}, Path("/tmp")).env["BENCH_QUEEN_PREFORK"])
+
+    def test_an_engine_setting_applies_to_that_engine_only(self) -> None:
+        scenario = next(s for s in matrix.SCENARIOS if s.name == "stop-lease")
+
+        self.assertEqual("90", scenario.env_for(matrix.PROFILES["horizon"])["BENCH_RETRY_AFTER"])
+        self.assertEqual("30", scenario.env_for(matrix.PROFILES["queen-rust"])["BENCH_RETRY_AFTER"])
+
+
+def outcome(same: dict | None = None, near: dict | None = None) -> dict:
+    return {"same": same or {}, "near": {k: {"value": v, "tolerance": t} for k, (v, t) in (near or {}).items()}}
+
+
+class ParityTest(unittest.TestCase):
+    def test_equal_values_and_times_within_tolerance_are_the_same(self) -> None:
+        horizon = outcome({"job p1": {"runs": [1, 2, 3]}, "checks": {"a": True}}, {"gap": (1.81, 1.5)})
+        queen = outcome({"job p1": {"runs": [1, 2, 3]}, "checks": {"a": True}}, {"gap": (1.02, 1.5)})
+
+        self.assertEqual(([], []), matrix.compare_outcomes(horizon, queen))
+
+    def test_another_value_a_time_out_of_tolerance_or_a_failed_check_differs(self) -> None:
+        horizon = outcome({"job j1": {"pickups": [1, 2, 3, 4]}, "checks": {"a": True}}, {"gap": (5.0, 1.5)})
+        queen = outcome({"job j1": {"pickups": [1, 2, 3]}, "checks": {"a": False}}, {"gap": (0.1, 1.5)})
+
+        divergences, _ = matrix.compare_outcomes(horizon, queen)
+
+        self.assertEqual(3, len(divergences), divergences)
+        self.assertTrue(any(d.startswith("job j1: Horizon") for d in divergences))
+        self.assertTrue(any("Horizon passes, this lane fails" in d for d in divergences))
+        self.assertTrue(any(d.startswith("gap: Horizon 5.0 s, this lane 0.1 s") for d in divergences))
+
+    def test_a_check_only_one_backend_runs_is_a_note_but_a_missing_value_differs(self) -> None:
+        horizon = outcome({"checks": {"a": True}, "batch state": {"finished": True}})
+        queen = outcome({"checks": {"a": True, "queen: one partition": True}})
+
+        divergences, notes = matrix.compare_outcomes(horizon, queen)
+
+        self.assertEqual(["batch state: not recorded here"], divergences)
+        self.assertEqual(["checked on one side only: queen: one partition"], notes)
+
+    def test_php_empty_maps_compare_as_empty(self) -> None:
+        self.assertEqual(([], []), matrix.compare_outcomes({"same": [], "near": []}, {"same": {}, "near": []}))
+
+    def test_each_lane_is_compared_with_the_horizon_lane_of_its_scenario(self) -> None:
+        same = {"x": outcome({"v": 1})}
+        results = [
+            {"scenario": "s", "profile": "horizon", "outcome": same},
+            {"scenario": "s", "profile": "queen-php", "outcome": same},
+            {"scenario": "s", "profile": "queen-rust-prefork-off", "outcome": {"x": outcome({"v": 2})}},
+            {"scenario": "s", "profile": "queen-rust", "error": "RuntimeError: boom"},
+            {"scenario": "t", "profile": "queen-php", "outcome": same},
+        ]
+
+        rows = {(r["scenario"], r["profile"]): r for r in matrix.parity(results)}
+
+        self.assertEqual("same", rows[("s", "queen-php")]["status"])
+        self.assertEqual("differs", rows[("s", "queen-rust-prefork-off")]["status"])
+        self.assertEqual("missing", rows[("s", "queen-rust")]["status"], "a lane that crashed has no outcome")
+        self.assertEqual("no Horizon lane", rows[("t", "queen-php")]["status"])
+        self.assertNotIn(("s", "horizon"), rows)
+        self.assertIn("| s | x | queen-rust-prefork-off | differs | v: Horizon 1, this lane 2 |",
+                      matrix.parity_markdown(matrix.parity(results)))
 
 
 if __name__ == "__main__":

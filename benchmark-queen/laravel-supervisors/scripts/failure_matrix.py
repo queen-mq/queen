@@ -4,13 +4,19 @@ failure they are meant to survive, each checked for lost jobs, duplicate
 completions and where final failures land.
 
 Usage:
-  failure_matrix.py --output DIR [--scenarios a,b] [--profiles horizon,queen-php,queen-rust] [--build]
+  failure_matrix.py --output DIR [--scenarios a,b] [--profiles horizon,queen-php,queen-rust]
+                    [--prefork on,off] [--only item,item] [--build]
 
 Each lane is one scenario on one profile, on a fresh Compose project from
 compose.raft.yml (Redis for Horizon, one Raft broker node for Queen). Jobs are
 `App\\Jobs\\FailureMatrixJob`; `bench:matrix-report` returns every attempt, the
 Laravel failed-job rows and the broker's dead-letter entries. A lane writes
 `<output>/<scenario>/<profile>.json`; the run writes `<output>/summary.md`.
+
+Scenarios that record an outcome are also held to the Horizon lane of the same
+scenario: the same attempts, failed-job rows and callbacks, and times within a
+tolerance. The run writes that comparison to `<output>/parity.md` and
+`parity.json`, and fails when a Queen lane differs.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parents[1]
@@ -64,6 +70,24 @@ PROFILES = {
     }, "artisan queen:supervise"),
 }
 DEFAULT_PROFILES = ("horizon", "queen-php", "queen-rust")
+# The Horizon lane every other lane of a scenario is compared with.
+REFERENCE = "horizon"
+PREFORK_MODES = ("on", "off")
+
+
+def lane_profiles(names: list[str], prefork: list[str]) -> list[Profile]:
+    """Each Queen profile once per prefork mode; Horizon, which has no prefork, once.
+    With prefork on a profile keeps its name, so earlier runs stay comparable."""
+    profiles: list[Profile] = []
+    for name in names:
+        profile = PROFILES[name]
+        if profile.connection != "queen":
+            profiles.append(profile)
+            continue
+        for mode in prefork:
+            profiles.append(profile if mode == "on" else replace(
+                profile, name=f"{profile.name}-prefork-off", env={**profile.env, "BENCH_QUEEN_PREFORK": "false"}))
+    return profiles
 
 
 @dataclass
@@ -114,6 +138,17 @@ class Jobs:
         spans = sorted(self.attempts(job))
         return any(end is not None and later[0] < end for (_, end), later in zip(spans, spans[1:]))
 
+    def failed_with(self, job: str) -> str | None:
+        """The exception failed() received, by class name."""
+        return next((e[3] for e in self.raw["jobs"].get(job, {}).get("events", []) if e[0] == "failed_hook"), None)
+
+    def outcome(self, job: str) -> dict:
+        """What the Horizon lane and a Queen lane must share about one job."""
+        store = self.failed_store()
+        return {"runs": self.count(job, "started"), "completed": self.count(job, "completed"),
+                "failed": self.count(job, "failed_hook"), "failed_with": self.failed_with(job),
+                "failed_row": None if store is None else job in store}
+
     def failed_store(self) -> list[str] | None:
         store = self.raw.get("failed_store", {})
         return store.get("job_ids") if store.get("available") else None
@@ -126,7 +161,8 @@ class Jobs:
 class Lane:
     """One Compose project: one engine, its backend and the producer."""
 
-    def __init__(self, scenario: str, profile: Profile, env: dict[str, str], output: Path) -> None:
+    def __init__(self, scenario: str, profile: Profile, env: dict[str, str], output: Path,
+                 only: frozenset[str] = frozenset()) -> None:
         token = uuid.uuid4().hex[:8]
         self.profile = profile
         self.project = f"qfm-{scenario}-{profile.name}-{token}".lower()
@@ -137,6 +173,11 @@ class Lane:
         self.started = time.monotonic()
         # Scenario-specific observations, saved with the lane's result.
         self.extra: dict = {}
+        # What parity() compares with the Horizon lane, per item: a compatibility
+        # scenario's name, or this scenario's. Each is {"same": {...}, "near": {...}}.
+        self.outcome: dict[str, dict] = {}
+        # The compatibility scenarios to run, when not all of them (--only).
+        self.only = only
         self.env = {
             "BENCH_RESULTS_VOLUME": self.volume,
             "BENCH_PROFILE": "fixed",
@@ -395,10 +436,20 @@ def job_timeout(lane: Lane) -> list[Check]:
     jobs = lane.wait_until(lambda r: all(r.count(j, "failed_hook") for j in expected), 240, "all failed")
     jobs = lane.settle(5)
     workers_after = set(lane.wait_workers(int(lane.env["BENCH_WORKERS"])))
+    replaced = not workers_after & workers_before or not workers_before
+    # The killed attempt holds its reservation (Redis) or lease (Queen) until
+    # retry_after: Laravel retries it no sooner. Later is the engine's pace.
+    lease = int(lane.env["BENCH_RETRY_AFTER"])
+    retried_after_lease = all(starts[1] - starts[0] >= lease - 2 for j in expected
+                              if len(starts := jobs.times(j, "started")) > 1)
+    lane.outcome["job-timeout"] = {"same": {
+        **{f"job {j}": jobs.outcome(j) for j in expected},
+        "timed-out workers replaced": replaced,
+        f"retried no sooner than retry_after ({lease} s)": retried_after_lease,
+    }, "near": {}}
     return [
         every(jobs, expected, "two attempts, both cut short", lambda j: jobs.count(j, "started") == 2),
-        Check("timed-out workers replaced", not workers_after & workers_before or not workers_before,
-              f"before {sorted(workers_before)} after {sorted(workers_after)}"),
+        Check("timed-out workers replaced", replaced, f"before {sorted(workers_before)} after {sorted(workers_after)}"),
         *failed_finally(lane, jobs, expected),
     ]
 
@@ -410,9 +461,13 @@ def memory_limit(lane: Lane) -> list[Check]:
     jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 180, "all completed")
     jobs = lane.settle(5)
     pids = {pid for job in expected for pid in jobs.raw["jobs"].get(job, {}).get("pids", [])}
+    replaced = len(pids) > int(lane.env["BENCH_WORKERS"])
+    lane.outcome["memory-limit"] = {"same": {
+        **{f"job {j}": jobs.outcome(j) for j in expected},
+        "a worker over its memory limit was replaced": replaced,
+    }, "near": {}}
     return [
-        Check("a worker over its memory limit was replaced", len(pids) > int(lane.env["BENCH_WORKERS"]),
-              f"{len(pids)} distinct worker PIDs for 6 jobs"),
+        Check("a worker over its memory limit was replaced", replaced, f"{len(pids)} distinct worker PIDs for 6 jobs"),
         *completed_once(jobs, expected),
     ]
 
@@ -469,8 +524,40 @@ def stop_short(lane: Lane) -> list[Check]:
     lane.restart_app()
     jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 120, "all completed")
     jobs = lane.settle(10)
+    lane.outcome["stop-short"] = {"same": {f"job {j}": jobs.outcome(j) for j in expected}, "near": {}}
     return [
         every(jobs, expected, "finished during the grace, not run again", lambda j: jobs.count(j, "started") == 1),
+        *completed_once(jobs, expected),
+    ]
+
+
+def stop_lease(lane: Lane) -> list[Check]:
+    """A deploy (SIGTERM) right after a job started that outlives its lease: on Queen, retry_after
+    30 s for a job of 36 s, so only renewals during the drain keep the lease, until the job ends
+    within shutdown_grace (40 s). A second replica is idle: if the lease lapses, it takes the job,
+    which then runs twice. Horizon cannot renew, so its lane runs with a retry_after longer than
+    the job, as a Horizon deployment must."""
+    expected = ids(0, 1)
+    lane.dispatch("ok", 1, sleep_ms=36_000, timeout=60, tries=3)
+    jobs = lane.wait_until(lambda r: r.count("000000", "started"), 60, "the job started")
+    hosts = jobs.raw["jobs"].get("000000", {}).get("hosts", [])
+    replicas = lane.containers(lane.profile.engine)
+    # A container's host name is the start of its id.
+    victim = next((c for c in replicas if hosts and hosts[0] and c.startswith(hosts[0])), "")
+    if not victim:
+        raise RuntimeError(f"no replica runs the job: hosts {hosts}, replicas {replicas}")
+    lane.docker("stop", "--time", "90", victim)
+    lane.note(f"replica {victim[:12]} stopped (SIGTERM, 90 s grace)")
+    lane.docker("start", victim)
+    lane.wait_healthy()
+    lane.note(f"replica {victim[:12]} started again")
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 120, "all completed")
+    jobs = lane.settle(10)
+    runs = jobs.raw["jobs"].get("000000", {})
+    lane.outcome["stop-lease"] = {"same": {f"job {j}": jobs.outcome(j) for j in expected}, "near": {}}
+    return [
+        every(jobs, expected, "finished during the drain, not run again", lambda j: jobs.count(j, "started") == 1),
+        Check("ran in one replica only", len(runs.get("hosts", [])) == 1, f"hosts {runs.get('hosts')}"),
         *completed_once(jobs, expected),
     ]
 
@@ -586,6 +673,26 @@ COMPAT_MORE_SCENARIOS = (
     "unique-until-processing", "missing-models", "batch-allow-failures", "batch-cancel", "retry-batch",
     "delay-datetime", "release-delay", "queue-monitor", "prune-failed", "fork-in-job",
 )
+# `bench:compat-parity`: how Laravel counts attempts, compared attempt by attempt with Horizon.
+COMPAT_PARITY_SCENARIOS = ("release-attempts", "retry-until-precedence", "overlap-attempts", "rate-limited-attempts")
+# `bench:compat-routed`: the routed default connection; only on a routed lane.
+COMPAT_ROUTED_SCENARIOS = (
+    "route-push", "route-later", "route-bulk", "route-batch", "route-chain", "route-after-commit", "route-pop",
+)
+# The compatibility scenarios held to the Horizon lane: attempts and release(), retryUntil,
+# maxExceptions, timeouts, WithoutOverlapping and RateLimited, unique jobs, batches and their
+# callbacks, chains, failed() and failed-job rows, also of a queued closure. None empties the
+# failed-job store, and none leaves a worker dying.
+PARITY_RUNS = (
+    *(("bench:compat", name) for name in (
+        "chain", "chain-failure", "batch", "batch-failure", "unique", "without-overlapping", "rate-limited",
+        "backoff-array", "retry-until", "max-exceptions", "fail-on-timeout", "after-commit", "events",
+        "failed-commands")),
+    *(("bench:compat-parity", name) for name in COMPAT_PARITY_SCENARIOS),
+    *(("bench:compat-more", name) for name in (
+        "queued-closure", "unique-until-processing", "batch-allow-failures", "release-delay")),
+)
+ROUTED_RUNS = (*(("bench:compat-routed", name) for name in COMPAT_ROUTED_SCENARIOS), *PARITY_RUNS)
 
 
 def replicas_kill(lane: Lane) -> list[Check]:
@@ -744,13 +851,14 @@ def compat_database(lane: Lane) -> None:
                  f"touch {COMPAT_DATABASE} && php artisan --no-ansi bench:compat setup")
 
 
-def laravel_compat(lane: Lane) -> list[Check]:
-    """Laravel's queue features, each checked by `bench:compat` or `bench:compat-more`
-    inside the supervisor's container, beside its workers."""
+def run_compat(lane: Lane, runs: tuple[tuple[str, str], ...] | list[tuple[str, str]]) -> list[Check]:
+    """Compatibility scenarios, each run by its artisan command inside the supervisor's
+    container, beside its workers. Each one's checks join the lane's; its outcome is
+    kept for parity()."""
     checks: list[Check] = []
-    runs = [("bench:compat", name) for name in COMPAT_SCENARIOS]
-    runs += [("bench:compat-more", name) for name in COMPAT_MORE_SCENARIOS]
     for command, name in runs:
+        if lane.only and name not in lane.only:
+            continue
         result = lane.app_artisan(command, name, f"--run-id={lane.run_id}-{name}", check=False)
         lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
         try:
@@ -760,8 +868,38 @@ def laravel_compat(lane: Lane) -> list[Check]:
             lane.note(f"{name}: no result")
             continue
         lane.extra[name] = data
+        lane.outcome[name] = data.get("outcome") or {}
         checks.extend(Check(f"{name}: {c['name']}", c["passed"], c["detail"]) for c in data["checks"])
         lane.note(f"{name}: {'pass' if data['passed'] else 'FAIL'}")
+    return checks
+
+
+def laravel_compat(lane: Lane) -> list[Check]:
+    """Every Laravel queue feature of `bench:compat`, `bench:compat-parity` and `bench:compat-more`."""
+    return run_compat(lane, [
+        *(("bench:compat", name) for name in COMPAT_SCENARIOS),
+        *(("bench:compat-parity", name) for name in COMPAT_PARITY_SCENARIOS),
+        *(("bench:compat-more", name) for name in COMPAT_MORE_SCENARIOS),
+    ])
+
+
+def laravel_parity(lane: Lane) -> list[Check]:
+    """The compatibility scenarios that parity() holds to Horizon (PARITY_RUNS)."""
+    return run_compat(lane, PARITY_RUNS)
+
+
+ROUTED_POP_ERROR = "The routed queue connection only dispatches"
+
+
+def routed_parity(lane: Lane) -> list[Check]:
+    """cb3's layout: queue.default only dispatches, to one connection per pool. The routing
+    scenarios, then PARITY_RUNS, all dispatched through it. A worker that popped from the
+    router would log its LogicException, and the supervisor would restart it."""
+    checks = run_compat(lane, ROUTED_RUNS)
+    logs = lane.compose("logs", "--no-color", lane.profile.engine, check=False, timeout=120).stdout
+    pops = logs.count(ROUTED_POP_ERROR)
+    lane.outcome["routed-logs"] = {"same": {"workers that popped from the routed connection": pops}, "near": {}}
+    checks.append(Check("no worker popped from the routed connection", pops == 0, f"{pops} LogicExceptions in the logs"))
     return checks
 
 
@@ -792,9 +930,13 @@ def queue_restart(lane: Lane) -> list[Check]:
     servers = {pid for pid, _, args in after if "queen:fork-server" in args}
     lane.extra["queue_restart"] = {"old_workers": sorted(old_workers), "old_fork_servers": sorted(old_servers),
                                    "workers": workers, "fork_servers": sorted(servers)}
+    replaced = bool(workers) and not set(workers) & old_workers
+    lane.outcome["queue-restart"] = {"same": {
+        **{f"job {j}": jobs.outcome(j) for j in first + later},
+        "every worker was replaced": replaced,
+    }, "near": {}}
     checks = [
-        Check("every worker was replaced", bool(workers) and not set(workers) & old_workers,
-              f"before {sorted(old_workers)}, after {sorted(workers)}"),
+        Check("every worker was replaced", replaced, f"before {sorted(old_workers)}, after {sorted(workers)}"),
         *completed_once(jobs, first + later),
     ]
     if old_servers:
@@ -816,6 +958,17 @@ class Scenario:
     env: dict[str, str] = field(default_factory=dict)
     replicas: int = 1
     prepare: Callable[[Lane], None] | None = None
+    # Settings for one engine only, over `env`: where Horizon needs another setting to run the
+    # same job safely, such as a retry_after longer than a job it cannot renew.
+    engine_env: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def env_for(self, profile: Profile) -> dict[str, str]:
+        return {**self.env, **self.engine_env.get(profile.engine, {})}
+
+
+# The compatibility lanes share a cache and a database across the container's processes.
+COMPAT_ENV = {"BENCH_CACHE_STORE": "database", "BENCH_DB_DATABASE": COMPAT_DATABASE}
+THREE_WORKERS = {"BENCH_WORKERS": "3", "BENCH_MIN_WORKERS": "3", "BENCH_MAX_WORKERS": "3"}
 
 
 SCENARIOS = [
@@ -841,25 +994,35 @@ SCENARIOS = [
     Scenario("replicas-rolling", replicas_rolling, {"BENCH_QUEEN_COORDINATION": "true"}, replicas=2),
     Scenario("soak", soak, {"BENCH_WORKERS": "8", "BENCH_MIN_WORKERS": "8", "BENCH_MAX_WORKERS": "8"}),
     # queue:work reads the restart signal from the cache, which every process must share.
-    Scenario("queue-restart", queue_restart, {
-        "BENCH_CACHE_STORE": "database", "BENCH_DB_DATABASE": COMPAT_DATABASE,
-    }, prepare=compat_database),
-    Scenario("laravel-compat", laravel_compat, {
-        "BENCH_CACHE_STORE": "database", "BENCH_DB_DATABASE": COMPAT_DATABASE,
-        "BENCH_WORKERS": "3", "BENCH_MIN_WORKERS": "3", "BENCH_MAX_WORKERS": "3",
-    }, prepare=compat_database),
+    Scenario("queue-restart", queue_restart, COMPAT_ENV, prepare=compat_database),
+    Scenario("laravel-compat", laravel_compat, {**COMPAT_ENV, **THREE_WORKERS}, prepare=compat_database),
+    # One worker per replica, so the job's replica can be stopped while the other waits idle.
+    # A pool timeout of 25 s gives the Queen supervisor a shutdown_grace of 40 s.
+    Scenario("stop-lease", stop_lease, {
+        "BENCH_QUEEN_COORDINATION": "true", "BENCH_TIMEOUT": "25", "BENCH_RETRY_AFTER": "30",
+        "BENCH_WORKERS": "1", "BENCH_MIN_WORKERS": "1", "BENCH_MAX_WORKERS": "1",
+    }, replicas=2, engine_env={"horizon": {"BENCH_RETRY_AFTER": "90"}}),
+    Scenario("laravel-parity", laravel_parity, {**COMPAT_ENV, **THREE_WORKERS}, prepare=compat_database),
+    # cb3's layout: every dispatch through the routed default connection to the pools'.
+    Scenario("routed-parity", routed_parity, {**COMPAT_ENV, **THREE_WORKERS, "BENCH_ROUTED": "true"},
+             prepare=compat_database),
 ]
+# The scenarios that record an outcome for parity(), besides the compatibility runs.
+PARITY_SCENARIOS = ("job-timeout", "memory-limit", "stop-short", "stop-lease", "queue-restart",
+                    "laravel-parity", "routed-parity")
 
 
-def run_lane(scenario: Scenario, profile: Profile, output: Path) -> dict:
-    lane = Lane(scenario.name, profile, scenario.env, output)
+def run_lane(scenario: Scenario, profile: Profile, output: Path, only: frozenset[str] = frozenset()) -> dict:
+    lane = Lane(scenario.name, profile, scenario.env_for(profile), output, only)
     print(f"\n== {scenario.name} / {profile.name} ({lane.project})", flush=True)
-    result: dict = {"scenario": scenario.name, "profile": profile.name, "run_id": lane.run_id}
+    result: dict = {"scenario": scenario.name, "profile": profile.name, "run_id": lane.run_id,
+                    "settings": {key: lane.env[key] for key in sorted(LANE_SETTINGS) if key in lane.env}}
     try:
         lane.up(scenario.replicas, scenario.prepare)
         checks = scenario.run(lane)
         result["checks"] = [check.__dict__ for check in checks]
         result["passed"] = all(check.passed for check in checks)
+        result["outcome"] = lane.outcome
         result["report"] = lane.report().raw
         result["extra"] = lane.extra
     except Exception as error:  # a lane that cannot finish is a failed lane, not a crashed matrix
@@ -892,29 +1055,127 @@ def summary(results: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# The settings a lane's result records, to tell its prefork mode, lease and layout apart.
+LANE_SETTINGS = ("BENCH_QUEEN_PREFORK", "BENCH_ROUTED", "BENCH_RETRY_AFTER", "BENCH_TIMEOUT", "BENCH_WORKERS",
+                 "QUEEN_PREFETCH", "BENCH_QUEEN_LEASE_SERVICE", "BENCH_QUEEN_COORDINATION")
+
+
+def as_map(value: object) -> dict:
+    """PHP encodes an empty map as a list."""
+    return value if isinstance(value, dict) else {}
+
+
+def compare_outcomes(reference: dict, candidate: dict) -> tuple[list[str], list[str]]:
+    """How a lane's outcome differs from the Horizon lane's: values of `same` must be equal,
+    times of `near` within the larger tolerance. Checks are compared where both lanes ran
+    them; a check that only one backend has (a Queen partition, say) is a note, not a
+    divergence. Returns the divergences and the notes."""
+    divergences: list[str] = []
+    notes: list[str] = []
+    ours, theirs = as_map(reference.get("same")), as_map(candidate.get("same"))
+    for key in sorted(set(ours) | set(theirs)):
+        if key == "checks":
+            mine, other = as_map(ours.get(key)), as_map(theirs.get(key))
+            for name in sorted(set(mine) & set(other)):
+                if mine[name] != other[name]:
+                    divergences.append(f"check '{name}': Horizon {'passes' if mine[name] else 'fails'}, "
+                                       f"this lane {'passes' if other[name] else 'fails'}")
+            if set(mine) ^ set(other):
+                notes.append("checked on one side only: " + "; ".join(sorted(set(mine) ^ set(other))))
+        elif key not in ours or key not in theirs:
+            divergences.append(f"{key}: {'not recorded on Horizon' if key not in ours else 'not recorded here'}")
+        elif ours[key] != theirs[key]:
+            divergences.append(f"{key}: Horizon {json.dumps(ours[key])}, this lane {json.dumps(theirs[key])}")
+    ours, theirs = as_map(reference.get("near")), as_map(candidate.get("near"))
+    for key in sorted(set(ours) | set(theirs)):
+        if key not in ours or key not in theirs:
+            divergences.append(f"{key}: {'not recorded on Horizon' if key not in ours else 'not recorded here'}")
+            continue
+        tolerance = max(float(ours[key]["tolerance"]), float(theirs[key]["tolerance"]))
+        if abs(float(ours[key]["value"]) - float(theirs[key]["value"])) > tolerance:
+            divergences.append(f"{key}: Horizon {ours[key]['value']} s, this lane {theirs[key]['value']} s "
+                               f"(tolerance {tolerance} s)")
+    return divergences, notes
+
+
+def parity(results: list[dict]) -> list[dict]:
+    """Every outcome item of every lane, against the same item of the Horizon lane of its
+    scenario. A lane that ended in an error has no outcome: its items read `missing`."""
+    rows = []
+    for scenario in dict.fromkeys(r["scenario"] for r in results):
+        lanes = [r for r in results if r["scenario"] == scenario]
+        reference = next((r for r in lanes if r["profile"] == REFERENCE), None)
+        for lane in lanes:
+            if lane is reference:
+                continue
+            items = as_map(lane.get("outcome"))
+            expected = as_map(reference.get("outcome")) if reference else {}
+            for item in sorted(set(items) | set(expected)):
+                row = {"scenario": scenario, "item": item, "profile": lane["profile"], "divergences": [], "notes": []}
+                if reference is None:
+                    row["status"] = "no Horizon lane"
+                elif item not in expected or item not in items:
+                    row["status"] = "missing"
+                    row["divergences"] = [f"not recorded {'on Horizon' if item not in expected else 'here'}"]
+                else:
+                    row["divergences"], row["notes"] = compare_outcomes(expected[item], items[item])
+                    row["status"] = "differs" if row["divergences"] else "same"
+                rows.append(row)
+    return rows
+
+
+def parity_markdown(rows: list[dict]) -> str:
+    lines = ["| Scenario | Item | Profile | Parity with Horizon | Divergences |", "| --- | --- | --- | --- | --- |"]
+    for row in rows:
+        detail = "; ".join(row["divergences"]).replace("|", "\\|")
+        lines.append(f"| {row['scenario']} | {row['item']} | {row['profile']} | {row['status']} | {detail} |")
+    return "\n".join(lines) + "\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--scenarios", default=",".join(s.name for s in SCENARIOS))
+    parser.add_argument("--scenarios", default=",".join(s.name for s in SCENARIOS),
+                        help="comma-separated scenario names, or `parity` for the scenarios held to Horizon")
     parser.add_argument("--profiles", default=",".join(DEFAULT_PROFILES))
+    parser.add_argument("--prefork", default="on",
+                        help="on, off or on,off: the Queen profiles' prefork modes; with off a profile is "
+                             "named <profile>-prefork-off (default: on)")
+    parser.add_argument("--only", default="",
+                        help="run only these compatibility scenarios of a compatibility lane, by name")
     parser.add_argument("--build", action="store_true", help="rebuild the application image first")
     args = parser.parse_args()
 
-    wanted = args.scenarios.split(",")
-    unknown = set(wanted) - {s.name for s in SCENARIOS} | set(args.profiles.split(",")) - set(PROFILES)
+    wanted = list(PARITY_SCENARIOS) if args.scenarios == "parity" else args.scenarios.split(",")
+    prefork = args.prefork.split(",")
+    only = frozenset(filter(None, args.only.split(",")))
+    known_items = {*COMPAT_SCENARIOS, *COMPAT_MORE_SCENARIOS, *COMPAT_PARITY_SCENARIOS, *COMPAT_ROUTED_SCENARIOS}
+    unknown = (set(wanted) - {s.name for s in SCENARIOS} | set(args.profiles.split(",")) - set(PROFILES)
+               | set(prefork) - set(PREFORK_MODES) | only - known_items)
     if unknown:
-        parser.error(f"unknown scenario or profile: {', '.join(sorted(unknown))}")
+        parser.error(f"unknown scenario, profile, prefork mode or compatibility scenario: {', '.join(sorted(unknown))}")
     if args.build:
         subprocess.run(["docker", "compose", "--file", str(COMPOSE_FILE), "--profile", "tools", "build", "producer"],
                        check=True)
     args.output.mkdir(parents=True, exist_ok=True)
     results = []
+    rows: list[dict] = []
     for scenario in (s for s in SCENARIOS if s.name in wanted):
-        for name in args.profiles.split(","):
-            results.append(run_lane(scenario, PROFILES[name], args.output))
+        for profile in lane_profiles(args.profiles.split(","), prefork):
+            results.append(run_lane(scenario, profile, args.output, only))
             (args.output / "summary.md").write_text(summary(results), encoding="utf-8")
+            rows = parity(results)
+            (args.output / "parity.md").write_text(parity_markdown(rows), encoding="utf-8")
+            (args.output / "parity.json").write_text(json.dumps(rows, indent=1), encoding="utf-8")
     print("\n" + summary(results))
-    return 0 if all(result["passed"] for result in results) else 1
+    differing = [row for row in rows if row["status"] in ("differs", "missing")]
+    if rows:
+        statuses = {status: sum(1 for row in rows if row["status"] == status) for status in dict.fromkeys(
+            row["status"] for row in rows)}
+        print(f"Parity with Horizon, {len(rows)} items: " + ", ".join(f"{n} {s}" for s, n in statuses.items()))
+        for row in differing:
+            print(f"  {row['scenario']} / {row['item']} / {row['profile']}: {'; '.join(row['divergences'])}")
+    return 0 if all(result["passed"] for result in results) and not differing else 1
 
 
 if __name__ == "__main__":

@@ -5,6 +5,46 @@ use Illuminate\Support\Str;
 $benchmark = config('benchmark');
 $fixed = $benchmark['profile'] === 'fixed';
 
+$supervisor = [
+    'connection' => $benchmark['connection'],
+    'queue' => $benchmark['queues'],
+    'balance' => $fixed ? 'simple' : 'auto',
+    'autoScalingStrategy' => $benchmark['strategy'],
+    'processes' => $fixed ? $benchmark['workers'] : $benchmark['max_workers'],
+    'minProcesses' => $benchmark['min_workers'],
+    'maxProcesses' => $benchmark['max_workers'],
+    'balanceMaxShift' => $benchmark['balance_max_shift'],
+    'balanceCooldown' => $benchmark['balance_cooldown'],
+    'maxTime' => 0,
+    'maxJobs' => 0,
+    'memory' => $benchmark['worker_memory'],
+    'tries' => 1,
+    'timeout' => $benchmark['timeout'],
+    'sleep' => $benchmark['worker_sleep'],
+    'rest' => 0,
+    'nice' => 0,
+    'force' => false,
+];
+$supervisors = ['bench' => $supervisor];
+if ($benchmark['routed']) {
+    // The routed lanes: one Horizon supervisor per pool, on its `redis-<pool>`
+    // connection, with the pool's timeout and tries. No balancing: every
+    // worker works the pool's queues in order, as the Queen pools do.
+    $supervisors = [];
+    foreach ($benchmark['routed_pools'] as $name => $settings) {
+        $supervisors[$name] = array_replace($supervisor, [
+            'connection' => "redis-{$name}",
+            'queue' => $settings['queues'],
+            'balance' => false,
+            'processes' => $settings['processes'],
+            'minProcesses' => $settings['processes'],
+            'maxProcesses' => $settings['processes'],
+            'timeout' => $settings['timeout'],
+            'tries' => $settings['tries'],
+        ]);
+    }
+}
+
 return [
     'name' => env('HORIZON_NAME', 'benchmark-horizon'),
     'domain' => null,
@@ -37,31 +77,8 @@ return [
     ],
     'fast_termination' => false,
     'memory_limit' => (int) env('HORIZON_MEMORY_LIMIT', 128),
-    'defaults' => [
-        'bench' => [
-            'connection' => $benchmark['connection'],
-            'queue' => $benchmark['queues'],
-            'balance' => $fixed ? 'simple' : 'auto',
-            'autoScalingStrategy' => $benchmark['strategy'],
-            'processes' => $fixed ? $benchmark['workers'] : $benchmark['max_workers'],
-            'minProcesses' => $benchmark['min_workers'],
-            'maxProcesses' => $benchmark['max_workers'],
-            'balanceMaxShift' => $benchmark['balance_max_shift'],
-            'balanceCooldown' => $benchmark['balance_cooldown'],
-            'maxTime' => 0,
-            'maxJobs' => 0,
-            'memory' => $benchmark['worker_memory'],
-            'tries' => 1,
-            'timeout' => $benchmark['timeout'],
-            'sleep' => $benchmark['worker_sleep'],
-            'rest' => 0,
-            'nice' => 0,
-            'force' => false,
-        ],
-    ],
+    'defaults' => $supervisors,
     'environments' => [
-        'benchmark' => [
-            'bench' => [],
-        ],
+        'benchmark' => array_map(static fn (): array => [], $supervisors),
     ],
 ];
