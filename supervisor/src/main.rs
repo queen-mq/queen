@@ -5698,7 +5698,10 @@ mod tests {
         resolved.prefork = true;
         resolved.php_binary = "php".to_owned();
         resolved.artisan = fixture.to_string_lossy().into_owned();
-        resolved.cwd = fixture.parent().unwrap().to_string_lossy().into_owned();
+        // The fixture writes a spawned worker's report to a file named after its
+        // first argument, in the working directory: the test's own, not the
+        // checkout's.
+        resolved.cwd = state_directory.to_string_lossy().into_owned();
         let running = AtomicBool::new(true);
         let server = Rc::new(RefCell::new(
             ForkServer::start(&resolved, &running).unwrap(),
