@@ -1,0 +1,35 @@
+23:55:54 1. three nodes on the old build
+23:55:54   n1: 2.1.0 follower cv 5 kinds 5 applied 3 lag 0
+23:55:54   n2: 2.1.0 leader cv 5 kinds 5 applied 3 lag 0
+23:55:54   n3: 2.1.0 follower cv 5 kinds 5 applied 3 lag 0
+23:56:09    history written: pushed=280000, rows per node: n1=56000 n2=56000 n3=56000 
+23:56:19 2. node 3, then node 2, move to the new build
+23:56:22   n1: 2.1.0 leader cv 5 kinds 5 applied 40595 lag 0
+23:56:23   n2: 2.2.0 follower cv 5 kinds 6 applied 40613 lag 0
+23:56:23   n3: 2.2.0 follower cv 5 kinds 6 applied 40633 lag 0
+23:56:23    the cluster version is still 5 with one old node: OK
+23:56:23    rows per node (must still be there, the window is not on): n1=62383 n2=62385 n3=62391 
+23:56:23 3. node 3 goes back to the old build while the version has not risen
+23:56:23    the old build started on a directory the new one had written: OK
+23:56:26   n1: 2.1.0 leader cv 5 kinds 5 applied 42889 lag 0
+23:56:26   n2: 2.2.0 follower cv 5 kinds 6 applied 42904 lag 0
+23:56:26   n3: 2.1.0 follower cv 5 kinds 5 applied 42923 lag 0
+23:56:26 4. node 1 moves: the last one
+23:56:28    the cluster version rose to 6 by itself: OK
+23:56:28   n1: 2.2.0 follower cv 6 kinds 6 applied 43581 lag 0
+23:56:28   n2: 2.2.0 follower cv 6 kinds 6 applied 43592 lag 0
+23:56:28   n3: 2.2.0 leader cv 6 kinds 6 applied 43607 lag 0
+23:58:59    live traffic over the roll: [final] offered=74497 achieved=74127 shed=0 (msgs: offered=744970 achieved=741270 shed=0) pushErr=370 | pushed=741270 popped=742470 lag=-1200 | popErr=216 empty=66 | overall p50=1.82 p99=108.03 p999=489.47 ms | acked=741270 ackErr=1200 ackLag=0 ackAvg=5.09ms | e2e p50=5.86 p99=27394.05 p999=30801.92 ms
+23:58:59    rows per node after the window (hist's must be gone): n1=0 n2=0 n3=0 
+23:59:25    history read back: popped=280000 lag=-280000 | popErr=0
+23:59:25    claims from the queue log per node: n1=0 n2=0 n3=1120 
+23:59:25 5. the old build on upgraded data
+23:59:31    the old build refused:  INFO rsm: rsm: every member reads effect catalogue version 6: raising the cluster version from=5 to=6
+23:59:31   n1: 2.2.0 follower cv 6 kinds 6 applied 126777 lag 0
+23:59:31   n2: 2.2.0 leader cv 6 kinds 6 applied 126777 lag 0
+23:59:31   n3: 2.2.0 follower cv 6 kinds 6 applied 126757 lag 0
+23:59:31 errors and warnings per node (other than a peer being down during its restart):
+23:59:31   n1: 
+23:59:31   n2: 
+23:59:31   n3:       1 ROR rsm: rsm: this build cannot read the log of the cluster this store belongs to: refusing to start node=3 cluster_version=6 reads=5;      1 ERROR boot: FATAL: raft storage failed to open: open the openraft replicator at /root/improve/c3/data/n3: this build reads effect catalogue version 5, and the cluster th;
+23:59:34 ROLL_DONE

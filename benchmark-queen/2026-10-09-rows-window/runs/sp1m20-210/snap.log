@@ -1,0 +1,24 @@
+00:22:45 start rows=0 parts=0 cold=na scan= files/bytes=2/490/ anon/rss/cpu=11 28 2
+00:22:56 P rows=100116 parts=100116 cold=na scan= files/bytes=3/68700557/ anon/rss/cpu=367 398 115
+00:23:06 P rows=301377 parts=301377 cold=na scan= files/bytes=5/206353636/ anon/rss/cpu=883 947 183
+00:23:16 P rows=502468 parts=502468 cold=na scan= files/bytes=7/343953073/ anon/rss/cpu=1324 1419 211
+00:23:26 P rows=703598 parts=703598 cold=na scan= files/bytes=9/481505468/ anon/rss/cpu=1711 1837 226
+00:23:36 P rows=904753 parts=904753 cold=na scan= files/bytes=11/619134695/ anon/rss/cpu=2107 2264 236
+00:23:46 P rows=1105938 parts=1000000 cold=na scan= files/bytes=13/746498909/ anon/rss/cpu=2528 2741 241
+00:23:56 P rows=1307106 parts=1000000 cold=na scan= files/bytes=14/864685655/ anon/rss/cpu=2706 3005 241
+00:24:06 P rows=1508177 parts=1000000 cold=na scan= files/bytes=16/982771231/ anon/rss/cpu=2801 3208 241
+00:24:16 P rows=1708698 parts=1000000 cold=na scan= files/bytes=18/1100482603/ anon/rss/cpu=2997 3504 241
+00:24:26 P rows=1909917 parts=1000000 cold=na scan= files/bytes=20/1218698305/ anon/rss/cpu=3050 3663 241
+00:24:36 P rows=2111159 parts=1000000 cold=na scan= files/bytes=21/1336858497/ anon/rss/cpu=3102 3811 241
+00:24:46 P rows=2312517 parts=1000000 cold=na scan= files/bytes=23/1454919713/ anon/rss/cpu=3123 3903 257
+00:24:56 P rows=2513608 parts=1000000 cold=na scan= files/bytes=25/1572918599/ anon/rss/cpu=3148 3992 257
+00:25:06 P rows=2714834 parts=1000000 cold=na scan= files/bytes=27/1690893425/ anon/rss/cpu=3174 4075 257
+00:25:16 P rows=2915870 parts=1000000 cold=na scan= files/bytes=28/1808947507/ anon/rss/cpu=3246 4192 257
+00:25:26 P rows=3117196 parts=1000000 cold=na scan= files/bytes=30/1927070138/ anon/rss/cpu=3254 4250 257
+00:25:36 P rows=3318377 parts=1000000 cold=na scan= files/bytes=32/2045164584/ anon/rss/cpu=3273 4307 257
+00:25:47 P rows=3519724 parts=1000000 cold=na scan= files/bytes=34/2163303553/ anon/rss/cpu=3248 4320 259
+00:25:57 P rows=3720922 parts=1000000 cold=na scan= files/bytes=35/2281411286/ anon/rss/cpu=3274 4379 259
+00:26:06 P-end rows=3899518 parts=1000000 cold=na scan= files/bytes=37/2386274418/ anon/rss/cpu=3245 4388 259
+[final] offered=3900001 achieved=3899518 shed=483 (msgs: offered=3900001 achieved=3899518 shed=483) pushErr=0 | pushed=3899518 popped=0 lag=3899518 | popErr=0 empty=0 | overall p50=1.90 p99=36.10 p999=121.34 ms | acked=0 ackErr=0 ackLag=3899518 ackAvg=0.00ms | e2e p50=0.00 p99=0.00 p999=0.00 ms
+0
+SPARSE_DONE

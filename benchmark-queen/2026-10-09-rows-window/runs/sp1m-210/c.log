@@ -1,0 +1,25 @@
+qload tag= loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=1s duration=1s report=10s drain=1m0s GOMAXPROCS=10 GOGC=400(default) seed=1791587302185648601
+  topics: 1 x 1000000 partitions (sp..sp), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=1000000 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~319 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 16 here (ci 0..15 of 16), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  queen: url=http://127.0.0.1:6632 (of 1) conns=2048 timeout=30s pop-width=100 pop-batch=1000 pop-timeout=2s lease=30s | configure: leaseTime=30 completedRetention=3600 dedup=0 retryLimit=1000000 | plain: consumers pop+ack the queue
+  [queen] http://127.0.0.1:6632 healthy: version 2.1.0, this node leader
+  [consume] 16 consumers of sp: pop width 100, batch 1000, long poll 2s, lease 30s, async batch acks (ack-inflight 256)
+  [produce] -rate 0: no producers
+READY 1791587612830
+[start] GO 23:13:32.830 (unix ms 1791587612830)
+[drain] consumers keep going for 1m0s (lag now 0)
+[err consume #1] 23:13:34.831 pop sp: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+[err consume #2] 23:13:34.831 pop sp: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+[err consume #3] 23:13:34.831 pop sp: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+[err consume #4] 23:13:34.831 pop sp: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+[err consume #5] 23:13:34.831 pop sp: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+[23:13:42] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=0 pop=2469888 lag=-2469888 | errs push=0 pop=16 empty=0 gor=91 | ack=   246971/s ackErr=0 ackAvg=18.28ms | e2e p50=133693.44 p99=133693.44 p999=133693.44 n=2469888 | e2e_local p50=133693.44 p99=133693.44 n=2469888
+[23:13:52] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=0 pop=5678278 lag=-5678278 | errs push=0 pop=16 empty=0 gor=93 | ack=   320856/s ackErr=0 ackAvg=17.92ms | e2e p50=133693.44 p99=133693.44 p999=133693.44 n=3208390 | e2e_local p50=133693.44 p99=133693.44 n=3208390
+[23:14:02] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=0 pop=8865990 lag=-8865990 | errs push=0 pop=16 empty=0 gor=95 | ack=   318621/s ackErr=0 ackAvg=17.54ms | e2e p50=133693.44 p99=133693.44 p999=133693.44 n=3187712 | e2e_local p50=133693.44 p99=133693.44 n=3187712
+[23:14:12] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=0 pop=11429254 lag=-11429254 | errs push=0 pop=16 empty=16 gor=95 | ack=   256468/s ackErr=0 ackAvg=17.42ms | e2e p50=133693.44 p99=133693.44 p999=133693.44 n=2563264 | e2e_local p50=133693.44 p99=133693.44 n=2563264
+[23:14:22] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=0 pop=11429254 lag=-11429254 | errs push=0 pop=16 empty=96 gor=95 | ack=        0/s ackErr=0 ackAvg=17.42ms | e2e p50=0.00 p99=0.00 p999=0.00 n=0 | e2e_local p50=0.00 p99=0.00 n=0
+[23:14:32] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=0 pop=11429254 lag=-11429254 | errs push=0 pop=16 empty=192 gor=95 | ack=        0/s ackErr=0 ackAvg=17.42ms | e2e p50=0.00 p99=0.00 p999=0.00 n=0 | e2e_local p50=0.00 p99=0.00 n=0
+[info] errors consume=16 first: pop sp: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+[final] offered=0 achieved=0 shed=0 (msgs: offered=0 achieved=0 shed=0) pushErr=0 | pushed=0 popped=11429254 lag=-11429254 | popErr=16 empty=208 | overall p50=0.00 p99=0.00 p999=0.00 ms | acked=11429254 ackErr=0 ackLag=-11429254 ackAvg=17.42ms | e2e p50=133693.44 p99=133693.44 p999=133693.44 ms
+load_cpu=165.4%

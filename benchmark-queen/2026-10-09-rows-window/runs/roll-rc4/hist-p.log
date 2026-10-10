@@ -1,0 +1,12 @@
+qload tag= loader=0/1 mode=batch rate=20000 msg/s batch=5 batch-max=0 max-inflight=5000 ramp=2s duration=15s report=10s drain=0s GOMAXPROCS=10 GOGC=400(default) seed=1791586971828807678
+  offered: 20000 msg/s = 4000.0 units/s (avg 5.0 msgs/unit) across 64 pacer workers (62.50 units/s each)
+  topics: 1 x 100 partitions (hist..hist), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=100 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x5
+  consumers: 0 here (ci 0..-1 of 0), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  queen: url=http://127.0.0.1:6632 (of 1) conns=2048 timeout=30s pop-width=10 pop-batch=1000 pop-timeout=2s lease=30s | configure: leaseTime=30 completedRetention=3600 dedup=0 retryLimit=1000000 | plain: consumers pop+ack the queue
+  [queen] http://127.0.0.1:6632 healthy: version 2.1.0, this node leader
+READY 1791586645770
+[start] GO 22:57:25.770 (unix ms 1791586645770)
+[22:57:35] offered=    17997/s achieved=    17995/s shed=        0/s inflight=     6 | p50=   1.74 p99=    8.64 p999=   13.89 ms | push=179965 pop=0 lag=179965 | errs push=0 pop=0 empty=0 gor=199 | ack=        0/s ackErr=0 ackAvg=0.00ms | e2e p50=0.00 p99=0.00 p999=0.00 n=0 | e2e_local p50=0.00 p99=0.00 n=0
+[final] offered=56000 achieved=56000 shed=0 (msgs: offered=280000 achieved=280000 shed=0) pushErr=0 | pushed=280000 popped=0 lag=280000 | popErr=0 empty=0 | overall p50=1.74 p99=8.90 p999=13.50 ms | acked=0 ackErr=0 ackLag=280000 ackAvg=0.00ms | e2e p50=0.00 p99=0.00 p999=0.00 ms
+load_cpu=68.5%
