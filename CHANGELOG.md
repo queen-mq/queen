@@ -5,7 +5,7 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
-## 2.2.0
+## 2.2.0 - 2026-10-10
 
 **Server: a queue's memory no longer grows with the messages it keeps.** Every push left a row in
 the memory of every node (about 200 bytes: where the append begins and ends, when it was written,
