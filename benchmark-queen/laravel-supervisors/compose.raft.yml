@@ -53,7 +53,8 @@ x-app-environment: &app-environment
   BENCH_FAILED_LIMIT: ${BENCH_FAILED_LIMIT:-1000}
   BENCH_RESULTS_DIRECTORY: /results
   QUEEN_URL: http://broker:6632
-  QUEEN_URLS: http://broker:6632
+  # Every node of a three-node lane (BENCH_QUEEN_URLS); the one node otherwise.
+  QUEEN_URLS: ${BENCH_QUEEN_URLS:-http://broker:6632}
   QUEEN_QUEUE: ${BENCH_QUEUE:-benchmark}
   QUEEN_CONSUMER_GROUP: ${BENCH_GROUP:-benchmark}
   QUEEN_PREFETCH: ${QUEEN_PREFETCH:-1}
@@ -141,17 +142,23 @@ services:
       timeout: 2s
       retries: 10
 
-  broker:
+  broker: &broker
     # Raft storage: one node on a local data directory, no external database.
     # Built outside this compose file from the raft branch; BENCH_BROKER_IMAGE
     # runs a released server instead, such as ghcr.io/queen-mq/queen:2.0.4.
     image: ${BENCH_BROKER_IMAGE:-queen-laravel-supervisor-broker:raft}
     profiles: [queen-php, queen-rust, queen-installed]
-    environment:
+    environment: &broker-environment
       QUEEN_RAFT_DIR: /var/lib/queen/data
       PORT: "6632"
       QUEEN_POP_FUSION: ${QUEEN_POP_FUSION:-0}
       LOG_LEVEL: warn
+      # A three-node lane (the cluster profile) replicates with openraft over
+      # these peers; unset, the node is a single voter.
+      QUEEN_RAFT_REPLICATOR: ${BENCH_RAFT_REPLICATOR:-}
+      QUEEN_RAFT_PEERS: ${BENCH_RAFT_PEERS:-}
+      QUEEN_RAFT_TOKEN: queen-bench-raft-token
+      QUEEN_RAFT_NODE_ID: "1"
     restart: "no"
     # The whole backend budget, like Redis's: on PostgreSQL storage the broker
     # and the database split it.
@@ -171,6 +178,26 @@ services:
       interval: 1h
       timeout: 3s
       retries: 30
+
+  # The other two nodes of a three-node lane, as production runs the broker.
+  broker-2:
+    <<: *broker
+    profiles: [cluster]
+    environment:
+      <<: *broker-environment
+      QUEEN_RAFT_NODE_ID: "2"
+    volumes:
+      - broker-2-buffers:/var/lib/queen/data
+
+  broker-3:
+    <<: *broker
+    profiles: [cluster]
+    environment:
+      <<: *broker-environment
+      QUEEN_RAFT_NODE_ID: "3"
+    volumes:
+      - broker-3-buffers:/var/lib/queen/data
+
   horizon:
     <<: *app
     profiles: [horizon]
@@ -291,3 +318,5 @@ volumes:
     name: ${BENCH_RESULTS_VOLUME:-queen-laravel-supervisor-results}
   redis-data:
   broker-buffers:
+  broker-2-buffers:
+  broker-3-buffers:

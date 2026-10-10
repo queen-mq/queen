@@ -252,7 +252,7 @@ class ScenarioLanesTest(unittest.TestCase):
 
     def test_every_profile_engine_is_a_compose_service_with_a_broker_or_redis(self) -> None:
         compose = matrix.COMPOSE_FILE.read_text()
-        broker_profiles = re.search(r"\n  broker:\n(?:    .*\n)*?    profiles: \[([^\]]*)\]", compose)
+        broker_profiles = re.search(r"\n  broker:(?: &broker)?\n(?:    .*\n)*?    profiles: \[([^\]]*)\]", compose)
 
         self.assertIsNotNone(broker_profiles)
         for profile in matrix.PROFILES.values():
@@ -270,6 +270,22 @@ class ScenarioLanesTest(unittest.TestCase):
         self.assertEqual(set(), named - {s.name for s in matrix.SCENARIOS} - {"parity"})
         # Every scenario but the soak runs in some group.
         self.assertEqual({"soak"}, {s.name for s in matrix.SCENARIOS} - named - set(matrix.PARITY_SCENARIOS))
+
+    def test_a_three_node_lane_lists_every_node_to_the_clients_and_as_raft_peers(self) -> None:
+        single = matrix.Lane("s", matrix.PROFILES["queen-rust"], {}, Path("/tmp"))
+        cluster = matrix.Lane("s", matrix.PROFILES["queen-rust"], {}, Path("/tmp"), broker_nodes=3)
+
+        self.assertEqual(("broker",), single.brokers)
+        self.assertNotIn("BENCH_QUEEN_URLS", single.env)
+        self.assertEqual(("broker", "broker-2", "broker-3"), cluster.brokers)
+        self.assertEqual("http://broker:6632,http://broker-2:6632,http://broker-3:6632", cluster.env["BENCH_QUEEN_URLS"])
+        self.assertEqual("1=broker:7400/broker:6632,2=broker-2:7400/broker-2:6632,3=broker-3:7400/broker-3:6632",
+                         cluster.env["BENCH_RAFT_PEERS"])
+        compose = matrix.COMPOSE_FILE.read_text()
+        for key in ("BENCH_QUEEN_URLS", "BENCH_RAFT_PEERS", "BENCH_RAFT_REPLICATOR"):
+            self.assertIn("${" + key + ":", compose)
+        for node in cluster.brokers[1:]:
+            self.assertIn(f"\n  {node}:\n", compose)
 
     def test_a_status_gives_its_issue_codes_and_the_longest_wait_of_its_workers(self) -> None:
         status = {"readiness_issues": [{"code": "pool_not_consuming", "queue": "q"}, {"code": "queue_depth_unavailable"}],

@@ -39,6 +39,20 @@ COMPOSE_FILE = BENCH / "compose.raft.yml"
 APP_IMAGE = os.environ.get("BENCH_APP_IMAGE", "queen-laravel-supervisor-bench:local")
 
 
+# The broker's nodes, as compose.raft.yml names them; a lane runs the first one, or all three.
+BROKER_NODES = ("broker", "broker-2", "broker-3")
+
+
+def cluster_env(nodes: tuple[str, ...]) -> dict[str, str]:
+    """The settings of a lane whose broker is a Raft cluster of these nodes: openraft over their
+    peers, and every node's URL for the clients, as a production deployment lists them."""
+    return {
+        "BENCH_RAFT_REPLICATOR": "openraft",
+        "BENCH_RAFT_PEERS": ",".join(f"{i}={node}:7400/{node}:6632" for i, node in enumerate(nodes, 1)),
+        "BENCH_QUEEN_URLS": ",".join(f"http://{node}:6632" for node in nodes),
+    }
+
+
 @dataclass(frozen=True)
 class Profile:
     name: str
@@ -212,9 +226,11 @@ class Lane:
     """One Compose project: one engine, its backend and the producer."""
 
     def __init__(self, scenario: str, profile: Profile, env: dict[str, str], output: Path,
-                 only: frozenset[str] = frozenset()) -> None:
+                 only: frozenset[str] = frozenset(), broker_nodes: int = 1) -> None:
         token = uuid.uuid4().hex[:8]
         self.profile = profile
+        # Three: the broker is a Raft cluster of three nodes (compose.raft.yml's cluster profile).
+        self.brokers = BROKER_NODES[:broker_nodes]
         self.project = f"qfm-{scenario}-{profile.name}-{token}".lower()
         self.volume = f"{self.project}-results"
         self.run_id = f"{scenario}-{profile.name}-{token}"
@@ -254,6 +270,7 @@ class Lane:
             "QUEEN_ACK_BATCH": "1",
             "BENCH_REDIS_APPENDONLY": "yes",
             "BENCH_REDIS_APPEND_FSYNC": "always",
+            **(cluster_env(self.brokers) if len(self.brokers) > 1 else {}),
             **profile.env,
             **env,
         }
@@ -267,7 +284,8 @@ class Lane:
     def compose(self, *args: str, check: bool = True, timeout: float = 600) -> subprocess.CompletedProcess[str]:
         command = [
             "docker", "compose", "--file", str(COMPOSE_FILE), "--project-name", self.project,
-            "--profile", self.profile.engine, "--profile", "tools", *args,
+            "--profile", self.profile.engine, "--profile", "tools",
+            *(["--profile", "cluster"] if len(self.brokers) > 1 else []), *args,
         ]
         return subprocess.run(command, check=check, capture_output=True, text=True, timeout=timeout,
                               env={**os.environ, **self.env})
@@ -323,7 +341,7 @@ class Lane:
         if prepare is not None:
             prepare(self)
         self.compose("up", "--detach", "--no-build", "--scale", f"{self.profile.engine}={replicas}",
-                     self.profile.engine, "producer")
+                     *self.brokers[1:], self.profile.engine, "producer")
         self.wait_healthy()
         self.wait_workers(int(self.env["BENCH_WORKERS"]))
         self.note("ready" if replicas == 1 else f"ready, {replicas} replicas")
@@ -1296,6 +1314,58 @@ def binary_failure(lane: Lane) -> list[Check]:
     return checks
 
 
+def broker_leader(lane: Lane) -> str:
+    """The node that is the Raft leader, by each node's /health, or '' when none says so."""
+    for node in lane.brokers:
+        answer = lane.compose("exec", "--no-TTY", "producer", "curl", "--silent", "--max-time", "2",
+                              f"http://{node}:6632/health", check=False).stdout
+        try:
+            if json.loads(answer)["raft"]["role"] == "leader":
+                return node
+        except (ValueError, KeyError, TypeError):
+            continue
+    return ""
+
+
+def broker_leader_kill(lane: Lane) -> list[Check]:
+    """A broker of three nodes, as production runs it, whose leader is killed outright while 300
+    jobs run and the producer dispatches 50 more. The two others elect a leader, and the
+    clients, which list every node, carry on: every job must complete and none fail; a job
+    whose ACK the dead leader took with it may run twice (at least once). Dispatching must
+    not fail for the election, and the readiness probe must pass again once it is over."""
+    expected = ids(0, 350)
+    lane.dispatch("ok", 300, sleep_ms=100, tries=3)
+    lane.wait_until(lambda r: sum(r.count(j, "completed") for j in expected) >= 20, 60, "jobs running")
+    leader = broker_leader(lane)
+    if leader:
+        lane.docker("kill", lane.container(leader))
+        lane.note(f"leader {leader} killed")
+    killed = time.monotonic()
+    during = lane.dispatch("ok", 50, first=300, tries=3, check=False)
+    ready_after = None
+    while time.monotonic() - killed < 120:
+        if lane.status()[0]:
+            ready_after = round(time.monotonic() - killed, 1)
+            break
+        time.sleep(2)
+    lane.note(f"ready again after {ready_after} s" if ready_after is not None else "NOT ready again")
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 300, "all completed")
+    jobs = lane.settle(35)
+    successor = broker_leader(lane)
+    twice = sum(1 for j in expected if jobs.count(j, "completed") > 1)
+    lane.extra["leader_kill"] = {"leader": leader, "successor": successor, "ready_after": ready_after,
+                                 "dispatch_during": during.returncode, "completed_twice": twice}
+    error = (during.stderr or during.stdout).strip().splitlines()
+    return [
+        Check("the leader was found and killed", bool(leader), leader),
+        Check("the two others elected a leader", bool(successor) and successor != leader, successor),
+        Check("dispatching during the election succeeded", during.returncode == 0, error[-1][:300] if error else ""),
+        Check("ready again within 60 s of the kill", ready_after is not None and ready_after <= 60, f"{ready_after} s"),
+        Check("jobs that ran twice (information)", True, f"{twice} of {len(expected)}"),
+        *completed_once(jobs, expected, duplicates_allowed=True),
+    ]
+
+
 INSTALL_PATH = "/opt/queen-supervisor-bin"
 APP_USER = "benchmark"
 
@@ -1438,6 +1508,8 @@ class Scenario:
     # The engines the scenario runs on; empty for every one. A Queen feature that Horizon does not
     # have, such as the readiness probe, has no Horizon lane.
     engines: tuple[str, ...] = ()
+    # The broker's nodes: 1, or 3 for a Raft cluster.
+    broker_nodes: int = 1
 
     def env_for(self, profile: Profile) -> dict[str, str]:
         return {**self.env, **self.engine_env.get(profile.engine, {})}
@@ -1499,6 +1571,7 @@ SCENARIOS = [
     Scenario("poison-messages", poison_messages, engines=QUEEN_ENGINES),
     Scenario("job-metrics", job_metrics, engines=QUEEN_ENGINES),
     Scenario("install-owner", install_owner, engines=("queen-installed",)),
+    Scenario("broker-leader-kill", broker_leader_kill, engines=QUEEN_ENGINES, broker_nodes=3),
 ]
 # The scenarios that record an outcome for parity(), besides the compatibility runs.
 PARITY_SCENARIOS = ("job-timeout", "memory-limit", "stop-short", "stop-lease", "queue-restart",
@@ -1515,7 +1588,8 @@ def scenario_profiles(scenario: Scenario, names: list[str], prefork: list[str]) 
 
 def run_lane(scenario: Scenario, profile: Profile, output: Path, only: frozenset[str] = frozenset(),
              stack: str = "default") -> dict:
-    lane = Lane(scenario.name, profile, {**scenario.env_for(profile), **stack_env(stack, profile)}, output, only)
+    lane = Lane(scenario.name, profile, {**scenario.env_for(profile), **stack_env(stack, profile)}, output, only,
+                scenario.broker_nodes)
     print(f"\n== {scenario.name} / {profile.name} ({lane.project})", flush=True)
     result: dict = {"scenario": scenario.name, "profile": profile.name, "run_id": lane.run_id,
                     "settings": {key: lane.env[key] for key in sorted(LANE_SETTINGS) if key in lane.env},
