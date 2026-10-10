@@ -13,6 +13,13 @@ final class CompatMinuteLimitedJob extends CompatJob
 {
     public function middleware(): array
     {
-        return [(new RateLimited('compat-minute'))->releaseAfter(1)];
+        // RateLimited::releaseAfter() is Laravel 12's; both 11 and 12 take the
+        // release delay from getTimeUntilNextRetry() when it is not set.
+        return [new class('compat-minute') extends RateLimited {
+            protected function getTimeUntilNextRetry($key)
+            {
+                return 1;
+            }
+        }];
     }
 }
