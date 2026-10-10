@@ -14,8 +14,9 @@ use Queen\Laravel\Supervisor\SupervisorConfiguration;
 use Queen\Queen;
 
 /**
- * The PHP master's stop signal, as a platform sends it: to the master alone,
- * which then has the platform's stop deadline to drain its workers.
+ * The PHP master in a process of its own, with a worker stand-in: its stop
+ * signal, as a platform sends it, to the master alone, which then has the
+ * platform's stop deadline to drain its workers; and its status writes.
  */
 final class LaravelSupervisorSignalTest extends TestCase
 {
@@ -60,27 +61,7 @@ final class LaravelSupervisorSignalTest extends TestCase
     public function testWorkersGetSigtermAtOnceWhileTheMasterWaitsOnTheBroker(): void
     {
         $slowSince = $this->directory . '/slow-since';
-        $config = $this->config();
-        $master = pcntl_fork();
-        if ($master === -1) {
-            $this->fail('Unable to fork.');
-        }
-        if ($master === 0) {
-            try {
-                (new PhpSupervisor(
-                    $this->createStub(QueueManager::class),
-                    $config,
-                    queenFactory: fn (string $name, array $options): Queen => new Queen([
-                        ...$options,
-                        'handler' => HandlerStack::create(new BlackHoledAfterFirstAnswer($slowSince, self::BLACK_HOLE_SECONDS)),
-                    ]),
-                ))->run();
-            } catch (\Throwable $error) {
-                fwrite(STDERR, $error . "\n");
-            } finally {
-                posix_kill(getmypid(), SIGKILL);
-            }
-        }
+        $master = $this->startMaster(new BlackHoledAfterFirstAnswer($slowSince, self::BLACK_HOLE_SECONDS));
 
         try {
             $worker = $this->waitFor(fn (): ?int => $this->startedWorker(), 10.0, 'the worker to start');
@@ -101,6 +82,65 @@ final class LaravelSupervisorSignalTest extends TestCase
         } finally {
             $this->reap($master);
         }
+    }
+
+    /**
+     * One status.json write that failed, on a full or failing disk, ended the
+     * master, which drained every worker. The workers keep running while the
+     * master retries the write each pass; meanwhile status.json ages, and
+     * the probes report the master stale.
+     */
+    public function testAFailedStatusWriteDoesNotDrainTheWorkers(): void
+    {
+        $master = $this->startMaster(static fn (): FulfilledPromise => new FulfilledPromise(new Response(
+            200,
+            ['Content-Type' => 'application/json'],
+            json_encode(['pending' => 0, 'ready' => 0, 'processing' => 0]),
+        )));
+        $status = $this->directory . '/state/status.json';
+
+        try {
+            $worker = $this->waitFor(fn (): ?int => $this->startedWorker(), 10.0, 'the worker to start');
+            // What the master writes can no longer replace status.json.
+            unlink($status);
+            mkdir($status, 0700);
+            usleep(2_500_000);
+
+            $this->assertFileDoesNotExist($this->directory . "/signals/{$worker}.sigterm", 'the workers were drained');
+            $this->assertSame(0, pcntl_waitpid($master, $exit, WNOHANG), 'the master stopped');
+            rmdir($status);
+            $this->waitFor(fn (): ?bool => is_file($status) ? true : null, 5.0, 'status.json to be written again');
+        } finally {
+            $this->reap($master);
+        }
+    }
+
+    /** Run the master in a process of its own, against a broker that $handler answers for. */
+    private function startMaster(callable $handler): int
+    {
+        $config = $this->config();
+        $master = pcntl_fork();
+        if ($master === -1) {
+            $this->fail('Unable to fork.');
+        }
+        if ($master === 0) {
+            try {
+                (new PhpSupervisor(
+                    $this->createStub(QueueManager::class),
+                    $config,
+                    queenFactory: fn (string $name, array $options): Queen => new Queen([
+                        ...$options,
+                        'handler' => HandlerStack::create($handler),
+                    ]),
+                ))->run();
+            } catch (\Throwable $error) {
+                fwrite(STDERR, $error . "\n");
+            } finally {
+                posix_kill(getmypid(), SIGKILL);
+            }
+        }
+
+        return $master;
     }
 
     /** @return array<string, mixed> one pool of one worker, spawned from the stand-in */

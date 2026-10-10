@@ -85,6 +85,8 @@ final class PhpSupervisor
     private array $lastEvaluated = [];
     /** Where workers leave exit markers; null until it is ready. */
     private ?string $exitMarkers = null;
+    /** Since when the status write fails; null while it works. */
+    private ?float $statusFailingSince = null;
 
     public function __construct(
         private QueueManager $queues,
@@ -254,7 +256,7 @@ final class PhpSupervisor
                 if (!$this->running) {
                     break;
                 }
-                $this->writeStatus($this->paused ? 'paused' : 'running');
+                $this->writeLoopStatus();
                 if ($pollDue) {
                     $lastPoll = microtime(true);
                 } else {
@@ -295,6 +297,29 @@ final class PhpSupervisor
     public function stop(): void
     {
         $this->running = false;
+    }
+
+    /**
+     * The status write of each pass. One that failed, on a full or failing
+     * disk, ended the master, which drained every worker. The workers keep
+     * running and the write is retried each pass, while status.json ages and
+     * the probes report the master stale; only once it has failed for
+     * heartbeat_timeout, when every reader calls it stale, does the master
+     * stop.
+     */
+    private function writeLoopStatus(): void
+    {
+        try {
+            $this->writeStatus($this->paused ? 'paused' : 'running');
+            $this->statusFailingSince = null;
+        } catch (SupervisorStateWriteException $failure) {
+            $now = microtime(true);
+            $this->statusFailingSince ??= $now;
+            if ($now - $this->statusFailingSince >= (int) ($this->config['heartbeat_timeout'] ?? 60)) {
+                throw $failure;
+            }
+            $this->emit("Queen supervisor could not write its status; it retries: {$failure->getMessage()}\n", 'err');
+        }
     }
 
     /**
