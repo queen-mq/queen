@@ -7,6 +7,7 @@ use PHPUnit\Framework\TestCase;
 use Queen\Http\HttpClient;
 use Queen\Http\LoadBalancer;
 use Queen\Exceptions\HttpException;
+use Queen\Queen;
 use Queen\Tests\Support\PlanHandler;
 
 class HttpClientTest extends TestCase
@@ -134,7 +135,12 @@ class HttpClientTest extends TestCase
             'handler' => HandlerStack::create($handler),
         ]);
 
-        $this->assertSame([], $client->getAsyncWithFailover('/depth')->wait());
+        try {
+            $client->getAsyncWithFailover('/depth')->wait();
+            $this->fail('A redirect was taken for an answer.');
+        } catch (HttpException $exception) {
+            $this->assertSame(302, $exception->statusCode);
+        }
         $this->assertFalse($handler->options[0]['allow_redirects']);
         $this->assertSame('Bearer read-secret', $handler->requests[0]->getHeaderLine('Authorization'));
         $this->assertSame(1, $handler->count());
@@ -186,6 +192,105 @@ class HttpClientTest extends TestCase
 
         $this->assertSame(0, $handler->count());
         $this->assertLessThan(0.5, microtime(true) - $started, 'the default 1 s + 2 s backoff ran');
+    }
+
+    /**
+     * The client never follows a redirect (it could forward the token), so a
+     * redirect answers nothing the caller asked: a gateway's http->https 307
+     * must not read as a stored push.
+     */
+    public function testARedirectIsAnErrorThatIsNeitherRetriedNorFailedOver(): void
+    {
+        $handler = new PlanHandler([], ['status' => 307, 'body' => '']);
+        $loadBalancer = new LoadBalancer(['http://queen-a:6632', 'http://queen-b:6632'], 'round-robin');
+        $client = new HttpClient([
+            'loadBalancer' => $loadBalancer,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        try {
+            $client->post('/api/v1/push', ['items' => [['queue' => 'q', 'payload' => [], 'transactionId' => 't-1']]]);
+            $this->fail('A redirect was taken for an answer.');
+        } catch (HttpException $exception) {
+            $this->assertSame(307, $exception->statusCode);
+        }
+        $this->assertSame(1, $handler->count());
+        foreach ($loadBalancer->getHealthStatus() as $status) {
+            $this->assertTrue($status['healthy']);
+        }
+    }
+
+    public function testAPushAnsweredWithARedirectIsNotReportedAsStored(): void
+    {
+        $handler = new PlanHandler([], ['status' => 307, 'body' => '']);
+        $queen = new Queen(['url' => 'http://queen.test:6632', 'handler' => HandlerStack::create($handler)]);
+
+        $stored = null;
+        $failed = null;
+        $queen->queue('orders')->push(['id' => 1])
+            ->onSuccess(function (array $items) use (&$stored): void {
+                $stored = $items;
+            })
+            ->onError(function (array $items, \Throwable $error) use (&$failed): void {
+                $failed = $error;
+            })
+            ->execute();
+
+        $this->assertNull($stored, 'the push was reported stored');
+        $this->assertInstanceOf(HttpException::class, $failed);
+        $this->assertSame(1, $handler->count());
+    }
+
+    /**
+     * Push, ACK and transaction always answer a JSON body: an empty one (or a
+     * 204) confirms nothing, so it must not pass for success.
+     */
+    #[\PHPUnit\Framework\Attributes\TestWith([200])]
+    #[\PHPUnit\Framework\Attributes\TestWith([201])]
+    #[\PHPUnit\Framework\Attributes\TestWith([204])]
+    public function testAPushOrAnAckAnsweredWithoutABodyIsAnError(int $status): void
+    {
+        $handler = new PlanHandler([], ['status' => $status, 'body' => '']);
+        $queen = new Queen([
+            'url' => 'http://queen.test:6632',
+            'retryAttempts' => 1,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $stored = null;
+        $failed = null;
+        $queen->queue('orders')->push(['id' => 1])
+            ->onSuccess(function (array $items) use (&$stored): void {
+                $stored = $items;
+            })
+            ->onError(function (array $items, \Throwable $error) use (&$failed): void {
+                $failed = $error;
+            })
+            ->execute();
+        $this->assertNull($stored, "a push answered {$status} without a body was reported stored");
+        $this->assertNotNull($failed);
+
+        $message = ['transactionId' => 't-1', 'partitionId' => 'p-1', 'leaseId' => 'l-1'];
+        $this->assertFalse($queen->ack($message)['success'], 'a single ACK without an answer succeeded');
+        $this->assertFalse($queen->ack([$message])['success'], 'a batch ACK without an answer succeeded');
+    }
+
+    public function testAnEmptyPopIsABodiless204AndAnEmpty200IsAnError(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 204, 'body' => ''],
+            ['status' => 200, 'body' => ''],
+        ]);
+        $queen = new Queen([
+            'url' => 'http://queen.test:6632',
+            'retryAttempts' => 1,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $this->assertSame([], $queen->queue('orders')->wait(false)->pop());
+
+        $this->expectException(\UnexpectedValueException::class);
+        $queen->queue('orders')->wait(false)->pop();
     }
 
     public function testMalformedSuccessfulJsonUsesTheNormalRetryBoundary(): void

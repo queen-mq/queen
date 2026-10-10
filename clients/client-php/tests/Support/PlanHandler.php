@@ -12,7 +12,8 @@ use Psr\Http\Message\RequestInterface;
  * Wrap it in a HandlerStack and hand it to HttpClient/Queen as the 'handler'
  * option to drive retry and failover paths without a live server.
  *
- * Response descriptors: ['status' => int, 'json' => mixed, 'retryAfter' => string].
+ * Response descriptors: ['status' => int, 'json' => mixed, 'retryAfter' => string],
+ * or 'body' => string in place of 'json' for a raw (possibly empty) body.
  */
 class PlanHandler
 {
@@ -38,7 +39,7 @@ class PlanHandler
         return new FulfilledPromise(new Response(
             $descriptor['status'],
             $headers,
-            json_encode($descriptor['json'] ?? [])
+            array_key_exists('body', $descriptor) ? $descriptor['body'] : json_encode($descriptor['json'] ?? [])
         ));
     }
 

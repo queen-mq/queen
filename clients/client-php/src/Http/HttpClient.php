@@ -25,6 +25,17 @@ class HttpClient
     /** A detached request is written within the connect timeout, or dropped. */
     private const DETACHED_WRITE_MILLIS = 5_000;
 
+    /** Routes whose every answer is a JSON body; see answersWithJson(). */
+    private const JSON_ANSWER_PATHS = [
+        '/api/v1/push',
+        '/api/v1/ack',
+        '/api/v1/ack/batch',
+        '/api/v1/transaction',
+        '/api/v1/ephemeral/push',
+        '/api/v1/ephemeral/pop',
+        '/api/v1/ephemeral/ack',
+    ];
+
     private ?string $baseUrl;
     private ?LoadBalancer $loadBalancer;
     private int $timeoutMillis;
@@ -233,8 +244,9 @@ class HttpClient
             };
         }
 
-        $promise = $this->detachedClient()->requestAsync($method, $this->resolveUrl($affinityKey) . $path, $options)
-            ->then(fn (ResponseInterface $response) => $this->parseResponse($response));
+        $url = $this->resolveUrl($affinityKey) . $path;
+        $promise = $this->detachedClient()->requestAsync($method, $url, $options)
+            ->then(fn (ResponseInterface $response) => $this->parseResponse($response, $url));
         if ($this->detachedHandler === null) {
             return $promise;
         }
@@ -278,7 +290,7 @@ class HttpClient
             unset($this->detached[$promise]);
             try {
                 $answer = $this->transport->settle($request, $timeoutMillis);
-                $result = $this->parseAnswer($answer['status'], $answer['body'], $answer['retryAfter']);
+                $result = $this->parseAnswer($answer['status'], $answer['body'], $answer['retryAfter'], $request->url);
             } catch (\Throwable $failure) {
                 $promise->reject($failure);
                 throw $failure;
@@ -417,23 +429,55 @@ class HttpClient
         return $options;
     }
 
-    private function parseResponse(ResponseInterface $response): mixed
+    private function parseResponse(ResponseInterface $response, string $url): mixed
     {
         return $this->parseAnswer(
             $response->getStatusCode(),
             (string) $response->getBody(),
             $response->getHeaderLine('Retry-After'),
+            $url,
         );
     }
 
-    private function parseAnswer(int $statusCode, string $responseBody, string $retryAfter): mixed
+    /**
+     * Whether an answer to $url must carry a JSON body. The message path
+     * always answers one, except for an empty pop, which is a bodiless 204:
+     * an empty answer there confirms nothing (a gateway's, say), so it must
+     * not read as a stored push or a successful acknowledgement. The other
+     * routes keep reading an empty answer as null.
+     */
+    private static function answersWithJson(string $url, int $statusCode): bool
     {
-        if ($statusCode === 204) {
+        $path = (string) parse_url($url, PHP_URL_PATH);
+        if (str_starts_with($path, '/api/v1/pop')) {
+            return $statusCode !== 204;
+        }
+
+        return in_array($path, self::JSON_ANSWER_PATHS, true);
+    }
+
+    /**
+     * A redirect or a client error: the same request cannot succeed by being
+     * sent again, here or to another backend.
+     */
+    private static function isTerminalStatus(int $statusCode): bool
+    {
+        return $statusCode >= 300 && $statusCode < 500;
+    }
+
+    private function parseAnswer(int $statusCode, string $responseBody, string $retryAfter, string $url = ''): mixed
+    {
+        if ($statusCode === 204 && !self::answersWithJson($url, $statusCode)) {
             return null;
         }
 
-        if ($statusCode >= 400) {
-            $error = "HTTP {$statusCode}";
+        // A redirect is never followed (it could carry the bearer token to
+        // another host), so it answers nothing that was asked: an error, like
+        // a 4xx, and never a success with an empty result.
+        if ($statusCode >= 300) {
+            $error = $statusCode < 400
+                ? "HTTP {$statusCode}: Queen answered with a redirect, which the client does not follow; check the Queen URL"
+                : "HTTP {$statusCode}";
             $serverError = null;
             $errorCode = null;
             $reason = null;
@@ -494,6 +538,15 @@ class HttpClient
         }
 
         if (empty($responseBody)) {
+            if (self::answersWithJson($url, $statusCode)) {
+                // Like a malformed body: a transport failure, so the normal
+                // retry/failover boundary runs and the caller fails closed.
+                throw new UnexpectedValueException(
+                    "Queen answered HTTP {$statusCode} without a body, where a JSON answer was expected; "
+                    . 'nothing confirms the request took effect.',
+                );
+            }
+
             return null;
         }
 
@@ -549,7 +602,7 @@ class HttpClient
                 $requestTimeoutMillis ?? $this->timeoutMillis,
             );
 
-            return $this->parseAnswer($answer['status'], $answer['body'], $answer['retryAfter']);
+            return $this->parseAnswer($answer['status'], $answer['body'], $answer['retryAfter'], $url);
         }
 
         $options = $this->buildRequestOptions($method, null, $requestTimeoutMillis);
@@ -559,7 +612,7 @@ class HttpClient
             $options['body'] = $payload;
         }
         $response = $this->guzzle->request($method, $url, $options);
-        return $this->parseResponse($response);
+        return $this->parseResponse($response, $url);
     }
 
     /**
@@ -606,7 +659,7 @@ class HttpClient
         }
 
         return $this->guzzle->requestAsync($method, $url, $options)->then(
-            fn(ResponseInterface $response) => $this->parseResponse($response)
+            fn(ResponseInterface $response) => $this->parseResponse($response, $url)
         );
     }
 
@@ -630,7 +683,7 @@ class HttpClient
                     : new \RuntimeException('Queen async request failed with a non-exception rejection.');
                 $statusCode = $this->getStatusCode($error);
                 $nextAttempt = $attempt + 1;
-                if (($statusCode >= 400 && $statusCode < 500) || $nextAttempt >= $this->retryAttempts) {
+                if (self::isTerminalStatus($statusCode) || $nextAttempt >= $this->retryAttempts) {
                     throw $error;
                 }
 
@@ -671,7 +724,7 @@ class HttpClient
                 if ($statusCode === 0 || $statusCode >= 500) {
                     $this->loadBalancer?->markUnhealthy($url);
                 }
-                if (($statusCode >= 400 && $statusCode < 500) || !isset($urls[$index + 1])) {
+                if (self::isTerminalStatus($statusCode) || !isset($urls[$index + 1])) {
                     throw $error;
                 }
 
@@ -705,7 +758,7 @@ class HttpClient
                 $lastError = $error;
 
                 $statusCode = $this->getStatusCode($error);
-                if ($statusCode >= 400 && $statusCode < 500) {
+                if (self::isTerminalStatus($statusCode)) {
                     throw $error;
                 }
 
@@ -762,7 +815,7 @@ class HttpClient
                     $this->loadBalancer->markUnhealthy($url);
                 }
 
-                if ($statusCode >= 400 && $statusCode < 500) {
+                if (self::isTerminalStatus($statusCode)) {
                     throw $error;
                 }
             }
