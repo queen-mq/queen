@@ -5,6 +5,8 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+## PHP client 2.4.3 - 2026-10-10
+
 **Laravel: the PHP client pins supervisor 0.8.1.** `queen:supervisor-install` installs 0.8.1, with
 the fixes of the Rust master below. A deployment that pins the SHA-256 of the manifest, as
 `--manifest-sha256` or `supervisor_binary.manifest_sha256`, takes the one of the 0.8.1 release
