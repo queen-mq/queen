@@ -958,7 +958,8 @@ class HttpClient
         // a pop or an ACK only after a 503 that says it did not run.
         $resendsHarmlessly = in_array(self::REFUSED_CODE, $resendableCodes, true);
         $startedNanos = hrtime(true);
-        $urls = $this->loadBalancer->getAllUrls();
+        // A URL listed twice is one backend.
+        $urls = array_values(array_unique($this->loadBalancer->getAllUrls()));
 
         while (true) {
             $attemptedUrls = [];

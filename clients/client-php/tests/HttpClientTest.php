@@ -124,6 +124,28 @@ class HttpClientTest extends TestCase
         $this->assertCount(3, array_unique($handler->hosts()), 'a backend was tried twice while another was never tried');
     }
 
+    /** A URL listed twice is one backend: failover ends with that backend's error. */
+    public function testAUrlListedTwiceIsOneBackendForFailover(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 500, 'json' => ['error' => 'down']],
+            ['status' => 500, 'json' => ['error' => 'down']],
+        ]);
+        $client = new HttpClient([
+            'loadBalancer' => new LoadBalancer(['http://queen-a:6632', 'http://queen-a:6632'], 'affinity'),
+            'enableFailover' => true,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        try {
+            $client->get('/api/v1/status', affinityKey: 'orders:*:workers');
+            $this->fail('a backend that answers 500 succeeded');
+        } catch (\Queen\Exceptions\HttpException $error) {
+            $this->assertSame(500, $error->statusCode);
+        }
+        $this->assertSame(1, $handler->count());
+    }
+
     /**
      * consume() with concurrency > 1 polls with getAsync(): one try, no
      * failover in flight. It must still tell the balancer, or the next round
