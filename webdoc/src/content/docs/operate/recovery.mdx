@@ -74,7 +74,9 @@ digest: >-
 # records at once when a walk over old messages finds the file cold, seals an aged active file only
 # for retention or its size, and lets a directory pass take several steps; facade/real.rs exports
 # queen_raft_qlog_index_maps. A sealed file's damage is still not looked for at a start, and the
-# retired directories are as described.
+# retired directories are as described. Later the same night qlog/set.rs lowers its written seq at a
+# raft cut, which removes a refusal at start (raft log entries not all in the queue logs) that was a
+# bug and is not one of the refusals this page lists.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and

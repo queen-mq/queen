@@ -39,7 +39,10 @@ sourceOfTruth:
 # qlog/index.rs reads an index that fits a page into memory, and one the kernel refuses to map;
 # qlog/set.rs gives the kernel a read-ahead hint for old records and seals an aged active file only
 # for retention or its size; qlog/mod.rs makes a roll change nothing in memory until the sealed
-# file's index is open. The paragraphs on rolling, reclaim and limits say so.
+# file's index is open. The paragraphs on rolling, reclaim and limits say so. Later the same night
+# qlog/set.rs lowers its written seq at a raft cut and qlog/mod.rs lowers an empty file's first seq
+# at its first write, so an entry written after a cut is found by its seq: no paragraph describes
+# file headers, nothing here changes.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are

@@ -42,7 +42,9 @@ sourceOfTruth:
 # queen_raft_qlog_index_maps, batcher.rs warns when the mapped indexes pass 70% of the kernel's
 # limit, and qlog/mod.rs gives the kernel a read-ahead hint for the records a walk over old messages
 # will read, shares a sealed file's index with retention and seals an aged file only when that frees
-# something. The pipeline and its answers are as described.
+# something. The pipeline and its answers are as described. Later the same night qlog/mod.rs makes
+# an empty file begin where its first record does, after a raft cut: the pipeline and its answers
+# are as described.
 ---
 
 A worker's step in Queen is three calls at most: it pops a batch, does its work, and commits a

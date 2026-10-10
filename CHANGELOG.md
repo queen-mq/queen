@@ -94,13 +94,19 @@ whole. Every release since 2.0.0 has this.
 
 **Server: an entry written after a log cut can be read.** A log file is created for a sequence
 number: by a roll, for the group about to be written, and by the idle pass, which seals a quiet
-file and creates the next one for the writer's next number. When a follower then cut its log back
-below that number (a tail a new leader overruled), the empty file kept it, the next entry the log
-took carried a lower one, and a search by number skipped the file. The entry was on disk and the
-node refused to start: `raft log entries N..N+1 are not all in the queue logs`. A cut now lowers
-the first number of an empty file to the cut. Every release since 2.0.0 has this; it needs a quiet
-log sealed while the node holds entries that are later overruled, which the default seal age of
-600 seconds makes rare. Found by Jepsen on logs sealed after 10 seconds.
+file and creates the next one for the writer's next number. When a follower cuts its log back (a
+tail a new leader overruled), the entries it takes next carry lower numbers than that, in two
+ways. The cut can come after the seal, and the empty file kept the number it was created for. Or
+it can come before: the idle pass still counted the writer's next number from the tail the cut
+had removed, and a file sealed in the moment before the new leader's entries arrived was created
+too high. Either way an entry went into a file whose header said it held nothing that low, a
+search by number skipped the file, and at its next start the node refused:
+`raft log entries N..N+1 are not all in the queue logs`. A cut now lowers the first number of an
+empty file and the writer's own count, and a file begins where its first record does, whatever
+created it. Every release since 2.0.0 has this; it needs a log sealed around the moment a node's
+entries are overruled, which the default seal age of 600 seconds makes rare. Found by Jepsen on
+logs sealed after 10 seconds: the first way by four tests that were not valid, the second in the
+node logs of a test that was, because the other four nodes had carried it.
 
 **Server: a node starts after an empty queue log was removed half-way.** A queue's log whose files
 have all been reclaimed is closed and its directory deleted. The deletion was done in place, and
