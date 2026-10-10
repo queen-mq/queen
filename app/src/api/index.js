@@ -132,6 +132,8 @@ export const messages = {
 // TRACES API (tenant-scoped)
 // ============================================
 export const traces = {
+  getForMessage: (partitionId, transactionId, params, config) =>
+    client.get(`/api/v1/traces/${encodeURIComponent(partitionId)}/${encodeURIComponent(transactionId)}`, { params, ...config }),
   getByName: (traceName, params, config) =>
     client.get(`/api/v1/traces/by-name/${encodeURIComponent(traceName)}`, { params, ...config }),
   /** Trace names that actually exist for this tenant — the only honest source of suggestions. */

@@ -62,6 +62,7 @@
           <label class="tool-field" for="locks-limit">
             <span class="tool-label">Show</span>
             <select id="locks-limit" v-model.number="limit" class="input">
+              <option :value="25">25</option>
               <option :value="50">50</option>
               <option :value="100">100</option>
               <option :value="250">250</option>
@@ -365,7 +366,7 @@ const ROW_TITLE =
 // ---------------------------------------------------------------------------
 const prefixDraft = ref('')
 const appliedPrefix = ref('')
-const limit = ref(100)
+const limit = ref(25)
 
 const queryKey = computed(() => JSON.stringify([appliedPrefix.value, limit.value]))
 /** What the rows on screen answer; compared, so a filter that changed does not

@@ -352,6 +352,8 @@
     <div v-if="selectedQueue" class="card">
       <div class="card-header">
         <h3>Consumer groups of {{ selectedQueue }}</h3>
+        <RouterLink class="btn btn-ghost" :to="queueLocation(selectedQueue, route, 'overview', windowQuery(currentRange()))">Inspect queue →</RouterLink>
+        <RouterLink class="btn btn-ghost" :to="queueLocation(selectedQueue, route, 'consumers', windowQuery(currentRange()))">Inspect consumer groups →</RouterLink>
         <span class="card-sub">{{ groupsSub }}</span>
         <span class="chip chip-mute">now</span>
       </div>
@@ -630,6 +632,11 @@
 </template>
 
 <script setup>
+import { useRoute } from 'vue-router'
+import { useRouteState } from '@/composables/useRouteState'
+import { useRouteRange, rangeMinutes } from '@/composables/useRouteRange'
+import { queueLocation, windowQuery } from '@/composables/navigation'
+const route = useRoute()
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import {
   BarController, BarElement, CategoryScale, Chart, Filler, Legend, LineController,
@@ -820,11 +827,14 @@ const customMode = ref(false)
 const customFrom = ref('')
 const customTo = ref('')
 const appliedCustom = ref(null)
+useRouteRange({ range: selectedRange, customMode, customFrom, customTo, appliedCustom, reload: () => { fetchWorkload(); fetchDeeper() } })
 
 const groupBy = ref('namespace')
 const focus = ref(null)
 const selectedQueue = ref(null)
 const metric = ref('pop')
+const { restoring: restoringRoute } = useRouteState({ groupBy, focus, selectedQueue, metric })
+watch([groupBy, focus], () => { if (restoringRoute.value) fetchWorkload() })
 
 const metrics = [
   { label: 'delivered', value: 'pop' },
@@ -841,7 +851,7 @@ const METRIC_LABEL = {
 function currentRange() {
   if (customMode.value && appliedCustom.value) return appliedCustom.value
   const to = new Date()
-  const from = new Date(to.getTime() - (QUICK_MINUTES[selectedRange.value] || 60) * 60_000)
+  const from = new Date(to.getTime() - (QUICK_MINUTES[selectedRange.value] || rangeMinutes(selectedRange.value)) * 60_000)
   return { from, to }
 }
 
@@ -872,7 +882,7 @@ const toggleCustomMode = () => {
   customMode.value = !customMode.value
   if (customMode.value) {
     const now = new Date()
-    const from = new Date(now.getTime() - (QUICK_MINUTES[selectedRange.value] || 60) * 60_000)
+    const from = new Date(now.getTime() - (QUICK_MINUTES[selectedRange.value] || rangeMinutes(selectedRange.value)) * 60_000)
     customTo.value = formatDateTimeLocal(now)
     customFrom.value = formatDateTimeLocal(from)
   } else {

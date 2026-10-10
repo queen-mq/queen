@@ -1,11 +1,13 @@
 <template>
   <div class="view-container">
+    <PerformanceNavigation />
+    <p v-if="scopedQueue" class="tool-note">Queue charts focus on {{ scopedQueue }}. Retention and infrastructure sections cover their labelled scope.</p>
 
     <!-- This page really does poll (`useAutoRefresh` below), so the tick is a
          fact and not a label. It counts from the last SUCCESSFUL queue-ops
          load, so a failing refresh makes it climb instead of resetting into a
          freshness we do not have. -->
-    <PageHead title="Queue operations" :live="refreshAgo">
+    <PageHead title="Performance" :live="refreshAgo">
       <template #sub><span :title="rangeUtcTitle">{{ rangeLabel }}</span></template>
       <template #range>
         <div class="seg" role="group" aria-label="Time range">
@@ -130,7 +132,7 @@
                   <tbody>
                     <tr v-for="(row, i) in topQueues.push" :key="`push-${row.queue}`">
                       <td class="rank">{{ i + 1 }}</td>
-                      <td class="qname" :title="row.queue">{{ row.queue }}</td>
+                      <td class="qname" :title="row.queue"><RouterLink :to="queueLocation(row.queue, route, 'overview', windowQuery(currentRange()))">{{ row.queue }} →</RouterLink></td>
                       <td class="tabular-nums val">{{ formatRate(row.push) }}</td>
                     </tr>
                   </tbody>
@@ -144,7 +146,7 @@
                   <tbody>
                     <tr v-for="(row, i) in topQueues.pop" :key="`pop-${row.queue}`">
                       <td class="rank">{{ i + 1 }}</td>
-                      <td class="qname" :title="row.queue">{{ row.queue }}</td>
+                      <td class="qname" :title="row.queue"><RouterLink :to="queueLocation(row.queue, route, 'overview', windowQuery(currentRange()))">{{ row.queue }} →</RouterLink></td>
                       <td class="tabular-nums val">{{ formatRate(row.pop) }}</td>
                     </tr>
                   </tbody>
@@ -158,7 +160,7 @@
                   <tbody>
                     <tr v-for="(row, i) in topQueues.parked" :key="`parked-${row.queue}`">
                       <td class="rank">{{ i + 1 }}</td>
-                      <td class="qname" :title="row.queue">{{ row.queue }}</td>
+                      <td class="qname" :title="row.queue"><RouterLink :to="queueLocation(row.queue, route, 'overview', windowQuery(currentRange()))">{{ row.queue }} →</RouterLink></td>
                       <td class="tabular-nums val">{{ formatParked(row.parked) }}</td>
                     </tr>
                   </tbody>
@@ -172,7 +174,7 @@
                   <tbody>
                     <tr v-for="(row, i) in topQueues.lag" :key="`lag-${row.queue}`">
                       <td class="rank">{{ i + 1 }}</td>
-                      <td class="qname" :title="row.queue">{{ row.queue }}</td>
+                      <td class="qname" :title="row.queue"><RouterLink :to="queueLocation(row.queue, route, 'overview', windowQuery(currentRange()))">{{ row.queue }} →</RouterLink></td>
                       <td class="tabular-nums val">{{ formatDurationMs(row.lag) }}</td>
                     </tr>
                   </tbody>
@@ -553,6 +555,11 @@
 </template>
 
 <script setup>
+import { useRoute } from 'vue-router'
+import { useRouteState } from '@/composables/useRouteState'
+import { useRouteRange } from '@/composables/useRouteRange'
+import { queueLocation, windowQuery } from '@/composables/navigation'
+const route = useRoute()
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { system, operator as operatorApi, describeApiError } from '@/api'
 import { toNum, trimIncompleteBuckets, formatNumber } from '@/composables/useApi'
@@ -565,6 +572,7 @@ import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
+import PerformanceNavigation from '@/components/PerformanceNavigation.vue'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 import { chartColor, chartTheme, alpha } from '@/composables/useChartTheme'
@@ -585,6 +593,7 @@ const customTo = ref('')
 // The range the data on screen was actually fetched for — only Apply moves it,
 // so a half-typed custom range never silently re-scopes the panels.
 const appliedCustom = ref(null)
+useRouteRange({ range: timeRange, customMode, customFrom, customTo, appliedCustom, reload: () => fetchData() })
 
 // CELL-LEVEL. worker-metrics carries broker-wide worker counters with no
 // tenant column; the proxy classifies it Operator and answers 404 to everyone
@@ -607,7 +616,16 @@ const retentionUpdatedAt = ref(null)
 const queueParkedReplicasData = ref(null)
 const retentionData = ref(null)
 
-const selectedQueues = ref([])
+const scopedQueue = ref('')
+const comparedQueues = ref([])
+useRouteState({ queue: scopedQueue, queues: comparedQueues })
+const selectedQueues = computed({
+  get: () => scopedQueue.value ? [scopedQueue.value] : comparedQueues.value,
+  set: values => {
+    scopedQueue.value = values.length === 1 ? values[0] : ''
+    comparedQueues.value = values.length === 1 ? [] : values
+  },
+})
 const selectedQueueOp = ref('pop')
 // Cluster-aggregate ('aggregate') vs per-replica ('individual'); only
 // affects the Parked tab. Lives at this scope (not inside queueOpTabs)

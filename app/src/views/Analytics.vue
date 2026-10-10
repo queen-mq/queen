@@ -1,7 +1,8 @@
 <template>
   <div class="view-container">
+    <PerformanceNavigation />
 
-    <PageHead title="Analytics">
+    <PageHead title="Performance">
       <template #sub><span :title="rangeUtcTitle">{{ rangeLabel }}</span></template>
       <template #range>
         <div class="seg" role="group" aria-label="Time range">
@@ -49,6 +50,7 @@
         <span v-if="!scopeUnavailable" class="tool-note">{{ scopedQueues.length }} queue{{ scopedQueues.length === 1 ? '' : 's' }} match</span>
         <button class="btn btn-ghost" @click="clearFilters">Clear</button>
       </template>
+      <RouterLink v-if="queueFilter" class="btn btn-ghost" :to="queueLocation(queueFilter, route, 'overview', windowQuery(currentRange()))">Inspect queue →</RouterLink>
     </PageTools>
 
     <!-- A window of your own: the only range that waits for Apply, because a
@@ -186,6 +188,11 @@
 </template>
 
 <script setup>
+import { useRoute } from 'vue-router'
+import { useRouteState } from '@/composables/useRouteState'
+import { useRouteRange, rangeMinutes } from '@/composables/useRouteRange'
+import { queueLocation, windowQuery } from '@/composables/navigation'
+const route = useRoute()
 import { computed, ref, watch } from 'vue'
 
 import BaseChart from '@/components/BaseChart.vue'
@@ -202,6 +209,7 @@ import {
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import Autocomplete from '@/components/Autocomplete.vue'
+import PerformanceNavigation from '@/components/PerformanceNavigation.vue'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 
@@ -234,6 +242,8 @@ const appliedCustom = ref(null)
 const queueFilter = ref('')
 const namespaceFilter = ref('')
 const taskFilter = ref('')
+useRouteState({ queue: queueFilter, namespace: namespaceFilter, task: taskFilter })
+useRouteRange({ range: selectedRange, customMode, customFrom, customTo, appliedCustom, reload: () => fetchAll() })
 
 // ---------------------------------------------------------------------------
 // Range
@@ -243,7 +253,7 @@ const QUICK_MINUTES = { '1h': 60, '6h': 360, '24h': 1440, '7d': 10080 }
 function currentRange() {
   if (customMode.value && appliedCustom.value) return appliedCustom.value
   const to = new Date()
-  const from = new Date(to.getTime() - (QUICK_MINUTES[selectedRange.value] || 60) * 60_000)
+  const from = new Date(to.getTime() - (QUICK_MINUTES[selectedRange.value] || rangeMinutes(selectedRange.value)) * 60_000)
   return { from, to }
 }
 
@@ -276,7 +286,7 @@ const toggleCustomMode = () => {
   customMode.value = !customMode.value
   if (customMode.value) {
     const now = new Date()
-    const from = new Date(now.getTime() - (QUICK_MINUTES[selectedRange.value] || 60) * 60_000)
+    const from = new Date(now.getTime() - (QUICK_MINUTES[selectedRange.value] || rangeMinutes(selectedRange.value)) * 60_000)
     customTo.value = formatDateTimeLocal(now)
     customFrom.value = formatDateTimeLocal(from)
   } else {
@@ -366,15 +376,6 @@ const allowedQueueNames = computed(() => {
 const scopedQueues = computed(() => {
   const allow = allowedQueueNames.value
   return allow ? queues.value.filter(q => allow.has(q.name)) : queues.value
-})
-
-// Drop a queue selection the freshly-narrowed list no longer contains. Keyed on
-// the arrived list, not on the filter change, so it never judges the new scope
-// against the previous scope's queues.
-watch(queues, (list) => {
-  if (queueFilter.value && list.length && !list.some(q => q.name === queueFilter.value)) {
-    queueFilter.value = ''
-  }
 })
 
 // ---------------------------------------------------------------------------

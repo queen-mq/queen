@@ -46,7 +46,7 @@
             <router-link
               v-if="verdict.kind === 'success' && messagesLink"
               class="btn btn-ghost push-open"
-              :to="{ path: '/messages', query: { queue: result?.queueName || queue } }"
+              :to="queueLocation(result?.queueName || queue, route, 'messages', { from: undefined, to: undefined, range: '1h' })"
               @click="emit('close')"
             >
               Open in Messages
@@ -170,6 +170,8 @@
 // written) both leave the form up with the message still in it. See
 // composables/usePushVerdict.js for the mapping.
 import { computed, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { queueLocation } from '@/composables/navigation'
 
 import Autocomplete from '@/components/Autocomplete.vue'
 import { messages as messagesApi } from '@/api'
@@ -180,6 +182,8 @@ import {
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
+
+const route = useRoute()
 
 const props = defineProps({
   open: { type: Boolean, required: true },
@@ -203,10 +207,8 @@ const props = defineProps({
   copy: { type: Boolean, default: false },
   /**
    * Offer "Open in Messages" after a queued push. Messages itself passes false:
-   * `<router-view>` is not keyed, so a push to /messages from /messages would
-   * change the URL without re-reading the query — a link that looks like it
-   * filtered and did not. That page applies the queue to its own filter on
-   * `pushed` instead.
+   * that page applies the destination queue and a fresh time window to its
+   * own filters on `pushed`.
    */
   messagesLink: { type: Boolean, default: true },
 })

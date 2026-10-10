@@ -82,6 +82,7 @@
         <label class="tool-field">
           <span class="tool-label">Show</span>
           <select v-model="limit" class="input" @change="applyFilters">
+            <option :value="25">25</option>
             <option :value="50">50</option>
             <option :value="100">100</option>
             <option :value="200">200</option>
@@ -96,11 +97,11 @@
     <div v-if="rangePreset === 'custom'" class="page-tools">
       <label class="tool-field">
         <span class="tool-label">From</span>
-        <input v-model="filterFrom" type="datetime-local" class="input" :title="formatTimestampUtc(filterFrom)" />
+        <input v-model="filterFrom" type="datetime-local" step="any" class="input" :title="formatTimestampUtc(filterFrom)" />
       </label>
       <label class="tool-field">
         <span class="tool-label">To</span>
-        <input v-model="filterTo" type="datetime-local" class="input" :title="formatTimestampUtc(filterTo)" />
+        <input v-model="filterTo" type="datetime-local" step="any" class="input" :title="formatTimestampUtc(filterTo)" />
       </label>
       <button class="btn btn-primary" @click="applyFilters">Apply</button>
     </div>
@@ -267,6 +268,8 @@
           </div>
 
           <div class="detail-fields">
+            <RouterLink v-if="messageDetail.queue" class="btn btn-ghost" :to="queueLocation(messageDetail.queue, route)">Open queue →</RouterLink>
+            <RouterLink class="btn btn-ghost" :to="{ path: '/traces', query: { ...contextQuery(route), queue: messageDetail.queue, partitionId: selectedMessage.partitionId, transactionId: selectedMessage.transactionId } }">Message traces →</RouterLink>
             <DetailField label="Queue" :value="messageDetail.queue" tone="high" />
             <DetailField label="Partition" :value="messageDetail.partition" mono copyable />
             <DetailField label="Partition ID" :value="messageDetail.partitionId" mono copyable />
@@ -432,7 +435,10 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { useRouteState, replaceQueryFields } from '@/composables/useRouteState'
+import { contextQuery, queueLocation } from '@/composables/navigation'
+import { rangeMinutes } from '@/composables/useRouteRange'
 import { messages as messagesApi, queues as queuesApi, describeApiError } from '@/api'
 import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
 import { filtersForPushedMessage, isEncryptedEnvelope } from '@/composables/usePushVerdict'
@@ -450,6 +456,7 @@ import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 
 const route = useRoute()
+const router = useRouter()
 const { can } = useIdentity()
 const { notifySuccess, notifyError } = useToast()
 
@@ -464,7 +471,9 @@ const filterPartition = ref('')
 const filterStatus = ref('')
 const filterFrom = ref('')
 const filterTo = ref('')
-const limit = ref(100)
+const appliedFrom = ref('')
+const appliedTo = ref('')
+const limit = ref(25)
 const currentPage = ref(1)
 
 const selectedMessage = ref(null)
@@ -582,7 +591,7 @@ const headKey = (rows) => (rows.length ? rowKey(rows[0], 0) : null)
 
 // Helper to convert datetime-local to ISO string
 const toISOString = (dateTimeLocal) => {
-  if (!dateTimeLocal) return ''
+  if (!dateTimeLocal || !Number.isFinite(Date.parse(dateTimeLocal))) return ''
   return new Date(dateTimeLocal).toISOString()
 }
 
@@ -593,7 +602,9 @@ const RANGE_PRESETS = [
   { value: '24h', hours: 24 },
   { value: '7d', hours: 168 },
 ]
-const rangePreset = ref(route.query.from || route.query.to ? 'custom' : '1h')
+const incomingPreset = () => route.query.from || route.query.to ? 'custom'
+  : !route.query.range ? '1h' : RANGE_PRESETS.some(r => r.value === route.query.range) ? route.query.range : 'custom'
+const rangePreset = ref(incomingPreset())
 const pickRange = (preset) => {
   rangePreset.value = preset.value
   setTimeRange(preset.hours)
@@ -605,8 +616,10 @@ const setTimeRange = (hours) => {
   const now = new Date()
   const from = new Date(now.getTime() - hours * 60 * 60 * 1000)
 
-  filterFrom.value = formatDateTimeLocal(from)
-  filterTo.value = formatDateTimeLocal(now)
+  filterFrom.value = formatDateTimeLocal(from, true)
+  filterTo.value = formatDateTimeLocal(now, true)
+  appliedFrom.value = from.toISOString()
+  appliedTo.value = now.toISOString()
 }
 
 // Clear all filters
@@ -632,8 +645,8 @@ const buildParams = () => {
   if (filterQueue.value) params.queue = filterQueue.value
   if (filterPartition.value) params.partition = filterPartition.value
   if (filterStatus.value) params.status = filterStatus.value
-  if (filterFrom.value) params.from = toISOString(filterFrom.value)
-  if (filterTo.value) params.to = toISOString(filterTo.value)
+  if (appliedFrom.value) params.from = appliedFrom.value
+  if (appliedTo.value) params.to = appliedTo.value
   return params
 }
 
@@ -645,6 +658,8 @@ const fetchMessages = () => {
 }
 
 const applyFilters = () => {
+  appliedFrom.value = toISOString(filterFrom.value)
+  appliedTo.value = toISOString(filterTo.value)
   currentPage.value = 1
   fetchMessages()
 }
@@ -663,11 +678,13 @@ const nextPage = () => {
 }
 
 const closePanel = () => {
+  replaceQueryFields(router, route, { partitionId: null, transactionId: null })
   selectedMessage.value = null
   actionError.value = null
 }
 
 const openMessage = async (partitionId, transactionId) => {
+  replaceQueryFields(router, route, { partitionId, transactionId })
   selectedMessage.value = { partitionId, transactionId }
   detailLoading.value = true
   detailError.value = null
@@ -774,6 +791,7 @@ const onPushed = ({ queue, partition }) => {
     next.partition !== filterPartition.value
 
   filterTo.value = next.to
+  appliedTo.value = toISOString(next.to)
   filterStatus.value = next.status
   filterQueue.value = next.queue
   filterPartition.value = next.partition
@@ -813,38 +831,48 @@ const copyPayload = async () => {
 // Register for global refresh
 useRefresh(fetchMessages)
 
-// Initialize from query params and set the default time range. This runs in
-// setup, not onMounted, so the very first paint is the loading state rather
-// than "No messages found" — an empty table before the first request is an
-// answer we do not have yet.
-if (route.query.queue) {
-  filterQueue.value = route.query.queue
+// Query state is read before the first request, and again for same-page links.
+const dateField = field => computed({
+  get: () => field.value,
+  set: value => { field.value = toISOString(value) },
+})
+const { restoring: restoringRoute } = useRouteState({
+  queue: filterQueue, partition: filterPartition, status: filterStatus,
+  from: dateField(appliedFrom), to: dateField(appliedTo), limit, page: currentPage, search: searchQuery,
+})
+const restoreDateInputs = () => {
+  filterFrom.value = appliedFrom.value ? formatDateTimeLocal(new Date(appliedFrom.value), true) : ''
+  filterTo.value = appliedTo.value ? formatDateTimeLocal(new Date(appliedTo.value), true) : ''
 }
-if (route.query.partition) {
-  filterPartition.value = route.query.partition
-}
-if (route.query.status) {
-  filterStatus.value = route.query.status
-}
-if (!route.query.from && !route.query.to) {
-  setTimeRange(1)
-}
-
+restoreDateInputs()
+if (!appliedFrom.value && !appliedTo.value) setTimeRange(rangeMinutes(route.query.range || '1h') / 60)
+watch(() => route.query.range, () => {
+  if (!route.query.from && !route.query.to) {
+    rangePreset.value = incomingPreset()
+    setTimeRange(rangeMinutes(route.query.range || '1h') / 60)
+    fetchMessages()
+  }
+})
+watch([filterQueue, filterPartition, filterStatus, currentPage, appliedFrom, appliedTo, limit], (values, previous) => {
+  if (restoringRoute.value) fetchMessages()
+  else if (values.slice(0, 3).some((value, i) => value !== previous[i])) {
+    currentPage.value = 1
+    fetchMessages()
+  }
+})
+watch([appliedFrom, appliedTo], () => {
+  if (restoringRoute.value) {
+    restoreDateInputs()
+    rangePreset.value = incomingPreset()
+  }
+})
+watch(() => [route.query.partitionId, route.query.transactionId], ([partitionId, transactionId]) => {
+  if (typeof partitionId === 'string' && typeof transactionId === 'string') {
+    if (selectedMessage.value?.partitionId !== partitionId || selectedMessage.value?.transactionId !== transactionId) openMessage(partitionId, transactionId)
+  } else selectedMessage.value = null
+}, { immediate: true })
 refreshQueues()
 fetchMessages()
-
-// Deep link from Traces ("View Full Message"): the addressed message is not
-// necessarily on the default page, so open it directly instead of hoping the
-// list happens to contain it.
-if (route.query.partitionId && route.query.transactionId) {
-  openMessage(route.query.partitionId, route.query.transactionId)
-}
-
-// Watch for filter changes (auto-apply on queue/status change)
-watch([filterQueue, filterPartition, filterStatus], () => {
-  currentPage.value = 1
-  fetchMessages()
-})
 
 // Status words as a person reads them; the wire value stays in the drawer.
 const statusLabel = (st) => ({ pending: 'Pending', processing: 'Processing', completed: 'Completed', dead_letter: 'Dead letter', failed: 'Failed' }[st] || st)

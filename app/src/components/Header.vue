@@ -77,6 +77,8 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { queues as queuesApi, consumers as consumersApi } from '@/api'
 import { collapsed, toggleSidebar, wide } from '@/composables/useSidebar'
+import { queueOf, queueLocation, consumerLocation } from '@/composables/navigation'
+import { useIdentity } from '@/stores/identity'
 import BrokerBar from '@/components/BrokerBar.vue'
 import ThemeMenu from '@/components/ThemeMenu.vue'
 
@@ -90,7 +92,8 @@ const pageTitle = computed(() => {
   return route.meta.title || 'Overview'
 })
 const parentCrumb = computed(() =>
-  route.name === 'QueueDetail' ? { label: 'Queues', to: '/queues' } : null
+  route.name === 'QueueDetail' ? { label: 'Queues', to: '/queues' }
+    : queueOf(route) ? { label: queueOf(route), to: queueLocation(queueOf(route), route) } : null
 )
 
 const searchQuery = ref('')
@@ -116,10 +119,10 @@ const searchResults = computed(() => {
   const q = searchQuery.value.toLowerCase()
   const results = []
   queues.value.filter(x => x.name?.toLowerCase().includes(q)).slice(0, 5).forEach(x => {
-    results.push({ id: `q-${x.name}`, type: 'queue', name: x.name, partitions: x.partitions || 1, route: `/queues/${encodeURIComponent(x.name)}` })
+    results.push({ id: `q-${x.name}`, type: 'queue', name: x.name, partitions: x.partitions || 1, route: queueLocation(x.name, route) })
   })
   consumers.value.filter(x => x.name?.toLowerCase().includes(q)).slice(0, 5).forEach(x => {
-    results.push({ id: `c-${x.name}-${x.queueName}`, type: 'consumer', name: x.name, queueName: x.queueName, members: x.members || 0, route: `/consumers?search=${encodeURIComponent(x.name)}` })
+    results.push({ id: `c-${x.name}-${x.queueName}`, type: 'consumer', name: x.name, queueName: x.queueName, members: x.members || 0, route: consumerLocation(x, route) })
   })
   return results.slice(0, 10)
 })
@@ -136,17 +139,30 @@ const onSearchInput = () => { showResults.value = true; if (!searchDataLoaded.va
 const onSearchBlur = () => { setTimeout(() => { if (!searchQuery.value) { showResults.value = false; searchOpen.value = false } }, 150) }
 watch(searchQuery, () => { selectedIndex.value = 0; if (searchQuery.value) showResults.value = true })
 
+const { epoch } = useIdentity()
+let searchSequence = 0
 const loadSearchData = async () => {
   if (searchLoading.value) return
   searchLoading.value = true
+  const sequence = ++searchSequence
+  const clusterEpoch = epoch.value
   try {
     const [qr, cr] = await Promise.all([queuesApi.list(), consumersApi.list()])
+    if (sequence !== searchSequence || clusterEpoch !== epoch.value) return
     queues.value = Array.isArray(qr.data?.queues || qr.data) ? (qr.data?.queues || qr.data) : []
     consumers.value = Array.isArray(cr.data) ? cr.data : []
     searchDataLoaded.value = true
-  } catch { searchDataLoaded.value = true }
-  finally { searchLoading.value = false }
+  } catch { if (sequence === searchSequence) searchDataLoaded.value = false }
+  finally { if (sequence === searchSequence) searchLoading.value = false }
 }
+
+watch(epoch, () => {
+  searchSequence++
+  queues.value = []; consumers.value = []
+  searchDataLoaded.value = false; searchLoading.value = false
+  closeSearch()
+  loadSearchData()
+})
 
 const handleKeydown = (e) => {
   if (!(e.metaKey || e.ctrlKey)) return

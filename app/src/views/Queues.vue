@@ -1,7 +1,7 @@
 <template>
   <div class="view-container">
 
-    <PageHead title="Queues" :sub="lastFetched ? formatNumber(queues.length) : ''" :live="refreshAgo">
+    <PageHead title="Queues" :sub="headSub" :live="refreshAgo">
       <template #actions>
         <button v-if="can('queueAdmin')" class="btn btn-primary" @click="showCreate = true">Create queue</button>
       </template>
@@ -156,7 +156,9 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { useRouteState } from '@/composables/useRouteState'
+import { queueLocation } from '@/composables/navigation'
 import { queues as queuesApi, system as systemApi, describeApiError } from '@/api'
 import { formatNumber, toNum } from '@/composables/useApi'
 import { queueAttention } from '@/composables/useAttention'
@@ -173,6 +175,7 @@ import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 
 const router = useRouter()
+const route = useRoute()
 const { can } = useIdentity()
 const { notifySuccess } = useToast()
 
@@ -206,6 +209,7 @@ const searchQuery = ref('')
 const filterNamespace = ref(ALL)
 const filterTask = ref(ALL)
 const sortBy = ref('health')
+useRouteState({ search: searchQuery, namespace: filterNamespace, task: filterTask, sort: sortBy })
 
 // Modal state
 // The create form. It is not prefilled from anything on this page: a create
@@ -292,6 +296,15 @@ const filteredQueues = computed(() => {
   return result
 })
 
+const headSub = computed(() => {
+  if (!lastFetched.value) return ''
+  const total = queues.value.length
+  const count = `${formatNumber(total)} ${total === 1 ? 'queue' : 'queues'}`
+  return hasActiveFilter.value
+    ? `Showing ${formatNumber(filteredQueues.value.length)} of ${count}`
+    : count
+})
+
 // Methods — fetchQueues is now thin shim around the shared store.
 // On mount we use the cache (instant if Consumers/Dashboard already loaded
 // queues); on auto-refresh we force-bust so we get fresh data.
@@ -370,7 +383,7 @@ const refreshAll = async () => {
 }
 
 const viewQueue = (queue) => {
-  router.push(`/queues/${queue.name}`)
+  router.push(queueLocation(queue.name, route))
 }
 
 const confirmDelete = (queue) => {
