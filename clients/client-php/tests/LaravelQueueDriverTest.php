@@ -915,6 +915,39 @@ class LaravelQueueDriverTest extends TestCase
     }
 
     /**
+     * A QueryException with a latin-1 binding has a message that is not
+     * UTF-8. Its dead-letter ACK could not be encoded, so delete() threw
+     * inside Job::fail(): failed() and the batch and chain callbacks were
+     * skipped, and the job failed again after its lease expired, as
+     * MaxAttemptsExceeded, with a second failed-job row.
+     */
+    public function testAFailureWhoseMessageIsNotUtf8StillReachesTheDeadLetterQueue(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popResponse(['job' => FailureRecordingTestHandler::class . '@handle']
+                + $this->payload('job-latin1'))],
+            ['status' => 200, 'json' => ['success' => true, 'leaseReleased' => true, 'dlq' => true]],
+        ]);
+        [$queue] = $this->queueFor($handler);
+        $container = new Container();
+        $container->instance(\Illuminate\Contracts\Events\Dispatcher::class, new Dispatcher($container));
+        $queue->setContainer($container);
+        FailureRecordingTestHandler::$failures = [];
+        $job = $queue->pop('emails');
+        $failure = new \RuntimeException("caf\xE9 " . str_repeat('x', 100_000));
+
+        $job->fail($failure);
+
+        $this->assertCount(2, $handler->requests);
+        $this->assertSame('/api/v1/ack', $handler->requests[1]->getUri()->getPath());
+        $ack = json_decode((string) $handler->requests[1]->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('dlq', $ack['status']);
+        $this->assertStringStartsWith("caf\u{FFFD} xxx", $ack['error']);
+        $this->assertLessThanOrEqual(8192, strlen($ack['error']));
+        $this->assertSame([$failure], FailureRecordingTestHandler::$failures, 'the job\'s failed()');
+    }
+
+    /**
      * A delivery that carries no Laravel job never will. Left to lease expiry,
      * it came back forever, since an expiry never charges the broker's retry
      * budget, and held its partition: it goes to the dead-letter queue at its

@@ -36,6 +36,9 @@ class QueenQueue extends BaseQueue implements QueueContract
     /** A pop sent ahead never long-polls, so its answer is due at once. */
     private const POP_AHEAD_SETTLE_MILLIS = 5_000;
 
+    /** The dashboard shows a failure's summary up to the same bound. */
+    private const MAX_DEAD_LETTER_ERROR_BYTES = 8_192;
+
     /** @var array<string, array{messages: list<array>, next: int}> */
     private array $prefetched = [];
 
@@ -1158,7 +1161,7 @@ class QueenQueue extends BaseQueue implements QueueContract
                 $failed ? 'dlq' : 'completed',
                 array_filter([
                     'group' => $group,
-                    'error' => $exception?->getMessage(),
+                    'error' => $exception !== null ? self::deadLetterError($exception) : null,
                     'affinityKey' => $affinityKey,
                 ], fn ($value) => $value !== null),
             );
@@ -1172,6 +1175,28 @@ class QueenQueue extends BaseQueue implements QueueContract
         $this->markDeliveryHandled($message);
         $this->endSettling();
         $this->settleLeaseMessage($message);
+    }
+
+    /**
+     * The error a dead-letter ACK carries: the failure's message, as valid
+     * UTF-8 and bounded. A QueryException with a latin-1 binding is not
+     * UTF-8, and its ACK could not be encoded: delete() threw inside
+     * Job::fail(), which then skipped failed() and the batch and chain
+     * callbacks, and the job failed again at its next delivery.
+     */
+    private static function deadLetterError(\Throwable $exception): string
+    {
+        $error = json_decode(
+            json_encode($exception->getMessage(), JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR),
+            false,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        if (strlen($error) <= self::MAX_DEAD_LETTER_ERROR_BYTES) {
+            return $error;
+        }
+
+        return mb_strcut($error, 0, self::MAX_DEAD_LETTER_ERROR_BYTES - 3, 'UTF-8') . '...';
     }
 
     private function sendAckDetached(array $message, string $group, ?string $affinityKey): bool
