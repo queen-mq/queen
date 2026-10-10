@@ -506,8 +506,20 @@ fn main() {
 }
 
 fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
+    // Before the configuration export, which may take a minute: a master that
+    // is PID 1 ignores a signal it does not handle, so a SIGTERM during the
+    // export was lost, and the workers it then started were killed at the
+    // platform's deadline.
+    let running = Arc::new(AtomicBool::new(true));
+    let signal = Arc::clone(&running);
+    ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))?;
+
     let mut config = load_config(options)?;
     validate_config(&config)?;
+    if !running.load(Ordering::SeqCst) {
+        eprintln!("stopped while the configuration was read; no worker was started");
+        return Ok(());
+    }
     let state = State::acquire(&config.state_directory)?;
     // State::acquire validates the operator-provided spelling before
     // canonicalizing it. Every runtime consumer, including worker telemetry,
@@ -536,10 +548,6 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     config.lease_socket = start_lease_service(&config, &state.directory);
-
-    let running = Arc::new(AtomicBool::new(true));
-    let signal = Arc::clone(&running);
-    ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))?;
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(config.http_timeout))
@@ -8237,6 +8245,16 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
     #[test]
     #[ignore = "subprocess helper: the supervisor of the process tests"]
     fn run_helper() {
+        // The configuration exported by this artisan script, as in production.
+        if let Some(artisan) = std::env::var_os("QUEEN_RUN_HELPER_EXPORT") {
+            run(&CliOptions {
+                config: None,
+                php: "/bin/sh".into(),
+                artisan: artisan.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+            return;
+        }
         let Some(path) = std::env::var_os("QUEEN_RUN_HELPER_CONFIG") else {
             return;
         };
@@ -8415,6 +8433,53 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
             delay < Duration::from_millis(1_500),
             "the workers had their SIGTERM {delay:?} after the master's"
         );
+    }
+
+    /// A SIGTERM during the configuration export, which may take a minute,
+    /// stops the master before it starts a worker.
+    #[cfg(unix)]
+    #[test]
+    fn a_sigterm_during_the_configuration_export_starts_no_worker() {
+        let directory = temporary_directory("slow-export");
+        let document = supervisor_document(&directory, &closing_broker());
+        write_private_file(
+            &directory.join("config.json"),
+            &serde_json::to_vec(&document).unwrap(),
+        );
+        let artisan = write_fake_artisan(
+            &directory,
+            &format!(
+                "if [ \"$1\" = queen:supervisor-config ]; then sleep 2; cat '{}'; exit 0; fi\n\
+                 : > \"ready.$$\"\nwhile :; do sleep 1 & wait $!; done\n",
+                directory.join("config.json").display()
+            ),
+        );
+        let log = File::create(directory.join("supervisor.log")).unwrap();
+        let mut supervisor = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::run_helper", "--ignored", "--nocapture"])
+            .env("QUEEN_RUN_HELPER_EXPORT", &artisan)
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        thread::sleep(Duration::from_millis(700));
+        // SAFETY: plain signal delivery to the supervisor this test started.
+        unsafe { libc::kill(supervisor.id() as i32, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut status = None;
+        while status.is_none() && Instant::now() < deadline {
+            status = supervisor.try_wait().unwrap();
+            thread::sleep(Duration::from_millis(20));
+        }
+        let started = count_files(&directory, "ready.");
+        stop_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+        assert!(
+            status.is_some_and(|status| status.success()),
+            "the master did not stop cleanly ({status:?}):\n{log}"
+        );
+        assert_eq!(started, 0, "a worker started after the SIGTERM:\n{log}");
     }
 
     /// Files in `directory` whose name starts with `prefix`.
