@@ -68,6 +68,11 @@ PROFILES = {
         "BENCH_QUEEN_ACK_ASYNC": "true",
         "BENCH_QUEEN_POP_AHEAD": "true",
     }, "artisan queen:supervise"),
+    # The Rust supervisor installed as root for the user that runs it, in a container that starts
+    # as root (compose.raft.yml queen-installed); only the scenarios that name its engine use it.
+    # The launcher runs the binary from its pinned directory, as ./queen-supervisor.
+    "queen-installed": Profile("queen-installed", "queen-installed", "queen", PRODUCTION_LIKE,
+                               "queen-supervisor --php"),
 }
 DEFAULT_PROFILES = ("horizon", "queen-php", "queen-rust")
 # The Horizon lane every other lane of a scenario is compared with.
@@ -290,6 +295,23 @@ class Lane:
     def app_artisan(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         """Artisan in the supervisor's own container, beside its workers."""
         return self.docker("exec", self.container(self.profile.engine), "php", "artisan", "--no-ansi", *args, check=check)
+
+    def probe(self, *options: str, user: str = "") -> tuple[int, str]:
+        """`queen:supervisor status` in the supervisor's container, as a Kubernetes exec probe runs
+        it: its exit code and what it printed. `user` runs it as another user, as a probe of a
+        container that starts as root does."""
+        result = self.docker("exec", *(["--user", user] if user else []), self.container(self.profile.engine),
+                             "php", "artisan", "--no-ansi", "queen:supervisor", "status", *options, check=False)
+        return result.returncode, result.stdout + result.stderr
+
+    def status(self) -> tuple[bool, dict]:
+        """Whether the readiness probe passes, and the status it read (empty when none)."""
+        code, output = self.probe("--json", "--check")
+        line = next((line for line in output.splitlines() if line.startswith("{")), "")
+        try:
+            return code == 0, json.loads(line) if line else {}
+        except json.JSONDecodeError:
+            return code == 0, {}
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -1112,6 +1134,297 @@ def queue_restart(lane: Lane) -> list[Check]:
     return checks
 
 
+def issue_codes(status: dict, key: str) -> list[str]:
+    """The codes of a status's readiness_issues or processing_health_issues."""
+    issues = status.get(key)
+    return sorted({issue.get("code", "?") for issue in issues if isinstance(issue, dict)}) if isinstance(issues, list) else []
+
+
+def not_consuming_seconds(status: dict) -> int | None:
+    """How long the worker of any pool that has failed its pops the longest has done so."""
+    pools = status.get("pool_status")
+    seconds = [pool.get("not_consuming_seconds") for pool in pools if isinstance(pool, dict)] if isinstance(pools, list) else []
+    return max((s for s in seconds if isinstance(s, int)), default=None)
+
+
+# Longer than a pop that hangs through its timeout and retries (QUEEN_TIMEOUT_MS 30 s, 3
+# attempts) and the 60 s after which every worker that failed its pops is not consuming.
+PROBE_OUTAGE_SECONDS = 150
+
+
+def probe_broker_hung(lane: Lane) -> list[Check]:
+    """The broker hangs, as a node whose disk stalls does: `docker pause`, so connections open
+    and nothing answers, for longer than every timeout of a pop. Kubernetes runs the probes
+    of docs/guides/laravel/kubernetes. The liveness probe must pass throughout, or every pod
+    restarts for an outage a restart cannot fix; the readiness probe must fail while no
+    worker consumes and pass again once the broker is back; and the same workers must
+    consume again, with no restart."""
+    ready_before, _ = lane.status()
+    master = lane.master()
+    workers_before = set(lane.workers())
+    broker = lane.container("broker")
+    lane.docker("pause", broker)
+    lane.note(f"broker paused for {PROBE_OUTAGE_SECONDS} s")
+    samples: list[dict] = []
+    paused = time.monotonic()
+    try:
+        while (elapsed := time.monotonic() - paused) < PROBE_OUTAGE_SECONDS:
+            ready, status = lane.status()
+            live = lane.probe("--check-liveness")[0] == 0
+            samples.append({"t": round(elapsed, 1), "ready": ready, "live": live,
+                            "readiness": issue_codes(status, "readiness_issues"),
+                            "capacity": issue_codes(status, "processing_health_issues"),
+                            "not_consuming_seconds": not_consuming_seconds(status)})
+            time.sleep(3)
+    finally:
+        lane.docker("unpause", broker)
+    lane.note("broker resumed")
+    resumed, recovered = time.monotonic(), None
+    while time.monotonic() - resumed < 120:
+        if lane.status()[0]:
+            recovered = round(time.monotonic() - resumed, 1)
+            break
+        time.sleep(2)
+    lane.note(f"ready again after {recovered} s" if recovered is not None else "NOT ready again")
+    expected = ids(0, 4)
+    lane.dispatch("ok", 4, sleep_ms=100, tries=1)
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 120, "all completed")
+    jobs = lane.settle(5)
+    workers_after = set(lane.workers())
+    lane.extra["probe"] = {"samples": samples, "recovered_after": recovered,
+                           "workers_before": sorted(workers_before), "workers_after": sorted(workers_after)}
+    not_live = [s["t"] for s in samples if not s["live"]]
+    first_not_ready = next((s["t"] for s in samples if not s["ready"]), None)
+    reported = next((s["t"] for s in samples if "pool_not_consuming" in s["readiness"]), None)
+    pids = [pid for pid, _, args in lane.processes() if pid == master]
+    return [
+        Check("ready before the outage", ready_before),
+        Check("the liveness probe passed throughout the outage", not not_live, f"failed at {not_live[:5]} s"),
+        Check("the readiness probe failed during the outage", first_not_ready is not None,
+              f"first failure at {first_not_ready} s"),
+        Check("the status said no pool consumes", reported is not None,
+              f"pool_not_consuming first at {reported} s; last sample {samples[-1] if samples else None}"),
+        Check("ready again within 60 s of the broker's return", recovered is not None and recovered <= 60,
+              f"{recovered} s"),
+        Check("the master survived", bool(pids), f"master {master}"),
+        Check("the workers that waited out the outage consume again", workers_after == workers_before,
+              f"before {sorted(workers_before)}, after {sorted(workers_after)}"),
+        *completed_once(jobs, expected),
+    ]
+
+
+POISON_KINDS = ("not-json", "no-job", "missing-class")
+
+
+def poison_messages(lane: Lane) -> list[Check]:
+    """Three messages no worker can run, ahead of a job in one partition: a string that is not
+    JSON and an object that names no job, as another producer of the queue may push, and a
+    Laravel job whose class a deploy removed. A lease expiry never charges the broker's
+    retry budget, so a message that is neither ACKed nor failed holds its partition forever.
+    Each must go to the dead-letter queue at its first delivery, without a worker dying, and
+    the job behind them must run without waiting for a lease."""
+    partition = "matrix-poison"
+    workers_before = set(lane.workers())
+    for kind in POISON_KINDS:
+        lane.artisan("bench:matrix-raw", f"--run-id={lane.run_id}", f"--kind={kind}", f"--partition={partition}")
+    lane.note(f"pushed {', '.join(POISON_KINDS)}")
+    dispatched = time.monotonic()
+    lane.dispatch("ok", 1, tries=1, partition=partition)
+    jobs = lane.wait_until(lambda r: r.count("000000", "completed") >= 1, 150, "the job behind them completed")
+    waited = round(time.monotonic() - dispatched, 1)
+    jobs = lane.settle(5)
+    lease = int(lane.env["BENCH_RETRY_AFTER"])
+    ready, status = lane.status()
+    lane.extra["poison"] = {"waited": waited, "dead_letter": jobs.dead_letter(), "ready": ready,
+                            "readiness": issue_codes(status, "readiness_issues")}
+    return [
+        Check("the job behind them completed once", jobs.count("000000", "completed") == 1, f"{jobs.events('000000')}"),
+        Check(f"without waiting for a lease ({lease} s)", waited < lease, f"{waited} s"),
+        Check(f"the {len(POISON_KINDS)} reached the dead-letter queue", jobs.dead_letter() == len(POISON_KINDS),
+              f"{jobs.dead_letter()} entries"),
+        Check("no worker died", set(lane.workers()) == workers_before,
+              f"before {sorted(workers_before)}, after {sorted(lane.workers())}"),
+        Check("still ready", ready, f"{issue_codes(status, 'readiness_issues')}"),
+    ]
+
+
+def string_timeout(lane: Lane) -> list[Check]:
+    """A job whose $timeout is a numeric string, as `$this->timeout = env('JOB_TIMEOUT')` leaves
+    it, ahead of two jobs in one partition. Laravel's worker accepts the string. The job must
+    run as any other, the jobs behind it too, and no worker may leave for it: one that did
+    would leave the job leased, and the next worker would pop it and leave in turn."""
+    partition = "matrix-string-timeout"
+    workers_before = set(lane.workers())
+    lane.dispatch("string-timeout", 1, timeout=20, partition=partition)
+    lane.dispatch("ok", 2, first=1, tries=1, partition=partition)
+    expected = ids(0, 3)
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 120, "all completed")
+    jobs = lane.settle(5)
+    workers_after = set(lane.workers())
+    lane.outcome["string-timeout"] = {"same": {f"job {j}": jobs.outcome(j) for j in expected}, "near": {}}
+    return [
+        *completed_once(jobs, expected),
+        every(jobs, expected, "each ran once", lambda j: jobs.count(j, "started") == 1),
+        Check("no worker left", workers_after == workers_before,
+              f"before {sorted(workers_before)}, after {sorted(workers_after)}"),
+    ]
+
+
+def binary_failure(lane: Lane) -> list[Check]:
+    """Two jobs, tries 1, that throw an exception whose message is not UTF-8, as a database
+    error quoting a latin-1 value does. Each must fail once, with that exception: failed()
+    once, on Queen one dead-letter entry. An ACK that could not carry the message would leave
+    the job leased, and its redelivery would fail it a second time, past its tries."""
+    expected = ids(0, 2)
+    lane.dispatch("throw-binary", 2, tries=1)
+    jobs = lane.wait_until(lambda r: all(r.count(j, "failed_hook") for j in expected), 120, "all failed")
+    # Long enough for a lease the ACK left behind to expire and the job to come back.
+    jobs = lane.settle(int(lane.env["BENCH_RETRY_AFTER"]) + 5)
+    lane.extra["binary_failure"] = {"failed_store": jobs.failed_store(), "dead_letter": jobs.dead_letter()}
+    lane.outcome["binary-failure"] = {"same": {f"job {j}": {k: v for k, v in jobs.outcome(j).items() if k != "failed_row"}
+                                               for j in expected}, "near": {}}
+    checks = [
+        every(jobs, expected, "ran once", lambda j: jobs.count(j, "started") == 1),
+        every(jobs, expected, "failed() ran once", lambda j: jobs.count(j, "failed_hook") == 1),
+        every(jobs, expected, "failed with the job's own exception",
+              lambda j: str(jobs.failed_with(j)).endswith("RuntimeException")),
+        every(jobs, expected, "never completed", lambda j: jobs.count(j, "completed") == 0),
+    ]
+    if lane.profile.connection == "queen":
+        checks.append(Check("one dead-letter entry each", jobs.dead_letter() == len(expected),
+                            f"{jobs.dead_letter()} entries"))
+    return checks
+
+
+INSTALL_PATH = "/opt/queen-supervisor-bin"
+APP_USER = "benchmark"
+
+
+def process_users(lane: Lane) -> dict[int, tuple[int, str]]:
+    """Every process of the supervisor's container: its uid and arguments, by pid."""
+    rows = lane.docker("exec", lane.container(lane.profile.engine), "ps", "-eo", "pid=,uid=,args=", check=False)
+    users = {}
+    for line in rows.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            users[int(parts[0])] = (int(parts[1]), parts[2])
+    return users
+
+
+def install_owner(lane: Lane) -> list[Check]:
+    """An image that installs the supervisor as root for the user that runs it (`--owner`), and
+    a container that starts as root and runs the Composer launcher as that user, as
+    docs/guides/laravel/kubernetes describes. Every file of the installation must be the
+    user's; the master and its workers must run as the user; a probe run as root, the
+    container's user, must fail with a message that names the owner and the fix, not crash;
+    the probe wrapped in su must pass; and a SIGTERM to the container must reach the master
+    through the launcher, which replaced itself, and drain the job in flight."""
+    app = lane.container(lane.profile.engine)
+    owners = lane.docker("exec", app, "find", INSTALL_PATH, "-printf", "%u %p\\n", check=False).stdout.split("\n")
+    not_owned = [line for line in owners if line and not line.startswith(f"{APP_USER} ")]
+    users = process_users(lane)
+    master = lane.master()
+    workers = lane.workers()
+    master_uid, master_args = users.get(master, (-1, ""))
+    worker_uids = sorted({users.get(pid, (-1, ""))[0] for pid in workers})
+
+    as_root = lane.probe("--check")
+    as_owner = lane.probe("--check", user="1000:1000")
+    wrapped = lane.docker("exec", app, "su", "-s", "/bin/sh", APP_USER, "-c",
+                          "php artisan --no-ansi queen:supervisor status --check", check=False)
+    lane.extra["install_owner"] = {"not_owned": not_owned[:10], "master": [master, master_uid, master_args],
+                                   "worker_uids": worker_uids, "as_root": as_root,
+                                   "as_owner": as_owner[0], "wrapped": wrapped.returncode}
+
+    lane.dispatch("ok", 1, sleep_ms=8_000, timeout=30, tries=3)
+    lane.wait_until(lambda r: r.count("000000", "started") >= 1, 60, "the job started")
+    lane.docker("stop", "--time", "60", app)
+    lane.note("container stopped (SIGTERM, 60 s grace)")
+    exit_code = lane.docker("inspect", "--format", "{{.State.ExitCode}}", app, check=False).stdout.strip()
+    jobs = lane.settle(2)
+
+    def refusal(output: str) -> bool:
+        return f"uid 1000 ({APP_USER})" in output and f"su -s /bin/sh {APP_USER}" in output and "runAsUser" in output
+
+    return [
+        Check("the installation is the user's, every directory and file", bool(owners) and not not_owned,
+              f"{not_owned[:5]}"),
+        Check("the master runs the installed binary as the user", master_uid == 1000 and "queen-supervisor" in master_args,
+              f"uid {master_uid}: {master_args[:120]}"),
+        Check("the workers run as the user", bool(workers) and worker_uids == [1000], f"uids {worker_uids}"),
+        Check("the probe as the user passes", as_owner[0] == 0, as_owner[1][-300:]),
+        Check("the probe wrapped in su passes, as root", wrapped.returncode == 0, (wrapped.stdout + wrapped.stderr)[-300:]),
+        Check("the probe as root fails, naming the owner, su and runAsUser",
+              as_root[0] == 1 and refusal(as_root[1]), f"exit {as_root[0]}: {as_root[1][-400:]}"),
+        Check("SIGTERM drained the job in flight and the supervisor exited 0",
+              exit_code == "0" and jobs.count("000000", "completed") == 1 and jobs.count("000000", "started") == 1,
+              f"exit {exit_code}, {jobs.events('000000')}"),
+    ]
+
+
+METRICS_CLASS = "App\\Jobs\\FailureMatrixJob"
+
+
+def job_metrics_totals(lane: Lane) -> dict:
+    """The FailureMatrixJob row of the dashboard's Jobs page, or {} when there is none."""
+    result = lane.artisan("bench:job-metrics", check=False)
+    line = next((line for line in result.stdout.splitlines() if line.startswith("{")), "")
+    try:
+        read = json.loads(line) if line else {}
+    except json.JSONDecodeError:
+        return {}
+    return next((row for row in read.get("classes") or [] if row.get("class") == METRICS_CLASS), {})
+
+
+def wait_for_metrics(lane: Lane, expected: dict[str, int], timeout: float = 60) -> dict:
+    """The Jobs page's row once it shows `expected`, or as it stands at the timeout. A worker
+    writes its counts at most every ten seconds, while it waits for a job or when it stops."""
+    deadline, row = time.monotonic() + timeout, job_metrics_totals(lane)
+    while time.monotonic() < deadline and {key: row.get(key) for key in expected} != expected:
+        time.sleep(3)
+        row = job_metrics_totals(lane)
+    lane.note(f"metrics {row}")
+    return row
+
+
+def job_metrics(lane: Lane) -> list[Check]:
+    """The Jobs page after every way an attempt ends, as docs/guides/laravel/monitoring states
+    (Jobs per class): returned and released attempts are processed; an attempt that throws,
+    calls fail() or outlives its timeout is a failed attempt. Then a worker killed outright: its
+    attempt records nothing, and its redelivery, past its tries, is one failed attempt more. The
+    kill comes once every count before it is written: a killed worker loses the counts it has
+    not written yet, up to ten seconds of them, as documented."""
+    lane.dispatch("ok", 4, tries=1)                                        # 4 processed
+    lane.dispatch("throw", 2, first=4, tries=2)                            # 2 x 2 failed
+    lane.dispatch("fail", 2, first=6, tries=3)                             # 2 failed
+    lane.dispatch("release-once", 2, first=8, tries=3)                     # 2 x 2 processed
+    lane.dispatch("ok", 1, first=10, sleep_ms=15_000, tries=1, timeout=3)  # 1 failed, the worker killed
+    succeeded, failed = ids(0, 4) + ids(8, 2), ids(4, 4) + ids(10, 1)
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in succeeded)
+                           and all(r.count(j, "failed_hook") for j in failed), 180, "every job ended")
+    before_kill = wait_for_metrics(lane, {"processed": 8, "failed": 7})
+    lane.dispatch("ok", 1, first=11, sleep_ms=30_000, tries=1, timeout=40)
+    victim = lane.wait_until(lambda r: r.count("000011", "started") >= 1, 60, "the job to kill started")
+    run = run_in_progress(victim, "000011")
+    if run is not None:
+        lane.docker("exec", lane.container(lane.profile.engine), "kill", "-KILL", str(run[1]), check=False)
+        lane.note(f"SIGKILL worker {run[1]}")
+    jobs = lane.wait_until(lambda r: r.count("000011", "failed_hook") >= 1, 120, "the killed job failed")
+    after_kill = wait_for_metrics(lane, {"processed": 8, "failed": 8})
+    lane.extra["job_metrics"] = {"before_kill": before_kill, "after_kill": after_kill}
+    return [
+        Check("every job ended", all(jobs.count(j, "completed") for j in succeeded)
+              and all(jobs.count(j, "failed_hook") for j in failed + ["000011"]), ""),
+        Check("8 processed attempts", before_kill.get("processed") == 8, f"{before_kill}"),
+        Check("7 failed attempts: throws, fail() and the timeout", before_kill.get("failed") == 7, f"{before_kill}"),
+        Check("the longest attempt is the timed-out one, about 3 s", 2_500 <= (before_kill.get("max_ms") or 0) < 10_000,
+              f"max_ms {before_kill.get('max_ms')}"),
+        Check("the worker running the job to kill was killed", run is not None, f"{run}"),
+        Check("the killed job's redelivery, past its tries, is one failed attempt more",
+              after_kill.get("failed") == 8 and after_kill.get("processed") == 8, f"{after_kill}"),
+    ]
+
+
 @dataclass(frozen=True)
 class Scenario:
     name: str
@@ -1122,13 +1435,20 @@ class Scenario:
     # Settings for one engine only, over `env`: where Horizon needs another setting to run the
     # same job safely, such as a retry_after longer than a job it cannot renew.
     engine_env: dict[str, dict[str, str]] = field(default_factory=dict)
+    # The engines the scenario runs on; empty for every one. A Queen feature that Horizon does not
+    # have, such as the readiness probe, has no Horizon lane.
+    engines: tuple[str, ...] = ()
 
     def env_for(self, profile: Profile) -> dict[str, str]:
         return {**self.env, **self.engine_env.get(profile.engine, {})}
 
+    def runs_on(self, profile: Profile) -> bool:
+        return not self.engines or profile.engine in self.engines
+
 
 # The compatibility lanes share a cache and a database across the container's processes.
 COMPAT_ENV = {"BENCH_CACHE_STORE": "database", "BENCH_DB_DATABASE": COMPAT_DATABASE}
+QUEEN_ENGINES = ("queen-php", "queen-rust")
 THREE_WORKERS = {"BENCH_WORKERS": "3", "BENCH_MIN_WORKERS": "3", "BENCH_MAX_WORKERS": "3"}
 
 
@@ -1171,11 +1491,26 @@ SCENARIOS = [
     # Every dispatch through the routed default connection to the pools'.
     Scenario("routed-parity", routed_parity, {**COMPAT_ENV, **THREE_WORKERS, "BENCH_ROUTED": "true"},
              prepare=compat_database),
+    # Job settings and failures Laravel accepts, which a Queen worker must survive as Horizon's does.
+    Scenario("string-timeout", string_timeout),
+    Scenario("binary-failure", binary_failure, DEATH_ENV),
+    # What Horizon has no counterpart of: the probes, the dead-letter queue, the Jobs page.
+    Scenario("probe-broker-hung", probe_broker_hung, engines=QUEEN_ENGINES),
+    Scenario("poison-messages", poison_messages, engines=QUEEN_ENGINES),
+    Scenario("job-metrics", job_metrics, engines=QUEEN_ENGINES),
+    Scenario("install-owner", install_owner, engines=("queen-installed",)),
 ]
 # The scenarios that record an outcome for parity(), besides the compatibility runs.
 PARITY_SCENARIOS = ("job-timeout", "memory-limit", "stop-short", "stop-lease", "queue-restart",
                     "death-timeout", "death-sigkill", "death-release-timeout", "death-release-sigkill",
-                    "laravel-parity", "routed-parity")
+                    "laravel-parity", "routed-parity", "string-timeout", "binary-failure")
+
+
+def scenario_profiles(scenario: Scenario, names: list[str], prefork: list[str]) -> list[Profile]:
+    """The lanes of a scenario: the selected profiles it runs on. A scenario of an engine that no
+    selected profile has, such as queen-installed, runs on its own engine's profile."""
+    profiles = [profile for profile in lane_profiles(names, prefork) if scenario.runs_on(profile)]
+    return profiles or lane_profiles([name for name in scenario.engines if name in PROFILES], prefork)
 
 
 def run_lane(scenario: Scenario, profile: Profile, output: Path, only: frozenset[str] = frozenset(),
@@ -1187,7 +1522,7 @@ def run_lane(scenario: Scenario, profile: Profile, output: Path, only: frozenset
                     "stack": {"name": stack, "image": APP_IMAGE}}
     try:
         lane.up(scenario.replicas, scenario.prepare)
-        supervisor = "" if profile.engine != "queen-rust" else lane.docker(
+        supervisor = "" if profile.engine not in ("queen-rust", "queen-installed") else lane.docker(
             "exec", lane.container(profile.engine), "queen-supervisor", "--version", check=False).stdout
         result["stack"].update(stack_versions(lane.artisan("bench:config").stdout, supervisor))
         checks = scenario.run(lane)
@@ -1335,7 +1670,7 @@ def main() -> int:
     results = []
     rows: list[dict] = []
     for scenario in (s for s in SCENARIOS if s.name in wanted):
-        for profile in lane_profiles(args.profiles.split(","), prefork):
+        for profile in scenario_profiles(scenario, args.profiles.split(","), prefork):
             results.append(run_lane(scenario, profile, args.output, only, args.stack))
             (args.output / "summary.md").write_text(summary(results), encoding="utf-8")
             rows = parity(results)

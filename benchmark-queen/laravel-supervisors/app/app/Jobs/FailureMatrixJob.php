@@ -22,13 +22,15 @@ use Throwable;
  *   worker's life, then succeeds; above PHP's memory_limit the attempt dies;
  * - `release-then-ok`: releases itself for a second on its first run, then
  *   works as `ok`. Its first run is told by the log, not by attempts(), so a
- *   backend that counted the release wrongly still releases only once.
+ *   backend that counted the release wrongly still releases only once;
+ * - `throw-binary`: always throws, with a message that is not UTF-8, as a
+ *   database error that quotes a latin-1 value does.
  */
 class FailureMatrixJob implements ShouldQueue
 {
     use Queueable;
 
-    public const MODES = ['ok', 'throw', 'throw-once', 'release-once', 'fail', 'memory', 'release-then-ok'];
+    public const MODES = ['ok', 'throw', 'throw-once', 'release-once', 'fail', 'memory', 'release-then-ok', 'throw-binary'];
 
     /** Memory kept for the life of the worker, so the worker's --memory check trips. */
     private static array $ballast = [];
@@ -69,6 +71,10 @@ class FailureMatrixJob implements ShouldQueue
         if ($this->mode === 'throw' || ($this->mode === 'throw-once' && $attempt === 1)) {
             $log->record($this->runId, $this->jobId, $attempt, 'threw', $this->mode);
             throw new RuntimeException("failure matrix: {$this->mode} on attempt {$attempt}");
+        }
+        if ($this->mode === 'throw-binary') {
+            $log->record($this->runId, $this->jobId, $attempt, 'threw', $this->mode);
+            throw new RuntimeException("failure matrix: no row for 'caf\xE9 \xFF\xFE' on attempt {$attempt}");
         }
         if ($this->mode === 'release-once' && $attempt === 1) {
             $log->record($this->runId, $this->jobId, $attempt, 'released', $this->mode);

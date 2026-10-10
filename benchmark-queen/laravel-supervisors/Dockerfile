@@ -75,6 +75,27 @@ COPY --from=php-extensions /usr/local/etc/php/conf.d/ /usr/local/etc/php/conf.d/
 COPY --from=composer-bin /usr/bin/composer /usr/local/bin/composer
 COPY --from=rust-supervisor /out/queen-supervisor /usr/local/bin/queen-supervisor
 
+# The same binary as an offline release, packed as release-supervisor.yml packs one, for the
+# lane that installs it as root for the user that runs it (queen-installed). The other
+# platforms' archives are empty: the installer reads only this host's.
+COPY supervisor/scripts/package_release.py supervisor/scripts/build_release_manifest.py /tmp/release-scripts/
+COPY supervisor/dist/queen-supervisor.service.example LICENSE.md /tmp/release-staging/
+RUN set -eu; \
+    version="$(queen-supervisor --version)"; version="${version#queen-supervisor }"; \
+    case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) exit 1 ;; esac; \
+    install -m 0755 /usr/local/bin/queen-supervisor /tmp/release-staging/queen-supervisor; \
+    release=/opt/queen-supervisor-release; \
+    python3 /tmp/release-scripts/package_release.py --staging /tmp/release-staging --output "$release" \
+        --version "$version" --os linux --arch "$arch" --source-date-epoch 0; \
+    for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do \
+        [ -e "$release/queen-supervisor-$version-$platform.tar.gz" ] || : > "$release/queen-supervisor-$version-$platform.tar.gz"; \
+    done; \
+    python3 /tmp/release-scripts/build_release_manifest.py --version "$version" --repository queen-mq/queen \
+        --source-commit 0000000000000000000000000000000000000000 --dist "$release" \
+        --output "$release/queen-supervisor-manifest.json"; \
+    ln -s "queen-supervisor-$version-linux-$arch.tar.gz" "$release/host.tar.gz"; \
+    rm -rf /tmp/release-scripts /tmp/release-staging
+
 # Preserve this layout: the fixture's Composer path repository deliberately
 # resolves ../../../clients/client-php to the client from this checkout.
 WORKDIR /workspace/benchmark-queen/laravel-supervisors/app
@@ -131,5 +152,14 @@ RUN --mount=type=cache,target=/home/benchmark/.cache/composer,uid=1000,gid=1000 
     fi \
     && php artisan bench:config >/dev/null \
     && queen-supervisor --version
+
+# As docs/guides/laravel/kubernetes builds an image: root installs the release for the user
+# that runs it (--owner), in the build. Only the queen-installed lane launches it.
+USER 0:0
+RUN manifest=/opt/queen-supervisor-release/queen-supervisor-manifest.json \
+    && QUEEN_SUPERVISOR_INSTALL_PATH=/opt/queen-supervisor-bin php artisan --no-ansi queen:supervisor-install \
+        --manifest="$manifest" --archive="$(readlink -f /opt/queen-supervisor-release/host.tar.gz)" \
+        --manifest-sha256="$(sha256sum "$manifest" | cut -d' ' -f1)" --owner="${APP_UID}"
+USER ${APP_UID}:${APP_GID}
 
 CMD ["php", "artisan", "list", "--no-ansi"]

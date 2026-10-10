@@ -146,7 +146,7 @@ services:
     # Built outside this compose file from the raft branch; BENCH_BROKER_IMAGE
     # runs a released server instead, such as ghcr.io/queen-mq/queen:2.0.4.
     image: ${BENCH_BROKER_IMAGE:-queen-laravel-supervisor-broker:raft}
-    profiles: [queen-php, queen-rust]
+    profiles: [queen-php, queen-rust, queen-installed]
     environment:
       QUEEN_RAFT_DIR: /var/lib/queen/data
       PORT: "6632"
@@ -236,6 +236,42 @@ services:
       start_period: 30s
       interval: 1h
       timeout: 3s
+      retries: 10
+
+  # The Rust supervisor as docs/guides/laravel/kubernetes deploys it from an
+  # image that installs it as root for the user that runs it: the release the
+  # image build installed with --owner, started by the Composer launcher. The
+  # container starts as root, as one whose entrypoint prepares the state
+  # directory does, and runs the launcher as that user; so the probes run as
+  # root and must wrap the status command in su.
+  queen-installed:
+    <<: *app
+    profiles: [queen-installed]
+    user: "0:0"
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      <<: *app-environment
+      BENCH_LANE: queen-installed
+      BENCH_CONNECTION: queen
+      QUEUE_CONNECTION: queen
+      QUEEN_SUPERVISOR_INSTALL_PATH: /opt/queen-supervisor-bin
+    command:
+      - sh
+      - -ceu
+      - >-
+        sleep 2;
+        exec setpriv --reuid=1000 --regid=1000 --init-groups
+        vendor/bin/queen-supervisor --php /usr/local/bin/php --artisan artisan
+    tmpfs:
+      - /run/queen-supervisor:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=1000,gid=1000
+    healthcheck:
+      test: [CMD-SHELL, "su -s /bin/sh benchmark -c 'php artisan queen:supervisor status --check --no-ansi' >/dev/null 2>&1"]
+      start_interval: 1s
+      start_period: 30s
+      interval: 1h
+      timeout: 5s
       retries: 10
 
   # Explicitly targeted by the runner; its tools-only profile prevents it from

@@ -150,7 +150,8 @@ class FailureMatrixChecksTest(unittest.TestCase):
         names = [s.name for s in matrix.SCENARIOS]
 
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual({"horizon", "queen-php", "queen-rust", "queen-rust-fast", "queen-php-fast"}, set(matrix.PROFILES))
+        self.assertEqual({"horizon", "queen-php", "queen-rust", "queen-rust-fast", "queen-php-fast", "queen-installed"},
+                         set(matrix.PROFILES))
         self.assertEqual(("horizon", "queen-php", "queen-rust"), matrix.DEFAULT_PROFILES)
 
     def test_a_soak_report_with_empty_php_arrays_reads_as_maps(self) -> None:
@@ -227,6 +228,57 @@ class LaneProfilesTest(unittest.TestCase):
         self.assertEqual("60", scenario.env_for(matrix.PROFILES["horizon"])["BENCH_TIMEOUT"])
         self.assertEqual("30", scenario.env_for(matrix.PROFILES["queen-rust"])["BENCH_RETRY_AFTER"])
         self.assertEqual("25", scenario.env_for(matrix.PROFILES["queen-rust"])["BENCH_TIMEOUT"])
+
+
+class ScenarioLanesTest(unittest.TestCase):
+    def test_a_scenario_of_the_queen_engines_has_no_horizon_lane(self) -> None:
+        scenario = next(s for s in matrix.SCENARIOS if s.name == "probe-broker-hung")
+        lanes = matrix.scenario_profiles(scenario, ["horizon", "queen-php", "queen-rust"], ["on", "off"])
+
+        self.assertEqual(["queen-php", "queen-php-prefork-off", "queen-rust", "queen-rust-prefork-off"],
+                         [p.name for p in lanes])
+
+    def test_a_scenario_of_its_own_engine_runs_on_it_whatever_the_profiles(self) -> None:
+        scenario = next(s for s in matrix.SCENARIOS if s.name == "install-owner")
+
+        self.assertEqual(["queen-installed"],
+                         [p.name for p in matrix.scenario_profiles(scenario, ["horizon", "queen-rust"], ["on"])])
+
+    def test_a_scenario_of_every_engine_runs_on_the_selected_profiles(self) -> None:
+        scenario = next(s for s in matrix.SCENARIOS if s.name == "string-timeout")
+
+        self.assertEqual(["horizon", "queen-rust"],
+                         [p.name for p in matrix.scenario_profiles(scenario, ["horizon", "queen-rust"], ["on"])])
+
+    def test_every_profile_engine_is_a_compose_service_with_a_broker_or_redis(self) -> None:
+        compose = matrix.COMPOSE_FILE.read_text()
+        broker_profiles = re.search(r"\n  broker:\n(?:    .*\n)*?    profiles: \[([^\]]*)\]", compose)
+
+        self.assertIsNotNone(broker_profiles)
+        for profile in matrix.PROFILES.values():
+            self.assertIn(f"\n  {profile.engine}:\n", compose, profile.engine)
+            if profile.connection == "queen":
+                self.assertIn(profile.engine, broker_profiles.group(1), profile.engine)
+
+    def test_every_group_of_the_ci_workflow_names_known_scenarios(self) -> None:
+        workflow = (matrix.BENCH.parents[1] / ".github/workflows/laravel-matrix.yml").read_text()
+        named = set()
+        for value in re.findall(r"scenarios=(?:\$scenarios,)?([a-z0-9,-]+)", workflow):
+            named |= set(value.split(","))
+
+        self.assertTrue(named)
+        self.assertEqual(set(), named - {s.name for s in matrix.SCENARIOS} - {"parity"})
+        # Every scenario but the soak runs in some group.
+        self.assertEqual({"soak"}, {s.name for s in matrix.SCENARIOS} - named - set(matrix.PARITY_SCENARIOS))
+
+    def test_a_status_gives_its_issue_codes_and_the_longest_wait_of_its_workers(self) -> None:
+        status = {"readiness_issues": [{"code": "pool_not_consuming", "queue": "q"}, {"code": "queue_depth_unavailable"}],
+                  "pool_status": [{"not_consuming_seconds": None}, {"not_consuming_seconds": 61}, "garbage"]}
+
+        self.assertEqual(["pool_not_consuming", "queue_depth_unavailable"], matrix.issue_codes(status, "readiness_issues"))
+        self.assertEqual([], matrix.issue_codes(status, "processing_health_issues"))
+        self.assertEqual(61, matrix.not_consuming_seconds(status))
+        self.assertIsNone(matrix.not_consuming_seconds({}))
 
 
 class StackTest(unittest.TestCase):
