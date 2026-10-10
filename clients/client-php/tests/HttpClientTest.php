@@ -92,6 +92,37 @@ class HttpClientTest extends TestCase
         $this->assertFalse($loadBalancer->getHealthStatus()['http://queen-a:6632']['healthy']);
     }
 
+    /**
+     * A leader election can leave every backend marked unhealthy: the
+     * balancer then offers one URL whatever it is asked, and the failover
+     * must still go on to the others.
+     */
+    #[\PHPUnit\Framework\Attributes\TestWith(['round-robin'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['affinity'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['session'])]
+    public function testFailoverTriesEveryBackendWhenAllAreMarkedUnhealthy(string $strategy): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 500, 'json' => ['error' => 'down']],
+            ['status' => 500, 'json' => ['error' => 'down']],
+            ['status' => 200, 'json' => ['ok' => true]],
+        ]);
+        $urls = ['http://queen-a:6632', 'http://queen-b:6632', 'http://queen-c:6632'];
+        $loadBalancer = new LoadBalancer($urls, $strategy);
+        foreach ($urls as $url) {
+            $loadBalancer->markUnhealthy($url);
+        }
+        $client = new HttpClient([
+            'loadBalancer' => $loadBalancer,
+            'enableFailover' => true,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $this->assertSame(['ok' => true], $client->get('/api/v1/status', affinityKey: 'orders:*:workers'));
+        $this->assertSame(3, $handler->count());
+        $this->assertCount(3, array_unique($handler->hosts()), 'a backend was tried twice while another was never tried');
+    }
+
     public function testAsyncFailoverDoesNotForwardCredentialsAcrossARedirect(): void
     {
         $handler = new PlanHandler([

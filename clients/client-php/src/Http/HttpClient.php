@@ -730,11 +730,15 @@ class HttpClient
         $attemptedUrls = [];
         $lastError = null;
 
-        for ($i = 0; $i < count($urls); $i++) {
+        while (count($attemptedUrls) < count($urls)) {
             $url = $this->loadBalancer->getNextUrl($affinityKey);
 
             if (in_array($url, $attemptedUrls, true)) {
-                continue;
+                // The balancer offers a backend this call already tried, as it
+                // does when every backend is marked unhealthy (a leader
+                // election marks them all): go on with the ones not tried yet,
+                // in order, rather than give up with them untried.
+                $url = array_values(array_diff($urls, $attemptedUrls))[0];
             }
 
             $attemptedUrls[] = $url;
