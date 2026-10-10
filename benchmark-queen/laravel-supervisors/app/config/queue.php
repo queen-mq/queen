@@ -2,7 +2,7 @@
 
 $benchmark = config('benchmark');
 
-// The routed lanes' pool connections, as cb3 declares them: no lease setting
+// The routed lanes' pool connections: no lease setting
 // of their own (the lease is retry_after), after_commit on, one partition
 // for an ordered pool. Every Queen pool connection names the same default
 // queue; the router passes the real one with each dispatch.
@@ -20,7 +20,7 @@ if ($benchmark['routed']) {
         ];
         $pools["queen-{$pool}"] = [
             'driver' => 'queen',
-            'queue' => 'cb-backend.' . config('app.env') . '.default',
+            'queue' => 'app.' . config('app.env') . '.default',
             'retry_after' => $settings['retry_after'],
             'partitions' => $settings['partitions'],
             'after_commit' => true,

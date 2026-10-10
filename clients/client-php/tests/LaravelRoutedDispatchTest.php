@@ -28,8 +28,8 @@ use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Output\BufferedOutput;
 
 /**
- * An application whose default connection only dispatches, as cb3-backend's
- * `routed`: every dispatch goes through it to the Queen connection of the
+ * An application whose default connection only dispatches, a `routed`
+ * connection: every dispatch goes through it to the Queen connection of the
  * pool the queue belongs to, and a pool's worker, spawned or forked, works
  * that connection with the pool's settings. One broker in memory carries
  * the job from the dispatch to the worker.
@@ -43,7 +43,7 @@ final class LaravelRoutedDispatchTest extends TestCase
         'QUEEN_LARAVEL_RETRY_AFTER',
     ];
 
-    /** cb3's pools: retry_after and partitions of their connections. */
+    /** The pools: retry_after and partitions of their connections. */
     private const POOLS = [
         'interactive' => [180, 64],
         'batch' => [360, 64],
@@ -87,10 +87,10 @@ final class LaravelRoutedDispatchTest extends TestCase
         $app['config']->set('queue.default', 'routed');
         $app['config']->set('queue.connections.routed', ['driver' => 'routed']);
         foreach (self::POOLS as $pool => [$retryAfter, $partitions]) {
-            // As cb3-backend's queen-<pool>: no lease of its own, after_commit.
+            // A pool's queen-<pool>: no lease of its own, after_commit.
             $app['config']->set("queue.connections.queen-{$pool}", [
                 'driver' => 'queen',
-                'queue' => 'cb-backend.testing.default',
+                'queue' => 'app.testing.default',
                 'retry_after' => $retryAfter,
                 'partitions' => $partitions,
                 'after_commit' => true,
@@ -127,23 +127,23 @@ final class LaravelRoutedDispatchTest extends TestCase
 
         $pushed = $this->broker->pushed();
         $this->assertCount(1, $pushed);
-        $this->assertSame('cb-backend.testing.compliance', $pushed[0]['queue']);
+        $this->assertSame('app.testing.compliance', $pushed[0]['queue']);
         $this->assertMatchesRegularExpression('/^laravel-00([0-5]\d|6[0-3])$/', $pushed[0]['partition'], 'not one of 64 stripes');
         $this->assertSame(RoutedProbeJob::class, $pushed[0]['payload']['displayName']);
 
-        [$code, $output] = $this->workAsPool($mode, 'batch', 'cb-backend.testing.compliance', 2);
+        [$code, $output] = $this->workAsPool($mode, 'batch', 'app.testing.compliance', 2);
 
         $this->assertSame(0, $code, $output);
         $this->assertSame([[
             'name' => 'compliance-1',
             'connection' => 'queen-batch',
-            'queue' => 'cb-backend.testing.compliance',
+            'queue' => 'app.testing.compliance',
             'attempts' => 1,
         ]], RoutedProbeJob::$runs);
         $pops = $this->broker->pops();
         $this->assertCount(2, $pops, 'one pop for the job, one empty');
-        $this->assertSame('cb-backend.testing.compliance', $pops[0]['queue']);
-        $this->assertSame('cb-backend-production', $pops[0]['consumerGroup']);
+        $this->assertSame('app.testing.compliance', $pops[0]['queue']);
+        $this->assertSame('app-production', $pops[0]['consumerGroup']);
         $this->assertSame('360', $pops[0]['leaseSeconds']);
         $this->assertSame('64', $pops[0]['partitions']);
         $this->assertNotSame([], $this->broker->requestsTo('/api/v1/ack/batch') ?: $this->broker->requestsTo('/api/v1/ack'));
@@ -163,12 +163,12 @@ final class LaravelRoutedDispatchTest extends TestCase
             $this->broker->requestsTo('/api/v1/timers'),
         ));
         $this->assertSame(
-            [['cb-backend.testing.ical', 30000], ['cb-backend.testing.notifications', 5000]],
+            [['app.testing.ical', 30000], ['app.testing.notifications', 5000]],
             array_map(static fn (array $timer): array => [$timer['queue'], $timer['delayMs']], $timers),
         );
         $pushed = $this->broker->pushed();
         $this->assertSame(
-            ['cb-backend.testing.background', 'cb-backend.testing.background', 'cb-backend.testing.reservation-sync'],
+            ['app.testing.background', 'app.testing.background', 'app.testing.reservation-sync'],
             array_column($pushed, 'queue'),
         );
         $this->assertSame(
@@ -223,7 +223,7 @@ final class LaravelRoutedDispatchTest extends TestCase
         $environment = [
             'QUEEN_LARAVEL_CONNECTION' => "queen-{$pool}",
             'QUEEN_LARAVEL_SUPERVISOR' => $pool,
-            'QUEEN_LARAVEL_CONSUMER_GROUP' => 'cb-backend-production',
+            'QUEEN_LARAVEL_CONSUMER_GROUP' => 'app-production',
             'QUEEN_LARAVEL_RETRY_AFTER' => (string) self::POOLS[$pool][0],
         ];
         if ($mode === 'spawned') {
@@ -249,7 +249,7 @@ final class LaravelRoutedDispatchTest extends TestCase
             }
             (new \ReflectionMethod(ForkServerCommand::class, 'prepareChild'))->invoke($server);
         }
-        // What the supervisor sends for one queue of cb3's batch pool.
+        // What the supervisor sends for one queue of the batch pool.
         $arguments = [
             "queen-{$pool}", "--queue={$queue}", '--sleep=1', '--timeout=300', '--tries=1', '--memory=448',
             '--backoff=0', '--max-jobs=0', '--max-time=0', '--rest=0', '--quiet',

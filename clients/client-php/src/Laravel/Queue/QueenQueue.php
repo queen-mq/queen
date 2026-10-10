@@ -546,6 +546,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         if ($this->popGuard === null) {
             return $this->popJob($queue);
         }
+        $this->popGuard->popping();
         try {
             $job = $this->popJob($queue);
         } catch (\Throwable $error) {

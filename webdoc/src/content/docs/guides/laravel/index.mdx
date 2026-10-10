@@ -87,6 +87,9 @@ sourceOfTruth:
 # a refused installation and the installer takes --owner; the pin (0.8.0) and the targets are
 # unchanged. Nothing this page states changes; the versions table gains 2.4.2 at its release.
 # sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider changes only the job-metrics listeners (timed-out attempts and $this->fail() count as failed). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
+# supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
+# Nothing this page states changes.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and
@@ -355,9 +358,9 @@ class, monitored tags, long-wait alerts and the Prometheus endpoint. Read the
 ## Versions
 
 The PHP client is `queen-mq/php-client` on Packagist; the Rust supervisor is a separate binary
-whose version each client release pins. These pages describe PHP client 2.4.0, which pins
-supervisor 0.8.0, as 2.3.0 and 2.3.1 do. That supervisor is published for Linux (amd64 and arm64, static
-musl builds) and macOS with a signed manifest.
+whose version each client release pins. These pages describe PHP client 2.4.3, which pins
+supervisor 0.8.1; 2.3.0 to 2.4.2 pin 0.8.0. That supervisor is published for Linux (amd64 and
+arm64, static musl builds) and macOS with a signed manifest.
 Everything not listed here works from 1.6.0 on.
 
 | PHP client | Supervisor | Brings |
@@ -373,6 +376,7 @@ Everything not listed here works from 1.6.0 on.
 | 2.4.0 | 0.8.0 | `$queen->lock()` and `$queen->semaphore()`, `->guard($lock)` on a transaction and `kv()->check()` ([locks](/concepts/locks/)); they need a 2.1 broker |
 | 2.4.1 | 0.8.0 | a forked worker works its pool's connection; a pool's settings reach the worked connection alone, and a pool takes its connection's queue and consumer group; a worker forked after `queue:restart` leaves at once; failed jobs of other drivers stay Laravel's; the switch variables take `1` |
 | 2.4.2 | 0.8.0 | a supervised worker that cannot consume leaves, or `queen:supervisor status` reports it after a minute ([inspect and control](/guides/laravel/supervisors/#inspect-and-control-either-engine)); a delivery that carries no Laravel job goes to the dead-letter queue at once; refused installations and states name their owner, and `queen:supervisor-install --owner`; job metrics count timed-out attempts and `fail()` as failed |
+| 2.4.3 | 0.8.1 | a worker that has not consumed counts from the start of its first failed pop, so a broker that stops answering shows once that pop times out; supervisor 0.8.1 stops stray workers, tries prefork again at `queue:restart`, reaps a dead fork server's workers and closes a circuit only with the probe |
 
 ## Limits
 

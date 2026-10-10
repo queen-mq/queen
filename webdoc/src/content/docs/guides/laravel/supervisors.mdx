@@ -429,7 +429,8 @@ that already belongs to another user: run it as that user. `chown -R www-data` o
 directory also works. For container images, see
 [build the image](/guides/laravel/kubernetes/#build-the-image).
 
-PHP client 2.3.0 pins supervisor 0.8.0. Its GitHub release, `supervisor/v0.8.0`, publishes static
+PHP client 2.4.3 pins supervisor 0.8.1, and 2.3.0 to 2.4.2 pin 0.8.0. Its GitHub release,
+`supervisor/v0.8.1`, publishes static
 (musl) Linux builds and macOS builds for amd64 and arm64, with a manifest and its Sigstore bundle,
 so the online install works on those hosts. On any other
 host the installer fails closed; run the PHP engine there.
@@ -443,7 +444,7 @@ needs a local manifest:
 ```bash
 php artisan queen:supervisor-install \
   --manifest=/srv/mirror/queen-supervisor-manifest.json \
-  --archive=/srv/mirror/queen-supervisor-0.8.0-linux-amd64.tar.gz
+  --archive=/srv/mirror/queen-supervisor-0.8.1-linux-amd64.tar.gz
 ```
 
 A mirror can serve both over HTTPS from one base URL (`QUEEN_SUPERVISOR_RELEASE_BASE_URL`), and a
@@ -515,9 +516,13 @@ shows there without making readiness flap.
 A live worker whose pops have all failed for 60 seconds is not consuming (PHP client 2.4.2). A pool
 in which every running worker is in that state is not ready, and one with any such worker is not at
 full capacity; a shorter outage, such as a broker failing over, reports nothing, and the issues
-clear on their own at the first pop that works. `status --json` lists, on each entry of
-`pool_status`, every worker that has not consumed since its last failed pop, however short the
-time, in `not_consuming` (`pid`, `seconds`, `failures`, `error`), with the longest in
+clear on their own at the first pop that works. Since PHP client 2.4.3 the 60 seconds count from
+the start of the first pop that failed. A broker that stops answering fails a pop only when its
+request times out, 35 seconds for each broker URL the client tries, so its workers show as not
+consuming as soon as that first pop gives up, about 105 seconds in with three URLs, not a minute
+later. `status --json` lists, on each entry of `pool_status`, every worker whose pops have failed
+since some moment, however short the time, in `not_consuming` (`pid`, `seconds`, `failures`,
+`error`), with the longest in
 `not_consuming_seconds` (`null` when there is none), so a monitor can apply a threshold of its own.
 These two fields come from the reader on the supervisor's host, not from the status document the
 engines publish.

@@ -76,12 +76,12 @@ PREFORK_MODES = ("on", "off")
 
 
 # Settings a stack lays over every lane, after the scenario's: "*" for every engine, then the
-# engine's own. `cb3` is cb3's production layout: pools that balance by backlog, more than one
+# engine's own. `balanced`: pools that balance by backlog, more than one
 # queue per pool (routed: BENCH_ROUTED_BALANCE), the command-line opcache on. The image decides
 # Laravel and PHP (BENCH_LARAVEL_VERSION, BENCH_PHP_VERSION at build time).
 STACKS: dict[str, dict[str, dict[str, str]]] = {
     "default": {},
-    "cb3": {
+    "balanced": {
         "*": {
             "BENCH_OPCACHE_CLI": "1", "BENCH_PROFILE": "auto", "BENCH_QUEUES": "benchmark,benchmark-low",
             "BENCH_WORKERS": "2", "BENCH_MIN_WORKERS": "2", "BENCH_MAX_WORKERS": "4",
@@ -173,6 +173,11 @@ class Jobs:
         """Whether an attempt started before the previous one ended."""
         spans = sorted(self.attempts(job))
         return any(end is not None and later[0] < end for (_, end), later in zip(spans, spans[1:]))
+
+    def codes(self, job: str) -> list[str | None]:
+        """The code each run of the job ran (DeployedCode, as its worker loaded it at boot)."""
+        return [(e[5] or {}).get("code") if len(e) > 5 else None
+                for e in self.raw["jobs"].get(job, {}).get("events", []) if e[0] == "started"]
 
     def attempts_of(self, job: str, event: str) -> list[int | None]:
         """The attempt each `event` of the job was logged with, in order."""
@@ -1032,7 +1037,7 @@ ROUTED_POP_ERROR = "The routed queue connection only dispatches"
 
 
 def routed_parity(lane: Lane) -> list[Check]:
-    """cb3's layout: queue.default only dispatches, to one connection per pool. The routing
+    """queue.default only dispatches, to one connection per pool. The routing
     scenarios, then PARITY_RUNS, all dispatched through it. A worker that popped from the
     router would log its LogicException, and the supervisor would restart it."""
     checks = run_compat(lane, ROUTED_RUNS)
@@ -1046,12 +1051,20 @@ def routed_parity(lane: Lane) -> list[Check]:
 def queue_restart(lane: Lane) -> list[Check]:
     """A deploy that runs only `php artisan queue:restart`, as Forge and Envoyer do. Every worker
     stops after its job and is replaced. With prefork the replacements must come from a fork server
-    booted after the signal; from the one booted before it, they would keep its code."""
+    booted after the signal; from the one booted before it, they would keep its code. The deploy
+    changes DeployedCode in the supervisor's container first: the jobs dispatched after the restart
+    must run the new value, and a job that started before the deploy the old one, which shows the
+    value is the one loaded at boot."""
     first, later = ids(0, 4), ids(4, 4)
+    deployed = f"deployed-{lane.run_id[-8:]}"
     old_workers = set(lane.workers())
     old_servers = {pid for pid, _, args in lane.processes() if "queen:fork-server" in args}
     lane.dispatch("ok", 4, sleep_ms=3_000, tries=1)
-    lane.wait_until(lambda r: any(r.count(j, "started") for j in first), 60, "a job started")
+    early = lane.wait_until(lambda r: any(r.count(j, "started") for j in first), 60, "a job started")
+    started_early = [j for j in first if early.count(j, "started")]
+    lane.docker("exec", lane.container(lane.profile.engine), "sed", "-i", f"s/VERSION = 'build'/VERSION = '{deployed}'/",
+                "app/Support/DeployedCode.php")
+    lane.note(f"deployed {deployed}")
     lane.artisan("queue:restart")
     lane.note("queue:restart")
     deadline = time.monotonic() + 120
@@ -1071,12 +1084,20 @@ def queue_restart(lane: Lane) -> list[Check]:
     lane.extra["queue_restart"] = {"old_workers": sorted(old_workers), "old_fork_servers": sorted(old_servers),
                                    "workers": workers, "fork_servers": sorted(servers)}
     replaced = bool(workers) and not set(workers) & old_workers
+    codes = {j: jobs.codes(j) for j in first + later}
+    lane.extra["queue_restart"]["codes"] = codes
+    new_code = all(codes[j] == [deployed] for j in later)
     lane.outcome["queue-restart"] = {"same": {
         **{f"job {j}": jobs.outcome(j) for j in first + later},
         "every worker was replaced": replaced,
+        "the jobs after the restart ran the deployed code": new_code,
     }, "near": {}}
     checks = [
         Check("every worker was replaced", replaced, f"before {sorted(old_workers)}, after {sorted(workers)}"),
+        Check("the jobs after the restart ran the deployed code", new_code, f"{codes}"),
+        Check("a job started before the deploy ran the code its worker booted with",
+              bool(started_early) and all(codes[j] == ["build"] for j in started_early),
+              f"started before the deploy: {started_early}; {codes}"),
         *completed_once(jobs, first + later),
     ]
     if old_servers:
@@ -1147,7 +1168,7 @@ SCENARIOS = [
     Scenario("death-release-timeout", death_release_timeout, DEATH_ENV),
     Scenario("death-release-sigkill", death_release_sigkill, DEATH_ENV),
     Scenario("laravel-parity", laravel_parity, {**COMPAT_ENV, **THREE_WORKERS}, prepare=compat_database),
-    # cb3's layout: every dispatch through the routed default connection to the pools'.
+    # Every dispatch through the routed default connection to the pools'.
     Scenario("routed-parity", routed_parity, {**COMPAT_ENV, **THREE_WORKERS, "BENCH_ROUTED": "true"},
              prepare=compat_database),
 ]
@@ -1295,7 +1316,7 @@ def main() -> int:
     parser.add_argument("--only", default="",
                         help="run only these compatibility scenarios of a compatibility lane, by name")
     parser.add_argument("--stack", default="default", choices=sorted(STACKS),
-                        help="settings laid over every lane: cb3 is cb3's production layout (default: default)")
+                        help="settings laid over every lane: balanced pools balance by backlog over several queues, with the CLI opcache on (default: default)")
     parser.add_argument("--build", action="store_true", help="rebuild the application image first")
     args = parser.parse_args()
 

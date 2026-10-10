@@ -78,7 +78,7 @@ final class LaravelForkServerWorkerTest extends TestCase
      * pool never read its own queue, with its own settings (php-client 2.3.1
      * to 2.4.0).
      */
-    #[TestWith([['--queue=cb-backend.production.compliance'], 'cb-backend.production.compliance'])]
+    #[TestWith([['--queue=app.production.compliance'], 'app.production.compliance'])]
     #[TestWith([[], 'batch'])]
     public function testAForkedWorkerPopsFromTheConnectionItWasGiven(array $queue, string $expected): void
     {

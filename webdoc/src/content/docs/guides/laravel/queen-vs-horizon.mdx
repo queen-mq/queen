@@ -62,6 +62,9 @@ sourceOfTruth:
 # delivery that carries no Laravel job in the dead-letter queue at once. Nothing this page states
 # changes.
 # sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): JobMetricsRecorder::flush() starts over in a forked process, and timed-out attempts and $this->fail() count as failed; the page still describes live per-class metrics over up to a day. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
+# supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
+# Nothing this page states changes.
 ---
 
 Queen is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both

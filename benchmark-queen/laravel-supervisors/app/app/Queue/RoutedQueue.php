@@ -9,8 +9,8 @@ use LogicException;
 use Psr\Log\LoggerInterface;
 
 /**
- * cb3's default queue connection, as it runs in production: it only
- * dispatches. Each push, later and bulk goes to the connection of the pool
+ * A default queue connection that only dispatches, as an application that
+ * moves its queues one pool at a time may have. Each push, later and bulk goes to the connection of the pool
  * that owns the queue, `queen-<pool>` or `redis-<pool>`, under that backend's
  * queue name. It touches no payload, event or after_commit: the target
  * connection does all of that. Workers pop from the pool connections, never

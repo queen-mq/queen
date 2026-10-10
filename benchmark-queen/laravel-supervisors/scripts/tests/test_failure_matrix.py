@@ -124,6 +124,17 @@ class FailureMatrixChecksTest(unittest.TestCase):
         self.assertEqual([1, 2], running.attempts_of("000000", "event_before"))
         self.assertEqual([(1.0, 2.0), (4.0, None)], running.attempts("000000"), "five fields read as four")
 
+    def test_each_run_reports_the_code_its_worker_booted_with(self) -> None:
+        jobs = matrix.Jobs({"jobs": {"000000": {"events": [
+            ["event_before", 1, 0.0, None, 7, None],
+            ["started", 1, 0.1, None, 7, {"code": "build"}],
+            ["started", 2, 5.0, None, 9, {"code": "deployed-1"}],
+            ["started", 3, 9.0, None, 9],
+        ], "pids": [7, 9]}}})
+
+        self.assertEqual(["build", "deployed-1", None], jobs.codes("000000"), "an older report has no detail")
+        self.assertEqual([], jobs.codes("000001"))
+
     def test_the_summary_lists_failed_checks_and_errors(self) -> None:
         text = matrix.summary([
             {"scenario": "a", "profile": "queen", "passed": True, "checks": [{"name": "x", "passed": True}]},
@@ -222,9 +233,9 @@ class StackTest(unittest.TestCase):
     def test_the_default_stack_changes_no_lane(self) -> None:
         self.assertEqual({}, matrix.stack_env("default", matrix.PROFILES["queen-rust"]))
 
-    def test_cb3_balances_by_backlog_over_two_queues_with_the_cli_opcache_on_every_engine(self) -> None:
-        queen = matrix.stack_env("cb3", matrix.PROFILES["queen-rust"])
-        horizon = matrix.stack_env("cb3", matrix.PROFILES["horizon"])
+    def test_balanced_balances_by_backlog_over_two_queues_with_the_cli_opcache_on_every_engine(self) -> None:
+        queen = matrix.stack_env("balanced", matrix.PROFILES["queen-rust"])
+        horizon = matrix.stack_env("balanced", matrix.PROFILES["horizon"])
 
         for env in (queen, horizon):
             self.assertEqual(("auto", "auto", "1"), (env["BENCH_PROFILE"], env["BENCH_ROUTED_BALANCE"],
@@ -237,7 +248,7 @@ class StackTest(unittest.TestCase):
         scenario = next(s for s in matrix.SCENARIOS if s.name == "laravel-parity")
         profile = matrix.PROFILES["horizon"]
 
-        lane = matrix.Lane("s", profile, {**scenario.env_for(profile), **matrix.stack_env("cb3", profile)}, Path("/tmp"))
+        lane = matrix.Lane("s", profile, {**scenario.env_for(profile), **matrix.stack_env("balanced", profile)}, Path("/tmp"))
 
         self.assertEqual("1", lane.env["BENCH_OPCACHE_CLI"], "the lane alone turns it off on Horizon")
         self.assertEqual("4", lane.env["BENCH_MAX_WORKERS"])

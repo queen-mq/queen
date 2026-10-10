@@ -29,9 +29,10 @@ use Illuminate\Queue\Events\WorkerStopping;
  * restarting every worker of every pool would turn a short outage into a
  * restart storm. The worker stays, and leaves `<pid>.pop-failures` in the
  * master's private exits directory (QUEEN_SUPERVISOR_EXITS_DIR) saying since
- * when its pops fail; a pop that succeeds, empty or not, removes it. A healthy
- * worker writes nothing. SupervisorState reads the file for the pool's
- * workers: see SupervisorState::NOT_CONSUMING_AFTER_SECONDS.
+ * when its pops fail, from the start of the first that failed; a pop that
+ * succeeds, empty or not, removes it. A healthy worker writes nothing.
+ * SupervisorState reads the file for the pool's workers: see
+ * SupervisorState::NOT_CONSUMING_AFTER_SECONDS.
  */
 final class WorkerPopGuard
 {
@@ -46,6 +47,8 @@ final class WorkerPopGuard
     private ?\Throwable $fatal = null;
 
     private ?int $failingSince = null;
+
+    private ?int $popStartedAt = null;
 
     private int $failures = 0;
 
@@ -122,8 +125,15 @@ final class WorkerPopGuard
         }
     }
 
+    /** Before each pop of the pool's connection. */
+    public function popping(): void
+    {
+        $this->popStartedAt = ($this->clock)();
+    }
+
     public function popped(): void
     {
+        $this->popStartedAt = null;
         if ($this->failingSince === null) {
             return;
         }
@@ -134,13 +144,17 @@ final class WorkerPopGuard
 
     public function popFailed(\Throwable $error): void
     {
+        $startedAt = $this->popStartedAt;
+        $this->popStartedAt = null;
         if ($error instanceof \LogicException) {
             $this->fatal ??= $error;
 
             return;
         }
         $now = ($this->clock)();
-        $this->failingSince ??= $now;
+        // From the start of the pop: one that hung until its timeout, on a
+        // broker that stopped answering, consumed nothing from then on.
+        $this->failingSince ??= min($startedAt ?? $now, $now);
         $this->failures++;
         if ($this->publishedAt === null || $now - $this->publishedAt >= self::REFRESH_SECONDS) {
             $this->publish($now, $error);

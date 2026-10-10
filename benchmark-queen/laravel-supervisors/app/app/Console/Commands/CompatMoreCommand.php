@@ -104,7 +104,7 @@ final class CompatMoreCommand extends CompatScenarioCommand
         // Laravel docs, Queues > Queueing Closures.
         $this->check('a queued closure ran once, in a worker', $this->count('k1', 'completed') === 1 && $this->inWorker('k1', 'completed'));
         // Laravel docs, Queues > Queueing Closures: catch() runs once the closure has failed.
-        // A closure has no $tries: the worker's --tries applies, 1 here, 2 in cb3's interactive pool.
+        // A closure has no $tries: the worker's --tries applies, 1 here.
         $tries = $this->workerTries();
         $this->check("a throwing closure ran {$tries} time(s), the worker's tries, then its catch() callback ran once",
             $this->count('k2', 'started') === $tries && $this->count('k2', 'closure_catch') === 1,

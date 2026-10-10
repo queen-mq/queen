@@ -15,9 +15,11 @@ use Illuminate\Queue\Queue;
 use Orchestra\Testbench\TestCase;
 use PHPUnit\Framework\Attributes\TestWith;
 use Psr\Http\Message\RequestInterface;
+use Queen\Exceptions\HttpException;
 use Queen\Laravel\Commands\ForkServerCommand;
 use Queen\Laravel\QueenServiceProvider;
 use Queen\Laravel\Supervisor\SupervisorState;
+use Queen\Laravel\Supervisor\WorkerExitMarker;
 use Queen\Laravel\Supervisor\WorkerPopGuard;
 use Queen\Tests\Support\PlanHandler;
 use Queen\Tests\Support\ScriptedWorker;
@@ -91,8 +93,8 @@ final class WorkerPopGuardTest extends TestCase
 
     protected function defineEnvironment($app): void
     {
-        // As in cb3-backend: the default connection only dispatches, and
-        // every pool works a Queen connection of its own.
+        // The default connection only dispatches, and every pool works a Queen
+        // connection of its own.
         $app['config']->set('queue.default', 'routed');
         $app['config']->set('queue.connections.routed', ['driver' => 'routed']);
         $app['config']->set('queue.connections.queen-batch', [
@@ -283,6 +285,79 @@ final class WorkerPopGuardTest extends TestCase
         } catch (\Throwable) {
         }
 
+        $this->assertNull($this->popFailures());
+    }
+
+    /**
+     * A pop on a broker that stopped answering fails only when it times out,
+     * after 35 s, and on three urls after about 105 s: the worker has not
+     * consumed since the pop began, and says so. Later failures keep that
+     * start; a pop that works clears it, and the next streak starts at its
+     * own first pop.
+     */
+    public function testAFailedPopFailsFromItsStart(): void
+    {
+        $now = 1_000;
+        $guard = new WorkerPopGuard('batch', 'queen-batch', new WorkerExitMarker($this->exitsDirectory), function () use (&$now): int {
+            return $now;
+        });
+        $refused = new \RuntimeException('Queen request timed out after 35000 ms');
+
+        $guard->popping();
+        $now = 1_105;
+        $guard->popFailed($refused);
+        $this->assertSame(1_000, $this->popFailures()['failing_since']);
+        $this->assertSame(1, $this->popFailures()['failures']);
+
+        $guard->popping();
+        $now = 1_210;
+        $guard->popFailed($refused);
+        $this->assertSame(1_000, $this->popFailures()['failing_since'], 'a later failure moved the start');
+        $this->assertSame(2, $this->popFailures()['failures']);
+
+        $guard->popping();
+        $now = 1_211;
+        $guard->popped();
+        $this->assertNull($this->popFailures());
+
+        $now = 1_300;
+        $guard->popping();
+        $now = 1_302;
+        $guard->popFailed($refused);
+        $this->assertSame(1_300, $this->popFailures()['failing_since']);
+        $this->assertSame(1, $this->popFailures()['failures']);
+    }
+
+    /** The pool's QueenQueue tells the guard when each pop begins. */
+    public function testThePoolsQueueReportsWhenItsFailedPopBegan(): void
+    {
+        $now = 2_000;
+        $this->app->instance(WorkerPopGuard::class, new WorkerPopGuard(
+            'batch',
+            'queen-batch',
+            new WorkerExitMarker($this->exitsDirectory),
+            function () use (&$now): int {
+                return $now;
+            },
+        ));
+        // The broker holds the pop until the request times out.
+        $this->broker->answer(function () use (&$now): int {
+            $now += 105;
+
+            return 503;
+        }, times: 1);
+        $queue = $this->app['queue']->connection('queen-batch');
+
+        try {
+            $queue->pop();
+            $this->fail('the pop worked');
+        } catch (HttpException) {
+        }
+
+        $this->assertSame(2_000, $this->popFailures()['failing_since']);
+
+        // An empty pop works, and takes the file back.
+        $this->assertNull($queue->pop());
         $this->assertNull($this->popFailures());
     }
 
@@ -632,10 +707,10 @@ final class WorkerPopGuardTest extends TestCase
 /** The broker of the pool's connection: a scripted answer to every request. */
 final class BrokerScript
 {
-    /** @var list<int|\Throwable|array<string, mixed>> */
+    /** @var list<int|\Throwable|array<string, mixed>|\Closure> */
     private array $plan = [];
 
-    private int|\Throwable|array $default = 204;
+    private int|\Throwable|array|\Closure $default = 204;
 
     private int $requests = 0;
 
@@ -643,7 +718,7 @@ final class BrokerScript
      * Answer the next $times requests so, with a status, a failure or a JSON
      * body; without $times, every one after the plan.
      */
-    public function answer(int|\Throwable|array $answer, ?int $times = null): void
+    public function answer(int|\Throwable|array|\Closure $answer, ?int $times = null): void
     {
         if ($times === null) {
             $this->default = $answer;
@@ -662,6 +737,9 @@ final class BrokerScript
     {
         $this->requests++;
         $answer = array_shift($this->plan) ?? $this->default;
+        if ($answer instanceof \Closure) {
+            $answer = $answer();
+        }
         if ($answer instanceof \Throwable) {
             throw $answer;
         }
@@ -674,7 +752,7 @@ final class BrokerScript
     }
 }
 
-/** cb3-backend's `routed` connection: it dispatches to the pools and never pops. */
+/** A `routed` connection: it dispatches to the pools and never pops. */
 final class DispatchOnlyConnector implements ConnectorInterface
 {
     public function __construct(private \Closure $popped)

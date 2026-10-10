@@ -9,7 +9,7 @@ final class SupervisorBinary
     /**
      * Kept in lockstep with supervisor/Cargo.toml by the release workflow.
      */
-    public const VERSION = '0.8.0';
+    public const VERSION = '0.8.1';
 
     public const MANIFEST_FILENAME = 'queen-supervisor-manifest.json';
 

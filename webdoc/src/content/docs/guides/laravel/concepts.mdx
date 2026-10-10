@@ -95,6 +95,9 @@ sourceOfTruth:
 # leaves on a wrong connection or a LogicException from its pop, and otherwise writes since when its
 # pops fail beside its exit marker (WorkerExitMarker writes both); the fork server's child registers
 # the guard. The paragraph on a forked worker's files says so.
+# sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
+# supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
+# Nothing this page states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,

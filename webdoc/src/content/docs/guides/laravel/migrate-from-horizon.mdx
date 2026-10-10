@@ -67,6 +67,9 @@ sourceOfTruth:
 # checks and exit codes are unchanged, and the state directory stays the supervisor user's. Nothing
 # this page states changes.
 # sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider and JobMetricsRecorder now count timed-out attempts and $this->fail() as failed; the page links the monitoring section that compares runtimes with Horizon. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
+# supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
+# Nothing this page states changes.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place
