@@ -79,6 +79,11 @@ sourceOfTruth:
 # messages whose rows are gone from the queue log, apply_shard.rs applies the watermark that removes
 # those rows, facade/real.rs exports two metric families. Claims, leases, retries and the DLQ are as
 # described.
+# sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): ForkServerCommand binds
+# queue:work's arguments after the command name, lets go of the queue connections the boot
+# resolved, reports a child's exception and leaves at once after queue:restart; QueenConnector
+# applies the pool's environment to the worked connection alone; the failed-job provider leaves
+# other drivers to Laravel. The failed-jobs and restart paragraphs say so.
 # sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
 # sealed for retention or its size and not for its age): facade/real.rs exports
 # queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
@@ -288,7 +293,8 @@ trimmed after `trim.failed` minutes (a week by default).
 
 `sync_failed_jobs` (on by default) keeps the two in step. `failed_jobs_lock_store` names a cache
 store whose locks every worker host can see (`null` means Laravel's default store), and
-`failed_jobs_lock_ttl` and `failed_jobs_lock_wait` default to 600 s each.
+`failed_jobs_lock_ttl` and `failed_jobs_lock_wait` default to 600 s each. A failure on another
+queue driver goes to Laravel's provider as before, without the lock (PHP client 2.4.1).
 
 ## Prefetch, ack_async and pop_ahead
 
@@ -524,8 +530,9 @@ itself held 24 MiB of PSS beside the Rust master's 6.6 MiB; Horizon's master and
   to every page it shares would copy the booted heap, 12.8 MiB in the benchmark, but never the
   compiled code in the opcache. `max_jobs` and `max_time` replace a forked worker without a boot.
 - **A restart at deploy.** The fork server keeps the code it booted. `queue:restart` makes the
-  master start a new one (PHP client 2.1.0, Laravel 12), and a change to `config/queen.php` still
-  needs the master restarted. Prefork is also not for an application whose boot starts threads or
+  master start a new one (PHP client 2.1.0, Laravel 12); a worker forked between the restart and
+  that first replaced exit leaves at once with the restart marker instead of carrying the old code
+  (PHP client 2.4.1); and a change to `config/queen.php` still needs the master restarted. Prefork is also not for an application whose boot starts threads or
   keeps connections open: [when not to use it](/guides/laravel/supervisors/#when-not-to-use-prefork).
 
 `QUEEN_SUPERVISOR_PREFORK=true` turns prefork on, a pool's own `prefork` overrides it, and

@@ -73,6 +73,10 @@ sourceOfTruth:
 # versions only rise. The supervisor's KV reads and writes are unchanged. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (dashboard store tests): dashboard/store.rs changes how its own tests name their scratch directories, no code the broker runs. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (review fixes): main.rs closes a pool's circuit only with the
+# probe and reads its fork servers' events once per loop; the dashboard config reads
+# QUEEN_DASHBOARD_ENABLED through filter_var, so 1 turns it on. Nothing else this page states
+# changes.
 # sourceOfTruth re-read 2026-10-10 (pull request 115 merged): app/src/router/index.js renames two
 # pages and regroups the sidebar of the broker's dashboard; no path changes, and the messages page
 # still reads queue and status from the address, so the links this panel builds (/queues/{queue},

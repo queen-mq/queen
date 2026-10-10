@@ -104,6 +104,16 @@ final class ForkServerClient
         return $reply['pid'];
     }
 
+    /**
+     * Read the events available now. A late reply to a request this master
+     * gave up on stops its stray only when somebody reads it, and nothing
+     * polls a server none of whose workers is tracked.
+     */
+    public function tick(): void
+    {
+        $this->poll();
+    }
+
     /** The raw wait status of an exited worker, or null while it runs. */
     public function exitStatus(int $pid): ?int
     {

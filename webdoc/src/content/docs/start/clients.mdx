@@ -106,6 +106,9 @@ verifiedBy:
 # page states changes.
 # sourceOfTruth re-read 2026-10-09 (2.2.0): server/Cargo.toml moves the broker to 2.2.0; the clients
 # stay at 2.1.0, and the versions sentence says so.
+# sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): config/queen.php reads its
+# switch variables through filter_var; url, urls and the token this page shows are unchanged.
+# Nothing this page states changes.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same

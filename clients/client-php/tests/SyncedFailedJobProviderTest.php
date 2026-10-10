@@ -104,6 +104,67 @@ class SyncedFailedJobProviderTest extends TestCase
         $this->assertNotNull($inner->find('failed-1'));
     }
 
+    /**
+     * The provider replaces queue.failer for the whole application. A failure
+     * on another driver has no Queen snapshot: it goes to Laravel's provider,
+     * without the cache lock, and its connection is never resolved.
+     */
+    public function testAFailureOnAnotherDriverGoesStraightToLaravelWithoutTheLock(): void
+    {
+        $inner = new InMemoryFailedJobProvider([]);
+        $locked = 0;
+        $provider = new SyncedFailedJobProvider(
+            $inner,
+            fn (string $connection) => throw new \LogicException("resolved [{$connection}]"),
+            function (\Closure $operation) use (&$locked): mixed {
+                ++$locked;
+
+                return $operation(static function (): void {
+                });
+            },
+            fn (string $connection): bool => $connection === 'queen',
+        );
+
+        $provider->log('redis', 'default', '{}', new \RuntimeException('boom'));
+
+        $this->assertSame(0, $locked);
+    }
+
+    /**
+     * queue:forget and queue:flush resolved every record's connection to
+     * delete its snapshot: a record of a removed connection made them throw.
+     */
+    public function testForgetAndFlushRemoveRecordsOfOtherDriversWithoutResolvingTheirConnection(): void
+    {
+        $redis = $this->record();
+        $redis->id = 'failed-redis';
+        $redis->connection = 'redis';
+        $removed = $this->record();
+        $removed->id = 'failed-removed';
+        $removed->connection = 'a-connection-that-was-removed';
+        $inner = new InMemoryFailedJobProvider([$redis, $removed]);
+        $locked = 0;
+        $provider = new SyncedFailedJobProvider(
+            $inner,
+            fn (string $connection) => throw new \LogicException("resolved [{$connection}]"),
+            function (\Closure $operation) use (&$locked): mixed {
+                ++$locked;
+
+                return $operation(static function (): void {
+                });
+            },
+            fn (string $connection): bool => $connection === 'queen',
+        );
+
+        $this->assertTrue($provider->forget('failed-redis'));
+        $provider->flush();
+
+        $this->assertSame([], $inner->all());
+        // forget locks once to look the record up; flush once for its
+        // snapshot, and never once per record of another driver.
+        $this->assertSame(2, $locked);
+    }
+
     private function record(): object
     {
         return (object) [

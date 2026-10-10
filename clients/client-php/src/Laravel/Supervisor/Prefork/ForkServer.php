@@ -112,7 +112,10 @@ final class ForkServer
                 $this->handle($line);
             }
             if (strlen($buffer) > self::MAX_LINE_BYTES) {
-                break;
+                // Not a reason to end the server, and every worker with it:
+                // refuse the request and forget what came of it.
+                $this->send(['failed' => null, 'error' => 'oversized fork request']);
+                $buffer = '';
             }
         }
     }

@@ -47,6 +47,10 @@ sourceOfTruth:
 # is not. Nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-08 (locks): Queen.php gained lock(), semaphore() and locks(); the worker loop
 # does not use them. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): QueenServiceProvider tells
+# the failed-job provider which connections are Queen ones; QueenConnector scopes the pool's
+# environment to the worked connection. queen:consume reads config('queen') directly, as this page
+# says; nothing this page states changes.
 ---
 
 `php artisan queen:consume` reads a Queen queue and passes each message to a class of yours. Use it

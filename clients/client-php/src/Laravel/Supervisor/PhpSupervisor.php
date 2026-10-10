@@ -110,6 +110,7 @@ final class PhpSupervisor
                     $this->reap($name, $this->config['supervisors'][$name]);
                 }
                 $this->reapDraining();
+                $this->tickForkServers();
                 $this->refreshForkServer();
                 $this->observeStableWorkers();
 
@@ -543,7 +544,8 @@ final class PhpSupervisor
         if ($options['force']) {
             $arguments[] = '--force';
         }
-        if ($options['quiet'] ?? false) {
+        // Quiet unless the document says otherwise, as the Rust master reads it.
+        if ($options['quiet'] ?? true) {
             $arguments[] = '--quiet';
         }
 
@@ -557,7 +559,10 @@ final class PhpSupervisor
             'QUEEN_LARAVEL_CONNECTION' => $options['connection'],
             'QUEEN_LARAVEL_SUPERVISOR' => $name,
             'QUEEN_LARAVEL_RETRY_AFTER' => (string) ($options['retry_after'] ?? ($options['timeout'] + 1)),
-            'QUEEN_LARAVEL_BLOCK_FOR' => $options['balance'] === 'off' ? '0' : null,
+            // `false`, not null: Symfony Process sets a null variable to an
+            // empty string, which a forked worker and the Rust master's
+            // workers do not have.
+            'QUEEN_LARAVEL_BLOCK_FOR' => $options['balance'] === 'off' ? '0' : false,
             // Where the worker says why it exits; see WorkerExitMarker.
             WorkerExitMarker::ENVIRONMENT => $this->exitMarkers ?? false,
         ];
@@ -688,8 +693,10 @@ final class PhpSupervisor
      */
     private function refreshForkServer(): void
     {
-        if ($this->forkServerStale && $this->forkServer instanceof ForkServerClient) {
-            $this->retiredForkServers[] = $this->forkServer;
+        if ($this->forkServerStale) {
+            if ($this->forkServer instanceof ForkServerClient) {
+                $this->retiredForkServers[] = $this->forkServer;
+            }
             $this->forkServer = null;
             $this->preforkFailed = false;
             $this->emit("prefork: queue:restart received, starting a new fork server\n", 'out');
@@ -710,6 +717,35 @@ final class PhpSupervisor
             }
         }
         $this->retiredForkServers = $retired;
+    }
+
+    /**
+     * Prefork is configured and no server forks: its boot failed, or a fork
+     * did since. `queue:restart` is the moment to try again; until then the
+     * workers are spawned and nothing says so twice.
+     */
+    private function preforkWantsAServer(): bool
+    {
+        return ($this->config['prefork'] ?? false) === true
+            && (!$this->forkServer instanceof ForkServerClient || $this->preforkFailed);
+    }
+
+    /**
+     * Read every server's events, tracked workers or not: a late reply to a
+     * fork request this master gave up on stops its stray only when read.
+     */
+    private function tickForkServers(): void
+    {
+        foreach ([$this->forkServer, ...$this->retiredForkServers] as $server) {
+            if (!$server instanceof ForkServerClient) {
+                continue;
+            }
+            try {
+                $server->tick();
+            } catch (\Throwable $error) {
+                $this->emit("prefork: {$error->getMessage()}\n", 'err');
+            }
+        }
     }
 
     private function hasForkedWorkers(ForkServerClient $server): bool
@@ -757,8 +793,8 @@ final class PhpSupervisor
                 $this->emit("exited {$name}:{$queue} pid=" . ($pid ?? 'unknown') . " code=" . ($exitCode ?? 'unknown') . "\n", $exitCode === 0 ? 'out' : 'err');
                 $announced = $this->announcedExit($pid, $exitCode);
                 if ($announced === WorkerExitMarker::RESTART
-                    && $process instanceof ForkedProcess
-                    && $process->server() === $this->forkServer) {
+                    && (($process instanceof ForkedProcess && $process->server() === $this->forkServer)
+                        || $this->preforkWantsAServer())) {
                     $this->forkServerStale = true;
                 }
                 if ($poolHadProbe && !$wasProbe) {
@@ -1387,6 +1423,11 @@ final class PhpSupervisor
         pcntl_signal(SIGTERM, fn () => $this->stop());
         if (defined('SIGQUIT')) {
             pcntl_signal(SIGQUIT, fn () => $this->stop());
+        }
+        if (defined('SIGHUP')) {
+            // A dropped terminal, or an operator's HUP: a drain, as the Rust
+            // master does, not a hard death that leaves the workers behind.
+            pcntl_signal(SIGHUP, fn () => $this->stop());
         }
     }
 

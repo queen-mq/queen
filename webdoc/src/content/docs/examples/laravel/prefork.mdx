@@ -18,6 +18,10 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Supervisor/worker_launcher.php
 verifiedBy:
   - examples/apps/laravel/app/Console/Commands/Examples/PreforkExample.php
+# sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): a worker forked after
+# queue:restart leaves at once, an oversized fork request is refused instead of ending the server,
+# the PHP engine reads its servers' events once per loop. The queue:restart bullet says so; the
+# measurements are unchanged.
 ---
 
 With prefork, the supervisor boots Laravel once in a fork server and forks the workers from it. A
@@ -124,7 +128,8 @@ macOS), and checks each step:
   copy-on-write; a worker copies only the pages it writes
   ([why a forked worker is smaller](/guides/laravel/concepts/#why-a-forked-worker-is-smaller-when-it-is-still-php)).
 - **queue:restart.** A forked worker that stops for the restart signal leaves an exit marker, the
-  master boots a new fork server, and the old one closes when its last worker is gone
+  master boots a new fork server, and the old one closes when its last worker is gone; a worker
+  forked after the restart, before that first exit, leaves at once (PHP client 2.4.1)
   ([how a forked worker talks to its master](/guides/laravel/concepts/#how-a-forked-worker-talks-to-its-master)).
 - **terminate.** The master sends SIGTERM to every worker, waits for them, closes the fork server
   and exits.

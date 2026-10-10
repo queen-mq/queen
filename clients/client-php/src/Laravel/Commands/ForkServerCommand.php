@@ -3,7 +3,10 @@
 namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Contracts\Debug\ExceptionHandler;
+use Illuminate\Log\LogManager;
 use Illuminate\Queue\Console\WorkCommand;
+use Illuminate\Queue\QueueManager;
 use Queen\Laravel\Supervisor\Prefork\ForkSafety;
 use Queen\Laravel\Supervisor\Prefork\ForkServer;
 use Queen\Laravel\Supervisor\WorkerExitMarker;
@@ -25,6 +28,14 @@ class ForkServerCommand extends Command
 
     /** How long a thread left by the boot gets to end, see ForkSafety. */
     private const THREAD_GRACE_SECONDS = 5.0;
+
+    /** Where `php artisan queue:restart` leaves its signal: Laravel's Worker reads the same key. */
+    private const RESTART_SIGNAL_KEY = 'illuminate:queue:restart';
+
+    /** The restart signal when this server booted, if the cache answered. */
+    private mixed $restartSignalAtBoot = null;
+
+    private bool $restartSignalKnown = false;
 
     public function handle(?ForkSafety $safety = null): int
     {
@@ -51,10 +62,18 @@ class ForkServerCommand extends Command
         class_exists(WorkCommand::class);
         $this->laravel->make('queue.worker');
         $work = $this->getApplication()->find('queue:work');
+        $this->rememberRestartSignal();
 
         // Nothing the boot opened may reach the children, and a server with
         // a second thread is not forked at all: the master spawns instead.
-        $this->releaseBootResources();
+        $resolved = $this->releaseBootResources();
+        if ($resolved !== []) {
+            $this->warn(sprintf(
+                'queen:fork-server: the boot resolved the queue connection(s) %s. Every forked worker builds its own, '
+                . 'with its pool\'s settings; whatever kept the boot\'s instance keeps the boot\'s settings and its socket.',
+                implode(', ', $resolved),
+            ));
+        }
         $safety ??= new ForkSafety();
         $threads = $safety->threadsThatStay(self::THREAD_GRACE_SECONDS);
         if ($threads !== null && $threads !== []) {
@@ -91,11 +110,25 @@ class ForkServerCommand extends Command
      * forked worker never goes through: without this, a pool configured
      * quiet printed two lines for every job.
      *
-     * @param list<string> $argv
+     * @param list<string> $argv queue:work's arguments, the connection first
      */
     private function runWorker(SymfonyCommand $work, array $argv): int
     {
-        $input = new ArgvInput(['artisan', ...$argv]);
+        if ($this->restartedSinceBoot()) {
+            // `php artisan queue:restart` ran after this server booted: the
+            // code on disk is newer than the code this child carries, and
+            // Laravel's worker would read the signal only now, as its
+            // baseline, and never stop for it. Say why this worker leaves,
+            // and leave: the master replaces the server.
+            WorkerExitMarker::fromEnvironment()?->write(WorkerExitMarker::RESTART);
+
+            return 0;
+        }
+        // Command::run() binds the input against the command's definition
+        // merged with the application's, whose first argument is the command
+        // name: bound without it, the connection was taken for that name and
+        // the worker fell back to queue.default.
+        $input = new ArgvInput(['artisan', 'queue:work', ...$argv]);
         $verbosity = match (true) {
             $input->hasParameterOption(['--quiet', '-q'], true) => OutputInterface::VERBOSITY_QUIET,
             $input->hasParameterOption('-vvv', true) => OutputInterface::VERBOSITY_DEBUG,
@@ -108,7 +141,45 @@ class ForkServerCommand extends Command
             $this->output->setVerbosity($verbosity);
         }
 
-        return $work->run($input, $this->output);
+        try {
+            return $work->run($input, $this->output);
+        } catch (\Throwable $error) {
+            // A spawned worker's exception reaches the console kernel, which
+            // reports it to the application's handler; this child has no
+            // kernel above it.
+            $handler = $this->laravel->make(ExceptionHandler::class);
+            $handler->report($error);
+            $handler->renderForConsole($this->output, $error);
+
+            return 1;
+        }
+    }
+
+    private function rememberRestartSignal(): void
+    {
+        try {
+            $this->restartSignalAtBoot = $this->laravel->make('cache.store')->get(self::RESTART_SIGNAL_KEY);
+            $this->restartSignalKnown = true;
+        } catch (\Throwable) {
+            // Without a baseline nothing can be called newer.
+            $this->restartSignalKnown = false;
+        }
+    }
+
+    /** Whether `queue:restart` ran after this server booted. */
+    private function restartedSinceBoot(): bool
+    {
+        if (!$this->restartSignalKnown) {
+            return false;
+        }
+        try {
+            $signal = $this->laravel->make('cache.store')->get(self::RESTART_SIGNAL_KEY);
+        } catch (\Throwable) {
+            return false;
+        }
+
+        // Laravel's Worker compares the timestamps loosely too.
+        return $signal !== null && $signal != $this->restartSignalAtBoot;
     }
 
     /** Runs in each forked child, before queue:work. */
@@ -123,9 +194,13 @@ class ForkServerCommand extends Command
      * A provider may have opened a connection while the server booted; a
      * socket shared by two processes corrupts both conversations. Database
      * and Redis connections reconnect on their next use; log channels and
-     * mailers are built again when next used.
+     * mailers are built again when next used. A queue connection the boot
+     * resolved carries the server's environment, not the pool's, besides
+     * its socket: the manager lets it go, and names it.
+     *
+     * @return list<string> the queue connections let go
      */
-    private function releaseBootResources(): void
+    private function releaseBootResources(): array
     {
         if ($this->laravel->resolved('db')) {
             foreach (array_keys($this->laravel['db']->getConnections()) as $name) {
@@ -137,13 +212,35 @@ class ForkServerCommand extends Command
                 $this->laravel['redis']->purge($name);
             }
         }
-        if ($this->laravel->resolved('log')) {
-            foreach (array_keys($this->laravel['log']->getChannels()) as $name) {
-                $this->laravel['log']->forgetChannel($name);
+        // An application may bind a logger of its own as `log`, with no
+        // channels to forget.
+        if ($this->laravel->resolved('log') && ($log = $this->laravel['log']) instanceof LogManager) {
+            foreach (array_keys($log->getChannels()) as $name) {
+                $log->forgetChannel($name);
             }
         }
         if ($this->laravel->resolved('mail.manager')) {
             $this->laravel['mail.manager']->forgetMailers();
         }
+        if ($this->laravel->resolved('queue') && ($queue = $this->laravel['queue']) instanceof QueueManager) {
+            return self::forgetQueueConnections($queue);
+        }
+
+        return [];
+    }
+
+    /**
+     * The manager keeps every connection it resolved and has no way to let
+     * one go.
+     *
+     * @return list<string>
+     */
+    private static function forgetQueueConnections(QueueManager $queue): array
+    {
+        $connections = new \ReflectionProperty(QueueManager::class, 'connections');
+        $names = array_keys($connections->getValue($queue));
+        $connections->setValue($queue, []);
+
+        return $names;
     }
 }

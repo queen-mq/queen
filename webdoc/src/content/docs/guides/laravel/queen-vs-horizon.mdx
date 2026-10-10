@@ -53,6 +53,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-06 (indexed message browsing): message browsing keeps its response and status filters; the documented Laravel dashboard and broker capabilities are unchanged.
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/pop.rs reads
 # messages whose rows are gone from the queue log. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (review fixes): the crash-loop circuit closes only with the
+# probe in both engines, as the table says; the failed-job provider leaves other drivers' records
+# to Laravel. Nothing this page states changes.
 ---
 
 Queen is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both

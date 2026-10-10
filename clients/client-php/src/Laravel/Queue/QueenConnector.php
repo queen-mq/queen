@@ -2,6 +2,7 @@
 
 namespace Queen\Laravel\Queue;
 
+use Illuminate\Container\Container;
 use Illuminate\Queue\Connectors\ConnectorInterface;
 use InvalidArgumentException;
 use Queen\Queen;
@@ -24,11 +25,20 @@ class QueenConnector implements ConnectorInterface
 
     public function connect(array $config): QueenQueue
     {
-        $config = array_replace($this->defaults, $config);
+        // The pool's settings a supervisor put in the environment are the
+        // worked connection's alone.
+        $worked = self::isTheWorkedConnection($config);
+        $defaults = $this->defaults;
+        // A connection that names its own url, and no urls, is not on the
+        // default cluster: config/queen.php's urls would win below.
+        if (array_key_exists('url', $config) && !array_key_exists('urls', $config)) {
+            unset($defaults['urls']);
+        }
+        $config = array_replace($defaults, $config);
 
-        $workerConsumerGroup = getenv('QUEEN_LARAVEL_CONSUMER_GROUP');
-        $workerRetryAfter = getenv('QUEEN_LARAVEL_RETRY_AFTER');
-        $workerBlockFor = getenv('QUEEN_LARAVEL_BLOCK_FOR');
+        $workerConsumerGroup = $worked ? getenv('QUEEN_LARAVEL_CONSUMER_GROUP') : false;
+        $workerRetryAfter = $worked ? getenv('QUEEN_LARAVEL_RETRY_AFTER') : false;
+        $workerBlockFor = $worked ? getenv('QUEEN_LARAVEL_BLOCK_FOR') : false;
 
         $defaultQueue = self::name($config['queue'] ?? 'default', 'queue');
         $consumerGroup = self::name(
@@ -170,6 +180,30 @@ class QueenConnector implements ConnectorInterface
             shutdownClient: $shutdownClient,
             adaptiveBatch: $adaptivePrefetch ? new AdaptiveBatch() : null,
         );
+    }
+
+    /**
+     * Whether `$config`, as Laravel's queue manager passed it, is the
+     * connection this worker was started for. A supervisor names that
+     * connection in QUEEN_LARAVEL_CONNECTION beside the pool's consumer
+     * group, retry_after and block_for, which belong to it and not to another
+     * Queen connection a job resolves from inside the worker, to dispatch
+     * onto it. Without the name, or without an application to look it up in,
+     * every connection is the worked one, as it was before the name was sent.
+     */
+    private static function isTheWorkedConnection(array $config): bool
+    {
+        $worked = getenv('QUEEN_LARAVEL_CONNECTION');
+        if (!is_string($worked) || $worked === '') {
+            return true;
+        }
+        $container = Container::getInstance();
+        if (!$container->bound('config')) {
+            return true;
+        }
+        $workedConfig = $container->make('config')->get("queue.connections.{$worked}");
+
+        return !is_array($workedConfig) || $workedConfig === $config;
     }
 
     private static function name(mixed $value, string $label): string
