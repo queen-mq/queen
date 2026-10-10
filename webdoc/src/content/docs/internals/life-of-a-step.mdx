@@ -45,6 +45,8 @@ sourceOfTruth:
 # something. The pipeline and its answers are as described. Later the same night qlog/mod.rs makes
 # an empty file begin where its first record does, after a raft cut: the pipeline and its answers
 # are as described.
+# sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): dedup.rs
+# changes its module comment only; the probe of step 3 is as described.
 ---
 
 A worker's step in Queen is three calls at most: it pops a batch, does its work, and commits a

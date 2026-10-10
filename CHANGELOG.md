@@ -8,18 +8,20 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 **Server: a queue's memory no longer grows with the messages it keeps.** Every push left a row in
 the memory of every node (about 200 bytes: where the append begins and ends, when it was written,
 the hash of each `transactionId`), and the row stayed until retention removed the message. A queue
-with retention off, or with days of it, held a row for its whole history in RAM, on each node, and
-a restart loaded them all again. A row now leaves the store when the queue's dedup window has
-passed (`dedupWindowSeconds`, 3,600 s by default, or `completedRetentionSeconds` if longer, and
-never less than `QUEEN_RAFT_TXN_WINDOW_MIN_S`, 900 s), whatever the retention. Messages older than
-that are read from the queue log, which always held them: a consumer far behind, a group that
-subscribes at a past instant, a lookup by timestamp, and retention itself. Memory now follows the
-push rate times the window, not the size of the queue. On one 16-core VM, 20,000 single pushes a
-second for five minutes with retention off and a 60-second window: 2.1.0 ended with 5.95 million
-rows and 1.8 GB, and still held 1.4 GB after the pushes stopped; this build stayed at 1.2 million
-rows while they ran and held no row and 0.3 GB 75 seconds after. Consumers at the tail are served
-from memory as before: at 300,000 messages a second the push p50 was 8.5 to 9.4 ms on this build
-and 8.8 to 9.0 ms on 2.1.0, over five runs on ten cores of that VM.
+with retention off, or with days of it, held a row for its whole history in RAM, on each node, and a
+restart loaded them all again. A row now leaves the store when the queue's dedup window has passed
+(`dedupWindowSeconds`, 3,600 s by default, and never less than `QUEEN_RAFT_TXN_WINDOW_MIN_S`,
+900 s), whatever the retention: `retentionSeconds` and `completedRetentionSeconds` say how long a
+message stays on disk, and no longer how long its row stays in memory (until 2.1.0 a longer
+`completedRetentionSeconds` was also the least time a row was kept). Messages older than that are
+read from the queue log, which always held them: a consumer far behind, a group that subscribes at a
+past instant, a lookup by timestamp, and retention itself. Memory now follows the push rate times
+the window, not the size of the queue. On one 16-core VM, 20,000 single pushes a second for five
+minutes with retention off and a 60-second window: 2.1.0 ended with 5.95 million rows and 1.8 GB,
+and still held 1.4 GB after the pushes stopped; this build stayed at 1.2 million rows while they ran
+and held no row and 0.3 GB 75 seconds after. Consumers at the tail are served from memory as before:
+at 300,000 messages a second the push p50 was 8.5 to 9.4 ms on this build and 8.8 to 9.0 ms on
+2.1.0, over five runs on ten cores of that VM.
 The backlog of that run, 5.9 million messages with no row left, was read back by 16 consumers at
 about 500,000 messages a second, against about 520,000 on 2.1.0, which read it from memory. While
 it was being read, the traffic at the tail kept its 300,000 messages a second, with a push p50 of
@@ -57,7 +59,8 @@ caught up.
 was already acked is still a no-op. The broker recognises it while the message's row exists (the
 dedup window), and after that while the message is among the last 65,536 its group consumed from
 that partition; an older one is answered as not found. On a queue without retention, 2.1.0
-recognised it for as long as the queue existed.
+recognised it for as long as the queue existed, and on a queue with retention for at least as long
+as it kept the message.
 
 **Server: a quiet queue no longer makes a log file every ten minutes.** A log file is sealed when
 it is full (64 MiB), and a quiet one by age, so that retention can free what expired in it: every

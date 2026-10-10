@@ -24,6 +24,10 @@
 //!   retention is turned on, the messages go by their age read from the queue
 //!   log, the partitions' `log_start` reaches their end and the byte counters
 //!   return to zero.
+//! - [`a_queue_that_keeps_its_consumed_messages_keeps_no_row_for_them`]: an
+//!   hour of completed retention does not hold a row: the rows go at the dedup
+//!   window, a leased group reads and acks every message from the queue log,
+//!   the consumed messages stay, and a second group reads them again.
 //! - [`completed_retention_frees_messages_without_rows_up_to_the_slowest_group`]:
 //!   with completed retention the messages every group has consumed go, whole
 //!   appends below the slowest group's cursor and nothing past it (an append
@@ -773,6 +777,61 @@ async fn completed_retention_frees_messages_without_rows_up_to_the_slowest_group
         last.is_none(),
         "completed retention never removed the rest: {last:?}"
     );
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_queue_that_keeps_its_consumed_messages_keeps_no_row_for_them() {
+    let dir = scratch("kept");
+    let facade = open(&dir);
+    let (q, parts) = ("kept", ["x", "y"]);
+    // Consumed messages stay for an hour; the dedup window is zero.
+    configure(
+        &facade,
+        q,
+        json!({
+            "dedupWindowSeconds": 0,
+            "retentionEnabled": true,
+            "completedRetentionSeconds": 3600,
+        }),
+    )
+    .await;
+    version_six(&facade).await;
+    for p in parts {
+        for at in (0..40).step_by(5) {
+            push(&facade, q, p, at, 5).await;
+        }
+    }
+    // The rows go at the dedup window, whatever the completed retention.
+    rows_gone(&facade, q, &parts, 0).await;
+
+    // A leased group reads and acks all of it from the queue log.
+    let seen = drain(&facade, q, Some("first"), 10, false, &all()).await;
+    expect_all(&seen, &parts, 0, 40, "first");
+    assert!(
+        facade.cold_claims_for_test() > 0,
+        "claims from the queue log"
+    );
+
+    // Consumed, and not an hour old: retention leaves every message where it
+    // is, over many rounds of it.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let (rows, ps) = state(&facade, q, &parts);
+    assert_eq!(rows, 0);
+    for p in &ps {
+        assert_eq!(
+            (p.log_start, p.rows_start, p.txns_start),
+            (0, 40, 0),
+            "{p:?}"
+        );
+        assert!(p.unrowed_bytes > 0, "{p:?}");
+    }
+
+    // So a second group still gets them all.
+    let seen = drain(&facade, q, Some("second"), 10, true, &all()).await;
+    expect_all(&seen, &parts, 0, 40, "second");
 
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

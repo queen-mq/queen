@@ -44,6 +44,8 @@ sourceOfTruth:
 # sealed for retention or its size and not for its age): a row for the memory maps of the sealed
 # files' indexes (qlog/index.rs reads a small one into memory, and one the kernel refuses to map);
 # batcher.rs warns near the limit and facade/real.rs exports queen_raft_qlog_index_maps.
+# sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): the row for
+# how long the hashes are kept drops completedRetentionSeconds (maintenance.rs, queue_cutoffs).
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling
@@ -106,7 +108,7 @@ default: an option you leave out keeps its value, and `null` restores its defaul
 | Limit | Default | Setting | Applied in |
 |---|---|---|---|
 | Dedup window, per queue, checked per partition | 3600 s; `0` turns dedup off; no upper bound | `dedupWindowSeconds` on `configure` | `server/src/rsm/planner/push.rs` |
-| How long the hashes behind it are kept | the largest of the window, `completedRetentionSeconds` and 900 s | `QUEEN_RAFT_TXN_WINDOW_MIN_S` | `server/src/rsm/maintenance.rs` |
+| How long the hashes behind it are kept | the window, and never less than 900 s | `QUEEN_RAFT_TXN_WINDOW_MIN_S` | `server/src/rsm/maintenance.rs` |
 | How long a push keeps its index row in memory | the same time, then the row goes even if the message stays (cluster version 6) | `QUEEN_RAFT_ROWS_WINDOW` | `server/src/rsm/maintenance.rs` |
 | A committed command answers a retry of its request id | 60 s | `QUEEN_RAFT_REQUEST_ID_WINDOW_S` | `server/src/rsm/batcher.rs` |
 

@@ -539,6 +539,45 @@ fn a_partition_with_retention_moves_its_watermarks_as_before() {
         .unwrap();
 }
 
+/// Completed retention says when a consumed message leaves the log, and has
+/// no say in how long a row stays. A queue that deletes everything after a
+/// day and keeps consumed messages for a month: the rows of the messages the
+/// day's retention removed go with them. Until 2.2.0 the month was part of the
+/// txns window, and they stayed for it.
+#[test]
+fn completed_retention_keeps_no_row_past_the_dedup_window() {
+    // 10 rows two days old, then 10 from a minute ago.
+    let (_d, store) = store("completed-window", &[(1, part(0, 0, 19, NOW - 60_000_000))]);
+    txns_rows(&store, 1, 0, 10, NOW - 2 * DAY_US);
+    txns_rows(&store, 1, 10, 10, NOW - 60_000_000);
+    let cfg = maintenance::Config::default();
+    store
+        .read(|r| {
+            let mut qcfg = super::apply::queue_config(0);
+            qcfg.retention_enabled = true;
+            qcfg.retention_seconds = 86_400;
+            qcfg.completed_retention_seconds = 30 * 86_400;
+            let cut = maintenance::queue_cutoffs(r, NOW, &cfg, "t", "q", &qcfg);
+            let part = r.partition(1)?.expect("partition");
+            let got = maintenance::judge_partition(r, NOW, &cfg, 1, &part, &cut)?;
+            assert_eq!(
+                got,
+                Some(maintenance::Verdict::Watermark {
+                    log_start: 10,
+                    txns_start: 10,
+                    rows: None,
+                    more: false,
+                })
+            );
+            assert_eq!(
+                got,
+                maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, &cut)?
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
 /// The shortcuts against the walk as it was, over every combination that
 /// decides them: which cutoffs apply, where the watermarks stand, how old the
 /// rows are, whether the partition still holds anything, and none at all.

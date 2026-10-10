@@ -25,6 +25,9 @@ sourceOfTruth:
 # only for retention or its size. Nothing this page states changes. Later the same night qlog/set.rs
 # lowers its written seq at a raft cut (a file sealed right after one is created for the seq that
 # comes next): nothing here changes.
+# sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): maintenance.rs
+# computes a push's row time from the dedup window and QUEEN_RAFT_TXN_WINDOW_MIN_S alone; the
+# settings table describes that setting as before, and the runs on this page predate the change.
 ---
 
 Every number in this section comes from a folder of logs, and most can be produced again with one

@@ -25,7 +25,8 @@
 //! carries two watermarks (§6.1): `log_start`, below which the payload is
 //! gone, and `txns_start`, below which the hash lists are gone.
 //! `txns_start ≤ log_start`, and the gap is the txns window,
-//! `max(dedup_window, completed_retention, 900 s)` (D10, retention.rs ≈16–17).
+//! `max(dedup_window, 900 s)` (D10; until 2.2.0 `completed_retention` was in
+//! the max as well, after retention.rs ≈16–17, and no reader needed it).
 //! Inside that gap a re-push is still a duplicate and an ack-by-hash below the
 //! cursor still resolves.
 //!

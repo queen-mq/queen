@@ -36,6 +36,10 @@ verifiedBy:
 # sealed for retention or its size and not for its age): facade/real.rs exports
 # queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): maintenance.rs
+# no longer counts completedRetentionSeconds in how long a push keeps its row. The
+# dedupWindowSeconds row already named the dedup window alone; the completedRetentionSeconds row
+# describes the messages it removes, as before.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a

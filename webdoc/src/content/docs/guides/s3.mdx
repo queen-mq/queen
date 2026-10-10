@@ -35,6 +35,8 @@ sidebar:
 # sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): maintenance.rs lets a
 # push's row expire while the sink's retention hold still keeps its message; the sink reads the
 # queue log, not the rows, so the hold and the export are as described.
+# sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): maintenance.rs
+# changes how long a push's row is kept, not the sink's retention hold this page describes.
 ---
 
 The broker can mirror its queues into an S3-compatible bucket, as JSONL or Parquet files in a Hive

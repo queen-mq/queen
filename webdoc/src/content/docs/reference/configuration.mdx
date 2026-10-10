@@ -53,6 +53,9 @@ sourceOfTruth:
 # in it or it holds an eighth of a full file (the QUEEN_QLOG_SEAL_AGE_S row says so); batcher.rs
 # warns near the kernel's map limit, facade/real.rs exports a series for it; no variable is added.
 # Later the same night qlog/set.rs lowers its written seq at a raft cut: no variable changes.
+# sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): dedup.rs
+# changes its module comment only; the QUEEN_RAFT_ROWS_WINDOW row already named the dedup window
+# alone.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

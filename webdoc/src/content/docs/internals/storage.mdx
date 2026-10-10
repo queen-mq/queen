@@ -43,6 +43,9 @@ sourceOfTruth:
 # qlog/set.rs lowers its written seq at a raft cut and qlog/mod.rs lowers an empty file's first seq
 # at its first write, so an entry written after a cut is found by its seq: no paragraph describes
 # file headers, nothing here changes.
+# sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): maintenance.rs
+# computes a push's row time from the dedup window and the node's floor alone; the retention steps
+# say so.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are
@@ -210,10 +213,11 @@ Retention is decided once, on the leader, and executed on every node, like every
    payloads are gone; `rows_start`, below which the store holds no index row; and `txns_start`,
    the lower of the two, below which a record has neither and its file can be reclaimed. A push's
    index row (its offsets, its timestamp and the hashes of its `transactionId`s) is kept for the
-   longest of the queue's dedup window, its completed retention and `QUEEN_RAFT_TXN_WINDOW_MIN_S`
-   (900 s). That is independent of the message: the row of a message retention already took
-   stays for the rest of that time, so dedup outlives the payload, and the row of a message that
-   is still retained goes at the end of it, so memory does not grow with what a queue retains.
+   queue's dedup window, and never less than `QUEEN_RAFT_TXN_WINDOW_MIN_S` (900 s). That is
+   independent of the message and of the retention that keeps it (`retentionSeconds`,
+   `completedRetentionSeconds`): the row of a message retention already took stays for the rest
+   of that time, so dedup outlives the payload, and the row of a message that is still retained
+   goes at the end of it, so memory does not grow with what a queue retains.
    The messages left without a row are served from the queue log's own index: a consumer that
    far behind reads its positions from disk, as it reads its payloads. One watermark moves at
    most `RETENTION_BATCH_SIZE` (1000) pushes of a partition, and a partition that has more due is

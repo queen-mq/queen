@@ -39,9 +39,9 @@ pub struct Config {
     /// The queue the next pass starts at, `None` = the first.
     pub walk_queue: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
     /// `QUEEN_RAFT_TXN_WINDOW_MIN_S` (default 900): the least time a message's
-    /// hash list — and so its queue-log record — is kept, whatever the queue's
-    /// dedup window and completed retention. The physical reclaim of a queue
-    /// log follows this watermark, so nothing is freed before it.
+    /// hash list — and so its queue-log record — is kept, however short the
+    /// queue's dedup window. The physical reclaim of a queue log follows this
+    /// watermark, so nothing is freed before it.
     pub txn_window_min_s: i64,
     /// Walk the partitions here, on the planning thread (the old way). Off
     /// when the background scanner ([`crate::rsm::retention_scan`]) walks them:
@@ -506,9 +506,14 @@ pub(crate) fn queue_cutoffs<R: Reads + ?Sized>(
         .map(|v| v.min(sink_floor));
     let max_wait = (qcfg.max_wait_time_seconds > 0)
         .then(|| now_us.saturating_sub(qcfg.max_wait_time_seconds as i64 * 1_000_000));
-    let txn_window_s = i64::from(qcfg.dedup_window_seconds)
-        .max(i64::from(qcfg.completed_retention_seconds))
-        .max(cfg.txn_window_min_s.max(0));
+    // The txns window, how long a push keeps its row: the dedup window, and
+    // never under the node's floor. Completed retention was part of it until
+    // 2.2.0 and is not: it says when a consumed message leaves the LOG
+    // (`completed` above), and nothing reads a row older than the dedup window
+    // but an ack repeated after it (a probe ignores an older row, dedup.rs).
+    // With it, a queue that keeps its consumed messages for a month kept a
+    // month of rows in every node's memory.
+    let txn_window_s = i64::from(qcfg.dedup_window_seconds).max(cfg.txn_window_min_s.max(0));
     // Catalogue version 6, read from committed state as every gate is (D20).
     // A store that cannot say reads as below it: the old shape is always safe.
     let v6 = r

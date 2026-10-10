@@ -33,6 +33,9 @@ verifiedBy:
 # sealed for retention or its size and not for its age): facade/real.rs exports
 # queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): dedup.rs
+# changes its module comment only; a duplicate is still judged inside dedupWindowSeconds and
+# nothing this page states changes.
 ---
 
 Every message carries a `transactionId`. Push the same id to the same partition again, inside the
