@@ -174,7 +174,7 @@ jobs:
               scenarios=$scenarios,dispatch-backend-down,replicas-kill,replicas-rolling
               prefork=on ;;
             queen)
-              scenarios=probe-broker-hung,poison-messages,job-metrics,install-owner,broker-leader-kill,partition-order
+              scenarios=probe-broker-hung,poison-messages,job-metrics,install-owner,broker-leader-kill,partition-order,orphan-reaping
               profiles=queen-php,queen-rust ;;
             laravel-11) scenarios=parity stack=laravel-11 stack_layout=balanced prefork=on ;;
             upgrade) scenarios=rolling-upgrade profiles=queen-php,queen-rust prefork=on ;;

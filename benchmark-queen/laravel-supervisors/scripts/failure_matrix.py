@@ -1380,33 +1380,56 @@ def start_order(jobs: Jobs, expected: list[str]) -> list[tuple[float, str]]:
 
 def partition_order(lane: Lane) -> list[Check]:
     """One partition, as an ordered queue keeps one: 40 jobs, two workers, and the worker running
-    one of them killed outright. Queen leases a partition to one consumer at a time, so the jobs
-    must start in the order they were dispatched, never two at once, and the killed job must run
-    again before any job behind it."""
-    expected = ids(0, 40)
-    lane.dispatch("ok", 40, sleep_ms=300, tries=3, partition="matrix-order")
-    jobs = lane.wait_until(lambda r: sum(1 for j in expected if r.count(j, "started")) >= 10, 60, "10 jobs started")
-    run = next(((job, found) for job in expected if (found := run_in_progress(jobs, job)) is not None), None)
-    if run is not None:
-        lane.docker("exec", lane.container(lane.profile.engine), "kill", "-KILL", str(run[1][1]), check=False)
-        lane.note(f"SIGKILL worker {run[1][1]} running {run[0]}")
+    the eleventh, a long one, killed outright. Queen leases a partition to one consumer at a
+    time, so the jobs must start in the order they were dispatched, never two at once, and the
+    killed job must run again before any job behind it."""
+    expected, killed = ids(0, 40), "000010"
+    lane.dispatch("ok", 10, sleep_ms=300, tries=3, partition="matrix-order")
+    lane.dispatch("ok", 1, first=10, sleep_ms=8_000, tries=3, partition="matrix-order")
+    lane.dispatch("ok", 29, first=11, sleep_ms=300, tries=3, partition="matrix-order")
+    jobs = lane.wait_until(lambda r: r.count(killed, "started") >= 1, 60, "the long job started")
+    run = run_in_progress(jobs, killed)
+    if run is not None and run_in_progress(lane.report(), killed) == run:
+        lane.docker("exec", lane.container(lane.profile.engine), "kill", "-KILL", str(run[1]), check=False)
+        lane.note(f"SIGKILL worker {run[1]} running {killed}")
+    else:
+        run = None
     jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 240, "all completed")
     jobs = lane.settle(5)
     # Each job where it first started; a rerun keeps the job's first place.
     firsts = list(dict.fromkeys(job for _, job in start_order(jobs, expected)))
-    killed = run[0] if run is not None else None
-    after_killed = firsts[firsts.index(killed) + 1] if killed in firsts and firsts.index(killed) + 1 < len(firsts) else None
-    rerun_before_next = (killed is not None and len(jobs.times(killed, "started")) > 1
-                         and (after_killed is None or jobs.times(killed, "started")[1] < jobs.times(after_killed, "started")[0]))
+    reruns, behind = jobs.times(killed, "started"), jobs.times("000011", "started")
     spans = sorted((start, end, job) for job in expected for start, end in jobs.attempts(job))
     overlaps = [(a[2], b[2]) for a, b in zip(spans, spans[1:]) if a[1] is not None and b[0] < a[1]]
-    lane.extra["partition_order"] = {"killed": killed, "order": firsts}
+    lane.extra["partition_order"] = {"order": firsts, "killed_starts": reruns, "next_starts": behind}
     return [
-        Check("the jobs started in dispatch order", firsts == expected, f"{firsts[:12]}"),
+        Check("the jobs started in dispatch order", firsts == expected, f"{firsts[:14]}"),
         Check("never two at once", not overlaps, f"{overlaps[:5]}"),
-        Check("the worker running a job was killed", killed is not None, f"{run}"),
-        Check("the killed job ran again before the job behind it", rerun_before_next,
-              f"{killed}: {jobs.times(killed, 'started') if killed else None}; next {after_killed}"),
+        Check("the worker running the long job was killed", run is not None, f"{run}"),
+        Check("the killed job ran again before the job behind it",
+              len(reruns) > 1 and bool(behind) and reruns[1] < behind[0], f"{killed} at {reruns}; 000011 at {behind}"),
+        *completed_once(jobs, expected),
+    ]
+
+
+def orphan_reaping(lane: Lane) -> list[Check]:
+    """Jobs that leave a process behind, as one that starts a converter in the background does,
+    in a container whose PID 1 is the supervisor, as in a Kubernetes pod, which has no init. The
+    orphans reparent to PID 1. When they end, PID 1 must reap them, or zombies pile up until
+    the container runs out of pids and no worker can start."""
+    expected = ids(0, 5)
+    lane.dispatch("orphan", 5, sleep_ms=100, tries=1)
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 60, "all completed")
+    # Each orphan ends three seconds after it starts.
+    time.sleep(8)
+    rows = lane.docker("exec", lane.container(lane.profile.engine), "ps", "-eo", "stat=,pid=,ppid=,args=",
+                       check=False).stdout.splitlines()
+    zombies = [row.strip() for row in rows if row.strip().startswith("Z")]
+    first = next((row.split(None, 3)[3] for row in rows if len(row.split(None, 3)) == 4 and row.split()[1] == "1"), "")
+    lane.extra["orphans"] = {"pid_1": first, "zombies": zombies}
+    return [
+        Check("PID 1 is the supervisor", lane.profile.master in first, first[:120]),
+        Check("no zombie is left", not zombies, f"{len(zombies)}: {zombies[:5]}"),
         *completed_once(jobs, expected),
     ]
 
@@ -1659,6 +1682,8 @@ SCENARIOS = [
     Scenario("job-metrics", job_metrics, engines=QUEEN_ENGINES),
     Scenario("install-owner", install_owner, engines=("queen-installed",)),
     # A renewal may try all three URLs: 60 s fits the renewal budget that 30 s does not.
+    # No init: the supervisor is PID 1, as in a Kubernetes pod.
+    Scenario("orphan-reaping", orphan_reaping, {"BENCH_APP_INIT": "false"}, engines=QUEEN_ENGINES),
     # A 10 s lease, so the killed job comes back in seconds.
     Scenario("partition-order", partition_order, DEATH_ENV, engines=QUEEN_ENGINES),
     # Coordinated, so the two releases share the queue as replicas of one deployment do.

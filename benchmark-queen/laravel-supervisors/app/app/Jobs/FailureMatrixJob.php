@@ -24,13 +24,19 @@ use Throwable;
  *   works as `ok`. Its first run is told by the log, not by attempts(), so a
  *   backend that counted the release wrongly still releases only once;
  * - `throw-binary`: always throws, with a message that is not UTF-8, as a
- *   database error that quotes a latin-1 value does.
+ *   database error that quotes a latin-1 value does;
+ * - `orphan`: starts a process in the background that outlives the job by
+ *   three seconds, as a job that starts a converter does, then works as
+ *   `ok`. The process is an orphan at once, left to whichever process reaps
+ *   orphans: PID 1, or a subreaper.
  */
 class FailureMatrixJob implements ShouldQueue
 {
     use Queueable;
 
-    public const MODES = ['ok', 'throw', 'throw-once', 'release-once', 'fail', 'memory', 'release-then-ok', 'throw-binary'];
+    public const MODES = [
+        'ok', 'throw', 'throw-once', 'release-once', 'fail', 'memory', 'release-then-ok', 'throw-binary', 'orphan',
+    ];
 
     /** Memory kept for the life of the worker, so the worker's --memory check trips. */
     private static array $ballast = [];
@@ -93,6 +99,10 @@ class FailureMatrixJob implements ShouldQueue
             $this->fail(new RuntimeException('failure matrix: failed by the job'));
 
             return;
+        }
+        if ($this->mode === 'orphan') {
+            // Detached from this process: it lives on when the worker is killed.
+            exec('sh -c "sleep 3" > /dev/null 2>&1 &');
         }
         if ($this->mode === 'memory') {
             $missing = $this->allocateMib * 1024 * 1024 - memory_get_usage(true);

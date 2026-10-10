@@ -97,7 +97,9 @@ x-app: &app
       BENCH_PHP_CLIENT_VERSION: ${BENCH_PHP_CLIENT_VERSION:-}
   user: "1000:1000"
   working_dir: /workspace/benchmark-queen/laravel-supervisors/app
-  init: true
+  # An init process as PID 1 reaps the orphans of killed jobs. A Kubernetes pod
+  # has none: BENCH_APP_INIT=false makes the supervisor PID 1, as there.
+  init: ${BENCH_APP_INIT:-true}
   restart: "no"
   cpus: ${BENCH_APP_CPUS:-4.0}
   mem_limit: ${BENCH_APP_MEMORY:-1024m}
