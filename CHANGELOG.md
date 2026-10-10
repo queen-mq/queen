@@ -18,15 +18,19 @@ push rate times the window, not the size of the queue. On one 16-core VM, 20,000
 second for five minutes with retention off and a 60-second window: 2.1.0 ended with 5.95 million
 rows and 1.8 GB, and still held 1.4 GB after the pushes stopped; this build stayed at 1.2 million
 rows while they ran and held no row and 0.3 GB 75 seconds after. Consumers at the tail are served
-from memory as before: at 300,000 messages a second the push p50 was 6.4 to 6.7 ms on both builds.
+from memory as before: at 300,000 messages a second the push p50 was 8.5 to 9.4 ms on this build
+and 8.8 to 9.0 ms on 2.1.0, over five runs on ten cores of that VM.
 The backlog of that run, 5.9 million messages with no row left, was read back by 16 consumers at
-about 500,000 messages a second, against about 590,000 on 2.1.0, which read it from memory. While
+about 500,000 messages a second, against about 520,000 on 2.1.0, which read it from memory. While
 it was being read, the traffic at the tail kept its 300,000 messages a second, with a push p50 of
-about 21 ms for those seconds on both builds. From the disk it is the same on both: with 32 GB of
+9 to 10 ms on both builds. From the disk it is the same on both: with 32 GB of
 backlog (48.75 million messages) and the page cache dropped, the consumers read it back at about
 360,000 messages a second on this build and 375,000 on 2.1.0, and the broker's own memory stayed
 at 0.6 GB against 2.2 GB. A walk over old messages asks the kernel for a chunk of records at
-once as soon as one read has waited for the disk, so the reads overlap.
+once as soon as one read has waited for the disk, so the reads overlap. A queue of 99 GB (149
+million messages, retention off) left the broker with 0.4 GB of memory once its rows had gone, and
+the node started on it in 3.5 seconds with a cold page cache. The runs are in
+`benchmark-queen/2026-10-09-rows-window/`.
 The change needs cluster version 6, which the leader raises by itself once every node runs this
 release; from then on 2.1.0 and older refuse to start on that data, and
 `QUEEN_RAFT_CLUSTER_VERSION_MS=0` keeps the way back open while the release bakes. Until the

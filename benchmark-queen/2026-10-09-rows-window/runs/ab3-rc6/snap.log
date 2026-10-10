@@ -1,0 +1,56 @@
+01:58:34 start txns_rows=0 cold_claims=0 anon_MB rss_MB cpu% = 10 29 2
+01:58:44 P txns_rows=150036 cold_claims=0 anon_MB rss_MB cpu% = 301 361 140
+01:58:54 P txns_rows=351226 cold_claims=0 anon_MB rss_MB cpu% = 436 537 180
+01:59:05 P txns_rows=552121 cold_claims=0 anon_MB rss_MB cpu% = 532 667 194
+01:59:15 P txns_rows=747453 cold_claims=0 anon_MB rss_MB cpu% = 798 973 202
+01:59:25 P txns_rows=948497 cold_claims=0 anon_MB rss_MB cpu% = 871 1087 209
+01:59:35 P txns_rows=1149384 cold_claims=0 anon_MB rss_MB cpu% = 977 1233 212
+01:59:45 P txns_rows=1202914 cold_claims=0 anon_MB rss_MB cpu% = 1044 1358 212
+01:59:55 P txns_rows=1203948 cold_claims=0 anon_MB rss_MB cpu% = 1083 1432 212
+02:00:05 P txns_rows=1204995 cold_claims=0 anon_MB rss_MB cpu% = 1038 1424 212
+02:00:15 P txns_rows=1211816 cold_claims=0 anon_MB rss_MB cpu% = 1101 1522 212
+02:00:25 P txns_rows=1212831 cold_claims=0 anon_MB rss_MB cpu% = 1089 1540 212
+02:00:35 P txns_rows=1213772 cold_claims=0 anon_MB rss_MB cpu% = 1082 1567 254
+02:00:45 P txns_rows=1214815 cold_claims=0 anon_MB rss_MB cpu% = 1067 1587 254
+02:00:55 P txns_rows=1215855 cold_claims=0 anon_MB rss_MB cpu% = 1129 1663 254
+02:01:05 P txns_rows=1216868 cold_claims=0 anon_MB rss_MB cpu% = 1102 1642 254
+02:01:15 P txns_rows=1217808 cold_claims=0 anon_MB rss_MB cpu% = 1090 1643 254
+02:01:25 P txns_rows=1218994 cold_claims=0 anon_MB rss_MB cpu% = 1106 1670 254
+02:01:35 P txns_rows=1219940 cold_claims=0 anon_MB rss_MB cpu% = 1115 1690 257
+02:01:45 P txns_rows=1220880 cold_claims=0 anon_MB rss_MB cpu% = 1164 1752 257
+02:01:55 P txns_rows=1222139 cold_claims=0 anon_MB rss_MB cpu% = 1117 1710 257
+02:02:05 P txns_rows=1223211 cold_claims=0 anon_MB rss_MB cpu% = 1215 1819 257
+02:02:16 P txns_rows=1204118 cold_claims=0 anon_MB rss_MB cpu% = 1103 1718 257
+02:02:26 P txns_rows=1205063 cold_claims=0 anon_MB rss_MB cpu% = 1130 1756 257
+02:02:36 P txns_rows=1206035 cold_claims=0 anon_MB rss_MB cpu% = 1117 1748 259
+02:02:46 P txns_rows=1206748 cold_claims=0 anon_MB rss_MB cpu% = 1104 1747 259
+02:02:56 P txns_rows=1207782 cold_claims=0 anon_MB rss_MB cpu% = 1125 1779 259
+02:03:06 P txns_rows=1208868 cold_claims=0 anon_MB rss_MB cpu% = 1135 1800 259
+02:03:16 P txns_rows=1209987 cold_claims=0 anon_MB rss_MB cpu% = 1117 1788 259
+02:03:26 P txns_rows=1211099 cold_claims=0 anon_MB rss_MB cpu% = 1115 1798 259
+02:03:35 P-end txns_rows=1202213 cold_claims=0 anon_MB rss_MB cpu% = 1123 1816 262
+02:04:50 P+75s txns_rows=0 cold_claims=0 anon_MB rss_MB cpu% = 304 998 25
+02:04:59 C1-end txns_rows=0 cold_claims=4716 anon_MB rss_MB cpu% = 542 1236 25
+02:05:04 M txns_rows=3676 cold_claims=4716 anon_MB rss_MB cpu% = 572 1267 25
+02:05:09 M txns_rows=14937 cold_claims=4716 anon_MB rss_MB cpu% = 596 1291 25
+02:05:14 M txns_rows=30098 cold_claims=4716 anon_MB rss_MB cpu% = 701 1397 25
+02:05:19 M txns_rows=45331 cold_claims=4716 anon_MB rss_MB cpu% = 851 1548 25
+02:05:24 replay starts
+02:05:24 M txns_rows=60514 cold_claims=4795 anon_MB rss_MB cpu% = 967 1712 25
+02:05:29 M txns_rows=75723 cold_claims=6309 anon_MB rss_MB cpu% = 1310 2120 25
+02:05:34 M txns_rows=90867 cold_claims=8043 anon_MB rss_MB cpu% = 1459 2333 208
+02:05:39 M txns_rows=106095 cold_claims=8043 anon_MB rss_MB cpu% = 1455 2393 208
+02:05:44 M txns_rows=121251 cold_claims=8043 anon_MB rss_MB cpu% = 1418 2420 208
+02:05:49 M txns_rows=136401 cold_claims=8043 anon_MB rss_MB cpu% = 1462 2529 208
+02:05:54 M txns_rows=151524 cold_claims=8043 anon_MB rss_MB cpu% = 1537 2667 208
+02:05:59 M txns_rows=166649 cold_claims=8043 anon_MB rss_MB cpu% = 1600 2794 208
+02:06:04 M txns_rows=178364 cold_claims=8043 anon_MB rss_MB cpu% = 1690 2949 208
+02:06:10 M txns_rows=178350 cold_claims=8043 anon_MB rss_MB cpu% = 1724 3014 208
+02:06:15 M txns_rows=163358 cold_claims=8043 anon_MB rss_MB cpu% = 1618 2912 208
+02:06:20 M txns_rows=148355 cold_claims=8043 anon_MB rss_MB cpu% = 1558 2852 208
+02:06:25 M txns_rows=133391 cold_claims=8043 anon_MB rss_MB cpu% = 1443 2783 208
+02:06:25 replay ends
+02:06:25 M-end txns_rows=133391 cold_claims=8043 anon_MB rss_MB cpu% = 1443 2783 208
+02:07:45 I-end txns_rows=151722 cold_claims=8043 anon_MB rss_MB cpu% = 1536 3470 307
+0
+AB_DONE

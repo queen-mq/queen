@@ -1,0 +1,6 @@
+[verify] queen http://127.0.0.1:6632: 1 ledgers from /root/improve/runs/pipe-rc6/ids; reading vx-out (group verify, from the first message) then the rest of vx-in
+[verify] out vx-out: 4673000 records after 10s
+[verify] out vx-out: 8850190 records after 20s
+[verify] out vx-out: 8850190 records, idle 10s: scan complete after 28.5s
+[verify] rest of vx-in: 0 records, idle 10s: scan complete after 10.0s
+[verify] system=queen ledgers=1 produced=8849990 ambiguous=0 out_records=8850190 out_unique=8849990 duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=200 scan=38.8s | VERDICT PASS
