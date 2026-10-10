@@ -61,6 +61,15 @@ final class PhpSupervisor
     private ReplicaCoordinator|false|null $coordinator = null;
     private ForkServerClient|false|null $forkServer = null;
     private ?OrphanReaper $orphanReaper = null;
+    /**
+     * Per pool, the workers that exited and are not replaced yet, and how many
+     * of them did not crash; see reconcile().
+     *
+     * @var array<string, int>
+     */
+    private array $vacancies = [];
+    /** @var array<string, int> */
+    private array $cleanVacancies = [];
     private bool $preforkFailed = false;
     /** A worker of the current fork server stopped for queue:restart. */
     private bool $forkServerStale = false;
@@ -452,7 +461,17 @@ final class PhpSupervisor
 
         foreach ($desired as $queue => $target) {
             $pool =& $this->processes[$name][$queue];
-            while ($budget > 0 && $target > count($pool)) {
+            $key = $this->poolKey($name, (string) $queue);
+            while ($target > count($pool)) {
+                // Replacing workers that exited, up to the count the pool
+                // had, is no scale-up: a pool that lost most of its workers
+                // at once (queue:restart after a deploy, max_time, the OOM
+                // killer) is refilled now, not one balance_max_shift per
+                // balance_cooldown.
+                $replaces = ($this->vacancies[$key] ?? 0) > 0;
+                if (!$replaces && $budget <= 0) {
+                    break;
+                }
                 // A process remains part of the global capacity budget until
                 // it has actually exited. This prevents a slow graceful drain
                 // from temporarily oversubscribing process_limit while a
@@ -461,24 +480,36 @@ final class PhpSupervisor
                 if ($this->remainingProcessSlots() < $processCost) {
                     break;
                 }
-                $permission = $this->restartPermission($name, $queue);
+                // A worker that exited cleanly is replaced even while a crash
+                // holds the circuit: only crashes wait for its backoff or probe.
+                $clean = ($this->cleanVacancies[$key] ?? 0) > 0;
+                $permission = $clean ? 'normal' : $this->restartPermission($name, $queue);
                 if ($permission === null) {
                     break;
                 }
                 try {
                     $process = $this->startWorker($name, $queue, $options);
                     if ($permission === 'probe') {
-                        $key = $this->poolKey($name, $queue);
                         $this->restartPhase[$key] = 'probe';
                         $this->restartProbes[spl_object_id($process)] = $key;
                     }
                     $pool[] = $process;
-                    $budget--;
+                    if ($replaces) {
+                        $this->vacancies[$key]--;
+                    } else {
+                        $budget--;
+                    }
+                    if ($clean) {
+                        $this->cleanVacancies[$key]--;
+                    }
                 } catch (\Throwable $error) {
                     $this->registerCrash($name, $queue, $options, $error->getMessage());
                     break;
                 }
             }
+            // Owed no more than the pool lacks: a lower target cancels the rest.
+            $this->vacancies[$key] = min($this->vacancies[$key] ?? 0, max(0, $target - count($pool)));
+            $this->cleanVacancies[$key] = min($this->cleanVacancies[$key] ?? 0, $this->vacancies[$key]);
         }
     }
 
@@ -798,6 +829,15 @@ final class PhpSupervisor
                     && (($process instanceof ForkedProcess && $process->server() === $this->forkServer)
                         || $this->preforkWantsAServer())) {
                     $this->forkServerStale = true;
+                }
+                // A worker that exited is owed a replacement; one that did not
+                // crash is owed it even while the restart circuit waits.
+                $this->vacancies[$restartKey] = ($this->vacancies[$restartKey] ?? 0) + 1;
+                if ($exitCode === 0
+                    || $announced === WorkerExitMarker::MEMORY
+                    || $announced === WorkerExitMarker::TIMEOUT
+                    || (!$wasProbe && $runtime >= (float) $options['stable_after'])) {
+                    $this->cleanVacancies[$restartKey] = ($this->cleanVacancies[$restartKey] ?? 0) + 1;
                 }
                 if ($poolHadProbe && !$wasProbe) {
                     continue;
@@ -1486,6 +1526,8 @@ final class PhpSupervisor
                 $this->processes[$supervisor][$queue] = [];
             }
         }
+        $this->vacancies = [];
+        $this->cleanVacancies = [];
     }
 
     private function resume(): void
