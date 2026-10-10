@@ -22,6 +22,9 @@ sourceOfTruth:
 # --dedup-window, the dedupWindowSeconds of the test queues, and db.clj passes it to the queues it
 # configures. The default is the 24 hours every campaign on this page ran with. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-10 (the runner reads the node logs): run-campaign.sh marks a test
+# REFUSED when a node's log holds FATAL or a panic, corruption tests excepted; "How a test runs"
+# says so.
 ---
 
 A million messages a second is worth nothing if one of them can go missing. We check that with
@@ -43,7 +46,11 @@ read every partition) and hands the full history to the workload's checkers. A t
 when every checker is. The failover workload is the exception in its shape: it starts two
 clusters of three nodes, one following the other, and the faults run on both. The harness is in
 `test/jepsen/` (Clojure, Jepsen 0.3.14), and `run-campaign.sh` runs a list of tests and writes
-one verdict line per test:
+one verdict line per test. The checkers judge the history, and three nodes of five can carry a
+history while the other two are down, so after each test the script also reads every node's log:
+a node that refused to start or panicked turns the line into `REFUSED`, whatever the checkers
+said. The tests that damage a node's files on purpose are left out of that, because there a
+refusal is the right answer.
 
 <Figure id="benchmarks/jepsen-test" />
 
