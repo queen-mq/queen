@@ -31,11 +31,10 @@ A million messages a second is worth nothing if one of them can go missing. We c
 Jepsen: five nodes, clients driving the native API as hard as they can, a nemesis that kills,
 pauses, partitions, skews clocks and cuts power, and checkers that read the whole history
 afterwards looking for a message lost, delivered twice, acked twice or seen out of order. The
-latest full campaign ran 153 tests on the code of 2.1.0, on 2026-10-08 and 09: 152 came back valid,
-and the other, judged invalid on test nodes whose clocks had drifted apart, was valid when it ran
-again. A standby cluster's failover had 37 tests of its own on the same build. That is evidence,
-not proof. Jepsen finds bugs and cannot show there are none, and further down is every bug it
-found in Queen 2.
+latest full campaign ran 244 tests on the code of 2.2.0, on 2026-10-09 and 10, a standby cluster's
+failover among them: all 244 came back valid, one of them at its second run, after the harness had
+crashed in the first. That is evidence, not proof. Jepsen finds bugs and cannot show there are
+none, and further down is every bug it found in Queen 2.
 
 ## How a test runs
 
@@ -109,19 +108,21 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | Kafka-facade build | 2026-10-02 | the code of 2.0.0-beta.5, before a fix inside the facade | 65 | 64 valid, 1 unknown |
 | 2.0.1 | 2026-10-05 | 2.0.1, `bc1b5bfb6` | 19: queue, pipeline, dead letters, log, dedup and KV register under kills, pauses, partitions, restarts, a deaf leader and power loss, the queue and the pipeline on 2,000 and 1,000 partitions whose idle consumer state leaves the leader's memory after a second | 19 valid |
 | Locks | 2026-10-08 | `2287397a3`: 2.0.3 with locks, the KV `check` op and cluster version 5 | 41: W11 and W11b (29, three of them without faults), then KV register, counter and claim, Elle and the pipeline again (12), under kills, pauses, partitions, clock faults, restarts, membership changes, bridges, a deaf leader and power loss, and with kills, pauses, partitions and clock faults in one test | 41 valid |
-| Full | 2026-10-08 and 09 | `b69470031`, the code of 2.1.0: 2.0.4 with the standby cluster, locks and the four fixes of that night | 153: the 125 of P11 (W1 to W10) and 28 lock and semaphore tests (W11, W11b), two of them without faults | 152 valid; the other was the harness, which had let the nodes' clocks drift apart, and it ran again valid |
+| 2.1.0 | 2026-10-08 and 09 | `b69470031`, the code of 2.1.0: 2.0.4 with the standby cluster, locks and the four fixes of that night | 153: the 125 of P11 (W1 to W10) and 28 lock and semaphore tests (W11, W11b), two of them without faults | 152 valid; the other was the harness, which had let the nodes' clocks drift apart, and it ran again valid |
 | Failover | 2026-10-08 and 09 | the same build | 37: W12 on two clusters of three nodes, with crashes of the source, planned switches, transactions and crashes that find the standby 10 s behind, under kills, power loss, pauses, partitions, clock faults, restarts and all of them at once | 36 valid; the other was the harness, and the 10 planned switches ran again valid |
+| Rows window, first pass | 2026-10-09 | `e8efda8cb`, the first build of 2.2.0's rows window | 41: the queue, the pipeline, retention, the log, dead letters, dedup, the KV register and Elle with rows that live two seconds, on 256 KiB log files sealed after 10 s, so that consumers read messages that have no row; under kills, power loss, pauses, partitions, clock faults, restarts, membership changes, bridges and a deaf leader | 37 valid; the other 4 were the two refusals to start below |
+| 2.2.0 | 2026-10-09 and 10 | `3b1a6d9bb`, the code of 2.2.0 without its last three commits | 244: the 153 of the 2.1.0 campaign, 40 of the first pass, 12 on the same small log files with rows that stay, 8 on shared logs, and 31 failovers, 4 of them with rows that live two seconds | 244 valid, one at its second run: the harness crashed in the first |
 
 The unknown of 2026-10-02 is W9 under bridge partitions. After the last heal, a follower's pops
 kept timing out for about 90 seconds although it had caught up, so the final reads did not finish
 within the test's time limit and the checker had no end state to judge. It was a liveness
-problem, and its cause was not found. The same test was valid in the full campaign, on
+problem, and its cause was not found. The same test was valid in the 2.1.0 campaign, on
 2026-10-09, whose build has the fix for a leader that stops planning while it leads
 (`5d48aef94`): such a leader's requests time out the same way, and whether it was the cause that
 day is not known. P8 to P10 are archived with every history in
 `benchmark-queen/2026-09-27-jepsen-archive/`.
 
-The full campaign started on the build as it was merged (`e2f7236bd`) and was stopped after 48
+The 2.1.0 campaign started on the build as it was merged (`e2f7236bd`) and was stopped after 48
 tests, 47 of them valid. The other had found a five-node cluster whose leader led on for two
 minutes and answered nothing (the row for `5d48aef94` below), and the fix was ready. The campaign
 then ran from its first test on the build with the four fixes, on two sets of five nodes that
@@ -155,6 +156,24 @@ given another slot, and the first permit was live again a moment later. No semap
 permits than its limit. Every test's verdict and counts are in
 `benchmark-queen/2026-10-08-jepsen-locks/`.
 
+The 2.2.0 campaign tests what that release changes: a push's row leaves the store when its
+queue's dedup window has passed, and a consumer behind that reads from the queue log. Its first
+pass ran the consumption workloads with rows that live two seconds, on log files of 256 KiB
+that are sealed after ten seconds, where the defaults are 64 MiB and ten minutes, so that every
+test seals, reclaims and removes log files while its faults run. Four of its 41 tests were not
+valid, each with nodes that had refused to start: the two rows below. Both bugs are in 2.1.0 too,
+where a five-minute test does not reach them.
+
+The campaign then ran for sixteen hours on two sets of nodes, and on five builds, because fixes
+landed while it ran: each test that had run on an older build ran again on the newer one, 352
+runs in all, and all 244 tests ran on the last build, `3b1a6d9bb`. One run on the first build was
+judged valid while two of its five nodes had refused to start: three nodes carried the history.
+It was the second bug again, in a place the first fix had missed, and it is among our own faults
+below, because the harness should have said so. Every node's log of both sets was read at the
+end, the tests that damage a node's files on purpose left out, and no other run has a refusal or
+a panic. Eleven of the tests then ran on the final code, `8f5342d29`, and all were valid. The
+verdicts, the builds and the node logs' scan are in `benchmark-queen/2026-10-09-jepsen-220/`.
+
 ## What the tests found
 
 Every row is a bug in Queen that a campaign caught, and the commit that fixed it names the test
@@ -171,8 +190,10 @@ that found it.
 | P15 | W2, graceful restart | an ack whose answer was lost in a leader change was answered "stale" on the new leader, and its message never came back | `7a2a1711` |
 | P22 | W7, kill -9 | 1 to 8 of about 7,600 dead letters were filed without their payload | `7a2a1711` |
 | Failover | W12, power loss and partitions | a standby's new leader planned a client's command that had waited out its election, stamped with its own clock; every node refused the next entry it replayed, and stopped | `963f7846b` |
-| Full, 2026-10-08 | W2, power loss with two slow disks; W12, partitions | a leader that no quorum had acknowledged for 2 s had a write refused by raft, stopped planning and never started again while it led: every request ran into its deadline, and a standby could not be promoted | `5d48aef94` |
+| 2.1.0 | W2, power loss with two slow disks; W12, partitions | a leader that no quorum had acknowledged for 2 s had a write refused by raft, stopped planning and never started again while it led: every request ran into its deadline, and a standby could not be promoted | `5d48aef94` |
 | Failover | W12, partitions | a node that had led the standby and was elected again after the promotion answered `503 standby`, also to the retry of a write the cluster had already taken | `63a4805ed` |
+| Rows window | W2 and W8, power loss, on log files sealed after 10 s | an empty queue log was deleted in place; a removal that stopped half-way left its directory with no file in it, which a start takes for a log that lost its records, and every node refused to start | `6f18bd40f` |
+| Rows window and 2.2.0 | W8 and W2, kills, on log files sealed after 10 s | a follower's log was cut back and its next entry went into an empty file created for a later seq, one the cut had emptied or one sealed right after it; a search by seq skipped that file, and the node refused to start | `6f18bd40f`, `3b1a6d9bb` |
 
 Two of P8's failures were our own. The claim workload lost ids when a call timed out, and Elle
 reported version cycles that did not exist, because a set union in its `bifurcan` dependency
@@ -188,6 +209,12 @@ again, and the last one on those nodes was three hours old; a lease survives a l
 only while the clocks agree within 500 ms. Every test now starts with its nodes' clocks set
 (`c4525140e`).
 
+The 2.2.0 campaign had two more. A run was judged valid while two of its nodes had refused to
+start: the checkers judge the history, and nothing looked at the nodes. `run-campaign.sh` reads
+every node's log after each test since, and such a run is `REFUSED`. And a failover test crashed
+in the harness, the first one that needed lazyfs on six nodes: the sixth had never built it, and
+the build took longer than a node's setup may. It ran again valid.
+
 ## Limits
 
 This is testing. A valid run shows that these histories, under these faults, broke no rule a
@@ -196,10 +223,14 @@ several raft groups, several tenants, the Kafka facade and the embedded proxy we
 Lease exclusivity across a leader change needs the nodes' clocks within
 `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. Losing a majority of the disks for good can
 lose acknowledged writes, since raft survives the loss of a minority. The full campaign last ran
-on `b69470031`: 2.1.0's server code differs from it in the version number and four lines of a
-unit test, and no campaign ran on the released binary. A standby's failover has its own workload
-since 2026-10-08, on a standby that starts empty beside its source: a seeded standby, one that
-follows across a version upgrade, and two clusters in different places were not part of it.
+on `3b1a6d9bb`. 2.2.0's server code adds three commits to it: one line of the rule for how long a
+push keeps its row, which a queue's completed retention no longer extends, `/health` answering
+ready only while the leader has its majority, and tests. Eleven of the tests ran again on that
+code, and no campaign ran on the released binary. No test sets a completed retention above its
+queue's dedup window, so none of them tells the old rule from the new one. A standby's failover
+has its own workload since 2026-10-08, on a standby that starts empty beside its source: a seeded
+standby, one that follows across a version upgrade, and two clusters in different places were not
+part of it.
 
 What each API guarantees, written for the developer using it, is on
 [guarantees](/concepts/guarantees/).

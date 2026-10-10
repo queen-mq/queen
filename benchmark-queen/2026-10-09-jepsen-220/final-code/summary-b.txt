@@ -1,0 +1,13 @@
+2026-10-10T13:44:31Z start rc7-w2-restart: --workload queue --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-10T13:50:21Z done  rc7-w2-restart: valid store=/root/jepsen-220b/store/queen-queue-restart_offload=on_lanes=16/2026-10-10T13:44:37.732929998Z log=/root/runs-220rc7b/rc7-w2-restart.log
+2026-10-10T13:50:21Z start rc7-w2-pause: --workload queue --nemesis pause --time-limit 300 --rate 200
+2026-10-10T13:56:11Z done  rc7-w2-pause: valid store=/root/jepsen-220b/store/queen-queue-pause_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-10T13:50:27.824555064Z log=/root/runs-220rc7b/rc7-w2-pause.log
+2026-10-10T13:56:11Z start rc7-w1-member-kill: --workload log --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-10T14:01:52Z done  rc7-w1-member-kill: valid store=/root/jepsen-220b/store/queen-log-kill,membership_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-10T13:56:18.025513613Z log=/root/runs-220rc7b/rc7-w1-member-kill.log
+2026-10-10T14:01:52Z start rc7-rw-w8-kill: --workload retention --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-10T14:07:42Z done  rc7-rw-w8-kill: valid store=/root/jepsen-220b/store/queen-retention-kill_t=one,primaries,majority,all_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-10T14:01:58.120009323Z log=/root/runs-220rc7b/rc7-rw-w8-kill.log
+2026-10-10T14:07:42Z matrix matrix-rc7b.txt finished
+2026-10-10T14:07:42Z start rc7-fo-crash-kill: --workload failover --standby-nodes 3 --failover crash --nemesis kill --time-limit 300 --rate 200
+2026-10-10T14:13:17Z done  rc7-fo-crash-kill: valid store=/root/jepsen-220b/store/queen-failover-kill_t=one,primaries,majority,all_standby=3_crash_offload=on_lanes=16/2026-10-10T14:07:48.291297453Z log=/root/runs-220rc7b/rc7-fo-crash-kill.log
+2026-10-10T14:13:17Z matrix matrix-rc7b-fo.txt finished
+2026-10-10T14:13:17Z ALL DONE

@@ -1,0 +1,94 @@
+{:faults {:corrupt-outcomes {},
+          :corrupt-not-back [],
+          :valid? true,
+          :member-final nil,
+          :member-removals {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? true,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches ()},
+ :lazyfs {:valid? true},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:total-queue {:ok-count 17621,
+                          :duplicated-count 3,
+                          :valid? true,
+                          :lost-count 0,
+                          :lost #{},
+                          :acknowledged-count 17603,
+                          :recovered #{13582
+                                       13620
+                                       2129
+                                       14524
+                                       13958
+                                       14598
+                                       13865
+                                       407
+                                       14174
+                                       14734
+                                       216
+                                       14294
+                                       14633
+                                       3458
+                                       14318
+                                       4181
+                                       13541
+                                       13820},
+                          :attempt-count 17681,
+                          :unexpected #{},
+                          :unexpected-count 0,
+                          :recovered-count 18,
+                          :duplicated #{1711 9395 6102}},
+            :queue {:lease-overlaps (),
+                    :payload-mismatch (),
+                    :valid? true,
+                    :noop-ack-examples (),
+                    :acked-twice (),
+                    :acked-twice-count 0,
+                    :lease-overlap-count 0,
+                    :partial-acks 0,
+                    :acked 17621,
+                    :redeliveries 62,
+                    :pop-skips (),
+                    :offset-value-mismatch (),
+                    :ack-unknown 3,
+                    :pop-skip-count 0,
+                    :noop-acks 0,
+                    :deliveries 17629,
+                    :pop-internal-gaps (),
+                    :redelivered-after-ack-count 0,
+                    :ack-rejected 5,
+                    :redelivered-after-ack ()},
+            :valid? true},
+ :stats {:valid? true,
+         :count 35518,
+         :ok-count 35276,
+         :fail-count 161,
+         :info-count 81,
+         :by-f {:dequeue {:valid? true,
+                          :count 17837,
+                          :ok-count 17673,
+                          :fail-count 161,
+                          :info-count 3},
+                :enqueue {:valid? true,
+                          :count 17681,
+                          :ok-count 17603,
+                          :fail-count 0,
+                          :info-count 78}}}}

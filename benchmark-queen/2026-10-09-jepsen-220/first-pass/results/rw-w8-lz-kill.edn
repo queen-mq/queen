@@ -1,0 +1,159 @@
+{:faults {:corrupt-outcomes {},
+          :corrupt-not-back [],
+          :valid? true,
+          :member-final nil,
+          :member-removals {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? :unknown,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches ()},
+ :lazyfs {:valid? true,
+          :max-usage-pct 1.215362548828125,
+          :nodes {"n1" {:max-usage-pct 0.968170166015625,
+                        :clears 9,
+                        :lossy-clears 9,
+                        :lost-bytes 1894968},
+                  "n2" {:max-usage-pct 0.8026123046875,
+                        :clears 8,
+                        :lossy-clears 8,
+                        :lost-bytes 761427},
+                  "n3" {:max-usage-pct 0.7293701171875,
+                        :clears 10,
+                        :lossy-clears 10,
+                        :lost-bytes 2028378},
+                  "n4" {:max-usage-pct 0.8026123046875,
+                        :clears 7,
+                        :lossy-clears 7,
+                        :lost-bytes 695763},
+                  "n5" {:max-usage-pct 1.215362548828125,
+                        :clears 8,
+                        :lossy-clears 8,
+                        :lost-bytes 1767156}}},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:valid? :unknown,
+            :error {:via [{:type java.lang.IllegalArgumentException,
+                           :message "nil is not a known valid? value",
+                           :at [jepsen.checker$merge_valid$fn__14248
+                                invoke
+                                "checker.clj"
+                                53]}],
+                    :trace [[jepsen.checker$merge_valid$fn__14248
+                             invoke
+                             "checker.clj"
+                             53]
+                            [clojure.core.protocols$fn__8275
+                             invokeStatic
+                             "protocols.clj"
+                             167]
+                            [clojure.core.protocols$fn__8275
+                             invoke
+                             "protocols.clj"
+                             123]
+                            [clojure.core.protocols$fn__8229$G__8224__8238
+                             invoke
+                             "protocols.clj"
+                             19]
+                            [clojure.core.protocols$seq_reduce
+                             invokeStatic
+                             "protocols.clj"
+                             31]
+                            [clojure.core.protocols$fn__8262
+                             invokeStatic
+                             "protocols.clj"
+                             74]
+                            [clojure.core.protocols$fn__8262
+                             invoke
+                             "protocols.clj"
+                             74]
+                            [clojure.core.protocols$fn__8203$G__8198__8216
+                             invoke
+                             "protocols.clj"
+                             13]
+                            [clojure.core$reduce
+                             invokeStatic
+                             "core.clj"
+                             6969]
+                            [clojure.core$reduce
+                             invoke
+                             "core.clj"
+                             6951]
+                            [jepsen.checker$merge_valid
+                             invokeStatic
+                             "checker.clj"
+                             46]
+                            [jepsen.checker$merge_valid
+                             invoke
+                             "checker.clj"
+                             43]
+                            [jepsen.checker.Compose
+                             check
+                             "checker.clj"
+                             108]
+                            [jepsen.checker$check_safe
+                             invokeStatic
+                             "checker.clj"
+                             95]
+                            [jepsen.checker$check_safe
+                             invoke
+                             "checker.clj"
+                             87]
+                            [jepsen.checker.Compose$fn__14306
+                             invoke
+                             "checker.clj"
+                             106]
+                            [clojure.core$pmap$fn__8582$fn__8583
+                             invoke
+                             "core.clj"
+                             7173]
+                            [clojure.core$binding_conveyor_fn$fn__5842
+                             invoke
+                             "core.clj"
+                             2051]
+                            [clojure.lang.AFn call "AFn.java" 18]
+                            [java.util.concurrent.FutureTask
+                             run
+                             "FutureTask.java"
+                             317]
+                            [java.util.concurrent.ThreadPoolExecutor
+                             runWorker
+                             "ThreadPoolExecutor.java"
+                             1144]
+                            [java.util.concurrent.ThreadPoolExecutor$Worker
+                             run
+                             "ThreadPoolExecutor.java"
+                             642]
+                            [java.lang.Thread run "Thread.java" 1583]],
+                    :cause "nil is not a known valid? value"}},
+ :stats {:valid? true,
+         :count 921562,
+         :ok-count 19130,
+         :fail-count 902400,
+         :info-count 32,
+         :by-f {:dequeue {:valid? true,
+                          :count 892480,
+                          :ok-count 9463,
+                          :fail-count 883015,
+                          :info-count 2},
+                :enqueue {:valid? true,
+                          :count 29082,
+                          :ok-count 9667,
+                          :fail-count 19385,
+                          :info-count 30}}}}

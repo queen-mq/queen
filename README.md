@@ -75,7 +75,7 @@ Redpanda 26.2.3 and Pulsar 4.2.4 on the same machines. Each row links to the run
 | [Transactions](https://queenmq.com/benchmarks/transactions/) | 10 messages per transaction at 9,000 msg/s: commit p99 **4 ms**, e2e p99 19 ms (Kafka 34 and 51 ms, Pulsar 32 and 50 ms). |
 | [Kafka clients](https://queenmq.com/benchmarks/kafka-clients/) | franz-go at 1,000,000 msg/s through Queen's Kafka port, e2e p99 91 ms. |
 | [Soak](https://queenmq.com/benchmarks/soak/) | 500,000 msg/s for 3 h 23 min over 1,000,000 partitions, through a kill -9 of the leader and of a follower: e2e p99 86 ms in the median window. |
-| [Jepsen](https://queenmq.com/benchmarks/jepsen/) | **153 tests** on the code of 2.1.0: 152 valid, and the other, judged on test nodes whose clocks had drifted apart, valid when run again. No acknowledged message lost, no lease held twice, transactions atomic. |
+| [Jepsen](https://queenmq.com/benchmarks/jepsen/) | **244 tests** on the code of 2.2.0: all valid, one of them at its second run, after the test harness had crashed in the first. No acknowledged message lost, no lease held twice, transactions atomic. |
 | [Laravel](https://queenmq.com/benchmarks/laravel/) | 2,753 jobs/s with 32 workers on one node, against 1,124 for Horizon on Redis. |
 
 Where Queen is behind: with few partitions and very high rates, Kafka carries more (4M msg/s at

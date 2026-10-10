@@ -1,0 +1,306 @@
+{:faults {:corrupt-outcomes {},
+          :corrupt-not-back [],
+          :valid? true,
+          :member-final nil,
+          :member-removals {},
+          :corrupt-trials 0,
+          :member-rejoins {},
+          :corrupt-late-rejoined {},
+          :corrupt-exit-rcs {},
+          :corrupt-late-exits [],
+          :member-ops {},
+          :member-skipped {}},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+ :valid? false,
+ :leftovers {:valid? true, :leftovers {}},
+ :panic {:valid? true, :count 0, :matches ()},
+ :lazyfs {:valid? true,
+          :max-usage-pct 1.209259033203125,
+          :nodes {"n1" {:max-usage-pct 1.209259033203125,
+                        :clears 9,
+                        :lossy-clears 9,
+                        :lost-bytes 870077},
+                  "n2" {:max-usage-pct 0.79345703125,
+                        :clears 11,
+                        :lossy-clears 11,
+                        :lost-bytes 1131458},
+                  "n3" {:max-usage-pct 0.749969482421875,
+                        :clears 10,
+                        :lossy-clears 10,
+                        :lost-bytes 948837},
+                  "n4" {:max-usage-pct 1.019287109375,
+                        :clears 7,
+                        :lossy-clears 7,
+                        :lost-bytes 804789},
+                  "n5" {:max-usage-pct 1.012420654296875,
+                        :clears 12,
+                        :lossy-clears 12,
+                        :lost-bytes 1130325}}},
+ :ex {:valid? true},
+ :clock {:valid? true},
+ :members {:valid? true,
+           :voters {"n1" [1 2 3 4 5],
+                    "n2" [1 2 3 4 5],
+                    "n3" [1 2 3 4 5],
+                    "n4" [1 2 3 4 5],
+                    "n5" [1 2 3 4 5]},
+           :not-initialized [],
+           :no-answer []},
+ :workload {:total-queue {:ok-count 4217,
+                          :duplicated-count 0,
+                          :valid? false,
+                          :lost-count 209,
+                          :lost #{6874
+                                  7420
+                                  7360
+                                  7176
+                                  7419
+                                  7026
+                                  6933
+                                  7277
+                                  7377
+                                  6428
+                                  7443
+                                  7018
+                                  7451
+                                  6605
+                                  7490
+                                  7431
+                                  6723
+                                  7170
+                                  7051
+                                  7445
+                                  7097
+                                  7106
+                                  7469
+                                  6996
+                                  7077
+                                  6869
+                                  7472
+                                  7429
+                                  7088
+                                  7238
+                                  6695
+                                  7138
+                                  7454
+                                  7306
+                                  6973
+                                  7334
+                                  7370
+                                  6890
+                                  7185
+                                  7134
+                                  7068
+                                  6608
+                                  7444
+                                  6894
+                                  7245
+                                  6963
+                                  7259
+                                  6781
+                                  7336
+                                  7390
+                                  6998
+                                  7492
+                                  7498
+                                  6962
+                                  7450
+                                  7400
+                                  6905
+                                  6938
+                                  7470
+                                  7084
+                                  6917
+                                  7199
+                                  7356
+                                  6976
+                                  7124
+                                  7175
+                                  7369
+                                  7074
+                                  7382
+                                  7475
+                                  7332
+                                  7474
+                                  7322
+                                  7073
+                                  7193
+                                  7373
+                                  7131
+                                  7372
+                                  6937
+                                  7228
+                                  7188
+                                  6709
+                                  7404
+                                  7416
+                                  7318
+                                  7355
+                                  7484
+                                  7345
+                                  7271
+                                  6997
+                                  7192
+                                  7473
+                                  7305
+                                  7286
+                                  7208
+                                  7357
+                                  7035
+                                  7214
+                                  7480
+                                  6798
+                                  7424
+                                  7085
+                                  7329
+                                  6967
+                                  7265
+                                  7272
+                                  7168
+                                  6577
+                                  6884
+                                  7412
+                                  7348
+                                  7423
+                                  7394
+                                  7162
+                                  7186
+                                  6899
+                                  6956
+                                  7196
+                                  6826
+                                  7280
+                                  7237
+                                  6972
+                                  6699
+                                  7495
+                                  7266
+                                  7489
+                                  7044
+                                  7182
+                                  6819
+                                  7384
+                                  7105
+                                  7378
+                                  7496
+                                  6674
+                                  7366
+                                  7222
+                                  7389
+                                  7207
+                                  7467
+                                  7232
+                                  7374
+                                  6849
+                                  7407
+                                  7351
+                                  6942
+                                  6661
+                                  7379
+                                  6793
+                                  7350
+                                  7340
+                                  7466
+                                  7256
+                                  6520
+                                  5754
+                                  7291
+                                  7376
+                                  7462
+                                  6873
+                                  7368
+                                  7481
+                                  7401
+                                  7243
+                                  7380
+                                  7115
+                                  7136
+                                  7468
+                                  7343
+                                  7230
+                                  7053
+                                  6332
+                                  6774
+                                  7383
+                                  7235
+                                  7316
+                                  7112
+                                  7202
+                                  7163
+                                  6953
+                                  7045
+                                  7276
+                                  7395
+                                  7054
+                                  7251
+                                  7308
+                                  7212
+                                  6931
+                                  6986
+                                  7167
+                                  6924
+                                  7363
+                                  7281
+                                  7458
+                                  7244
+                                  7288
+                                  7262
+                                  7344
+                                  7491
+                                  7144
+                                  7391
+                                  7339
+                                  6547
+                                  6927
+                                  7324
+                                  7482
+                                  7410
+                                  7388
+                                  7293
+                                  7179
+                                  7487},
+                          :acknowledged-count 4425,
+                          :recovered #{1663},
+                          :attempt-count 28392,
+                          :unexpected #{},
+                          :unexpected-count 0,
+                          :recovered-count 1,
+                          :duplicated #{}},
+            :queue {:lease-overlaps (),
+                    :payload-mismatch (),
+                    :valid? true,
+                    :noop-ack-examples (),
+                    :acked-twice (),
+                    :acked-twice-count 0,
+                    :lease-overlap-count 0,
+                    :partial-acks 0,
+                    :acked 4216,
+                    :redeliveries 8,
+                    :pop-skips (),
+                    :offset-value-mismatch (),
+                    :ack-unknown 1,
+                    :pop-skip-count 0,
+                    :noop-acks 0,
+                    :deliveries 4217,
+                    :pop-internal-gaps (),
+                    :redelivered-after-ack-count 0,
+                    :ack-rejected 0,
+                    :redelivered-after-ack ()},
+            :valid? false},
+ :stats {:valid? true,
+         :count 1927493,
+         :ok-count 8811,
+         :fail-count 1918649,
+         :info-count 33,
+         :by-f {:dequeue {:valid? true,
+                          :count 1899101,
+                          :ok-count 4386,
+                          :fail-count 1894714,
+                          :info-count 1},
+                :enqueue {:valid? true,
+                          :count 28392,
+                          :ok-count 4425,
+                          :fail-count 23935,
+                          :info-count 32}}}}

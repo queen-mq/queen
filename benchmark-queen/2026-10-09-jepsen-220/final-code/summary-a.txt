@@ -1,0 +1,14 @@
+2026-10-10T13:42:01Z start rc7-w2-kill: --workload queue --nemesis kill --time-limit 300 --rate 200
+2026-10-10T13:47:41Z done  rc7-w2-kill: valid store=/root/jepsen-220a/store/queen-queue-kill_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-10T13:42:07.738221264Z log=/root/runs-220rc7a/rc7-w2-kill.log
+2026-10-10T13:47:41Z start rc7-w2-part: --workload queue --nemesis partition --time-limit 300 --rate 200
+2026-10-10T13:53:26Z done  rc7-w2-part: valid store=/root/jepsen-220a/store/queen-queue-partition_p=one,primaries,majority,majorities-ring_offload=on_lanes=16/2026-10-10T13:47:47.749852335Z log=/root/runs-220rc7a/rc7-w2-part.log
+2026-10-10T13:53:26Z start rc7-w1-membership: --workload log --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+2026-10-10T13:59:02Z done  rc7-w1-membership: valid store=/root/jepsen-220a/store/queen-log-membership_offload=on_lanes=16/2026-10-10T13:53:32.965304154Z log=/root/runs-220rc7a/rc7-w1-membership.log
+2026-10-10T13:59:02Z start rc7-rw-w2-kill: --workload queue --w2-partitions 400 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+2026-10-10T14:04:42Z done  rc7-rw-w2-kill: valid store=/root/jepsen-220a/store/queen-queue-kill_t=one,primaries,majority,all_dedupwin=2_offload=on_lanes=16_env=QLOG_SEAL_AGE_S=10,SEGMENT_BYTES=262144,TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000/2026-10-10T13:59:08.204424199Z log=/root/runs-220rc7a/rc7-rw-w2-kill.log
+2026-10-10T14:04:42Z start rc7-w3b-lz-kill: --workload counter --lazyfs --nemesis kill --time-limit 300 --rate 100
+2026-10-10T14:10:07Z done  rc7-w3b-lz-kill: valid store=/root/jepsen-220a/store/queen-counter-kill_t=one,primaries,majority,all_lazyfs_offload=on_lanes=16/2026-10-10T14:04:48.329405096Z log=/root/runs-220rc7a/rc7-w3b-lz-kill.log
+2026-10-10T14:10:07Z start rc7-w2-clock: --workload queue --nemesis clock --time-limit 300 --rate 200
+2026-10-10T14:15:42Z done  rc7-w2-clock: valid store=/root/jepsen-220a/store/queen-queue-clock_t=one,primaries,majority,all_offload=on_lanes=16/2026-10-10T14:10:13.240145701Z log=/root/runs-220rc7a/rc7-w2-clock.log
+2026-10-10T14:15:42Z matrix matrix-rc7a.txt finished
+2026-10-10T14:15:42Z ALL DONE

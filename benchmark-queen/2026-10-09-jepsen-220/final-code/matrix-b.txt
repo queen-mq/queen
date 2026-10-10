@@ -1,0 +1,7 @@
+# rc7 = commit 8f5342d29: a short pass on the final binary, five nodes.
+rc7-w2-restart     --workload queue --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+rc7-w2-pause       --workload queue --nemesis pause --time-limit 300 --rate 200
+rc7-w1-member-kill --workload log --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20
+rc7-rw-w8-kill     --workload retention --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+# rc7: one failover test, six nodes (two clusters of three).
+rc7-fo-crash-kill --workload failover --standby-nodes 3 --failover crash --nemesis kill --time-limit 300 --rate 200
