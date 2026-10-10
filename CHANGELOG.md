@@ -46,6 +46,13 @@ once as soon as one read has waited for the disk, so the reads overlap. A queue 
 million messages, retention off) left the broker with 0.4 GB of memory once its rows had gone, and
 the node started on it in 3.5 seconds with a cold page cache. The runs are in
 `benchmark-queen/2026-10-09-rows-window/`.
+On three 16-core machines, at 1,000,000 messages a second in and out of one queue of 500,000
+partitions for five minutes, this build and 2.1.0 both carried the rate with nothing shed and no
+error. With retention off, where 2.1.0 removes nothing, its leader's memory grew from 2.3 to
+11.1 GB and was still growing, and this build's stayed under 7.1 GB and fell to 5.1 GB, for eight
+more points of the apply thread on each node (55% against 47% on the leader) and 4 to 7% on the
+p99s. With consumed messages removed after a minute on both, the two builds could not be told
+apart (`benchmark-queen/2026-10-10-three-node-1m/`).
 The change needs cluster version 6, which the leader raises by itself once every node runs this
 release; from then on 2.1.0 and older refuse to start on that data, and
 `QUEEN_RAFT_CLUSTER_VERSION_MS=0` keeps the way back open while the release bakes. Until the

@@ -235,7 +235,8 @@ tests in `server/src/rsm/qlog/tests.rs` that fail on rc5's code
 
 ## What these runs do not show
 
-- More than one machine: every figure is one node, or three on one disk.
+- More than one machine: every figure is one node, or three on one disk. Three machines at
+  1,000,000 messages a second are in [`../2026-10-10-three-node-1m/`](../2026-10-10-three-node-1m/).
 - The Kafka facade and the S3 sink reading messages that have no row. Both read the queue log by
   offset and never read rows (`fetch_records` and `fetch_log` in `facade/real/phase2/reads.rs`),
   but neither was run here.

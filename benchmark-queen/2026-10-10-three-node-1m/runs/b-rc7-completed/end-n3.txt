@@ -1,0 +1,6 @@
+{"status":"healthy","engine":"raft","version":"2.2.0","raft":{"role":"follower","leader":true,"term":4,"applied":291940,"commit":291940,"lag":0,"quorumAckMs":152,"storageReady":true,"clusterVersion":6,"kinds":6,"apply":{"failure":null,"skipped":[]}}}
+{"appliedIndex":291940,"clusterId":"raft-fc1f3f8a","committedIndex":291940,"durableIndex":291930,"engine":"raft","error":null,"host":{"anonBytes":3613405184,"cpuPct":343.60306666666673,"cpuWindowSeconds":60,"cpus":16,"disk":{"gate":true,"highPct":85.0,"lowPct":80.0,"totalBytes":206900281344,"usedBytes":16554164224,"usedPct":8.001035144305309,"writesRefused":false},"memLimitBytes":33652006912,"rssBytes":9219280896},"hostname":"n3","httpAddr":"10.114.0.18:6632","inflight":0,"lastLogIndex":291940,"leaderId":1,"local":true,"log":{"bytes":3631985489,"files":56},"nodeId":3,"proposals":0,"raftAddr":"10.114.0.18:7400","reachable":true,"replication":null,"role":"voter","self":3,"singleNode":false,"state":"follower","store":{"mapBytes":68719476736,"mapUsedPct":8.213979005813599,"maxReaders":1024,"readersInUse":72,"usedBytes":5644603392},"term":4,"uptimeSeconds":363,"version":"2.2.0","voters":3}
+
+WARN_ERROR=7
+      1 2026-10-10T10:45:14.642886645Z ERROR openraft::raft::stream_append: stream_append: RaftCore stopped: raft stopped
+14G
