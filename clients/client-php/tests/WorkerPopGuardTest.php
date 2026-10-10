@@ -12,8 +12,6 @@ use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Queue\Queue as QueueContract;
 use Illuminate\Queue\Connectors\ConnectorInterface;
 use Illuminate\Queue\Queue;
-use Illuminate\Queue\Worker;
-use Illuminate\Queue\WorkerOptions;
 use Orchestra\Testbench\TestCase;
 use PHPUnit\Framework\Attributes\TestWith;
 use Psr\Http\Message\RequestInterface;
@@ -22,6 +20,7 @@ use Queen\Laravel\QueenServiceProvider;
 use Queen\Laravel\Supervisor\SupervisorState;
 use Queen\Laravel\Supervisor\WorkerPopGuard;
 use Queen\Tests\Support\PlanHandler;
+use Queen\Tests\Support\ScriptedWorker;
 use Symfony\Component\Console\Input\ArgvInput;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Output\BufferedOutput;
@@ -269,6 +268,22 @@ final class WorkerPopGuardTest extends TestCase
         unlink($this->exitsDirectory . '/102' . WorkerPopGuard::FILE_SUFFIX);
         $this->assertSame([], $this->issueCodes($state, $status));
         $this->assertAges([], $state, $status);
+    }
+
+    /**
+     * A pool with one worker that has not consumed for a minute and one that
+     * consumes still serves: it is ready, below full capacity.
+     */
+    public function testAPoolWithOneWorkerThatConsumesStaysReady(): void
+    {
+        $state = new SupervisorState($this->stateDirectory);
+        $status = $this->supervisorStatus([101, 102]);
+
+        $this->writePopFailures(101, 61);
+
+        $this->assertTrue($state->readiness($status, true)['ready']);
+        $this->assertSame(['pool_worker_not_consuming'], $this->issueCodes($state, $status));
+        $this->assertAges([101 => 61], $state, $status);
     }
 
     /**
@@ -549,39 +564,6 @@ final class WorkerPopGuardTest extends TestCase
         $this->app->make(Kernel::class)->call('queen:supervisor', ['action' => 'status', '--json' => true], $output);
 
         return json_decode(trim($output->fetch()), true, 512, JSON_THROW_ON_ERROR);
-    }
-}
-
-/**
- * Laravel's Worker, for a given number of loops, without the second of sleep
- * it takes after each failed pop.
- */
-final class ScriptedWorker extends Worker
-{
-    public int $maxLoops = 1;
-
-    public int $loops = 0;
-
-    /** @var (\Closure(int): void)|null before each loop's Looping */
-    public ?\Closure $onLoop = null;
-
-    protected function daemonShouldRun(WorkerOptions $options, $connectionName, $queue)
-    {
-        if ($this->loops >= $this->maxLoops) {
-            $this->shouldQuit = true;
-
-            return false;
-        }
-        $this->loops++;
-        if ($this->onLoop !== null) {
-            ($this->onLoop)($this->loops);
-        }
-
-        return parent::daemonShouldRun($options, $connectionName, $queue);
-    }
-
-    public function sleep($seconds)
-    {
     }
 }
 

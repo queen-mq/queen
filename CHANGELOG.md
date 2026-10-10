@@ -40,6 +40,14 @@ their own. It works with the supervisor 0.8.0: both engines already pass the dir
 workers and empty it for every generation. The issue codes `status --json` reports are now listed
 in the supervisor guide as a stable contract.
 
+What an application sees change: a supervised worker may now exit 1 with `WorkerCannotConsume`
+where it used to loop on the same exception; workers write `exits/<pid>.pop-failures` in the state
+directory while their pops fail; and `readiness()` and `capacityHealth()`, with `status --check`
+and `--check-capacity`, report two new codes, `pool_not_consuming` and
+`pool_worker_not_consuming`. A readiness probe that passed during a broker outage now fails once
+the outage lasts 60 seconds; the Kubernetes guide shows how to leave these codes out of a probe
+that must not stop a rollout.
+
 ## PHP client 2.4.1 - 2026-10-09
 
 **Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the
