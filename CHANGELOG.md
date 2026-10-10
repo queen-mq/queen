@@ -122,6 +122,19 @@ now renamed to `q<id>.dead` in one step and deleted after that is durable; a sta
 directories, and a snapshot leaves them out. Every release since 2.0.0 has this too. Found by
 Jepsen under power loss, where it took every node of a cluster down one after the other.
 
+**Dashboard: moving between views keeps what you were looking at.** The selected queue, the time
+window, the filters and the page of a list are part of the address: they survive a reload, a
+shared link and the browser's Back, and they follow you from a queue to its messages, its
+consumer groups and its traces. A queue's pages share a breadcrumb and tabs. The sidebar is
+grouped by what you do (Messaging, Workers, Analysis, State); Analytics is now Performance, with
+the per-queue Operations view as its second tab. A filtered list says how many of the total it
+shows.
+
+**Dashboard: a supervisor card charts all its queues.** The activity chart of a card opened on the
+first queue the application reports. It now opens on the sum of all of them, each counted once
+whatever the number of replicas, and the list of queues, now to the left of the chart, filters it
+to one.
+
 ## 2.1.0 - 2026-10-09
 
 **Server: a standby cluster.** A second cluster can now replay the first one's log and take over

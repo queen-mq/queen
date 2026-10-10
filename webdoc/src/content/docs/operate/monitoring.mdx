@@ -53,6 +53,11 @@ sourceOfTruth:
 # sealed for retention or its size and not for its age): a row for the log files' mapped indexes
 # against the kernel's limit (queen_raft_qlog_index_maps with its refused count, and the warning
 # batcher.rs logs past 70%).
+# sourceOfTruth re-read 2026-10-10 (pull requests 113 and 115 merged): SupervisorActivity.vue charts
+# all the reported queues of a card until one is selected and puts the list to the left;
+# Supervisors.vue passes the route to the card's links. The paragraph on published supervisors says
+# so, and the list of pages follows the router's new titles (Analytics is Performance, Queue
+# operations a tab of it).
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -64,9 +69,11 @@ dashboard needs a login.
 ## The dashboard
 
 The dashboard is compiled into the binary from `app/`, so there is nothing else to deploy: open
-`http://<node>:6632/`. It has an Overview, Queue operations, the queues and each queue on its own,
-Ephemeral queues, Consumer groups, Messages, KV, Timers, Traces, Supervisors, Analytics, Workload and Dead
-letter. System shows the replicated log, each node with its role, term, indexes and store usage,
+`http://<node>:6632/`. It has an Overview, the queues and each queue on its own, Ephemeral queues,
+Messages, Dead letter, Timers, Consumer groups, Supervisors, Performance (trends, and the
+operations of each queue beside them), Workload, Traces, KV and Locks. Filters, the time window and
+the page of a list are part of the address, so a reload, a shared link and the browser's Back land
+on the same view. System shows the replicated log, each node with its role, term, indexes and store usage,
 and the members; the bar at the top of every page says when a node refuses writes because its
 disk is full.
 
@@ -83,8 +90,9 @@ process supervisors. Each card shows reported workers against the target, pools 
 attention, heartbeat age and worker allocations by queue. Groups with issues come first;
 search and engine filters retain all the instances of a matching group.
 
-Select a reported queue to view its last hour of traffic or sampled backlog. This history covers
-all consumers of that queue on the acting cluster, not just the application in the card; a
+Each card charts the last hour of traffic or sampled backlog of its reported queues: all of them
+together until you select one, and **All queues** returns to the sum. This history covers all
+consumers of those queues on the acting cluster, not just the application in the card; a
 supervisor may use another connection. Missing samples appear as gaps. SDK cards also show busy
 workers and cumulative handler failures; process supervisor cards show draining workers and
 free process slots. The [status reference](/reference/supervisor-status/#application-overview)

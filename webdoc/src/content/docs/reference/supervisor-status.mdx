@@ -61,6 +61,11 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-09 (supervisors restyle): Supervisors.vue, SupervisorGroupCard.vue and SupervisorActivity.vue
 # are rebuilt from the dashboard's shared card, stats, table and segmented control; a healthy application is a grey
 # dot and the per-instance marks are gone. The colours paragraph says so; what is read and how it is combined is unchanged.
+# sourceOfTruth re-read 2026-10-10 (pull requests 113 and 115 merged): supervisorActivity.js gains
+# aggregateSupervisorActivity (each queue once, one window, traffic summed where observed, backlog
+# totalled only at instants every queue has), SupervisorActivity.vue opens on that sum and filters
+# on a selected queue, Supervisors.vue gives the card's links their route. The two paragraphs on
+# queue history say so; publication, decoding and the counts are unchanged.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.
@@ -95,13 +100,19 @@ elsewhere do not cancel them. Queue names are deduplicated across replicas, dyna
 scopes are identified separately, and shared backlog is never added. This aggregation
 requires no publisher or broker protocol change.
 
-Each card also reads the last hour of broker history for one selected, named queue through
-`/api/v1/analytics/queue-ops`. **Traffic** shows incoming and delivered messages per minute;
-**Backlog** shows sampled pending-message depth. Select another reported queue to change
-the chart. The queue list deduplicates names and sums worker allocations across loaded
-instances, while queue history and backlog are never multiplied by replica count.
+Each card also reads the last hour of broker history through `/api/v1/analytics/queue-ops`,
+for all of its reported, named queues together until one is selected. **Traffic** shows
+incoming and delivered messages per minute; **Backlog** shows sampled pending-message depth.
+Select a reported queue to chart it alone, and **All queues** to return to the sum; a
+selection survives a refresh, and a selected queue that is no longer reported returns the
+chart to the sum. The sum reads every queue over one window and counts each once, whatever
+the number of replicas that report it. Its traffic adds the observations there are and
+leaves a gap where no queue has one. Its backlog is a level, so a point is a total only
+when every queue has a depth sampled at that instant, and a gap otherwise. The queue list
+deduplicates names and sums worker allocations across loaded instances, while queue
+history and backlog are never multiplied by replica count.
 
-These charts describe **all consumers of the selected queue on the current cluster**,
+These charts describe **all consumers of the charted queues on the current cluster**,
 not the individual application's throughput. A supervisor may use another connection;
 its publication does not establish that it consumes from this broker. No named queue or
 unavailable analytics produces an explicit empty state. Missing samples remain gaps,
@@ -110,7 +121,7 @@ most recent complete time bucket; ACK failures and backlog deltas use the availa
 samples in the hour. SDK handler failures are separate cumulative counters since each
 instance started, not broker ACK failures or a historical error rate.
 
-History reads are limited to the selected queues of displayed cards, with at most three
+History reads are limited to the charted queues of displayed cards, with at most three
 concurrent requests and one shared request per queue per refresh. Stable endpoint refusals
 stop automatic analytics retries until an explicit refresh or a source/cluster switch.
 The supervisor KV publication itself still contains only the latest observation, not
