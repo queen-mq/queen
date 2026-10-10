@@ -287,6 +287,19 @@ class ScenarioLanesTest(unittest.TestCase):
         for node in cluster.brokers[1:]:
             self.assertIn(f"\n  {node}:\n", compose)
 
+    def test_the_start_order_lists_every_start_and_a_rerun_keeps_its_job_in_place(self) -> None:
+        jobs = matrix.Jobs({"jobs": {
+            "000000": {"events": [["started", 1, 1.0, None, 7], ["completed", 1, 1.5, None, 7]]},
+            "000001": {"events": [["started", 1, 2.0, None, 7], ["started", 2, 4.5, None, 8],
+                                  ["completed", 2, 4.8, None, 8]]},
+            "000002": {"events": [["started", 1, 5.0, None, 8], ["completed", 1, 5.3, None, 8]]},
+        }})
+
+        starts = matrix.start_order(jobs, matrix.ids(0, 3))
+
+        self.assertEqual([(1.0, "000000"), (2.0, "000001"), (4.5, "000001"), (5.0, "000002")], starts)
+        self.assertEqual(["000000", "000001", "000002"], list(dict.fromkeys(job for _, job in starts)))
+
     def test_a_status_gives_its_issue_codes_and_the_longest_wait_of_its_workers(self) -> None:
         status = {"readiness_issues": [{"code": "pool_not_consuming", "queue": "q"}, {"code": "queue_depth_unavailable"}],
                   "pool_status": [{"not_consuming_seconds": None}, {"not_consuming_seconds": 61}, "garbage"]}

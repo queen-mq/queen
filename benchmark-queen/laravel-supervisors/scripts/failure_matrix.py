@@ -226,9 +226,11 @@ class Lane:
     """One Compose project: one engine, its backend and the producer."""
 
     def __init__(self, scenario: str, profile: Profile, env: dict[str, str], output: Path,
-                 only: frozenset[str] = frozenset(), broker_nodes: int = 1) -> None:
+                 only: frozenset[str] = frozenset(), broker_nodes: int = 1, services: tuple[str, ...] = ()) -> None:
         token = uuid.uuid4().hex[:8]
         self.profile = profile
+        # Services the lane runs beside its engine, each under the Compose profile of its name.
+        self.services = services
         # Three: the broker is a Raft cluster of three nodes (compose.raft.yml's cluster profile).
         self.brokers = BROKER_NODES[:broker_nodes]
         self.project = f"qfm-{scenario}-{profile.name}-{token}".lower()
@@ -285,7 +287,8 @@ class Lane:
         command = [
             "docker", "compose", "--file", str(COMPOSE_FILE), "--project-name", self.project,
             "--profile", self.profile.engine, "--profile", "tools",
-            *(["--profile", "cluster"] if len(self.brokers) > 1 else []), *args,
+            *(["--profile", "cluster"] if len(self.brokers) > 1 else []),
+            *(argument for service in self.services for argument in ("--profile", service)), *args,
         ]
         return subprocess.run(command, check=check, capture_output=True, text=True, timeout=timeout,
                               env={**os.environ, **self.env})
@@ -341,8 +344,10 @@ class Lane:
         if prepare is not None:
             prepare(self)
         self.compose("up", "--detach", "--no-build", "--scale", f"{self.profile.engine}={replicas}",
-                     *self.brokers[1:], self.profile.engine, "producer")
+                     *self.brokers[1:], *self.services, self.profile.engine, "producer")
         self.wait_healthy()
+        for service in self.services:
+            self.wait_healthy(service=service)
         self.wait_workers(int(self.env["BENCH_WORKERS"]))
         self.note("ready" if replicas == 1 else f"ready, {replicas} replicas")
 
@@ -356,17 +361,19 @@ class Lane:
         self.compose("down", "--volumes", "--remove-orphans", "--timeout", "5", check=False)
         self.docker("volume", "rm", "--force", self.volume, check=False)
 
-    def wait_healthy(self, timeout: float = 180) -> None:
+    def wait_healthy(self, timeout: float = 180, service: str = "") -> None:
+        service = service or self.profile.engine
+        replicas = getattr(self, "replicas", 1) if service == self.profile.engine else 1
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            apps = self.containers(self.profile.engine)
+            apps = self.containers(service)
             states = [self.docker("inspect", "--format",
                                   "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
                                   app, check=False).stdout.strip() for app in apps]
-            if len(apps) >= getattr(self, "replicas", 1) and states and all(s == "healthy" for s in states):
+            if len(apps) >= replicas and states and all(s == "healthy" for s in states):
                 return
             time.sleep(1)
-        raise RuntimeError(f"{self.profile.engine} did not become healthy")
+        raise RuntimeError(f"{service} did not become healthy")
 
     def processes(self) -> list[tuple[int, int, str]]:
         app = self.container(self.profile.engine)
@@ -1366,6 +1373,84 @@ def broker_leader_kill(lane: Lane) -> list[Check]:
     ]
 
 
+def start_order(jobs: Jobs, expected: list[str]) -> list[tuple[float, str]]:
+    """Every start of these jobs, in time order: (time, job)."""
+    return sorted((at, job) for job in expected for at in jobs.times(job, "started"))
+
+
+def partition_order(lane: Lane) -> list[Check]:
+    """One partition, as an ordered queue keeps one: 40 jobs, two workers, and the worker running
+    one of them killed outright. Queen leases a partition to one consumer at a time, so the jobs
+    must start in the order they were dispatched, never two at once, and the killed job must run
+    again before any job behind it."""
+    expected = ids(0, 40)
+    lane.dispatch("ok", 40, sleep_ms=300, tries=3, partition="matrix-order")
+    jobs = lane.wait_until(lambda r: sum(1 for j in expected if r.count(j, "started")) >= 10, 60, "10 jobs started")
+    run = next(((job, found) for job in expected if (found := run_in_progress(jobs, job)) is not None), None)
+    if run is not None:
+        lane.docker("exec", lane.container(lane.profile.engine), "kill", "-KILL", str(run[1][1]), check=False)
+        lane.note(f"SIGKILL worker {run[1][1]} running {run[0]}")
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 240, "all completed")
+    jobs = lane.settle(5)
+    # Each job where it first started; a rerun keeps the job's first place.
+    firsts = list(dict.fromkeys(job for _, job in start_order(jobs, expected)))
+    killed = run[0] if run is not None else None
+    after_killed = firsts[firsts.index(killed) + 1] if killed in firsts and firsts.index(killed) + 1 < len(firsts) else None
+    rerun_before_next = (killed is not None and len(jobs.times(killed, "started")) > 1
+                         and (after_killed is None or jobs.times(killed, "started")[1] < jobs.times(after_killed, "started")[0]))
+    spans = sorted((start, end, job) for job in expected for start, end in jobs.attempts(job))
+    overlaps = [(a[2], b[2]) for a, b in zip(spans, spans[1:]) if a[1] is not None and b[0] < a[1]]
+    lane.extra["partition_order"] = {"killed": killed, "order": firsts}
+    return [
+        Check("the jobs started in dispatch order", firsts == expected, f"{firsts[:12]}"),
+        Check("never two at once", not overlaps, f"{overlaps[:5]}"),
+        Check("the worker running a job was killed", killed is not None, f"{run}"),
+        Check("the killed job ran again before the job behind it", rerun_before_next,
+              f"{killed}: {jobs.times(killed, 'started') if killed else None}; next {after_killed}"),
+        *completed_once(jobs, expected),
+    ]
+
+
+PREVIOUS = "queen-previous"
+
+
+def rolling_upgrade(lane: Lane) -> list[Check]:
+    """A rolling upgrade: a replica of the previous release of the PHP client (queen-previous, its
+    image built with BENCH_PHP_CLIENT_VERSION) and one of the checkout's share a queue,
+    coordinated, while each dispatches jobs; then the previous one stops, as the rollout
+    replaces it. A patch release must run beside the release before it: every job, whichever
+    release dispatched it and whichever runs it, completes once; both replicas run jobs; and the
+    previous one finishes the jobs it holds and exits 0."""
+    previous = lane.container(PREVIOUS)
+    version = lane.docker("exec", previous, "php", "-r", 'require "vendor/autoload.php"; '
+                          'echo \\Composer\\InstalledVersions::getPrettyVersion("queen-mq/php-client");',
+                          check=False).stdout.strip()
+    lane.note(f"previous release {version}")
+    lane.dispatch("ok", 60, sleep_ms=500, tries=3)
+    old_dispatch = lane.docker("exec", previous, "php", "artisan", "--no-ansi", "bench:matrix-dispatch",
+                               f"--run-id={lane.run_id}", "--mode=ok", "--jobs=60", "--first=60", "--sleep-ms=500",
+                               "--tries=3", check=False)
+    lane.note(f"the previous release dispatched 60 (exit {old_dispatch.returncode})")
+    expected = ids(0, 120)
+    lane.wait_until(lambda r: sum(r.count(j, "completed") for j in expected) >= 30, 120, "jobs running on both")
+    lane.docker("stop", "--time", "90", previous)
+    exit_code = lane.docker("inspect", "--format", "{{.State.ExitCode}}", previous, check=False).stdout.strip()
+    lane.note(f"previous replica stopped (SIGTERM), exit {exit_code}")
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 240, "all completed")
+    jobs = lane.settle(10)
+    hosts = {host for job in expected for host in jobs.raw["jobs"].get(job, {}).get("hosts", []) if host}
+    ran_previous = {host for host in hosts if previous.startswith(host)}
+    lane.extra["rolling_upgrade"] = {"previous_version": version, "hosts": sorted(hosts), "exit": exit_code}
+    return [
+        Check("the previous replica runs a released client", bool(version) and not version.startswith("dev-"), version),
+        Check("the previous release dispatched", old_dispatch.returncode == 0,
+              (old_dispatch.stderr or old_dispatch.stdout).strip()[-300:]),
+        Check("both replicas ran jobs", bool(ran_previous) and len(hosts) > len(ran_previous), f"hosts {sorted(hosts)}"),
+        Check("the previous replica drained and exited 0", exit_code == "0", exit_code),
+        *completed_once(jobs, expected),
+    ]
+
+
 INSTALL_PATH = "/opt/queen-supervisor-bin"
 APP_USER = "benchmark"
 
@@ -1510,6 +1595,8 @@ class Scenario:
     engines: tuple[str, ...] = ()
     # The broker's nodes: 1, or 3 for a Raft cluster.
     broker_nodes: int = 1
+    # Services beside the engine, such as queen-previous.
+    services: tuple[str, ...] = ()
 
     def env_for(self, profile: Profile) -> dict[str, str]:
         return {**self.env, **self.engine_env.get(profile.engine, {})}
@@ -1572,6 +1659,11 @@ SCENARIOS = [
     Scenario("job-metrics", job_metrics, engines=QUEEN_ENGINES),
     Scenario("install-owner", install_owner, engines=("queen-installed",)),
     # A renewal may try all three URLs: 60 s fits the renewal budget that 30 s does not.
+    # A 10 s lease, so the killed job comes back in seconds.
+    Scenario("partition-order", partition_order, DEATH_ENV, engines=QUEEN_ENGINES),
+    # Coordinated, so the two releases share the queue as replicas of one deployment do.
+    Scenario("rolling-upgrade", rolling_upgrade, {"BENCH_QUEEN_COORDINATION": "true"}, engines=QUEEN_ENGINES,
+             services=(PREVIOUS,)),
     Scenario("broker-leader-kill", broker_leader_kill, {"BENCH_RETRY_AFTER": "60", "BENCH_LEASE_RENEWAL_TIMEOUT": "3"},
              engines=QUEEN_ENGINES, broker_nodes=3),
 ]
@@ -1591,7 +1683,7 @@ def scenario_profiles(scenario: Scenario, names: list[str], prefork: list[str]) 
 def run_lane(scenario: Scenario, profile: Profile, output: Path, only: frozenset[str] = frozenset(),
              stack: str = "default") -> dict:
     lane = Lane(scenario.name, profile, {**scenario.env_for(profile), **stack_env(stack, profile)}, output, only,
-                scenario.broker_nodes)
+                scenario.broker_nodes, scenario.services)
     print(f"\n== {scenario.name} / {profile.name} ({lane.project})", flush=True)
     result: dict = {"scenario": scenario.name, "profile": profile.name, "run_id": lane.run_id,
                     "settings": {key: lane.env[key] for key in sorted(LANE_SETTINGS) if key in lane.env},

@@ -94,6 +94,7 @@ x-app: &app
       BENCH_LARAVEL_VERSION: ${BENCH_LARAVEL_VERSION:-}
       BENCH_HORIZON_VERSION: ${BENCH_HORIZON_VERSION:-5.48.3}
       BENCH_COMPOSER_ADVISORY_IGNORE_IDS: ${BENCH_COMPOSER_ADVISORY_IGNORE_IDS:-}
+      BENCH_PHP_CLIENT_VERSION: ${BENCH_PHP_CLIENT_VERSION:-}
   user: "1000:1000"
   working_dir: /workspace/benchmark-queen/laravel-supervisors/app
   init: true
@@ -147,7 +148,7 @@ services:
     # Built outside this compose file from the raft branch; BENCH_BROKER_IMAGE
     # runs a released server instead, such as ghcr.io/queen-mq/queen:2.0.4.
     image: ${BENCH_BROKER_IMAGE:-queen-laravel-supervisor-broker:raft}
-    profiles: [queen-php, queen-rust, queen-installed]
+    profiles: [queen-php, queen-rust, queen-installed, queen-previous]
     environment: &broker-environment
       QUEEN_RAFT_DIR: /var/lib/queen/data
       PORT: "6632"
@@ -299,6 +300,33 @@ services:
       start_period: 30s
       interval: 1h
       timeout: 5s
+      retries: 10
+
+  # The previous release of the PHP client, beside the lane's own replica on
+  # the same queue, as during a rolling upgrade (failure_matrix.py
+  # rolling-upgrade). Its image is built with BENCH_PHP_CLIENT_VERSION, and it
+  # runs the PHP engine, whatever the lane's.
+  queen-previous:
+    <<: *app
+    image: ${BENCH_PREVIOUS_APP_IMAGE:-queen-laravel-supervisor-bench:previous}
+    profiles: [queen-previous]
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      <<: *app-environment
+      BENCH_LANE: queen-previous
+      BENCH_CONNECTION: queen
+      QUEUE_CONNECTION: queen
+    command: [sh, -ceu, "sleep 2; exec php artisan queen:supervise"]
+    tmpfs:
+      - /run/queen-supervisor:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=1000,gid=1000
+    healthcheck:
+      test: [CMD-SHELL, php artisan queen:supervisor status --check --no-ansi >/dev/null 2>&1]
+      start_interval: 1s
+      start_period: 30s
+      interval: 1h
+      timeout: 3s
       retries: 10
 
   # Explicitly targeted by the runner; its tools-only profile prevents it from

@@ -67,8 +67,8 @@ jobs:
           import json, os
           event, wanted = os.environ["EVENT"], (os.environ.get("GROUPS_INPUT") or "all").strip()
           # A pull request runs what its changes most often break, on the newest broker.
-          smoke = ["queen", "deaths", "lifecycle"]
-          groups = ["lifecycle", "deaths", "compat", "compat-all", "faults", "queen", "laravel-11"]
+          smoke = ["queen", "deaths", "lifecycle", "upgrade"]
+          groups = ["lifecycle", "deaths", "compat", "compat-all", "faults", "queen", "upgrade", "laravel-11"]
           if event == "pull_request":
               chosen, brokers = smoke, json.loads(os.environ["BROKER_NEWEST"])
           elif event == "schedule" and os.environ.get("SCHEDULE") == "41 3 * * 0" or wanted == "soak":
@@ -81,7 +81,8 @@ jobs:
                   raise SystemExit(f"unknown groups: {sorted(unknown)}")
               brokers = json.loads(os.environ["BROKERS_ALL"])
           print("lanes=" + json.dumps([{"group": g, "broker": b} for g in chosen for b in brokers]))
-          print("stacks=" + json.dumps(["laravel-11", "default"] if "laravel-11" in chosen else ["default"]))
+          stacks = ["default"] + ["laravel-11"] * ("laravel-11" in chosen) + ["previous"] * ("upgrade" in chosen)
+          print("stacks=" + json.dumps(stacks))
           EOF
 
   image:
@@ -108,6 +109,13 @@ jobs:
               default) ;;
               # Laravel 11 on PHP 8.4. Composer refuses every Laravel 11 for its
               # advisories; a test image lets them through.
+              # The newest PHP client on Packagist: before a release is
+              # published, the one it follows (rolling-upgrade).
+              previous)
+                version=$(curl --fail --silent --show-error https://repo.packagist.org/p2/queen-mq/php-client.json \
+                  | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"]["queen-mq/php-client"][0]["version"])')
+                echo "BENCH_PHP_CLIENT_VERSION=${version#v}"
+                ;;
               laravel-11)
                 echo 'BENCH_PHP_VERSION=8.4'
                 echo 'BENCH_COMPOSER_VERSION=2.10.3'
@@ -166,9 +174,10 @@ jobs:
               scenarios=$scenarios,dispatch-backend-down,replicas-kill,replicas-rolling
               prefork=on ;;
             queen)
-              scenarios=probe-broker-hung,poison-messages,job-metrics,install-owner,broker-leader-kill
+              scenarios=probe-broker-hung,poison-messages,job-metrics,install-owner,broker-leader-kill,partition-order
               profiles=queen-php,queen-rust ;;
             laravel-11) scenarios=parity stack=laravel-11 stack_layout=balanced prefork=on ;;
+            upgrade) scenarios=rolling-upgrade profiles=queen-php,queen-rust prefork=on ;;
             soak-*) scenarios=soak profiles=${GROUP#soak-} prefork=on ;;
             *) echo "unknown group $GROUP" >&2; exit 1 ;;
           esac
@@ -183,18 +192,27 @@ jobs:
         with:
           name: laravel-matrix-app-${{ steps.group.outputs.stack }}
           path: ${{ runner.temp }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: matrix.lane.group == 'upgrade'
+        with:
+          name: laravel-matrix-app-previous
+          path: ${{ runner.temp }}
       - name: Load the images
         env:
           STACK: ${{ steps.group.outputs.stack }}
           BROKER: ${{ matrix.lane.broker }}
         run: |
           docker load --input "$RUNNER_TEMP/app-$STACK.tar"
+          if [ -f "$RUNNER_TEMP/app-previous.tar" ]; then
+            docker load --input "$RUNNER_TEMP/app-previous.tar"
+          fi
           docker pull --quiet "ghcr.io/queen-mq/queen:$BROKER"
       - name: Failure matrix
         working-directory: benchmark-queen/laravel-supervisors
         env:
           BENCH_APP_IMAGE: queen-laravel-supervisor-bench:${{ steps.group.outputs.stack }}
           BENCH_BROKER_IMAGE: ghcr.io/queen-mq/queen:${{ matrix.lane.broker }}
+          BENCH_PREVIOUS_APP_IMAGE: queen-laravel-supervisor-bench:previous
           SCENARIOS: ${{ steps.group.outputs.scenarios }}
           PROFILES: ${{ steps.group.outputs.profiles }}
           PREFORK: ${{ steps.group.outputs.prefork }}

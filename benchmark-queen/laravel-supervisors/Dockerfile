@@ -125,9 +125,22 @@ USER ${APP_UID}:${APP_GID}
 ARG BENCH_LARAVEL_VERSION=
 ARG BENCH_HORIZON_VERSION=5.48.3
 ARG BENCH_COMPOSER_ADVISORY_IGNORE_IDS=
+# A released PHP client from Packagist, such as 2.4.3, instead of the
+# checkout's: the previous release of a rolling upgrade (queen-previous).
+ARG BENCH_PHP_CLIENT_VERSION=
 
 RUN --mount=type=cache,target=/home/benchmark/.cache/composer,uid=1000,gid=1000 \
-    if [ -z "${BENCH_LARAVEL_VERSION}" ]; then \
+    if [ -n "${BENCH_PHP_CLIENT_VERSION}" ]; then \
+        composer config --unset repositories.0 \
+        && composer require --no-update --no-interaction "queen-mq/php-client:${BENCH_PHP_CLIENT_VERSION}" \
+        && composer update queen-mq/php-client \
+            --with-dependencies \
+            --no-dev \
+            --no-interaction \
+            --no-progress \
+            --prefer-dist \
+            --classmap-authoritative; \
+    elif [ -z "${BENCH_LARAVEL_VERSION}" ]; then \
         composer install \
             --no-dev \
             --no-interaction \
@@ -154,12 +167,15 @@ RUN --mount=type=cache,target=/home/benchmark/.cache/composer,uid=1000,gid=1000 
     && queen-supervisor --version
 
 # As docs/guides/laravel/kubernetes builds an image: root installs the release for the user
-# that runs it (--owner), in the build. Only the queen-installed lane launches it.
+# that runs it (--owner), in the build. Only the queen-installed lane launches it; a released
+# client pins its own supervisor, not the checkout's, so an image of one has none.
 USER 0:0
-RUN manifest=/opt/queen-supervisor-release/queen-supervisor-manifest.json \
-    && QUEEN_SUPERVISOR_INSTALL_PATH=/opt/queen-supervisor-bin php artisan --no-ansi queen:supervisor-install \
-        --manifest="$manifest" --archive="$(readlink -f /opt/queen-supervisor-release/host.tar.gz)" \
-        --manifest-sha256="$(sha256sum "$manifest" | cut -d' ' -f1)" --owner="${APP_UID}"
+RUN if [ -z "${BENCH_PHP_CLIENT_VERSION}" ]; then \
+        manifest=/opt/queen-supervisor-release/queen-supervisor-manifest.json \
+        && QUEEN_SUPERVISOR_INSTALL_PATH=/opt/queen-supervisor-bin php artisan --no-ansi queen:supervisor-install \
+            --manifest="$manifest" --archive="$(readlink -f /opt/queen-supervisor-release/host.tar.gz)" \
+            --manifest-sha256="$(sha256sum "$manifest" | cut -d' ' -f1)" --owner="${APP_UID}"; \
+    fi
 USER ${APP_UID}:${APP_GID}
 
 CMD ["php", "artisan", "list", "--no-ansi"]
