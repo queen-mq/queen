@@ -4291,17 +4291,16 @@ mod tests {
     const FAKE_WORKER: &str = "trap 'exit 0' TERM\ntrap 'exit 1' USR1\n: > \"ready.$$\"\n\
                                while :; do sleep 0.05; done\n";
 
-    /// A configuration whose PHP binary is the shell `script`, run in a
-    /// private temporary directory that is also its cwd and state directory.
+    /// A configuration whose artisan is the shell `script`, run by /bin/sh as
+    /// its PHP binary, in a private temporary directory that is also its cwd
+    /// and state directory.
     #[cfg(unix)]
     fn fake_php_config(label: &str, script: &str) -> (Config, PathBuf) {
         let directory = temporary_directory(label);
-        let php = directory.join("php");
-        fs::write(&php, format!("#!/bin/sh\n{script}")).unwrap();
-        fs::set_permissions(&php, fs::Permissions::from_mode(0o700)).unwrap();
+        let artisan = write_fake_artisan(&directory, script);
         let mut resolved = config(options("auto"));
-        resolved.php_binary = php.to_string_lossy().into_owned();
-        resolved.artisan = "artisan".into();
+        resolved.php_binary = "/bin/sh".into();
+        resolved.artisan = artisan.to_string_lossy().into_owned();
         resolved.cwd = directory.to_string_lossy().into_owned();
         resolved.state_directory = directory.to_string_lossy().into_owned();
         (resolved, directory)
@@ -7360,6 +7359,163 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// The master of spawn_worker_starts_queue_work_as_its_own_group_leader:
+    /// its fake PHP binary, cwd and pool.
+    #[cfg(unix)]
+    fn spawn_helper_config(directory: &Path) -> Config {
+        let mut resolved = config(options("auto"));
+        resolved.php_binary = "/bin/sh".into();
+        resolved.cwd = directory.join("app").to_string_lossy().into_owned();
+        resolved.artisan = directory.join("artisan").to_string_lossy().into_owned();
+        resolved
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper for spawn_worker_starts_queue_work_as_its_own_group_leader"]
+    fn spawn_worker_helper() {
+        let Some(directory) = std::env::var_os("QUEEN_SPAWN_HELPER_DIR") else {
+            return;
+        };
+        let directory = PathBuf::from(directory);
+        let resolved = spawn_helper_config(&directory);
+        let worker = spawn_worker(
+            &resolved,
+            "default",
+            "high",
+            &resolved.supervisors["default"],
+            false,
+            None,
+        )
+        .unwrap();
+        fs::write(directory.join("worker.pid"), worker.child.id().to_string()).unwrap();
+        // The parent test kills this master: a crash, not a drain.
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    /// spawn_worker as the master runs it: the PHP binary with the artisan
+    /// entry point, queue:work and the pool's arguments in that order, in the configured
+    /// cwd, with the worker's variables set and the master's own removed, as
+    /// the leader of its own process group, a child of the master. On Linux
+    /// the worker dies with its master (PDEATHSIG).
+    #[cfg(unix)]
+    #[test]
+    fn spawn_worker_starts_queue_work_as_its_own_group_leader() {
+        let directory = temporary_directory("spawn-worker");
+        fs::create_dir(directory.join("app")).unwrap();
+        let report = directory.to_str().unwrap();
+        write_fake_artisan(
+            &directory,
+            &format!(
+                "printf '%s\\n' \"$0\" \"$@\" > '{report}/argv.tmp'\n\
+                 pwd -P > '{report}/pwd'\n\
+                 env > '{report}/env'\n\
+                 ps -o pgid= -p $$ > '{report}/pgid' 2>/dev/null || cut -d' ' -f5 /proc/$$/stat > '{report}/pgid'\n\
+                 ps -o ppid= -p $$ > '{report}/ppid' 2>/dev/null || cut -d' ' -f4 /proc/$$/stat > '{report}/ppid'\n\
+                 mv '{report}/argv.tmp' '{report}/argv'\n\
+                 exec sleep 30\n"
+            ),
+        );
+        let mut master = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::spawn_worker_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("QUEEN_SPAWN_HELPER_DIR", &directory)
+            .env("QUEEN_SUPERVISOR_TELEMETRY_DIR", "/leaked/telemetry")
+            .env("QUEEN_SUPERVISOR_EXITS_DIR", "/leaked/exits")
+            .env("QUEEN_SUPERVISOR_LEASE_SOCKET", "/leaked/lease.sock")
+            .env("QUEEN_LARAVEL_BLOCK_FOR", "9")
+            .env("QUEEN_TEST_INHERITED", "kept")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !directory.join("argv").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let read = |name: &str| fs::read_to_string(directory.join(name)).unwrap_or_default();
+        let worker: i32 = read("worker.pid").trim().parse().unwrap_or(0);
+        let (argv, pwd, env) = (read("argv"), read("pwd"), read("env"));
+        let (pgid, ppid) = (read("pgid"), read("ppid"));
+
+        let _ = master.kill();
+        let _ = master.wait();
+        #[cfg(target_os = "linux")]
+        let fenced = {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let state = fs::read_to_string(format!("/proc/{worker}/stat"))
+                    .ok()
+                    .and_then(|stat| stat.rsplit_once(") ").map(|(_, tail)| tail.to_owned()))
+                    .and_then(|tail| tail.chars().next());
+                if state.is_none() || matches!(state, Some('Z' | 'X')) {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        };
+        if worker > 0 {
+            // SAFETY: plain signal delivery to the worker this test started.
+            unsafe {
+                libc::kill(-worker, libc::SIGKILL);
+                libc::kill(worker, libc::SIGKILL);
+            }
+        }
+        let resolved = spawn_helper_config(&directory);
+        let app = fs::canonicalize(directory.join("app")).unwrap();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(worker > 0, "the master never spawned the worker");
+        let (arguments, _) = worker_invocation(
+            &resolved,
+            "default",
+            "high",
+            &resolved.supervisors["default"],
+        );
+        let expected: Vec<String> = [resolved.artisan.clone(), "queue:work".to_owned()]
+            .into_iter()
+            .chain(arguments)
+            .collect();
+        assert_eq!(argv.lines().collect::<Vec<_>>(), expected);
+        assert_eq!(Path::new(pwd.trim()), app);
+        let variables: HashMap<&str, &str> = env
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect();
+        for (variable, value) in [
+            ("QUEEN_LARAVEL_CONSUMER_GROUP", "workers"),
+            ("QUEEN_LARAVEL_CONNECTION", "queen"),
+            ("QUEEN_LARAVEL_SUPERVISOR", "default"),
+            ("QUEEN_LARAVEL_RETRY_AFTER", "90"),
+            ("QUEEN_TEST_INHERITED", "kept"),
+        ] {
+            assert_eq!(variables.get(variable), Some(&value), "{variable}");
+        }
+        for removed in [
+            "QUEEN_SUPERVISOR_TELEMETRY_DIR",
+            "QUEEN_SUPERVISOR_EXITS_DIR",
+            "QUEEN_SUPERVISOR_LEASE_SOCKET",
+            "QUEEN_LARAVEL_BLOCK_FOR",
+        ] {
+            assert_eq!(variables.get(removed), None, "{removed} leaked");
+        }
+        assert_eq!(pgid.trim(), worker.to_string(), "not its own group leader");
+        assert_eq!(
+            ppid.trim(),
+            master.id().to_string(),
+            "not the master's child"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(fenced, "worker {worker} survived its master");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "subprocess helper for linux_master_death_hard_fences_worker"]
@@ -7696,15 +7852,15 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
     }
 
     /// A resolved configuration for start_supervisor: one auto pool on
-    /// queue "high", whose PHP binary is the script `php` in `directory`,
-    /// against the broker at `broker`.
+    /// queue "high", whose artisan is the script write_fake_artisan left in
+    /// `directory`, against the broker at `broker`.
     #[cfg(unix)]
     fn supervisor_document(directory: &Path, broker: &str) -> serde_json::Value {
         serde_json::json!({
             "version": 2,
             "cwd": directory,
-            "php_binary": directory.join("php"),
-            "artisan": "artisan",
+            "php_binary": "/bin/sh",
+            "artisan": directory.join("artisan"),
             "state_directory": directory.join("state"),
             "poll_interval": 1,
             "http_timeout": 2,
@@ -7723,12 +7879,15 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
         })
     }
 
-    /// Write the fake PHP binary `php` of `directory`.
+    /// Write `script` as the artisan of `directory`, for the PHP binary
+    /// /bin/sh: $1 is the command, queue:work or queen:fork-server. A script
+    /// sh reads is never executed itself, so a fork in another test, which
+    /// may hold it open for writing a moment, cannot fail with ETXTBSY.
     #[cfg(unix)]
-    fn write_fake_php(directory: &Path, script: &str) {
-        let php = directory.join("php");
-        fs::write(&php, format!("#!/bin/sh\n{script}")).unwrap();
-        fs::set_permissions(&php, fs::Permissions::from_mode(0o700)).unwrap();
+    fn write_fake_artisan(directory: &Path, script: &str) -> PathBuf {
+        let artisan = directory.join("artisan");
+        fs::write(&artisan, script).unwrap();
+        artisan
     }
 
     /// A broker that accepts every connection and never answers: its URL,
@@ -7791,7 +7950,7 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
     #[test]
     fn a_sigterm_during_a_hung_broker_call_reaches_the_workers_at_once() {
         let directory = temporary_directory("hung-broker");
-        write_fake_php(
+        write_fake_artisan(
             &directory,
             "trap ': > \"terminated.$$\"; exit 0' TERM\n: > \"ready.$$\"\n\
              while :; do sleep 0.05; done\n",
