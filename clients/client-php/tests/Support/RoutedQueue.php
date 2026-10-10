@@ -8,15 +8,15 @@ use Illuminate\Queue\Queue;
 use LogicException;
 
 /**
- * cb3-backend's `routed` connection, its application's queue.default: it
- * only dispatches, to the connection of the pool its queue belongs to, under
+ * A `routed` connection, an application's queue.default that only
+ * dispatches: to the connection of the pool its queue belongs to, under
  * that pool's queue name, and leaves payloads, events and after_commit to
  * that connection. Workers pop from the pools' connections; a pop here
  * throws.
  */
 final class RoutedQueue extends Queue implements QueueContract
 {
-    /** cb3's QueueName to QueuePool, for the queues of these tests. */
+    /** The pool of each queue of these tests. */
     public const POOLS = [
         'default' => 'interactive',
         'notifications' => 'interactive',
@@ -83,6 +83,6 @@ final class RoutedQueue extends Queue implements QueueContract
             throw new LogicException("No pool for queue [{$name}].");
         }
 
-        return [$this->queues->connection('queen-' . $pool), "cb-backend.{$this->environment}.{$name}"];
+        return [$this->queues->connection('queen-' . $pool), "app.{$this->environment}.{$name}"];
     }
 }

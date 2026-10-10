@@ -17,7 +17,7 @@ use RuntimeException;
 use Throwable;
 
 /**
- * cb3's dispatch-only default connection, end to end, on a routed lane
+ * A dispatch-only default connection, end to end, on a routed lane
  * (BENCH_ROUTED): every job is dispatched without naming a connection, so it
  * goes through `routed`, and must run on the connection of its queue's pool
  * with that connection's settings. Each job logs where it ran; JobQueued

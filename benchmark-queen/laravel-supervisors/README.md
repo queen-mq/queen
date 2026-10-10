@@ -425,7 +425,7 @@ comparison goes to `parity.md` and `parity.json`; a difference fails the run.
 | `job-timeout`, `memory-limit`, `queue-restart` | a job timeout counted as an attempt and retried no sooner than `retry_after`; a worker over `--memory` replaced; every worker replaced after `queue:restart` |
 | `stop-short`, `stop-lease` | SIGTERM with a job in flight: shorter than the lease, and longer, where only renewals during the drain keep the lease while a second replica waits |
 | `death-timeout`, `death-sigkill`, `death-release-timeout`, `death-release-sigkill` | a worker that dies at every run, by Laravel's timeout handler or SIGKILL from outside, with or without one release first, on one partition and a 10 s lease: the deliveries, the attempt of each run, `failed()` and its exception, the failed-job row, and the next message on the partition running |
-| `routed-parity` | cb3's layout: `queue.default` is `routed` ([`RoutedQueue`](app/app/Queue/RoutedQueue.php)), which only dispatches, to `queen-<pool>` (or `redis-<pool>`) with the pool's lease, partitions and `after_commit`; the routing scenarios (`bench:compat-routed`), then the 22 scenarios, all dispatched through it |
+| `routed-parity` | an application whose `queue.default` is `routed` ([`RoutedQueue`](app/app/Queue/RoutedQueue.php)), which only dispatches, to `queen-<pool>` (or `redis-<pool>`) with the pool's lease, partitions and `after_commit`; the routing scenarios (`bench:compat-routed`), then the 22 scenarios, all dispatched through it |
 
 `--prefork on,off` runs every Queen profile with prefork on and off; the
 second lane of a profile is named `<profile>-prefork-off`. `--only` limits a
@@ -446,9 +446,10 @@ Laravel 12 on PHP 8.3. The build arguments `BENCH_PHP_VERSION`,
 resolve another Laravel at build time instead of the committed lock. Composer
 2.9 and later refuse a Laravel with a security advisory, and every Laravel 11
 has one: `BENCH_COMPOSER_ADVISORY_IGNORE_IDS` lets the named advisories
-through, for a test image only. `--stack cb3` lays cb3's layout over every
-lane: pools that balance by backlog over more than one queue, routed pools
-like cb3's (`BENCH_ROUTED_BALANCE=auto`), and the command-line opcache on.
+through, for a test image only. `--stack balanced` lays another layout over
+every lane: pools that balance by backlog over more than one queue, routed
+pools that do the same (`BENCH_ROUTED_BALANCE=auto`), and the command-line
+opcache on.
 Each lane's JSON records the PHP, Laravel, Horizon and supervisor versions it
 ran:
 
@@ -458,7 +459,7 @@ BENCH_COMPOSER_VERSION=2.10.3 BENCH_LARAVEL_VERSION=11.55.1 BENCH_HORIZON_VERSIO
 BENCH_COMPOSER_ADVISORY_IGNORE_IDS="PKSA-d5tc-s1qs-h781 PKSA-m5cs-t1y6-qpcs PKSA-3r5d-mb8f-1qw9 PKSA-mdq4-51ck-6kdq" \
 docker compose --file compose.raft.yml --profile tools build producer
 BENCH_APP_IMAGE=queen-laravel-supervisor-bench:parity-l11 BENCH_BROKER_IMAGE=ghcr.io/queen-mq/queen:2.0.4 \
-python3 scripts/failure_matrix.py --output results/parity-l11 --stack cb3 --prefork on \
+python3 scripts/failure_matrix.py --output results/parity-l11 --stack balanced --prefork on \
   --scenarios death-timeout,death-sigkill,death-release-timeout,death-release-sigkill,routed-parity
 ```
 

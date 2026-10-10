@@ -233,9 +233,9 @@ class StackTest(unittest.TestCase):
     def test_the_default_stack_changes_no_lane(self) -> None:
         self.assertEqual({}, matrix.stack_env("default", matrix.PROFILES["queen-rust"]))
 
-    def test_cb3_balances_by_backlog_over_two_queues_with_the_cli_opcache_on_every_engine(self) -> None:
-        queen = matrix.stack_env("cb3", matrix.PROFILES["queen-rust"])
-        horizon = matrix.stack_env("cb3", matrix.PROFILES["horizon"])
+    def test_balanced_balances_by_backlog_over_two_queues_with_the_cli_opcache_on_every_engine(self) -> None:
+        queen = matrix.stack_env("balanced", matrix.PROFILES["queen-rust"])
+        horizon = matrix.stack_env("balanced", matrix.PROFILES["horizon"])
 
         for env in (queen, horizon):
             self.assertEqual(("auto", "auto", "1"), (env["BENCH_PROFILE"], env["BENCH_ROUTED_BALANCE"],
@@ -248,7 +248,7 @@ class StackTest(unittest.TestCase):
         scenario = next(s for s in matrix.SCENARIOS if s.name == "laravel-parity")
         profile = matrix.PROFILES["horizon"]
 
-        lane = matrix.Lane("s", profile, {**scenario.env_for(profile), **matrix.stack_env("cb3", profile)}, Path("/tmp"))
+        lane = matrix.Lane("s", profile, {**scenario.env_for(profile), **matrix.stack_env("balanced", profile)}, Path("/tmp"))
 
         self.assertEqual("1", lane.env["BENCH_OPCACHE_CLI"], "the lane alone turns it off on Horizon")
         self.assertEqual("4", lane.env["BENCH_MAX_WORKERS"])

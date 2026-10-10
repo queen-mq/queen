@@ -156,15 +156,15 @@ if (!is_string($failedPath)
     );
 }
 
-// The routed lanes: cb3's layout. queue.default is the `routed` connection,
+// The routed lanes. queue.default is the `routed` connection,
 // which only dispatches, to the pool that owns each queue: `queen-<pool>` on
 // Queen lanes, `redis-<pool>` on Horizon lanes. Timeouts, leases (retry_after),
-// tries and partitions are cb3's.
+// tries and partitions are set per pool below.
 //
 // BENCH_ROUTED_BALANCE `off` (the default): the first pool runs BENCH_WORKERS
-// workers, the others one each, over their queues in order. `auto`: cb3's
-// auto-scaled pools and queue counts (interactive 5 queues, batch 3), with
-// smaller ranges than cb3's 5..14 and 3..6 so a lane fits on Docker Desktop.
+// workers, the others one each, over their queues in order. `auto`: pools
+// that scale with their backlog over several queues (interactive 5 queues,
+// batch 3), with ranges small enough for a lane to fit on Docker Desktop.
 $routed = filter_var(env('BENCH_ROUTED', false), FILTER_VALIDATE_BOOL);
 $routedBalance = $oneOf('BENCH_ROUTED_BALANCE', 'off', ['off', 'auto']);
 $routedPools = $routedBalance === 'auto' ? [
