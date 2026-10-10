@@ -100,6 +100,30 @@ The row cleanup is the eight points of the apply thread, on the leader and on th
 alike, and 4 to 7% on the p99s. In five minutes 2.1.0's leader grew by 8.8 GB, about 1.8 GB a
 minute: at that pace its own memory reaches the machine's 31 GB some eleven minutes later.
 
+## The highest rate, on 2.2.0
+
+One cluster kept up and the offered rate raised in steps of 75 s (a 10 s ramp, then a steady
+window of 60 s), with consumed messages removed after 60 s (`scripts/ramp.sh`, `runs/ramp-rc7/`).
+A step is carried when nothing is shed, nothing errs and the consumers keep up.
+
+| Offered | Pushed / consumed per second | Shed | Push p50 / p99 (ms) | End to end p50 / p99 (ms) | Leader, followers (cores) |
+|---|---|---|---|---|---|
+| 1,200,000 | 1,199,936 / 1,199,934 | 0 | 14.5 / 467 | 38.9 / 1,049 | 9.1, 4.8 |
+| 1,400,000 | 1,399,757 / 1,401,009 | 0 | 33.8 / 114 | 91.1 / 266 | 10.3, 5.5 |
+| 1,600,000 | 1,497,648 / 1,497,965 | 3,251,700 messages | 1,524 / 3,277 | 1,819 / 3,506 | 12.3, 6.6 |
+
+2.2.0 carries 1,400,000 messages a second on these machines, and offered 1,600,000 it pushes and
+delivers about 1,500,000 and sheds the rest. The steps between were not run. The leader is what
+gives way: its raft thread is at a whole core at every rate, and the followers use about half of
+what it does. The loaders were at 30.5 of their 48 cores in the last step.
+
+The p99s of the first step are one event. In the fifth 10 s window of the cluster's first
+minute under load, the consumers fell to 1,105,000 a second, and they caught up in the sixth; the
+1,400,000 step, later on the same cluster, has no such window. The 1,000,000 runs above show the
+same dip, much smaller, 30 to 40 s into their load and on both builds (consumed 989,000 in
+`b-rc7-completed`, 988,600 in `a2-210-completed`). Its cause was not looked for. 2.1.0 was not
+run in the ramp.
+
 ## The threads
 
 In September the followers' apply thread ran at 93 to 97% at this rate and was what gave way
@@ -112,7 +136,8 @@ whole core is the leader's raft thread, at 98 to 103% in every run, on both buil
   window is an hour by default: at this rate and those windows 2.2.0 holds 15 or 60 times the
   rows of these runs, about 13 GB or 54 GB of 100-message rows. That is what remembering every
   `transactionId` of a million messages a second for that long weighs.
-- The highest rate either build can carry. One rate was offered and both carried it.
+- The highest rate to the nearest 100,000, and the highest rate of 2.1.0. The ramp has three
+  steps, on 2.2.0 only.
 - A consumer that is behind. Every consumer here reads at the tail, from memory. Reads of
   messages whose rows are gone were measured on one VM, in `../2026-10-09-rows-window/`.
 - A fault. No node was stopped during a run.
@@ -125,6 +150,7 @@ cp scripts/hosts.env.example scripts/hosts.env     # the six machines
 scripts/deploy.sh <a directory with queen-210, queen-rc7 and qload>
 scripts/chain1.sh                                   # the four runs, about 30 minutes
 scripts/chain2.sh                                   # the pair again
+scripts/ramp.sh ramp-rc7 queen-rc7 completed 1200000 1400000 1600000   # the highest rate
 ```
 
 The warning lines a run's `end-n*.txt` counts are almost all from the start of the cluster, when
