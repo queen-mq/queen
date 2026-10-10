@@ -5025,21 +5025,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_queue_restart_replaces_the_fork_server_and_retires_the_old_one() {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../clients/client-php/tests/Fixtures/Prefork/fork_server.php");
-        let autoload =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../clients/client-php/vendor/autoload.php");
-        let php = Command::new("php")
-            .args([
-                "-r",
-                "exit(function_exists('pcntl_fork') && function_exists('posix_setsid') ? 0 : 1);",
-            ])
-            .status()
-            .is_ok_and(|status| status.success());
-        if !php || !fixture.exists() || !autoload.exists() {
-            eprintln!("skipped: PHP with pcntl/posix and the Laravel package are required");
+        let Some(fixture) = prefork::test_fixture() else {
             return;
-        }
+        };
         let (mut resolved, state_directory) = exit_marker_config("fork-server-restart");
         resolved.prefork = true;
         resolved.php_binary = "php".to_owned();
@@ -5156,21 +5144,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_pool_with_prefork_off_spawns_beside_the_fork_server() {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../clients/client-php/tests/Fixtures/Prefork/fork_server.php");
-        let autoload =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../clients/client-php/vendor/autoload.php");
-        let php = Command::new("php")
-            .args([
-                "-r",
-                "exit(function_exists('pcntl_fork') && function_exists('posix_setsid') ? 0 : 1);",
-            ])
-            .status()
-            .is_ok_and(|status| status.success());
-        if !php || !fixture.exists() || !autoload.exists() {
-            eprintln!("skipped: PHP with pcntl/posix and the Laravel package are required");
+        let Some(fixture) = prefork::test_fixture() else {
             return;
-        }
+        };
         let (mut resolved, state_directory) = exit_marker_config("pool-prefork-off");
         resolved.prefork = true;
         resolved.php_binary = "php".to_owned();
@@ -5481,21 +5457,7 @@ mod tests {
     /// with its state directory, or None without PHP and the package.
     #[cfg(unix)]
     fn fixture_fork_server_config(name: &str) -> Option<(Config, PathBuf)> {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../clients/client-php/tests/Fixtures/Prefork/fork_server.php");
-        let autoload =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../clients/client-php/vendor/autoload.php");
-        let php = Command::new("php")
-            .args([
-                "-r",
-                "exit(function_exists('pcntl_fork') && function_exists('posix_setsid') ? 0 : 1);",
-            ])
-            .status()
-            .is_ok_and(|status| status.success());
-        if !php || !fixture.exists() || !autoload.exists() {
-            eprintln!("skipped: PHP with pcntl/posix and the Laravel package are required");
-            return None;
-        }
+        let fixture = prefork::test_fixture()?;
         let (mut resolved, state_directory) = exit_marker_config(name);
         resolved.prefork = true;
         resolved.php_binary = "php".to_owned();
