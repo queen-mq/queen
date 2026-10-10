@@ -25,6 +25,26 @@ class HttpClient
     /** A detached request is written within the connect timeout, or dropped. */
     private const DETACHED_WRITE_MILLIS = 5_000;
 
+    /** 503 codes with which the broker says it did not run the request. */
+    private const NOT_RUN_CODES = ['no_leader', 'standby'];
+
+    /**
+     * 503 code with which the broker refused a request before it ran, unless
+     * a follower lost its relay to the leader after the request went out.
+     */
+    private const REFUSED_CODE = 'retry';
+
+    /** 503 codes after which the request may have run. */
+    private const MAY_HAVE_RUN_CODES = ['outcome_unknown', 'timeout', 'retry'];
+
+    /** The longest a request waits for a leader, when its timeout is longer. */
+    private const LEADER_WAIT_MAX_MILLIS = 10_000;
+
+    /** The pause while a leader is elected: Retry-After within these bounds. */
+    private const LEADER_WAIT_DEFAULT_PAUSE_MILLIS = 1_000;
+    private const LEADER_WAIT_MIN_PAUSE_MILLIS = 50;
+    private const LEADER_WAIT_MAX_PAUSE_MILLIS = 5_000;
+
     /** Routes whose every answer is a JSON body; see answersWithJson(). */
     private const JSON_ANSWER_PATHS = [
         '/api/v1/push',
@@ -508,7 +528,9 @@ class HttpClient
                 }
             }
 
-            $retryAfterSeconds = $statusCode === 429
+            // 429: rate limited. 503: the broker is electing a leader or is
+            // otherwise briefly unavailable, and says when to come back.
+            $retryAfterSeconds = $statusCode === 429 || $statusCode === 503
                 ? $this->parseRetryAfter($retryAfter)
                 : null;
 
@@ -745,31 +767,145 @@ class HttpClient
         return ($error instanceof HttpException) ? $error->statusCode : 0;
     }
 
+
+    // ===========================
+    // Leader elections
+    // ===========================
+    //
+    // A raft cluster answers 503 for a few seconds while it elects a leader,
+    // and its `code` says whether the request ran (server: RsmError and the
+    // follower's relay in handlers/raft.rs):
+    //
+    //   no_leader, standby         it did not run;
+    //   retry                      refused before it ran, or a follower lost
+    //                              its relay to the leader after it went out;
+    //   outcome_unknown, timeout   it may have run.
+    //
+    // A request whose second run changes nothing waits the election out, at
+    // the pace of Retry-After and within a bounded budget, instead of failing
+    // after the few quick attempts the retry loops make. A pop is never sent
+    // again after a 503 that leaves its outcome unknown.
+
+    /**
+     * The 503 codes after which this request may be sent again while the
+     * cluster elects a leader:
+     *
+     * - a read, or a push whose every item has a transactionId (the broker
+     *   deduplicates it): a second run changes nothing, so after any 503 that
+     *   says it did not run or was refused;
+     * - a pop or an ACK: only after a 503 that says it did not run, since a
+     *   second run of one that ran claims other messages, or calls the
+     *   messages it acknowledged stale;
+     * - anything else: none, and it keeps the retryAttempts it had.
+     *
+     * @return list<string>
+     */
+    private static function resendableCodes(string $method, string $path, ?array $body): array
+    {
+        $route = (string) parse_url($path, PHP_URL_PATH);
+        if (self::isPopRoute($route)
+            || ($method === 'POST' && in_array($route, ['/api/v1/ack', '/api/v1/ack/batch'], true))) {
+            return self::NOT_RUN_CODES;
+        }
+        if ($method === 'GET'
+            || ($method === 'POST' && $route === '/api/v1/push' && self::everyItemHasTransactionId($body))) {
+            return [...self::NOT_RUN_CODES, self::REFUSED_CODE];
+        }
+
+        return [];
+    }
+
+    private static function isPopRoute(string $route): bool
+    {
+        return str_starts_with($route, '/api/v1/pop') || $route === '/api/v1/ephemeral/pop';
+    }
+
+    private static function everyItemHasTransactionId(?array $body): bool
+    {
+        $items = $body['items'] ?? null;
+        if (!is_array($items) || $items === []) {
+            return false;
+        }
+        foreach ($items as $item) {
+            if (!is_array($item) || !is_string($item['transactionId'] ?? null) || $item['transactionId'] === '') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /** A 503 that names the request one the broker may have run, on a pop. */
+    private static function isUnknownPopOutcome(string $path, \Throwable $error): bool
+    {
+        return $error instanceof HttpException
+            && $error->statusCode === 503
+            && in_array($error->errorCode, self::MAY_HAVE_RUN_CODES, true)
+            && self::isPopRoute((string) parse_url($path, PHP_URL_PATH));
+    }
+
+    /** @param list<string> $resendableCodes */
+    private static function isElectionAnswer(\Throwable $error, array $resendableCodes): bool
+    {
+        return $error instanceof HttpException
+            && $error->statusCode === 503
+            && in_array($error->errorCode, $resendableCodes, true);
+    }
+
+    /**
+     * The pause before the request is sent again, in milliseconds: the 503's
+     * Retry-After, within bounds. Null once the next attempt could not start
+     * inside the budget, the shorter of LEADER_WAIT_MAX_MILLIS and the
+     * request's own timeout.
+     */
+    private function leaderWaitPause(HttpException $error, int $startedNanos, ?int $requestTimeoutMillis): ?int
+    {
+        $pause = $error->retryAfterSeconds !== null
+            ? (int) round(min($error->retryAfterSeconds * 1000, self::LEADER_WAIT_MAX_PAUSE_MILLIS))
+            : self::LEADER_WAIT_DEFAULT_PAUSE_MILLIS;
+        $pause = max($pause, self::LEADER_WAIT_MIN_PAUSE_MILLIS);
+        $budget = min(self::LEADER_WAIT_MAX_MILLIS, $requestTimeoutMillis ?? $this->timeoutMillis);
+        $elapsed = intdiv(hrtime(true) - $startedNanos, 1_000_000);
+
+        return $elapsed + $pause <= $budget ? $pause : null;
+    }
+
     private function requestWithRetry(string $method, string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null, ?string $retryKind = null): mixed
     {
         $payload = $this->encodeBody($body);
-        $lastError = null;
+        $resendableCodes = self::resendableCodes($method, $path, $body);
+        $startedNanos = hrtime(true);
+        $attempt = 0;
 
-        for ($attempt = 0; $attempt < $this->retryAttempts; $attempt++) {
+        while (true) {
             try {
                 $url = $this->resolveUrl($affinityKey) . $path;
                 return $this->executeRequestWithRetry429($url, $method, $payload, $requestTimeoutMillis, $retryKind);
             } catch (\Throwable $error) {
-                $lastError = $error;
-
                 $statusCode = $this->getStatusCode($error);
-                if (self::isTerminalStatus($statusCode)) {
+                if (self::isTerminalStatus($statusCode) || self::isUnknownPopOutcome($path, $error)) {
                     throw $error;
                 }
 
-                if ($attempt < $this->retryAttempts - 1) {
-                    $delay = $this->retryDelayMillis * (2 ** $attempt);
-                    usleep($delay * 1000);
+                // An election uses up no attempt: it is waited out within
+                // its own budget.
+                if (self::isElectionAnswer($error, $resendableCodes)) {
+                    $pause = $this->leaderWaitPause($error, $startedNanos, $requestTimeoutMillis);
+                    if ($pause === null) {
+                        throw $error;
+                    }
+                    usleep($pause * 1000);
+                    continue;
                 }
+
+                $attempt++;
+                if ($attempt >= $this->retryAttempts) {
+                    throw $error;
+                }
+                $delay = $this->retryDelayMillis * (2 ** ($attempt - 1));
+                usleep($delay * 1000);
             }
         }
-
-        throw $lastError;
     }
 
     private function requestWithFailover(string $method, string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null, ?string $retryKind = null): mixed
@@ -779,48 +915,73 @@ class HttpClient
         }
 
         $payload = $this->encodeBody($body);
+        $resendableCodes = self::resendableCodes($method, $path, $body);
+        // A read or a deduplicated push may be sent again after any failure;
+        // a pop or an ACK only after a 503 that says it did not run.
+        $resendsHarmlessly = in_array(self::REFUSED_CODE, $resendableCodes, true);
+        $startedNanos = hrtime(true);
         $urls = $this->loadBalancer->getAllUrls();
-        $attemptedUrls = [];
-        $lastError = null;
 
-        while (count($attemptedUrls) < count($urls)) {
-            $url = $this->loadBalancer->getNextUrl($affinityKey);
+        while (true) {
+            $attemptedUrls = [];
+            $lastError = null;
+            $electionAnswer = null;
+            $harmless = true;
 
-            if (in_array($url, $attemptedUrls, true)) {
-                // The balancer offers a backend this call already tried, as it
-                // does when every backend is marked unhealthy (a leader
-                // election marks them all): go on with the ones not tried yet,
-                // in order, rather than give up with them untried.
-                $url = array_values(array_diff($urls, $attemptedUrls))[0];
-            }
+            while (count($attemptedUrls) < count($urls)) {
+                $url = $this->loadBalancer->getNextUrl($affinityKey);
 
-            $attemptedUrls[] = $url;
-
-            try {
-                // 429s are retried in place against this same backend inside
-                // executeRequestWithRetry429: rate limiting is a tenant-quota
-                // signal, not a backend-health one, so it must neither mark
-                // the server unhealthy nor fail over to another (every backend
-                // would answer the same, and spraying the fleet only makes the
-                // limiter angrier). An exhausted 429 is a 4xx and therefore
-                // leaves the loop below without a second server being tried.
-                $result = $this->executeRequestWithRetry429($url . $path, $method, $payload, $requestTimeoutMillis, $retryKind);
-                $this->loadBalancer->markHealthy($url);
-                return $result;
-            } catch (\Throwable $error) {
-                $lastError = $error;
-
-                $statusCode = $this->getStatusCode($error);
-                if ($statusCode === 0 || $statusCode >= 500) {
-                    $this->loadBalancer->markUnhealthy($url);
+                if (in_array($url, $attemptedUrls, true)) {
+                    // The balancer offers a backend this call already tried, as it
+                    // does when every backend is marked unhealthy (a leader
+                    // election marks them all): go on with the ones not tried yet,
+                    // in order, rather than give up with them untried.
+                    $url = array_values(array_diff($urls, $attemptedUrls))[0];
                 }
 
-                if (self::isTerminalStatus($statusCode)) {
-                    throw $error;
+                $attemptedUrls[] = $url;
+
+                try {
+                    // 429s are retried in place against this same backend inside
+                    // executeRequestWithRetry429: rate limiting is a tenant-quota
+                    // signal, not a backend-health one, so it must neither mark
+                    // the server unhealthy nor fail over to another (every backend
+                    // would answer the same, and spraying the fleet only makes the
+                    // limiter angrier). An exhausted 429 is a 4xx and therefore
+                    // leaves the loop below without a second server being tried.
+                    $result = $this->executeRequestWithRetry429($url . $path, $method, $payload, $requestTimeoutMillis, $retryKind);
+                    $this->loadBalancer->markHealthy($url);
+                    return $result;
+                } catch (\Throwable $error) {
+                    $lastError = $error;
+
+                    $statusCode = $this->getStatusCode($error);
+                    if ($statusCode === 0 || $statusCode >= 500) {
+                        $this->loadBalancer->markUnhealthy($url);
+                    }
+
+                    if (self::isTerminalStatus($statusCode) || self::isUnknownPopOutcome($path, $error)) {
+                        throw $error;
+                    }
+
+                    if (self::isElectionAnswer($error, $resendableCodes)) {
+                        $electionAnswer = $error;
+                    } elseif (!$resendsHarmlessly) {
+                        $harmless = false;
+                    }
                 }
             }
+
+            // Every backend failed. While the cluster elects a leader, wait
+            // and go round again, unless a backend failed in a way that leaves
+            // this request's outcome unknown.
+            $pause = $electionAnswer !== null && $harmless
+                ? $this->leaderWaitPause($electionAnswer, $startedNanos, $requestTimeoutMillis)
+                : null;
+            if ($pause === null) {
+                throw $lastError ?? new \RuntimeException('All servers failed');
+            }
+            usleep($pause * 1000);
         }
-
-        throw $lastError ?? new \RuntimeException('All servers failed');
     }
 }

@@ -160,7 +160,7 @@ class ConsumerManager
         $clientTimeout = $wait ? $timeoutMillis + 5000 : $timeoutMillis;
         $url = "{$path}?{$baseParams}";
         $pollPolicy = $this->httpClient->getRetry429Policy($wait ? Retry429Policy::KIND_POP : null);
-        $consecutive429 = 0;
+        $consecutiveBackoffs = 0;
 
         while ($running) {
             if (function_exists('pcntl_signal_dispatch')) {
@@ -213,7 +213,7 @@ class ConsumerManager
             }
 
             // Process results per worker
-            $rateLimitError = null;
+            $backoffError = null;
             foreach ($results as $w => $outcome) {
                 if (!$running) {
                     break;
@@ -222,11 +222,12 @@ class ConsumerManager
                 if ($outcome['state'] === 'rejected') {
                     $error = $outcome['reason'];
 
-                    // 429: the async path can't retry in flight without
+                    // 429, or a transient 5xx such as the 503 of a leader
+                    // election: the async path can't retry in flight without
                     // blocking every other worker on the shared multi-handle,
                     // so remember it and pace the next poll round once, below.
-                    if ($error instanceof HttpException && $error->statusCode === 429) {
-                        $rateLimitError = $error;
+                    if ($error instanceof HttpException && ($error->statusCode === 429 || $error->isTransient())) {
+                        $backoffError = $error;
                         continue;
                     }
 
@@ -304,11 +305,11 @@ class ConsumerManager
 
             // One backoff for the whole round: every worker shares the tenant
             // bucket, so N sleeps would only stall the poll N times over.
-            if ($rateLimitError !== null) {
-                usleep($pollPolicy->delayMillis($consecutive429, $rateLimitError->retryAfterSeconds) * 1000);
-                $consecutive429++;
+            if ($backoffError !== null) {
+                usleep($pollPolicy->delayMillis($consecutiveBackoffs, $backoffError->retryAfterSeconds) * 1000);
+                $consecutiveBackoffs++;
             } else {
-                $consecutive429 = 0;
+                $consecutiveBackoffs = 0;
             }
 
             // Check global limit
@@ -342,7 +343,7 @@ class ConsumerManager
         $lastMessageTime = $idleMillis !== null ? $this->nowMillis() : null;
         $retryKind = $wait ? Retry429Policy::KIND_POP : null;
         $pollPolicy = $this->httpClient->getRetry429Policy($retryKind);
-        $consecutive429 = 0;
+        $consecutiveBackoffs = 0;
 
         while ($running) {
             if (function_exists('pcntl_signal_dispatch')) {
@@ -370,7 +371,7 @@ class ConsumerManager
                 // wait=true is a long-poll: mark it so a 429 backs off and keeps
                 // waiting instead of giving up after the bounded push-like budget.
                 $result = $this->httpClient->get("{$path}?{$baseParams}", $clientTimeout, $affinityKey, $retryKind);
-                $consecutive429 = 0;
+                $consecutiveBackoffs = 0;
 
                 // Ahead of the empty-response shortcut: an old broker answers an
                 // empty pop with a bodiless 204, which arrives here as null, and
@@ -439,9 +440,13 @@ class ConsumerManager
                 // for a wait=true poll), so getting here means an explicit
                 // maxAttempts override ran out. Keep polling behind the same
                 // backoff rather than hot-looping against the limiter.
-                if ($error instanceof HttpException && $error->statusCode === 429) {
-                    usleep($pollPolicy->delayMillis($consecutive429, $error->retryAfterSeconds) * 1000);
-                    $consecutive429++;
+                // A transient 5xx (the 503 of a leader election, which lasts
+                // a few seconds, or a pop whose outcome the broker could not
+                // tell) backs off the same way, at the pace of Retry-After,
+                // instead of ending the consumer.
+                if ($error instanceof HttpException && ($error->statusCode === 429 || $error->isTransient())) {
+                    usleep($pollPolicy->delayMillis($consecutiveBackoffs, $error->retryAfterSeconds) * 1000);
+                    $consecutiveBackoffs++;
                     continue;
                 }
 
