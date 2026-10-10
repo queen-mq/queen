@@ -9,6 +9,7 @@ use Illuminate\Contracts\Queue\Queue as QueueContract;
 use Illuminate\Queue\Events\WorkerStopping;
 use Illuminate\Queue\InvalidPayloadException;
 use Illuminate\Queue\Queue as BaseQueue;
+use Illuminate\Queue\TimeoutExceededException;
 use JsonException;
 use Queen\Builders\QueueBuilder;
 use Queen\Exceptions\HttpException;
@@ -1113,17 +1114,50 @@ class QueenQueue extends BaseQueue implements QueueContract
         ?string $queue = null,
     ): void
     {
+        if ($failed && $exception instanceof TimeoutExceededException) {
+            $this->deadLetterTimedOut($message, $group, $exception, $queue);
+
+            return;
+        }
         $this->acknowledgeReserved($message, $group, $failed, $exception, $queue);
         // The job has ended: take in the batch popped ahead while it ran.
         $this->settlePendingPop();
     }
 
+    /**
+     * Dead-letter a job from Laravel's timeout handler, which fails it on
+     * timeout or on its last try, then kills the worker. The handler runs on
+     * SIGALRM: what throws there lands in the job's code, and JobTimedOut and
+     * the kill never come, so the job ran on past its timeout and a second
+     * worker got it after retry_after; the ordinary client alone could take
+     * three tries of 30 seconds. Here it is one bounded request, and a
+     * failure is only reported: the lease expires, the broker delivers the
+     * job again, and Laravel fails it past its tries. The kill's shutdown()
+     * hands back the rest.
+     */
+    private function deadLetterTimedOut(array $message, string $group, \Throwable $exception, ?string $queue): void
+    {
+        try {
+            $this->settlePendingAck(self::SHUTDOWN_ACK_TIMEOUT_MILLIS, retry: false);
+            $this->acknowledgeReserved($message, $group, true, $exception, $queue, $this->getBestEffortQueen());
+        } catch (\Throwable $failure) {
+            $this->reportQuietly(new RuntimeException(
+                'Queen Laravel could not dead-letter a job that timed out, which runs again after its lease expires: '
+                    . $failure->getMessage(),
+                0,
+                $failure,
+            ));
+        }
+    }
+
+    /** @param Queen|null $client the client of the ACKs; the ordinary one when null */
     private function acknowledgeReserved(
         array $message,
         string $group,
         bool $failed,
         ?\Throwable $exception,
         ?string $queue,
+        ?Queen $client = null,
     ): void {
         $this->settlePendingAck();
         $affinityKey = $queue !== null ? $this->affinityKey($queue, $group) : null;
@@ -1152,11 +1186,11 @@ class QueenQueue extends BaseQueue implements QueueContract
             // success acknowledgements first so a later batch failure cannot
             // obscure it. A DLQ transition invalidates same-partition tails.
             if ($failed) {
-                $this->flushAcknowledgements();
+                $this->flushAcknowledgementsWith($client ?? $this->queen);
                 $this->discardPrefetchedSiblings($message);
             }
 
-            $result = $this->queen->ack(
+            $result = ($client ?? $this->queen)->ack(
                 $message,
                 $failed ? 'dlq' : 'completed',
                 array_filter([
@@ -1278,6 +1312,11 @@ class QueenQueue extends BaseQueue implements QueueContract
     /** Flush successful ACKs deferred by ack_batch. */
     public function flushAcknowledgements(): void
     {
+        $this->flushAcknowledgementsWith($this->queen);
+    }
+
+    private function flushAcknowledgementsWith(Queen $queen): void
+    {
         while ($this->pendingAcknowledgements !== []) {
             $group = $this->pendingAcknowledgements[0]['group'];
             $affinityKey = $this->pendingAcknowledgements[0]['affinity_key'];
@@ -1292,7 +1331,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             }
 
             try {
-                $result = $this->queen->ack($messages, 'completed', array_filter([
+                $result = $queen->ack($messages, 'completed', array_filter([
                     'group' => $group,
                     'affinityKey' => $affinityKey,
                 ], fn ($value) => $value !== null));
