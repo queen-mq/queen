@@ -35,11 +35,14 @@ final class SupervisorState
     /** @var array{dev:int,ino:int,uid:int,mode:int}|null */
     private ?array $generationDirectory = null;
 
-    public function __construct(private string $directory)
+    private ProcessIdentity $identity;
+
+    public function __construct(private string $directory, ?ProcessIdentity $identity = null)
     {
         if (!extension_loaded('posix') || !function_exists('posix_geteuid')) {
             throw new RuntimeException('Queen supervisor state requires ext-posix for filesystem ownership checks.');
         }
+        $this->identity = $identity ?? new ProcessIdentity();
         $this->assertSafeDirectoryPath();
         $requested = rtrim($this->directory, DIRECTORY_SEPARATOR);
         $visitedLinks = [];
@@ -533,7 +536,7 @@ final class SupervisorState
     {
         if (($metadata['mode'] & 0170000) !== 0100000
             || ($metadata['mode'] & 07777) !== 0600
-            || ($metadata['uid'] ?? null) !== posix_geteuid()
+            || ($metadata['uid'] ?? null) !== $this->identity->effectiveUid()
             || $metadata['size'] < 1
             || $metadata['size'] > self::MAX_EXIT_MARKER_BYTES) {
             return null;
@@ -678,9 +681,10 @@ final class SupervisorState
         if ($metadata === false || ($metadata['mode'] & 0170000) !== 0040000) {
             throw new RuntimeException("Queen supervisor state directory [{$this->directory}] must not be a symbolic link.");
         }
-        if (($metadata['uid'] ?? null) !== posix_geteuid()) {
+        if (($metadata['uid'] ?? null) !== $this->identity->effectiveUid()) {
             throw new RuntimeException(
-                "Queen supervisor state directory [{$this->directory}] must be owned by the current user.",
+                "Queen supervisor state directory [{$this->directory}] must be owned by the current user."
+                . $this->ownershipDetail($metadata['uid'] ?? null),
             );
         }
         if ($created) {
@@ -701,6 +705,40 @@ final class SupervisorState
             );
         }
         $this->assertTrustedAncestorChain();
+    }
+
+    /**
+     * Appended to each refusal of a path that another user owns: who owns
+     * it, who is asking, and how to run as the owner. The start of each
+     * refusal stays as it was, for the applications and log searches that
+     * match it.
+     *
+     * Root is refused too: it reads and writes as itself, and PHP cannot
+     * open a file with O_NOFOLLOW, so in a directory the owner can change,
+     * the owner could swap a symbolic link in between a check and the open
+     * and make root open any path. A probe runs as the supervisor's user.
+     */
+    private function ownershipDetail(mixed $owner): string
+    {
+        if (!is_int($owner)) {
+            return '';
+        }
+        $name = $this->identity->name($owner);
+        $su = $name === null
+            ? ''
+            : "su -s /bin/sh {$name} -c \"php artisan queen:supervisor status --check\", or ";
+
+        return ' It is owned by ' . $this->describeUser($owner)
+            . ' and this process runs as ' . $this->describeUser($this->identity->effectiveUid()) . '.'
+            . " Run the supervisor and its probes as that user, for example {$su}securityContext.runAsUser: {$owner}"
+            . ' on the container.';
+    }
+
+    private function describeUser(int $uid): string
+    {
+        $name = $this->identity->name($uid);
+
+        return $name === null ? "uid {$uid}" : "uid {$uid} ({$name})";
     }
 
     private function assertSafeDirectoryPath(): void
@@ -790,9 +828,10 @@ final class SupervisorState
                 }
                 if ($parentWasSticky
                     && ($metadata['uid'] ?? null) !== 0
-                    && ($metadata['uid'] ?? null) !== posix_geteuid()) {
+                    && ($metadata['uid'] ?? null) !== $this->identity->effectiveUid()) {
                     throw new RuntimeException(
-                        "Queen supervisor state child [{$path}] below a sticky directory must be owned by the current user.",
+                        "Queen supervisor state child [{$path}] below a sticky directory must be owned by the current user."
+                        . $this->ownershipDetail($metadata['uid'] ?? null),
                     );
                 }
                 $identity = ($metadata['dev'] ?? '?') . ':' . ($metadata['ino'] ?? '?');
@@ -868,11 +907,12 @@ final class SupervisorState
         bool $stateLeaf,
         bool $parentWasSticky,
     ): bool {
-        $effectiveUid = posix_geteuid();
+        $effectiveUid = $this->identity->effectiveUid();
         $owner = $metadata['uid'] ?? null;
         if ($parentWasSticky && $owner !== 0 && $owner !== $effectiveUid) {
             throw new RuntimeException(
-                "Queen supervisor state child [{$path}] below a sticky directory must be owned by the current user.",
+                "Queen supervisor state child [{$path}] below a sticky directory must be owned by the current user."
+                . $this->ownershipDetail($owner),
             );
         }
         // A foreign owner can chmod and then rename children even when the
@@ -880,7 +920,8 @@ final class SupervisorState
         // are trusted owners for path components.
         if ($owner !== 0 && $owner !== $effectiveUid) {
             throw new RuntimeException(
-                "Queen supervisor state ancestor [{$path}] must be owned by root or the current user.",
+                "Queen supervisor state ancestor [{$path}] must be owned by root or the current user."
+                . $this->ownershipDetail($owner),
             );
         }
 
@@ -957,9 +998,10 @@ final class SupervisorState
                 "Queen supervisor state directory [{$this->directory}] must be a private real directory.",
             );
         }
-        if (($metadata['uid'] ?? null) !== posix_geteuid()) {
+        if (($metadata['uid'] ?? null) !== $this->identity->effectiveUid()) {
             throw new RuntimeException(
-                "Queen supervisor state directory [{$this->directory}] must be owned by the current user.",
+                "Queen supervisor state directory [{$this->directory}] must be owned by the current user."
+                . $this->ownershipDetail($metadata['uid'] ?? null),
             );
         }
         if ($this->generationDirectory !== null) {
@@ -989,7 +1031,7 @@ final class SupervisorState
     {
         if (($current['mode'] & 0170000) !== 0040000
             || ($current['mode'] & 07777) !== 0700
-            || ($current['uid'] ?? null) !== posix_geteuid()
+            || ($current['uid'] ?? null) !== $this->identity->effectiveUid()
             || ($current['dev'] ?? null) !== ($expected['dev'] ?? null)
             || ($current['ino'] ?? null) !== ($expected['ino'] ?? null)) {
             throw new RuntimeException('Queen supervisor state directory changed after generation acquisition.');
