@@ -212,6 +212,27 @@ with 280,000 messages written by 2.1.0 and never consumed. Run on rc3, rc4, rc5 
 The pushes and pops that fail during the roll (a few hundred of 74,500 pushes) are those sent to a
 node while it restarts: the load generator talks to each node directly and does not retry.
 
+## Kills on five nodes
+
+`killloop5.sh`. Five nodes on this machine with log files sealed after a second, traffic through
+all five, and three of them killed at once (`kill -9`) every cycle, the leader among them every
+other cycle. Each node must serve again after its start.
+
+| | rc5 | rc6 |
+|---|---|---|
+| Cycles | 150 | 300 |
+| Starts that did not end in a node that serves | 0 | 0 |
+| Tails a new leader overruled | 1 | 7 |
+| FATAL lines, panics | 0, 0 | 0, 0 |
+
+The loop was written to reproduce, on rc5, the refusal to start that the node logs of one Jepsen
+test showed (a log file sealed right after a log cut, fixed in rc6). It did not: on one machine
+the nodes' logs almost never diverge, and that refusal needs a tail that is overruled. What it
+shows is 450 cycles of kills without a node that fails to start. The fix itself is held by two
+tests in `server/src/rsm/qlog/tests.rs` that fail on rc5's code
+(`an_entry_written_into_a_file_created_for_a_later_seq_is_found`,
+`after_a_cut_the_idle_pass_seals_for_the_seq_that_comes_next`) and by the Jepsen campaign on rc6.
+
 ## What these runs do not show
 
 - More than one machine: every figure is one node, or three on one disk.

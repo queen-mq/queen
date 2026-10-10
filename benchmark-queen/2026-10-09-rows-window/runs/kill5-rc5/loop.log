@@ -1,0 +1,22 @@
+03:35:20 cycle 10: ok; tails overruled so far: 0, first seq lowered: 0
+03:36:03 cycle 20: ok; tails overruled so far: 0, first seq lowered: 0
+03:36:46 cycle 30: ok; tails overruled so far: 0, first seq lowered: 0
+03:37:30 cycle 40: ok; tails overruled so far: 0, first seq lowered: 0
+03:38:15 cycle 50: ok; tails overruled so far: 0, first seq lowered: 0
+03:38:59 cycle 60: ok; tails overruled so far: 0, first seq lowered: 0
+03:39:43 cycle 70: ok; tails overruled so far: 0, first seq lowered: 0
+03:40:28 cycle 80: ok; tails overruled so far: 0, first seq lowered: 0
+03:41:11 cycle 90: ok; tails overruled so far: 0, first seq lowered: 0
+03:41:55 cycle 100: ok; tails overruled so far: 0, first seq lowered: 0
+03:42:40 cycle 110: ok; tails overruled so far: 0, first seq lowered: 0
+03:43:26 cycle 120: ok; tails overruled so far: 0, first seq lowered: 0
+03:44:12 cycle 130: ok; tails overruled so far: 1, first seq lowered: 0
+03:44:58 cycle 140: ok; tails overruled so far: 1, first seq lowered: 0
+03:45:45 cycle 150: ok; tails overruled so far: 1, first seq lowered: 0
+03:45:47 cycles run: 150 of 150, bad=0
+03:45:47 n1: FATAL lines 0, panics 0, tails overruled 1, across a sealed file 0, first seq lowered 0
+03:45:48 n2: FATAL lines 0, panics 0, tails overruled 0, across a sealed file 0, first seq lowered 0
+03:45:49 n3: FATAL lines 0, panics 0, tails overruled 0, across a sealed file 0, first seq lowered 0
+03:45:49 n4: FATAL lines 0, panics 0, tails overruled 0, across a sealed file 0, first seq lowered 0
+03:45:50 n5: FATAL lines 0, panics 0, tails overruled 0, across a sealed file 0, first seq lowered 0
+KILLLOOP_DONE
