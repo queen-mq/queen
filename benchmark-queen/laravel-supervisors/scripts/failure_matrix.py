@@ -103,6 +103,11 @@ def stack_versions(config_json: str, supervisor: str = "") -> dict:
     config = json.loads(config_json)
     versions = {key: config.get(key) for key in ("php", "laravel", "horizon", "queen_client", "opcache_cli")}
     versions["supervisor"] = supervisor.strip().removeprefix("queen-supervisor ") or None
+    # The layout the application resolved, not the one asked for: a setting that does not
+    # reach the container shows here.
+    benchmark = config.get("benchmark") or {}
+    versions["layout"] = {"profile": benchmark.get("profile"), "queues": benchmark.get("queues"),
+                          "routed": benchmark.get("routed"), "routed_balance": benchmark.get("routed_balance")}
     return versions
 
 

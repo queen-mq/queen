@@ -14,6 +14,7 @@ x-app-environment: &app-environment
   # queue.default is a connection that only dispatches, to one connection
   # per worker pool, as in cb3 (config/benchmark.php).
   BENCH_ROUTED: ${BENCH_ROUTED:-false}
+  BENCH_ROUTED_BALANCE: ${BENCH_ROUTED_BALANCE:-off}
   SESSION_DRIVER: array
   BENCH_PROFILE: ${BENCH_PROFILE:-fixed}
   BENCH_QUEUE: ${BENCH_QUEUE:-benchmark}

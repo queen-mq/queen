@@ -243,12 +243,25 @@ class StackTest(unittest.TestCase):
         self.assertEqual("4", lane.env["BENCH_MAX_WORKERS"])
         self.assertEqual("database", lane.env["BENCH_CACHE_STORE"])
 
+    def test_every_setting_a_stack_scenario_or_profile_sets_reaches_the_containers(self) -> None:
+        compose = matrix.COMPOSE_FILE.read_text()
+        keys = {key for layers in matrix.STACKS.values() for layer in layers.values() for key in layer}
+        keys |= {key for scenario in matrix.SCENARIOS for key in scenario.env}
+        keys |= {key for scenario in matrix.SCENARIOS for env in scenario.engine_env.values() for key in env}
+        keys |= {key for profile in matrix.PROFILES.values() for key in profile.env}
+
+        self.assertEqual([], sorted(key for key in keys if "${" + key + ":" not in compose),
+                         "compose.raft.yml must read each of these, or the lane runs without it")
+
     def test_stack_versions_come_from_bench_config_and_the_supervisor(self) -> None:
         config = json.dumps({"php": "8.4.13", "laravel": "v11.55.1", "horizon": "v5.48.3",
-                             "queen_client": "dev-main", "opcache_cli": True, "benchmark": {}})
+                             "queen_client": "dev-main", "opcache_cli": True,
+                             "benchmark": {"profile": "auto", "queues": ["a", "b"], "routed": True,
+                                           "routed_balance": "auto", "workers": 2}})
 
         self.assertEqual({"php": "8.4.13", "laravel": "v11.55.1", "horizon": "v5.48.3", "queen_client": "dev-main",
-                          "opcache_cli": True, "supervisor": "0.8.0"},
+                          "opcache_cli": True, "supervisor": "0.8.0",
+                          "layout": {"profile": "auto", "queues": ["a", "b"], "routed": True, "routed_balance": "auto"}},
                          matrix.stack_versions(config, "queen-supervisor 0.8.0\n"))
         self.assertIsNone(matrix.stack_versions(config)["supervisor"])
         self.assertIsNone(matrix.stack_versions("{}")["opcache_cli"], "an older image reports no opcache")
