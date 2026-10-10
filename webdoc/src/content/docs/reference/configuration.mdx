@@ -153,6 +153,7 @@ what each one does. A cluster with none of them set is neither a standby nor rea
 | `QUEEN_RAFT_SEGMENT_BYTES` | `67108864` (64 MiB) | The size at which a queue-log file rolls. |
 | `QUEEN_RAFT_QLOG_ZSTD_LEVEL` | `1` | zstd level for queue-log payloads; `0` stores them raw. |
 | `QUEEN_QLOG_LANES` | `1` (1 to 64) | Queue-log lanes per queue. Read only when the data directory is created. |
+| `QUEEN_QLOG_SHARDS` | `0` (0 to 4096) | Shared queue logs. `0` gives every queue a log of its own; `K` maps every queue onto one of K shared logs, the layout for thousands of queues: a write fsyncs at most K files, and files fill at the rate of all the queues in them. Read only when the data directory is created. |
 | `QUEEN_QLOG_COMPACT_MIN_DEAD_PCT` | unset | Rewrite a sealed file once this percentage of it is dead. Unset: a per-queue log file on its first dead message, a shared one at 50%. |
 | `QUEEN_QLOG_SEAL_AGE_S` | `600` | An active file holding data this old is sealed so retention can reclaim it, once retention has a dead message in it or it holds an eighth of a full file; `0` never seals by age. |
 | `QUEEN_STORE_SCRUB_EVERY_S` | `21600` | How often the whole store is re-verified in the background; `0` turns the scrub off. |

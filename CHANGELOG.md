@@ -24,8 +24,8 @@ about 500,000 messages a second, against about 590,000 on 2.1.0, which read it f
 it was being read, the traffic at the tail kept its 300,000 messages a second, with a push p50 of
 about 21 ms for those seconds on both builds. From the disk it is the same on both: with 32 GB of
 backlog (48.75 million messages) and the page cache dropped, the consumers read it back at about
-365,000 messages a second on this build and 375,000 on 2.1.0, and the broker's own memory stayed
-at 0.5 GB against 2.2 GB. A walk over old messages asks the kernel for a chunk of records at
+360,000 messages a second on this build and 375,000 on 2.1.0, and the broker's own memory stayed
+at 0.6 GB against 2.2 GB. A walk over old messages asks the kernel for a chunk of records at
 once as soon as one read has waited for the disk, so the reads overlap.
 The change needs cluster version 6, which the leader raises by itself once every node runs this
 release; from then on 2.1.0 and older refuse to start on that data, and
@@ -62,7 +62,12 @@ or not retention had anything to free. A queue that got a message now and then m
 day, each with its index, and a queue without retention kept them all. An aged file is now sealed
 only when that is worth a file: retention found a message in it that has expired or whose queue
 is gone, or it holds an eighth of a full file. A queue without retention gets a new file every
-64 MiB and no other.
+64 MiB and no other. On a VM, 500 queues with a message each every 5 seconds for five minutes,
+retention off and the seal age at a twentieth of its default (what 100 minutes do at 600 s):
+2.1.0 ended with 3,630 files and 6,780 memory maps, this build with the 501 it started with and
+537 maps. With a retention of 20 seconds on the same queues, files are sealed as their messages
+expire and freed as they die: between 130 and 260 of them at any time, and none 45 seconds after
+the last message.
 
 **Server: the kernel's limit on memory maps cannot stop a node.** Every sealed log file kept its
 index memory-mapped, twice (the log's own map and retention's), and the kernel allows a process
