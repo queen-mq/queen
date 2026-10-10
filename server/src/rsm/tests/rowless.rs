@@ -24,6 +24,11 @@
 //!   retention is turned on, the messages go by their age read from the queue
 //!   log, the partitions' `log_start` reaches their end and the byte counters
 //!   return to zero.
+//! - [`completed_retention_frees_messages_without_rows_up_to_the_slowest_group`]:
+//!   with completed retention the messages every group has consumed go, whole
+//!   appends below the slowest group's cursor and nothing past it (an append
+//!   that cursor stops inside stays whole); that group then reads the rest
+//!   from the queue log, and the rest goes after it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -143,6 +148,25 @@ fn state(facade: &RaftFacade, q: &str, parts: &[&str]) -> (u64, Vec<PartitionRow
             Ok((r.count(Keyspace::Txns)?, rows))
         })
         .expect("read the store")
+}
+
+/// The committed cursor of `group` on `(q, part)`.
+fn committed(facade: &RaftFacade, q: &str, part: &str, group: &str) -> i64 {
+    let store = facade.store_for_test();
+    store
+        .read(|r| {
+            let pid = r.pid_of(T, q, part)?.expect("the partition exists");
+            let mut at = None;
+            r.scan_cursors(pid, usize::MAX, &mut |g, c| {
+                if g == group {
+                    at = Some(c.committed);
+                }
+                true
+            })?;
+            Ok(at)
+        })
+        .expect("read the store")
+        .unwrap_or_else(|| panic!("{group} has no cursor on {q}/{part}"))
 }
 
 /// Wait until every row of `(q, parts)` is gone while each partition still
@@ -651,6 +675,104 @@ async fn retention_removes_messages_without_rows_and_frees_their_bytes() {
     }
     let seen = drain(&facade, q, Some("late"), 10, true, &all()).await;
     expect_all(&seen, &parts, 40, 43, "after retention");
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn completed_retention_frees_messages_without_rows_up_to_the_slowest_group() {
+    let dir = scratch("completed");
+    let facade = open(&dir);
+    let (q, parts) = ("done", ["x"]);
+    configure(&facade, q, json!({ "dedupWindowSeconds": 0 })).await;
+    version_six(&facade).await;
+    // Eight appends of five messages.
+    for at in (0..40).step_by(5) {
+        push(&facade, q, "x", at, 5).await;
+    }
+    rows_gone(&facade, q, &parts, 0).await;
+    let held = state(&facade, q, &parts).1[0].unrowed_bytes;
+    assert!(held > 0, "the rows' bytes stay counted");
+
+    // One group reads everything, the other stops after its first messages.
+    let seen = drain(&facade, q, Some("fast"), 10, true, &all()).await;
+    expect_all(&seen, &parts, 0, 40, "fast");
+    let body = pop(&facade, q, Some("slow"), 12, true, &all())
+        .await
+        .expect("the slow group's first messages");
+    // Twelve messages: its cursor stops inside the third append.
+    let got = body["messages"].as_array().expect("messages").len() as u64;
+    assert_eq!(got, 12, "{body}");
+    assert_eq!(committed(&facade, q, "x", "slow"), 11);
+    // Completed retention frees whole appends below the lowest cursor: the
+    // third one stays, with the two messages of it that both groups have read.
+    let kept_from = 10;
+
+    configure(
+        &facade,
+        q,
+        json!({
+            "dedupWindowSeconds": 0,
+            "retentionEnabled": true,
+            "completedRetentionSeconds": 1,
+        }),
+    )
+    .await;
+    let mut last = None;
+    for _ in 0..600 {
+        let (rows, ps) = state(&facade, q, &parts);
+        if ps[0].log_start >= kept_from {
+            assert_eq!(rows, 0);
+            last = None;
+            break;
+        }
+        last = Some(ps);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        last.is_none(),
+        "completed retention never removed the messages both groups read: {last:?}"
+    );
+    // It stops at the slow group, however old the rest becomes.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let p = state(&facade, q, &parts).1.remove(0);
+    assert_eq!(
+        (p.log_start, p.rows_start, p.txns_start),
+        (kept_from, 40, kept_from),
+        "{p:?}"
+    );
+    assert!(
+        p.unrowed_bytes > 0 && p.unrowed_bytes < held,
+        "the bytes of what went are returned, the rest stay counted: {} of {held}",
+        p.unrowed_bytes
+    );
+
+    // The slow group reads what is left from the queue log, in order.
+    let seen = drain(&facade, q, Some("slow"), 10, true, &all()).await;
+    expect_all(&seen, &parts, got, 40, "slow");
+
+    // And then the rest goes too.
+    let mut last = None;
+    for _ in 0..600 {
+        let ps = state(&facade, q, &parts).1;
+        if ps[0].log_start == 40 {
+            assert_eq!(
+                (ps[0].rows_start, ps[0].txns_start, ps[0].unrowed_bytes),
+                (40, 40, 0),
+                "{:?}",
+                ps[0]
+            );
+            last = None;
+            break;
+        }
+        last = Some(ps);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        last.is_none(),
+        "completed retention never removed the rest: {last:?}"
+    );
 
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
