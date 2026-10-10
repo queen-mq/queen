@@ -225,6 +225,66 @@ final class JobMetricsWorkerTest extends TestCase
     }
 
     /**
+     * Laravel's timeout handler raises JobTimedOut, then WorkerStopping,
+     * then kills the worker: no JobProcessed and no JobExceptionOccurred.
+     * The attempt is a failed one, its runtime about the timeout, and it is
+     * written before the worker dies. Before 2.4.2 it was not recorded at all.
+     */
+    public function testAJobThatOutlivesItsTimeoutIsRecordedAsAFailedAttempt(): void
+    {
+        $this->requiresFork();
+        $log = $this->scratch('broker.log');
+        $this->broker->logTo($log);
+        $returned = $this->scratch('returned');
+
+        // A process of its own, since Laravel kills it.
+        $pid = $this->fork(function () use ($returned): void {
+            $this->broker->serve([
+                MetricsBroker::delivery(new MetricsInvoiceJob(20), 'job-1'),
+                MetricsBroker::delivery(new MetricsExportJob(5000), 'job-2'),
+            ]);
+            $this->spawn(['--timeout=1']);
+            touch($returned);
+        });
+        pcntl_waitpid($pid, $status);
+
+        $this->assertTrue(pcntl_wifsignaled($status) && pcntl_wtermsig($status) === SIGKILL);
+        $this->assertFileDoesNotExist($returned, 'killed inside the job');
+        $requests = MetricsBroker::logged($log);
+        $this->assertSame('/api/v1/kv', end($requests)['path'], 'written before the worker died');
+        $acknowledged = array_map(static fn (array $request): ?string => $request['body']['transactionId'] ?? null, $requests);
+        $this->assertNotContains('transaction-job-2', $acknowledged, 'never acknowledged');
+        $classes = $this->classes(MetricsBroker::fromLog($log));
+        $this->assertSame([1, 0], [$classes[MetricsInvoiceJob::class]['processed'], $classes[MetricsInvoiceJob::class]['failed']]);
+        $export = $classes[MetricsExportJob::class];
+        $this->assertSame([0, 1], [$export['processed'], $export['failed']]);
+        $this->assertGreaterThanOrEqual(1000, $export['max_ms']);
+        $this->assertLessThan(5000, $export['max_ms']);
+    }
+
+    /**
+     * `$this->fail()` returns normally, and Laravel raises JobProcessed for
+     * it; a delivery past its tries is failed before it runs. Both are failed
+     * attempts. Before 2.4.2 the first counted as processed.
+     */
+    public function testAJobThatFailsWithoutThrowingIsAFailedAttempt(): void
+    {
+        $this->broker->serve([
+            MetricsBroker::delivery(new MetricsExportJob(10, 'fail'), 'job-1'),
+            // The fourth delivery, for a pool with --tries=3.
+            MetricsBroker::delivery(new MetricsExportJob(10), 'job-2', 4),
+            MetricsBroker::delivery(new MetricsInvoiceJob(10), 'job-3'),
+        ]);
+
+        $this->assertSame(0, $this->spawn()[0]);
+
+        $classes = $this->classes($this->broker);
+        $this->assertSame(['MetricsExportJob', 'MetricsInvoiceJob'], MetricsJob::$ran, 'the fourth delivery never ran');
+        $this->assertSame([0, 2], [$classes[MetricsExportJob::class]['processed'], $classes[MetricsExportJob::class]['failed']]);
+        $this->assertSame([1, 0], [$classes[MetricsInvoiceJob::class]['processed'], $classes[MetricsInvoiceJob::class]['failed']]);
+    }
+
+    /**
      * Laravel raises JobProcessed for a job that released itself, or that
      * middleware such as WithoutOverlapping released: the attempt counts as
      * processed, with its runtime. Horizon leaves released jobs out of its
