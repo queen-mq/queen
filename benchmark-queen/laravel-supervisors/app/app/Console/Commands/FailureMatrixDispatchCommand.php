@@ -11,7 +11,7 @@ final class FailureMatrixDispatchCommand extends Command
 {
     protected $signature = 'bench:matrix-dispatch
         {--run-id= : Run identifier}
-        {--mode=ok : ok, throw, throw-once, release-once, fail or memory}
+        {--mode=ok : ok, throw, throw-once, release-once, fail, memory or release-then-ok}
         {--jobs=1 : Number of jobs}
         {--first=0 : Number of the first job, so several dispatches can share a run}
         {--sleep-ms=0 : Work of each successful attempt}

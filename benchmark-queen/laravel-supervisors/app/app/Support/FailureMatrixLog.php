@@ -12,6 +12,10 @@ use RuntimeException;
  */
 final class FailureMatrixLog
 {
+    /**
+     * @param array<string, mixed> $detail what the event saw, such as the
+     *        connection a worker ran the job on; empty for most events
+     */
     public function record(
         string $runId,
         string $jobId,
@@ -19,6 +23,7 @@ final class FailureMatrixLog
         string $event,
         string $mode,
         ?string $exception = null,
+        array $detail = [],
     ): void {
         $line = json_encode([
             'run_id' => $runId,
@@ -27,6 +32,10 @@ final class FailureMatrixLog
             'event' => $event,
             'mode' => $mode,
             'exception' => $exception,
+            'detail' => $detail === [] ? null : $detail,
+            // Replicas share the results volume and may reuse a pid: the
+            // container's host name tells their workers apart.
+            'host' => gethostname(),
             'pid' => getmypid(),
             'memory_mib' => intdiv(memory_get_usage(true), 1024 * 1024),
             'at' => microtime(true),

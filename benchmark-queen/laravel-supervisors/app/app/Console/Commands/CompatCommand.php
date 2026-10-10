@@ -114,6 +114,7 @@ final class CompatCommand extends CompatScenarioCommand
             $this->first('c2', 'started') >= $this->first('c1', 'completed')
             && $this->first('c3', 'started') >= $this->first('c2', 'completed'));
         $this->check('each link ran once', array_sum(array_map(fn (string $j): int => $this->count($j, 'completed'), ['c1', 'c2', 'c3'])) === 3);
+        $this->sameJobs(['c1', 'c2', 'c3']);
     }
 
     private function chainFailure(): void
@@ -131,6 +132,8 @@ final class CompatCommand extends CompatScenarioCommand
         $this->check('the link before the failure ran', $this->count('c1', 'completed') === 1);
         $this->check('the link after the failure never ran', $this->count('c3', 'started') === 0);
         $this->check('catch() ran once', $this->count('chain', 'chain_catch') === 1);
+        $this->sameJobs(['c1', 'c2', 'c3']);
+        $this->same('chain catch()', $this->count('chain', 'chain_catch'));
     }
 
     private function batch(): void
@@ -145,6 +148,8 @@ final class CompatCommand extends CompatScenarioCommand
         $found = Bus::findBatch($batch->id);
         $this->check('the batch is finished with no failure', $found !== null && $found->finished() && $found->failedJobs === 0,
             $found === null ? 'not found' : "finished {$found->finished()}, failed {$found->failedJobs}");
+        $this->sameJobs(['b0', 'b1', 'b2', 'b3', 'b4']);
+        $this->sameCallbacks($found);
     }
 
     private function batchFailure(): void
@@ -158,6 +163,9 @@ final class CompatCommand extends CompatScenarioCommand
         $found = Bus::findBatch($batch->id);
         $this->check('the batch is cancelled with one failure', $found !== null && $found->cancelled() && $found->failedJobs === 1,
             $found === null ? 'not found' : "cancelled {$found->cancelled()}, failed {$found->failedJobs}");
+        // b0 and b2 race the cancellation: whether they ran is the workers' timing.
+        $this->sameJobs(['b1']);
+        $this->sameCallbacks($found);
     }
 
     private function unique(): void
@@ -172,6 +180,7 @@ final class CompatCommand extends CompatScenarioCommand
         CompatUniqueJob::dispatch($this->run, 'u1', 'ok', 0)->onConnection($this->connection)->onQueue($this->queue);
         $this->waitFor(fn (): bool => $this->count('u1', 'completed') > 1);
         $this->check('once it ran, the lock is released', $this->count('u1', 'completed') === 2);
+        $this->sameJobs(['u1']);
     }
 
     private function withoutOverlapping(): void
@@ -220,6 +229,9 @@ final class CompatCommand extends CompatScenarioCommand
             $gaps[0] > 0.0 && $gaps[0] <= 5.0 && $gaps[1] > 2.0 && $gaps[1] <= 7.0,
             implode(', ', $this->observed['gaps_seconds']));
         $this->check('failed() ran once', $this->count('p1', 'failed_hook') === 1);
+        $this->sameJobs(['p1']);
+        $this->near('backoff before the second run', $gaps[0], 1.5);
+        $this->near('backoff before the third run', $gaps[1], 1.5);
     }
 
     private function retryUntil(): void
@@ -232,6 +244,11 @@ final class CompatCommand extends CompatScenarioCommand
         $this->observed['failed_after_seconds'] = round($span, 2);
         $this->check('retried until the deadline, then failed', count($starts) >= 3 && $span >= 4.5 && $span <= 20,
             count($starts) . " attempts, failed after {$this->observed['failed_after_seconds']} s");
+        // How many runs fit before the deadline is the workers' pace; that the
+        // job ran three times or more and failed once at the deadline is Laravel's.
+        $this->same('t1 ran three times or more', count($starts) >= 3);
+        $this->same('t1 failed() and its row', [$this->count('t1', 'failed_hook'), isset($this->failedIds()['t1'])]);
+        $this->near('t1 failed after', $span, 2.0);
     }
 
     private function maxExceptions(): void
@@ -240,6 +257,7 @@ final class CompatCommand extends CompatScenarioCommand
         $this->waitFor(fn (): bool => $this->count('m1', 'failed_hook') > 0);
         $this->settle(3);
         $this->check('failed after two exceptions, not ten tries', $this->count('m1', 'started') === 2, $this->count('m1', 'started') . ' attempts');
+        $this->sameJobs(['m1']);
     }
 
     private function failOnTimeout(): void
@@ -250,6 +268,7 @@ final class CompatCommand extends CompatScenarioCommand
         $this->check('failed on its first timeout, not retried', $this->count('f1', 'started') === 1 && $this->count('f1', 'completed') === 0,
             $this->count('f1', 'started') . ' attempts');
         $this->check('the failure is a timeout', str_contains((string) $this->exceptionOf('f1'), 'TimeoutExceeded'), (string) $this->exceptionOf('f1'));
+        $this->sameJobs(['f1']);
     }
 
     private function encrypted(): void
@@ -276,6 +295,7 @@ final class CompatCommand extends CompatScenarioCommand
         $this->settle(3);
         $this->check('a job dispatched in a rolled-back transaction never runs', $this->count('a1', 'started') === 0);
         $this->check('a job dispatched in a committed transaction runs', $this->count('a2', 'completed') === 1);
+        $this->sameJobs(['a1', 'a2']);
     }
 
     private function events(): void
@@ -287,6 +307,10 @@ final class CompatCommand extends CompatScenarioCommand
         $this->check('JobProcessing fired for both', $this->count('v1', 'event_before') === 1 && $this->count('v2', 'event_before') === 1);
         $this->check('JobProcessed fired for the one that succeeded', $this->count('v1', 'event_after') === 1);
         $this->check('JobFailed fired once for the one that failed', $this->count('v2', 'event_failing') === 1);
+        $this->sameJobs(['v1', 'v2']);
+        foreach (['v1', 'v2'] as $job) {
+            $this->same("{$job} JobProcessed, JobFailed", [$this->attemptsOf($job, 'event_after'), $this->attemptsOf($job, 'event_failing')]);
+        }
     }
 
     private function failedCommands(): void
@@ -316,6 +340,7 @@ final class CompatCommand extends CompatScenarioCommand
         $this->check('queue:flush removed the rest', $this->failedIds() === []);
         $this->settle(5);
         $this->check('none of the forgotten jobs ran', $this->count('f4', 'completed') === 0 && $this->count('f5', 'completed') === 0);
+        $this->sameJobs(['f1', 'f2', 'f3', 'f4', 'f5']);
     }
 
     private function queueSize(): void
@@ -367,6 +392,19 @@ final class CompatCommand extends CompatScenarioCommand
             ->onConnection($this->connection)
             ->onQueue($this->queue)
             ->dispatch();
+    }
+
+    /** The batch's callbacks and its final state, for the outcome. */
+    private function sameCallbacks(?Batch $found): void
+    {
+        $this->same('batch then(), catch(), finally()', array_map(fn (string $event): int => $this->count('batch', $event),
+            ['batch_then', 'batch_catch', 'batch_finally']));
+        $this->same('batch state', $found === null ? null : [
+            'finished' => $found->finished(),
+            'cancelled' => $found->cancelled(),
+            'pending' => $found->pendingJobs,
+            'failed' => $found->failedJobs,
+        ]);
     }
 
     /** @param int|list<int> $backoff */
