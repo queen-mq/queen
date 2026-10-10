@@ -2298,7 +2298,8 @@ class FailureRecordingTestHandler
     {
     }
 
-    public function failed(array $data, \Throwable $exception, string $uuid, mixed $job): void
+    /** Laravel 12 passes the job too; Laravel 11 does not. */
+    public function failed(array $data, \Throwable $exception, string $uuid, mixed $job = null): void
     {
         self::$failures[] = $exception;
     }
