@@ -168,6 +168,39 @@ final class LeaderElectionTest extends TestCase
         $this->assertSame(['t-1'], $handled);
     }
 
+    /**
+     * A gateway in front of the broker may answer a pop with an empty 200 during
+     * a rollout. That is no empty pop and no message, but neither is it the end
+     * of consume(): it backs off and polls again, as after a network error.
+     */
+    public function testConsumeGoesOnAfterAnAnswerThatIsNotTheBrokers(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'body' => ''],
+            ['status' => 200, 'json' => ['messages' => [[
+                'transactionId' => 't-1',
+                'partitionId' => 'p-1',
+                'leaseId' => 'l-1',
+                'data' => [],
+            ]]]],
+        ], ['status' => 200, 'json' => ['success' => true]]);
+        $queen = new Queen([
+            'url' => 'http://queen.test:6632',
+            'retryDelayMillis' => 0,
+            'retryAttempts' => 1,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $handled = [];
+        $queen->queue('orders')->group('workers')->limit(1)
+            ->consume(function (array $messages) use (&$handled): void {
+                $handled[] = $messages[0]['transactionId'];
+            })
+            ->execute();
+
+        $this->assertSame(['t-1'], $handled);
+    }
+
     public function testHighLevelConsumeReturnsNothingAfterA503(): void
     {
         $handler = new PlanHandler([], self::unavailable('outcome_unknown'));

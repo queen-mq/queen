@@ -199,12 +199,17 @@ class HighLevelConsumer
      */
     private function backedOffAfterTransientError(\Throwable $error, int $timeoutMs): bool
     {
-        if (!$error instanceof HttpException || !$error->isTransient()) {
+        // An answer that is not the broker's (empty or malformed, as a gateway's
+        // during a rollout) is transient too.
+        $unexpected = $error instanceof \UnexpectedValueException;
+        if (!$unexpected && (!$error instanceof HttpException || !$error->isTransient())) {
             return false;
         }
 
         $this->lastPopError = $error->getMessage();
-        $pauseMillis = $error->retryAfterSeconds !== null ? (int) round($error->retryAfterSeconds * 1000) : 1000;
+        $pauseMillis = $error instanceof HttpException && $error->retryAfterSeconds !== null
+            ? (int) round($error->retryAfterSeconds * 1000)
+            : 1000;
         usleep(max(0, min($pauseMillis, $timeoutMs)) * 1000);
 
         return true;

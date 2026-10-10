@@ -235,7 +235,10 @@ class ConsumerManager
                     if ($isTimeout && $wait) {
                         continue; // Normal for long polling
                     }
-                    $isNetwork = str_contains($error->getMessage(), 'Connection refused') || str_contains($error->getMessage(), 'cURL error');
+                    // An answer that is not the broker's (empty or malformed, as a
+                    // gateway's during a rollout) passes like a network error.
+                    $isNetwork = str_contains($error->getMessage(), 'Connection refused') || str_contains($error->getMessage(), 'cURL error')
+                        || $error instanceof \UnexpectedValueException;
                     if ($isNetwork) {
                         usleep(1_000_000);
                         continue;
@@ -455,7 +458,10 @@ class ConsumerManager
                     continue;
                 }
 
-                $isNetwork = str_contains($error->getMessage(), 'Connection refused') || str_contains($error->getMessage(), 'cURL error');
+                // An answer that is not the broker's (empty or malformed, as a
+                // gateway's during a rollout) passes like a network error.
+                $isNetwork = str_contains($error->getMessage(), 'Connection refused') || str_contains($error->getMessage(), 'cURL error')
+                    || $error instanceof \UnexpectedValueException;
                 if ($isNetwork) {
                     usleep(1_000_000);
                     continue;
