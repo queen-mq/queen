@@ -27,10 +27,45 @@ export function supervisorActivity(data, queue, now = Date.now()) {
   const samples = (data.backlog || []).filter(row => Date.parse(row.bucket) <= now && Date.parse(row.bucket) >= now - 3_600_000)
     .sort((a, b) => Date.parse(a.bucket) - Date.parse(b.bucket))
   return { ...metrics, points, minutes, readAt: now, queue,
+    backlogPoints: samples.map(row => ({ at: Date.parse(row.bucket), pending: value(row.pending) })),
     pendingAt: samples.length ? Date.parse(samples.at(-1).bucket) : null,
     incoming: points.at(-1)?.incoming ?? null, delivered: points.at(-1)?.delivered ?? null,
     trafficSamples: points.filter(point => point.incoming !== null || point.delivered !== null).length,
     backlogSamples: points.filter(point => point.pending !== null).length }
+}
+
+// Sum the reported queues, once each, over one shared read window. Traffic
+// rows are sparse: sum observations, leaving a gap when no queue has a sample.
+// Backlog is a level: only add depths measured at the same time for every queue.
+export function aggregateSupervisorActivity(activities) {
+  const queues = [...new Map(activities.map(activity => [activity.queue, activity])).values()]
+  if (!queues.length) return null
+  const first = queues[0]
+  if (queues.some(activity => activity.readAt !== first.readAt || activity.minutes !== first.minutes)) {
+    throw new Error('Inconsistent activity windows')
+  }
+  const sum = values => values.reduce((total, n) => n === null ? total : (total ?? 0) + n, null)
+  const depth = values => values.every(n => n != null) ? sum(values) : null
+  const points = first.points.map((point, index) => ({
+    at: point.at,
+    incoming: sum(queues.map(activity => activity.points[index].incoming)),
+    delivered: sum(queues.map(activity => activity.points[index].delivered)),
+    pending: depth(queues.map(activity => activity.points[index].pending)),
+  }))
+  const depths = queues.map(activity => new Map(activity.backlogPoints.map(point => [point.at, point.pending])))
+  const times = [...new Set(queues.flatMap(activity => activity.backlogPoints.map(point => point.at)))].sort((a, b) => a - b)
+  const backlogPoints = times.map(at => ({ at, pending: depth(depths.map(samples => samples.get(at))) }))
+  const latest = backlogPoints.at(-1)
+  return {
+    queue: null, minutes: first.minutes, readAt: first.readAt, points, backlogPoints,
+    incoming: points.at(-1)?.incoming ?? null, delivered: points.at(-1)?.delivered ?? null,
+    ackFailures: sum(queues.map(activity => activity.ackFailures)),
+    pending: latest?.pending ?? null, pendingAt: latest?.pending != null ? latest.at : null,
+    pendingDelta: backlogPoints.length > 1 && backlogPoints.every(point => point.pending !== null)
+      ? latest.pending - backlogPoints[0].pending : null,
+    trafficSamples: points.filter(point => point.incoming !== null || point.delivered !== null).length,
+    backlogSamples: points.filter(point => point.pending !== null).length,
+  }
 }
 
 // One reader per page: repeated queues share one request and visible cards
