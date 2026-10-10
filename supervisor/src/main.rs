@@ -478,7 +478,16 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
     config.exit_markers = match prepare_exit_markers(&state.directory) {
         Ok(directory) => Some(directory.to_string_lossy().into_owned()),
         Err(error) => {
-            eprintln!("exit markers disabled, a job timeout counts as a crash: {error}");
+            eprintln!(
+                "exit markers disabled, a job timeout counts as a crash{}: {error}",
+                if config.prefork {
+                    " and queue:restart is not seen: the fork server is never replaced, \
+                     so forked workers keep running the code it booted until the supervisor \
+                     restarts"
+                } else {
+                    ""
+                }
+            );
             None
         }
     };
@@ -8407,6 +8416,42 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
         assert!(alive, "the supervisor stopped:\n{log}");
         assert_eq!(drained, 0, "the workers were drained:\n{log}");
         assert_eq!(reported, "running", "{log}");
+    }
+
+    /// Without its exit markers, prefork cannot tell a queue:restart from
+    /// any clean exit: the fork server is never replaced and forked workers
+    /// keep running the code it booted. The master says so when it starts.
+    #[cfg(unix)]
+    #[test]
+    fn disabled_exit_markers_warn_that_prefork_misses_queue_restart() {
+        let directory = temporary_directory("exit-markers-disabled");
+        let state = directory.join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        // A file where the exit-marker directory goes.
+        write_private_file(&state.join("exits"), b"");
+        write_fake_artisan(
+            &directory,
+            "if [ \"$1\" = queen:fork-server ]; then exit 1; fi\n: > \"ready.$$\"\n\
+             while :; do sleep 0.05; done\n",
+        );
+        let mut document = supervisor_document(&directory, &closing_broker());
+        document["prefork"] = serde_json::json!(true);
+        let supervisor = start_supervisor(&directory, &document, &[]);
+        let worker = await_pid_file(&directory, "ready.", Duration::from_secs(20));
+        terminate_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(worker.is_some(), "the worker never started:\n{log}");
+        let warning = log
+            .lines()
+            .find(|line| line.starts_with("exit markers disabled"))
+            .unwrap_or_else(|| panic!("no warning:\n{log}"));
+        assert!(
+            warning.contains("queue:restart") && warning.contains("fork server"),
+            "{warning}"
+        );
     }
 
     /// The broker calls of a stop (coordination leave, remote status) may
