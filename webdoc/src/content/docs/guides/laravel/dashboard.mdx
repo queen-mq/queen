@@ -77,6 +77,10 @@ sourceOfTruth:
 # probe and reads its fork servers' events once per loop; the dashboard config reads
 # QUEEN_DASHBOARD_ENABLED through filter_var, so 1 turns it on. Nothing else this page states
 # changes.
+# sourceOfTruth re-read 2026-10-10 (probe user): SupervisorState reads a state that another user
+# owns as that user when root reads it, refuses root's writes, and names the owner and the reader
+# when it refuses anyone else. The panel's reads and controls are as described. Nothing this page
+# states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the

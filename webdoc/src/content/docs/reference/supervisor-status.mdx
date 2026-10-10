@@ -64,6 +64,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-09 (review fixes): main.rs changes how a pool's circuit closes and
 # how fork servers are refreshed; the status document, its restart_state values and its keys are
 # unchanged.
+# sourceOfTruth re-read 2026-10-10 (probe user): SupervisorState reads a state that another user
+# owns as that user when root reads it, and refuses root's writes. The status document, its
+# liveness and readiness rules are unchanged. Nothing this page states changes.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.
