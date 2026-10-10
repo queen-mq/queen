@@ -80,6 +80,10 @@ sourceOfTruth:
 # resolved, reports a child's exception and leaves at once after queue:restart; QueenConnector
 # applies the pool's environment to the worked connection alone; the failed-job provider leaves
 # other drivers to Laravel. The failed-jobs and restart paragraphs say so.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): a supervised worker
+# leaves on a wrong connection or a LogicException from its pop, and otherwise writes since when its
+# pops fail beside its exit marker (WorkerExitMarker writes both); the fork server's child registers
+# the guard. The paragraph on a forked worker's files says so.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,
@@ -458,7 +462,8 @@ master, exactly as with a worker started on its own.
 - **The files** sit in private directories (mode 0700) of the master's state directory, written to
   a temporary name and renamed, so the master never reads half a file. Runtimes are written only
   for pools that scale with the `time` strategy. The exit reason tells a job timeout from a crash,
-  and `restart` makes the master start a new fork server.
+  and `restart` makes the master start a new fork server. A worker whose pops fail writes since
+  when beside its exit marker, until a pop works ([status](/guides/laravel/supervisors/#inspect-and-control-either-engine)).
 - **When the master dies,** the fork server sees its stdin close, or on Linux gets SIGTERM as its
   parent-death signal, and SIGKILLs every worker it forked. No worker outlives its master.
 - **Nothing the boot opened is shared.** The fork server closes the database and Redis connections,

@@ -57,6 +57,9 @@ sourceOfTruth:
 # connection's, a connection's url is not replaced by the default urls, every switch variable
 # takes 1; the failed-job provider leaves other drivers' records to Laravel. The bullets, the urls
 # row and the pool table say so.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
+# registers WorkerPopGuard; QueenQueue::pop reports to it. The state directory row names the files
+# of workers whose pops fail; no setting changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. Since PHP client 2.1.0 the
@@ -266,7 +269,7 @@ ownership is checked before Laravel's row changes ([failed jobs](/guides/laravel
 | `supervisor.read_bearer_token` | unset | Token for the depth reads, the event-driven poll, the dashboard's reads and `queen:check-waits`. When unset: the connection's token. Variable: `QUEEN_SUPERVISOR_READ_BEARER_TOKEN`. |
 | `supervisor.shutdown_grace` | `75` | How long a stopping worker may finish its job before it is killed, in seconds. |
 | `supervisor.process_limit` | `256` | Most child processes the master runs, renewal helpers included, at most 4,096. |
-| `supervisor.state_directory` | `storage/queen-supervisor` | The private directory for status, the lock, controls, telemetry and exit markers. Variable: `QUEEN_SUPERVISOR_STATE_DIRECTORY`. |
+| `supervisor.state_directory` | `storage/queen-supervisor` | The private directory for status, the lock, controls, telemetry, exit markers and the notes of workers whose pops fail. Variable: `QUEEN_SUPERVISOR_STATE_DIRECTORY`. |
 | `supervisor.telemetry_ttl` | `300` | How long worker runtime samples are kept for the `time` strategy, in seconds. |
 | `supervisor.remote_status.enabled` | `false` | Also publish the status to the broker, for a dashboard on another host. Variable: `QUEEN_SUPERVISOR_REMOTE_STATUS`. |
 | `supervisor.remote_status.connection` | `queen` | The queue connection whose broker and write credential are used. |

@@ -52,6 +52,10 @@ sourceOfTruth:
 # takes its connection's; the failed-job provider leaves other drivers' records to Laravel,
 # without the lock; the connector applies the pool's settings to the worked connection alone. The
 # pool row says so.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
+# registers WorkerPopGuard, QueenQueue::pop reports to it, and `queen:supervisor status --json` lists
+# the workers that do not consume; `--check` also fails after a minute of failed pops. The rehearsal
+# still asks for `--check` to pass. Nothing this page states changes.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place

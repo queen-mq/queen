@@ -18,6 +18,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): QueenConnector applies a
 # pool's environment settings to the worked connection alone; prefetch, auto batching and the pop
 # counts this page measures are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenQueue::pop tells a
+# supervised worker's WorkerPopGuard how each pop went, a pop served from the prefetched batch
+# included; batches, ACKs and pop-ahead are unchanged. Nothing this page states changes.
 ---
 
 With `prefetch` 1 a worker makes one pop for every job. With `prefetch` `'auto'` it starts at one

@@ -13,6 +13,9 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Queue/QueenQueue.php
 verifiedBy:
   - examples/apps/laravel/app/Console/Commands/Examples/OrderingExample.php
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenQueue::pop tells a
+# supervised worker's WorkerPopGuard how each pop went; striping and partition order are unchanged.
+# Nothing this page states changes.
 ---
 
 A job that implements `QueenPartitionable` waits until the job before it of the same customer has

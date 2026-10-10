@@ -54,6 +54,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-09 (review fixes): the crash-loop circuit closes only with the
 # probe in both engines, as the table says; the failed-job provider leaves other drivers' records
 # to Laravel. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): a worker that cannot
+# pop leaves or is reported by status, where Horizon's keeps looping. The table gains that row.
 ---
 
 Queen is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both
@@ -288,6 +290,7 @@ the PHP client and the Rust supervisor.
 | Configuration and status | `config/horizon.php`, with its records in Redis | one configuration and one status protocol for both engines; configuration, status and telemetry have explicit size limits |
 | Worker memory | every worker boots Laravel | the same, or prefork: workers share one booted Laravel |
 | Crash loops | restart behaviour of Horizon and the outer monitor | capped backoff and a one-probe circuit in both engines, for short-lived crashes only |
+| A worker that cannot pop | it reports each failure and pops again, alive and counted | it leaves on a wrong connection or a `LogicException`, and otherwise status reports it after a minute of failed pops |
 | Several master hosts | master records in Horizon's Redis repository | opt-in coordination through the broker, otherwise one master |
 | Dashboard | the mature Horizon dashboard | the supervisor panel for every host or pod, plus the Queen dashboard |
 | Job metrics | per job and per queue, from `horizon:snapshot` | live per class, one hour to one day, from every worker; a per-queue chart from the broker's counters |
