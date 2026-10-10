@@ -196,6 +196,36 @@ Each probe boots Laravel once, so keep its period in tens of seconds. `status --
 asks only whether the master is alive. `status --check` also requires every pool to be ready, and
 fits a readiness probe if anything routes traffic to the pod.
 
+Readiness depends on the broker: `queue_depth_unavailable` when the master cannot read it, and,
+since PHP client 2.4.2, `pool_not_consuming` when every worker of a pool has failed every pop for a
+minute. A readiness or startup probe that includes them takes the pods out of a rollout for as long
+as the broker is unreachable, and a rollout that waits for ready pods, such as one with
+`maxUnavailable: 0` or `helm upgrade --atomic`, stops or is rolled back. If broker outages should
+raise an alert rather than stop a deploy, keep `--check-liveness` for liveness and read readiness
+yourself, without those codes, from a script that needs only Composer's autoloader:
+
+```php
+<?php // scripts/queen-ready.php: exits 1 unless the supervisor is ready, broker aside
+
+use Queen\Laravel\Supervisor\SupervisorState;
+
+require __DIR__ . '/../vendor/autoload.php';
+
+$state = new SupervisorState('/run/queen-supervisor'); // queen.supervisor.state_directory
+$status = $state->status();
+if ($status === null) {
+    exit(1);
+}
+$issues = array_filter(
+    $state->readiness($status)['issues'],
+    fn (array $issue): bool => !in_array($issue['code'], ['queue_depth_unavailable', 'pool_not_consuming'], true),
+);
+exit($issues === [] ? 0 : 1);
+```
+
+A worker that works the wrong connection, or whose pops fail on a `LogicException`, still fails
+readiness this way: it exits, its pool's restarts back off, and its circuit opens.
+
 Without coordination the rule is one master per application and consumer group: one replica, no
 autoscaler, and `strategy: { type: Recreate }`.
 
