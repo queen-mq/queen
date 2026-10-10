@@ -1,0 +1,119 @@
+---
+title: Terraform
+description: "A Terraform and OpenTofu provider for what lives inside a broker: the configuration of its queues and a cluster's S3 sink, whose secret is write-only and never enters the state."
+type: how-to
+tier: operate
+sidebar:
+  order: 3.7
+sourceOfTruth:
+  - deploy/terraform-provider-queen/internal/provider/provider.go
+  - deploy/terraform-provider-queen/internal/provider/queue_resource.go
+  - deploy/terraform-provider-queen/internal/provider/s3_sink_resource.go
+  - deploy/terraform-provider-queen/internal/provider/client.go
+  - deploy/terraform-provider-queen/examples/main.tf
+  - server/src/handlers/queues.rs
+  - proxy/src/cp.rs
+---
+
+A queue's retention and a cluster's S3 sink are settings of the broker, and they usually belong
+beside the infrastructure they depend on: the sink next to the bucket it writes to. The provider
+declares them from Terraform or OpenTofu, through the same HTTP API you would call by hand.
+
+```hcl
+terraform {
+  required_providers {
+    queen = { source = "queen-mq/queen" }
+  }
+}
+
+provider "queen" {
+  endpoint    = "http://queen.queen.svc.cluster.local:6632"
+  cp_endpoint = "http://queen-proxy.queen.svc.cluster.local:6711"
+}
+```
+
+`endpoint` is the broker, or the proxy in front of it, with `token` (an API key or a JWT) when it
+asks for one. `cp_endpoint` and `cp_token` are the proxy's [control plane](/operate/tenants/), which
+only the S3 sink needs. Each is also read from the environment (`QUEEN_ENDPOINT`, `QUEEN_TOKEN`,
+`QUEEN_CP_ENDPOINT`, `QUEEN_CP_TOKEN`), so a token need not be in any file.
+
+## A queue
+
+```hcl
+resource "queen_queue" "orders" {
+  name              = "orders"
+  lease_time        = 30
+  retry_limit       = 5
+  retention_enabled = true
+  retention_seconds = 604800
+}
+```
+
+The arguments are the [queue options](/concepts/partitions/#queue-options) in snake case. One you
+leave out stays as the broker has it, because the broker merges what it is sent. That is also what
+makes it safe to take over a queue a push already created: only what you name changes, and its
+`namespace` and `task` stay. A change made by hand shows in the next plan and is put back by the
+next apply.
+
+Destroying the resource leaves the queue and its messages and only forgets it. It deletes the
+queue, with every message in it, only when you ask:
+
+```hcl
+  delete_on_destroy = true
+```
+
+## The S3 sink
+
+```hcl
+variable "s3_secret_key" {
+  type      = string
+  sensitive = true
+  ephemeral = true
+}
+
+resource "queen_s3_sink" "lake" {
+  cluster            = "acme"
+  queues             = queen_queue.orders.name
+  endpoint           = "https://storage.googleapis.com"
+  region             = "auto"
+  bucket             = google_storage_bucket.lake.name
+  access_key         = google_storage_hmac_key.queen.access_id
+  secret_key         = var.s3_secret_key
+  secret_key_version = 1
+  format             = "parquet"
+}
+```
+
+The settings are the per-sink ones of the [S3 guide](/guides/s3/#reference), and the broker has to
+run with `QUEEN_S3_EMBEDDED=true`. `secret_key` is write-only: the plan shows it as such, it is
+sent to the broker, which seals it with its own encryption key, and it is never written to the
+state.
+
+```text
+      + secret_key         = (write-only attribute)
+      + secret_key_set     = (known after apply)
+      + secret_key_version = 1
+```
+
+It is sent when the sink is created, and again whenever `secret_key_version` changes, which is how
+you rotate it. Any other change sends the settings alone and the broker keeps the secret it holds.
+Write-only arguments need Terraform 1.11 or OpenTofu 1.11.
+
+## Import
+
+```bash
+terraform import queen_queue.orders orders
+terraform import queen_s3_sink.lake acme
+```
+
+A queue is imported by its name and a sink by its cluster's slug.
+
+## Limits
+
+- Tenants, API keys and the PostgreSQL connectors have no resource yet. The control plane creates
+  and deletes tenants and keys but has no route that reads one back, which a provider needs to see
+  drift.
+- The provider is built from `deploy/terraform-provider-queen` in the repository and is not in a
+  registry yet: until it is, point the CLI at a build with `dev_overrides`, as its README shows.
+- The broker stores a queue option as it is sent. The provider refuses a negative number before it
+  gets there.

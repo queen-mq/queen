@@ -193,6 +193,15 @@ on 2026-10-08, under a write load of 6,100 pushes of which none was lost; on thi
 tests ran, and those runs were not repeated. The image is `ghcr.io/queen-mq/queen-operator`, built
 by the `Operator` workflow. Docs: `operate/operator`.
 
+**Terraform: a provider for queues and the S3 sink.** `deploy/terraform-provider-queen` is a
+provider for Terraform and OpenTofu with two resources. `queen_queue` declares a queue's options:
+one you leave out stays as the broker has it, and destroying the resource forgets the queue and
+deletes it only with `delete_on_destroy`. `queen_s3_sink` declares a cluster's S3 sink through
+the control plane, with a `secret_key` that is write-only and never enters the state. Its
+acceptance tests pass against this release with Terraform 1.15.8 and OpenTofu 1.13.1. It is not in
+a registry yet: build it and point the CLI at the build with `dev_overrides`. Docs:
+`operate/terraform`.
+
 ## PHP client 2.4.1 - 2026-10-09
 
 **Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the
