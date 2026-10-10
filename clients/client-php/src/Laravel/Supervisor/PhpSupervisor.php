@@ -145,6 +145,10 @@ final class PhpSupervisor
                 // performs its own fail-open reconcile from the last target.
                 $unavailableConnections = [];
                 foreach ($this->config['supervisors'] as $name => $options) {
+                    // Stopped: no other pool's depth call delays the drain.
+                    if (!$this->running) {
+                        break;
+                    }
                     if (!$pollDue && !isset($eventDue[$name])) {
                         continue;
                     }
@@ -1477,15 +1481,35 @@ final class PhpSupervisor
     private function installSignalHandlers(): void
     {
         pcntl_async_signals(true);
-        pcntl_signal(SIGINT, fn () => $this->stop());
-        pcntl_signal(SIGTERM, fn () => $this->stop());
+        pcntl_signal(SIGINT, fn () => $this->stopOnSignal());
+        pcntl_signal(SIGTERM, fn () => $this->stopOnSignal());
         if (defined('SIGQUIT')) {
-            pcntl_signal(SIGQUIT, fn () => $this->stop());
+            pcntl_signal(SIGQUIT, fn () => $this->stopOnSignal());
         }
         if (defined('SIGHUP')) {
             // A dropped terminal, or an operator's HUP: a drain, as the Rust
             // master does, not a hard death that leaves the workers behind.
-            pcntl_signal(SIGHUP, fn () => $this->stop());
+            pcntl_signal(SIGHUP, fn () => $this->stopOnSignal());
+        }
+    }
+
+    /**
+     * A stop signal: the workers get their SIGTERM from the handler. The loop
+     * sees the stop only after the broker calls of its pass, the heartbeat
+     * and each pool's depth, each up to http_timeout per endpoint: with a
+     * broker that stopped answering, the workers got their SIGTERM tens of
+     * seconds late, and the platform's stop deadline killed them in the
+     * middle of a job. The handler only signals the pids it tracks, and
+     * touches no Process the interrupted code may be updating; the drain
+     * signals every worker again and waits for them.
+     */
+    private function stopOnSignal(): void
+    {
+        $this->stop();
+        foreach ($this->workerPids as $pid) {
+            if ($pid > 0) {
+                @posix_kill($pid, SIGTERM);
+            }
         }
     }
 
