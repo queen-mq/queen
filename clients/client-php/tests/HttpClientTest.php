@@ -109,6 +109,54 @@ class HttpClientTest extends TestCase
         $this->assertSame(1, $handler->count());
     }
 
+    /**
+     * A body json_encode() refuses (here a string that is not UTF-8) is the
+     * caller's error: nothing was sent, so no backend is to blame and no
+     * retry can help.
+     */
+    public function testABodyThatCannotBeEncodedFailsAtOnceAndLeavesEveryBackendHealthy(): void
+    {
+        $handler = new PlanHandler([], ['status' => 201, 'json' => [['status' => 'queued']]]);
+        $loadBalancer = new LoadBalancer(['http://queen-a:6632', 'http://queen-b:6632'], 'round-robin');
+        $client = new HttpClient([
+            'loadBalancer' => $loadBalancer,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $started = microtime(true);
+        try {
+            $client->post('/api/v1/push', ['items' => [['queue' => 'q', 'payload' => "caf\xE9"]]]);
+            $this->fail('A body json_encode() refuses was sent.');
+        } catch (\JsonException $exception) {
+            $this->assertStringContainsString('UTF-8', $exception->getMessage());
+        }
+
+        $this->assertSame(0, $handler->count());
+        $this->assertLessThan(0.5, microtime(true) - $started, 'no backoff for a request that was never sent');
+        foreach ($loadBalancer->getHealthStatus() as $url => $status) {
+            $this->assertTrue($status['healthy'], "{$url} was marked unhealthy for the caller's body");
+        }
+    }
+
+    public function testABodyThatCannotBeEncodedIsNotRetriedAgainstASingleBackend(): void
+    {
+        $handler = new PlanHandler([], ['status' => 201, 'json' => [['status' => 'queued']]]);
+        $client = new HttpClient([
+            'baseUrl' => 'http://queen.test:6632',
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $started = microtime(true);
+        try {
+            $client->post('/api/v1/push', ['items' => [['queue' => 'q', 'payload' => "caf\xE9"]]]);
+            $this->fail('A body json_encode() refuses was sent.');
+        } catch (\JsonException) {
+        }
+
+        $this->assertSame(0, $handler->count());
+        $this->assertLessThan(0.5, microtime(true) - $started, 'the default 1 s + 2 s backoff ran');
+    }
+
     public function testMalformedSuccessfulJsonUsesTheNormalRetryBoundary(): void
     {
         $calls = 0;
