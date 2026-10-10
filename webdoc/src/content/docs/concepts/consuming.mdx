@@ -69,6 +69,10 @@ verifiedBy:
 # start waits for the circuit; the PHP stop signal reaches the workers once; the Rust master handles
 # SIGTERM during its configuration export and drops a log line it cannot write. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-11 (consume() lease renewal, unreleased): ConsumerManager's
+# automatic renewal waits at most the renewal interval, encodes the lease id and logs a renewal that
+# failed or renewed nothing. The renewal this page describes, the extend route and renewLease(), is
+# unchanged.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers
