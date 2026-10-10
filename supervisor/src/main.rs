@@ -289,6 +289,10 @@ struct ScaleGuard {
 struct RestartGuard {
     consecutive_failures: u32,
     phase: RestartPhase,
+    /// Workers of the pool that exited since its last reconcile, owed a
+    /// replacement. Refilling the pool to the size it had is no scale-up, so
+    /// balance_max_shift does not throttle it; see reconcile.
+    vacancies: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3189,12 +3193,16 @@ fn reconcile(
         let target = desired.get(queue).copied().unwrap_or(0);
         let key = (name.to_owned(), queue.clone());
         let pool = pools.entry(key).or_default();
-        while budget > 0 && process_slots >= worker_process_cost && target > pool.len() {
-            let restart = restarts
-                .entry((name.to_owned(), queue.clone()))
-                .or_default();
+        let restart = restarts
+            .entry((name.to_owned(), queue.clone()))
+            .or_default();
+        while process_slots >= worker_process_cost && target > pool.len() {
             let permission = restart.spawn_permission(Instant::now());
             if permission == SpawnPermission::Blocked {
+                break;
+            }
+            let replaces = restart.vacancies > 0;
+            if !replaces && budget == 0 {
                 break;
             }
             match spawn_worker(
@@ -3208,7 +3216,11 @@ fn reconcile(
                 Ok(worker) => {
                     restart.mark_spawned(permission);
                     pool.push(worker);
-                    budget -= 1;
+                    if replaces {
+                        restart.vacancies -= 1;
+                    } else {
+                        budget -= 1;
+                    }
                     process_slots -= worker_process_cost;
                 }
                 Err(error) => {
@@ -3226,6 +3238,9 @@ fn reconcile(
                 }
             }
         }
+        // A replacement is owed only up to the target: one the circuit holds
+        // back starts once it allows, one the pool no longer wants never.
+        restart.vacancies = restart.vacancies.min(target.saturating_sub(pool.len()));
     }
     Ok(())
 }
@@ -3504,6 +3519,7 @@ fn reap(
                     restarted = true;
                 }
                 record_worker_exit(key, worker, status, announced, options, restart);
+                restart.vacancies = restart.vacancies.saturating_add(1);
                 schedule_telemetry_cleanup(config, &key.0, pid, pending);
                 false
             }
@@ -3914,6 +3930,10 @@ fn drain_all(
     draining: &mut Draining,
     grace: Duration,
 ) {
+    // A pause empties every pool on purpose: nothing is owed after it.
+    for restart in restarts.values_mut() {
+        restart.vacancies = 0;
+    }
     for (pool, workers) in pools.iter_mut() {
         for worker in workers.drain(..) {
             if worker.restart_probe {
@@ -4180,6 +4200,69 @@ mod tests {
         Worker::new(child, restart_probe)
     }
 
+    /// A queue:work stand-in for `fake_php_config`: it says it is ready in
+    /// ready.<pid>, exits 0 on SIGTERM, as --max-jobs, --max-time and
+    /// queue:restart end a worker, and 1 on SIGUSR1, a crash.
+    #[cfg(unix)]
+    const FAKE_WORKER: &str = "trap 'exit 0' TERM\ntrap 'exit 1' USR1\n: > \"ready.$$\"\n\
+                               while :; do sleep 0.05; done\n";
+
+    /// A configuration whose PHP binary is the shell `script`, run in a
+    /// private temporary directory that is also its cwd and state directory.
+    #[cfg(unix)]
+    fn fake_php_config(label: &str, script: &str) -> (Config, PathBuf) {
+        let directory = temporary_directory(label);
+        let php = directory.join("php");
+        fs::write(&php, format!("#!/bin/sh\n{script}")).unwrap();
+        fs::set_permissions(&php, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut resolved = config(options("auto"));
+        resolved.php_binary = php.to_string_lossy().into_owned();
+        resolved.artisan = "artisan".into();
+        resolved.cwd = directory.to_string_lossy().into_owned();
+        resolved.state_directory = directory.to_string_lossy().into_owned();
+        (resolved, directory)
+    }
+
+    /// Wait until every worker of `pool` running FAKE_WORKER is ready.
+    #[cfg(unix)]
+    fn await_fake_workers(directory: &Path, pool: &[Worker]) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for worker in pool {
+            let ready = directory.join(format!("ready.{}", worker.child.id()));
+            while !ready.exists() {
+                assert!(Instant::now() < deadline, "a fake worker never started");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    /// Reap until `pool` has `left` workers.
+    #[cfg(unix)]
+    fn reap_until(
+        config: &Config,
+        pools: &mut Pools,
+        restarts: &mut RestartStates,
+        key: &PoolKey,
+        left: usize,
+    ) {
+        let mut pending = PendingTelemetryCleanup::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pools[key].len() > left {
+            assert!(Instant::now() < deadline, "the workers never exited");
+            reap(config, pools, restarts, &mut pending, None);
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn kill_pools(pools: &mut Pools) {
+        for worker in pools.values_mut().flatten() {
+            signal_process_group(&mut worker.child, libc::SIGKILL);
+            let _ = worker.child.wait();
+        }
+        pools.clear();
+    }
+
     fn temporary_directory(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4306,6 +4389,61 @@ mod tests {
         let auto = options("auto");
         assert_eq!(reconcile_budget(&auto, 0, 0), 2);
         assert_eq!(reconcile_budget(&auto, 2, 0), 1);
+    }
+
+    /// queue:restart after a deploy, a --max-time wave or an OOM wave stops
+    /// most of a pool at once. Replacing what exited, up to the size the pool
+    /// had, is no scale-up: one reconcile refills it, not one
+    /// balance_max_shift step per balance_cooldown.
+    #[cfg(unix)]
+    #[test]
+    fn a_pool_that_lost_most_workers_at_once_is_refilled_in_one_reconcile() {
+        let (resolved, directory) = fake_php_config("mass-exit", FAKE_WORKER);
+        let options = &resolved.supervisors["default"];
+        let key = ("default".to_owned(), "high".to_owned());
+        let desired = || HashMap::from([("high".to_owned(), 10), ("default".to_owned(), 0)]);
+        let mut pools = Pools::new();
+        let mut restarts = RestartStates::new();
+        let mut draining = Draining::new();
+        let launcher = Launcher {
+            config: &resolved,
+            forks: None,
+        };
+        for _ in 0..10 {
+            reconcile(
+                &launcher,
+                "default",
+                options,
+                desired(),
+                &mut pools,
+                &mut restarts,
+                &mut draining,
+            )
+            .unwrap();
+        }
+        assert_eq!(pools[&key].len(), 10);
+        await_fake_workers(&directory, &pools[&key]);
+
+        for worker in pools.get_mut(&key).unwrap().iter_mut().skip(1) {
+            signal_worker(&mut worker.child, libc::SIGTERM);
+        }
+        reap_until(&resolved, &mut pools, &mut restarts, &key, 1);
+        assert_eq!(restarts[&key].state_name(), "closed");
+        reconcile(
+            &launcher,
+            "default",
+            options,
+            desired(),
+            &mut pools,
+            &mut restarts,
+            &mut draining,
+        )
+        .unwrap();
+
+        let refilled = pools[&key].len();
+        kill_pools(&mut pools);
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(refilled, 10, "9 exits were replaced as a scale-up");
     }
 
     #[test]
@@ -4857,6 +4995,7 @@ mod tests {
         let mut guard = RestartGuard {
             consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
             phase: RestartPhase::Probe,
+            ..RestartGuard::default()
         };
 
         let (successful_sibling, success) = exited_worker(0, false);
@@ -4889,6 +5028,7 @@ mod tests {
         let mut failed_guard = RestartGuard {
             consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
             phase: RestartPhase::Probe,
+            ..RestartGuard::default()
         };
         let (mut failed_probe, failure) = exited_worker(1, true);
         failed_probe.started_at = Instant::now() - Duration::from_secs(options.stable_after + 1);
@@ -4910,6 +5050,7 @@ mod tests {
         let mut successful_guard = RestartGuard {
             consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
             phase: RestartPhase::Probe,
+            ..RestartGuard::default()
         };
         let (successful_probe, success) = exited_worker(0, true);
         record_worker_exit(
@@ -5283,6 +5424,7 @@ mod tests {
         let mut guard = RestartGuard {
             consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
             phase: RestartPhase::Probe,
+            ..RestartGuard::default()
         };
 
         record_worker_exit(
@@ -5402,6 +5544,7 @@ mod tests {
             RestartGuard {
                 consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
                 phase: RestartPhase::Probe,
+                ..RestartGuard::default()
             },
         )]);
 
@@ -5439,6 +5582,7 @@ mod tests {
                 phase: RestartPhase::Backoff {
                     until: Instant::now() + Duration::from_secs(30),
                 },
+                ..RestartGuard::default()
             },
         )]);
 
