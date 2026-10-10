@@ -5,6 +5,24 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Laravel: a refused supervisor installation says why, and root can install it for the user that
+runs it.** The launcher starts the Rust supervisor only when the user it runs as owns each
+directory and file of the installation. Otherwise it stopped with exit code 70 and "The Queen
+supervisor installation base must be a real, owned directory without group/world write access.",
+which named neither the condition that failed nor the way out, since PHP client 1.3.0. An image
+that ran `queen:supervisor-install` as root and the supervisor as `www-data` stopped there, and so
+did the Dockerfile of the Kubernetes guide. The message now goes on with the path and the
+condition: missing, a symbolic link, not a directory, a mode that grants group or world write
+access, or another owner than the effective user, with both users by uid and name and the ways
+out. The binary, the receipt and the installer's own refusals do the same; the first sentence and
+the exit code are unchanged. `queen:supervisor-install --owner=<user>`, a name or a numeric uid,
+lets root install and verify as itself and then give the installation to that user, with the
+modes a normal install gives. It changes the owners from the files up to the base with `lchown()`,
+below the pinned base, so no other user can swap an entry before it changes. It is refused without
+root, for a user that does not exist, and on a thread-safe PHP, whose `chdir()` pins the base by
+name only. In a multi-stage build, `COPY --chown` gives the copied installation to the runtime
+user, as the Kubernetes guide now shows.
+
 **Supervisor: strays are stopped, prefork is tried again at `queue:restart`, a dead server's
 workers are reaped, and only the probe closes a circuit.** The Rust master has the same four
 changes as the PHP engine above: a late fork reply is read once per loop whether or not a worker

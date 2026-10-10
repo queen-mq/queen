@@ -63,6 +63,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
 # delivery that carries no Laravel job in the dead-letter queue at once; no setting or message on this
 # page changes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (installation owner, PHP client 2.4.2): the launcher refuses an
+# installation another user owns, and SupervisorInstallCommand takes --owner. The native binary
+# section says so; the keys and defaults are unchanged.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. Since PHP client 2.1.0 the
@@ -398,7 +401,10 @@ The launcher, `vendor/bin/queen-supervisor`, reads neither `config/queen.php` no
 for the binary in `QUEEN_SUPERVISOR_INSTALL_PATH` from its own environment, and otherwise in
 `storage/queen-supervisor-bin` under the directory it starts in. When you install elsewhere, set
 the variable in the service's environment too
-([run the Rust engine](/guides/laravel/supervisors/#run-the-rust-engine)).
+([run the Rust engine](/guides/laravel/supervisors/#run-the-rust-engine)). The user that runs the
+launcher must own the installation. Install as that user, or as root with
+`queen:supervisor-install --owner=<user>` (PHP client 2.4.2), or copy it into a container image
+with `COPY --chown` ([build the image](/guides/laravel/kubernetes/#build-the-image)).
 
 ## Refused at start
 

@@ -218,6 +218,45 @@ class LaravelSupervisorCommandTest extends TestCase
         $this->assertLessThan(1024, strlen($rendered));
     }
 
+    public function testSupervisorInstallRefusesAnUnknownOwnerWithoutTouchingTheInstallPath(): void
+    {
+        $installPath = sys_get_temp_dir() . '/queen-supervisor-install-' . bin2hex(random_bytes(8));
+        $owner = 'queen-no-such-user-' . bin2hex(random_bytes(3));
+
+        [$exitCode, $rendered] = $this->callSupervisorInstall([
+            '--install-path' => $installPath,
+            '--manifest' => $installPath . '-missing-manifest.json',
+            '--owner' => $owner,
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString("The --owner user {$owner} does not exist on this system.", $rendered);
+        $this->assertStringNotContainsString('Stack trace', $rendered);
+        $this->assertDirectoryDoesNotExist($installPath);
+    }
+
+    public function testSupervisorInstallRefusesOwnerWhenNotRunAsRoot(): void
+    {
+        if (!function_exists('posix_geteuid') || posix_geteuid() === 0) {
+            $this->markTestSkipped('Needs a user other than root.');
+        }
+        $installPath = sys_get_temp_dir() . '/queen-supervisor-install-' . bin2hex(random_bytes(8));
+
+        [$exitCode, $rendered] = $this->callSupervisorInstall([
+            '--install-path' => $installPath,
+            '--manifest' => $installPath . '-missing-manifest.json',
+            '--owner' => (string) posix_geteuid(),
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString(
+            'The --owner option of queen:supervisor-install requires root, but the effective user is uid '
+            . posix_geteuid(),
+            $rendered,
+        );
+        $this->assertDirectoryDoesNotExist($installPath);
+    }
+
     public function testStatusCommandEmitsMachineReadableState(): void
     {
         $directory = $this->configureStateDirectory();
@@ -452,6 +491,19 @@ class LaravelSupervisorCommandTest extends TestCase
             flock($lock, LOCK_UN);
             fclose($lock);
         }
+    }
+
+    /** @return array{0: int, 1: string} the exit code and the output, its wrapping undone */
+    private function callSupervisorInstall(array $options): array
+    {
+        $output = new BufferedOutput();
+        $exitCode = $this->app->make(\Illuminate\Contracts\Console\Kernel::class)->call(
+            'queen:supervisor-install',
+            $options,
+            $output,
+        );
+
+        return [$exitCode, (string) preg_replace('/\s+/', ' ', $output->fetch())];
     }
 
     private function configureStateDirectory(): string

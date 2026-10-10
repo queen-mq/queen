@@ -79,6 +79,9 @@ sourceOfTruth:
 # reap a dead server's workers when the master is PID 1, and close a circuit only with the probe;
 # the PHP engine drains on SIGHUP and runs quiet by default. The queue:restart and init paragraphs
 # say so.
+# sourceOfTruth re-read 2026-10-10 (installation owner, PHP client 2.4.2): SupervisorBinary names the
+# path, the condition and both users when it refuses an installation, and SupervisorBinaryInstaller
+# takes --owner as root on a non-thread-safe PHP. Run the Rust engine says so.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
@@ -406,6 +409,22 @@ start and then replaces itself with the binary, so the Rust master is the proces
 manager signals. The installation leaf's parent has to be a real directory (a symlink is refused),
 and an existing leaf must not be group- or world-writable, which is why it lives apart from
 Laravel's `storage/`.
+
+The user that runs the launcher must also own the installation, each of its directories and files,
+so install as that user. If root installs and `www-data` runs the supervisor, the launcher exits
+with code 70, and the message names the path, its owner, the launcher's user and the ways out.
+Since PHP client 2.4.2, root can install for another user, by name or numeric uid:
+
+```bash
+php artisan queen:supervisor-install --owner=www-data
+```
+
+The installer installs and verifies as root, then gives each directory and file of the
+installation to that user, with the modes a normal install gives. It refuses `--owner` without
+root and on a thread-safe PHP, such as FrankenPHP's. As root, it does not update an installation
+that already belongs to another user: run it as that user. `chown -R www-data` on the installation
+directory also works. For container images, see
+[build the image](/guides/laravel/kubernetes/#build-the-image).
 
 PHP client 2.3.0 pins supervisor 0.8.0. Its GitHub release, `supervisor/v0.8.0`, publishes static
 (musl) Linux builds and macOS builds for amd64 and arm64, with a manifest and its Sigstore bundle,

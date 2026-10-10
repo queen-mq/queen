@@ -37,7 +37,10 @@ final class SupervisorBinaryInstaller
         bool $force = false,
         ?array $platform = null,
         ?string $manifestSha256 = null,
+        ?string $owner = null,
     ): array {
+        // Refuse an owner that cannot be honoured before anything is written.
+        $owner = $owner === null ? null : $this->resolveOwner($owner);
         $platform ??= SupervisorBinary::platform();
         $previousDirectory = getcwd();
         if (!is_string($previousDirectory) || $previousDirectory === '') {
@@ -82,6 +85,11 @@ final class SupervisorBinaryInstaller
             $result['binary'] = $installBase . DIRECTORY_SEPARATOR
                 . substr($result['binary'], strlen($relativePrefix));
 
+            if ($owner !== null) {
+                $this->handOver($expectedBase, $platform, $owner);
+                $result['owner_uid'] = $owner['uid'];
+            }
+
             return $result;
         } finally {
             if (is_resource($lock)) {
@@ -93,6 +101,131 @@ final class SupervisorBinaryInstaller
             if (!@chdir($previousDirectory)) {
                 throw new RuntimeException('Cannot restore the working directory after installing Queen supervisor.');
             }
+        }
+    }
+
+    /**
+     * Resolve --owner to a uid, and to the user's primary group when the user
+     * database names one, so the result matches an install run by that user.
+     *
+     * @return array{uid: int, gid: ?int}
+     */
+    private function resolveOwner(string $owner): array
+    {
+        if (!function_exists('posix_getpwnam') || !function_exists('posix_getpwuid')
+            || !function_exists('lchown') || !function_exists('lchgrp')) {
+            throw new RuntimeException('The --owner option needs ext-posix, lchown() and lchgrp().');
+        }
+        if (preg_match('/^[0-9]{1,10}$/D', $owner) === 1) {
+            $uid = (int) $owner;
+            // (uid_t) -1 means "leave the owner unchanged" to chown(2).
+            if ($uid > 4294967294) {
+                throw new RuntimeException("The --owner uid {$owner} is out of range.");
+            }
+            $entry = posix_getpwuid($uid);
+        } else {
+            if ($owner === '' || preg_match('#[\x00-\x20\x7F:/]#', $owner) === 1) {
+                throw new RuntimeException('The --owner value must be a user name or a numeric uid.');
+            }
+            $entry = posix_getpwnam($owner);
+            if (!is_array($entry) || !is_int($entry['uid'] ?? null)) {
+                throw new RuntimeException(
+                    "The --owner user {$owner} does not exist on this system. Name a user that exists "
+                    . 'where the installer runs, or give a numeric uid.',
+                );
+            }
+            $uid = $entry['uid'];
+        }
+
+        $effectiveUserId = SupervisorBinary::effectiveUserId();
+        if ($effectiveUserId !== 0) {
+            throw new RuntimeException(
+                'The --owner option of queen:supervisor-install requires root, but the effective user is '
+                . SupervisorBinary::describeUser($effectiveUserId) . '. Without root, run the installer as '
+                . 'the user that runs the supervisor, without --owner.',
+            );
+        }
+        if (PHP_ZTS) {
+            throw new RuntimeException(
+                'The --owner option is not available on a thread-safe (ZTS) PHP, whose chdir() does not pin '
+                . 'the installation directory while its owner changes. Run the installer with a '
+                . 'non-thread-safe PHP CLI, or as the user that runs the supervisor.',
+            );
+        }
+
+        return [
+            'uid' => $uid,
+            'gid' => is_array($entry) && is_int($entry['gid'] ?? null) ? $entry['gid'] : null,
+        ];
+    }
+
+    /**
+     * Give the verified installation to the user that will run the supervisor.
+     *
+     * Root installs and verifies everything as itself first, in directories
+     * only root can write, so nothing can change under it until this runs. The
+     * owner then changes from the leaves up: each entry changes while the
+     * directory holding it still belongs to root, so the new owner cannot swap
+     * it, or put a link in its path, before the change is made. lchown() never
+     * follows a link, and the base changes through ".", the inode chdir()
+     * pinned, so a parent its new owner can write to cannot redirect it. A
+     * thread-safe PHP pins "." by name only, which is why resolveOwner()
+     * refuses it.
+     *
+     * @param array<string, int> $expectedBase
+     * @param array{uid: int, gid: ?int} $owner
+     */
+    private function handOver(array $expectedBase, array $platform, array $owner): void
+    {
+        foreach ([
+            [SupervisorBinary::binaryPath('.', $platform), false],
+            [SupervisorBinary::receiptPath('.', $platform), false],
+            [SupervisorBinary::installationDirectory('.', $platform), true],
+            [SupervisorBinary::versionDirectory('.'), true],
+            ['.' . DIRECTORY_SEPARATOR . '.install.lock', false],
+        ] as [$path, $directory]) {
+            $this->handOverEntry($path, $directory, $owner);
+        }
+        $this->handOverEntry('.', true, $owner, $expectedBase);
+    }
+
+    /**
+     * @param array{uid: int, gid: ?int} $owner
+     * @param array<string, int>|null $expected the pinned identity the entry must still have
+     */
+    private function handOverEntry(string $path, bool $directory, array $owner, ?array $expected = null): void
+    {
+        $effectiveUserId = SupervisorBinary::effectiveUserId();
+        $display = SupervisorBinary::displayPath($path);
+        $recipient = SupervisorBinary::describeUser($owner['uid']);
+        clearstatcache(true, $path);
+        $before = @lstat($path);
+        $detail = SupervisorBinary::explainUnsafePath($display, $before, $directory, $effectiveUserId);
+        if ($detail === '' && $expected !== null
+            && ($before['dev'] !== $expected['dev'] || $before['ino'] !== $expected['ino'])) {
+            $detail = "{$display} changed during installation.";
+        }
+        if ($detail !== '') {
+            throw new RuntimeException("Cannot hand the Queen supervisor installation to {$recipient}. {$detail}");
+        }
+
+        if (!@lchown($path, $owner['uid'])
+            || ($owner['gid'] !== null && !@lchgrp($path, $owner['gid']))) {
+            throw new RuntimeException("Cannot change the owner of {$display} to {$recipient}.");
+        }
+
+        clearstatcache(true, $path);
+        $after = @lstat($path);
+        if (!is_array($after)
+            || $after['dev'] !== $before['dev']
+            || $after['ino'] !== $before['ino']
+            || ($after['uid'] ?? null) !== $owner['uid']
+            || ($owner['gid'] !== null && ($after['gid'] ?? null) !== $owner['gid'])
+            || ($after['mode'] & 07777) !== ($before['mode'] & 07777)) {
+            throw new RuntimeException(
+                "The owner of {$display} did not change to {$recipient}, or its mode changed with it; "
+                . 'the file system may not support ownership changes.',
+            );
         }
     }
 
@@ -560,11 +693,33 @@ final class SupervisorBinaryInstaller
             || ($metadata['mode'] & 0022) !== 0
             || ($metadata['uid'] ?? null) !== $effectiveUserId) {
             throw new RuntimeException(
-                "Queen supervisor {$description} must be a real, owned directory without group/world write access.",
+                "Queen supervisor {$description} must be a real, owned directory without group/world write access. "
+                . $this->explainUnsafePath($path, $metadata, true, $effectiveUserId),
             );
         }
 
         return $metadata;
+    }
+
+    /** @param array<string, int>|false $metadata */
+    private function explainUnsafePath(
+        string $path,
+        array|false $metadata,
+        bool $directory,
+        int $effectiveUserId,
+    ): string {
+        $display = SupervisorBinary::displayPath($path);
+        $user = SupervisorBinary::userArgument($effectiveUserId);
+
+        // The installer never writes into a tree another user can change.
+        return SupervisorBinary::explainUnsafePath(
+            $display,
+            $metadata,
+            $directory,
+            $effectiveUserId,
+            "Run the installer as the user that owns it, or chown -R {$user} {$display} first; "
+            . 'as root, --owner=<user> hands the installation to the user that runs the supervisor.',
+        );
     }
 
     /** @param array<string, int> $expected */
@@ -618,7 +773,8 @@ final class SupervisorBinaryInstaller
             || ($metadata['mode'] & 0022) !== 0
             || ($metadata['uid'] ?? null) !== $effectiveUserId) {
             throw new RuntimeException(
-                "Queen supervisor directory {$path} must be a real, owned directory without group/world write access.",
+                "Queen supervisor directory {$path} must be a real, owned directory without group/world write access. "
+                . $this->explainUnsafePath($path, $metadata, true, $effectiveUserId),
             );
         }
     }
@@ -633,7 +789,10 @@ final class SupervisorBinaryInstaller
             || ($metadata['mode'] & 0022) !== 0
             || ($metadata['uid'] ?? null) !== $effectiveUserId
         )) {
-            throw new RuntimeException('The Queen supervisor installation lock is unsafe.');
+            throw new RuntimeException(
+                'The Queen supervisor installation lock is unsafe. '
+                . $this->explainUnsafePath($path, $metadata, false, $effectiveUserId),
+            );
         }
         $handle = @fopen($path, 'c+b');
         if (!is_resource($handle) || !@chmod($path, 0600)) {
