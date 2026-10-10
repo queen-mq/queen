@@ -12,10 +12,13 @@ name: laravel-matrix
 # newest release; before a PHP client or a supervisor is published
 # (release-php-client.yml, release-supervisor.yml call it); and on a pull
 # request that changes the client, the supervisor or the harness, a smaller
-# set on the newest broker.
+# set on the newest broker. Every Sunday, the soak instead: 45 minutes of mixed
+# jobs with a worker killed every ten minutes and a rolling restart, one lane
+# per engine.
 on:
   schedule:
     - cron: '23 1 * * *'
+    - cron: '41 3 * * 0'
   pull_request:
     paths:
       - 'clients/client-php/**'
@@ -25,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       groups:
-        description: 'Comma-separated groups, or all'
+        description: 'Comma-separated groups, all, or soak'
         default: 'all'
         type: string
   workflow_call:
@@ -57,6 +60,7 @@ jobs:
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
           GROUPS_INPUT: ${{ inputs.groups }}
         run: |
           python3 - <<'EOF' >> "$GITHUB_OUTPUT"
@@ -67,6 +71,9 @@ jobs:
           groups = ["lifecycle", "deaths", "compat", "compat-all", "faults", "queen", "laravel-11"]
           if event == "pull_request":
               chosen, brokers = smoke, json.loads(os.environ["BROKER_NEWEST"])
+          elif event == "schedule" and os.environ.get("SCHEDULE") == "41 3 * * 0" or wanted == "soak":
+              # One soak lane per engine: three in one job would outlast its timeout.
+              chosen, brokers = ["soak-horizon", "soak-queen-php", "soak-queen-rust"], json.loads(os.environ["BROKER_NEWEST"])
           else:
               chosen = groups if wanted in ("", "all") else [g.strip() for g in wanted.split(",") if g.strip()]
               unknown = set(chosen) - set(groups)
@@ -162,6 +169,7 @@ jobs:
               scenarios=probe-broker-hung,poison-messages,job-metrics,install-owner,broker-leader-kill
               profiles=queen-php,queen-rust ;;
             laravel-11) scenarios=parity stack=laravel-11 stack_layout=balanced prefork=on ;;
+            soak-*) scenarios=soak profiles=${GROUP#soak-} prefork=on ;;
             *) echo "unknown group $GROUP" >&2; exit 1 ;;
           esac
           {

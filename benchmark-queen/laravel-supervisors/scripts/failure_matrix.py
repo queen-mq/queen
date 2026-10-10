@@ -1571,7 +1571,9 @@ SCENARIOS = [
     Scenario("poison-messages", poison_messages, engines=QUEEN_ENGINES),
     Scenario("job-metrics", job_metrics, engines=QUEEN_ENGINES),
     Scenario("install-owner", install_owner, engines=("queen-installed",)),
-    Scenario("broker-leader-kill", broker_leader_kill, engines=QUEEN_ENGINES, broker_nodes=3),
+    # A renewal may try all three URLs: 60 s fits the renewal budget that 30 s does not.
+    Scenario("broker-leader-kill", broker_leader_kill, {"BENCH_RETRY_AFTER": "60", "BENCH_LEASE_RENEWAL_TIMEOUT": "3"},
+             engines=QUEEN_ENGINES, broker_nodes=3),
 ]
 # The scenarios that record an outcome for parity(), besides the compatibility runs.
 PARITY_SCENARIOS = ("job-timeout", "memory-limit", "stop-short", "stop-lease", "queue-restart",

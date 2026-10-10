@@ -268,8 +268,8 @@ class ScenarioLanesTest(unittest.TestCase):
 
         self.assertTrue(named)
         self.assertEqual(set(), named - {s.name for s in matrix.SCENARIOS} - {"parity"})
-        # Every scenario but the soak runs in some group.
-        self.assertEqual({"soak"}, {s.name for s in matrix.SCENARIOS} - named - set(matrix.PARITY_SCENARIOS))
+        # Every scenario runs in some group.
+        self.assertEqual(set(), {s.name for s in matrix.SCENARIOS} - named - set(matrix.PARITY_SCENARIOS))
 
     def test_a_three_node_lane_lists_every_node_to_the_clients_and_as_raft_peers(self) -> None:
         single = matrix.Lane("s", matrix.PROFILES["queen-rust"], {}, Path("/tmp"))
