@@ -232,8 +232,10 @@ final class CompatRoutedCommand extends CompatScenarioCommand
             json_encode($workers));
         $this->check('every pool has a worker', array_diff($pools, array_values($workers)) === [], json_encode($workers));
         $this->same('routed pop()', $refused);
-        $this->same('pools with workers', array_values(array_unique(array_map(static fn (string $c): string => explode('-', $c, 2)[1] ?? $c,
-            array_values($workers)))));
+        // Sorted: the order is the workers' pids, which each engine assigns its own way.
+        $working = array_values(array_unique(array_map(static fn (string $c): string => explode('-', $c, 2)[1] ?? $c, array_values($workers))));
+        sort($working);
+        $this->same('pools with workers', $working);
     }
 
     // -------------------------------------------------------------- helpers
