@@ -293,6 +293,9 @@ struct RestartGuard {
     /// replacement. Refilling the pool to the size it had is no scale-up, so
     /// balance_max_shift does not throttle it; see reconcile.
     vacancies: usize,
+    /// Of those, the ones that did not crash: replaced whatever the circuit
+    /// says, which only holds back the replacement of a crash.
+    clean_vacancies: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3174,10 +3177,12 @@ fn reconcile(
         while budget > 0 && target < pool.len() {
             if let Some(worker) = pool.pop() {
                 if worker.restart_probe {
+                    // Stopped, the probe proved nothing: the next worker is
+                    // a probe again, with the failures counted so far.
                     restarts
                         .entry((name.to_owned(), queue.clone()))
                         .or_default()
-                        .cancel_probe();
+                        .release_probe(Instant::now());
                 }
                 begin_termination(
                     worker,
@@ -3197,7 +3202,14 @@ fn reconcile(
             .entry((name.to_owned(), queue.clone()))
             .or_default();
         while process_slots >= worker_process_cost && target > pool.len() {
-            let permission = restart.spawn_permission(Instant::now());
+            // A worker that exited cleanly is replaced whatever the circuit
+            // says, and never by its probe: the circuit is about crashes.
+            let clean = restart.clean_vacancies > 0;
+            let permission = if clean {
+                SpawnPermission::Normal
+            } else {
+                restart.spawn_permission(Instant::now())
+            };
             if permission == SpawnPermission::Blocked {
                 break;
             }
@@ -3218,6 +3230,7 @@ fn reconcile(
                     pool.push(worker);
                     if replaces {
                         restart.vacancies -= 1;
+                        restart.clean_vacancies -= usize::from(clean);
                     } else {
                         budget -= 1;
                     }
@@ -3241,6 +3254,7 @@ fn reconcile(
         // A replacement is owed only up to the target: one the circuit holds
         // back starts once it allows, one the pool no longer wants never.
         restart.vacancies = restart.vacancies.min(target.saturating_sub(pool.len()));
+        restart.clean_vacancies = restart.clean_vacancies.min(restart.vacancies);
     }
     Ok(())
 }
@@ -3518,8 +3532,11 @@ fn reap(
                 {
                     restarted = true;
                 }
-                record_worker_exit(key, worker, status, announced, options, restart);
+                let crashed = record_worker_exit(key, worker, status, announced, options, restart);
                 restart.vacancies = restart.vacancies.saturating_add(1);
+                if !crashed {
+                    restart.clean_vacancies = restart.clean_vacancies.saturating_add(1);
+                }
                 schedule_telemetry_cleanup(config, &key.0, pid, pending);
                 false
             }
@@ -3581,6 +3598,8 @@ fn close_retired_forks(retired: &mut Vec<Rc<RefCell<ForkServer>>>) {
 }
 
 /// `announced`: what the worker said about this exit; see announced_exit.
+/// Returns whether the exit counts as a crash: a young worker's exit that
+/// neither a clean status nor an announcement explains.
 fn record_worker_exit(
     key: &PoolKey,
     worker: &Worker,
@@ -3588,8 +3607,15 @@ fn record_worker_exit(
     announced: Option<AnnouncedExit>,
     options: &SupervisorConfig,
     restart: &mut RestartGuard,
-) {
+) -> bool {
     let uptime = worker.started_at.elapsed();
+    let long_lived = !worker.restart_probe && uptime >= Duration::from_secs(options.stable_after);
+    let crashed = !(status.success()
+        || long_lived
+        || matches!(
+            announced,
+            Some(AnnouncedExit::MemoryLimit | AnnouncedExit::JobTimeout)
+        ));
     if matches!(restart.phase, RestartPhase::Probe) && !worker.restart_probe {
         eprintln!(
             "[{}:{}] pid={} exited with {status} after {:.3}s while restart probe is active; circuit unchanged",
@@ -3598,7 +3624,7 @@ fn record_worker_exit(
             worker.child.id(),
             uptime.as_secs_f64(),
         );
-        return;
+        return crashed;
     }
     if status.success() {
         restart.record_healthy();
@@ -3609,7 +3635,7 @@ fn record_worker_exit(
             worker.child.id(),
             uptime.as_secs_f64(),
         );
-        return;
+        return false;
     }
     if announced == Some(AnnouncedExit::MemoryLimit) {
         // A deliberate stop after a job, like --max-jobs: it made progress.
@@ -3620,12 +3646,12 @@ fn record_worker_exit(
             key.1,
             worker.child.id(),
         );
-        return;
+        return false;
     }
     // Backoff is for short-lived exits. A worker that ran this long is not
     // crash-looping: queue:work exits 12 at --memory, and a job timeout kills
     // the worker.
-    if !worker.restart_probe && uptime >= Duration::from_secs(options.stable_after) {
+    if long_lived {
         restart.record_healthy();
         eprintln!(
             "[{}:{}] pid={} exited with {status} after {:.3}s; restarting",
@@ -3634,7 +3660,7 @@ fn record_worker_exit(
             worker.child.id(),
             uptime.as_secs_f64(),
         );
-        return;
+        return false;
     }
     if announced == Some(AnnouncedExit::JobTimeout) {
         // The job failed, not the worker, however soon it came. A probe
@@ -3648,7 +3674,7 @@ fn record_worker_exit(
             key.1,
             worker.child.id(),
         );
-        return;
+        return false;
     }
     let (delay, circuit_open) = restart.record_failure(options, Instant::now());
     eprintln!(
@@ -3664,6 +3690,7 @@ fn record_worker_exit(
         },
         delay.as_secs(),
     );
+    true
 }
 
 /// Laravel SIGKILLs a worker whose job outlives its timeout, which looks like
@@ -3933,6 +3960,7 @@ fn drain_all(
     // A pause empties every pool on purpose: nothing is owed after it.
     for restart in restarts.values_mut() {
         restart.vacancies = 0;
+        restart.clean_vacancies = 0;
     }
     for (pool, workers) in pools.iter_mut() {
         for worker in workers.drain(..) {
@@ -4444,6 +4472,127 @@ mod tests {
         kill_pools(&mut pools);
         fs::remove_dir_all(directory).unwrap();
         assert_eq!(refilled, 10, "9 exits were replaced as a scale-up");
+    }
+
+    /// One reconcile of the "default" pool towards `high` workers on its
+    /// queue "high".
+    #[cfg(unix)]
+    fn reconcile_high(
+        config: &Config,
+        pools: &mut Pools,
+        restarts: &mut RestartStates,
+        draining: &mut Draining,
+        high: usize,
+    ) {
+        reconcile(
+            &Launcher {
+                config,
+                forks: None,
+            },
+            "default",
+            &config.supervisors["default"],
+            HashMap::from([("high".to_owned(), high), ("default".to_owned(), 0)]),
+            pools,
+            restarts,
+            draining,
+        )
+        .unwrap();
+    }
+
+    /// One young crash puts the pool's circuit on a probe for stable_after.
+    /// Meanwhile a sibling that exits 0 (--max-jobs, --max-time) is replaced:
+    /// only a crash waits for the circuit.
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_exit_is_replaced_while_a_restart_probe_runs() {
+        let (mut resolved, directory) = fake_php_config("probe-siblings", FAKE_WORKER);
+        resolved
+            .supervisors
+            .get_mut("default")
+            .unwrap()
+            .restart_backoff = 0;
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut pools = Pools::new();
+        let mut restarts = RestartStates::new();
+        let mut draining = Draining::new();
+        while pools.get(&key).map_or(0, Vec::len) < 5 {
+            reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 5);
+        }
+        await_fake_workers(&directory, &pools[&key]);
+
+        signal_worker(&mut pools.get_mut(&key).unwrap()[0].child, libc::SIGUSR1);
+        reap_until(&resolved, &mut pools, &mut restarts, &key, 4);
+        reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 5);
+        assert_eq!(restarts[&key].state_name(), "probe");
+        assert_eq!(pools[&key].len(), 5);
+        await_fake_workers(&directory, &pools[&key]);
+
+        for worker in pools.get_mut(&key).unwrap().iter_mut().take(2) {
+            signal_worker(&mut worker.child, libc::SIGTERM);
+        }
+        reap_until(&resolved, &mut pools, &mut restarts, &key, 3);
+        reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 5);
+        let after_clean_exits = pools[&key].len();
+        let circuit = (
+            restarts[&key].state_name(),
+            restarts[&key].consecutive_failures,
+        );
+
+        // A sibling's crash still waits for the probe.
+        let crashed = pools
+            .get_mut(&key)
+            .unwrap()
+            .iter_mut()
+            .find(|worker| !worker.restart_probe)
+            .map(|worker| signal_worker(&mut worker.child, libc::SIGUSR1));
+        if crashed.is_some() {
+            await_fake_workers(&directory, &pools[&key]);
+            reap_until(&resolved, &mut pools, &mut restarts, &key, 4);
+            reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 5);
+        }
+        let after_crash = pools[&key].len();
+
+        kill_pools(&mut pools);
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(after_clean_exits, 5, "clean exits waited for the probe");
+        assert_eq!(circuit, ("probe", 1));
+        assert_eq!(after_crash, 4, "a crash was replaced while the probe ran");
+    }
+
+    /// A probe that a scale-down stops proved nothing: the next worker is a
+    /// probe again, with the failures counted so far.
+    #[cfg(unix)]
+    #[test]
+    fn a_scaled_down_probe_leaves_the_circuit_as_it_was() {
+        let resolved = config(options("auto"));
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut pools = Pools::from([(
+            key.clone(),
+            vec![sleeping_worker(false), sleeping_worker(true)],
+        )]);
+        let mut restarts = RestartStates::from([(
+            key.clone(),
+            RestartGuard {
+                consecutive_failures: 2,
+                phase: RestartPhase::Probe,
+                ..RestartGuard::default()
+            },
+        )]);
+        let mut draining = Draining::new();
+
+        reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 1);
+
+        let popped_probe = draining.iter().any(|entry| entry.worker.restart_probe);
+        let failures = restarts[&key].consecutive_failures;
+        let permission = restarts[&key].spawn_permission(Instant::now());
+        kill_pools(&mut pools);
+        for mut entry in draining {
+            signal_process_group(&mut entry.worker.child, libc::SIGKILL);
+            let _ = entry.worker.child.wait();
+        }
+        assert!(popped_probe);
+        assert_eq!(failures, 2, "stopping the probe closed the circuit");
+        assert_eq!(permission, SpawnPermission::Probe);
     }
 
     #[test]
