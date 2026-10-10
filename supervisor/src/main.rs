@@ -342,6 +342,25 @@ impl RejectedControl {
     fn error(reason: impl std::fmt::Display) -> Box<dyn std::error::Error> {
         Box::new(Self(reason.to_string()))
     }
+
+    /// Remove the bad document at `path` and reject it. One that cannot be
+    /// removed would be read again on every loop and hold back every later
+    /// request: that is a fault of the state directory, which stops the master.
+    fn remove(path: &Path, reason: impl std::fmt::Display) -> Box<dyn std::error::Error> {
+        let removed = if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        };
+        match removed {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => format!(
+                "a bad control request ({reason}) could not be removed from {}: {error}",
+                path.display()
+            )
+            .into(),
+            _ => Self::error(reason),
+        }
+    }
 }
 
 impl std::fmt::Display for RejectedControl {
@@ -1983,15 +2002,15 @@ impl State {
                 || metadata.len() == 0
                 || metadata.len() > MAX_CONTROL_BYTES
             {
-                let _ = fs::remove_file(&path);
-                return Err(RejectedControl::error(
+                return Err(RejectedControl::remove(
+                    &path,
                     "control command must be a small regular file",
                 ));
             }
             #[cfg(unix)]
             if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o777 != 0o600 {
-                let _ = fs::remove_file(&path);
-                return Err(RejectedControl::error(
+                return Err(RejectedControl::remove(
+                    &path,
                     "control command must be a private owned regular file",
                 ));
             }
@@ -2000,8 +2019,7 @@ impl State {
             {
                 Ok(control) => control,
                 Err(error) => {
-                    let _ = fs::remove_file(&path);
-                    return Err(RejectedControl::error(error));
+                    return Err(RejectedControl::remove(&path, error));
                 }
             };
             if control.nonce.is_empty()
@@ -2011,16 +2029,15 @@ impl State {
                 || control.instance_id.len() > 128
                 || control.instance_id.chars().any(char::is_control)
             {
-                let _ = fs::remove_file(&path);
-                return Err(RejectedControl::error("control nonce is invalid"));
+                return Err(RejectedControl::remove(&path, "control nonce is invalid"));
             }
             let now = now_epoch();
             if control.requested_at_epoch > now.saturating_add(CONTROL_CLOCK_SKEW_SECONDS)
                 || control.expires_at_epoch < control.requested_at_epoch
                 || control.expires_at_epoch < now
             {
-                let _ = fs::remove_file(&path);
-                return Err(RejectedControl::error(
+                return Err(RejectedControl::remove(
+                    &path,
                     "control command is expired or has an invalid timestamp",
                 ));
             }
@@ -6840,6 +6857,33 @@ mod tests {
 
         drop(state);
         handle.join().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bad_control_request_that_cannot_be_removed_stops_the_master() {
+        let directory = temporary_directory("control-stuck");
+        let state = State::acquire(directory.to_str().unwrap()).unwrap();
+        let control = directory.join("control.json");
+
+        // Rejected and removed: supervision goes on.
+        fs::create_dir(&control).unwrap();
+        let removable = state.command(None).unwrap_err();
+        assert!(removable.is::<RejectedControl>(), "{removable}");
+        assert!(!control.exists());
+
+        // Read again on every loop, it would hold back every later request.
+        fs::create_dir(&control).unwrap();
+        fs::write(control.join("stuck"), b"x").unwrap();
+        let stuck = state.command(None).unwrap_err();
+        assert!(!stuck.is::<RejectedControl>(), "{stuck}");
+        assert!(
+            stuck.to_string().contains("could not be removed"),
+            "{stuck}"
+        );
+
+        drop(state);
         fs::remove_dir_all(directory).unwrap();
     }
 
