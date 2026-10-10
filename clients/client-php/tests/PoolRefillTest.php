@@ -12,9 +12,10 @@ use Symfony\Component\Process\Process;
 
 /**
  * How the PHP engine replaces workers that exited, with real processes: a
- * fake `php` that runs until a signal, exiting 0 on SIGTERM (a clean exit, as
- * at queue:restart or --max-time) and 1 on SIGUSR1 (a crash). The Rust engine
- * asserts the same (`a_pool_that_lost_most_workers_at_once_is_refilled_in_one_reconcile`,
+ * fake `php` that says it is ready in ready.<pid> and runs until a signal,
+ * exiting 0 on SIGTERM (as at --max-time) and 1 on SIGUSR1 (a crash). The
+ * Rust engine asserts the same (`a_pool_that_lost_most_workers_at_once_is_refilled_in_one_reconcile`,
+ * `young_exits_are_replaced_within_the_budget`,
  * `a_clean_exit_is_replaced_while_a_restart_probe_runs`).
  */
 final class PoolRefillTest extends TestCase
@@ -30,7 +31,7 @@ final class PoolRefillTest extends TestCase
         mkdir($this->directory, 0700);
         file_put_contents(
             $this->directory . '/php',
-            "#!/bin/sh\ntrap 'exit 0' TERM\ntrap 'exit 1' USR1\nwhile :; do sleep 0.05; done\n",
+            "#!/bin/sh\ntrap 'exit 0' TERM\ntrap 'exit 1' USR1\n: > \"ready.\$\$\"\nwhile :; do sleep 1 & wait \$!; done\n",
         );
         chmod($this->directory . '/php', 0700);
     }
@@ -45,9 +46,27 @@ final class PoolRefillTest extends TestCase
 
     public function testAPoolThatLostMostOfItsWorkersAtOnceIsRefilledInOneReconcile(): void
     {
-        [$supervisor, $options] = $this->supervisor();
+        $this->assertSame(10, $this->refillAfterNineExits(longLived: true), 'one balance_max_shift per balance_cooldown would take nine');
+    }
+
+    /** Laravel's worker exits 0 when it loses its database, every second through an outage. */
+    public function testYoungExitsAreReplacedWithinTheBudget(): void
+    {
+        $this->assertSame(2, $this->refillAfterNineExits(longLived: false));
+    }
+
+    /**
+     * Fill a pool of ten, stop nine cleanly, once they have run stable_after
+     * (1 s) or at once, reconcile once: the size of the pool after it.
+     */
+    private function refillAfterNineExits(bool $longLived): int
+    {
+        [$supervisor, $options] = $this->supervisor(['stable_after' => $longLived ? 1 : 60]);
         try {
             $this->fill($supervisor, $options, 10);
+            if ($longLived) {
+                usleep(1_200_000);
+            }
 
             foreach (array_slice($this->pool($supervisor), 0, 9) as $worker) {
                 posix_kill($worker->getPid(), SIGTERM);
@@ -55,7 +74,7 @@ final class PoolRefillTest extends TestCase
             $this->reapUntil($supervisor, $options, 1);
             $this->reconcile($supervisor, $options, 10);
 
-            $this->assertCount(10, $this->pool($supervisor), 'one balance_max_shift per balance_cooldown would take nine');
+            return count($this->pool($supervisor));
         } finally {
             $this->stop($supervisor);
         }
@@ -63,7 +82,7 @@ final class PoolRefillTest extends TestCase
 
     public function testACleanExitIsReplacedWhileARestartProbeRuns(): void
     {
-        [$supervisor, $options] = $this->supervisor(['restart_backoff' => 0]);
+        [$supervisor, $options] = $this->supervisor(['restart_backoff' => 0, 'stable_after' => 1]);
         try {
             $this->fill($supervisor, $options, 5);
 
@@ -73,8 +92,10 @@ final class PoolRefillTest extends TestCase
             $this->reconcile($supervisor, $options, 5);
             $this->assertCount(5, $this->pool($supervisor));
             $this->assertSame(['probe'], array_values($this->property($supervisor, 'restartPhase')));
+            $this->awaitReady($this->pool($supervisor));
 
-            // Two workers stop at --max-time while the probe runs.
+            // Two of the first workers stop at --max-time, having run stable_after, while the probe runs.
+            usleep(1_200_000);
             $probes = $this->property($supervisor, 'restartProbes');
             $siblings = array_values(array_filter(
                 $this->pool($supervisor),
@@ -141,8 +162,25 @@ final class PoolRefillTest extends TestCase
             $this->reconcile($supervisor, $options, $workers);
         }
         $this->assertCount($workers, $this->pool($supervisor));
-        // Every worker is running its loop, so it handles the signals.
-        usleep(300_000);
+        $this->awaitReady($this->pool($supervisor));
+    }
+
+    /**
+     * Until every worker has set its traps, so it handles the signals.
+     *
+     * @param list<Process> $workers
+     */
+    private function awaitReady(array $workers): void
+    {
+        $deadline = microtime(true) + 10;
+        foreach ($workers as $worker) {
+            while (!is_file($this->directory . '/ready.' . $worker->getPid())) {
+                if (microtime(true) > $deadline) {
+                    $this->fail('fake worker ' . $worker->getPid() . ' never said it was ready');
+                }
+                usleep(10_000);
+            }
+        }
     }
 
     /** @param array<string, mixed> $options */

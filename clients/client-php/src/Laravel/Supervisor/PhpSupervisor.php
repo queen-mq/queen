@@ -62,14 +62,13 @@ final class PhpSupervisor
     private ForkServerClient|false|null $forkServer = null;
     private ?OrphanReaper $orphanReaper = null;
     /**
-     * Per pool, the workers that exited and are not replaced yet, and how many
-     * of them did not crash; see reconcile().
+     * Per pool, the workers that left as expected and are not replaced yet,
+     * owed a replacement that neither balance_max_shift nor the restart
+     * circuit holds back; see reap() and reconcile().
      *
      * @var array<string, int>
      */
     private array $vacancies = [];
-    /** @var array<string, int> */
-    private array $cleanVacancies = [];
     private bool $preforkFailed = false;
     /** A worker of the current fork server stopped for queue:restart. */
     private bool $forkServerStale = false;
@@ -492,11 +491,11 @@ final class PhpSupervisor
             $pool =& $this->processes[$name][$queue];
             $key = $this->poolKey($name, (string) $queue);
             while ($target > count($pool)) {
-                // Replacing workers that exited, up to the count the pool
-                // had, is no scale-up: a pool that lost most of its workers
-                // at once (queue:restart after a deploy, max_time, the OOM
-                // killer) is refilled now, not one balance_max_shift per
-                // balance_cooldown.
+                // Replacing workers that left as expected, up to the count the
+                // pool had, is no scale-up: a pool that lost most of its
+                // workers at once (queue:restart after a deploy, max_time) is
+                // refilled now, not one balance_max_shift per balance_cooldown.
+                // Nor does it wait for the circuit, which is about crashes.
                 $replaces = ($this->vacancies[$key] ?? 0) > 0;
                 if (!$replaces && $budget <= 0) {
                     break;
@@ -509,10 +508,7 @@ final class PhpSupervisor
                 if ($this->remainingProcessSlots() < $processCost) {
                     break;
                 }
-                // A worker that exited cleanly is replaced even while a crash
-                // holds the circuit: only crashes wait for its backoff or probe.
-                $clean = ($this->cleanVacancies[$key] ?? 0) > 0;
-                $permission = $clean ? 'normal' : $this->restartPermission($name, $queue);
+                $permission = $replaces ? 'normal' : $this->restartPermission($name, $queue);
                 if ($permission === null) {
                     break;
                 }
@@ -528,9 +524,6 @@ final class PhpSupervisor
                     } else {
                         $budget--;
                     }
-                    if ($clean) {
-                        $this->cleanVacancies[$key]--;
-                    }
                 } catch (\Throwable $error) {
                     $this->registerCrash($name, $queue, $options, $error->getMessage());
                     break;
@@ -538,7 +531,6 @@ final class PhpSupervisor
             }
             // Owed no more than the pool lacks: a lower target cancels the rest.
             $this->vacancies[$key] = min($this->vacancies[$key] ?? 0, max(0, $target - count($pool)));
-            $this->cleanVacancies[$key] = min($this->cleanVacancies[$key] ?? 0, $this->vacancies[$key]);
         }
     }
 
@@ -859,14 +851,16 @@ final class PhpSupervisor
                         || $this->preforkWantsAServer())) {
                     $this->forkServerStale = true;
                 }
-                // A worker that exited is owed a replacement; one that did not
-                // crash is owed it even while the restart circuit waits.
-                $this->vacancies[$restartKey] = ($this->vacancies[$restartKey] ?? 0) + 1;
-                if ($exitCode === 0
+                // A worker that left as expected (queue:restart, its memory
+                // limit, Laravel's job timeout, or having run stable_after) is
+                // owed a replacement outside the budget and the circuit. A
+                // young exit is not, even with status 0: Laravel's worker exits
+                // 0 when it loses its database, every second through an outage.
+                if ($announced === WorkerExitMarker::RESTART
                     || $announced === WorkerExitMarker::MEMORY
                     || $announced === WorkerExitMarker::TIMEOUT
                     || (!$wasProbe && $runtime >= (float) $options['stable_after'])) {
-                    $this->cleanVacancies[$restartKey] = ($this->cleanVacancies[$restartKey] ?? 0) + 1;
+                    $this->vacancies[$restartKey] = ($this->vacancies[$restartKey] ?? 0) + 1;
                 }
                 if ($poolHadProbe && !$wasProbe) {
                     continue;
@@ -1576,7 +1570,6 @@ final class PhpSupervisor
             }
         }
         $this->vacancies = [];
-        $this->cleanVacancies = [];
     }
 
     private function resume(): void
