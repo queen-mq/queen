@@ -226,8 +226,17 @@ jobs:
             release-output/queen-supervisor-*.tar.gz.sha256
           if-no-files-found: error
 
+  # The Laravel failure matrix on the tagged code, before anything is published.
+  laravel-matrix:
+    needs: prepare
+    uses: ./.github/workflows/laravel-matrix.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ needs.prepare.outputs.commit_sha }}
+
   release:
-    needs: [prepare, build]
+    needs: [prepare, build, laravel-matrix]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

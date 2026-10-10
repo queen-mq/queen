@@ -1,0 +1,212 @@
+name: laravel-matrix
+
+# The failure matrix of the Laravel supervisors
+# (benchmark-queen/laravel-supervisors/scripts/failure_matrix.py): Horizon and
+# both Queen engines under every failure they must survive, held to Horizon
+# where Laravel documents the behaviour, on the PHP client and the supervisor
+# of the checkout and on released brokers. Unit tests share the assumptions of
+# the code they test; these lanes run real workers, a real broker and real
+# signals, as a deployment does.
+#
+# Nightly on master and on demand, every group on a 2.0 broker and on the
+# newest release; before a PHP client or a supervisor is published
+# (release-php-client.yml, release-supervisor.yml call it); and on a pull
+# request that changes the client, the supervisor or the harness, a smaller
+# set on the newest broker.
+on:
+  schedule:
+    - cron: '23 1 * * *'
+  pull_request:
+    paths:
+      - 'clients/client-php/**'
+      - 'supervisor/**'
+      - 'benchmark-queen/laravel-supervisors/**'
+      - '.github/workflows/laravel-matrix.yml'
+  workflow_dispatch:
+    inputs:
+      groups:
+        description: 'Comma-separated groups, or all'
+        default: 'all'
+        type: string
+  workflow_call:
+    inputs:
+      ref:
+        description: 'The commit to test'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: laravel-matrix-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # A 2.0 broker, as deployments that have not upgraded run, and the newest release.
+  BROKERS_ALL: '["2.0.4", "2.2.0"]'
+  BROKER_NEWEST: '["2.2.0"]'
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      lanes: ${{ steps.plan.outputs.lanes }}
+      stacks: ${{ steps.plan.outputs.stacks }}
+    steps:
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          GROUPS_INPUT: ${{ inputs.groups }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          event, wanted = os.environ["EVENT"], (os.environ.get("GROUPS_INPUT") or "all").strip()
+          # A pull request runs what its changes most often break, on the newest broker.
+          smoke = ["queen", "deaths", "lifecycle"]
+          groups = ["lifecycle", "deaths", "compat", "compat-all", "faults", "queen", "laravel-11"]
+          if event == "pull_request":
+              chosen, brokers = smoke, json.loads(os.environ["BROKER_NEWEST"])
+          else:
+              chosen = groups if wanted in ("", "all") else [g.strip() for g in wanted.split(",") if g.strip()]
+              unknown = set(chosen) - set(groups)
+              if unknown:
+                  raise SystemExit(f"unknown groups: {sorted(unknown)}")
+              brokers = json.loads(os.environ["BROKERS_ALL"])
+          print("lanes=" + json.dumps([{"group": g, "broker": b} for g in chosen for b in brokers]))
+          print("stacks=" + json.dumps(["laravel-11", "default"] if "laravel-11" in chosen else ["default"]))
+          EOF
+
+  image:
+    needs: plan
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ fromJSON(needs.plan.outputs.stacks) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Build arguments
+        id: args
+        env:
+          STACK: ${{ matrix.stack }}
+        run: |
+          {
+            echo 'args<<EOF'
+            case "$STACK" in
+              # The campaigns' stack: the committed lock, Laravel 12 on PHP 8.3.
+              default) ;;
+              # Laravel 11 on PHP 8.4. Composer refuses every Laravel 11 for its
+              # advisories; a test image lets them through.
+              laravel-11)
+                echo 'BENCH_PHP_VERSION=8.4'
+                echo 'BENCH_COMPOSER_VERSION=2.10.3'
+                echo 'BENCH_LARAVEL_VERSION=11.55.1'
+                echo 'BENCH_HORIZON_VERSION=5.48.3'
+                echo 'BENCH_COMPOSER_ADVISORY_IGNORE_IDS=PKSA-d5tc-s1qs-h781 PKSA-m5cs-t1y6-qpcs PKSA-3r5d-mb8f-1qw9 PKSA-mdq4-51ck-6kdq'
+                ;;
+              *) echo "unknown stack $STACK" >&2; exit 1 ;;
+            esac
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: benchmark-queen/laravel-supervisors/Dockerfile
+          build-args: ${{ steps.args.outputs.args }}
+          tags: queen-laravel-supervisor-bench:${{ matrix.stack }}
+          outputs: type=docker,dest=${{ runner.temp }}/app-${{ matrix.stack }}.tar
+          cache-from: type=gha,scope=laravel-matrix-${{ matrix.stack }}
+          cache-to: type=gha,mode=max,scope=laravel-matrix-${{ matrix.stack }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: laravel-matrix-app-${{ matrix.stack }}
+          path: ${{ runner.temp }}/app-${{ matrix.stack }}.tar
+          retention-days: 1
+
+  lanes:
+    needs: [plan, image]
+    name: ${{ matrix.lane.group }} on broker ${{ matrix.lane.broker }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(needs.plan.outputs.lanes) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Select the group's scenarios
+        id: group
+        env:
+          GROUP: ${{ matrix.lane.group }}
+        run: |
+          stack=default stack_layout=default prefork=on,off profiles=horizon,queen-php,queen-rust
+          case "$GROUP" in
+            lifecycle) scenarios=job-timeout,memory-limit,stop-short,stop-lease,queue-restart,string-timeout ;;
+            deaths) scenarios=death-timeout,death-sigkill,death-release-timeout,death-release-sigkill,binary-failure ;;
+            compat) scenarios=laravel-parity,routed-parity ;;
+            compat-all) scenarios=laravel-compat prefork=on ;;
+            faults)
+              scenarios=exception-retry,exception-once,release-and-fail,memory-fatal,worker-kill,master-kill
+              scenarios=$scenarios,stop-long,stop-long-batch,backend-restart,pause-short,pause-long
+              scenarios=$scenarios,dispatch-backend-down,replicas-kill,replicas-rolling
+              prefork=on ;;
+            queen)
+              scenarios=probe-broker-hung,poison-messages,job-metrics,install-owner
+              profiles=queen-php,queen-rust ;;
+            laravel-11) scenarios=parity stack=laravel-11 stack_layout=balanced prefork=on ;;
+            *) echo "unknown group $GROUP" >&2; exit 1 ;;
+          esac
+          {
+            echo "scenarios=$scenarios"
+            echo "profiles=$profiles"
+            echo "prefork=$prefork"
+            echo "stack=$stack"
+            echo "layout=$stack_layout"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: laravel-matrix-app-${{ steps.group.outputs.stack }}
+          path: ${{ runner.temp }}
+      - name: Load the images
+        env:
+          STACK: ${{ steps.group.outputs.stack }}
+          BROKER: ${{ matrix.lane.broker }}
+        run: |
+          docker load --input "$RUNNER_TEMP/app-$STACK.tar"
+          docker pull --quiet "ghcr.io/queen-mq/queen:$BROKER"
+      - name: Failure matrix
+        working-directory: benchmark-queen/laravel-supervisors
+        env:
+          BENCH_APP_IMAGE: queen-laravel-supervisor-bench:${{ steps.group.outputs.stack }}
+          BENCH_BROKER_IMAGE: ghcr.io/queen-mq/queen:${{ matrix.lane.broker }}
+          SCENARIOS: ${{ steps.group.outputs.scenarios }}
+          PROFILES: ${{ steps.group.outputs.profiles }}
+          PREFORK: ${{ steps.group.outputs.prefork }}
+          LAYOUT: ${{ steps.group.outputs.layout }}
+        run: |
+          python3 scripts/failure_matrix.py --output "$RUNNER_TEMP/matrix" \
+            --scenarios "$SCENARIOS" --profiles "$PROFILES" --prefork "$PREFORK" --stack "$LAYOUT"
+      - name: Summary
+        if: always()
+        run: |
+          for file in summary.md parity.md; do
+            if [ -s "$RUNNER_TEMP/matrix/$file" ]; then
+              cat "$RUNNER_TEMP/matrix/$file" >> "$GITHUB_STEP_SUMMARY"
+              echo >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: laravel-matrix-${{ matrix.lane.group }}-broker-${{ matrix.lane.broker }}
+          path: ${{ runner.temp }}/matrix
+          if-no-files-found: ignore
+          retention-days: 14
