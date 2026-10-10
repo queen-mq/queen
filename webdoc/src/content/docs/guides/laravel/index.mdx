@@ -372,6 +372,7 @@ Everything not listed here works from 1.6.0 on.
 | 2.3.1 | 0.8.0 | `->supervision([...])` on a fluent `consume()->execute()` reports that consumer to the dashboard, off by default ([consumer status](/reference/supervisor-status/#optional-sdk-consumer-supervision)) |
 | 2.4.0 | 0.8.0 | `$queen->lock()` and `$queen->semaphore()`, `->guard($lock)` on a transaction and `kv()->check()` ([locks](/concepts/locks/)); they need a 2.1 broker |
 | 2.4.1 | 0.8.0 | a forked worker works its pool's connection; a pool's settings reach the worked connection alone, and a pool takes its connection's queue and consumer group; a worker forked after `queue:restart` leaves at once; failed jobs of other drivers stay Laravel's; the switch variables take `1` |
+| 2.4.2 | 0.8.0 | a supervised worker that cannot consume leaves, or `queen:supervisor status` reports it after a minute ([inspect and control](/guides/laravel/supervisors/#inspect-and-control-either-engine)); a delivery that carries no Laravel job goes to the dead-letter queue at once; refused installations and states name their owner, and `queen:supervisor-install --owner`; job metrics count timed-out attempts and `fail()` as failed |
 
 ## Limits
 
