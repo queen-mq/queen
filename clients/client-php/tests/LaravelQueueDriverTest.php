@@ -4,7 +4,10 @@ namespace Queen\Tests;
 
 use DateInterval;
 use DateTimeImmutable;
+use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Promise\Create;
+use GuzzleHttp\Promise\PromiseInterface;
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Events\Dispatcher;
@@ -12,6 +15,7 @@ use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\WorkerStopping;
 use PHPUnit\Framework\Attributes\TestWith;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\RequestInterface;
 use Queen\Exceptions\ConflationPolicyMismatchException;
 use Queen\Exceptions\HttpException;
 use Queen\Laravel\Contracts\QueenPartitionable;
@@ -632,6 +636,45 @@ class LaravelQueueDriverTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('after worker shutdown began');
         $queue->pop('emails');
+    }
+
+    /**
+     * The shutdown hand-back went to one backend, without failover: with two
+     * URLs and one of them down, the prefetched tail was not handed back,
+     * waited for its lease, and was charged an attempt. It tries the other
+     * URL, within the same two-second bound.
+     */
+    public function testTheShutdownHandBackFailsOverToAnotherBackendWithinItsBound(): void
+    {
+        $plan = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([$this->payload('job-1'), $this->payload('job-2')])],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        $refused = [];
+        $handler = static function (RequestInterface $request, array $options) use ($plan, &$refused): PromiseInterface {
+            if ($request->getUri()->getHost() === 'queen-1.test') {
+                $refused[] = [$request->getUri()->getPath(), $options['timeout'] ?? null];
+
+                return Create::rejectionFor(new ConnectException('Connection refused', $request));
+            }
+
+            return $plan($request, $options);
+        };
+        [$queue] = $this->queueFor($plan, [
+            'urls' => ['http://queen-1.test:6632', 'http://queen-2.test:6632'],
+            'load_balancing_strategy' => 'round-robin',
+            'handler' => HandlerStack::create($handler),
+            'prefetch' => 2,
+        ]);
+
+        $queue->pop('emails');
+        $queue->shutdown();
+
+        $this->assertSame(['/api/v1/transaction'], array_column(array_slice($refused, 1), 0), 'tried the backend that is down first');
+        $this->assertCount(2, $plan->requests);
+        $handBack = $this->handBack($plan->requests[1]);
+        $this->assertSame(['job-1', 'job-2'], $this->copiedJobs($handBack));
+        $this->assertEquals([1, 1], [$refused[1][1], $plan->options[1]['timeout']], 'two backends share the two seconds');
     }
 
     public function testShutdownCompletesDeferredSuccessAndHandsBackTheTailInOneTransaction(): void

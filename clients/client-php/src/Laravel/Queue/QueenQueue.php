@@ -184,9 +184,9 @@ class QueenQueue extends BaseQueue implements QueueContract
 
     /**
      * Complete the deferred ACKs and hand back every unhandled prefetched
-     * delivery, in one transaction on the connector's single-attempt,
-     * two-second client. If it fails, everything falls back to durable lease
-     * expiry.
+     * delivery, in one transaction on the connector's bounded client: one
+     * attempt per backend, two seconds in all. If it fails, everything falls
+     * back to durable lease expiry.
      */
     public function shutdown(): void
     {
@@ -1420,11 +1420,11 @@ class QueenQueue extends BaseQueue implements QueueContract
     }
 
     /**
-     * The client for writes that may fail, such as job metrics: one attempt,
-     * two seconds, no failover, no 429 retry. They run in a worker's job
-     * events and in WorkerStopping, where the ordinary client's retries would
-     * hold the worker; the ordinary client when the connector did not build
-     * this queue.
+     * The client for writes that may fail, such as job metrics: one attempt
+     * per backend, two seconds shared by the backends, no 429 retry. They
+     * run in a worker's job events and in WorkerStopping, where the ordinary
+     * client's retries would hold the worker; the ordinary client when the
+     * connector did not build this queue.
      */
     public function getBestEffortQueen(): Queen
     {
