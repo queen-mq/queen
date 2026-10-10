@@ -366,6 +366,7 @@ Everything not listed here works from 1.6.0 on.
 | 2.4.0 | 0.8.0 | `$queen->lock()` and `$queen->semaphore()`, `->guard($lock)` on a transaction and `kv()->check()` ([locks](/concepts/locks/)); they need a 2.1 broker |
 | 2.4.1 | 0.8.0 | a forked worker works its pool's connection; a pool's settings reach the worked connection alone, and a pool takes its connection's queue and consumer group; a worker forked after `queue:restart` leaves at once; failed jobs of other drivers stay Laravel's; the switch variables take `1` |
 | 2.4.2 | 0.8.0 | a supervised worker that cannot consume leaves, or `queen:supervisor status` reports it after a minute ([inspect and control](/guides/laravel/supervisors/#inspect-and-control-either-engine)); a delivery that carries no Laravel job goes to the dead-letter queue at once; refused installations and states name their owner, and `queen:supervisor-install --owner`; job metrics count timed-out attempts and `fail()` as failed |
+| 2.4.3 | 0.8.1 | a worker that has not consumed counts from the start of its first failed pop, so a broker that stops answering shows once that pop times out; supervisor 0.8.1 stops stray workers, tries prefork again at `queue:restart`, reaps a dead fork server's workers and closes a circuit only with the probe |
 
 ## Limits
 
