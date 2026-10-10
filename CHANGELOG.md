@@ -16,6 +16,15 @@ backoff no longer closes it, which only the probe does, as in the PHP engine. Th
 longer lets a pool that balances inherit its own `QUEEN_LARAVEL_BLOCK_FOR`. These changes need a
 supervisor release; the worker-invocation record pins them.
 
+**Laravel: a worker that has not consumed counts from the start of its first failed pop.** A
+supervised worker whose pops fail records since when, and `queen:supervisor status` reports its pool
+after 60 seconds (PHP client 2.4.2). The time was taken when the pop failed, not when it began. A
+broker that keeps its connections but stops answering fails a pop only when the request times out,
+35 seconds for each broker URL the client tries, about 105 seconds with three, so a hung broker
+showed as `pool_not_consuming` about 165 seconds in. The worker now records the start of the pop
+that failed: the pool shows as not consuming once that first pop gives up. A pop that works still
+clears it, and the next failure starts a new count from its own pop.
+
 ## PHP client 2.4.2 - 2026-10-10
 
 **Laravel: a supervised worker that cannot consume leaves, or says so.** Laravel's worker catches
