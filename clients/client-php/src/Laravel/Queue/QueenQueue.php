@@ -637,7 +637,15 @@ class QueenQueue extends BaseQueue implements QueueContract
         if ($messages === []) {
             return null;
         }
-        $this->acceptPopped($queue, $messages, $popStartedMillis);
+        try {
+            $this->acceptPopped($queue, $messages, $popStartedMillis);
+        } catch (\Throwable $untracked) {
+            // Leased all the same: hand the jobs back, as a batch popped
+            // ahead is, instead of leaving them to lease expiry, which
+            // charges each one an attempt.
+            $this->releaseUnstarted($messages, $queue, $untracked);
+            throw $untracked;
+        }
 
         return $this->takePrefetched($queue);
     }
@@ -894,7 +902,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             ));
         } catch (\Throwable $failure) {
             $this->reportQuietly(new RuntimeException(
-                'Queen Laravel could not hand back jobs it popped ahead, which will run after their lease expires: '
+                'Queen Laravel could not hand back jobs it popped, which will run after their lease expires: '
                     . $failure->getMessage() . ' (' . $reason->getMessage() . ')',
                 0,
                 $failure,

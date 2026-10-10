@@ -1142,6 +1142,36 @@ class LaravelQueueDriverTest extends TestCase
         $queue->pop('emails');
     }
 
+    /**
+     * A batch whose lease could not be tracked is leased all the same. The
+     * pop threw and left it to lease expiry, which charged every job an
+     * attempt, while a batch popped ahead was handed back. Both are handed
+     * back now, and the pop still throws.
+     */
+    public function testABatchWhoseLeaseCannotBeTrackedIsHandedBack(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([$this->payload('job-1'), $this->payload('job-2')])],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->trackFailure = 'child died before tracked ACK';
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 2);
+
+        try {
+            $queue->pop('emails');
+            $this->fail('A job whose lease is not tracked was handed to Laravel.');
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString('before tracked ACK', $error->getMessage());
+        }
+
+        $this->assertCount(2, $handler->requests);
+        $handBack = $this->handBack($handler->requests[1]);
+        $this->assertSame(['transaction-1', 'transaction-2'], array_column($handBack['acks'], 'transactionId'));
+        $this->assertSame(['job-1', 'job-2'], $this->copiedJobs($handBack));
+        $this->assertSame([0, 0], $this->copiedAttempts($handBack), 'no attempt charged');
+    }
+
     public function testAmbiguousAckStopsRenewingAndDiscardsEveryPartitionInTheLease(): void
     {
         $response = $this->popBatchResponse([
