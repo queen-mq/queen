@@ -1,0 +1,21 @@
+{
+  "system": "queen",
+  "ledgers": 1,
+  "produced": 8850030,
+  "ambiguous": 0,
+  "out_records": 8850230,
+  "out_unique": 8850030,
+  "duplicates": 0,
+  "dup_records": 0,
+  "missing": 0,
+  "pending_in": 0,
+  "in_and_out": 0,
+  "extra": 0,
+  "ambiguous_in_out": 0,
+  "rereads": 0,
+  "unparsed": 0,
+  "warm": 200,
+  "pending_records": 0,
+  "pass": true,
+  "scan_s": 38.357198994
+}

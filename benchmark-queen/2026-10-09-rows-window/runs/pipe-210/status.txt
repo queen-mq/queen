@@ -1,0 +1,3 @@
+n1 pid=519882 {"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"follower","leader":true,"term":2,"applied":3,"commit":3,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"ap
+n2 pid=519897 {"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"follower","leader":true,"term":2,"applied":3,"commit":3,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"ap
+n3 pid=519913 {"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"leader","leader":true,"term":2,"applied":3,"commit":3,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"appl

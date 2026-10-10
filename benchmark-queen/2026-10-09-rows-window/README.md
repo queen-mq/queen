@@ -154,6 +154,39 @@ whether or not retention has anything to free in it, and each sealed file costs 
 sealed files were 67,139 maps on 2.1.0 and 1,140 on rc3. The kernel allows a process 65,530
 unless `vm.max_map_count` is raised (this VM has 1,048,576, so nothing failed here).
 
+## An exactly-once pipeline over messages without rows
+
+`pipe.sh`, three nodes on this machine. The transactional pipeline of the Kafka comparison
+(`qload -txn`): a feeder writes `vx-in` at 30,000 messages a second for 300 s, 16 workers move ten
+messages a transaction to `vx-out` (one transaction acks its inputs and pushes its outputs), and
+rows leave the store 20 s after a push. The workers are slower than the feeder on this machine, so
+within a minute they are behind the rows and claim their input from the queue log, inside
+transactions; when the feeder stops they go on until the input is empty. The verifier then reads
+all of `vx-out` and the rest of `vx-in`, none of it with a row by then, and accounts for every id
+the feeder wrote down.
+
+| | 2.1.0 | rc5 |
+|---|---|---|
+| Produced, and found once in `vx-out` | 8,850,030 | 8,850,010 |
+| Duplicates, missing, extra | 0, 0, 0 | 0, 0, 0 |
+| Verdict | PASS | PASS |
+| Claims served from the queue log, on the leader | | 653,161 |
+| Workers while the feeder runs (msg/s) | 15,200 to 15,800 | 14,200 to 15,700 |
+| ...transaction commit p50 / p99 | 3.8 to 4.0 / 13 to 16 ms | 3.7 to 4.3 / 12 to 22 ms |
+| Workers alone, after it (msg/s) | 21,000 | 19,500 |
+| ...transaction commit p50 / p99 | 2.90 / 8.9 ms | 2.93 / 10.0 ms |
+| Rows on each node at the end | 1,770,406 | 0 |
+| Broker memory on each node at the end | 730 to 860 MB | 110 to 250 MB |
+
+A worker that is behind the window reads its input's ids from the log and no longer from memory,
+which costs it about 7% here. One that keeps up is not on that path.
+
+`pipe-rc5-overrun` is the first attempt, kept because its verdict reads FAIL: the feeder ran for
+600 s and the workers got 60 s to finish, so 7.8 million inputs were still unprocessed. The
+verifier reads that rest without acking it, one batch a partition, and so found 148,000 of them
+and counted the others missing. Nothing was: no duplicate, nothing extra, and every output the
+workers had made was there once. `pipe.sh` now lets the workers finish.
+
 ## A rolling upgrade
 
 `roll.sh`, three nodes on this machine, traffic through all three for the whole roll, and a queue
