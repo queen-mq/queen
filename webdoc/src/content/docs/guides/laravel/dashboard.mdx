@@ -77,6 +77,9 @@ sourceOfTruth:
 # probe and reads its fork servers' events once per loop; the dashboard config reads
 # QUEEN_DASHBOARD_ENABLED through filter_var, so 1 turns it on. Nothing else this page states
 # changes.
+# sourceOfTruth re-read 2026-10-10 (probe user): SupervisorState's refusal of a state that another
+# user owns now names the owner and the reader and shows su and securityContext.runAsUser; the
+# checks are unchanged. Nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the

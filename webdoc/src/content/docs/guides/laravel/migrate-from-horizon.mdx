@@ -52,6 +52,10 @@ sourceOfTruth:
 # takes its connection's; the failed-job provider leaves other drivers' records to Laravel,
 # without the lock; the connector applies the pool's settings to the worked connection alone. The
 # pool row says so.
+# sourceOfTruth re-read 2026-10-10 (probe user): queen:supervisor's refusal of a state that another
+# user owns now names the owner and the reader and shows su and securityContext.runAsUser; its
+# checks and exit codes are unchanged, and the state directory stays the supervisor user's. Nothing
+# this page states changes.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place
