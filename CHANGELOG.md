@@ -16,6 +16,27 @@ backoff no longer closes it, which only the probe does, as in the PHP engine. Th
 longer lets a pool that balances inherit its own `QUEEN_LARAVEL_BLOCK_FOR`. These changes need a
 supervisor release; the worker-invocation record pins them.
 
+**Laravel: a probe that runs as root reads the status of a supervisor that runs as another user.**
+A Kubernetes exec probe runs as the container's user. In a container that starts as root and runs
+the supervisor as `www-data`, `queen:supervisor status --check`, `--check-capacity` and
+`--check-liveness`, and `SupervisorState`'s `status()` and `isLive()` called from a script, refused
+the state with "Queen supervisor state ancestor [/run/queen-supervisor] must be owned by root or the
+current user.": only root and the reader's own user were trusted owners. The probe failed and
+Kubernetes restarted a healthy pod every few minutes. Since PHP client 1.3.0, where the supervisor
+arrived. Root now reads such a state as its owner: for each read it takes the owner's uid, primary
+group and supplementary groups, as `su` does, and takes back its own after, so every check applies
+exactly as it does when the owner reads. That is also what keeps it safe: PHP cannot open a file
+with `O_NOFOLLOW`, so the checks notice a symbolic link only after the open followed it, and as the
+owner an open reaches only what the owner could open itself. The read creates, changes and locks
+nothing that the owner's own read would not. Root may still not write to the state: the
+supervisor, `pause`, `continue` and `terminate` keep requiring the owner and are refused with a
+message that says so. The owner needs an entry in the user database, as for `su`. Every refusal of
+a path that another user owns now goes on to say who owns it and who is asking, by uid and by name,
+and how to run as the owner, such as
+`su -s /bin/sh www-data -c "php artisan queen:supervisor status --check"` or
+`securityContext.runAsUser`. The first sentence of each message and the exit codes are unchanged.
+The Rust supervisor reads no state on behalf of a probe and is unchanged.
+
 ## PHP client 2.4.1 - 2026-10-09
 
 **Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the
