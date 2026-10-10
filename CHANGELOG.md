@@ -101,7 +101,8 @@ that says it did not run (`no_leader`, `standby`); a read, or a push whose every
 every URL marked unhealthy, as an election leaves them, a request went to the first URL only; it now
 tries each. A 3xx read as a success with an empty result, so a push behind a redirecting proxy
 reported its messages stored; it is now an error, never followed or retried. An empty body where
-the broker always sends one (push, ACK, transaction, a pop with status 200) is an error too. A body
+the broker always sends one (push, ACK, transaction, a pop with status 200) is an error too, after
+which `consume()` backs off and polls again, as after a network error. A body
 that cannot be encoded as JSON fails at once, with no request sent and no backend marked
 unhealthy; it marked every URL unhealthy and slept through the retries. Asynchronous requests now
 report the health of their backend, so a `consume()` with several workers leaves a dead node.

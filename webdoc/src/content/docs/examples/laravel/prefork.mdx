@@ -26,6 +26,11 @@ verifiedBy:
 # SupervisorConfiguration: refills outside balance_max_shift, orphans reaped as PID 1, a failed
 # fork-server boot waits before the next, status writes retried, the budget refusal. The process
 # tree and the forked workers this page prints are unchanged.
+# sourceOfTruth re-read 2026-10-11 (review fixes, unreleased): failover counts a URL listed twice
+# once; consume() backs off after an answer that is not the broker's; a replacement that cannot
+# start waits for the circuit; the PHP stop signal reaches the workers once; the Rust master handles
+# SIGTERM during its configuration export and drops a log line it cannot write. Nothing this page
+# states changes.
 ---
 
 With prefork, the supervisor boots Laravel once in a fork server and forks the workers from it. A
