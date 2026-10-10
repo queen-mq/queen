@@ -60,6 +60,7 @@ final class PhpSupervisor
     private RemoteStatusPublisher|false|null $remoteStatus = null;
     private ReplicaCoordinator|false|null $coordinator = null;
     private ForkServerClient|false|null $forkServer = null;
+    private ?OrphanReaper $orphanReaper = null;
     private bool $preforkFailed = false;
     /** A worker of the current fork server stopped for queue:restart. */
     private bool $forkServerStale = false;
@@ -111,6 +112,7 @@ final class PhpSupervisor
                 }
                 $this->reapDraining();
                 $this->tickForkServers();
+                $this->reapOrphans();
                 $this->refreshForkServer();
                 $this->observeStableWorkers();
 
@@ -1174,6 +1176,22 @@ final class PhpSupervisor
             'supervisor' => $supervisor,
             'queue' => $queue,
         ];
+    }
+
+    /**
+     * The orphans that come to the master as PID 1, as a process a job leaves
+     * behind does: reaped, so their zombies do not use up the container's pids.
+     * Its own workers and fork servers keep their exit statuses for reap().
+     */
+    private function reapOrphans(): void
+    {
+        $tracked = array_values($this->workerPids);
+        foreach ([$this->forkServer, ...$this->retiredForkServers] as $server) {
+            if ($server instanceof ForkServerClient) {
+                $tracked[] = $server->pid();
+            }
+        }
+        ($this->orphanReaper ??= new OrphanReaper())->reap($tracked);
     }
 
     private function reapDraining(): void
