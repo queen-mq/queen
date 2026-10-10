@@ -190,6 +190,17 @@ With a single URL the load-balancing keys have no effect. With several, `enable_
 place of `retry_attempts`: each backend gets one try, and a backend that failed is skipped for
 `health_retry_after`.
 
+Since PHP client 2.4.4 a failover that finds every backend marked unhealthy still tries each one,
+not only the first. While a cluster elects a leader, its nodes answer 503 `no_leader`: a request
+waits the election out at the pace of the `Retry-After` header, for at most 10 seconds or its
+`timeout`, without using up its tries. A read, or a push whose every message has a `transactionId`
+(the broker drops a second copy, and a Laravel job always has one), also waits after a 503 `retry`.
+A pop whose 503 says it may have run (`outcome_unknown`, `timeout` or `retry`) is never sent again,
+so a lease is never taken twice. A redirect is an error, never followed or retried: check the URL.
+An answer without a body where the broker always sends one (a push, an ACK, a transaction, a pop
+with status 200) is an error too, no longer a success. A body that cannot be encoded as JSON, such
+as a string that is not UTF-8, fails at once, with no request sent and no backend marked unhealthy.
+
 <Aside type="caution">
 Two defaults differ from the plain PHP client's, because `config/queen.php` sets its own:
 `affinity_hash_ring` is `150` under Laravel and `128` in `new Queen(...)`, and
