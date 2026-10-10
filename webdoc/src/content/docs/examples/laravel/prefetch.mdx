@@ -24,6 +24,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
 # delivery that carries no Laravel job in the dead-letter queue at once, through a failed job's path;
 # batches, ACKs and pop-ahead are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
+# supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
+# Nothing this page states changes.
 ---
 
 With `prefetch` 1 a worker makes one pop for every job. With `prefetch` `'auto'` it starts at one

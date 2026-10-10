@@ -5,16 +5,32 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Laravel: the PHP client pins supervisor 0.8.1.** `queen:supervisor-install` installs 0.8.1, with
+the fixes of the Rust master below. A deployment that pins the SHA-256 of the manifest, as
+`--manifest-sha256` or `supervisor_binary.manifest_sha256`, takes the one of the 0.8.1 release
+manifest.
+
+**Laravel: a worker that has not consumed counts from the start of its first failed pop.** A
+supervised worker whose pops fail records since when, and `queen:supervisor status` reports its pool
+after 60 seconds (PHP client 2.4.2). The time was taken when the pop failed, not when it began. A
+broker that keeps its connections but stops answering fails a pop only when the request times out,
+35 seconds for each broker URL the client tries, about 105 seconds with three, so a hung broker
+showed as `pool_not_consuming` about 165 seconds in. The worker now records the start of the pop
+that failed: the pool shows as not consuming once that first pop gives up. A pop that works still
+clears it, and the next failure starts a new count from its own pop.
+
+## Supervisor 0.8.1 - 2026-10-10
+
 **Supervisor: strays are stopped, prefork is tried again at `queue:restart`, a dead server's
 workers are reaped, and only the probe closes a circuit.** The Rust master has the same four
-changes as the PHP engine above: a late fork reply is read once per loop whether or not a worker
+changes as the PHP engine of PHP client 2.4.1: a late fork reply is read once per loop whether or not a worker
 of that server is polled; a `queue:restart` announced by a spawned worker starts a fork server
 when prefork has none; a forked worker whose server died is reaped by the master when the master
 is the nearest subreaper (PID 1 in a container), with its real status, instead of staying a zombie
 that kept its pool slot; and a sibling that reached `stable_after` while the pool's circuit was in
 backoff no longer closes it, which only the probe does, as in the PHP engine. The master also no
-longer lets a pool that balances inherit its own `QUEEN_LARAVEL_BLOCK_FOR`. These changes need a
-supervisor release; the worker-invocation record pins them.
+longer lets a pool that balances inherit its own `QUEEN_LARAVEL_BLOCK_FOR`. The PHP client
+pins this release from 2.4.3; the worker-invocation record pins its behaviour.
 
 ## PHP client 2.4.2 - 2026-10-10
 
