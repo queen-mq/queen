@@ -579,8 +579,10 @@ class QueenQueue extends BaseQueue implements QueueContract
             if ($message === null) {
                 return null;
             }
-            $job = $this->makeJob($message, $queue);
-            $this->adaptiveBatch?->handedOut($queue);
+            $job = $this->jobFor($message, $queue);
+            if ($job !== null) {
+                $this->adaptiveBatch?->handedOut($queue);
+            }
 
             return $job;
         }
@@ -591,7 +593,11 @@ class QueenQueue extends BaseQueue implements QueueContract
             $this->jobHandedOutMillis = null;
             return null;
         }
-        $job = $this->makeJob($message, $queue);
+        $job = $this->jobFor($message, $queue);
+        if ($job === null) {
+            $this->jobHandedOutMillis = null;
+            return null;
+        }
         $this->adaptiveBatch?->handedOut($queue);
         $this->jobHandedOutMillis = self::monotonicMillis();
         // The batch popped ahead waits for this job, leased but not renewed:
@@ -987,6 +993,50 @@ class QueenQueue extends BaseQueue implements QueueContract
     {
         return ($this->leaseIdOrNull($message) ?? '') . "\0"
             . (string) ($message['partitionId'] ?? $message['partition_id'] ?? '');
+    }
+
+    /**
+     * The job of a delivery; null for one that carries no Laravel job, which
+     * goes to the dead-letter queue at once. Laravel's worker pops again after
+     * its sleep.
+     */
+    private function jobFor(array $message, string $queue): ?QueenJob
+    {
+        $reason = self::notALaravelJob($message);
+        if ($reason === null) {
+            return $this->makeJob($message, $queue);
+        }
+        $poison = NotALaravelJobException::for($message, $queue, $reason);
+        // As a failed job's: synchronous, with the deferred ACKs before it.
+        $this->acknowledgeReserved($message, $this->consumerGroup, true, $poison, $queue);
+        $this->reportQuietly($poison);
+
+        return null;
+    }
+
+    /**
+     * Why a delivery carries no Laravel job, or null when it does: QueenJob
+     * reads its data as the payload, a JSON object or the array decoded from
+     * one, and Laravel calls the payload's `job`.
+     */
+    private static function notALaravelJob(array $message): ?string
+    {
+        $data = $message['data'] ?? $message['payload'] ?? null;
+        if (is_string($data)) {
+            try {
+                $data = json_decode($data, true, 512, JSON_THROW_ON_ERROR);
+            } catch (JsonException $invalid) {
+                return 'its data is not JSON: ' . $invalid->getMessage();
+            }
+        }
+        if (!is_array($data)) {
+            return 'its data is not a JSON object';
+        }
+        if (!is_string($data['job'] ?? null) || $data['job'] === '') {
+            return 'its payload names no job to call';
+        }
+
+        return null;
     }
 
     private function makeJob(array $message, string $queue): QueenJob
@@ -1598,14 +1648,16 @@ class QueenQueue extends BaseQueue implements QueueContract
             return;
         }
 
+        // A deploy fixes the job class or the connection, nothing else: a
+        // supervised worker leaves (WorkerPopGuard), and its pool shows it.
         if (!is_int($timeout) || $timeout < 0) {
-            throw new RuntimeException(
+            throw new UnsafeJobTimeoutException(
                 'Queen Laravel job timeout must be a non-negative integer or null.',
             );
         }
 
         if ($this->leaseRenewer === null && ($timeout === 0 || $timeout >= $this->retryAfter)) {
-            throw new RuntimeException(
+            throw new UnsafeJobTimeoutException(
                 "Queen Laravel job timeout [{$timeout}] must be positive and shorter than retry_after "
                 . "[{$this->retryAfter}] when lease_renewal is disabled.",
             );

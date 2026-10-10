@@ -173,7 +173,9 @@ the stripes (`laravel`).
    the job and queues it again in one broker transaction. A job that fails for the last time is
    filed into the dead-letter queue with its error, and Laravel writes its `failed_jobs` row.
 5. **Crash.** A worker that dies sends no ACK. When the lease expires, the broker delivers the job
-   again.
+   again, as the next attempt: Laravel counts the runs the payload records plus the broker's
+   deliveries of it, so a job that kills its worker every time fails at `tries` like any other. An
+   expiry never charges the queue's own `retryLimit`, which only a failed ACK does.
 
 <Figure id="laravel/job-life" />
 
@@ -275,6 +277,17 @@ step. If the broker cannot be reached, the Laravel row stays and the command can
 `queue:retry` also resets the attempt count. Use these commands, or the dashboard's Retry button,
 which runs `queue:retry`: a replay from the Queen dashboard's dead-letter page knows nothing about
 `failed_jobs`.
+
+A delivery that carries no Laravel job, such as a message another producer pushed onto the queue,
+never will. Since PHP client 2.4.2 the worker files it into the dead-letter queue at its first
+delivery and reports it to the application's exception handler, with its transaction ID, partition,
+delivery attempt and first bytes; there is no `failed_jobs` row, so it shows only on the Queen
+dashboard's dead-letter page. Before, it was left to its lease, and since an expiry never charges
+the retry limit it came back forever and held its partition: on a queue with one partition, the
+whole queue. A job whose timeout its lease cannot cover (`timeout` at or above `retry_after`
+without lease renewal) is the opposite case: only a deploy fixes it, so a worker under a
+supervisor leaves, its pool shows the crash, and the job waits, to lease expiry, for a worker that
+runs the fixed code.
 
 A failed payload carries a retry ID of its own, fixed when the job fails. `queue:retry` pushes the
 job again under that ID instead of the job's UUID, so the deduplication record of the original

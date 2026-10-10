@@ -48,6 +48,25 @@ and `--check-capacity`, report two new codes, `pool_not_consuming` and
 the outage lasts 60 seconds; the Kubernetes guide shows how to leave these codes out of a probe
 that must not stop a rollout.
 
+**Laravel: a delivery that carries no Laravel job goes to the dead-letter queue at once.** A
+message whose data is not a JSON object, or names no `job` to call, made `pop()` throw, and the
+delivery was left to its lease. A lease expiry never charges the queue's retry limit, which only a
+failed ACK does (checked on the 2.0.4 broker with `retryLimit` 3 and `dlqAfterMaxRetries`: six
+expiries, six deliveries, no dead letter), so it came back at every expiry, forever, and the
+messages behind it on its partition never ran; on a queue with one partition, none did. The worker
+now files it into the dead-letter queue at its first delivery, as it does a failed job, reports a
+`NotALaravelJobException` to the application's exception handler with the delivery's transaction ID,
+queue, partition, delivery attempt and first 120 bytes, the same text as the dead-letter error, and
+pops again. No `failed_jobs` row is written: it was never a Laravel job. Since the PHP client 1.0.
+
+**Laravel: a job whose timeout its lease cannot cover ends a supervised worker.** A job with a
+`timeout` at or above `retry_after`, without lease renewal, made `pop()` throw a
+`RuntimeException` and was left to its lease, silently, at every delivery. Only a deploy fixes the
+job class or the connection, so the exception is now an `UnsafeJobTimeoutException`, a
+`LogicException` with the same message, and a worker started by a supervisor leaves at its next
+loop: its pool's restarts back off and the crash shows in `queen:supervisor status`. The delivery
+waits, to lease expiry, for a worker that runs the fixed code.
+
 ## PHP client 2.4.1 - 2026-10-09
 
 **Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the

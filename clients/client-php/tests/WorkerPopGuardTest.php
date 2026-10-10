@@ -144,6 +144,49 @@ final class WorkerPopGuardTest extends TestCase
     }
 
     /**
+     * A job whose timeout its lease cannot cover is wrong in the code, and
+     * only a deploy fixes it: the worker leaves, so its pool shows it, and the
+     * delivery waits for a worker that runs the fixed code.
+     */
+    #[TestWith(['spawned'])]
+    #[TestWith(['forked'])]
+    public function testAJobWhoseTimeoutItsLeaseCannotCoverEndsTheWorker(string $mode): void
+    {
+        $this->broker->answer($this->delivery(['job' => 'Handler@handle', 'uuid' => 'too-long', 'timeout' => 400]), times: 1);
+        $worker = $this->superviseAs($mode);
+
+        [$code, $output] = $this->work($mode, $worker, 'queen-batch', 5);
+
+        $this->assertSame(1, $code);
+        $this->assertSays('cannot pop from connection [queen-batch]: Queen\Laravel\Queue\UnsafeJobTimeoutException: '
+            . 'Queen Laravel job timeout [400] must be positive and shorter than retry_after [90]', $output);
+        $this->assertSame(2, $worker->loops);
+    }
+
+    /**
+     * A delivery that carries no Laravel job goes to the dead-letter queue,
+     * and the worker goes on: one bad message must not stop a pool.
+     */
+    #[TestWith(['spawned'])]
+    #[TestWith(['forked'])]
+    public function testADeliveryThatCarriesNoLaravelJobDoesNotEndTheWorker(string $mode): void
+    {
+        $this->broker->answer($this->delivery(['poison' => 'not a Laravel job']), times: 1);
+        $this->broker->answer(['success' => true, 'leaseReleased' => true, 'dlq' => true], times: 1);
+        $worker = $this->superviseAs($mode);
+        $files = [];
+        $worker->onLoop = function (int $loop) use (&$files): void {
+            $files[$loop] = $this->popFailures() !== null;
+        };
+
+        [$code, $output] = $this->work($mode, $worker, 'queen-batch', 3);
+
+        $this->assertSame(0, $code, $output);
+        $this->assertSame([1 => false, 2 => false, 3 => false], $files, 'a dead-lettered delivery counted as a failed pop');
+        $this->assertSame(4, $this->broker->count(), 'one pop, its dlq ACK, two empty pops');
+    }
+
+    /**
      * A broker that is down, slow or refusing is not the worker's fault, and
      * no restart helps: restarting every worker of every pool would only turn
      * a short outage into a restart storm. The worker stays, says since when
@@ -493,6 +536,25 @@ final class WorkerPopGuardTest extends TestCase
         return json_decode((string) file_get_contents($path), true, 4, JSON_THROW_ON_ERROR);
     }
 
+    /** @return array<string, mixed> a pop's answer: one delivery of $data */
+    private function delivery(array $data): array
+    {
+        return [
+            'success' => true,
+            'queue' => 'batch',
+            'leaseId' => 'lease-1',
+            'messages' => [[
+                'id' => 'message-1',
+                'transactionId' => 'transaction-1',
+                'partitionId' => '0198f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83',
+                'partition' => 'laravel-0001',
+                'leaseId' => 'lease-1',
+                'deliveryAttempt' => 1,
+                'data' => $data,
+            ]],
+        ];
+    }
+
     /** What a worker of pid $pid leaves when its pops failed for $seconds. */
     private function writePopFailures(int $pid, int $seconds): void
     {
@@ -570,15 +632,18 @@ final class WorkerPopGuardTest extends TestCase
 /** The broker of the pool's connection: a scripted answer to every request. */
 final class BrokerScript
 {
-    /** @var list<int|\Throwable> */
+    /** @var list<int|\Throwable|array<string, mixed>> */
     private array $plan = [];
 
-    private int|\Throwable $default = 204;
+    private int|\Throwable|array $default = 204;
 
     private int $requests = 0;
 
-    /** Answer the next $times requests so; without $times, every one after the plan. */
-    public function answer(int|\Throwable $answer, ?int $times = null): void
+    /**
+     * Answer the next $times requests so, with a status, a failure or a JSON
+     * body; without $times, every one after the plan.
+     */
+    public function answer(int|\Throwable|array $answer, ?int $times = null): void
     {
         if ($times === null) {
             $this->default = $answer;
@@ -599,6 +664,9 @@ final class BrokerScript
         $answer = array_shift($this->plan) ?? $this->default;
         if ($answer instanceof \Throwable) {
             throw $answer;
+        }
+        if (is_array($answer)) {
+            return new FulfilledPromise(new Response(200, ['Content-Type' => 'application/json'], json_encode($answer)));
         }
 
         // An empty pop is a bodiless 204.
