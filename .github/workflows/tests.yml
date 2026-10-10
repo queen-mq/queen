@@ -250,6 +250,19 @@ jobs:
         run: cargo test --manifest-path crates/queen-protocol/Cargo.toml --locked
       - name: client tests
         run: cargo test --manifest-path clients/client-rust/Cargo.toml --locked
+      # The supervisor's prefork tests boot the PHP client's fork server and
+      # need its Composer dependencies; without them they skipped, and under
+      # CI a skip now fails the test.
+      - name: Set up PHP 8.3 for the supervisor's fork-server tests
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pcntl, posix, dom, xml, xmlwriter
+          coverage: none
+          tools: composer:v2
+      - name: Install the PHP client's dependencies
+        working-directory: clients/client-php
+        run: composer install --no-interaction --no-progress --prefer-dist
       - name: Laravel supervisor tests
         run: cargo test --manifest-path supervisor/Cargo.toml --locked
       # `signals` is off by default, so nothing else in the repo ever compiles
