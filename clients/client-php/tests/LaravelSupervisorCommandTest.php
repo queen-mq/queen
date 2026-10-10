@@ -5,7 +5,9 @@ namespace Queen\Tests;
 use Orchestra\Testbench\TestCase;
 use Queen\Laravel\Commands\SupervisorControlCommand;
 use Queen\Laravel\QueenServiceProvider;
+use Queen\Laravel\Supervisor\ProcessIdentity;
 use Queen\Laravel\Supervisor\SupervisorState;
+use Queen\Tests\Support\FakeProcessIdentity;
 use Symfony\Component\Console\Output\BufferedOutput;
 use Symfony\Component\Console\Output\ConsoleOutputInterface;
 use Symfony\Component\Console\Output\ConsoleSectionOutput;
@@ -394,6 +396,60 @@ class LaravelSupervisorCommandTest extends TestCase
                 'action' => 'status',
                 '--check-capacity' => true,
             ])->assertFailed();
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    public function testARootProbeReadsAnotherUsersStatusButMayNotControlIt(): void
+    {
+        if (posix_geteuid() === 0) {
+            $this->markTestSkipped('Plays root against a state that the test user owns, so needs a test user that is not root.');
+        }
+        $directory = $this->configureStateDirectory();
+        $state = new SupervisorState($directory);
+        $lock = $state->acquireLock();
+        // A Kubernetes exec probe in a container that starts as root, while
+        // the supervisor runs as another user.
+        $root = new FakeProcessIdentity(0, [0 => 'root', posix_geteuid() => 'supervisor']);
+        $this->app->instance(ProcessIdentity::class, $root);
+
+        try {
+            $state->writeStatus([
+                'engine' => 'rust',
+                'state' => 'running',
+                'pools' => [],
+                'pool_status' => [[
+                    'supervisor' => 'orders',
+                    'queue' => 'default',
+                    'desired' => 1,
+                    'running' => 1,
+                    'healthy' => true,
+                    'restart_state' => 'closed',
+                    'restart_failures' => 0,
+                    'depth' => 0,
+                    'depth_available' => true,
+                ]],
+            ]);
+            foreach (['--check', '--check-capacity', '--check-liveness', '--json'] as $option) {
+                $this->artisan('queen:supervisor', ['action' => 'status', $option => true])->assertSuccessful();
+            }
+
+            $output = new BufferedOutput();
+            $exitCode = $this->app->make(\Illuminate\Contracts\Console\Kernel::class)->call(
+                'queen:supervisor',
+                ['action' => 'pause'],
+                $output,
+            );
+            $rendered = (string) preg_replace('/\s+/', ' ', $output->fetch());
+
+            $this->assertSame(1, $exitCode);
+            $this->assertStringContainsString('must be owned by root or the current user.', $rendered);
+            $this->assertStringContainsString("Root may only read another user's supervisor state", $rendered);
+            $this->assertFileDoesNotExist($directory . '/control.json');
+            $this->assertNotSame([], $root->assumed);
+            $this->assertSame(0, $root->effectiveUid());
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
