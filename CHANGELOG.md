@@ -106,6 +106,15 @@ that cannot be encoded as JSON fails at once, with no request sent and no backen
 unhealthy; it marked every URL unhealthy and slept through the retries. Asynchronous requests now
 report the health of their backend, so a `consume()` with several workers leaves a dead node.
 
+**Supervisor: a SIGTERM during start-up, and a closed stderr, no longer cost the workers.** The
+signal handler was installed after the configuration export, which runs Artisan and may take a
+minute; a master that is PID 1 ignores a signal it does not handle, so a SIGTERM during the export
+was lost and the workers it then started were killed at the platform's deadline. The handler now
+comes first, and a stop during the export ends the master before it starts a worker. And the
+master logged with `eprintln!`, which panics when stderr is a pipe whose reader is gone; the panic
+ended the master and, through `PR_SET_PDEATHSIG`, every worker. A line it cannot write is now
+dropped.
+
 **Supervisor: a bad control request is discarded instead of stopping the master.** A control
 document that was expired, malformed or dated in the future by a clock step made the Rust master
 drain every worker and exit. It is now removed with one log line and supervision goes on, as in the
