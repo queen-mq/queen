@@ -64,7 +64,10 @@ final class AppServiceProvider extends ServiceProvider
     private static function recordEvent(string $event, Job $job, ?\Throwable $exception = null): void
     {
         $payload = $job->payload();
-        if (!str_starts_with((string) ($payload['displayName'] ?? ''), 'App\\Jobs\\Compat\\')) {
+        $name = (string) ($payload['displayName'] ?? '');
+        // The failure matrix's jobs too: a delivery that Laravel fails before
+        // handle() (too many attempts) shows only as a JobProcessing event.
+        if (!str_starts_with($name, 'App\\Jobs\\Compat\\') && !str_starts_with($name, 'App\\Jobs\\FailureMatrix')) {
             return;
         }
         $command = (string) ($payload['data']['command'] ?? '');

@@ -123,7 +123,7 @@ class Jobs:
         """Each attempt's start and end; the end is None when it was killed."""
         spans: list[tuple[float, float | None]] = []
         open_spans: dict[int | None, int] = {}
-        for event, attempt, at, _ in self.raw["jobs"].get(job, {}).get("events", []):
+        for event, attempt, at, *_ in self.raw["jobs"].get(job, {}).get("events", []):
             if event == "started":
                 open_spans[attempt] = len(spans)
                 spans.append((at, None))
@@ -137,6 +137,10 @@ class Jobs:
         """Whether an attempt started before the previous one ended."""
         spans = sorted(self.attempts(job))
         return any(end is not None and later[0] < end for (_, end), later in zip(spans, spans[1:]))
+
+    def attempts_of(self, job: str, event: str) -> list[int | None]:
+        """The attempt each `event` of the job was logged with, in order."""
+        return [e[1] for e in self.raw["jobs"].get(job, {}).get("events", []) if e[0] == event]
 
     def failed_with(self, job: str) -> str | None:
         """The exception failed() received, by class name."""
@@ -599,6 +603,104 @@ def stop_long_batch(lane: Lane) -> list[Check]:
     ]
 
 
+def run_in_progress(jobs: Jobs, job: str) -> tuple[int, int] | None:
+    """The job's last run, if it has not ended: its number and the pid of its worker. A run
+    that released itself, threw or completed has ended."""
+    events = jobs.raw["jobs"].get(job, {}).get("events", [])
+    starts = [index for index, event in enumerate(events) if event[0] == "started"]
+    if not starts or len(events[starts[-1]]) < 5:
+        return None
+    if any(event[0] in ("released", "threw", "completed", "failed_hook") for event in events[starts[-1] + 1:]):
+        return None
+    return len(starts), int(events[starts[-1]][4])
+
+
+def worker_death(lane: Lane, item: str, *, mode: str, tries: int, timeout: int, kill: bool,
+                 runs: list[int], deliveries: list[int], failed_with: str) -> list[Check]:
+    """A job whose worker dies in the middle of a run, every run: Laravel's timeout handler
+    kills it (`kill` False: the job sleeps past its `timeout`), or SIGKILL from outside, as
+    the kernel's OOM killer would (`kill` True). A second message waits behind it in the
+    same partition, the lane's only one: a job stuck in its lease would hold it forever.
+    On Queen the attempt Laravel sees is the payload's runs plus the broker's delivery
+    count; a lease that expires adds one delivery, as Redis adds one reservation."""
+    killer, follower = "000000", "000001"
+    lane.dispatch(mode, 1, sleep_ms=30_000, tries=tries, timeout=timeout)
+    lane.dispatch("ok", 1, first=1, tries=1)
+    container = lane.container(lane.profile.engine)
+    handled: set[int] = set()
+    kills: list[dict] = []
+    deadline = time.monotonic() + 240
+    jobs = lane.report()
+    while time.monotonic() < deadline and not (
+            (jobs.count(killer, "failed_hook") or jobs.count(killer, "completed")) and jobs.count(follower, "completed")):
+        run = run_in_progress(jobs, killer) if kill else None
+        if run is not None and run[0] not in handled:
+            # A run that releases itself does so at once; one that sleeps is still running.
+            time.sleep(1)
+            if run_in_progress(lane.report(), killer) == run:
+                lane.docker("exec", container, "kill", "-KILL", str(run[1]), check=False)
+                kills.append({"run": run[0], "pid": run[1]})
+                lane.note(f"SIGKILL worker {run[1]} in run {run[0]}")
+            handled.add(run[0])
+        time.sleep(1)
+        jobs = lane.report()
+    lane.note("killer ended, follower completed" if jobs.count(follower, "completed") else "TIMED OUT")
+    jobs = lane.settle(5)
+    observed = {
+        "kills": kills, "deliveries": jobs.attempts_of(killer, "event_before"),
+        "runs": jobs.attempts_of(killer, "started"), "failed_with": jobs.failed_with(killer),
+        "dead_letter_entries": jobs.dead_letter(), "failed_rows": jobs.failed_store(),
+        "follower_started_after_killer_failed": round(
+            (jobs.times(follower, "started") or [0])[0] - (jobs.times(killer, "failed_hook") or [0])[0], 2),
+    }
+    lane.extra["worker_death"] = observed
+    lane.outcome[item] = {"same": {
+        f"job {killer}": {**jobs.outcome(killer), "deliveries": observed["deliveries"], "attempts of its runs": observed["runs"]},
+        "next message on the partition": jobs.outcome(follower),
+    }, "near": {}}
+    return [
+        Check(f"deliveries {deliveries}, runs {runs}", observed["deliveries"] == deliveries and observed["runs"] == runs,
+              f"deliveries {observed['deliveries']}, runs {observed['runs']}, kills {kills}"),
+        Check(f"failed with {failed_with}", str(observed["failed_with"]).endswith(failed_with), f"{observed['failed_with']}"),
+        *failed_finally(lane, jobs, [killer]),
+        Check("the next message on the partition ran, once", jobs.count(follower, "completed") == 1,
+              f"{jobs.events(follower)}"),
+    ]
+
+
+# One partition, so a message stuck in its lease blocks the next; a lease of 10 s, so a death
+# costs seconds. A renewal request may take 1 s, for the renewal budget to fit in the lease.
+DEATH_ENV = {"QUEEN_PARTITIONS": "1", "BENCH_RETRY_AFTER": "10", "BENCH_TIMEOUT": "5",
+             "BENCH_LEASE_RENEWAL_TIMEOUT": "1"}
+
+
+def death_timeout(lane: Lane) -> list[Check]:
+    """tries 2, a run that outlives its timeout: Laravel fails the job when the second run
+    times out, then kills the worker."""
+    return worker_death(lane, "death-timeout", mode="ok", tries=2, timeout=3, kill=False,
+                        runs=[1, 2], deliveries=[1, 2], failed_with="TimeoutExceededException")
+
+
+def death_sigkill(lane: Lane) -> list[Check]:
+    """tries 2, SIGKILL at each run: no handler runs, so the third delivery exceeds tries and
+    Laravel fails it before handle()."""
+    return worker_death(lane, "death-sigkill", mode="ok", tries=2, timeout=9, kill=True,
+                        runs=[1, 2], deliveries=[1, 2, 3], failed_with="MaxAttemptsExceededException")
+
+
+def death_release_timeout(lane: Lane) -> list[Check]:
+    """tries 3, released once, then runs that outlive their timeout: the release is the first
+    attempt, so the second timeout, at attempt 3, fails the job."""
+    return worker_death(lane, "death-release-timeout", mode="release-then-ok", tries=3, timeout=3, kill=False,
+                        runs=[1, 2, 3], deliveries=[1, 2, 3], failed_with="TimeoutExceededException")
+
+
+def death_release_sigkill(lane: Lane) -> list[Check]:
+    """tries 3, released once, then SIGKILL at each run: the fourth delivery exceeds tries."""
+    return worker_death(lane, "death-release-sigkill", mode="release-then-ok", tries=3, timeout=9, kill=True,
+                        runs=[1, 2, 3], deliveries=[1, 2, 3, 4], failed_with="MaxAttemptsExceededException")
+
+
 def backend_restart(lane: Lane) -> list[Check]:
     expected = ids(0, 300)
     lane.dispatch("ok", 300, sleep_ms=100, tries=3)
@@ -1002,6 +1104,10 @@ SCENARIOS = [
         "BENCH_QUEEN_COORDINATION": "true", "BENCH_TIMEOUT": "25", "BENCH_RETRY_AFTER": "30",
         "BENCH_WORKERS": "1", "BENCH_MIN_WORKERS": "1", "BENCH_MAX_WORKERS": "1",
     }, replicas=2, engine_env={"horizon": {"BENCH_RETRY_AFTER": "90"}}),
+    Scenario("death-timeout", death_timeout, DEATH_ENV),
+    Scenario("death-sigkill", death_sigkill, DEATH_ENV),
+    Scenario("death-release-timeout", death_release_timeout, DEATH_ENV),
+    Scenario("death-release-sigkill", death_release_sigkill, DEATH_ENV),
     Scenario("laravel-parity", laravel_parity, {**COMPAT_ENV, **THREE_WORKERS}, prepare=compat_database),
     # cb3's layout: every dispatch through the routed default connection to the pools'.
     Scenario("routed-parity", routed_parity, {**COMPAT_ENV, **THREE_WORKERS, "BENCH_ROUTED": "true"},
@@ -1009,6 +1115,7 @@ SCENARIOS = [
 ]
 # The scenarios that record an outcome for parity(), besides the compatibility runs.
 PARITY_SCENARIOS = ("job-timeout", "memory-limit", "stop-short", "stop-lease", "queue-restart",
+                    "death-timeout", "death-sigkill", "death-release-timeout", "death-release-sigkill",
                     "laravel-parity", "routed-parity")
 
 

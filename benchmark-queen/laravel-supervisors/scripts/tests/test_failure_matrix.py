@@ -107,6 +107,22 @@ class FailureMatrixChecksTest(unittest.TestCase):
         self.assertEqual({"runs": 1, "completed": 1, "failed": 0, "failed_with": None, "failed_row": False},
                          jobs.outcome("000001"))
 
+    def test_only_a_run_that_has_not_ended_is_killed_and_its_worker_is_known(self) -> None:
+        def jobs(events: list[tuple[str, int, int]]) -> matrix.Jobs:
+            return matrix.Jobs({"jobs": {"000000": {"events": [[e, a, float(i), None, pid] for i, (e, a, pid)
+                                                               in enumerate(events)], "pids": []}}})
+
+        running = jobs([("event_before", 1, 7), ("started", 1, 7), ("released", 1, 7), ("event_before", 2, 9),
+                        ("started", 2, 9)])
+        released = jobs([("event_before", 1, 7), ("started", 1, 7), ("released", 1, 7)])
+        four_fields = matrix.Jobs({"jobs": {"000000": {"events": [["started", 1, 0.0, None]], "pids": [7]}}})
+
+        self.assertEqual((2, 9), matrix.run_in_progress(running, "000000"))
+        self.assertIsNone(matrix.run_in_progress(released, "000000"))
+        self.assertIsNone(matrix.run_in_progress(four_fields, "000000"), "a report without pids names no worker")
+        self.assertEqual([1, 2], running.attempts_of("000000", "event_before"))
+        self.assertEqual([(1.0, 2.0), (4.0, None)], running.attempts("000000"), "five fields read as four")
+
     def test_the_summary_lists_failed_checks_and_errors(self) -> None:
         text = matrix.summary([
             {"scenario": "a", "profile": "queen", "passed": True, "checks": [{"name": "x", "passed": True}]},
