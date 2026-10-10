@@ -61,6 +61,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs,
 # facade/real.rs, handlers/raft.rs change what /health answers (raft.quorumAckMs; ready needs the
 # leader's majority within QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): ConsumerManager: consume() backs
+# off after a 5xx and goes on polling, and logs an ACK that failed. The consume loop this page
+# describes is unchanged.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers

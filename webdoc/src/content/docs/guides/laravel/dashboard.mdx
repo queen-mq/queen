@@ -92,6 +92,10 @@ sourceOfTruth:
 # user owns now names the owner and the reader and shows su and securityContext.runAsUser; the
 # checks are unchanged. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider records timed-out attempts and $this->fail() as failed attempts, so max_ms now covers a run cut by its timeout; the deploy advice still compares max_ms with shutdown_grace as stated. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): TuningAdvisor uses no null offset;
+# SupervisorState opens its locks close-on-exec and retries a failed status write; main.rs and
+# remote_status.rs publish from a thread a stop abandons. The panel, its status and its advice are
+# unchanged.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the

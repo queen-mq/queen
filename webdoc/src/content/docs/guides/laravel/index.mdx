@@ -90,6 +90,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
 # supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): QueenConnector, QueenQueue,
+# SupervisorConfiguration: a job whose timeout its lease cannot cover fails alone (migrate-from-
+# horizon says so), and the budget refusal names its parts. The lease and timeout rules here are
+# unchanged; the version table gains its row at the release.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and

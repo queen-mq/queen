@@ -22,6 +22,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
 # supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): QueenQueue: an unsafe job timeout
+# fails that job, a dead-letter error is made UTF-8, a batch whose lease cannot be tracked is handed
+# back. One partition's order, as this page runs it, is unchanged; the harness's partition-order
+# scenario holds it across a kill.
 ---
 
 A job that implements `QueenPartitionable` waits until the job before it of the same customer has

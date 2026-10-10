@@ -27,6 +27,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
 # supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): QueenConnector, QueenQueue: the
+# shutdown hand-back fails over within its 2 s bound, and a batch whose lease cannot be tracked is
+# handed back. The prefetch, ACKs and hand-back this page shows are unchanged.
 ---
 
 With `prefetch` 1 a worker makes one pop for every job. With `prefetch` `'auto'` it starts at one

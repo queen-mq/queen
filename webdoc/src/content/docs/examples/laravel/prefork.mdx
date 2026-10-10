@@ -22,6 +22,10 @@ verifiedBy:
 # queue:restart leaves at once, an oversized fork request is refused instead of ending the server,
 # the PHP engine reads its servers' events once per loop. The queue:restart bullet says so; the
 # measurements are unchanged.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): PhpSupervisor,
+# SupervisorConfiguration: refills outside balance_max_shift, orphans reaped as PID 1, a failed
+# fork-server boot waits before the next, status writes retried, the budget refusal. The process
+# tree and the forked workers this page prints are unchanged.
 ---
 
 With prefork, the supervisor boots Laravel once in a fork server and forks the workers from it. A

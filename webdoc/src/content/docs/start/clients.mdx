@@ -109,6 +109,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): config/queen.php reads its
 # switch variables through filter_var; url, urls and the token this page shows are unchanged.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): ConsumerManager: consume() backs
+# off after a 5xx and logs an ACK that failed; a request waits out a leader election. The failover
+# each tab describes still holds.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same

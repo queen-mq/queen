@@ -33,6 +33,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
 # supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): QueenQueue, QueenConnector,
+# SupervisorConfiguration: a job whose timeout its lease cannot cover fails alone, a numeric-string
+# timeout counts, the renewal budget refusal names its parts. The lease, its expiry and the refused
+# ACKs this page runs are unchanged.
 ---
 
 Without lease renewal, a job that runs longer than `retry_after` goes to a second worker while the

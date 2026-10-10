@@ -76,6 +76,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-10 (probe user): SupervisorState's refusal of a state that another
 # user owns now names the owner and the reader; the status document and its liveness and readiness
 # rules are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): SupervisorState, ConsumerManager,
+# coordination.rs, main.rs, remote_status.rs: status writes retried until heartbeat_timeout, broker
+# calls on a thread a stop abandons, a terminate publishes terminating after the worker fan-out. The
+# document's fields and their meaning are unchanged.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.

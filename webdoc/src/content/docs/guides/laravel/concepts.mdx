@@ -98,6 +98,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
 # supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): ForkServerCommand releases the
+# boot's cache stores before forking, so the fork server holds no connection, as this page says;
+# TuningAdvisor uses no null offset; the QueenQueue, QueenConnector, SupervisorConfiguration and
+# prefork.rs fixes change nothing this page states.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,

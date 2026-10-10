@@ -65,6 +65,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
 # supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): QueenConnector, QueenQueue,
+# SupervisorConfiguration, coordination.rs, main.rs, prefork.rs: the stability fixes of the
+# unreleased changelog. A worker that cannot pop still leaves on a wrong connection or a
+# LogicException, which an unsafe job timeout no longer is; every row still holds.
 ---
 
 Queen is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both
