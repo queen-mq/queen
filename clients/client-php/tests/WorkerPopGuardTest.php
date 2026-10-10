@@ -93,8 +93,8 @@ final class WorkerPopGuardTest extends TestCase
 
     protected function defineEnvironment($app): void
     {
-        // As in cb3-backend: the default connection only dispatches, and
-        // every pool works a Queen connection of its own.
+        // The default connection only dispatches, and every pool works a Queen
+        // connection of its own.
         $app['config']->set('queue.default', 'routed');
         $app['config']->set('queue.connections.routed', ['driver' => 'routed']);
         $app['config']->set('queue.connections.queen-batch', [
@@ -752,7 +752,7 @@ final class BrokerScript
     }
 }
 
-/** cb3-backend's `routed` connection: it dispatches to the pools and never pops. */
+/** A `routed` connection: it dispatches to the pools and never pops. */
 final class DispatchOnlyConnector implements ConnectorInterface
 {
     public function __construct(private \Closure $popped)

@@ -3,7 +3,7 @@
 # The stack under test. The defaults install the committed lock: Laravel 12
 # on PHP 8.3, the campaigns' stack. BENCH_LARAVEL_VERSION resolves another
 # Laravel (and BENCH_HORIZON_VERSION another Horizon) at build time instead,
-# such as cb3's 11.55.1 on PHP 8.4.
+# such as 11.55.1 on PHP 8.4.
 ARG BENCH_PHP_VERSION=8.3
 ARG BENCH_COMPOSER_VERSION=2.8.10
 

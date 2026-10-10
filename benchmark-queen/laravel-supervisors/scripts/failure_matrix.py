@@ -76,12 +76,12 @@ PREFORK_MODES = ("on", "off")
 
 
 # Settings a stack lays over every lane, after the scenario's: "*" for every engine, then the
-# engine's own. `cb3` is cb3's production layout: pools that balance by backlog, more than one
+# engine's own. `balanced`: pools that balance by backlog, more than one
 # queue per pool (routed: BENCH_ROUTED_BALANCE), the command-line opcache on. The image decides
 # Laravel and PHP (BENCH_LARAVEL_VERSION, BENCH_PHP_VERSION at build time).
 STACKS: dict[str, dict[str, dict[str, str]]] = {
     "default": {},
-    "cb3": {
+    "balanced": {
         "*": {
             "BENCH_OPCACHE_CLI": "1", "BENCH_PROFILE": "auto", "BENCH_QUEUES": "benchmark,benchmark-low",
             "BENCH_WORKERS": "2", "BENCH_MIN_WORKERS": "2", "BENCH_MAX_WORKERS": "4",
@@ -1037,7 +1037,7 @@ ROUTED_POP_ERROR = "The routed queue connection only dispatches"
 
 
 def routed_parity(lane: Lane) -> list[Check]:
-    """cb3's layout: queue.default only dispatches, to one connection per pool. The routing
+    """queue.default only dispatches, to one connection per pool. The routing
     scenarios, then PARITY_RUNS, all dispatched through it. A worker that popped from the
     router would log its LogicException, and the supervisor would restart it."""
     checks = run_compat(lane, ROUTED_RUNS)
@@ -1168,7 +1168,7 @@ SCENARIOS = [
     Scenario("death-release-timeout", death_release_timeout, DEATH_ENV),
     Scenario("death-release-sigkill", death_release_sigkill, DEATH_ENV),
     Scenario("laravel-parity", laravel_parity, {**COMPAT_ENV, **THREE_WORKERS}, prepare=compat_database),
-    # cb3's layout: every dispatch through the routed default connection to the pools'.
+    # Every dispatch through the routed default connection to the pools'.
     Scenario("routed-parity", routed_parity, {**COMPAT_ENV, **THREE_WORKERS, "BENCH_ROUTED": "true"},
              prepare=compat_database),
 ]
@@ -1316,7 +1316,7 @@ def main() -> int:
     parser.add_argument("--only", default="",
                         help="run only these compatibility scenarios of a compatibility lane, by name")
     parser.add_argument("--stack", default="default", choices=sorted(STACKS),
-                        help="settings laid over every lane: cb3 is cb3's production layout (default: default)")
+                        help="settings laid over every lane: balanced pools balance by backlog over several queues, with the CLI opcache on (default: default)")
     parser.add_argument("--build", action="store_true", help="rebuild the application image first")
     args = parser.parse_args()
 
