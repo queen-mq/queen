@@ -22,6 +22,8 @@ sourceOfTruth:
   - server/src/obs.rs
   - server/src/obs/panic_policy.rs
   - app/src/router/index.js
+  - app/src/composables/settingsDoc.js
+  - app/src/composables/useSeverity.js
   - app/src/views/Supervisors.vue
   - app/src/components/SupervisorGroupCard.vue
   - app/src/components/SupervisorActivity.vue
@@ -58,6 +60,11 @@ sourceOfTruth:
 # Supervisors.vue passes the route to the card's links. The paragraph on published supervisors says
 # so, and the list of pages follows the router's new titles (Analytics is Performance, Queue
 # operations a tab of it).
+# sourceOfTruth re-read 2026-10-10 (dashboard settings; the Performance pages are gone): the router
+# drops /analytics and /operations (they redirect to the queue they named, or to Workload), moves KV
+# and Locks under Messaging, adds /settings and reaches Users from Members. The list of pages
+# follows, with a paragraph and a table for the lines of settingsDoc.js and their built-in values in
+# useSeverity.js.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -70,17 +77,35 @@ dashboard needs a login.
 
 The dashboard is compiled into the binary from `app/`, so there is nothing else to deploy: open
 `http://<node>:6632/`. It has an Overview, the queues and each queue on its own, Ephemeral queues,
-Messages, Dead letter, Timers, Consumer groups, Supervisors, Performance (trends, and the
-operations of each queue beside them), Workload, Traces, KV and Locks. Filters, the time window and
+Messages, Dead letter, Timers, KV, Locks, Consumer groups, Supervisors, Workload (who does the
+work, by namespace or task, down to one queue), Traces and Settings. Filters, the time window and
 the page of a list are part of the address, so a reload, a shared link and the browser's Back land
 on the same view. System shows the replicated log, each node with its role, term, indexes and store usage,
 and the members; the bar at the top of every page says when a node refuses writes because its
 disk is full.
 
+Amber and red on those pages come from a few lines, and Settings is where a tenant moves them:
+for all its queues, or for one queue from that queue's page. A queue that no consumer group is
+meant to read can be marked so, and stops asking for attention.
+
+| Line | Needs attention | Failing |
+|---|---|---|
+| Consumer lag: the age of a group's oldest unconsumed message | 60 s | 300 s |
+| Backlog: the pending messages, as seconds of work at the rate they are acked | 300 s | 1800 s |
+| Failed acks, as a share of the acks attempted in the window | 1% | 5%, with at least 500 failures |
+| A node's memory, as a share of its limit | 80% | 90% |
+| A node's CPU, as a share of the CPUs it may use | 90% | never |
+
+The moved lines are one JSON document in the tenant's KV (namespace `queen.console`, key
+`settings`), so they are replicated with everything else and another tool can read them. A line
+left blank keeps the value above. Everyone who can open the dashboard sees the lines in force;
+saving needs the right to configure a queue, and on a cluster without KV the built-in lines stay.
+
 On the broker's port with JWT off, the dashboard runs as an administrator and shows everything.
 With the broker's JWT on, it cannot sign anyone in and points you to the proxy. Through the proxy,
 the same dashboard sits behind the console login: admins also get Members and API keys, and
-[operators](/operate/tenants/#the-console-and-sign-in) get System and Users.
+[operators](/operate/tenants/#the-console-and-sign-in) get System and, from Members, the Users of
+the whole cell.
 
 ### Published supervisors
 

@@ -22,6 +22,9 @@
 // The thresholds are collected in THRESHOLDS so the test file can pin the
 // numbers rather than re-typing them, and so a future argument about "is 1%
 // the right line?" happens in one place and moves every surface at once.
+// These are the BUILT-IN lines. A tenant may move some of them, for itself or
+// for one queue, from the Settings page (composables/settingsDoc.js lists
+// which); the functions below judge by the lines in force, see `current`.
 //
 // Pure functions, no imports: the views consume them and `app/test` exercises
 // them without a DOM, exactly as useConflation / useWorkload already do.
@@ -78,8 +81,7 @@ export const THRESHOLDS = Object.freeze({
   driftFloor: 100,              // messages; below this the drift is noise
 
   // --- Message age (already proportional: it is a duration) ---------------
-  lagOkSeconds: 60,             // under a minute old = fresh
-  lagWarnSeconds: 60,
+  lagWarnSeconds: 60,           // under a minute old = fresh
   lagBadSeconds: 300,
 
   // --- Queue-level average lag, in ms -------------------------------------
@@ -128,7 +130,20 @@ export const THRESHOLDS = Object.freeze({
   memBadShare: 0.9,
 })
 
-const T = THRESHOLDS
+// The lines in force. THRESHOLDS, unless the console has laid the tenant's
+// saved lines over it: stores/settingsStore.js hands in a reader of its own
+// table, and every function below asks it on each call, so a verdict computed
+// inside a Vue computed follows a saved change by itself. Nothing is installed
+// under `app/test`, where the lines are the built-in ones.
+let current = () => THRESHOLDS
+
+/** Install (or, with nothing, remove) the reader of the lines in force. */
+export function setLinesReader(reader) {
+  current = typeof reader === 'function' ? reader : () => THRESHOLDS
+}
+
+/** The lines a caller passed for one queue, or the ones in force. */
+const linesOr = (lines) => (lines && typeof lines === 'object' ? lines : current())
 
 /** Finite number or null — every input here arrives from an API that is
  *  allowed to omit a field, and `undefined > 0` must never decide a colour. */
@@ -152,9 +167,11 @@ export const numTone = (sev) => (sev === SEV_WARN || sev === SEV_BAD ? sev : SEV
  * @param {number|null} o.failed    ack failures in the window
  * @param {number|null} [o.succeeded] successful acks in the window
  * @param {number|null} [o.attempts]  failed + succeeded, when the caller has it
+ * @param {object} [lines]  the lines of the queue the acks belong to; without it, the tenant's
  * @returns {''|'warn'|'bad'}
  */
-export function ackFailureSeverity({ failed, succeeded = null, attempts = null } = {}) {
+export function ackFailureSeverity({ failed, succeeded = null, attempts = null } = {}, lines) {
+  const T = linesOr(lines)
   const f = n(failed) || 0
   if (f <= 0) return SEV_NONE
 
@@ -188,6 +205,7 @@ export function ackFailureSeverity({ failed, succeeded = null, attempts = null }
  * @returns {''|'warn'}
  */
 export function dlqGrowthSeverity({ added, attempts = null } = {}) {
+  const T = current()
   const a = n(added)
   if (a === null || a < T.dlqGrowthFloor) return SEV_NONE
   const total = n(attempts)
@@ -201,9 +219,11 @@ export function dlqGrowthSeverity({ added, attempts = null } = {}) {
  * @param {object} o
  * @param {number|null} o.pending       messages waiting
  * @param {number|null} o.drainPerSec   acks (or pops) per second, right now
+ * @param {object} [lines]  the lines of the queue the backlog is on; without it, the tenant's
  * @returns {''|'warn'|'bad'}
  */
-export function backlogSeverity({ pending, drainPerSec } = {}) {
+export function backlogSeverity({ pending, drainPerSec } = {}, lines) {
+  const T = linesOr(lines)
   const p = n(pending)
   const rate = n(drainPerSec)
   // Nothing to judge: no depth, no measured drain, or a drain of zero (which
@@ -227,6 +247,7 @@ export function backlogSeverity({ pending, drainPerSec } = {}) {
  * @returns {''|'ok'|'warn'|'bad'}
  */
 export function pendingDriftSeverity({ delta, pushed } = {}) {
+  const T = current()
   const d = n(delta)
   if (d === null) return SEV_NONE
   if (Math.abs(d) < T.driftFloor) return SEV_NONE
@@ -242,20 +263,24 @@ export function pendingDriftSeverity({ delta, pushed } = {}) {
 /**
  * Age of the oldest un-consumed message, in seconds. A duration is already
  * proportional — "five minutes late" means the same thing at 14 msg/s and at
- * 140 000 — so this one keeps the thresholds it always had.
+ * 140 000 — so it is judged against two lines and nothing else. `lines` is
+ * the table of the queue the age belongs to (a queue may have its own two);
+ * without it, the tenant's.
  *
  * @returns {'mute'|'ok'|'warn'|'bad'}
  */
-export function timeLagSeverity(seconds) {
+export function timeLagSeverity(seconds, lines) {
+  const T = linesOr(lines)
   const s = n(seconds)
   if (s === null || s <= 0) return SEV_MUTE
-  if (s < T.lagOkSeconds) return SEV_OK
+  if (s < T.lagWarnSeconds) return SEV_OK
   if (s < T.lagBadSeconds) return SEV_WARN
   return SEV_BAD
 }
 
 /** The same measure in milliseconds, as the queue grids report it. */
 export function lagMsSeverity(ms) {
+  const T = current()
   const v = n(ms)
   if (v === null || v <= 0) return SEV_MUTE
   if (v < T.lagMsFresh) return SEV_OK
@@ -266,6 +291,7 @@ export function lagMsSeverity(ms) {
 
 /** Node's event loop lag on a broker worker. Degradation of the host itself. */
 export function eventLoopSeverity(ms) {
+  const T = current()
   const v = n(ms)
   if (v === null || v <= 0) return SEV_NONE
   if (v >= T.eventLoopBadMs) return SEV_BAD
@@ -281,6 +307,7 @@ export function eventLoopSeverity(ms) {
  * @returns {'mute'|'ok'|'warn'|'bad'}
  */
 export function keepUpSeverity({ pop, push } = {}) {
+  const T = current()
   const o = n(pop) || 0
   const i = n(push) || 0
   if (i < T.keepUpMinRate && o < T.keepUpMinRate) return SEV_MUTE
@@ -300,6 +327,7 @@ export function keepUpSeverity({ pop, push } = {}) {
  * @returns {''|'warn'}
  */
 export function lossSeverity({ dropped, delivered } = {}) {
+  const T = current()
   const d = n(dropped)
   if (d === null || d < T.lossFloor) return SEV_NONE
   const got = n(delivered)
@@ -310,18 +338,24 @@ export function lossSeverity({ dropped, delivered } = {}) {
 }
 
 /**
- * Consumer-group state. `state` is the broker's own verdict and is kept: a
- * group the broker calls Lagging IS behind. The lag in seconds escalates it.
- * `partitionsWithLag > 0` on its own does NOT: on a busy queue a partition is
- * momentarily behind all the time, and that is what "working" looks like.
+ * A consumer group, judged by the age of its oldest unconsumed message
+ * against the lines of its queue (`lines`; without it, the tenant's).
+ *
+ * Of the broker's `state` only Dead is read: a group that has never consumed
+ * is not an alert. `Lagging` is the broker's own fixed line (300 s, reads.rs
+ * group_view) and is NOT read, or a queue whose lines were moved past it would
+ * be amber on the broker's word. `partitionsWithLag > 0` is not read either:
+ * on a busy queue a partition is momentarily behind all the time, and that is
+ * what "working" looks like.
  *
  * @returns {'mute'|'ok'|'warn'|'bad'}
  */
-export function consumerGroupSeverity({ state, maxTimeLag } = {}) {
+export function consumerGroupSeverity({ state, maxTimeLag } = {}, lines) {
+  const T = linesOr(lines)
   const lag = n(maxTimeLag) || 0
   if (state === 'Dead') return SEV_MUTE
   if (lag >= T.lagBadSeconds) return SEV_BAD
-  if (state === 'Lagging' || lag >= T.lagWarnSeconds) return SEV_WARN
+  if (lag >= T.lagWarnSeconds) return SEV_WARN
   return SEV_OK
 }
 
@@ -338,6 +372,7 @@ export function consumerGroupSeverity({ state, maxTimeLag } = {}) {
  * @returns {''|'warn'}
  */
 export function raftLagSeverity(entries) {
+  const T = current()
   const e = n(entries)
   if (e === null || e < T.raftLagWarnEntries) return SEV_NONE
   return SEV_WARN
@@ -345,6 +380,7 @@ export function raftLagSeverity(entries) {
 
 /** How long ago the leader last heard from a follower. A duration, so it keeps fixed lines. */
 export function raftHeartbeatSeverity(ms) {
+  const T = current()
   const v = n(ms)
   if (v === null || v < T.raftHeartbeatWarnMs) return SEV_NONE
   if (v >= T.raftHeartbeatBadMs) return SEV_BAD
@@ -353,6 +389,7 @@ export function raftHeartbeatSeverity(ms) {
 
 /** The store's map usage, in percent: a utilisation, on the broker's own gate. */
 export function storeMapSeverity(pct) {
+  const T = current()
   const v = n(pct)
   if (v === null || v < T.storeMapWarnPct) return SEV_NONE
   if (v >= T.storeMapBadPct) return SEV_BAD
@@ -361,6 +398,7 @@ export function storeMapSeverity(pct) {
 
 /** A node's CPU as a share of the CPUs its process may use. Never red. */
 export function cpuShareSeverity(share) {
+  const T = current()
   const v = n(share)
   if (v === null || v < T.cpuWarnShare) return SEV_NONE
   return SEV_WARN
@@ -368,6 +406,7 @@ export function cpuShareSeverity(share) {
 
 /** A node's resident memory as a share of the limit it runs under. */
 export function memoryShareSeverity(share) {
+  const T = current()
   const v = n(share)
   if (v === null || v < T.memWarnShare) return SEV_NONE
   if (v >= T.memBadShare) return SEV_BAD

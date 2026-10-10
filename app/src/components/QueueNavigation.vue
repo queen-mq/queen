@@ -24,7 +24,6 @@ const tabs = [
   { view: 'failed', label: 'Failed messages', names: ['DeadLetter'] },
   { view: 'scheduled', label: 'Scheduled', names: ['Timers'] },
   { view: 'consumers', label: 'Consumer groups', names: ['Consumers'] },
-  { view: 'metrics', label: 'Metrics', names: ['Analytics', 'QueueOperations'] },
   { view: 'supervisors', label: 'Supervisors', names: ['Supervisors'] },
 ]
 const supported = computed(() => tabs.some(tab => tab.names.includes(route.name)) || route.name === 'Traces')

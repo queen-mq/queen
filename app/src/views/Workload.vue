@@ -78,46 +78,35 @@
       <span v-if="customError" class="tool-note is-bad">{{ customError }}</span>
     </div>
 
-    <!-- Counts. The tenant totals, whatever the rows below are filtered to. -->
-    <!-- Counts strip: the Dashboard idiom. Point-in-time totals on the left, the
-         window sums on the right; the range picker bounds only the right group. -->
-    <div class="counts-strip">
-        <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
-        <div v-else-if="!tenant" class="empty">Loading…</div>
-        <template v-else>
-          <div class="counts-group">
-            <span class="count-item-label">now</span>
-            <span class="count-item count-static"><strong>{{ fmt.n(tenant.queues) }}</strong><span>queues</span></span>
-            <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong>{{ fmt.n(tenant.now.groups) }}</strong><span>consumer groups</span></span>
-            <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong>{{ fmt.n(tenant.now.partitions) }}</strong><span>partitions</span></span>
-            <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong :class="pendingTone">{{ fmt.n(tenant.now.pending) }}</strong><span>pending</span></span>
-            <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong>{{ fmt.n(tenant.now.processing) }}</strong><span>in flight</span></span>
-            <span class="count-sep">·</span>
-            <span class="count-item count-static"><!-- Depth, not growth: nothing purges a dead-letter queue, so `> 0` is
-                 permanent and says nothing about this window. -->
-            <strong>{{ fmt.n(tenant.now.deadLetter) }}</strong><span>in DLQ</span></span>
-            <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong>{{ fmt.bytes(tenant.now.retainedBytes) }}</strong><span>retained</span></span>
-          </div>
-          <div class="counts-group">
-            <span class="count-item-label">{{ rangeLabel }}<template v-if="deltas"> vs {{ compareLabel }}</template></span>
-            <span class="count-item count-static"><strong>{{ fmt.n(tenant.window.pushMessages) }}</strong><span>pushed</span><em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.pushMessages.pct) }}</em></span>
-            <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong>{{ fmt.n(tenant.window.popMessages) }}</strong><span>delivered</span><em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.popMessages.pct) }}</em></span>
-            <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong>{{ fmt.n(tenant.window.ackSuccess) }}</strong><span>acked</span><em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.ackSuccess.pct) }}</em></span>
-            <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong :class="ackFailedTone">{{ fmt.n(tenant.window.ackFailed) }}</strong><span>ack failures</span><em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.ackFailed.pct) }}</em></span>
-            <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong>{{ fmt.n(tenant.window.popEmpty) }}</strong><span>empty polls</span><em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.popEmpty.pct) }}</em></span>
-            <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong>{{ fmt.pct(tenantFill) }}</strong><span>fill</span></span>
-          </div>
-        </template>
+    <!-- Counts. The tenant totals, whatever the rows below are filtered to:
+         the Overview's count tiles, in two rows. The first is what there is
+         right now; the second is what the window added up to, and is the only
+         one the range picker moves. -->
+    <div v-if="workloadFailed" class="panel-err wl-block">{{ workloadErrorText }}</div>
+    <div v-else-if="!tenant" class="skeleton wl-block" style="height: 132px" />
+    <div v-else class="wl-counts wl-block">
+      <div class="wl-counts-row" role="group" aria-label="Right now">
+        <span class="wl-counts-head">now</span>
+        <div class="count-tile"><span class="k">Queues</span><span class="v">{{ fmt.n(tenant.queues) }}</span></div>
+        <div class="count-tile"><span class="k">Consumer groups</span><span class="v">{{ fmt.n(tenant.now.groups) }}</span></div>
+        <div class="count-tile"><span class="k">Partitions</span><span class="v">{{ fmt.n(tenant.now.partitions) }}</span></div>
+        <div class="count-tile"><span class="k">Pending</span><span class="v" :class="pendingTone">{{ fmt.n(tenant.now.pending) }}</span></div>
+        <div class="count-tile"><span class="k">In flight</span><span class="v">{{ fmt.n(tenant.now.processing) }}</span></div>
+        <!-- Depth, not growth: nothing purges a dead-letter queue, so `> 0` is
+             permanent and says nothing about this window. -->
+        <div class="count-tile"><span class="k">In DLQ</span><span class="v">{{ fmt.n(tenant.now.deadLetter) }}</span></div>
+        <div class="count-tile"><span class="k">Retained</span><span class="v">{{ fmt.bytes(tenant.now.retainedBytes) }}</span></div>
+      </div>
+      <div class="wl-counts-row" role="group" :aria-label="rangeLabel">
+        <span class="wl-counts-head">{{ rangeLabel }}<template v-if="deltas"><br />vs {{ compareLabel }}</template></span>
+        <div class="count-tile"><span class="k">Pushed</span><span class="v">{{ fmt.n(tenant.window.pushMessages) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.pushMessages.pct) }}</em></span></div>
+        <div class="count-tile"><span class="k">Delivered</span><span class="v">{{ fmt.n(tenant.window.popMessages) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.popMessages.pct) }}</em></span></div>
+        <div class="count-tile"><span class="k">Acked</span><span class="v">{{ fmt.n(tenant.window.ackSuccess) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.ackSuccess.pct) }}</em></span></div>
+        <div class="count-tile"><span class="k">Ack failures</span><span class="v" :class="ackFailedTone">{{ fmt.n(tenant.window.ackFailed) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.ackFailed.pct) }}</em></span></div>
+        <div class="count-tile"><span class="k">Empty polls</span><span class="v">{{ fmt.n(tenant.window.popEmpty) }}<em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.popEmpty.pct) }}</em></span></div>
+        <div class="count-tile"><span class="k">Fill</span><span class="v">{{ fmt.pct(tenantFill) }}</span></div>
+        <div class="count-tile wl-counts-rest" aria-hidden="true" />
+      </div>
     </div>
 
     <!-- Work over time -->
@@ -133,7 +122,7 @@
             @click="metric = m.value"
           >{{ m.label }}</button>
         </div>
-        <span class="chip chip-mute">{{ rangeLabel }}</span>
+        <span class="muted">{{ rangeLabel }}</span>
       </div>
       <div class="card-body">
         <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -148,8 +137,8 @@
       <div class="card">
         <div class="card-header">
           <h3>{{ `Share of the work by ${level === 'queue' ? 'queue' : groupBy}` }}</h3>
-          <span class="card-sub">delivered and pushed, share is of the tenant</span>
-          <span class="chip chip-mute">{{ rangeLabel }}</span>
+          <span class="card-sub">delivered, with pushed under it · share is of the tenant</span>
+          <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
           <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -163,8 +152,8 @@
       <div class="card">
         <div class="card-header">
           <h3>{{ `Activity map by ${level === 'queue' ? 'queue' : groupBy}` }}</h3>
-          <span class="card-sub">deliveries per bucket · darkest = {{ fmt.n(heat.max) }} / {{ bucketMinutes }} min</span>
-          <span class="chip chip-mute">{{ rangeLabel }}</span>
+          <span class="card-sub">deliveries per bucket · strongest = {{ fmt.n(heat.max) }} / {{ bucketMinutes }} min</span>
+          <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
           <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -186,7 +175,7 @@
         <div class="card-header">
           <h3>{{ `Partitions by ${levelWord}` }}</h3>
           <span class="card-sub">live partitions · label = partitions per queue</span>
-          <span class="chip chip-mute">now</span>
+          <span class="muted">now</span>
         </div>
         <div class="card-body">
           <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -200,8 +189,8 @@
       <div class="card">
         <div class="card-header">
           <h3>{{ `Queues and consumer groups by ${levelWord}` }}</h3>
-          <span class="card-sub">queues in full colour, the groups attached to them faded</span>
-          <span class="chip chip-mute">now</span>
+          <span class="card-sub">queues, with the consumer groups attached to them under</span>
+          <span class="muted">now</span>
         </div>
         <div class="card-body">
           <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -218,7 +207,7 @@
         <div class="card-header">
           <h3>{{ `Retained bytes by ${levelWord}` }}</h3>
           <span class="card-sub">what is on disk for each</span>
-          <span class="chip chip-mute">now</span>
+          <span class="muted">now</span>
         </div>
         <div class="card-body">
           <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -233,7 +222,7 @@
         <div class="card-header">
           <h3>{{ `Partition churn by ${levelWord}` }}</h3>
           <span class="card-sub">partitions created, then deleted, in the window</span>
-          <span class="chip chip-mute">{{ rangeLabel }}</span>
+          <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
           <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -252,7 +241,7 @@
         <div class="card-header">
           <h3>Pending</h3>
           <span class="card-sub">amber = no consumer group</span>
-          <span class="chip chip-mute">now</span>
+          <span class="muted">now</span>
         </div>
         <div class="card-body">
           <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -266,8 +255,8 @@
       <div class="card">
         <div class="card-header">
           <h3>Oldest waiting</h3>
-          <span class="card-sub">worst consumer-group time lag</span>
-          <span class="chip chip-mute">now</span>
+          <span class="card-sub">worst consumer-group time lag · coloured by each queue's lag lines</span>
+          <span class="muted">now</span>
         </div>
         <div class="card-body">
           <!-- This panel is the consumer-groups list, not the workload
@@ -288,7 +277,7 @@
         <div class="card-header">
           <h3>In DLQ</h3>
           <span class="card-sub">rows parked in dead-letter</span>
-          <span class="chip chip-mute">now</span>
+          <span class="muted">now</span>
         </div>
         <div class="card-body">
           <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -303,7 +292,7 @@
         <div class="card-header">
           <h3>Fill</h3>
           <span class="card-sub">deliveries per poll · blank under 5 polls</span>
-          <span class="chip chip-mute">{{ rangeLabel }}</span>
+          <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
           <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -321,7 +310,7 @@
         <div class="card-header">
           <h3>Ack ok</h3>
           <span class="card-sub">blank under 5 acks</span>
-          <span class="chip chip-mute">{{ rangeLabel }}</span>
+          <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
           <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -336,7 +325,7 @@
         <div class="card-header">
           <h3>Lag at pop</h3>
           <span class="card-sub">average → worst, log scale</span>
-          <span class="chip chip-mute">{{ rangeLabel }}</span>
+          <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
           <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -355,7 +344,7 @@
         <RouterLink class="btn btn-ghost" :to="queueLocation(selectedQueue, route, 'overview', windowQuery(currentRange()))">Inspect queue →</RouterLink>
         <RouterLink class="btn btn-ghost" :to="queueLocation(selectedQueue, route, 'consumers', windowQuery(currentRange()))">Inspect consumer groups →</RouterLink>
         <span class="card-sub">{{ groupsSub }}</span>
-        <span class="chip chip-mute">now</span>
+        <span class="muted">now</span>
       </div>
       <div class="card-body">
         <div v-if="groupsFailed" class="panel-err">{{ groupsErrorText }}</div>
@@ -383,17 +372,16 @@
       <div class="card-header">
         <h3>Weekly profile</h3>
         <span class="card-sub">{{ weekSub }}</span>
-        <span class="chip chip-mute">last 7d</span>
+        <span class="muted">last 7d</span>
       </div>
       <div class="card-body">
         <div v-if="deepWeek.failed.value" :class="deeperErrorClass(deepWeek)">{{ deeperErrorText(deepWeek) }}</div>
         <div v-else-if="!week" class="empty">Loading…</div>
         <template v-else>
-          <div class="wl-pills">
+          <div class="seg seg-sm wl-seg">
             <button
               v-for="p in weekPills"
               :key="p.value"
-              class="pill"
               :class="{ on: weekPick === p.value }"
               @click="weekPick = p.value"
             >{{ p.label }}</button>
@@ -425,7 +413,7 @@
         <div class="card-header">
           <h3>Deliveries per pushed message</h3>
           <span class="card-sub">top 12 queues by deliveries</span>
-          <span class="chip chip-mute">last 24h</span>
+          <span class="muted">last 24h</span>
         </div>
         <div class="card-body">
           <div v-if="deepEff.failed.value" :class="deeperErrorClass(deepEff)">{{ deeperErrorText(deepEff) }}</div>
@@ -440,7 +428,7 @@
         <div class="card-header">
           <h3>Acks per delivery</h3>
           <span class="card-sub">acks inside /transaction are not attributed</span>
-          <span class="chip chip-mute">last 24h</span>
+          <span class="muted">last 24h</span>
         </div>
         <div class="card-body">
           <div v-if="deepEff.failed.value" :class="deeperErrorClass(deepEff)">{{ deeperErrorText(deepEff) }}</div>
@@ -458,7 +446,7 @@
         <div class="card-header">
           <h3>Messages per request</h3>
           <span class="card-sub">push and ack batch sizes</span>
-          <span class="chip chip-mute">last 24h</span>
+          <span class="muted">last 24h</span>
         </div>
         <div class="card-body">
           <div v-if="deepEff.failed.value" :class="deeperErrorClass(deepEff)">{{ deeperErrorText(deepEff) }}</div>
@@ -473,7 +461,7 @@
         <div class="card-header">
           <h3>Lag budget</h3>
           <span class="card-sub">share of the queue's active buckets, by worst lag at pop</span>
-          <span class="chip chip-mute">last 24h</span>
+          <span class="muted">last 24h</span>
         </div>
         <div class="card-body">
           <div v-if="deepEff.failed.value" :class="deeperErrorClass(deepEff)">{{ deeperErrorText(deepEff) }}</div>
@@ -493,7 +481,7 @@
         <div class="card-header">
           <h3>Retention and eviction</h3>
           <span class="card-sub">per queue · evicted = older than the max wait, never delivered</span>
-          <span class="chip chip-mute">{{ rangeLabel }}</span>
+          <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
           <div v-if="retention.failed.value" :class="deeperErrorClass(retention)">{{ deeperErrorText(retention) }}</div>
@@ -513,7 +501,7 @@
         <div class="card-header">
           <h3>Partitions alive</h3>
           <span class="card-sub">total vs written to in the last 24h</span>
-          <span class="chip chip-mute">now</span>
+          <span class="muted">now</span>
         </div>
         <div class="card-body">
           <div v-if="partitions.failed.value" :class="deeperErrorClass(partitions)">{{ deeperErrorText(partitions) }}</div>
@@ -530,16 +518,15 @@
       <div class="card-header">
         <h3>Why messages are in the DLQ</h3>
         <span class="card-sub">{{ dlqSub }}</span>
-        <span class="chip chip-mute">now</span>
+        <span class="muted">now</span>
       </div>
       <div class="card-body">
         <div v-if="!dlqPills.length" class="empty">No queue has a dead-letter row right now.</div>
         <template v-else>
-          <div class="wl-pills">
+          <div class="seg seg-sm wl-seg">
             <button
               v-for="p in dlqPills"
               :key="p"
-              class="pill"
               :class="{ on: dlqPick === p }"
               @click="pickDlq(p)"
             >{{ shortQueue(p) }}</button>
@@ -559,7 +546,7 @@
       <div class="card-header">
         <h3>Where the bytes are</h3>
         <span class="card-sub">retained bytes per message · top 10 by retained</span>
-        <span class="chip chip-mute">now</span>
+        <span class="muted">now</span>
       </div>
       <div class="card-body">
         <div v-if="deepEff.failed.value" :class="deeperErrorClass(deepEff)">{{ deeperErrorText(deepEff) }}</div>
@@ -586,7 +573,7 @@
     <div class="card">
       <div class="card-header">
         <h3>What needs attention</h3>
-        <span class="chip chip-mute">{{ rangeLabel }}</span>
+        <span class="muted">{{ rangeLabel }}</span>
       </div>
       <div class="card-body">
         <div v-if="workloadFailed" class="panel-err">{{ workloadErrorText }}</div>
@@ -598,7 +585,7 @@
           <ul class="wl-findings">
             <li v-for="(f, i) in attention" :key="i">
               <button class="finding" :class="`sev-${f.sev}`" @click="drill(f.row)">
-                <span class="fdot"></span>
+                <span class="g" :class="findingGlyph(f.sev)" aria-hidden="true" />
                 <span class="ftext">{{ f.text }}</span>
                 <span class="fev">{{ f.evidence }}</span>
               </button>
@@ -618,7 +605,7 @@
         <ul class="wl-findings">
           <li v-for="(f, i) in deepAttention" :key="i">
             <div class="finding finding-stack" :class="`sev-${f.sev}`" style="cursor: default">
-              <span class="fdot"></span>
+              <span class="g" :class="findingGlyph(f.sev)" aria-hidden="true" />
               <span class="ftext">{{ f.text }}</span>
               <span class="fev">{{ f.evidence }}</span>
             </div>
@@ -646,8 +633,7 @@ import {
 import Heatmap from '@/components/Heatmap.vue'
 import { analytics, consumers, describeApiError, system } from '@/api'
 import { useApi } from '@/composables/useApi'
-import { categorySlot } from '@/composables/useCategoryColors'
-import { alpha, categoryPalette, chartPalette, chartTheme, legendLabels, semanticColors, themeVersion } from '@/composables/useChartTheme'
+import { alpha, chartPalette, chartTheme, legendLabels, semanticColors, themeVersion } from '@/composables/useChartTheme'
 import { ackFailureSeverity, backlogSeverity } from '@/composables/useSeverity'
 import {
   formatDateTimeLocal, formatTimestampRange, formatTimestampRangeUtc, formatTimestampUtc,
@@ -664,6 +650,8 @@ import {
 } from '@/composables/useWorkload'
 import { onClusterChange } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { formatSpan } from '@/composables/settingsDoc'
 import { isMissingRoute, routeSupport } from '@/stores/routeSupport'
 
 // TENANT PAGE. Three sources, each with its own panel state:
@@ -1113,31 +1101,42 @@ const multiDay = computed(() => {
 // their keys to the queue colour slots and mislabel every finding.
 const levelOf = (p) => (p?.groupBy === 'queue' ? 'queue' : (p?.groupBy || level.value))
 const rowsLevel = computed(() => levelOf(payload.value))
-const rows = computed(() => enrichRows(payload.value, groupsByQueue.value, queueMetaMap.value, rowsLevel.value))
+const { lines: tenantLines, linesFor } = useSettingsStore()
+// The two lag lines, drawn across a lag chart. "Oldest waiting" draws the
+// tenant's: one of its bars may be a queue with lines of its own, and that
+// bar's colour follows those, not the two drawn. The chart of one queue's
+// groups draws that queue's.
+const lagRefLines = (lines) => [
+  { x: lines.lagWarnSeconds, label: formatSpan(lines.lagWarnSeconds), tone: 'warn' },
+  { x: lines.lagBadSeconds, label: formatSpan(lines.lagBadSeconds), tone: 'bad' },
+]
+const rows = computed(() => enrichRows(payload.value, groupsByQueue.value, queueMetaMap.value, rowsLevel.value, linesFor))
 
 const prevPayload = computed(() => (compare.value === 'off' ? null : trimOpenBucket(workloadPrev.data.value)))
-const prevRows = computed(() => enrichRows(prevPayload.value, groupsByQueue.value, queueMetaMap.value, levelOf(prevPayload.value)))
+const prevRows = computed(() => enrichRows(prevPayload.value, groupsByQueue.value, queueMetaMap.value, levelOf(prevPayload.value), linesFor))
 const prevByKey = computed(() => new Map(prevRows.value.map((r) => [r.key, r])))
 const deltas = computed(() => windowDeltas(tenant.value?.window, prevPayload.value?.tenant?.window))
 
-// Entity → colour. The slot is assigned by deliveries rank the first time an
-// entity is seen and then kept for the session (useCategoryColors), so a
-// refresh that reorders the rows does not repaint them; past the fifth slot
-// the bar is grey, and the flow chart folds those into "Other". Queues are
-// keyed per focus: the queues of one namespace share nothing with another's,
-// and coming back to a namespace finds its queues in their old colours.
-const entityColors = computed(() => {
+// Entity → ink. Nothing on this page is coloured by identity: a hue is a
+// verdict everywhere else in the console, and five of them on a healthy tenant
+// read as five things to look at. The flow chart tells its series apart by
+// the grey ramp (and names each one at its right edge); the activity map's
+// swatch is that same grey, so a row can be found in the chart above it. The
+// four biggest by deliveries get a step each, in flowSeries' own order; the
+// rest share the fifth, as they share "Other". Every bar chart is one ink.
+const entityInk = computed(() => {
   const m = new Map()
-  const kind = rowsLevel.value === 'queue' ? `queue:${groupBy.value}=${focus.value}` : rowsLevel.value
   ;[...rows.value]
     .sort((a, b) => b.window.popMessages - a.window.popMessages)
-    .forEach((r) => { m.set(r.key, categorySlot(kind, r.key)) })
+    .slice(0, 4)
+    .forEach((r, i) => { m.set(r.key, chartPalette[i].line) })
   return m
 })
-const colorOf = (key) => {
-  const slot = entityColors.value.get(key)
-  return slot === null || slot === undefined ? chartPalette[2].line : categoryPalette[slot].line
-}
+const colorOf = (key) => entityInk.value.get(key) || chartPalette[4].line
+// One measure per row, and two when a row carries a pair.
+const barInk = () => alpha(chartPalette[1].line, 0.85)
+const barInkLead = () => alpha(chartPalette[0].line, 0.85)
+const findingGlyph = (sev) => (sev === 'bad' || sev === 'warn' ? sev : 'ok')
 
 const tenantFill = computed(() => {
   const w = tenant.value?.window
@@ -1149,7 +1148,7 @@ const heat = computed(() => (payload.value ? heatCells(rows.value) : { max: 0, r
 const heatRows = computed(() => heat.value.rows.map((r) => ({ ...r, color: colorOf(r.key) })))
 
 const attention = computed(() => findings(
-  rows.value, level.value, rangeLabel.value, { hasGroups: !groupsFailed.value },
+  rows.value, level.value, rangeLabel.value, { hasGroups: !groupsFailed.value, linesFor },
 ))
 
 const summary = computed(() => {
@@ -1350,7 +1349,7 @@ function renderFlow() {
     data: {
       labels,
       datasets: series.map((s) => {
-        const color = s.key === null ? chartPalette[2].line : colorOf(s.key)
+        const color = chartPalette[s.index].line
         return {
           label: s.label, data: s.data, borderColor: color, backgroundColor: alpha(color, 0.38),
           fill: true, borderWidth: 1.5, pointRadius: 0, pointHitRadius: 6, tension: 0, spanGaps: false,
@@ -1410,8 +1409,8 @@ function renderShare() {
     data: {
       labels,
       datasets: [
-        { label: 'delivered', data: sorted.map((r) => r.window.popMessages), backgroundColor: sorted.map((r) => alpha(colorOf(r.key), 0.9)), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
-        { label: 'pushed', data: sorted.map((r) => r.window.pushMessages), backgroundColor: sorted.map((r) => alpha(colorOf(r.key), 0.42)), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'delivered', data: sorted.map((r) => r.window.popMessages), backgroundColor: barInkLead(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'pushed', data: sorted.map((r) => r.window.pushMessages), backgroundColor: barInk(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
         ...(prevPayload.value ? [{
           label: `delivered, ${compareLabel.value}`, data: sorted.map((r) => prevByKey.value.get(r.key)?.window.popMessages ?? null),
           backgroundColor: 'transparent', borderColor: chartTheme.tick, borderWidth: 1, borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8,
@@ -1452,7 +1451,7 @@ function renderPartsBy() {
       labels,
       datasets: [{
         label: 'partitions', data: sorted.map((r) => r.now.partitions),
-        backgroundColor: sorted.map((r) => alpha(colorOf(r.key), 0.85)), borderRadius: 2, barPercentage: 0.7, categoryPercentage: 0.8,
+        backgroundColor: barInk(), borderRadius: 2, barPercentage: 0.7, categoryPercentage: 0.8,
       }],
     },
     options,
@@ -1482,8 +1481,8 @@ function renderStructure() {
     data: {
       labels,
       datasets: [
-        { label: 'queues', data: sorted.map((r) => r.queues || 0), backgroundColor: sorted.map((r) => alpha(colorOf(r.key), 0.9)), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
-        { label: 'consumer groups', data: sorted.map((r) => r.now.groups), backgroundColor: sorted.map((r) => alpha(colorOf(r.key), 0.42)), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'queues', data: sorted.map((r) => r.queues || 0), backgroundColor: barInkLead(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'consumer groups', data: sorted.map((r) => r.now.groups), backgroundColor: barInk(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
       ],
     },
     options,
@@ -1506,7 +1505,7 @@ function renderRetained() {
       labels,
       datasets: [{
         label: 'retained', data: sorted.map((r) => r.now.retainedBytes || 0),
-        backgroundColor: sorted.map((r) => alpha(colorOf(r.key), 0.85)), borderRadius: 2, barPercentage: 0.7, categoryPercentage: 0.8,
+        backgroundColor: barInk(), borderRadius: 2, barPercentage: 0.7, categoryPercentage: 0.8,
       }],
     },
     options,
@@ -1535,7 +1534,7 @@ function renderChurn() {
     data: {
       labels,
       datasets: [
-        { label: 'created', data: sorted.map((r) => r.window.partitionsCreated || 0), backgroundColor: sorted.map((r) => alpha(colorOf(r.key), 0.9)), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
+        { label: 'created', data: sorted.map((r) => r.window.partitionsCreated || 0), backgroundColor: barInkLead(), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
         { label: 'deleted', data: sorted.map((r) => r.window.partitionsDeleted || 0), backgroundColor: alpha(chartPalette[2].line, 0.7), borderRadius: 2, barPercentage: 0.82, categoryPercentage: 0.8 },
       ],
     },
@@ -1546,7 +1545,6 @@ function renderChurn() {
 function renderPending() {
   const sorted = [...rows.value].sort((a, b) => b.now.pending - a.now.pending)
   const labels = sorted.map((r) => r.name)
-  const tone = (v) => v >= 10000 ? semanticColors.bad.line : v >= 1000 ? semanticColors.warn.line : chartPalette[1].line
   const options = barBase(labels, drillOn(sorted))
   options.scales.x.stacked = true
   options.scales.y.stacked = true
@@ -1568,8 +1566,9 @@ function renderPending() {
     data: {
       labels,
       datasets: [
-        { label: 'with a consumer group', data: sorted.map((r) => r.now.pending - r.now.pendingWithoutGroup), backgroundColor: sorted.map((r) => alpha(tone(r.now.pending), 0.85)), borderRadius: 2 },
-        { label: 'no consumer group', data: sorted.map((r) => r.now.pendingWithoutGroup), backgroundColor: alpha(semanticColors.warn.line, 0.9), borderRadius: 2 },
+        { label: 'with a consumer group', data: sorted.map((r) => r.now.pending - r.now.pendingWithoutGroup), backgroundColor: barInk(), borderRadius: 2 },
+        // Amber, unless Settings says no reader is expected on those queues.
+        { label: 'no consumer group', data: sorted.map((r) => r.now.pendingWithoutGroup), backgroundColor: sorted.map((r) => (r.noGroupExpected ? barInk() : alpha(semanticColors.warn.line, 0.9))), borderRadius: 2 },
       ],
     },
     options,
@@ -1579,9 +1578,8 @@ function renderPending() {
 function renderOldest() {
   const sorted = [...rows.value].sort((a, b) => (b.oldest ?? -1) - (a.oldest ?? -1))
   const labels = sorted.map((r) => r.name)
-  const tone = (s) => s >= 300 ? 'bad' : s >= 60 ? 'warn' : 'mute'
   const options = barBase(labels, drillOn(sorted))
-  options.scales.x.max = Math.max(360, ...sorted.map((r) => r.oldest || 0)) * 1.15
+  options.scales.x.max = Math.max(tenantLines.value.lagBadSeconds * 1.2, ...sorted.map((r) => r.oldest || 0)) * 1.15
   options.scales.x.ticks.callback = (v) => fmt.sec(v)
   options.plugins = {
     legend: { display: false },
@@ -1601,7 +1599,7 @@ function renderOldest() {
         return r.now.pending > 0 ? `no group · ${fmt.n(r.now.pending)} pending` : 'no group'
       },
     },
-    refLines: { lines: [{ x: 60, label: '60s', tone: 'warn' }, { x: 300, label: '300s', tone: 'bad' }] },
+    refLines: { lines: lagRefLines(tenantLines.value) },
   }
   mount('oldest', {
     type: 'bar',
@@ -1610,7 +1608,7 @@ function renderOldest() {
       datasets: [{
         label: 'oldest waiting',
         data: sorted.map((r) => (r.oldest === null ? null : r.oldest)),
-        backgroundColor: sorted.map((r) => alpha(toneColor(tone(r.oldest || 0)), 0.85)),
+        backgroundColor: sorted.map((r) => alpha(toneColor(r.lagSev || 'mute'), 0.85)),
         borderRadius: 2, barPercentage: 0.7,
       }],
     },
@@ -1635,7 +1633,7 @@ function renderDlq() {
       datasets: [{
         label: 'in DLQ',
         data: sorted.map((r) => r.now.deadLetter),
-        backgroundColor: sorted.map((r) => alpha(r.now.deadLetter > 0 ? semanticColors.warn.line : chartPalette[1].line, 0.85)),
+        backgroundColor: barInk(),
         borderRadius: 2, barPercentage: 0.7,
       }],
     },
@@ -1781,10 +1779,11 @@ function renderGroups() {
     return
   }
   const labels = gs.map((g) => (g.name === '__QUEUE_MODE__' ? 'queue mode' : g.name))
-  const tone = (s) => s >= 300 ? 'bad' : s >= 60 ? 'warn' : 'mute'
+  const lines = linesFor(selectedQueue.value)
+  const tone = (s) => s >= lines.lagBadSeconds ? 'bad' : s >= lines.lagWarnSeconds ? 'warn' : 'mute'
   const options = barBase(labels, null)
   options.layout.padding.right = 240
-  options.scales.x.max = Math.max(360, ...gs.map((g) => g.maxTimeLag || 0)) * 1.15
+  options.scales.x.max = Math.max(lines.lagBadSeconds * 1.2, ...gs.map((g) => g.maxTimeLag || 0)) * 1.15
   options.scales.x.ticks.callback = (v) => fmt.sec(v)
   options.plugins = {
     legend: { display: false },
@@ -1804,7 +1803,7 @@ function renderGroups() {
           + ` · mode ${g.subscriptionMode || '—'}`
       },
     },
-    refLines: { lines: [{ x: 60, label: '60s', tone: 'warn' }, { x: 300, label: '300s', tone: 'bad' }] },
+    refLines: { lines: lagRefLines(lines) },
   }
   mount('groups', {
     type: 'bar',
@@ -2312,7 +2311,7 @@ function renderDlqSig() {
       datasets: [{
         label: 'share',
         data: rows.map((r) => r.share * 100),
-        backgroundColor: alpha(semanticColors.warn.line, 0.85),
+        backgroundColor: barInk(),
         borderRadius: 2, barPercentage: 0.7,
       }],
     },
@@ -2468,18 +2467,39 @@ onUnmounted(() => {
 
 .wl-chart { position: relative; width: 100%; }
 
-/* Counts strip tones (the strip itself is global). */
+/* Counts: the Overview's count tiles as a two-row ledger, each row named in a
+   narrow first cell. One hairline grid, so the two rows share their columns. */
+.wl-block { margin-bottom: 16px; }
+.wl-counts {
+  display: grid; gap: 1px; background: var(--bd);
+  border: 1px solid var(--bd); border-radius: var(--r-card); overflow: hidden;
+}
+.wl-counts-row { display: grid; grid-template-columns: 96px repeat(7, minmax(0, 1fr)); gap: 1px; }
+.wl-counts-head {
+  display: flex; align-items: center; padding: 12px 16px; background: var(--ink-2);
+  font-size: 12px; line-height: 1.35; color: var(--text-low);
+}
+.wl-counts .count-tile .v { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wl-warn { color: var(--warn-400) !important; }
-.count-delta { font-style: normal; font-size: 11px; color: var(--text-low); margin-left: 6px; font-variant-numeric: tabular-nums; }
 .wl-bad { color: var(--ember-400) !important; }
+.count-delta { margin-left: 6px; font-style: normal; font-size: 11px; font-weight: 400; letter-spacing: 0; color: var(--text-low); }
+/* Narrower than seven tiles: the row wraps and its tiles grow to fill each
+   line, so no line ends in an empty slot. */
+@media (max-width: 1100px) {
+  .wl-counts-row { display: flex; flex-wrap: wrap; }
+  .wl-counts-row > .count-tile { flex: 1 1 150px; }
+  .wl-counts-head { flex: 1 1 100%; padding: 8px 16px; }
+  .wl-counts-head br { display: none; }
+  .wl-counts-rest { display: none; }
+}
 
-/* Findings: dot · sentence · evidence, one hairline per row. */
-.wl-summary { font-size: 12.5px; color: var(--text-mid); margin: 0 0 10px; line-height: 1.5; }
+/* Findings: glyph · sentence · evidence, one hairline per row. */
+.wl-summary { font-size: 13px; color: var(--text-mid); margin: 0 0 10px; line-height: 1.5; }
 .wl-findings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .wl-findings > li { border-bottom: 1px solid var(--bd-soft, var(--bd)); }
 .wl-findings > li:last-child { border-bottom: none; }
 .finding {
-  display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: baseline; gap: 4px 10px;
+  display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 4px 10px;
   width: 100%; text-align: left; background: none; border: none; cursor: pointer;
   padding: 8px 6px; border-radius: var(--r-chip, 4px); font-family: inherit;
 }
@@ -2492,17 +2512,14 @@ onUnmounted(() => {
   .finding .fev { grid-column: 2; justify-self: start; text-align: left; max-width: none; }
 }
 .finding:hover { background: color-mix(in srgb, var(--text-hi) 2.5%, transparent); }
-.fdot { width: 6px; height: 6px; border-radius: 50%; background: var(--bd-hi); position: relative; top: -1px; }
-.sev-bad .fdot { background: var(--ember-400); box-shadow: 0 0 8px color-mix(in srgb, var(--ember-500) 55%, transparent); }
-.sev-warn .fdot { background: var(--warn-400); }
-.sev-ice .fdot { background: var(--ice-400); }
-.ftext { font-size: 12.5px; color: var(--text-hi); line-height: 1.45; }
-.fev { font-size: 11px; color: var(--text-low); font-variant-numeric: tabular-nums; line-height: 1.45; }
+.finding .g { justify-self: center; }
+.ftext { font-size: 13px; color: var(--text-hi); line-height: 1.45; }
+.fev { font-size: 12px; color: var(--text-low); font-variant-numeric: tabular-nums; line-height: 1.45; }
 /* The deeper findings carry evidence that is a list (queues, shares), too
    long to sit beside the sentence: stack it under the text instead. */
 .finding-stack { grid-template-columns: 10px 1fr; }
 .finding-stack .fev { grid-column: 2; justify-self: start; text-align: left; max-width: none; overflow-wrap: anywhere; }
-.empty { padding: 22px 0; text-align: center; font-size: 12.5px; color: var(--text-low); }
+.empty { padding: 22px 0; text-align: center; font-size: 13px; color: var(--text-low); }
 
 /* Focus breadcrumb in the filter card. */
 .wl-crumbs { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
@@ -2520,18 +2537,10 @@ onUnmounted(() => {
 .wl-eyebrow { display: flex; align-items: center; gap: 12px; margin: 28px 2px 14px; }
 .eyebrow-text { font-size: 13px; font-weight: 600; color: var(--text-hi); }
 .eyebrow-rule { height: 1px; background: var(--bd); flex: 0 0 48px; }
-.eyebrow-sub { font-size: 11.5px; color: var(--text-low); }
+.eyebrow-sub { font-size: 12px; color: var(--text-low); }
 
-/* Pills are the app's segmented control, one level smaller. */
-.wl-pills {
-  display: inline-flex; flex-wrap: wrap; gap: 1px; padding: 2px; margin: 0 0 12px;
-  border-radius: var(--r-control); border: 1px solid var(--bd); background: var(--ink-2);
-}
-.pill {
-  background: transparent; border: none; color: var(--text-mid); font-family: inherit;
-  font-size: 11.5px; font-weight: 500; padding: 3px 10px; border-radius: var(--r-chip); cursor: pointer;
-}
-.pill:hover { color: var(--text-hi); }
-.pill.on { color: var(--text-hi); background: var(--ink-5); }
-.wl-note { font-size: 11.5px; color: var(--text-low); margin: 10px 0 0; }
+/* A choice inside a card: the app's segmented control, wrapping when a tenant
+   has more namespaces than the card is wide. */
+.wl-seg { flex-wrap: wrap; margin: 0 0 12px; }
+.wl-note { font-size: 12px; color: var(--text-low); margin: 10px 0 0; }
 </style>

@@ -60,11 +60,15 @@
                 Worked out in the browser from <code>GET /api/v1/resources/queues</code>,
                 <code>GET /api/v1/consumer-groups</code> and this window's
                 <code>queue-ops</code>. A queue needs you when a consumer group on it is
-                more than 1 minute behind (5 minutes: failing), or when it holds
+                more than {{ formatSpan(lines.lagWarnSeconds) }} behind
+                ({{ formatSpan(lines.lagBadSeconds) }}: failing), or when it holds
                 messages and no consumer group reads it — a group that has never
                 consumed does not count as a reader. Ack failures count when their
-                share of the window's acks crosses the product's threshold. The
-                sidebar, Queues and Consumer groups use the same rule.
+                share of the window's acks crosses
+                {{ formatLine(LINE_META.ackWarnRate, lines.ackWarnRate) }}. The
+                sidebar, Queues and Consumer groups use the same rule, and the lines
+                are the ones in <router-link to="/settings">Settings</router-link>,
+                where a queue may have lag lines of its own.
               </p>
             </details>
           </template>
@@ -384,7 +388,7 @@
             <div class="entity-head">
               <span class="g" :class="queueGlyph(q)" aria-hidden="true" />
               <span class="entity-name">{{ q.name }}</span>
-              <span class="entity-right num" :class="lagNumClass(q._lag)">
+              <span class="entity-right num" :class="lagNumClass(q._lag, q.name)">
                 {{ q._lag > 0 ? fmtLagSeconds(q._lag) : '—' }}
               </span>
             </div>
@@ -443,7 +447,7 @@
               >
                 {{ (g.partitionsWithLag || 0) > 0 ? `${g.partitionsWithLag} behind` : '—' }}
               </span>
-              <span v-else class="entity-right num" :class="lagNumClass(g.maxTimeLag)">
+              <span v-else class="entity-right num" :class="lagNumClass(g.maxTimeLag, g.queueName)">
                 {{ (g.maxTimeLag || 0) > 0 ? fmtLagSeconds(g.maxTimeLag) : '—' }}
               </span>
             </div>
@@ -456,7 +460,7 @@
                   <span class="meta-sep">·</span>
                   <span class="num">{{ formatNumber(g.totalLag || 0) }} log lag</span>
                   <span class="meta-sep">·</span>
-                  <span class="num" :class="lagNumClass(g.maxTimeLag)">{{ (g.maxTimeLag || 0) > 0 ? fmtLagSeconds(g.maxTimeLag) : '0s' }} time lag</span>
+                  <span class="num" :class="lagNumClass(g.maxTimeLag, g.queueName)">{{ (g.maxTimeLag || 0) > 0 ? fmtLagSeconds(g.maxTimeLag) : '0s' }} time lag</span>
                 </template>
                 <span class="meta-sep">·</span>
                 <!-- One row per (partition, group) cursor — NOT a consumer
@@ -506,6 +510,8 @@ import {
 } from '@/composables/useSeverity'
 import { groupAttention, queueAttention } from '@/composables/useAttention'
 import { useGroupsStore } from '@/stores/groupsStore'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { LINE_META, formatLine, formatSpan } from '@/composables/settingsDoc'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
@@ -801,9 +807,11 @@ const lagSeriesData = computed(() => {
   ]
 })
 // An age is proportional by construction — "five minutes late" means the same
-// at 14 msg/s and at 140 000 — so this rule survives the rewrite unchanged; it
-// just lives in useSeverity now, with the grids that share it.
-const lagNumClass = (s) => numTone(timeLagSeverity(s))
+// at 14 msg/s and at 140 000 — so it is judged against two lines and nothing
+// else: the queue's own when a row names its queue and Settings holds some,
+// else the tenant's.
+const { lines, linesFor } = useSettingsStore()
+const lagNumClass = (s, queue) => numTone(timeLagSeverity(s, queue === undefined ? undefined : linesFor(queue)))
 const lagSeverity = computed(() => lagNumClass(lagMaxSeconds.value || 0))
 const lagContext = computed(() => {
   const sampled = history.value.some(x => x.avgLagMs !== null)
@@ -1265,8 +1273,9 @@ const focus = computed(() => {
 // printed with its rules under the list. It never claims "healthy" when it
 // could not read the queues or the groups: that is "status unknown".
 //
-//   bad   a consumer group on the queue is ≥ 5 min behind
-//   warn  a consumer group on the queue is ≥ 1 min behind
+//   bad   a consumer group on the queue is past the queue's second lag line
+//   warn  a consumer group on the queue is past its first (5 min and 1 min
+//         unless Settings moved them)
 //   warn  the queue holds messages and no live consumer group reads it
 //   warn/bad  the tenant's ack failures, by ackFailureSeverity (useSeverity)
 //
@@ -1278,7 +1287,7 @@ const issues = computed(() => {
   if (queuesFailed.value || consumersFailed.value) return []
   const out = []
   // enrichedQueues is sorted by depth; the rule keeps that order.
-  for (const a of queueAttention(enrichedQueues.value, consumers.value)) {
+  for (const a of queueAttention(enrichedQueues.value, consumers.value, linesFor)) {
     const why = a.reason === 'lag'
       ? `A consumer group is ${fmtLagSeconds(a.lag)} behind · ${formatNumber(a.pending)} pending`
       : `${a.deadOnly ? 'Its consumer group has never read' : 'No consumer group reads it'} · ${formatNumber(a.pending)} waiting`
@@ -1292,7 +1301,7 @@ const issues = computed(() => {
 const issueSevByQueue = computed(() => new Map(issues.value.filter(i => !i.tenant).map(i => [i.name, i.sev])))
 const queueGlyph = (q) => issueSevByQueue.value.get(q.name) || 'ok'
 const groupGlyph = (g) => {
-  const s = groupAttention(g)
+  const s = groupAttention(g, linesFor)
   return s === 'bad' || s === 'warn' ? s : s === 'mute' ? 'idle' : 'ok'
 }
 

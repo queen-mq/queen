@@ -169,6 +169,7 @@ import { useToast } from '@/composables/useToast'
 import { useGroupsStore } from '@/stores/groupsStore'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import QueueConfigModal from '@/components/QueueConfigModal.vue'
 import QueueHealthGrid from '@/components/QueueHealthGrid.vue'
 import PageHead from '@/components/PageHead.vue'
@@ -365,12 +366,13 @@ const fetchQueueOps = async () => {
 // listing (a full scan on the broker — stores/groupsStore), kept fresher here
 // because this is the page that shows the verdicts.
 const groupsStore = useGroupsStore()
+const { linesFor } = useSettingsStore()
 const groupsFailed = computed(() => groupsStore.error.value !== null)
 const fetchGroups = () => groupsStore.fetchGroups({ ttlMs: 25_000 })
 const attention = computed(() => {
   const groups = groupsStore.groups.value
   if (groups === null) return null
-  return new Map(queueAttention(queuesStore.queues.value, groups).map((a) => [a.name, a]))
+  return new Map(queueAttention(queuesStore.queues.value, groups, linesFor).map((a) => [a.name, a]))
 })
 
 // Auto-refresh forces fresh queues; mount-time call reuses cache.

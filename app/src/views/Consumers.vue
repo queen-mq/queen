@@ -477,6 +477,7 @@ import { groupAttention } from '@/composables/useAttention'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 import { useQueuesStore } from '@/stores/queuesStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 
 // TENANT PAGE. /api/v1/consumer-groups* is tenant-scoped broker-side; the
 // mutating routes (delete / seek) are RouteClass::QueueAdmin at the proxy, so
@@ -671,7 +672,8 @@ const VERDICT = {
   mute: { glyph: 'idle', word: 'Never consumed', tone: '' },
   ok: { glyph: 'ok', word: 'Stable', tone: '' },
 }
-const verdictOf = (g) => VERDICT[groupAttention(g)] || VERDICT.ok
+const { linesFor } = useSettingsStore()
+const verdictOf = (g) => VERDICT[groupAttention(g, linesFor)] || VERDICT.ok
 const verdictGlyph = (g) => verdictOf(g).glyph
 const verdictWord = (g) => verdictOf(g).word
 const verdictTone = (g) => verdictOf(g).tone

@@ -395,10 +395,6 @@ a.cell-line:hover { color: var(--text-mid); background: var(--ink-2); }
 .cell-words .is-bad { color: var(--ember-400); }
 .cell-words .is-warn { color: var(--warn-400); }
 
-.session-row { display: flex; align-items: center; gap: 10px; padding: 0 8px; font-size: 12px; }
-.session-email { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-low); }
-.session-out { padding: 0; border: 0; background: transparent; font: inherit; color: var(--text-mid); cursor: pointer; }
-.session-out:hover { color: var(--text-hi); }
 
 /* =========================================================================
    THE RAIL — the sidebar at icon width, the operator's choice on a wide

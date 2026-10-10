@@ -35,12 +35,12 @@ and persist on this device; choosing System clears that override.
   renewal and when it expires. A permit is a KV row, so the page is the KV listing asked for
   the namespace `queen-locks` and a viewer can open it. Read-only: the drawer shows the guard
   a transaction carries and the release call for the lease period on screen, and sends neither
-- **Queue Operations** — per-queue throughput, lag and consumer health over a time range
-  (`QueueOperations.vue`). It inspects; it does not push, pop or ack
 - **Consumer Groups** — health, lag, subscription changes, seek, delete
 - **Message Tracing** — cross-message trace timeline viewer
-- **Analytics** and **Workload** — per-queue and per-group performance, and who is doing the
-  work grouped by namespace or task
+- **Workload** — who is doing the work, grouped by namespace or task and drilled down to a
+  queue: flow, lag, acks, dead letters, retention
+- **Settings** — the lines the console judges by, for the tenant and per queue: one JSON
+  document in the tenant's KV (`queen.console` / `settings`)
 - **Ephemeral** — the in-memory queue class, on its own page
 - **System** and **Users** — cell-level health, PostgreSQL internals (or, on a raft-mode broker,
   the replicated log and the Raft cluster's members) and account management (operators only;
@@ -50,9 +50,9 @@ There is **no pop inspector**, and there will not be one: a pop from a console t
 steals from a real consumer and burns a retry attempt with nobody to ack it.
 
 The sidebar groups the views by activity: Overview; **Messaging** (Queues, Ephemeral,
-Messages, Dead letter, Timers); **Workers** (Consumer groups, Supervisors); **Analysis**
-(Performance, Workload, Traces); **State** (KV, Locks); **Access** (Members, API keys);
-and **Cell** (System, Users). Performance has Trends and Operations tabs.
+Messages, Dead letter, Timers, KV, Locks); **Workers** (Consumer groups, Supervisors);
+**Analysis** (Workload, Traces, Settings); **Access** (Members, API keys); and **Cell**
+(System). Users has no row of its own: it is reached from Members.
 
 ## Navigation paths
 
@@ -73,9 +73,6 @@ flowchart TD
   queue <-->|Queue tabs| timers[Scheduled messages]
   queue <-->|Queue tabs| consumer
   queue <-->|Queue tabs| supervisors[Supervisors]
-  queue <-->|Queue tabs| trends[Performance: Trends]
-  trends <-->|Same queue and period| operations[Performance: Operations]
-  operations -->|Inspect queue| queue
   workload[Workload] -->|Selected queue and period| queue
   workload -->|Selected queue| consumer
   consumer -->|Queue's workers| supervisors
@@ -258,7 +255,6 @@ app/
 │   │   └── ui.js                 # global error / toast surface
 │   ├── router/                   # routes + nav groups + role metadata + guard
 │   ├── views/                    # Page components
-│   │   ├── Analytics.vue
 │   │   ├── Consumers.vue
 │   │   ├── Dashboard.vue
 │   │   ├── DeadLetter.vue
@@ -267,7 +263,6 @@ app/
 │   │   ├── Locks.vue
 │   │   ├── Messages.vue
 │   │   ├── QueueDetail.vue
-│   │   ├── QueueOperations.vue
 │   │   ├── Queues.vue
 │   │   ├── System.vue
 │   │   ├── Timers.vue

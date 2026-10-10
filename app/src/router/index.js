@@ -20,6 +20,15 @@ const { standalone } = useIdentity()
 //   navParent: the nav row that stands for this page when it has none of its
 //              own: that row is the one lit while you are here.
 //   proxyOnly: the broker-direct dashboard has no pxdb-backed account store.
+function performanceMoved(to) {
+  const query = {}
+  for (const key of ['range', 'from', 'to']) {
+    if (typeof to.query[key] === 'string' && to.query[key]) query[key] = to.query[key]
+  }
+  const queue = typeof to.query.queue === 'string' ? to.query.queue : ''
+  return queue ? { path: `/queues/${encodeURIComponent(queue)}`, query } : { path: '/workload', query }
+}
+
 const routes = [
   {
     path: '/',
@@ -29,16 +38,6 @@ const routes = [
       title: 'Overview', subtitle: 'System overview and key metrics',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Overview', icon: 'dashboard', order: 1 },
-    }
-  },
-  {
-    path: '/operations',
-    name: 'QueueOperations',
-    component: () => import('@/views/QueueOperations.vue'),
-    meta: {
-      title: 'Performance · Operations', subtitle: 'Per-queue throughput, lag, and consumer health',
-      requires: 'read', scope: 'tenant',
-      navParent: '/analytics',
     }
   },
   {
@@ -104,7 +103,7 @@ const routes = [
     meta: {
       title: 'KV', subtitle: 'Browse the key-value store, namespace by namespace',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'State', icon: 'kv', order: 1 },
+      nav: { group: 'Messaging', icon: 'kv', order: 7 },
     }
   },
   {
@@ -132,7 +131,7 @@ const routes = [
     meta: {
       title: 'Locks', subtitle: 'Who holds each lock and semaphore, and until when',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'State', icon: 'locks', order: 2 },
+      nav: { group: 'Messaging', icon: 'locks', order: 8 },
     }
   },
   {
@@ -155,16 +154,11 @@ const routes = [
       nav: { group: 'Workers', icon: 'system', order: 2 },
     }
   },
-  {
-    path: '/analytics',
-    name: 'Analytics',
-    component: () => import('@/views/Analytics.vue'),
-    meta: {
-      title: 'Performance', subtitle: 'Throughput and performance trends',
-      requires: 'read', scope: 'tenant',
-      nav: { group: 'Analysis', icon: 'analytics', order: 1 },
-    }
-  },
+  // The two Performance pages are gone: what they showed is on Workload, on a
+  // queue's own page and on System. A link someone kept still lands somewhere
+  // that answers it — the queue it named, else Workload — on the same window.
+  { path: '/analytics', redirect: performanceMoved },
+  { path: '/operations', redirect: performanceMoved },
   {
     // Who is doing the work. Tenant-scoped: /api/v1/analytics/workload counts
     // only this tenant's queues, and its `tenant` total is what every share on
@@ -186,6 +180,20 @@ const routes = [
       title: 'Dead letter', subtitle: 'Inspect, replay and purge failed messages',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Messaging', icon: 'dlq', order: 5 },
+    }
+  },
+  {
+    // The lines this console judges by, for the acting tenant: one document in
+    // its KV (stores/settingsStore.js). 'read' because the page states the
+    // lines in force to anyone; saving is offered to queueAdmin, the capability
+    // that configures a queue.
+    path: '/settings',
+    name: 'Settings',
+    component: () => import('@/views/Settings.vue'),
+    meta: {
+      title: 'Settings', subtitle: 'The lines this console judges by',
+      requires: 'read', scope: 'tenant',
+      nav: { group: 'Analysis', icon: 'settings', order: 4 },
     }
   },
   {
@@ -224,14 +232,15 @@ const routes = [
     }
   },
   {
-    // Accounts across the cell. Keep this scope explicit in the operator group.
+    // Accounts across the cell. No row of its own: it is reached from Members
+    // through the scope switch both pages carry (components/AccessScope.vue).
     path: '/users',
     name: 'Users',
     component: () => import('@/views/Users.vue'),
     meta: {
       title: 'Users', subtitle: 'Cell-level: user accounts and cluster access',
       requires: 'operator', scope: 'cell', proxyOnly: true,
-      nav: { group: 'Cell', icon: 'members', order: 2 },
+      navParent: '/members',
     }
   },
   {

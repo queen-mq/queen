@@ -95,13 +95,6 @@
             <b :class="cellTone">{{ cellWord }}</b><template v-if="raftText"> · {{ raftText }}</template><template v-if="raftLagText"> · <span :class="raftLagTone">{{ raftLagText }}</span></template>
           </span>
         </component>
-
-        <!-- The session. Standalone has none: no email to show, and a sign-out
-             that could only reload the page. -->
-        <div v-if="!standalone && !rail" class="session-row">
-          <span class="session-email" :title="email || 'signed in'">{{ email || 'signed in' }}</span>
-          <button class="session-out" type="button" @click="logout">Sign out</button>
-        </div>
       </div>
     </div>
   </aside>
@@ -130,12 +123,13 @@ import { useEphemeralStore } from '@/stores/ephemeralStore'
 import { useGroupsStore } from '@/stores/groupsStore'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { rail } from '@/composables/useSidebar'
 
 const route = useRoute()
 const router = useRouter()
 const {
-  email, can, epoch, logout, standalone, clusters, operatorLive, role,
+  can, epoch, standalone, clusters, operatorLive, role,
   actingTenantSlug, actingClusterSlug, actingCellSlug,
 } = useIdentity()
 const mobileOpen = ref(false)
@@ -242,11 +236,14 @@ watch(epoch, () => { health.value = null; healthFailed.value = false })
 // read is a full scan on the broker, so the sidebar never adds one within a
 // minute of anybody else's (stores/groupsStore). The rule is
 // composables/useAttention, the Overview's own, so a mark here always matches
-// the page behind it.
+// the page behind it. The lines the rule judges by are the tenant's settings
+// (stores/settingsStore); this component is on every page, so its tick is the
+// one that keeps them read.
 // ---------------------------------------------------------------------------
 const queuesStore = useQueuesStore()
 const ephemeralStore = useEphemeralStore()
 const groupsStore = useGroupsStore()
+const settingsStore = useSettingsStore()
 const groups = groupsStore.groups // null = not read yet
 const groupsFailed = computed(() => groupsStore.error.value !== null)
 
@@ -256,6 +253,7 @@ const refreshAttention = () => Promise.allSettled([
   groupsStore.fetchGroups(),
   // Quiet about a broker without the class: it is a figure, not a check.
   ephemeralStore.fetchQueues(),
+  settingsStore.fetchSettings(),
 ])
 
 refreshAttention()
@@ -305,7 +303,7 @@ const marks = computed(() => {
   }
   if (groups.value === null || !queuesStore.lastFetched.value) return out
 
-  const qa = queueAttention(queuesStore.queues.value, groups.value)
+  const qa = queueAttention(queuesStore.queues.value, groups.value, settingsStore.linesFor)
   const q = summarize(qa.map((i) => i.sev))
   if (q.sev) {
     const bad = qa.filter((i) => i.sev === 'bad').length
@@ -319,12 +317,12 @@ const marks = computed(() => {
     out['/queues'] = { parts: parts(bad, qa.length - bad), title: `${plural(q.count, 'queue needs', 'queues need')} you: ${why}` }
   }
 
-  const gs = groups.value.map(groupAttention)
+  const gs = groups.value.map((group) => groupAttention(group, settingsStore.linesFor))
   const g = summarize(gs)
   if (g.sev) {
     const bad = gs.filter((s) => s === 'bad').length
     const behind = gs.filter((s) => s === 'warn').length
-    const why = [bad && `${bad} over 5 minutes`, behind && `${behind} over 1 minute`].filter(Boolean).join(', ')
+    const why = [bad && `${bad} falling behind`, behind && `${behind} behind`].filter(Boolean).join(', ')
     out['/consumers'] = { parts: parts(bad, behind), title: `${plural(g.count, 'consumer group is', 'consumer groups are')} behind: ${why}` }
   }
   return out
@@ -358,7 +356,7 @@ const isActive = (path) => {
 // is last and named for what it covers, because its pages answer for the
 // CELL and not for the acting tenant. The first group carries no label.
 // ---------------------------------------------------------------------------
-const GROUP_ORDER = ['Overview', 'Messaging', 'Workers', 'Analysis', 'State', 'Access', 'Cell']
+const GROUP_ORDER = ['Overview', 'Messaging', 'Workers', 'Analysis', 'Access', 'Cell']
 const OPERATOR_GROUP = 'Cell'
 
 const navGroups = computed(() => {
@@ -392,7 +390,6 @@ const navGroups = computed(() => {
 // ---------------------------------------------------------------------------
 const icons = {
   dashboard: DashboardIcon,
-  operations: OperationsIcon,
   queues: QueuesIcon,
   ephemeral: EphemeralIcon,
   consumers: ConsumersIcon,
@@ -401,16 +398,15 @@ const icons = {
   timers: TimersIcon,
   locks: LocksIcon,
   traces: TracesIcon,
-  analytics: AnalyticsIcon,
   workload: WorkloadIcon,
   dlq: DlqIcon,
   members: MembersIcon,
   keys: ApiKeysIcon,
+  settings: SettingsIcon,
   system: SystemIcon,
 }
 
 function DashboardIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('rect',{x:'3',y:'3',width:'7',height:'9',rx:'1.5'}),h('rect',{x:'14',y:'3',width:'7',height:'5',rx:'1.5'}),h('rect',{x:'14',y:'12',width:'7',height:'9',rx:'1.5'}),h('rect',{x:'3',y:'16',width:'7',height:'5',rx:'1.5'})]) }
-function OperationsIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('path',{d:'M3 12h3l2-6 4 12 2.5-7 1.5 4H21'})]) }
 function QueuesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M3 7h18M3 12h18M3 17h18'}),h('circle',{cx:'6',cy:'7',r:'1.2',fill:'currentColor'}),h('circle',{cx:'10',cy:'12',r:'1.2',fill:'currentColor'}),h('circle',{cx:'8',cy:'17',r:'1.2',fill:'currentColor'})]) }
 /* Ephemeral: the queue glyph with a bolt through it — same stacked rows, and
    the bolt is the one thing this class is: it lives in RAM and it goes. */
@@ -429,7 +425,6 @@ function TimersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24
 function LocksIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('rect',{x:'5',y:'11',width:'14',height:'9',rx:'2'}),h('path',{d:'M8 11V8a4 4 0 018 0v3'})]) }
 function TracesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M3 6h6M11 10h8M7 14h10M3 18h6'}),h('circle',{cx:'9',cy:'6',r:'1.6',fill:'currentColor'}),h('circle',{cx:'19',cy:'10',r:'1.6',fill:'currentColor'}),h('circle',{cx:'17',cy:'14',r:'1.6',fill:'currentColor'}),h('circle',{cx:'9',cy:'18',r:'1.6',fill:'currentColor'})]) }
 function WorkloadIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round' }, [h('rect',{x:'3',y:'4',width:'8',height:'6',rx:'1.5'}),h('rect',{x:'13',y:'4',width:'8',height:'11',rx:'1.5'}),h('rect',{x:'3',y:'14',width:'8',height:'6',rx:'1.5'}),h('path',{d:'M17 18v2'})]) }
-function AnalyticsIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M4 20V10M10 20V4M16 20v-8M22 20H2'})]) }
 function SystemIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('rect',{x:'3',y:'4',width:'18',height:'6',rx:'1.6'}),h('rect',{x:'3',y:'14',width:'18',height:'6',rx:'1.6'}),h('circle',{cx:'7',cy:'7',r:'.9',fill:'currentColor'}),h('circle',{cx:'7',cy:'17',r:'.9',fill:'currentColor'})]) }
 /* Members: a person and the roster lines beside them; Consumers is two
    people. */
@@ -437,6 +432,9 @@ function MembersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 2
 /* API keys: a credential card, not a key. The key glyph is KV's, and a key
    here is what a service shows the proxy, i.e. a card with a name on it. */
 function ApiKeysIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('rect',{x:'3',y:'6',width:'18',height:'12',rx:'1.6'}),h('circle',{cx:'8.5',cy:'12',r:'2'}),h('path',{d:'M13 10.5h5M13 13.5h3.5'})]) }
+/* Settings: three lines, each with the stop you move along it. Hollow stops,
+   so it does not read as Queues, whose dots are messages on a line. */
+function SettingsIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5', 'stroke-linecap':'round' }, [h('path',{d:'M3 7h10.5M18.5 7H21M3 12h4.5M12.5 12H21M3 17h8.5M16.5 17H21'}),h('circle',{cx:'16',cy:'7',r:'2.2'}),h('circle',{cx:'10',cy:'12',r:'2.2'}),h('circle',{cx:'14',cy:'17',r:'2.2'})]) }
 function DlqIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.5' }, [h('path',{d:'M5 7h14l-1.2 11.2a2 2 0 01-2 1.8H8.2a2 2 0 01-2-1.8L5 7Z'}),h('path',{d:'M9 4h6v3H9z'})]) }
 </script>
 

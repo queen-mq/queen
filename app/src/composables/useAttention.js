@@ -3,11 +3,18 @@
 // screen can disagree about the same queue.
 //
 //   a consumer group     judged by consumerGroupSeverity (useSeverity): its
-//                        oldest unconsumed message 5 min old is bad, 1 min is
-//                        warn; a Dead group (the broker's word for one that
-//                        has never consumed) is mute, not an alert.
+//                        oldest unconsumed message past the queue's second
+//                        lag line is bad, past the first is warn (5 min and
+//                        1 min unless Settings moved them); a Dead group (the
+//                        broker's word for one that has never consumed) is
+//                        mute, not an alert.
 //   a queue              the worst of its live groups; and warn when it holds
-//                        messages that no live group reads.
+//                        messages that no live group reads, unless Settings
+//                        says no reader is expected on that queue.
+//
+// `linesFor` is the settings store's lookup, queue name → the lines in force
+// for that queue (and its flags). Without one every queue is judged by the
+// tenant's lines.
 //
 // The Overview adds one rule of its own, ack failures across the tenant: that
 // one needs the hour's ack counts, which only the Overview fetches.
@@ -23,9 +30,13 @@ const num = (v) => {
   return Number.isFinite(x) ? x : null
 }
 
+// Not a function when a caller hands groupAttention straight to Array.map,
+// which passes the index here.
+const linesOf = (linesFor, queue) => (typeof linesFor === 'function' ? linesFor(queue) : undefined)
+
 /** A consumer group's verdict: 'bad' | 'warn' | 'ok' | 'mute' (Dead). */
-export function groupAttention(g) {
-  return consumerGroupSeverity({ state: g?.state, maxTimeLag: g?.maxTimeLag })
+export function groupAttention(g, linesFor) {
+  return consumerGroupSeverity({ state: g?.state, maxTimeLag: g?.maxTimeLag }, linesOf(linesFor, g?.queueName))
 }
 
 /**
@@ -34,7 +45,7 @@ export function groupAttention(g) {
  * `lag` is the worst live group's age in seconds; `deadOnly` says the queue has
  * groups, but none of them has ever consumed.
  */
-export function queueAttention(queues = [], groups = []) {
+export function queueAttention(queues = [], groups = [], linesFor) {
   const byQueue = new Map()
   for (const g of groups || []) {
     const q = g?.queueName
@@ -47,17 +58,17 @@ export function queueAttention(queues = [], groups = []) {
     if (!q?.name) continue
     const pending = num(q.messages?.pending) || 0
     const all = byQueue.get(q.name) || []
-    const live = all.filter((g) => groupAttention(g) !== 'mute')
+    const live = all.filter((g) => groupAttention(g, linesFor) !== 'mute')
     let sev = null
     let lag = 0
     for (const g of live) {
-      const s = groupAttention(g)
+      const s = groupAttention(g, linesFor)
       lag = Math.max(lag, num(g.maxTimeLag) || 0)
       if ((RANK[s] || 0) > (RANK[sev] || 0)) sev = s
     }
     if (sev === 'bad' || sev === 'warn') {
       out.push({ name: q.name, sev, reason: 'lag', lag, pending, deadOnly: false })
-    } else if (pending > 0 && live.length === 0) {
+    } else if (pending > 0 && live.length === 0 && !linesOf(linesFor, q.name)?.noReaderOk) {
       out.push({ name: q.name, sev: 'warn', reason: 'noReader', lag, pending, deadOnly: all.length > 0 })
     }
   }

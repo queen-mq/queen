@@ -14,7 +14,15 @@
 // and the caller must say so rather than render a zero.
 
 /** Severity ladder. Higher wins; `mute` is "nothing to say". */
+import { THRESHOLDS } from './useSeverity.js'
+
 export const SEV_RANK = { bad: 3, warn: 2, ok: 1, ice: 0.5, mute: 0 }
+
+// A group's age against the two lag lines of its queue. `linesFor` is the
+// settings store's lookup (queue → the lines in force); without one, as in
+// the tests, the lines are the built-in ones.
+const lagLines = (linesFor, queue) => (typeof linesFor === 'function' && linesFor(queue)) || THRESHOLDS
+const lagVerdict = (seconds, t) => (seconds >= t.lagBadSeconds ? 'bad' : seconds >= t.lagWarnSeconds ? 'warn' : null)
 
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const pad = (n) => String(n).padStart(2, '0')
@@ -69,25 +77,33 @@ const { n: fmtN, pct: fmtPct, ms: fmtMs, sec: fmtSec, plural } = formatters
  * @param {Map<string, Array<object>>} groupsByQueue queue name -> group rows
  * @param {(queue: string) => (string|null)} keyOfQueue maps a queue to the row key
  * @param {string} key the row's key
- * @returns {{lagging: number, maxLag: number|null, groups: number, bad: Array<{group: object, queue: string}>}}
+ * @param {(queue: string) => object} [linesFor] the lines in force for a queue
+ * @returns {{lagging: number, maxLag: number|null, groups: number, bad: Array<{group: object, queue: string}>, sev: 'bad'|'warn'|null}}
  *          `maxLag` is seconds (the list's `maxTimeLag`), null when no group matched.
+ *          `sev` is the worst group, each judged by the lag lines of ITS queue:
+ *          a row may hold several queues, and the oldest message of the row
+ *          may sit on the one that is expected to run behind.
  */
-export function groupLag(groupsByQueue, keyOfQueue, key) {
+export function groupLag(groupsByQueue, keyOfQueue, key, linesFor) {
   let lagging = 0
   let maxLag = null
   let groups = 0
+  let sev = null
   const bad = []
   for (const [q, gs] of groupsByQueue) {
     if (keyOfQueue(q) !== key) continue
+    const lines = lagLines(linesFor, q)
     for (const g of gs) {
       groups++
       const isLag = g.state === 'Lagging' || (g.partitionsWithLag || 0) > 0
       if (isLag) { lagging++; bad.push({ group: g, queue: q }) }
       const t = g.maxTimeLag || 0
       if (maxLag === null || t > maxLag) maxLag = t
+      const v = lagVerdict(t, lines)
+      if (v && (SEV_RANK[v] > (SEV_RANK[sev] || 0))) sev = v
     }
   }
-  return { lagging, maxLag, groups, bad }
+  return { lagging, maxLag, groups, bad, sev }
 }
 
 /**
@@ -111,9 +127,11 @@ export function severity(row) {
   const n = row.now
   let sev = 'mute'
   const up = (s) => { if (SEV_RANK[s] > SEV_RANK[sev]) sev = s }
-  if (n.pendingWithoutGroup > 0) up('bad')
-  if (row.oldest !== null && row.oldest >= 300) up('bad')
-  else if (row.oldest !== null && row.oldest >= 60) up('warn')
+  if (n.pendingWithoutGroup > 0 && !row.noGroupExpected) up('bad')
+  // enrichRows judged each group by its queue's lines; a row built by hand
+  // carries only the age, and is judged by the built-in two.
+  const lag = row.lagSev !== undefined ? row.lagSev : (row.oldest === null ? null : lagVerdict(row.oldest, THRESHOLDS))
+  if (lag) up(lag)
   if (row.acks >= 20 && row.ackOk < 0.5) up('bad')
   else if (row.acks >= 20 && row.ackOk < 0.9) up('warn')
   if (w.maxLagMs !== null && w.maxLagMs >= 60000) up('warn')
@@ -139,9 +157,10 @@ export function severity(row) {
  * @param {Map<string, Array<object>>} groupsByQueue queue -> consumer-group rows ('' / empty map when unknown)
  * @param {Map<string, {namespace: string, task: string}>} queueMeta queue -> its namespace/task
  * @param {'namespace'|'task'|'queue'} level how the rows are keyed
- * @returns {Array<object>} the payload rows plus name/level/acks/share/ackOk/fill/oldest/groupsLagging/groupsN/laggingGroups/touched/sev
+ * @param {(queue: string) => object} [linesFor] the lines in force for a queue
+ * @returns {Array<object>} the payload rows plus name/level/acks/share/ackOk/fill/oldest/lagSev/noGroupExpected/groupsLagging/groupsN/laggingGroups/touched/sev
  */
-export function enrichRows(payload, groupsByQueue, queueMeta, level) {
+export function enrichRows(payload, groupsByQueue, queueMeta, level, linesFor) {
   if (!payload || !Array.isArray(payload.rows)) return []
   const groups = groupsByQueue || new Map()
   const meta = queueMeta || new Map()
@@ -151,13 +170,32 @@ export function enrichRows(payload, groupsByQueue, queueMeta, level) {
       const m = meta.get(q)
       return m ? (level === 'task' ? m.task : m.namespace) : null
     }
+  // Messages on a queue with no consumer group are an alarm, unless Settings
+  // says no reader is expected there. A row may hold several queues and the
+  // payload does not say which ones are without a group, so the row is let
+  // off only when EVERY group-less queue of it is one of those.
+  const expected = (q) => lagLines(linesFor, q).noReaderOk === true
+  const groupless = new Map()
+  if (level !== 'queue') {
+    for (const q of meta.keys()) {
+      if ((groups.get(q) || []).length) continue
+      const key = keyOfQueue(q)
+      if (!groupless.has(key)) groupless.set(key, [])
+      groupless.get(key).push(q)
+    }
+  }
+  const noGroupExpected = (key) => {
+    if (level === 'queue') return expected(key)
+    const queues = groupless.get(key) || []
+    return queues.length > 0 && queues.every(expected)
+  }
   const tenantPop = payload.tenant?.window?.popMessages || 0
   const fallbackName = level === 'task' ? '(no task)' : '(no namespace)'
   return payload.rows.map((r) => {
     const w = r.window
     const n = r.now
     const acks = w.ackSuccess + w.ackFailed
-    const gl = groupLag(groups, keyOfQueue, r.key)
+    const gl = groupLag(groups, keyOfQueue, r.key, linesFor)
     const e = {
       ...r,
       name: level === 'queue' ? r.key : (r.key || fallbackName),
@@ -167,6 +205,8 @@ export function enrichRows(payload, groupsByQueue, queueMeta, level) {
       ackOk: acks >= 5 ? w.ackSuccess / acks : null,
       fill: (w.popMessages + w.popEmpty) >= 5 ? w.popMessages / (w.popMessages + w.popEmpty) : null,
       oldest: gl.groups ? gl.maxLag : null,
+      lagSev: gl.groups ? gl.sev : null,
+      noGroupExpected: noGroupExpected(r.key),
       groupsLagging: gl.lagging,
       groupsN: gl.groups,
       laggingGroups: gl.bad,
@@ -188,18 +228,17 @@ export function enrichRows(payload, groupsByQueue, queueMeta, level) {
  * @param {Array<object>} rows output of {@link enrichRows}
  * @param {'namespace'|'task'|'queue'} level
  * @param {string} rangeLabel e.g. 'last 1h', used in the sentences
- * @param {{hasGroups?: boolean}} [options]
+ * @param {{hasGroups?: boolean, linesFor?: (queue: string) => object}} [options]
  * @returns {Array<{sev: string, key: string, name: string, text: string, evidence: string}>}
  */
 export function findings(rows, level, rangeLabel, options = {}) {
   const hasGroups = options.hasGroups !== false
   const out = []
-  const sevOf = (s) => s >= 300 ? 'bad' : 'warn'
   for (const r of rows) {
     const w = r.window
     const n = r.now
     const base = { key: r.key, name: r.name, row: r }
-    if (hasGroups && n.pendingWithoutGroup > 0) {
+    if (hasGroups && n.pendingWithoutGroup > 0 && !r.noGroupExpected) {
       out.push({
         ...base, sev: 'bad',
         text: `${r.name}: ${fmtN(n.pendingWithoutGroup)} pending messages on ${level === 'queue' ? 'a queue' : 'queues'} with no consumer group`,
@@ -210,9 +249,10 @@ export function findings(rows, level, rangeLabel, options = {}) {
     }
     if (hasGroups) {
       for (const { group: g, queue: q } of r.laggingGroups) {
-        if ((g.maxTimeLag || 0) < 60) continue
+        const lagSev = lagVerdict(g.maxTimeLag || 0, lagLines(options.linesFor, q))
+        if (!lagSev) continue
         out.push({
-          ...base, sev: sevOf(g.maxTimeLag),
+          ...base, sev: lagSev,
           text: `${g.name === '__QUEUE_MODE__' ? 'queue mode' : g.name} on ${q} is ${fmtSec(g.maxTimeLag)} behind`,
           evidence: `${fmtN(g.partitionsWithLag)} of ${fmtN(g.members)} partitions lagging · ${fmtN(g.totalLag || 0)} messages`,
         })

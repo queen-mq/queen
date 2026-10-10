@@ -204,7 +204,7 @@ export const dlq = {
 }
 
 // ============================================
-// KV BROWSER API (tenant-scoped, read-only)
+// KV API (tenant-scoped)
 // ============================================
 // The console's view of the KV store (PLAN_DASHBOARD_ACTIONS.md §2.5). NOT the
 // batch route `POST /api/v1/kv`: that one is Gated(Kv, Mixed) at the proxy, so a
@@ -231,6 +231,21 @@ export const kv = {
   namespaces: (config) => client.get('/api/v1/resources/kv/namespaces', config),
   /** `{namespace, prefix?, after?, limit?, keysOnly?, includeExpired?}` → `{rows, truncated, nextAfter}`. */
   list: (body, config) => client.post('/api/v1/resources/kv/list', body, config),
+  // The two single-key routes, for the one document the console keeps for
+  // itself (stores/settingsStore.js). Unlike the two above they are the KV
+  // family proper: Gated(Kv, Read) and Gated(Kv, Grow) at the proxy, so a plan
+  // without KV answers 403 feature_gated — a state to render, with `probe`.
+  /** `{found, value, version, updatedAt}`; a key that is not there is 200 `{found: false}`. */
+  get: (namespace, key, config) =>
+    client.get(`/api/v1/kv/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`, config),
+  /**
+   * `{value, forever: true | ttlSeconds, expect?}` → `{applied: true, version}`.
+   * `expect` is the version the write was made from (0 = the key must not
+   * exist). Lost, it is still a 200: `{applied: false, reason: 'version',
+   * value, version}`, carrying what is stored now.
+   */
+  put: (namespace, key, body, config) =>
+    client.put(`/api/v1/kv/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`, body, config),
 }
 
 // ============================================

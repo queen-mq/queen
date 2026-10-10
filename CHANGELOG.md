@@ -129,9 +129,23 @@ Jepsen under power loss, where it took every node of a cluster down one after th
 window, the filters and the page of a list are part of the address: they survive a reload, a
 shared link and the browser's Back, and they follow you from a queue to its messages, its
 consumer groups and its traces. A queue's pages share a breadcrumb and tabs. The sidebar is
-grouped by what you do (Messaging, Workers, Analysis, State); Analytics is now Performance, with
-the per-queue Operations view as its second tab. A filtered list says how many of the total it
-shows.
+grouped by what you do (Messaging, Workers, Analysis), with KV and Locks under Messaging. A
+filtered list says how many of the total it shows. Who is signed in, and the way out, are in a
+menu at the right of the top bar; an operator reaches Users from Members.
+
+**Dashboard: the lines it judges by can be moved.** What turns a queue or a consumer group amber
+or red was fixed in the code: a group 60 seconds behind, five minutes of backlog, 1% of acks
+failing, a node at 80% of its memory. A new Settings page states those lines and lets a tenant
+move them, for all its queues or for one queue (also from the queue's own page), and mark a queue
+that no consumer group is meant to read. The moved lines are one JSON document in the tenant's KV
+(`queen.console` / `settings`), written with a version check, so two people cannot overwrite each
+other. A blank line keeps the built-in value; saving needs the right to configure a queue.
+
+**Dashboard: the two Performance pages are gone.** Analytics and Queue operations showed, with
+their own charts, what Workload, a queue's own page and System already hold: Workload goes from
+a namespace or a task down to one queue (flow, lag, acks, dead letters, retention). A link to
+`/analytics` or `/operations` lands on the queue it named, or on Workload, with the same time
+window.
 
 **Dashboard: a supervisor card charts all its queues.** The activity chart of a card opened on the
 first queue the application reports. It now opens on the sum of all of them, each counted once

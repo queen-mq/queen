@@ -2,8 +2,9 @@
   <div class="topbar-wrap">
   <header class="topbar">
     <!-- Three parts: the page on the left, the broker in the middle, search
-         and the buttons on the right. The two sides share the rest equally,
-         so the middle is the bar's centre whatever the page is called. -->
+         and the buttons on the right, the account last. The two sides share
+         the rest equally, so the middle is the bar's centre whatever the page
+         is called. -->
     <div class="topbar-side">
     <!-- The sidebar's width: the full column or its rail of icons. A wide
          screen only; below that the sidebar is a drawer with its own button
@@ -67,6 +68,8 @@
     <button class="top-btn" @click="handleRefresh" :disabled="isRefreshing" title="Refresh">
       <svg style="width:15px; height:15px;" :class="{ 'animate-spin': isRefreshing }" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
     </button>
+
+    <UserMenu />
     </div>
   </header>
   </div>
@@ -81,6 +84,7 @@ import { queueOf, queueLocation, consumerLocation } from '@/composables/navigati
 import { useIdentity } from '@/stores/identity'
 import BrokerBar from '@/components/BrokerBar.vue'
 import ThemeMenu from '@/components/ThemeMenu.vue'
+import UserMenu from '@/components/UserMenu.vue'
 
 const route = useRoute()
 const router = useRouter()

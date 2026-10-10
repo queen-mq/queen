@@ -4,7 +4,7 @@ export const textParam = value => typeof value === 'string' ? value : ''
 export function safeReturnTo(value) {
   const path = textParam(value)
   // Only dashboard destinations; never a protocol-relative or external URL.
-  return /^\/(?:\?(?:.*)|$|(?:queues(?:\/[^?]*)?|messages|dlq|timers|consumers|supervisors|analytics|operations|workload|traces|kv|locks|ephemeral|members|keys|users|system)(?:\?.*)?)$/.test(path)
+  return /^\/(?:\?(?:.*)|$|(?:queues(?:\/[^?]*)?|messages|dlq|timers|consumers|supervisors|workload|traces|kv|locks|ephemeral|settings|members|keys|users|system)(?:\?.*)?)$/.test(path)
     && !/[\\\r\n]/.test(path) ? path : ''
 }
 
@@ -23,7 +23,7 @@ export function contextQuery(route) {
 }
 
 export function queueLocation(queue, route, view = 'overview', extra = {}) {
-  const paths = { messages: '/messages', failed: '/dlq', scheduled: '/timers', consumers: '/consumers', metrics: '/analytics', supervisors: '/supervisors' }
+  const paths = { messages: '/messages', failed: '/dlq', scheduled: '/timers', consumers: '/consumers', supervisors: '/supervisors' }
   return {
     path: paths[view] || `/queues/${encodeURIComponent(queue)}`,
     query: { ...contextQuery(route), ...(paths[view] ? { queue } : {}), ...extra },

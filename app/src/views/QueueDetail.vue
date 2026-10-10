@@ -372,6 +372,26 @@
               options, the namespace and the task. The dimmed three are not among them.
             </template>
           </p>
+
+          <!-- Not broker configuration: the lines the console judges this queue
+               by (Settings). They are here because this is where one looks
+               when a queue is amber and should not be. The two lag lines are
+               always stated; the others only when this queue has its own. -->
+          <div class="qd-lines-head">
+            <h4>Console settings</h4>
+            <span class="qd-lines-sub">{{ ownLines ? 'this queue has its own' : 'the tenant’s lines' }} · <router-link to="/settings">Settings</router-link></span>
+            <button v-if="canSetLines" class="qd-config-link" @click="linesOpen = true">Change</button>
+          </div>
+          <ul class="qd-settings">
+            <li v-for="meta in shownLines" :key="meta.key">
+              <span :title="meta.help">{{ meta.group }} · {{ meta.label.toLowerCase() }}</span>
+              <b>{{ meta.unit === 's' ? formatSpan(queueLines[meta.key]) : formatLine(meta, queueLines[meta.key]) }}<i v-if="ownLines && ownLines[meta.key] !== undefined">this queue</i></b>
+            </li>
+            <li v-for="flag in shownFlags" :key="flag.key">
+              <span :title="flag.help">{{ flag.label }}</span>
+              <b>Yes<i>this queue</i></b>
+            </li>
+          </ul>
       </div>
       </div>
     </template>
@@ -416,6 +436,8 @@
          refetches the page rather than patching anything locally: the status
          route is the one that describes this queue, and two sources of the same
          six numbers would drift. -->
+    <QueueLinesModal :open="linesOpen" :queue="queueName" @close="linesOpen = false" />
+
     <QueueConfigModal
       :open="configOpen"
       mode="edit"
@@ -447,6 +469,8 @@ import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import { useGroupsStore } from '@/stores/groupsStore'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { QUEUE_FLAGS, QUEUE_LINES, formatLine, formatSpan } from '@/composables/settingsDoc'
 import { queueAttention } from '@/composables/useAttention'
 import { semanticColors } from '@/composables/useChartTheme'
 import {
@@ -459,6 +483,7 @@ import PageHead from '@/components/PageHead.vue'
 import RowChart from '@/components/RowChart.vue'
 import PushMessageModal from '@/components/PushMessageModal.vue'
 import QueueConfigModal from '@/components/QueueConfigModal.vue'
+import QueueLinesModal from '@/components/QueueLinesModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -749,10 +774,18 @@ const lagLatest = computed(() => {
     max: latestFinite(l.map(x => x.max)),
   }
 })
-// An age is already proportional, so the thresholds are the app's, unchanged —
-// they just come from useSeverity now, in seconds, like everywhere else.
+// An age is already proportional, so it is judged against two lines and
+// nothing else: this queue's own when Settings holds some, else the tenant's.
+const settingsStore = useSettingsStore()
+const queueLines = computed(() => settingsStore.linesFor(queueName.value))
+const ownLines = computed(() => settingsStore.settings.value.queues.get(queueName.value) || null)
+const shownLines = computed(() => QUEUE_LINES.filter((m) => m.group === 'Consumer lag' || ownLines.value?.[m.key] !== undefined))
+const shownFlags = computed(() => QUEUE_FLAGS.filter((f) => ownLines.value?.[f.key] === true))
+// The capability that configures a queue, on a document that was read.
+const canSetLines = computed(() => can('queueAdmin') && settingsStore.state.value === 'ready')
+const linesOpen = ref(false)
 const lagNumClass = (ms) => (
-  ms === null || ms === undefined ? '' : numTone(timeLagSeverity(ms / 1000))
+  ms === null || ms === undefined ? '' : numTone(timeLagSeverity(ms / 1000, queueLines.value))
 )
 // MetricRow.severity expects a key like 'warn' / 'bad'; map from the raw ms.
 const lagSeverityKey = computed(() => lagNumClass(lagLatest.value.max))
@@ -834,7 +867,7 @@ const errorsContext = computed(() => {
   return `${formatNumber(t)} of ${formatNumber(delivered)} delivered (${((t / delivered) * 100).toFixed(2)}%)`
 })
 const errorsSeverity = computed(() =>
-  ackFailureSeverity({ failed: errorsTotal.value, attempts: deliveredTotal.value })
+  ackFailureSeverity({ failed: errorsTotal.value, attempts: deliveredTotal.value }, queueLines.value)
 )
 
 // ---------------------------------------------------------------------------
@@ -991,7 +1024,7 @@ const banners = computed(() => {
 // Seconds of work at the rate this queue is actually acking, not a raw depth:
 // 50 000 pending drains in four seconds at 12k/s and never drains at 0/s.
 const drainPerSec = computed(() => latestFinite(history.value.map(x => x.ackPerSecond)))
-const pendingNumClass = (n) => backlogSeverity({ pending: n, drainPerSec: drainPerSec.value })
+const pendingNumClass = (n) => backlogSeverity({ pending: n, drainPerSec: drainPerSec.value }, queueLines.value)
 
 // ---------------------------------------------------------------------------
 // Formatters
@@ -1071,7 +1104,7 @@ const queueSev = computed(() => {
   const groups = groupsStore.groups.value
   if (groups === null || groupsStore.error.value !== null) return 'ok'
   const here = { name: queueName.value, messages: { pending: totalMessages.value.pending } }
-  return queueAttention([here], groups)[0]?.sev || 'ok'
+  return queueAttention([here], groups, settingsStore.linesFor)[0]?.sev || 'ok'
 })
 // Each seed's lag — the age of the oldest message its slowest reader has not
 // consumed — comes from /resources/partitions, for the seeds the flower can
@@ -1290,6 +1323,15 @@ onMounted(fetchAll)
   text-underline-offset: 2px;
 }
 .qd-config-link:hover { color: var(--accent-text); }
+
+.qd-lines-head {
+  display: flex; align-items: baseline; gap: 10px; padding: 12px 16px 2px;
+  border-top: 1px solid var(--bd);
+}
+.qd-lines-head h4 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-hi); }
+.qd-lines-sub { font-size: 12px; color: var(--text-low); }
+.qd-lines-sub a { color: var(--text-mid); text-decoration: underline; text-underline-offset: 2px; }
+.qd-lines-head .qd-config-link { margin-left: auto; font-size: 12px; }
 
 /* The delete modal uses the shared shell — .modal-backdrop / .modal-card /
    .modal-foot — and the shared .panel-err for its form error, so it is not a
