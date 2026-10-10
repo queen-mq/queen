@@ -18,6 +18,9 @@ final class PhpSupervisor
     private const CRASH_CIRCUIT_THRESHOLD = 5;
 
     private const FORK_SERVER_BOOT_SECONDS = 60;
+    /** After a fork server fails to boot, the next boot waits this long, doubling each time. */
+    private const FORK_SERVER_RETRY_SECONDS = 60;
+    private const FORK_SERVER_RETRY_MAX_SECONDS = 900;
 
     private const FORK_TIMEOUT_SECONDS = 5;
 
@@ -72,6 +75,10 @@ final class PhpSupervisor
     private bool $preforkFailed = false;
     /** A worker of the current fork server stopped for queue:restart. */
     private bool $forkServerStale = false;
+    /** Fork server boots that failed in a row, and when the next may start. */
+    private int $forkBootFailures = 0;
+    private ?float $forkBootRetryAt = null;
+    private bool $forkBootDeferred = false;
     /** @var list<ForkServerClient> replaced servers, open until their workers are gone */
     private array $retiredForkServers = [];
     /** @var array<string, QueueWatcher>|null event-driven watchers by connection; null when disabled */
@@ -718,9 +725,19 @@ final class PhpSupervisor
                 self::FORK_SERVER_BOOT_SECONDS,
                 fn (): bool => !$this->running,
             );
+            $this->forkBootFailures = 0;
+            $this->forkBootRetryAt = null;
             $this->emit("prefork: fork server started\n", 'out');
         } catch (\Throwable $error) {
             $this->forkServer = false;
+            // A boot can take FORK_SERVER_BOOT_SECONDS, during which nothing
+            // is reaped or restarted: the next one waits, 60 s doubling to 15
+            // minutes, however many queue:restart exits ask for it meanwhile.
+            $this->forkBootFailures++;
+            $this->forkBootRetryAt = microtime(true) + min(
+                self::FORK_SERVER_RETRY_SECONDS * 2 ** min($this->forkBootFailures - 1, 16),
+                self::FORK_SERVER_RETRY_MAX_SECONDS,
+            );
             $this->emit("prefork disabled, spawning workers: {$error->getMessage()}\n", 'err');
         }
     }
@@ -747,7 +764,18 @@ final class PhpSupervisor
      */
     private function refreshForkServer(): void
     {
-        if ($this->forkServerStale) {
+        $wait = $this->forkBootRetryAt === null ? 0.0 : $this->forkBootRetryAt - microtime(true);
+        if ($this->forkServerStale && $wait > 0) {
+            // The last boot failed: this request waits for the next boot, and
+            // workers are spawned meanwhile.
+            if ($this->forkBootFailures > 0 && !$this->forkBootDeferred) {
+                $this->emit(sprintf(
+                    "prefork: queue:restart received; the last fork server failed to boot, so the next boot waits %ds and workers are spawned meanwhile\n",
+                    (int) ceil($wait),
+                ), 'err');
+                $this->forkBootDeferred = true;
+            }
+        } elseif ($this->forkServerStale) {
             if ($this->forkServer instanceof ForkServerClient) {
                 $this->retiredForkServers[] = $this->forkServer;
             }
@@ -755,8 +783,9 @@ final class PhpSupervisor
             $this->preforkFailed = false;
             $this->emit("prefork: queue:restart received, starting a new fork server\n", 'out');
             $this->startForkServer();
+            $this->forkServerStale = false;
+            $this->forkBootDeferred = false;
         }
-        $this->forkServerStale = false;
 
         $retired = [];
         foreach ($this->retiredForkServers as $server) {
