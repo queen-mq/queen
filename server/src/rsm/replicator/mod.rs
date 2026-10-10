@@ -291,6 +291,59 @@ impl ClusterMembers {
             view_age: Some(std::time::Duration::ZERO),
         }
     }
+
+    /// How long ago the leader this node follows (itself, when it leads) last
+    /// heard from a majority of the voters, counted to now: the silence of
+    /// the voter that completes the majority, the leader included, plus the
+    /// view's age. `None` without a view, or while fewer voters than a
+    /// majority have ever answered that leader.
+    ///
+    /// This is what `/health` judges a node's contact with the cluster by
+    /// (`QUEEN_RAFT_READY_QUORUM_MS`). A leader that lost its quorum sees its
+    /// members' silence grow. A follower cut off from the leader receives no
+    /// append, so its copy ages. A follower still reached by a leader that
+    /// lost the others reads that leader's own figures.
+    pub fn quorum_ack_age(&self) -> Option<std::time::Duration> {
+        let view = self.view.as_ref()?;
+        let age = self.view_age?;
+        let voters = view.members.iter().filter(|m| m.voter).count();
+        let mut silences: Vec<u64> = view
+            .members
+            .iter()
+            .filter(|m| m.voter)
+            .filter_map(|m| m.last_ack_ms)
+            .collect();
+        silences.sort_unstable();
+        let majority = voters / 2 + 1;
+        silences
+            .get(majority.checked_sub(1)?)
+            .map(|ms| std::time::Duration::from_millis(*ms) + age)
+    }
+
+    /// The commit point as the view shows it, and the view's age: the highest
+    /// index a majority of the voters hold (RSM numbering), which is what the
+    /// leader had committed when it took the view. `None` without a view, or
+    /// while fewer voters than a majority have a known position.
+    ///
+    /// A follower reads this when the leader does not answer its own
+    /// question about the commit index (`/health`'s catch-up lag). The view
+    /// arrives on the appends, so it reaches even a node the leader cannot
+    /// replicate to: a voter that came back empty under its id, whose log the
+    /// leader still believes it holds.
+    pub fn commit_seen(&self) -> Option<(u64, std::time::Duration)> {
+        let view = self.view.as_ref()?;
+        let age = self.view_age?;
+        let voters = view.members.iter().filter(|m| m.voter).count();
+        let mut held: Vec<u64> = view
+            .members
+            .iter()
+            .filter(|m| m.voter)
+            .filter_map(|m| m.matched)
+            .collect();
+        held.sort_unstable_by(|a, b| b.cmp(a));
+        let majority = voters / 2 + 1;
+        held.get(majority.checked_sub(1)?).map(|i| (*i, age))
+    }
 }
 
 impl Membership {

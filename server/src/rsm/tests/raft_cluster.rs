@@ -979,6 +979,80 @@ async fn a_node_behind_its_last_late_answer_takes_no_lease() {
     }
 }
 
+/// `/health` on a node that lost its quorum (F8 in `test/recovery`). With two
+/// of three nodes gone the survivor cannot commit, yet it keeps the id of the
+/// last leader it knew and its apply lag is 0: it answered `200 healthy` for
+/// as long as it ran, so a readiness probe kept sending it clients whose
+/// requests waited out their deadlines. A node is ready only while the leader
+/// it follows (itself, when it leads) heard from a majority within the
+/// window, and ready again once a majority is back. Both survivors are
+/// covered: one that did not lead when the others stopped, and the leader.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_node_without_its_quorum_stops_reporting_ready() {
+    const LAG_MS: u64 = 2_000;
+    const QUORUM_MS: u64 = 2_000;
+    let _one = serial().await;
+    log_init();
+    let ready = |f: &RaftFacade| f.health().ready(LAG_MS, QUORUM_MS);
+    async fn until(what: &str, secs: u64, mut ok: impl FnMut() -> bool) {
+        let end = Instant::now() + Duration::from_secs(secs);
+        while !ok() {
+            assert!(Instant::now() < end, "{what}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    for survivor_leads in [false, true] {
+        let dirs: Vec<PathBuf> = (0..3).map(|_| scratch("health")).collect();
+        let ports = free_ports(3);
+        let opts = vec![test_opts(); 3];
+        let mut nodes = open_facades(&dirs, &opts, |id| cluster_config(&ports, id)).await;
+        let l = facade_leader(&nodes).await;
+        until("not every node of a whole cluster became ready", 20, || {
+            nodes.iter().flatten().all(|f| ready(f))
+        })
+        .await;
+
+        let s = if survivor_leads { l } else { (l + 1) % 3 };
+        let stopped: Vec<usize> = (0..3).filter(|i| *i != s).collect();
+        for i in &stopped {
+            close_facade(nodes[*i].take().expect("a running node")).await;
+        }
+        let survivor = nodes[s].clone().expect("the survivor");
+        until("a node without its quorum still reports ready", 20, || {
+            !ready(&survivor)
+        })
+        .await;
+        // The window turned off is the rule as it was, which the survivor
+        // may well still pass: that was the finding.
+        let h = survivor.health();
+        assert!(
+            h.quorum_ack_ms.is_none_or(|ms| ms > QUORUM_MS),
+            "the survivor's quorum figure: {h:?}"
+        );
+
+        // One node back makes a majority: the survivor is ready again.
+        let i = stopped[0];
+        let (d, c) = (dirs[i].clone(), cluster_config(&ports, i as u64 + 1));
+        let back = tokio::task::spawn_blocking(move || open_facade(&d, c, test_opts()))
+            .await
+            .expect("open task");
+        nodes[i] = Some(Arc::new(back));
+        until("a node with its quorum back is not ready", 30, || {
+            ready(&survivor)
+        })
+        .await;
+
+        drop(survivor);
+        for n in nodes.into_iter().flatten() {
+            close_facade(n).await;
+        }
+        for d in dirs {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Membership changes, the single-survivor recovery, the apply skip
 // ---------------------------------------------------------------------------

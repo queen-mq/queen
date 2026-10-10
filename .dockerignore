@@ -33,6 +33,7 @@ webdoc/
 docs/
 assets/
 examples/
+deploy/
 helm/
 helm_queen/
 helm_v1/

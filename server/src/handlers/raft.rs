@@ -448,14 +448,15 @@ pub(crate) async fn dispatch_depth(
 // ---------------------------------------------------------------------------
 
 /// `GET /health` in raft mode (§14.1): keeps `status`/`version`/`engine`, adds
-/// the `raft` block, and answers `200 healthy` while a leader is known and the
-/// apply lag is under the ready threshold, else `503 settling`. Reads
-/// node-local state only.
+/// the `raft` block, and answers `200 healthy` while a leader is known, the
+/// apply lag is under the ready threshold and that leader heard from a
+/// majority of the voters recently, else `503 settling`. Reads node-local
+/// state only.
 pub(crate) async fn handle_health(
     axum::extract::State(st): axum::extract::State<Arc<AppState>>,
 ) -> Response {
     let h = st.rsm.health();
-    let (status, label) = if h.ready(st.raft_ready_lag_ms) {
+    let (status, label) = if h.ready(st.raft_ready_lag_ms, st.raft_ready_quorum_ms) {
         (StatusCode::OK, "healthy")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "settling")
@@ -600,6 +601,7 @@ pub(crate) async fn handle_metrics(
             "applied": health.applied,
             "commit": health.commit,
             "lag": health.lag_ms,
+            "quorumAckMs": health.quorum_ack_ms,
             "storageReady": health.storage_ready,
         }
     });
@@ -944,6 +946,7 @@ pub(crate) fn build_raft_state_with(
         server_id: cfg.server_id.clone(),
         rsm,
         raft_ready_lag_ms: cfg.raft_ready_lag_ms,
+        raft_ready_quorum_ms: cfg.raft_ready_quorum_ms,
     }))
 }
 

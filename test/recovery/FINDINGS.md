@@ -48,12 +48,23 @@ Damage matrix (`sc04-corrupt.sh`, one follower, data verified through that node 
 - Remedy that works (tested): DELETE member -> wipe again -> start -> add learner -> promote.
 - Fix options: refuse to start a fresh node that is still a VOTER in the cluster's membership
   (clear FATAL: "remove node N first"); or set `allow_log_reversion` (openraft keeps the quorum value).
+- STILL OPEN (2026-10-08, sc03c again on a 2.0.3 build): the node never catches up. What changed is
+  what it says: with the F2 fix below its /health is 503 once the cluster is more than 1000 entries
+  ahead (applied 0, lag from the epoch), where it was 200 for good.
 
 ## F2 — /health says healthy for a node that applied nothing
 - server/src/rsm/facade/real.rs catch_up_lag(): `if last <= 0 { return 0 }` — a node with no applied
   entry (store last_now_us 0) reports lag 0 although it is 1000+ entries behind the leader's commit.
 - Impact: k8s readiness passes for the stuck node of F1, the Service sends it clients.
 - Fix: nothing applied while > slack behind -> report a lag (e.g. now - read time, or u64::MAX).
+- FIXED 2026-10-08. Two causes, not one. (1) `if last <= 0 { return 0 }`: gone, the age is counted
+  from the epoch. (2) That line was never reached for the node of F1: it asks the leader its commit
+  index through a membership it does not have, gets no answer, and "no reading" also meant lag 0.
+  The catch-up lag now falls back to the commit point of the view the leader puts on its appends
+  (`ClusterMembers::commit_seen`: what a majority of the voters hold), which does reach that node.
+  Rehearsal: 3,262 entries, follower wiped and restarted under its id -> 503 settling from its
+  first answer, role learner, applied 0, lag 1.79e12; on 2.0.3 the same node said healthy.
+  Within the slack (1000 entries, QUEEN_RAFT_READY_LAG_ENTRIES) such a node still says healthy.
 
 ## F3 — damage in an OLD sealed queue-log file is not detected; the node stays healthy and answers 500
 - Repro: probe-sealed.sh (flip 16 bytes in a sealed qlog file whose entries are below the store's
@@ -110,6 +121,16 @@ qlog active file bit flip or truncation, sealed qlog damage that the boot reads,
 - Impact: readiness stays green, an alert on /health never fires for the survivor; clients hang.
 - Fix option: leader_known only if the leader's last append/heartbeat reached this node within ~2x the
   election timeout max (the members view carries its age), else 503 settling.
+- FIXED 2026-10-08: /health is ready only while the leader the node follows (itself, when it leads)
+  heard from a majority of the voters within QUEEN_RAFT_READY_QUORUM_MS (5000; 0 = not checked).
+  The figure is in the body (`raft.quorumAckMs`): the silence of the voter that completes the
+  majority in the leader's members view, plus the view's age on a follower
+  (`ClusterMembers::quorum_ack_age`). It rides the appends, so no load on the client path holds
+  it up. Rehearsals (3 containers, kill -9): survivor a follower -> 503 at +5.0 s; survivor the
+  leader -> 503 at +5.2 s; back to 200 2-3 s after one node returns; a plain leader failover
+  (3.7 s) -> both remaining nodes 200 throughout. On 2.0.3 the survivor said healthy for good.
+  Test: rsm::tests::raft_cluster::a_node_without_its_quorum_stops_reporting_ready (fails with the
+  window at 0).
 
 ## F9 (design note, not a bug) — the disk gate protects a node only from its OWN clients
 - S5: node 3 on a smaller disk. At 85% its gate closes (pushes sent to it: 507), but writes taken by the

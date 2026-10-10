@@ -23,7 +23,8 @@ x-node: &node
   # default). Docker's 10 s default would kill it halfway.
   stop_grace_period: 60s
   healthcheck:
-    # 200 once the node knows a leader and has caught up, 503 "settling" before.
+    # 200 while the node knows a leader that hears from a majority and has
+    # caught up, 503 "settling" otherwise.
     test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:6632/health"]
     interval: 5s
     timeout: 3s

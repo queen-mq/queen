@@ -138,6 +138,21 @@ now renamed to `q<id>.dead` in one step and deleted after that is durable; a sta
 directories, and a snapshot leaves them out. Every release since 2.0.0 has this too. Found by
 Jepsen under power loss, where it took every node of a cluster down one after the other.
 
+**Server: `/health` no longer says healthy without a majority.** A node answered `200 healthy` as
+long as it knew a leader and its apply was not behind. A leader that had lost every follower, and
+a follower cut off from its leader, kept that leader's name and said healthy for good; a voter
+that came back with an empty disk said it from its first answer. On Kubernetes, where `/health` is
+the readiness probe, the Service kept sending clients to a node that could not serve them, and a
+rolling update moved on to the next pod before the one it had restarted was back in the cluster.
+`/health` now also needs the leader the node follows (itself, when it leads) to have heard from a
+majority of the voters within `QUEEN_RAFT_READY_QUORUM_MS` (5000 ms; `0` turns the check off), and
+the body says how long ago that was, in `raft.quorumAckMs`. A node that has applied nothing while
+the cluster is more than `QUEEN_RAFT_READY_LAG_ENTRIES` ahead answers `503 settling`: its catch-up
+is now measured against the commit point the leader's appends carry when the leader does not
+answer its question. An election stays `200`: the figure is the silence of a majority, not the
+absence of a leader. Do not point a liveness probe at `/health`: a lost majority would restart
+every pod.
+
 **Dashboard: moving between views keeps what you were looking at.** The selected queue, the time
 window, the filters and the page of a list are part of the address: they survive a reload, a
 shared link and the browser's Back, and they follow you from a queue to its messages, its
