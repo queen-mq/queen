@@ -61,6 +61,10 @@ const CONTROL_CLOCK_SKEW_SECONDS: u64 = 5;
 const PROCESS_START_BUDGET_SECONDS: u64 = 5;
 const TELEMETRY_SCAN_BUDGET_SECONDS: u64 = 60;
 const CONTROL_LOOP_MARGIN_SECONDS: u64 = 5;
+// After a fork server failed to boot, the next boot waits this long, doubled
+// for every further failure up to the maximum; see ForkServerBoots.
+const FORK_SERVER_RETRY_SECONDS: u64 = 60;
+const FORK_SERVER_RETRY_MAX_SECONDS: u64 = 900;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -492,8 +496,9 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(|settings| Coordinator::new(settings, &state.instance_id, state.hostname.as_deref()));
     let coordinated_scopes = coordinated_scopes(&config);
+    let mut fork_boots = ForkServerBoots::default();
     let mut fork_server = if config.prefork {
-        match ForkServer::start(&config, &running) {
+        let server = match ForkServer::start(&config, &running) {
             Ok(server) => {
                 eprintln!("prefork: fork server started");
                 Some(Rc::new(RefCell::new(server)))
@@ -502,7 +507,9 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("prefork disabled, spawning workers: {error}");
                 None
             }
-        }
+        };
+        fork_boots.record(server.is_some(), Instant::now());
+        server
     } else {
         None
     };
@@ -638,8 +645,12 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         );
         reap_draining(&config, &mut draining, &mut pending_telemetry_cleanup);
         if restarted {
+            fork_boots.request(Instant::now());
+        }
+        if fork_boots.due(Instant::now()) {
             fork_server =
                 refresh_fork_server(&config, &running, fork_server.take(), &mut retired_forks);
+            fork_boots.record(fork_server.is_some(), Instant::now());
         }
         close_retired_forks(&mut retired_forks);
         observe_stable_workers(&config, &mut pools, &mut restarts);
@@ -3639,6 +3650,54 @@ fn refresh_fork_server(
             eprintln!("prefork disabled, spawning workers: {error}");
             None
         }
+    }
+}
+
+/// When a new fork server boots. A boot that fails may hold the control loop
+/// for up to prefork::BOOT_TIMEOUT, reaping, starting and reporting nothing,
+/// and queue:restart stops the workers one at a time, as each finishes its
+/// job. So after a failure, the next boot a queue:restart asks for waits
+/// FORK_SERVER_RETRY_SECONDS, doubled for every further failure up to
+/// FORK_SERVER_RETRY_MAX_SECONDS; the workers are spawned meanwhile.
+#[derive(Debug, Default)]
+struct ForkServerBoots {
+    failures: u32,
+    retry_at: Option<Instant>,
+    /// A queue:restart asked for a new server that has not booted yet.
+    requested: bool,
+}
+
+impl ForkServerBoots {
+    fn request(&mut self, now: Instant) {
+        if !self.requested {
+            if let Some(at) = self.retry_at.filter(|at| *at > now) {
+                eprintln!(
+                    "prefork: queue:restart received; the last fork server failed to boot, \
+                     so the next boot waits {}s and workers are spawned meanwhile",
+                    at.saturating_duration_since(now).as_secs()
+                );
+            }
+        }
+        self.requested = true;
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        self.requested && self.retry_at.is_none_or(|at| now >= at)
+    }
+
+    fn record(&mut self, booted: bool, now: Instant) {
+        self.requested = false;
+        if booted {
+            self.failures = 0;
+            self.retry_at = None;
+            return;
+        }
+        self.failures = self.failures.saturating_add(1);
+        let doublings = self.failures.saturating_sub(1).min(16);
+        let delay = FORK_SERVER_RETRY_SECONDS
+            .saturating_mul(1 << doublings)
+            .min(FORK_SERVER_RETRY_MAX_SECONDS);
+        self.retry_at = Some(now + Duration::from_secs(delay));
     }
 }
 
@@ -7990,6 +8049,99 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
         assert!(
             delay < Duration::from_millis(1_500),
             "the workers had their SIGTERM {delay:?} after the master's"
+        );
+    }
+
+    /// Files in `directory` whose name starts with `prefix`.
+    #[cfg(unix)]
+    fn count_files(directory: &Path, prefix: &str) -> usize {
+        fs::read_dir(directory)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Stop the supervisor as the platform does, with SIGTERM, and wait.
+    #[cfg(unix)]
+    fn terminate_supervisor(mut supervisor: Child) {
+        // SAFETY: plain signal delivery to the supervisor this test started.
+        unsafe { libc::kill(supervisor.id() as i32, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while matches!(supervisor.try_wait(), Ok(None)) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        stop_supervisor(supervisor);
+    }
+
+    #[test]
+    fn a_failed_fork_server_boot_backs_off_and_a_boot_resets_it() {
+        let now = Instant::now();
+        let mut boots = ForkServerBoots::default();
+        assert!(!boots.due(now), "booted without a queue:restart");
+        boots.request(now);
+        assert!(boots.due(now), "a working server waits for a queue:restart");
+
+        let mut waited = Vec::new();
+        for _ in 0..6 {
+            boots.record(false, now);
+            assert!(!boots.due(now), "booted again without a request");
+            boots.request(now);
+            waited.push(boots.retry_at.unwrap().duration_since(now).as_secs());
+            assert!(!boots.due(now + Duration::from_secs(waited[waited.len() - 1] - 1)));
+        }
+        assert_eq!(waited, [60, 120, 240, 480, 900, 900]);
+        assert!(boots.due(now + Duration::from_secs(900)));
+
+        boots.record(true, now);
+        boots.request(now);
+        assert!(boots.due(now));
+    }
+
+    /// A fork server that cannot boot (here it exits at once; a hung boot
+    /// holds the control loop for up to BOOT_TIMEOUT) is not booted again
+    /// for every worker queue:restart stops. Workers are spawned meanwhile.
+    #[cfg(unix)]
+    #[test]
+    fn a_fork_server_that_failed_to_boot_waits_before_booting_again() {
+        let directory = temporary_directory("fork-server-retry");
+        let boots = directory.join("boots");
+        write_fake_artisan(
+            &directory,
+            &format!(
+                "if [ \"$1\" = queen:fork-server ]; then echo boot >> '{}'; exit 1; fi\n\
+                 : > \"started.$$\"\n\
+                 sleep 0.3\n\
+                 umask 077\n\
+                 printf restart > \"$QUEEN_SUPERVISOR_EXITS_DIR/$$.tmp\"\n\
+                 mv \"$QUEEN_SUPERVISOR_EXITS_DIR/$$.tmp\" \"$QUEEN_SUPERVISOR_EXITS_DIR/$$\"\n",
+                boots.display()
+            ),
+        );
+        let mut document = supervisor_document(&directory, &closing_broker());
+        document["prefork"] = serde_json::json!(true);
+        let supervisor = start_supervisor(&directory, &document, &[]);
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while count_files(&directory, "started.") < 4 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let started = count_files(&directory, "started.");
+        let booted = fs::read_to_string(&boots)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        terminate_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(started >= 4, "no worker was spawned meanwhile:\n{log}");
+        assert_eq!(
+            booted, 1,
+            "the fork server booted for every queue:restart:\n{log}"
         );
     }
 
