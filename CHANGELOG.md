@@ -58,6 +58,9 @@ now files it into the dead-letter queue at its first delivery, as it does a fail
 `NotALaravelJobException` to the application's exception handler with the delivery's transaction ID,
 queue, partition, delivery attempt and first 120 bytes, the same text as the dead-letter error, and
 pops again. No `failed_jobs` row is written: it was never a Laravel job. Since the PHP client 1.0.
+A Laravel job that fails for the last time also goes to the dead-letter queue, as before, beside
+its `failed_jobs` row, so a count of dead letters includes ordinary failures: the error text
+"carries no Laravel job" tells the deliveries of this paragraph from them.
 
 **Laravel: a job whose timeout its lease cannot cover ends a supervised worker.** A job with a
 `timeout` at or above `retry_after`, without lease renewal, made `pop()` throw a
