@@ -465,12 +465,13 @@ python3 scripts/failure_matrix.py --output results/parity-l11 --stack balanced -
 
 ### What only Queen has
 
-Seven scenarios run only on the Queen engines, since Horizon has no counterpart to
+Eight scenarios run only on the Queen engines, since Horizon has no counterpart to
 compare with:
 
 | Scenario | What must hold |
 | --- | --- |
 | `probe-broker-hung` | the broker hangs (`docker pause`) for 150 s, longer than every timeout of a pop; the probes of [the Kubernetes guide](../../webdoc/src/content/docs/guides/laravel/kubernetes.mdx) run every 3 s: liveness passes throughout, readiness fails during the outage and says `pool_not_consuming`, and passes again within 60 s of the broker's return; the master and the same workers carry on and consume again |
+| `broker-slow` | every answer of the broker takes 1.5 s more (`tc netem` from a container in its network namespace) for a minute while jobs of 2 s run: each completes once, no lease lapses into a second run, and the pool stays ready |
 | `poison-messages` | a string that is not JSON, an object that names no job and a Laravel job whose class is gone, ahead of a job in one partition: the three go to the dead-letter queue at their first delivery, no worker dies, and the job behind them runs without waiting for a lease |
 | `job-metrics` | the Jobs page after every way an attempt ends (`bench:job-metrics`): returned and released attempts are processed; a throw, `fail()`, a timeout and a delivery past its tries are failed attempts; the longest attempt is the timed-out one |
 | `install-owner` | the `queen-installed` service: the image build installs the release as root with `--owner` ([Dockerfile](Dockerfile)), the container starts as root and runs the Composer launcher as the user. The installation and every process are the user's; the probe as root fails with a message naming the owner, `su` and `runAsUser`, and the probe wrapped in `su` passes; SIGTERM drains the job in flight and the supervisor exits 0 |

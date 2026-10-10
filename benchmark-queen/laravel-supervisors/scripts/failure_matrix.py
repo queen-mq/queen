@@ -317,6 +317,15 @@ class Lane:
         """Artisan in the supervisor's own container, beside its workers."""
         return self.docker("exec", self.container(self.profile.engine), "php", "artisan", "--no-ansi", *args, check=check)
 
+    def netem(self, *rule: str) -> None:
+        """Shape what the broker sends (tc netem on its eth0), from a container of the app image
+        in the broker's network namespace; no rule removes the shaping."""
+        command = ["tc", "qdisc", "replace", "dev", "eth0", "root", "netem", *rule] if rule else \
+            ["tc", "qdisc", "del", "dev", "eth0", "root"]
+        self.docker("run", "--rm", "--user", "0:0", "--network", f"container:{self.container('broker')}",
+                    "--cap-add", "NET_ADMIN", APP_IMAGE, *command)
+        self.note(f"broker traffic: {' '.join(rule) or 'unshaped'}")
+
     def probe(self, *options: str, user: str = "") -> tuple[int, str]:
         """`queen:supervisor status` in the supervisor's container, as a Kubernetes exec probe runs
         it: its exit code and what it printed. `user` runs it as another user, as a probe of a
@@ -1238,6 +1247,35 @@ def probe_broker_hung(lane: Lane) -> list[Check]:
     ]
 
 
+def broker_slow(lane: Lane) -> list[Check]:
+    """Every answer of the broker takes 1.5 s more, as across a congested link, for a minute while
+    jobs of 2 s run: a pop, an ACK, a lease renewal and a depth read each take longer, but all
+    within their timeouts. Every job must complete once, no lease may lapse into a second run,
+    and the pool must stay ready."""
+    expected = ids(0, 40)
+    lane.dispatch("ok", 40, sleep_ms=2_000, tries=3)
+    lane.wait_until(lambda r: sum(1 for j in expected if r.count(j, "started")) >= 2, 60, "jobs running")
+    lane.netem("delay", "1500ms")
+    samples: list[dict] = []
+    try:
+        shaped = time.monotonic()
+        while time.monotonic() - shaped < 60:
+            ready, status = lane.status()
+            samples.append({"ready": ready, "readiness": issue_codes(status, "readiness_issues")})
+            time.sleep(5)
+    finally:
+        lane.netem()
+    jobs = lane.wait_until(lambda r: all(r.count(j, "completed") for j in expected), 240, "all completed")
+    jobs = lane.settle(10)
+    not_ready = [s["readiness"] for s in samples if not s["ready"]]
+    lane.extra["broker_slow"] = {"samples": samples}
+    return [
+        Check("ready throughout", not not_ready, f"{len(not_ready)} of {len(samples)} samples: {not_ready[:3]}"),
+        every(jobs, expected, "each ran once", lambda j: jobs.count(j, "started") == 1),
+        *completed_once(jobs, expected),
+    ]
+
+
 POISON_KINDS = ("not-json", "no-job", "missing-class")
 
 
@@ -1679,6 +1717,7 @@ SCENARIOS = [
     # What Horizon has no counterpart of: the probes, the dead-letter queue, the Jobs page.
     Scenario("probe-broker-hung", probe_broker_hung, engines=QUEEN_ENGINES),
     Scenario("poison-messages", poison_messages, engines=QUEEN_ENGINES),
+    Scenario("broker-slow", broker_slow, engines=QUEEN_ENGINES),
     Scenario("job-metrics", job_metrics, engines=QUEEN_ENGINES),
     Scenario("install-owner", install_owner, engines=("queen-installed",)),
     # A renewal may try all three URLs: 60 s fits the renewal budget that 30 s does not.

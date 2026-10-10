@@ -60,6 +60,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        iproute2 \
         libonig5 \
         libxml2 \
         procps \
