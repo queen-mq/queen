@@ -16,6 +16,8 @@ backoff no longer closes it, which only the probe does, as in the PHP engine. Th
 longer lets a pool that balances inherit its own `QUEEN_LARAVEL_BLOCK_FOR`. These changes need a
 supervisor release; the worker-invocation record pins them.
 
+## PHP client 2.4.2 - 2026-10-10
+
 **Laravel: a supervised worker that cannot consume leaves, or says so.** Laravel's worker catches
 what a pop throws, reports it, sleeps a second and pops again, for as long as it lives, so a worker
 whose every pop failed stayed alive and counted as capacity: with the PHP client 2.3.1, forked
