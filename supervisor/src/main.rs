@@ -3466,6 +3466,8 @@ fn reconcile(
                 }
                 Err(error) => {
                     let (delay, circuit_open) = restart.record_failure(options, Instant::now());
+                    // A start that fails is a crash: the next waits for the circuit.
+                    restart.vacancies = 0;
                     return Err(format!(
                         "could not start {name}:{queue}: {error}; {} for {}s",
                         if circuit_open {
@@ -4806,6 +4808,49 @@ mod tests {
     #[test]
     fn young_exits_are_replaced_within_the_budget() {
         assert_eq!(refill_after_nine_exits("young-exit", false), 2);
+    }
+
+    /// A replacement that cannot start is a crash: the next start waits for the
+    /// circuit instead of being retried at every reconcile.
+    #[cfg(unix)]
+    #[test]
+    fn a_replacement_that_cannot_start_waits_for_the_circuit() {
+        let (mut resolved, directory) = fake_php_config("failed-start", FAKE_WORKER);
+        let options = resolved.supervisors.get_mut("default").unwrap();
+        options.stable_after = 1;
+        options.restart_backoff = 30;
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut pools = Pools::new();
+        let mut restarts = RestartStates::new();
+        let mut draining = Draining::new();
+        while pools.get(&key).map_or(0, Vec::len) < 3 {
+            reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 3);
+        }
+        await_fake_workers(&directory, &pools[&key]);
+        thread::sleep(Duration::from_millis(1_200));
+        signal_worker(&mut pools.get_mut(&key).unwrap()[0].child, libc::SIGTERM);
+        reap_until(&resolved, &mut pools, &mut restarts, &key, 2);
+
+        // The working directory is gone, so no worker can start.
+        resolved.cwd = directory.join("gone").to_string_lossy().into_owned();
+        for _ in 0..2 {
+            let _ = reconcile(
+                &Launcher {
+                    config: &resolved,
+                    forks: None,
+                },
+                "default",
+                &resolved.supervisors["default"],
+                HashMap::from([("high".to_owned(), 3), ("default".to_owned(), 0)]),
+                &mut pools,
+                &mut restarts,
+                &mut draining,
+            );
+        }
+        let failures = restarts[&key].consecutive_failures;
+        kill_pools(&mut pools);
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(failures, 1, "the failing start was retried at once");
     }
 
     /// Fill a pool of ten fake workers, stop nine of them, cleanly, once they
