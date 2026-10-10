@@ -264,6 +264,33 @@ final class WorkerPopGuardTest extends TestCase
         $this->assertFalse($seen[32], 'the file outlived a pop that worked');
     }
 
+    /**
+     * A pop that fails with "Connection reset by peer" or "Broken pipe" reads,
+     * to Laravel's worker, as a lost database connection: the worker stopped
+     * with exit code 0, which the supervisor counts as a clean exit, with no
+     * backoff, and its stop took the file back. A pool whose broker kept
+     * resetting its connections restarted its workers in a loop, and never
+     * said they were not consuming. The worker stays, as for any failed pop.
+     */
+    #[TestWith(['spawned', 'cURL error 56: Recv failure: Connection reset by peer'])]
+    #[TestWith(['forked', 'cURL error 55: Send failure: Broken pipe'])]
+    public function testAConnectionTheBrokerResetDoesNotStopTheWorker(string $mode, string $error): void
+    {
+        $this->broker->answer(new \RuntimeException($error));
+        $worker = $this->superviseAs($mode);
+        $seen = [];
+        $worker->onLoop = function (int $loop) use (&$seen): void {
+            $seen[$loop] = $this->popFailures();
+        };
+
+        [$code, $output] = $this->work($mode, $worker, 'queen-batch', 3);
+
+        $this->assertSame(0, $code, $output);
+        $this->assertSame(3, $worker->loops, 'the worker stopped');
+        $this->assertSame(3, $this->broker->count());
+        $this->assertStringContainsString($error, $seen[3]['error'] ?? '', 'the file says what the broker did');
+    }
+
     /** queue:work run by hand, or by Horizon, is Laravel's as it was. */
     public function testAWorkerNoSupervisorStartedIsLeftAsLaravelMadeIt(): void
     {

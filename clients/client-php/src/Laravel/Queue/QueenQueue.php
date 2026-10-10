@@ -6,6 +6,7 @@ use GuzzleHttp\Promise\PromiseInterface;
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Queue\Queue as QueueContract;
+use Illuminate\Database\DetectsLostConnections;
 use Illuminate\Queue\Events\WorkerStopping;
 use Illuminate\Queue\InvalidPayloadException;
 use Illuminate\Queue\Queue as BaseQueue;
@@ -557,11 +558,47 @@ class QueenQueue extends BaseQueue implements QueueContract
             // Laravel's worker reports it and pops again; the guard decides
             // whether the worker should leave or say it is not consuming.
             $this->popGuard->popFailed($error, $this->getQueue($queue));
-            throw $error;
+            throw self::asFailedPop($error, $this->getQueue($queue));
         }
         $this->popGuard->popped($this->getQueue($queue));
 
         return $job;
+    }
+
+    /**
+     * A failed pop as a supervised worker's loop should see it. One whose
+     * message reads, to Laravel, as a lost database connection ("reset by
+     * peer", "Broken pipe") stopped the worker with exit code 0, which the
+     * supervisor counts as clean and restarts without backoff, and its stop
+     * took the worker's pop-failures file back: with a broker that kept
+     * resetting connections, the pool restarted its workers in a loop and
+     * never said they were not consuming. Wrapped, it is a failed pop like
+     * any other; the broker's error is the previous exception.
+     */
+    private static function asFailedPop(\Throwable $error, string $queue): \Throwable
+    {
+        if ($error instanceof \LogicException) {
+            return $error;
+        }
+        $detector = new class () {
+            use DetectsLostConnections;
+
+            public function lost(\Throwable $error): bool
+            {
+                return $this->causedByLostConnection($error);
+            }
+        };
+        if (!$detector->lost($error)) {
+            return $error;
+        }
+        $failedPop = new RuntimeException(
+            "Queen Laravel could not pop [{$queue}]: the broker's connection failed ("
+                . get_class($error) . '); the worker pops again, see the previous exception.',
+            0,
+            $error,
+        );
+
+        return $detector->lost($failedPop) ? $error : $failedPop;
     }
 
     private function popJob(?string $queue): ?QueenJob
