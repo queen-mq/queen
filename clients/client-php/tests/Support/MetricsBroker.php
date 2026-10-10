@@ -23,7 +23,7 @@ use Queen\Queen;
  */
 final class MetricsBroker
 {
-    /** @var list<array{pid: int, method: string, path: string, body: mixed}> */
+    /** @var list<array{pid: int, method: string, path: string, bytes: int, body: mixed}> */
     public array $requests = [];
 
     /** @var array<string, array<string, mixed>> namespace => key => value */
@@ -64,9 +64,9 @@ final class MetricsBroker
     /**
      * One leased delivery of a queued command, as the broker hands it out.
      * $deliveryAttempt above the worker's --tries makes Laravel fail it
-     * before it runs.
+     * before it runs; $displayName is the class the metrics count it as.
      */
-    public static function delivery(object $command, string $id, int $deliveryAttempt = 1): array
+    public static function delivery(object $command, string $id, int $deliveryAttempt = 1, ?string $displayName = null): array
     {
         return [
             'id' => 'message-' . $id,
@@ -78,7 +78,7 @@ final class MetricsBroker
             'deliveryAttempt' => $deliveryAttempt,
             'data' => [
                 'uuid' => $id,
-                'displayName' => $command::class,
+                'displayName' => $displayName ?? $command::class,
                 'job' => CallQueuedHandler::class . '@call',
                 'maxTries' => null,
                 'maxExceptions' => null,
@@ -109,7 +109,7 @@ final class MetricsBroker
         return $broker;
     }
 
-    /** @return list<array{pid: int, method: string, path: string, body: mixed}> */
+    /** @return list<array{pid: int, method: string, path: string, bytes: int, body: mixed}> */
     public static function logged(string $log): array
     {
         $lines = is_file($log) ? file($log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : [];
@@ -156,8 +156,9 @@ final class MetricsBroker
     public function __invoke(RequestInterface $request, array $options): PromiseInterface
     {
         $path = $request->getUri()->getPath();
-        $body = json_decode((string) $request->getBody(), true);
-        $entry = ['pid' => getmypid(), 'method' => $request->getMethod(), 'path' => $path, 'body' => $body];
+        $raw = (string) $request->getBody();
+        $body = json_decode($raw, true);
+        $entry = ['pid' => getmypid(), 'method' => $request->getMethod(), 'path' => $path, 'bytes' => strlen($raw), 'body' => $body];
         $this->requests[] = $entry;
         if ($this->log !== null) {
             file_put_contents($this->log, json_encode($entry, JSON_THROW_ON_ERROR) . "\n", FILE_APPEND | LOCK_EX);
