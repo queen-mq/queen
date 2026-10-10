@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ramp.sh <tag> <queen-210|queen-rc7> <completed|off> <rate> [rate...] : one fresh cluster, then one 75 s load step per rate
 # (total msg/s over the nine processes), ascending. It stops at the first step that sheds, falls behind or errs.
+# BATCH (100) is the number of messages a push request carries and POPW (10) the partitions a pop claims.
 set -u
 TAG=$1; BINNAME=$2; RET=$3; shift 3
 HERE=$(cd "$(dirname "$0")" && pwd); PARTS=500000; DUR=75
@@ -12,7 +13,7 @@ log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 role() { $SSH root@${BP[$1]} "curl -s -m 2 http://${BV[$1]}:6632/health" 2>/dev/null | sed -n 's/.*"status":"\([a-z]*\)".*"role":"\([a-z]*\)".*/\1 \2/p'; }
 start_node() { $SSH root@${BP[$1]} "BIN=/root/p3/bin/$BINNAME EXTRA='$EXTRA' /root/p3/qc.sh start"; }
 all_healthy() { for t in $(seq 1 90); do ok=0; for i in 0 1 2; do [ "$(role $i | cut -d' ' -f1)" = healthy ] && ok=$((ok+1)); done; [ $ok = 3 ] && return 0; sleep 1; done; return 1; }
-log "ramp $TAG: $BINNAME, retention $RET, steps of ${DUR}s at: $*"
+log "ramp $TAG: $BINNAME, retention $RET, ${BATCH:-100} messages a push, pops over ${POPW:-10} partitions, steps of ${DUR}s at: $*"
 for i in 0 1 2; do $SSH root@${BP[$i]} "/root/p3/qc.sh sample-stop; /root/p3/qc.sh stop; /root/p3/qc.sh wipe" & done
 for h in "${LP[@]}"; do $SSH root@$h "pkill -x qload; true" & done; wait
 for i in 0 1 2; do start_node $i & done; wait
@@ -33,7 +34,7 @@ for TOTAL in "$@"; do
   for h in "${LP[@]}"; do $SSH root@$h "rm -rf /root/p3/runs/$ST" & done
   for i in 0 1 2; do $SSH root@${BP[$i]} "/root/p3/qc.sh sample-stop; /root/p3/qc.sh sample-start $ST" & done; wait
   START=$($SSH root@${LP[0]} 'echo $(( $(date +%s%3N) + 12000 ))')
-  for l in 0 1 2; do $SSH root@${LP[$l]} "URLS=$URLS RATE=$RATE PARTS=$PARTS nohup /root/p3/ld.sh $ST $START $((l*3)) $DUR > /root/p3/runs/ld-$ST.log 2>&1 </dev/null &" & done; wait
+  for l in 0 1 2; do $SSH root@${LP[$l]} "URLS=$URLS BATCH=${BATCH:-100} POPW=${POPW:-10} RATE=$RATE PARTS=$PARTS nohup /root/p3/ld.sh $ST $START $((l*3)) $DUR > /root/p3/runs/ld-$ST.log 2>&1 </dev/null &" & done; wait
   sleep $((DUR + 12 + 14))
   for t in $(seq 1 40); do n=0; for l in 0 1 2; do $SSH root@${LP[$l]} "test -f /root/p3/runs/$ST/done-$((l*3))" 2>/dev/null && n=$((n+1)); done; [ $n = 3 ] && break; sleep 3; done
   for i in 0 1 2; do $SSH root@${BP[$i]} "/root/p3/qc.sh sample-stop" & scp -q -o ConnectTimeout=20 root@${BP[$i]}:/root/p3/runs/$ST/sample-n$((i+1)).log "$OUT/" & done

@@ -124,6 +124,31 @@ same dip, much smaller, 30 to 40 s into their load and on both builds (consumed 
 `b-rc7-completed`, 988,600 in `a2-210-completed`). Its cause was not looked for. 2.1.0 was not
 run in the ramp.
 
+## One message a request, on 2.2.0
+
+The same ramp with one message in each push request instead of 100 (`BATCH=1`), and pops that
+claim up to 100 partitions so that a pop still returns many messages (`POPW=100`). Every message
+is then its own request, its own planned command and its own row. `runs/ramp-rc7-single/` and
+`runs/ramp-rc7-single-fine/`, a fresh cluster for each.
+
+| Offered | Pushed / consumed per second | Shed | Push p50 / p99 (ms) | End to end p50 / p99 (ms) | Leader, followers (cores) |
+|---|---|---|---|---|---|
+| 50,000 | 49,992 / 49,956 | 0 | 6.8 / 56 | 18.7 / 557 | 8.5, 4.7 |
+| 60,000 | 59,998 / 59,904 | 0 | 9.1 / 71 | 26.9 / 1,008 | 9.2, 5.2 to 5.4 |
+| 70,000 | 69,997 / 70,411 | 0 | 62 / 533 | 1,344 / 2,851 | 9.9, 5.7 to 5.9 |
+| 80,000 | 72,966 / 72,985 | 419,651 messages | 393 / 885 | 3,015 / 4,096 | 10.6, 5.7 to 5.9 |
+| 100,000 | 74,400 / 74,448 | 1,638,894 messages | 549 / 983 | 3,244 / 4,129 | 10.9, 5.4 to 5.5 |
+
+With one message a request the cluster carries 60,000 messages a second at its usual push
+latencies and 70,000 with nothing shed but more than a second from push to delivery; offered
+more, it stays at about 73,000 and sheds the rest. That is a twentieth of the rate it carries with
+100 messages a request. The threads that fill are the apply threads, 155 to 180% of a core
+together on the leader and 128 to 162% on a follower, where the batched runs keep them near 60%;
+the checkpoint thread follows, at 41 to 77%.
+
+The end-to-end p99s of the 50,000 and 60,000 steps are again one 10 s window in the cluster's
+first minute, in which the consumers fell behind by a tenth and caught up.
+
 ## The threads
 
 In September the followers' apply thread ran at 93 to 97% at this rate and was what gave way
@@ -136,8 +161,8 @@ whole core is the leader's raft thread, at 98 to 103% in every run, on both buil
   window is an hour by default: at this rate and those windows 2.2.0 holds 15 or 60 times the
   rows of these runs, about 13 GB or 54 GB of 100-message rows. That is what remembering every
   `transactionId` of a million messages a second for that long weighs.
-- The highest rate to the nearest 100,000, and the highest rate of 2.1.0. The ramp has three
-  steps, on 2.2.0 only.
+- The highest rate to the nearest 100,000 (10,000 with one message a request), and the highest
+  rate of 2.1.0. The ramps are on 2.2.0 only.
 - A consumer that is behind. Every consumer here reads at the tail, from memory. Reads of
   messages whose rows are gone were measured on one VM, in `../2026-10-09-rows-window/`.
 - A fault. No node was stopped during a run.
@@ -151,6 +176,7 @@ scripts/deploy.sh <a directory with queen-210, queen-rc7 and qload>
 scripts/chain1.sh                                   # the four runs, about 30 minutes
 scripts/chain2.sh                                   # the pair again
 scripts/ramp.sh ramp-rc7 queen-rc7 completed 1200000 1400000 1600000   # the highest rate
+BATCH=1 POPW=100 scripts/ramp.sh ramp-rc7-single queen-rc7 completed 50000 100000   # one message a request
 ```
 
 The warning lines a run's `end-n*.txt` counts are almost all from the start of the cluster, when
