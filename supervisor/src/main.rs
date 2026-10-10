@@ -371,6 +371,33 @@ impl std::fmt::Display for RejectedControl {
 
 impl std::error::Error for RejectedControl {}
 
+/// status.json could not be written, as on a full or failing disk: not a fault
+/// of the state directory's ownership, which write_status checks apart.
+#[derive(Debug)]
+struct StatusWriteFailed(String);
+
+impl std::fmt::Display for StatusWriteFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StatusWriteFailed {}
+
+/// Whether failed status writes stop the master. One failed write ended it,
+/// draining every worker; the workers now keep running and the write is
+/// retried each pass, while status.json ages and the probes report the master
+/// stale, until the writes have failed for heartbeat_timeout, when every
+/// reader calls it stale. As the PHP engine does.
+fn status_write_gives_up(
+    failing_since: &mut Option<Instant>,
+    now: Instant,
+    heartbeat_timeout: u64,
+) -> bool {
+    let since = *failing_since.get_or_insert(now);
+    now.duration_since(since) >= Duration::from_secs(heartbeat_timeout)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum ControlCommand {
@@ -536,6 +563,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
     // removed does.
     let mut last_rejected_control: Option<String> = None;
     let mut status_failure: Option<String> = None;
+    let mut status_failing_since: Option<Instant> = None;
     let mut remote_status = config
         .remote_status
         .as_ref()
@@ -662,12 +690,25 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         replicas: &replica_counts,
                     },
                 ) {
-                    Ok(status) => remote_status::publish_unless_stopped(
-                        &mut remote_status,
-                        &client,
-                        &status,
-                        &running,
-                    ),
+                    Ok(status) => {
+                        status_failing_since = None;
+                        remote_status::publish_unless_stopped(
+                            &mut remote_status,
+                            &client,
+                            &status,
+                            &running,
+                        )
+                    }
+                    Err(error)
+                        if error.is::<StatusWriteFailed>()
+                            && !status_write_gives_up(
+                                &mut status_failing_since,
+                                Instant::now(),
+                                config.heartbeat_timeout,
+                            ) =>
+                    {
+                        eprintln!("state status write failed; the workers keep running and it is retried: {error}");
+                    }
                     Err(error) => {
                         status_failure = Some(format!("state status write failed: {error}"));
                         running.store(false, Ordering::SeqCst);
@@ -949,12 +990,25 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     replicas: &replica_counts,
                 },
             ) {
-                Ok(status) => remote_status::publish_unless_stopped(
-                    &mut remote_status,
-                    &client,
-                    &status,
-                    &running,
-                ),
+                Ok(status) => {
+                    status_failing_since = None;
+                    remote_status::publish_unless_stopped(
+                        &mut remote_status,
+                        &client,
+                        &status,
+                        &running,
+                    )
+                }
+                Err(error)
+                    if error.is::<StatusWriteFailed>()
+                        && !status_write_gives_up(
+                            &mut status_failing_since,
+                            Instant::now(),
+                            config.heartbeat_timeout,
+                        ) =>
+                {
+                    eprintln!("state status write failed; the workers keep running and it is retried: {error}");
+                }
                 Err(error) => {
                     status_failure = Some(format!("state status write failed: {error}"));
                     running.store(false, Ordering::SeqCst);
@@ -2257,7 +2311,8 @@ impl State {
         if serde_json::to_vec(&status)?.len() as u64 > MAX_STATUS_BYTES {
             return Err(format!("supervisor status exceeds {MAX_STATUS_BYTES} bytes").into());
         }
-        atomic_json(&self.directory.join("status.json"), &status)?;
+        atomic_json(&self.directory.join("status.json"), &status)
+            .map_err(|error| StatusWriteFailed(error.to_string()))?;
         self.verify_directory()?;
         Ok(status)
     }
@@ -6857,6 +6912,65 @@ mod tests {
 
         drop(state);
         handle.join().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_status_writes_stop_the_master_only_after_heartbeat_timeout() {
+        let start = Instant::now();
+        let mut since = None;
+
+        assert!(!status_write_gives_up(&mut since, start, 60));
+        assert!(!status_write_gives_up(
+            &mut since,
+            start + Duration::from_secs(59),
+            60
+        ));
+        assert!(status_write_gives_up(
+            &mut since,
+            start + Duration::from_secs(60),
+            60
+        ));
+        // A write that works starts the count again.
+        since = None;
+        assert!(!status_write_gives_up(
+            &mut since,
+            start + Duration::from_secs(61),
+            60
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_status_that_cannot_be_written_is_a_status_write_failure() {
+        let directory = temporary_directory("status-write");
+        let state = State::acquire(directory.to_str().unwrap()).unwrap();
+        // A non-empty directory in its place: the rename onto it fails, as a write
+        // to a full disk does.
+        let _ = fs::remove_file(directory.join("status.json"));
+        fs::create_dir(directory.join("status.json")).unwrap();
+        fs::write(directory.join("status.json").join("in-the-way"), b"x").unwrap();
+        let resolved = config(options("auto"));
+
+        let error = state
+            .write_status(
+                "rust",
+                "running",
+                StatusSnapshot {
+                    config: &resolved,
+                    pools: &Pools::new(),
+                    restarts: &RestartStates::new(),
+                    draining: &Draining::new(),
+                    desired: &HashMap::new(),
+                    depths: &HashMap::new(),
+                    depths_available: &HashMap::new(),
+                    replicas: &HashMap::new(),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.is::<StatusWriteFailed>(), "{error}");
+        drop(state);
         fs::remove_dir_all(directory).unwrap();
     }
 
