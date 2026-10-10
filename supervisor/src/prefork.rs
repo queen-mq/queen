@@ -233,6 +233,12 @@ impl ForkServer {
         self.exits.remove(&pid)
     }
 
+    /// The server's pid.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub(crate) fn is_alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }

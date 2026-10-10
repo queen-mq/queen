@@ -521,6 +521,12 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         Some(settings) => Some(watch::start(&config, settings, Arc::clone(&running))?),
         None => None,
     };
+    // As PID 1 or a child subreaper this master inherits orphans; see
+    // reap_orphans.
+    #[cfg(target_os = "linux")]
+    let adopts_orphans = adopts_orphans();
+    #[cfg(target_os = "linux")]
+    let mut last_orphan_scan = Instant::now();
     // Pools still climbing towards a higher target after an event-driven
     // reconcile was held back by its step budget.
     let mut climbing: HashSet<String> = HashSet::new();
@@ -653,6 +659,12 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             fork_boots.record(fork_server.is_some(), Instant::now());
         }
         close_retired_forks(&mut retired_forks);
+        #[cfg(target_os = "linux")]
+        if adopts_orphans && last_orphan_scan.elapsed() >= Duration::from_secs(1) {
+            let servers = fork_server.iter().chain(retired_forks.iter());
+            reap_orphans(&tracked_children(&pools, &draining, servers));
+            last_orphan_scan = Instant::now();
+        }
         observe_stable_workers(&config, &mut pools, &mut restarts);
         let poll_due = last_poll.elapsed() >= Duration::from_secs(config.poll_interval);
         let event_due = match (&wakes, paused) {
@@ -3698,6 +3710,86 @@ impl ForkServerBoots {
             .saturating_mul(1 << doublings)
             .min(FORK_SERVER_RETRY_MAX_SECONDS);
         self.retry_at = Some(now + Duration::from_secs(delay));
+    }
+}
+
+/// Whether orphaned processes come to this master: as PID 1, the container
+/// runtime's init when Kubernetes runs the Composer launcher that execs the
+/// binary, or as a child subreaper.
+#[cfg(target_os = "linux")]
+fn adopts_orphans() -> bool {
+    let mut subreaper: libc::c_int = 0;
+    // SAFETY: PR_GET_CHILD_SUBREAPER writes one int through the pointer.
+    std::process::id() == 1
+        || (unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut subreaper) } == 0
+            && subreaper != 0)
+}
+
+/// Every pid this master waits for itself: its workers, spawned, forked or
+/// draining (a forked one comes to it when its server dies), and its fork
+/// servers.
+#[cfg(target_os = "linux")]
+fn tracked_children<'a>(
+    pools: &Pools,
+    draining: &Draining,
+    servers: impl Iterator<Item = &'a Rc<RefCell<ForkServer>>>,
+) -> HashSet<u32> {
+    pools
+        .values()
+        .flatten()
+        .map(|worker| worker.child.id())
+        .chain(draining.iter().map(|entry| entry.worker.child.id()))
+        .chain(servers.map(|server| server.borrow().pid()))
+        .collect()
+}
+
+/// Reap the exited children of this master that it does not track. Laravel's
+/// job timeout SIGKILLs a worker alone: the processes its job started come
+/// to this master when it adopts orphans, and each would stay a zombie,
+/// filling the container's pids.max. A zombie's pid is not reused before it
+/// is reaped, so one that is not tracked never becomes a worker's, and a
+/// tracked worker's exit status stays for reap().
+#[cfg(target_os = "linux")]
+fn reap_orphans(tracked: &HashSet<u32>) {
+    let me = std::process::id();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return;
+    };
+    let mut reaped = 0usize;
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if tracked.contains(&pid) {
+            continue;
+        }
+        // state and ppid follow the command name, which may hold spaces.
+        let zombie_child = fs::read_to_string(entry.path().join("stat"))
+            .ok()
+            .and_then(|stat| {
+                let (_, tail) = stat.rsplit_once(") ")?;
+                let mut fields = tail.split_whitespace();
+                let state = fields.next()?;
+                let parent = fields.next()?.parse::<u32>().ok()?;
+                Some(state == "Z" && parent == me)
+            })
+            .unwrap_or(false);
+        let mut status = 0;
+        // SAFETY: waitpid on a zombie child of this process that nothing
+        // here waits for; WNOHANG never blocks.
+        if zombie_child
+            && unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) }
+                == pid as libc::pid_t
+        {
+            reaped += 1;
+        }
+    }
+    if reaped > 0 {
+        eprintln!("reaped {reaped} orphaned process(es) left by exited workers");
     }
 }
 
@@ -8142,6 +8234,79 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
         assert_eq!(
             booted, 1,
             "the fork server booted for every queue:restart:\n{log}"
+        );
+    }
+
+    /// The state letter of /proc/<pid>/stat, None once the pid is gone.
+    #[cfg(target_os = "linux")]
+    fn process_state(pid: i32) -> Option<char> {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()?
+            .rsplit_once(") ")?
+            .1
+            .chars()
+            .next()
+    }
+
+    /// As PID 1 of a container, or a child subreaper, the master inherits
+    /// the children of a worker that Laravel's job timeout SIGKILLed: it
+    /// reaps them once they exit, instead of leaving zombies that fill
+    /// pids.max. A tracked worker's exit status stays its own.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_master_reaps_the_orphans_it_inherits() {
+        let directory = temporary_directory("orphans");
+        write_fake_artisan(
+            &directory,
+            "sleep 1 &\necho $! > \"orphan.$$\"\n: > \"ready.$$\"\n\
+             while :; do sleep 0.05; done\n",
+        );
+        let document = supervisor_document(&directory, &closing_broker());
+        let supervisor = start_supervisor(
+            &directory,
+            &document,
+            &[("QUEEN_RUN_HELPER_SUBREAPER", "1")],
+        );
+        let worker = await_pid_file(&directory, "ready.", Duration::from_secs(20));
+        let orphan: Option<i32> = worker.and_then(|worker| {
+            fs::read_to_string(directory.join(format!("orphan.{worker}")))
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+        });
+        if let Some(worker) = worker {
+            // Laravel's job timeout: SIGKILL to the worker alone.
+            // SAFETY: plain signal delivery to the worker the supervisor started.
+            unsafe { libc::kill(worker as i32, libc::SIGKILL) };
+        }
+        let status_path = directory.join("state").join("status.json");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (mut reaped, mut replaced) = (false, false);
+        while !(reaped && replaced) && Instant::now() < deadline {
+            reaped = orphan.is_some_and(|orphan| process_state(orphan).is_none());
+            replaced = fs::read_to_string(&status_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .is_some_and(|status| {
+                    let pool = &status["pool_status"][0];
+                    pool["restart_failures"] == 1
+                        && !pool["pids"]
+                            .as_array()
+                            .is_some_and(|pids| pids.iter().any(|pid| *pid == worker.unwrap()))
+                });
+            thread::sleep(Duration::from_millis(50));
+        }
+        let state = orphan.and_then(process_state);
+        terminate_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(orphan.is_some(), "the worker never started:\n{log}");
+        assert!(reaped, "orphan {orphan:?} left in state {state:?}:\n{log}");
+        assert!(
+            replaced && !log.contains("wait failed"),
+            "the killed worker's exit was not the master's to classify:\n{log}"
         );
     }
 
