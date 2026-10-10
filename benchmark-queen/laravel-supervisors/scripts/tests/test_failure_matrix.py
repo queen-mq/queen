@@ -212,7 +212,9 @@ class LaneProfilesTest(unittest.TestCase):
         scenario = next(s for s in matrix.SCENARIOS if s.name == "stop-lease")
 
         self.assertEqual("90", scenario.env_for(matrix.PROFILES["horizon"])["BENCH_RETRY_AFTER"])
+        self.assertEqual("60", scenario.env_for(matrix.PROFILES["horizon"])["BENCH_TIMEOUT"])
         self.assertEqual("30", scenario.env_for(matrix.PROFILES["queen-rust"])["BENCH_RETRY_AFTER"])
+        self.assertEqual("25", scenario.env_for(matrix.PROFILES["queen-rust"])["BENCH_TIMEOUT"])
 
 
 def outcome(same: dict | None = None, near: dict | None = None) -> dict:

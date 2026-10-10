@@ -540,7 +540,9 @@ def stop_lease(lane: Lane) -> list[Check]:
     30 s for a job of 36 s, so only renewals during the drain keep the lease, until the job ends
     within shutdown_grace (40 s). A second replica is idle: if the lease lapses, it takes the job,
     which then runs twice. Horizon cannot renew, so its lane runs with a retry_after longer than
-    the job, as a Horizon deployment must."""
+    the job; and a stopping Horizon supervisor waits for its workers only `timeout` seconds,
+    then exits and the job dies, so its timeout must outlast the drain too. A Horizon
+    deployment needs both."""
     expected = ids(0, 1)
     lane.dispatch("ok", 1, sleep_ms=36_000, timeout=60, tries=3)
     jobs = lane.wait_until(lambda r: r.count("000000", "started"), 60, "the job started")
@@ -1103,7 +1105,7 @@ SCENARIOS = [
     Scenario("stop-lease", stop_lease, {
         "BENCH_QUEEN_COORDINATION": "true", "BENCH_TIMEOUT": "25", "BENCH_RETRY_AFTER": "30",
         "BENCH_WORKERS": "1", "BENCH_MIN_WORKERS": "1", "BENCH_MAX_WORKERS": "1",
-    }, replicas=2, engine_env={"horizon": {"BENCH_RETRY_AFTER": "90"}}),
+    }, replicas=2, engine_env={"horizon": {"BENCH_TIMEOUT": "60", "BENCH_RETRY_AFTER": "90"}}),
     Scenario("death-timeout", death_timeout, DEATH_ENV),
     Scenario("death-sigkill", death_sigkill, DEATH_ENV),
     Scenario("death-release-timeout", death_release_timeout, DEATH_ENV),
