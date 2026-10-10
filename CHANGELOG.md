@@ -88,6 +88,20 @@ job class or the connection, so the exception is now an `UnsafeJobTimeoutExcepti
 loop: its pool's restarts back off and the crash shows in `queen:supervisor status`. The delivery
 waits, to lease expiry, for a worker that runs the fixed code.
 
+**Laravel: a refused state says whose it is and whom to run as.** A Kubernetes exec probe runs as
+the container's user. In a container that starts as root and runs the supervisor as `www-data`,
+`queen:supervisor status --check` refused the state with "Queen supervisor state ancestor
+[/run/queen-supervisor] must be owned by root or the current user." and nothing else: the message
+did not say that the directory is `www-data`'s, that the probe ran as root, or that root is refused
+by design. The probe failed and Kubernetes restarted a healthy pod every few minutes. Since PHP
+client 1.3.0, where the supervisor arrived. Every refusal of a path that another user owns, root
+included, now goes on to say who owns it and who is asking, by uid and by name when the user
+database has one, and how to run as the owner, such as
+`su -s /bin/sh www-data -c "php artisan queen:supervisor status --check"` or
+`securityContext.runAsUser: 33` on the container. The first sentence of each message, the checks
+themselves and the exit codes are unchanged: a probe must still run as the supervisor's user, and
+the Kubernetes guide now shows the probes wrapped in `su` for a container that starts as root.
+
 ## PHP client 2.4.1 - 2026-10-09
 
 **Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the

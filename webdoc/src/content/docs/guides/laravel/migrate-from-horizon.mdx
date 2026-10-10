@@ -59,6 +59,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue throws
 # UnsafeJobTimeoutException, a LogicException with the same message, for a job timeout its lease
 # cannot cover, so a supervised worker exits; the paragraph on that refusal says so.
+# sourceOfTruth re-read 2026-10-10 (probe user): queen:supervisor's refusal of a state that another
+# user owns now names the owner and the reader and shows su and securityContext.runAsUser; its
+# checks and exit codes are unchanged, and the state directory stays the supervisor user's. Nothing
+# this page states changes.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place

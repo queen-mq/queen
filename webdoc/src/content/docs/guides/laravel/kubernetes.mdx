@@ -12,6 +12,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Commands/SupervisorControlCommand.php
   - clients/client-php/src/Laravel/Commands/SupervisorInstallCommand.php
   - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
   - clients/client-php/src/Laravel/Supervisor/ReplicaCoordinator.php
   - clients/client-php/src/Laravel/Supervisor/QueueWatcher.php
   - clients/client-php/src/Laravel/Dashboard/PrometheusMetrics.php
@@ -53,6 +54,10 @@ sourceOfTruth:
 # installation another user owns, and SupervisorInstallCommand takes --owner. Build the image
 # installed as root and ran as www-data, which exits 70; it now passes --owner=www-data and shows
 # COPY --chown for a multi-stage build.
+# sourceOfTruth re-read 2026-10-10 (probe user): SupervisorControlCommand and SupervisorState refuse
+# a reader that does not own the state, root included, as before, and the refusal now names the
+# owner and the reader and shows su and securityContext.runAsUser. The Deployment gains the
+# readiness probe, and the probes section says to run the probes as the supervisor's user.
 ---
 
 This page puts the supervisor features together for the setup most teams end up with: Laravel
@@ -208,6 +213,12 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["php", "artisan", "queen:supervisor", "status", "--check"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
 ```
 
 On SIGTERM the supervisor stops starting workers and sends SIGTERM to each of them, so they finish
@@ -220,8 +231,37 @@ finishing. A pod that crashes still counts in the coordination until its key exp
 can be short by its share for up to one control-loop bound.
 
 Each probe boots Laravel once, so keep its period in tens of seconds. `status --check-liveness`
-asks only whether the master is alive. `status --check` also requires every pool to be ready, and
-fits a readiness probe if anything routes traffic to the pod.
+asks only whether the master is alive. `status --check` also requires every pool to be ready: as
+the readiness probe it holds a rolling update until the new pod's pools serve, and it fits anything
+that routes traffic to the pod.
+
+Run the probes as the supervisor's user. The state directory is private to that user, and the
+status command refuses any other, root included. An exec probe runs as the container's user, so
+with `USER www-data` in the image, as above, or with `securityContext.runAsUser` set to the
+supervisor's uid, nothing else is needed. If the container
+starts as root instead, because an entrypoint prepares the state directory and then starts the
+supervisor as `www-data`, the probes run as root and fail with `must be owned by root or the
+current user`, and the failing liveness probe restarts the pod. Wrap each probe's command in `su`:
+
+```yaml
+          livenessProbe:
+            exec:
+              command: ["su", "-s", "/bin/sh", "www-data", "-c", "php artisan queen:supervisor status --check-liveness"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["su", "-s", "/bin/sh", "www-data", "-c", "php artisan queen:supervisor status --check"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+```
+
+`su` keeps the working directory, so `artisan` resolves as before. Do the same for `pause`,
+`continue` and `terminate` run through `kubectl exec`. Since PHP client 2.4.2 the refusal goes on
+to name the state's owner and the user asking, and shows this `su` command and the
+`securityContext.runAsUser` value to use.
 
 Readiness depends on the broker: `queue_depth_unavailable` when the master cannot read it, and,
 since PHP client 2.4.2, `pool_not_consuming` when every worker of a pool has failed every pop for a

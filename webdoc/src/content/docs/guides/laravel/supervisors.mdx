@@ -82,6 +82,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (installation owner, PHP client 2.4.2): SupervisorBinary names the
 # path, the condition and both users when it refuses an installation, and SupervisorBinaryInstaller
 # takes --owner as root on a non-thread-safe PHP. Run the Rust engine says so.
+# sourceOfTruth re-read 2026-10-10 (probe user): SupervisorState refuses a reader that does not own
+# the state, root included, as before; the refusal now names the owner and the reader and shows su
+# and securityContext.runAsUser. The commands section says to run them as the supervisor's user.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
@@ -491,6 +494,13 @@ php artisan queen:supervisor pause
 php artisan queen:supervisor continue
 php artisan queen:supervisor terminate
 ```
+
+Run them as the supervisor's user: the state directory is private to it, and the commands refuse
+any other user, root included, without reading or writing anything. Since PHP client 2.4.2 the
+refusal names the state's owner and the user asking and shows how to run as the owner, such as
+`su -s /bin/sh www-data -c "php artisan queen:supervisor status --check"` from root, or
+`securityContext.runAsUser` on a Kubernetes container
+([probes](/guides/laravel/kubernetes/#deploy-the-worker-pods)).
 
 `status --check` exits non-zero unless the current generation is live and every pool is ready,
 which means its depth sample is current and it has workers whenever it wants some. A pool with

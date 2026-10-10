@@ -81,6 +81,9 @@ sourceOfTruth:
 # registers WorkerPopGuard; SupervisorState's readiness and capacity read the workers' pop failures
 # on the supervisor's host. The panel reads the published status, which does not change. Nothing
 # this page states changes.
+# sourceOfTruth re-read 2026-10-10 (probe user): SupervisorState's refusal of a state that another
+# user owns now names the owner and the reader and shows su and securityContext.runAsUser; the
+# checks are unchanged. Nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the
