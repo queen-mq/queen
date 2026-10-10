@@ -128,7 +128,7 @@ final class LaravelRoutedDispatchTest extends TestCase
         $pushed = $this->broker->pushed();
         $this->assertCount(1, $pushed);
         $this->assertSame('cb-backend.testing.compliance', $pushed[0]['queue']);
-        $this->assertMatchesRegularExpression('/^laravel-00[0-5]\d$/', $pushed[0]['partition'], 'not one of 64 stripes');
+        $this->assertMatchesRegularExpression('/^laravel-00([0-5]\d|6[0-3])$/', $pushed[0]['partition'], 'not one of 64 stripes');
         $this->assertSame(RoutedProbeJob::class, $pushed[0]['payload']['displayName']);
 
         [$code, $output] = $this->workAsPool($mode, 'batch', 'cb-backend.testing.compliance', 2);
