@@ -8,6 +8,7 @@ use GuzzleHttp\HandlerStack;
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Events\Dispatcher;
+use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\WorkerStopping;
 use PHPUnit\Framework\Attributes\TestWith;
 use PHPUnit\Framework\TestCase;
@@ -843,21 +844,74 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame(2, $restarted->pop('emails')->attempts(), 'a crash charges the tail one attempt');
     }
 
-    public function testUnrenewedJobSpecificTimeoutMustBeShorterThanRetryAfter(): void
+    /**
+     * A job whose timeout its lease cannot cover is wrong in its code, and
+     * only a deploy fixes it. Thrown from pop(), it ended the worker; the
+     * lease expired without charging an attempt, the next worker popped the
+     * same job and ended too, and the job never reached the dead-letter
+     * queue. It fails as Laravel fails a job: dead-letter queue, JobFailed
+     * (which queue:work's failed-job row listens to) and the job's failed().
+     */
+    #[TestWith([120, 'Queen Laravel job timeout [120] must be positive and shorter than retry_after [120] when lease_renewal is disabled.'])]
+    #[TestWith([0, 'Queen Laravel job timeout [0] must be positive and shorter than retry_after [120]'])]
+    #[TestWith(['600', 'Queen Laravel job timeout [600] must be positive and shorter than retry_after [120]'])]
+    #[TestWith([-1, 'Queen Laravel job timeout must be a non-negative integer or null.'])]
+    #[TestWith(['ten minutes', 'Queen Laravel job timeout must be a non-negative integer or null.'])]
+    public function testAJobWhoseTimeoutItsLeaseCannotCoverFailsAndThePopGoesOn(int|string $timeout, string $says): void
     {
         $payload = $this->payload('job-too-long');
-        $payload['timeout'] = 120;
+        $payload['job'] = FailureRecordingTestHandler::class . '@handle';
+        $payload['timeout'] = $timeout;
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popResponse($payload)],
+            ['status' => 200, 'json' => ['success' => true, 'leaseReleased' => true, 'dlq' => true]],
+            ['status' => 200, 'json' => $this->popResponse($this->payload('job-next'))],
+        ]);
+        [$queue] = $this->queueFor($handler);
+        $container = new Container();
+        $container->instance(ExceptionHandler::class, $reported = new RecordingExceptionHandler());
+        $container->instance(\Illuminate\Contracts\Events\Dispatcher::class, $events = new Dispatcher($container));
+        $failed = [];
+        $events->listen(JobFailed::class, function (JobFailed $event) use (&$failed): void {
+            $failed[] = $event;
+        });
+        $queue->setContainer($container);
+        FailureRecordingTestHandler::$failures = [];
+
+        $this->assertNull($queue->pop('emails'));
+
+        $this->assertSame('/api/v1/ack', $handler->requests[1]->getUri()->getPath());
+        $ack = json_decode((string) $handler->requests[1]->getBody(), true);
+        $this->assertSame('dlq', $ack['status']);
+        $this->assertSame('transaction-1', $ack['transactionId']);
+        $this->assertStringContainsString($says, $ack['error']);
+        $this->assertCount(1, $failed);
+        $this->assertInstanceOf(UnsafeJobTimeoutException::class, $failed[0]->exception);
+        $this->assertSame([$failed[0]->exception], FailureRecordingTestHandler::$failures, 'the job\'s failed()');
+        $this->assertSame([$failed[0]->exception], $reported->reported, 'the operator sees the setting to fix');
+        $this->assertSame('job-next', $queue->pop('emails')?->getJobId());
+    }
+
+    /**
+     * `$this->timeout = env('JOB_TIMEOUT')` gives a string. Laravel's worker
+     * arms its alarm with it as with the integer, and so does the driver.
+     */
+    #[TestWith(['60'])]
+    #[TestWith(['60.0'])]
+    public function testANumericStringTimeoutIsTheTimeoutLaravelArms(string $timeout): void
+    {
+        $payload = $this->payload('job-from-env');
+        $payload['timeout'] = $timeout;
         $handler = new PlanHandler([[
             'status' => 200,
             'json' => $this->popResponse($payload),
         ]]);
         [$queue] = $this->queueFor($handler);
 
-        // A LogicException: only a deploy fixes it, so a supervised worker leaves.
-        $this->expectException(UnsafeJobTimeoutException::class);
-        $this->expectExceptionMessage('job timeout [120]');
-        $this->expectExceptionMessage('retry_after [120]');
-        $queue->pop('emails');
+        $job = $queue->pop('emails');
+
+        $this->assertInstanceOf(QueenJob::class, $job);
+        $this->assertCount(1, $handler->requests, 'nothing was dead-lettered');
     }
 
     /**
@@ -2126,6 +2180,21 @@ class DelayedPlanHandler
     {
         usleep($this->delayMicros);
         return ($this->inner)($request, $options);
+    }
+}
+
+class FailureRecordingTestHandler
+{
+    /** @var list<\Throwable> */
+    public static array $failures = [];
+
+    public function handle(): void
+    {
+    }
+
+    public function failed(array $data, \Throwable $exception, string $uuid, mixed $job): void
+    {
+        self::$failures[] = $exception;
     }
 }
 

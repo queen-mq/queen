@@ -11,6 +11,7 @@ use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Queue\Queue as QueueContract;
 use Illuminate\Queue\Connectors\ConnectorInterface;
+use Illuminate\Queue\Failed\NullFailedJobProvider;
 use Illuminate\Queue\Queue;
 use Orchestra\Testbench\TestCase;
 use PHPUnit\Framework\Attributes\TestWith;
@@ -18,6 +19,7 @@ use Psr\Http\Message\RequestInterface;
 use Queen\Exceptions\HttpException;
 use Queen\Laravel\Commands\ForkServerCommand;
 use Queen\Laravel\QueenServiceProvider;
+use Queen\Laravel\Queue\UnsafeJobTimeoutException;
 use Queen\Laravel\Supervisor\SupervisorState;
 use Queen\Laravel\Supervisor\WorkerExitMarker;
 use Queen\Laravel\Supervisor\WorkerPopGuard;
@@ -147,22 +149,35 @@ final class WorkerPopGuardTest extends TestCase
 
     /**
      * A job whose timeout its lease cannot cover is wrong in the code, and
-     * only a deploy fixes it: the worker leaves, so its pool shows it, and the
-     * delivery waits for a worker that runs the fixed code.
+     * only a deploy fixes it. The worker used to leave: the lease expired
+     * without charging an attempt, the next worker popped the same job and
+     * left too, and the pool crash-looped on one job that never reached the
+     * dead-letter queue. That job fails, as Laravel fails one, with the
+     * setting to fix in its exception, and the worker goes on.
      */
     #[TestWith(['spawned'])]
     #[TestWith(['forked'])]
-    public function testAJobWhoseTimeoutItsLeaseCannotCoverEndsTheWorker(string $mode): void
+    public function testAJobWhoseTimeoutItsLeaseCannotCoverFailsAndTheWorkerGoesOn(string $mode): void
     {
         $this->broker->answer($this->delivery(['job' => 'Handler@handle', 'uuid' => 'too-long', 'timeout' => 400]), times: 1);
+        $this->broker->answer(['success' => true, 'leaseReleased' => true, 'dlq' => true], times: 1);
         $worker = $this->superviseAs($mode);
+        $this->app->instance('queue.failer', $failer = new RecordingFailedJobProvider());
 
-        [$code, $output] = $this->work($mode, $worker, 'queen-batch', 5);
+        [$code, $output] = $this->work($mode, $worker, 'queen-batch', 3);
 
-        $this->assertSame(1, $code);
-        $this->assertSays('cannot pop from connection [queen-batch]: Queen\Laravel\Queue\UnsafeJobTimeoutException: '
-            . 'Queen Laravel job timeout [400] must be positive and shorter than retry_after [90]', $output);
-        $this->assertSame(2, $worker->loops);
+        $this->assertSame(0, $code, $output);
+        $this->assertSame(4, $this->broker->count(), 'one pop, its dlq ACK, two empty pops');
+        $this->assertNull($this->popFailures());
+        $says = 'Queen Laravel job timeout [400] must be positive and shorter than retry_after [90]';
+        $this->assertCount(1, $failer->logged, 'Laravel\'s failed-job row');
+        $this->assertSame('queen-batch', $failer->logged[0]['connection']);
+        $this->assertInstanceOf(UnsafeJobTimeoutException::class, $failer->logged[0]['exception']);
+        $this->assertStringContainsString($says, $failer->logged[0]['exception']->getMessage());
+        $ack = json_decode((string) $this->broker->requests[1]->getBody(), true);
+        $this->assertSame('/api/v1/ack', $this->broker->requests[1]->getUri()->getPath());
+        $this->assertSame('dlq', $ack['status']);
+        $this->assertStringContainsString($says, $ack['error']);
     }
 
     /**
@@ -712,7 +727,8 @@ final class BrokerScript
 
     private int|\Throwable|array|\Closure $default = 204;
 
-    private int $requests = 0;
+    /** @var list<RequestInterface> */
+    public array $requests = [];
 
     /**
      * Answer the next $times requests so, with a status, a failure or a JSON
@@ -730,12 +746,12 @@ final class BrokerScript
 
     public function count(): int
     {
-        return $this->requests;
+        return count($this->requests);
     }
 
     public function __invoke(RequestInterface $request, array $options): PromiseInterface
     {
-        $this->requests++;
+        $this->requests[] = $request;
         $answer = array_shift($this->plan) ?? $this->default;
         if ($answer instanceof \Closure) {
             $answer = $answer();
@@ -793,5 +809,19 @@ final class DispatchOnlyConnector implements ConnectorInterface
                 throw new \LogicException('The routed queue connection only dispatches; workers pop from the pool connections.');
             }
         };
+    }
+}
+
+/** Laravel's failed-job store, keeping what queue:work logged. */
+final class RecordingFailedJobProvider extends NullFailedJobProvider
+{
+    /** @var list<array{connection: string, queue: string, payload: string, exception: \Throwable}> */
+    public array $logged = [];
+
+    public function log($connection, $queue, $payload, $exception)
+    {
+        $this->logged[] = compact('connection', 'queue', 'payload', 'exception');
+
+        return null;
     }
 }

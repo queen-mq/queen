@@ -1040,7 +1040,8 @@ class QueenQueue extends BaseQueue implements QueueContract
         return null;
     }
 
-    private function makeJob(array $message, string $queue): QueenJob
+    /** The job of a delivery; null for one whose unsafe timeout failed it. */
+    private function makeJob(array $message, string $queue): ?QueenJob
     {
         if ($this->leaseRenewer !== null) {
             $leaseId = $this->leaseId($message);
@@ -1069,14 +1070,36 @@ class QueenQueue extends BaseQueue implements QueueContract
             $this->consumerGroup,
         );
 
-        try {
-            $this->assertJobTimeoutIsSafe($job);
-        } catch (\Throwable $timeoutFailure) {
-            $this->abandonDelivery($message);
-            throw $timeoutFailure;
+        $unsafe = $this->unsafeJobTimeout($job);
+        if ($unsafe !== null) {
+            $this->failUnsafeJob($job, $unsafe);
+
+            return null;
         }
 
         return $job;
+    }
+
+    /**
+     * Fail a job whose timeout its lease cannot cover, as Laravel fails one:
+     * the dead-letter queue, JobFailed (queue:work's failed-job row) and the
+     * job's failed(). Thrown from pop(), it ended the worker instead, and the
+     * lease expired without charging an attempt: the next worker popped the
+     * same job and ended too, so the pool crash-looped on it and its
+     * partition never moved. The exception names the setting to fix, and is
+     * reported as well.
+     */
+    private function failUnsafeJob(QueenJob $job, UnsafeJobTimeoutException $unsafe): void
+    {
+        $this->reportQuietly($unsafe);
+        try {
+            $job->fail($unsafe);
+        } catch (\Throwable $failure) {
+            // As Laravel's worker does with what fail() throws: report it and
+            // go on. A dead-letter ACK that failed left the delivery to lease
+            // expiry.
+            $this->reportQuietly($failure);
+        }
     }
 
     public function deleteReserved(
@@ -1640,29 +1663,38 @@ class QueenQueue extends BaseQueue implements QueueContract
         $this->journaled = [];
     }
 
-    private function assertJobTimeoutIsSafe(QueenJob $job): void
+    /** Why its lease cannot cover the job's timeout; null when it can. */
+    private function unsafeJobTimeout(QueenJob $job): ?UnsafeJobTimeoutException
     {
         $timeout = $job->timeout();
         if ($timeout === null) {
             // The worker CLI's --timeout is not part of Laravel's queue
             // connection contract. Supervisors validate it at startup.
-            return;
+            return null;
         }
 
-        // A deploy fixes the job class or the connection, nothing else: a
-        // supervised worker leaves (WorkerPopGuard), and its pool shows it.
+        // `$this->timeout = env('JOB_TIMEOUT')` gives a numeric string, which
+        // Laravel's worker coerces to the integer it arms its alarm with.
+        if (!is_int($timeout) && is_numeric($timeout) && (float) $timeout >= 0 && (float) $timeout < PHP_INT_MAX) {
+            $timeout = (int) $timeout;
+        }
+
+        // A deploy fixes the job class or the connection, nothing else: the
+        // job fails, and its exception names the setting to fix.
         if (!is_int($timeout) || $timeout < 0) {
-            throw new UnsafeJobTimeoutException(
+            return new UnsafeJobTimeoutException(
                 'Queen Laravel job timeout must be a non-negative integer or null.',
             );
         }
 
         if ($this->leaseRenewer === null && ($timeout === 0 || $timeout >= $this->retryAfter)) {
-            throw new UnsafeJobTimeoutException(
+            return new UnsafeJobTimeoutException(
                 "Queen Laravel job timeout [{$timeout}] must be positive and shorter than retry_after "
                 . "[{$this->retryAfter}] when lease_renewal is disabled.",
             );
         }
+
+        return null;
     }
 
     private function takePrefetched(string $queue): ?array
