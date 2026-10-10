@@ -13,6 +13,7 @@ use PHPUnit\Framework\Attributes\TestWith;
 use Psr\Log\NullLogger;
 use Queen\Laravel\Commands\ForkServerCommand;
 use Queen\Laravel\QueenServiceProvider;
+use Queen\Tests\Support\RecordingExceptionHandler;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Output\BufferedOutput;
 
@@ -286,30 +287,5 @@ final class SpyQueue extends NullQueue
         ($this->onPop)((string) $this->getConnectionName(), (string) $queue);
 
         return null;
-    }
-}
-
-final class RecordingExceptionHandler implements ExceptionHandler
-{
-    /** @var list<\Throwable> */
-    public array $reported = [];
-
-    public function report(\Throwable $e): void
-    {
-        $this->reported[] = $e;
-    }
-
-    public function shouldReport(\Throwable $e): bool
-    {
-        return true;
-    }
-
-    public function render($request, \Throwable $e)
-    {
-        throw $e;
-    }
-
-    public function renderForConsole($output, \Throwable $e): void
-    {
     }
 }

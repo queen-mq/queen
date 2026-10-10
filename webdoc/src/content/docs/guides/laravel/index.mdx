@@ -77,6 +77,16 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/real.rs
 # changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
 # QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
+# registers WorkerPopGuard and QueenQueue::pop reports to it, under a supervisor only. Nothing this
+# page states changes.
+# sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
+# delivery that carries no Laravel job in the dead-letter queue at once. Nothing this page states
+# changes.
+# sourceOfTruth re-read 2026-10-10 (installation owner, PHP client 2.4.2): SupervisorBinary explains
+# a refused installation and the installer takes --owner; the pin (0.8.0) and the targets are
+# unchanged. Nothing this page states changes; the versions table gains 2.4.2 at its release.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider changes only the job-metrics listeners (timed-out attempts and $this->fail() count as failed). Nothing this page states changes.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and

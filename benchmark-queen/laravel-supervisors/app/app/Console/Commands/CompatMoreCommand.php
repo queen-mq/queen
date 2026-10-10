@@ -104,9 +104,17 @@ final class CompatMoreCommand extends CompatScenarioCommand
         // Laravel docs, Queues > Queueing Closures.
         $this->check('a queued closure ran once, in a worker', $this->count('k1', 'completed') === 1 && $this->inWorker('k1', 'completed'));
         // Laravel docs, Queues > Queueing Closures: catch() runs once the closure has failed.
-        $this->check('a throwing closure ran once, then its catch() callback ran once',
-            $this->count('k2', 'started') === 1 && $this->count('k2', 'closure_catch') === 1,
+        // A closure has no $tries: the worker's --tries applies, 1 here, 2 in cb3's interactive pool.
+        $tries = $this->workerTries();
+        $this->check("a throwing closure ran {$tries} time(s), the worker's tries, then its catch() callback ran once",
+            $this->count('k2', 'started') === $tries && $this->count('k2', 'closure_catch') === 1,
             $this->count('k2', 'started') . ' runs, catch() ' . $this->count('k2', 'closure_catch') . ' times');
+        // Laravel docs, Queues > Dealing With Failed Jobs: a failed closure is
+        // a failed job like any other, with its row in the failed-job store.
+        $rows = $this->failedClosureRows();
+        $this->check('the failed closure left one failed-job row', $rows === 1, "{$rows} rows");
+        $this->same('k1 runs', $this->count('k1', 'completed'));
+        $this->same('k2 runs, catch(), failed-job rows', [$this->count('k2', 'started'), $this->count('k2', 'closure_catch'), $rows]);
     }
 
     private function throttlesExceptions(): void
@@ -157,6 +165,7 @@ final class CompatMoreCommand extends CompatScenarioCommand
         $this->check('a second dispatch while the first waited was refused', $this->count('u2', 'started') === 0);
         $this->check('a dispatch once the first was processing was accepted', $this->count('u3', 'completed') === 1);
         $this->check('the first ran once', $this->count('u1', 'completed') === 1);
+        $this->sameJobs(['u1', 'u2', 'u3']);
     }
 
     private function missingModels(): void
@@ -200,6 +209,10 @@ final class CompatMoreCommand extends CompatScenarioCommand
         $this->check('catch() ran once', $this->count('batch', 'batch_catch') === 1);
         $this->check('then() never ran', $this->count('batch', 'batch_then') === 0);
         $this->check('finally() ran once', $this->count('batch', 'batch_finally') === 1);
+        $this->sameJobs(['a0', 'a1', 'a2']);
+        $this->same('batch then(), catch(), finally()', array_map(fn (string $event): int => $this->count('batch', $event),
+            ['batch_then', 'batch_catch', 'batch_finally']));
+        $this->same('batch state', $this->batchState($batch->id));
     }
 
     private function batchCancel(): void
@@ -277,6 +290,9 @@ final class CompatMoreCommand extends CompatScenarioCommand
         $this->check('then it ran again and completed, with no failure',
             $this->count('r1', 'started') === 2 && $this->count('r1', 'completed') === 1 && $this->count('r1', 'failed_hook') === 0
             && !isset($this->failedIds()['r1']), $this->count('r1', 'started') . ' runs');
+        // The release counts as an attempt: the second run is attempt 2.
+        $this->sameJobs(['r1']);
+        $this->near('r1 release(5) delay', $gap, 1.5);
     }
 
     private function queueMonitor(): void

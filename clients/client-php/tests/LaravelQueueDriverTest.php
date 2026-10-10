@@ -6,19 +6,24 @@ use DateInterval;
 use DateTimeImmutable;
 use GuzzleHttp\HandlerStack;
 use Illuminate\Container\Container;
+use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Events\Dispatcher;
 use Illuminate\Queue\Events\WorkerStopping;
+use PHPUnit\Framework\Attributes\TestWith;
 use PHPUnit\Framework\TestCase;
 use Queen\Exceptions\ConflationPolicyMismatchException;
 use Queen\Exceptions\HttpException;
 use Queen\Laravel\Contracts\QueenPartitionable;
 use Queen\Laravel\Queue\HandBackJournal;
 use Queen\Laravel\Queue\LeaseRenewer;
+use Queen\Laravel\Queue\NotALaravelJobException;
 use Queen\Laravel\Queue\QueenConnector;
 use Queen\Laravel\Queue\QueenJob;
 use Queen\Laravel\Queue\QueenQueue;
+use Queen\Laravel\Queue\UnsafeJobTimeoutException;
 use Queen\Queen;
 use Queen\Tests\Support\PlanHandler;
+use Queen\Tests\Support\RecordingExceptionHandler;
 
 class LaravelQueueDriverTest extends TestCase
 {
@@ -848,10 +853,79 @@ class LaravelQueueDriverTest extends TestCase
         ]]);
         [$queue] = $this->queueFor($handler);
 
-        $this->expectException(\RuntimeException::class);
+        // A LogicException: only a deploy fixes it, so a supervised worker leaves.
+        $this->expectException(UnsafeJobTimeoutException::class);
         $this->expectExceptionMessage('job timeout [120]');
         $this->expectExceptionMessage('retry_after [120]');
         $queue->pop('emails');
+    }
+
+    /**
+     * A delivery that carries no Laravel job never will. Left to lease expiry,
+     * it came back forever, since an expiry never charges the broker's retry
+     * budget, and held its partition: it goes to the dead-letter queue at its
+     * first delivery instead, and the report says which one it was.
+     */
+    #[TestWith(['not JSON {', 'its data is not JSON'])]
+    #[TestWith(['"a JSON string"', 'its data is not a JSON object'])]
+    #[TestWith([['poison' => 'not a Laravel job'], 'its payload names no job to call'])]
+    #[TestWith([['job' => ''], 'its payload names no job to call'])]
+    public function testADeliveryThatCarriesNoLaravelJobGoesToTheDeadLetterQueueAtOnce(string|array $data, string $reason): void
+    {
+        $response = $this->popResponse($this->payload('unused'), deliveryAttempt: 2);
+        $response['messages'][0]['data'] = $data;
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => ['success' => true, 'leaseReleased' => true, 'dlq' => true]],
+            ['status' => 200, 'json' => $this->popResponse($this->payload('job-next'))],
+        ]);
+        [$queue] = $this->queueFor($handler);
+        $reported = new RecordingExceptionHandler();
+        $container = new Container();
+        $container->instance(ExceptionHandler::class, $reported);
+        $queue->setContainer($container);
+
+        $this->assertNull($queue->pop('emails'));
+
+        $this->assertSame('/api/v1/ack', $handler->requests[1]->getUri()->getPath());
+        $ack = json_decode((string) $handler->requests[1]->getBody(), true);
+        $this->assertSame('dlq', $ack['status']);
+        $this->assertSame('transaction-1', $ack['transactionId']);
+        $this->assertSame('lease-1', $ack['leaseId']);
+        $this->assertCount(1, $reported->reported);
+        $this->assertInstanceOf(NotALaravelJobException::class, $reported->reported[0]);
+        $message = $reported->reported[0]->getMessage();
+        $this->assertSame($message, $ack['error']);
+        $this->assertStringContainsString('delivery [transaction-1] of queue [emails], partition [job-0001], delivery attempt 2', $message);
+        $this->assertStringContainsString($reason, $message);
+        $this->assertStringContainsString(
+            'Its first bytes: ' . json_encode(is_string($data) ? $data : json_encode($data)),
+            $message,
+        );
+
+        // The partition is free: the next delivery is a job again.
+        $this->assertSame('job-next', $queue->pop('emails')->getJobId());
+    }
+
+    public function testTheReportQuotesOnlyTheFirstBytesOfALongDelivery(): void
+    {
+        $response = $this->popResponse($this->payload('unused'));
+        $response['messages'][0]['data'] = str_repeat('x', 5000);
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => ['success' => true, 'leaseReleased' => true, 'dlq' => true]],
+        ]);
+        [$queue] = $this->queueFor($handler);
+        $reported = new RecordingExceptionHandler();
+        $container = new Container();
+        $container->instance(ExceptionHandler::class, $reported);
+        $queue->setContainer($container);
+
+        $this->assertNull($queue->pop('emails'));
+
+        $message = $reported->reported[0]->getMessage();
+        $this->assertStringContainsString('Its first bytes: "' . str_repeat('x', 120) . '" (5000 bytes in all)', $message);
+        $this->assertLessThan(1024, strlen($message));
     }
 
     public function testRenewedLeaseAcceptsAJobSpecificTimeoutLongerThanItsInitialLease(): void

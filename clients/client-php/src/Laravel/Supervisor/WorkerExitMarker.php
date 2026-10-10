@@ -105,36 +105,68 @@ final class WorkerExitMarker
      */
     public function write(string $reason): bool
     {
+        $pid = getmypid();
+
+        return is_int($pid) && $pid > 0 && $this->writeFile((string) $pid, $reason);
+    }
+
+    /**
+     * Leave `<directory>/<name>` for the master, replaced at once. Never
+     * throws; false when the file could not be written.
+     */
+    public function writeFile(string $name, string $contents): bool
+    {
         try {
-            return $this->publish($reason);
+            $directory = $this->privateDirectory();
+
+            return $directory !== null && $this->publish($directory . DIRECTORY_SEPARATOR . $name, $contents);
         } catch (\Throwable) {
             return false;
         }
     }
 
-    private function publish(string $reason): bool
+    /** Remove `<directory>/<name>`: a link itself, never its target; a directory stays. */
+    public function removeFile(string $name): void
+    {
+        try {
+            $directory = $this->privateDirectory();
+            if ($directory === null) {
+                return;
+            }
+            $path = $directory . DIRECTORY_SEPARATOR . $name;
+            $metadata = @lstat($path);
+            if (is_array($metadata) && ($metadata['mode'] & 0170000) !== 0040000) {
+                @unlink($path);
+            }
+        } catch (\Throwable) {
+            // The master empties the directory for every generation.
+        }
+    }
+
+    /** The master's private directory, never through a link; null otherwise. */
+    private function privateDirectory(): ?string
     {
         $directory = rtrim($this->directory, DIRECTORY_SEPARATOR);
-        $pid = getmypid();
         if ($directory === ''
             || !str_starts_with($directory, DIRECTORY_SEPARATOR)
             || preg_match('/[\x00-\x1F\x7F]/', $directory) === 1
-            || !is_int($pid)
-            || $pid < 1
             || !function_exists('posix_geteuid')) {
-            return false;
+            return null;
         }
-        // Only into the master's private directory, never through a link.
         clearstatcache(true, $directory);
         $metadata = @lstat($directory);
         if ($metadata === false
             || ($metadata['mode'] & 0170000) !== 0040000
             || ($metadata['mode'] & 07777) !== 0700
             || ($metadata['uid'] ?? null) !== posix_geteuid()) {
-            return false;
+            return null;
         }
 
-        $path = $directory . DIRECTORY_SEPARATOR . $pid;
+        return $directory;
+    }
+
+    private function publish(string $path, string $contents): bool
+    {
         $temporary = $path . '.tmp';
         // Only this process writes these names. A leftover of an earlier
         // process with the same pid is removed, and 'x' refuses any entry
@@ -144,9 +176,9 @@ final class WorkerExitMarker
         if ($handle === false) {
             return false;
         }
-        $written = @fwrite($handle, $reason);
+        $written = @fwrite($handle, $contents);
         $closed = @fclose($handle);
-        if ($written !== strlen($reason) || !$closed || !@chmod($temporary, 0600) || !@rename($temporary, $path)) {
+        if ($written !== strlen($contents) || !$closed || !@chmod($temporary, 0600) || !@rename($temporary, $path)) {
             @unlink($temporary);
 
             return false;

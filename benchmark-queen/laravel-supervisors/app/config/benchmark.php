@@ -156,8 +156,32 @@ if (!is_string($failedPath)
     );
 }
 
+// The routed lanes: cb3's layout. queue.default is the `routed` connection,
+// which only dispatches, to the pool that owns each queue: `queen-<pool>` on
+// Queen lanes, `redis-<pool>` on Horizon lanes. Timeouts, leases (retry_after),
+// tries and partitions are cb3's.
+//
+// BENCH_ROUTED_BALANCE `off` (the default): the first pool runs BENCH_WORKERS
+// workers, the others one each, over their queues in order. `auto`: cb3's
+// auto-scaled pools and queue counts (interactive 5 queues, batch 3), with
+// smaller ranges than cb3's 5..14 and 3..6 so a lane fits on Docker Desktop.
+$routed = filter_var(env('BENCH_ROUTED', false), FILTER_VALIDATE_BOOL);
+$routedBalance = $oneOf('BENCH_ROUTED_BALANCE', 'off', ['off', 'auto']);
+$routedPools = $routedBalance === 'auto' ? [
+    'interactive' => ['queues' => ['default', 'notifications', 'emails', 'channel-sync', 'webhooks'], 'timeout' => 60, 'retry_after' => 180, 'tries' => 2, 'partitions' => 64, 'min' => 5, 'max' => 7],
+    'batch' => ['queues' => ['compliance', 'ical', 'background'], 'timeout' => 300, 'retry_after' => 360, 'tries' => 1, 'partitions' => 64, 'min' => 3, 'max' => 4],
+    'ordered' => ['queues' => ['ordered-sync', 'ordered-rates'], 'timeout' => 60, 'retry_after' => 120, 'tries' => 1, 'partitions' => 1, 'min' => 2, 'max' => 2],
+] : [
+    'interactive' => ['queues' => ['default', 'notifications'], 'timeout' => 60, 'retry_after' => 180, 'tries' => 2, 'partitions' => 64, 'min' => $workers, 'max' => $workers],
+    'batch' => ['queues' => ['compliance', 'ical', 'background'], 'timeout' => 300, 'retry_after' => 360, 'tries' => 1, 'partitions' => 64, 'min' => 1, 'max' => 1],
+    'ordered' => ['queues' => ['ordered-sync'], 'timeout' => 60, 'retry_after' => 120, 'tries' => 1, 'partitions' => 1, 'min' => 1, 'max' => 1],
+];
+
 return [
     'profile' => $profile,
+    'routed' => $routed,
+    'routed_balance' => $routedBalance,
+    'routed_pools' => $routedPools,
     'connection' => $oneOf('BENCH_CONNECTION', 'redis', ['redis', 'queen']),
     // BENCH_QUEUE remains the one-queue compatibility input. When
     // BENCH_QUEUES is present its first entry becomes the default dispatch

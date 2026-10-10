@@ -5,7 +5,9 @@ namespace Queen\Tests;
 use Orchestra\Testbench\TestCase;
 use Queen\Laravel\Commands\SupervisorControlCommand;
 use Queen\Laravel\QueenServiceProvider;
+use Queen\Laravel\Supervisor\ProcessIdentity;
 use Queen\Laravel\Supervisor\SupervisorState;
+use Queen\Tests\Support\FakeProcessIdentity;
 use Symfony\Component\Console\Output\BufferedOutput;
 use Symfony\Component\Console\Output\ConsoleOutputInterface;
 use Symfony\Component\Console\Output\ConsoleSectionOutput;
@@ -218,6 +220,45 @@ class LaravelSupervisorCommandTest extends TestCase
         $this->assertLessThan(1024, strlen($rendered));
     }
 
+    public function testSupervisorInstallRefusesAnUnknownOwnerWithoutTouchingTheInstallPath(): void
+    {
+        $installPath = sys_get_temp_dir() . '/queen-supervisor-install-' . bin2hex(random_bytes(8));
+        $owner = 'queen-no-such-user-' . bin2hex(random_bytes(3));
+
+        [$exitCode, $rendered] = $this->callSupervisorInstall([
+            '--install-path' => $installPath,
+            '--manifest' => $installPath . '-missing-manifest.json',
+            '--owner' => $owner,
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString("The --owner user {$owner} does not exist on this system.", $rendered);
+        $this->assertStringNotContainsString('Stack trace', $rendered);
+        $this->assertDirectoryDoesNotExist($installPath);
+    }
+
+    public function testSupervisorInstallRefusesOwnerWhenNotRunAsRoot(): void
+    {
+        if (!function_exists('posix_geteuid') || posix_geteuid() === 0) {
+            $this->markTestSkipped('Needs a user other than root.');
+        }
+        $installPath = sys_get_temp_dir() . '/queen-supervisor-install-' . bin2hex(random_bytes(8));
+
+        [$exitCode, $rendered] = $this->callSupervisorInstall([
+            '--install-path' => $installPath,
+            '--manifest' => $installPath . '-missing-manifest.json',
+            '--owner' => (string) posix_geteuid(),
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString(
+            'The --owner option of queen:supervisor-install requires root, but the effective user is uid '
+            . posix_geteuid(),
+            $rendered,
+        );
+        $this->assertDirectoryDoesNotExist($installPath);
+    }
+
     public function testStatusCommandEmitsMachineReadableState(): void
     {
         $directory = $this->configureStateDirectory();
@@ -400,6 +441,48 @@ class LaravelSupervisorCommandTest extends TestCase
         }
     }
 
+    public function testARootProbeIsToldWhoseStateItIsAndWhomToRunAs(): void
+    {
+        if (posix_geteuid() === 0) {
+            $this->markTestSkipped('Plays root against a state that the test user owns, so needs a test user that is not root.');
+        }
+        $directory = $this->configureStateDirectory();
+        $state = new SupervisorState($directory);
+        $lock = $state->acquireLock();
+        $owner = posix_geteuid();
+        // A Kubernetes exec probe in a container that starts as root, while
+        // the supervisor runs as another user.
+        $this->app->instance(ProcessIdentity::class, new FakeProcessIdentity(0, [0 => 'root', $owner => 'supervisor']));
+        $kernel = $this->app->make(\Illuminate\Contracts\Console\Kernel::class);
+
+        try {
+            $state->writeStatus(['engine' => 'rust', 'state' => 'running', 'pools' => [], 'pool_status' => []]);
+            foreach ([
+                ['action' => 'status', '--check' => true],
+                ['action' => 'status', '--check-liveness' => true],
+                ['action' => 'pause'],
+            ] as $arguments) {
+                $output = new BufferedOutput();
+                $exitCode = $kernel->call('queen:supervisor', $arguments, $output);
+                $rendered = (string) preg_replace('/\s+/', ' ', $output->fetch());
+
+                $this->assertSame(1, $exitCode, json_encode($arguments, JSON_THROW_ON_ERROR));
+                $this->assertStringContainsString(
+                    "It is owned by uid {$owner} (supervisor) and this process runs as uid 0 (root). Run the"
+                    . ' supervisor and its probes as that user, for example su -s /bin/sh supervisor -c'
+                    . " \"php artisan queen:supervisor status --check\", or securityContext.runAsUser: {$owner}"
+                    . ' on the container.',
+                    $rendered,
+                );
+                $this->assertStringNotContainsString('Stack trace', $rendered);
+            }
+            $this->assertFileDoesNotExist($directory . '/control.json');
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
     public function testCliUsesRelativeStatePathAndActiveGenerationTiming(): void
     {
         $relative = 'queen-supervisor-command-' . bin2hex(random_bytes(8));
@@ -452,6 +535,19 @@ class LaravelSupervisorCommandTest extends TestCase
             flock($lock, LOCK_UN);
             fclose($lock);
         }
+    }
+
+    /** @return array{0: int, 1: string} the exit code and the output, its wrapping undone */
+    private function callSupervisorInstall(array $options): array
+    {
+        $output = new BufferedOutput();
+        $exitCode = $this->app->make(\Illuminate\Contracts\Console\Kernel::class)->call(
+            'queen:supervisor-install',
+            $options,
+            $output,
+        );
+
+        return [$exitCode, (string) preg_replace('/\s+/', ' ', $output->fetch())];
     }
 
     private function configureStateDirectory(): string

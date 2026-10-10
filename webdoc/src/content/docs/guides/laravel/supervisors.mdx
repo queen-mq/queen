@@ -79,6 +79,12 @@ sourceOfTruth:
 # reap a dead server's workers when the master is PID 1, and close a circuit only with the probe;
 # the PHP engine drains on SIGHUP and runs quiet by default. The queue:restart and init paragraphs
 # say so.
+# sourceOfTruth re-read 2026-10-10 (installation owner, PHP client 2.4.2): SupervisorBinary names the
+# path, the condition and both users when it refuses an installation, and SupervisorBinaryInstaller
+# takes --owner as root on a non-thread-safe PHP. Run the Rust engine says so.
+# sourceOfTruth re-read 2026-10-10 (probe user): SupervisorState refuses a reader that does not own
+# the state, root included, as before; the refusal now names the owner and the reader and shows su
+# and securityContext.runAsUser. The commands section says to run them as the supervisor's user.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
@@ -374,6 +380,16 @@ exit, which is how the master tells them from a crash. Every other non-zero exit
 failure, including a SIGKILL without that marker, such as the OOM killer's. Before 1.9.0 a burst of
 job timeouts could open the circuit and hold a healthy pool at one worker.
 
+Laravel's worker catches what a pop throws, reports it, sleeps a second and pops again, so a worker
+whose every pop fails stays alive and looks like capacity. Since PHP client 2.4.2 a worker started
+by either engine tells the two cases apart. When its loop works another connection than its pool's,
+or a pop throws a `LogicException` (an `InvalidArgumentException` included), no retry can help: the
+worker throws `WorkerCannotConsume` from its next loop, which reaches the application's exception
+handler, and exits 1, a crash like any other. When the broker is down, slow or refusing, a restart
+cannot help either, and restarting every worker would turn a short outage into a restart storm: the
+worker stays, and leaves a small file in the state directory saying since when its pops fail. The
+first pop that works, empty or not, removes it. `queen:supervisor status` reads it; see below.
+
 ## Run the Rust engine
 
 The Composer package carries a launcher; the binary for your platform is installed in a separate,
@@ -396,6 +412,22 @@ start and then replaces itself with the binary, so the Rust master is the proces
 manager signals. The installation leaf's parent has to be a real directory (a symlink is refused),
 and an existing leaf must not be group- or world-writable, which is why it lives apart from
 Laravel's `storage/`.
+
+The user that runs the launcher must also own the installation, each of its directories and files,
+so install as that user. If root installs and `www-data` runs the supervisor, the launcher exits
+with code 70, and the message names the path, its owner, the launcher's user and the ways out.
+Since PHP client 2.4.2, root can install for another user, by name or numeric uid:
+
+```bash
+php artisan queen:supervisor-install --owner=www-data
+```
+
+The installer installs and verifies as root, then gives each directory and file of the
+installation to that user, with the modes a normal install gives. It refuses `--owner` without
+root and on a thread-safe PHP, such as FrankenPHP's. As root, it does not update an installation
+that already belongs to another user: run it as that user. `chown -R www-data` on the installation
+directory also works. For container images, see
+[build the image](/guides/laravel/kubernetes/#build-the-image).
 
 PHP client 2.3.0 pins supervisor 0.8.0. Its GitHub release, `supervisor/v0.8.0`, publishes static
 (musl) Linux builds and macOS builds for amd64 and arm64, with a manifest and its Sigstore bundle,
@@ -463,6 +495,13 @@ php artisan queen:supervisor continue
 php artisan queen:supervisor terminate
 ```
 
+Run them as the supervisor's user: the state directory is private to it, and the commands refuse
+any other user, root included, without reading or writing anything. Since PHP client 2.4.2 the
+refusal names the state's owner and the user asking and shows how to run as the owner, such as
+`su -s /bin/sh www-data -c "php artisan queen:supervisor status --check"` from root, or
+`securityContext.runAsUser` on a Kubernetes container
+([probes](/guides/laravel/kubernetes/#deploy-the-worker-pods)).
+
 `status --check` exits non-zero unless the current generation is live and every pool is ready,
 which means its depth sample is current and it has workers whenever it wants some. A pool with
 surviving workers stays ready while a replacement waits in backoff or probe, and the degraded
@@ -471,7 +510,33 @@ heartbeat, which is what a liveness probe should ask. `--check-capacity` is the 
 pool runs at least as many workers as it wants, with a healthy restart circuit. It can be false
 for a moment during a normal scale-up, which is why it is separate from readiness. In
 `status --json`, each entry of `pool_status` carries `capacity_satisfied`, so a scale-up that lags
-shows there without making readiness flap. Status also records the host name, which is how the
+shows there without making readiness flap.
+
+A live worker whose pops have all failed for 60 seconds is not consuming (PHP client 2.4.2). A pool
+in which every running worker is in that state is not ready, and one with any such worker is not at
+full capacity; a shorter outage, such as a broker failing over, reports nothing, and the issues
+clear on their own at the first pop that works. `status --json` lists, on each entry of
+`pool_status`, every worker that has not consumed since its last failed pop, however short the
+time, in `not_consuming` (`pid`, `seconds`, `failures`, `error`), with the longest in
+`not_consuming_seconds` (`null` when there is none), so a monitor can apply a threshold of its own.
+These two fields come from the reader on the supervisor's host, not from the status document the
+engines publish.
+
+The issues `status --json` names are stable codes, and applications may filter on them:
+
+| Code | In | Meaning |
+| --- | --- | --- |
+| `supervisor_not_live` | readiness | The master's owner lock or heartbeat is gone. |
+| `supervisor_not_running` | readiness | The master is starting, paused, terminating or stopped. |
+| `pool_health_unavailable`, `pool_health_malformed`, `pool_capacity_malformed` | readiness | The status has no usable pool observations. |
+| `pool_zero_capacity` | readiness | The pool wants workers and has none. |
+| `queue_depth_unavailable` | readiness | The pool's depth sample is missing: the master cannot read the broker. |
+| `pool_not_consuming` | readiness | Every running worker of the pool has failed every pop for 60 seconds. |
+| `pool_below_desired_capacity` | capacity | The pool runs fewer workers than it wants. |
+| `worker_restart_circuit_unhealthy` | capacity | The pool's restarts are in backoff, open or probing, or failed recently. |
+| `pool_worker_not_consuming` | capacity | At least one worker of the pool has failed every pop for 60 seconds. |
+
+`--check` fails on any readiness issue, and `--check-capacity` on any issue of either kind. Status also records the host name, which is how the
 dashboard tells published instances apart. Updated publishers also record the generation's start,
 monotonic uptime at the heartbeat, engine version and installed client version when available.
 These fields are optional, so earlier publishers remain readable. The Rust engine requests client

@@ -15,7 +15,11 @@ use Throwable;
 /**
  * What the Laravel compatibility commands share: run one scenario against the
  * running supervisor of this container, read what the workers logged, and
- * print one JSON object with the scenario, its checks and what was observed.
+ * print one JSON object with the scenario, its checks, what was observed and
+ * its outcome: what the scenario must find the same on Horizon and on Queen.
+ *
+ * On a routed lane every dispatch goes through the application's `routed`
+ * connection, the default, to the pool that owns the `default` queue.
  */
 abstract class CompatScenarioCommand extends Command
 {
@@ -23,7 +27,11 @@ abstract class CompatScenarioCommand extends Command
 
     protected string $run;
 
+    /** The connection the scenario dispatches on: `routed`, or the lane's own. */
     protected string $connection;
+
+    /** The lane's backend: `redis` (Horizon) or `queen`. */
+    protected string $backend;
 
     protected string $queue;
 
@@ -32,6 +40,15 @@ abstract class CompatScenarioCommand extends Command
 
     /** @var array<string, mixed> */
     protected array $observed = [];
+
+    /**
+     * What failure_matrix.py compares with the Horizon lane: `same` must be
+     * equal, `near` within the larger of the two tolerances. Only what Laravel
+     * decides belongs here; which worker won a race does not.
+     *
+     * @var array{same: array<string, mixed>, near: array<string, array{value: float, tolerance: float}>}
+     */
+    protected array $outcome = ['same' => [], 'near' => []];
 
     /**
      * @param list<string> $scenarios
@@ -46,8 +63,10 @@ abstract class CompatScenarioCommand extends Command
         }
         $this->log = $log;
         $this->run = (string) ($this->option('run-id') ?: $scenario . '-' . bin2hex(random_bytes(4)));
-        $this->connection = (string) config('benchmark.connection');
-        $this->queue = (string) config('benchmark.queue');
+        $this->backend = (string) config('benchmark.connection');
+        $routed = (bool) config('benchmark.routed');
+        $this->connection = $routed ? 'routed' : $this->backend;
+        $this->queue = $routed ? 'default' : (string) config('benchmark.queue');
 
         try {
             $play(lcfirst(str_replace(' ', '', ucwords(str_replace('-', ' ', $scenario)))));
@@ -60,6 +79,9 @@ abstract class CompatScenarioCommand extends Command
                 $e['job_id'], $e['event'], $e['attempt'], round((float) $e['at'], 2), $e['exception'], $e['pid'],
             ], $this->log->read($this->run));
         }
+        // Which checks passed is part of the outcome: Horizon passing one that
+        // Queen fails is a divergence even where the scenario names no value.
+        $this->outcome['same']['checks'] = array_column($this->checks, 'passed', 'name');
         $this->line(json_encode([
             'scenario' => $scenario,
             'run_id' => $this->run,
@@ -67,9 +89,85 @@ abstract class CompatScenarioCommand extends Command
             'passed' => $this->checks !== [] && !in_array(false, array_column($this->checks, 'passed'), true),
             'checks' => $this->checks,
             'observed' => $this->observed,
+            // Objects even when empty: failure_matrix.py reads them as maps.
+            'outcome' => ['same' => (object) $this->outcome['same'], 'near' => (object) $this->outcome['near']],
         ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR));
 
         return self::SUCCESS;
+    }
+
+    /** The --tries of the workers that run this command's queue: the pool's on a routed lane. */
+    protected function workerTries(): int
+    {
+        foreach (config('benchmark.routed') ? (array) config('benchmark.routed_pools') : [] as $pool) {
+            if (in_array($this->queue, $pool['queues'], true)) {
+                return (int) $pool['tries'];
+            }
+        }
+
+        // The single pool of the other lanes (config/queen.php, config/horizon.php).
+        return 1;
+    }
+
+    /** A value of the outcome that Horizon and Queen must share exactly. */
+    protected function same(string $key, mixed $value): void
+    {
+        $this->outcome['same'][$key] = $value;
+    }
+
+    /** A time, in seconds, that Horizon and Queen must share within a tolerance. */
+    protected function near(string $key, float $value, float $tolerance): void
+    {
+        $this->outcome['near'][$key] = ['value' => round($value, 2), 'tolerance' => $tolerance];
+    }
+
+    /**
+     * The outcome of each job: the attempt of every run, every pickup and
+     * every completion, whether failed() ran and with what, and whether a
+     * failed-job row exists. A pickup is one JobProcessing event: a run that
+     * middleware released, or that Laravel failed before handle(), is a
+     * pickup without a run.
+     *
+     * @param list<string> $jobs
+     */
+    protected function sameJobs(array $jobs): void
+    {
+        $failed = $this->failedIds();
+        foreach ($jobs as $job) {
+            $this->same("job {$job}", [
+                'runs' => $this->attemptsOf($job, 'started'),
+                'pickups' => $this->attemptsOf($job, 'event_before'),
+                'completed' => $this->attemptsOf($job, 'completed'),
+                'failed' => $this->count($job, 'failed_hook'),
+                'failed_with' => $this->exceptionOf($job),
+                'failed_row' => isset($failed[$job]),
+            ]);
+        }
+    }
+
+    /** @return list<int|null> the attempt each `event` of the job was logged with, in order */
+    protected function attemptsOf(string $job, string $event): array
+    {
+        return array_values(array_map(static fn (array $e): ?int => $e['attempt'] === null ? null : (int) $e['attempt'],
+            array_filter($this->eventsOf($job), static fn (array $e): bool => $e['event'] === $event)));
+    }
+
+    /**
+     * Failed-job rows of this run's queued closures. A closure's command has
+     * no job id: its captured variables, the run id among them, are in it.
+     */
+    protected function failedClosureRows(): int
+    {
+        $rows = 0;
+        foreach (app('queue.failer')->all() as $record) {
+            $payload = json_decode((string) (((array) $record)['payload'] ?? ''), true);
+            if (str_starts_with((string) ($payload['displayName'] ?? ''), 'Closure')
+                && str_contains((string) ($payload['data']['command'] ?? ''), $this->run)) {
+                ++$rows;
+            }
+        }
+
+        return $rows;
     }
 
     /** then(), catch() and finally() callbacks that log under the job id `batch`. */
@@ -93,7 +191,7 @@ abstract class CompatScenarioCommand extends Command
 
     protected function pauseWorkers(): void
     {
-        if ($this->connection === 'redis') {
+        if ($this->backend === 'redis') {
             Artisan::call('horizon:pause');
             sleep(4);
 
@@ -114,7 +212,7 @@ abstract class CompatScenarioCommand extends Command
 
     protected function resumeWorkers(): void
     {
-        $this->connection === 'redis'
+        $this->backend === 'redis'
             ? Artisan::call('horizon:continue')
             : Artisan::call('queen:supervisor', ['action' => 'continue']);
     }

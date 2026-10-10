@@ -125,9 +125,18 @@ final class SupervisorBinary
 
     public static function assertInstalled(string $basePath, array $platform): string
     {
+        return self::assertInstalledAs($basePath, $platform, self::effectiveUserId());
+    }
+
+    /**
+     * The checks of assertInstalled() for the process whose effective user is
+     * $effectiveUserId. Production passes its own; a test passes another to
+     * see what a launcher running as a different user is told.
+     */
+    private static function assertInstalledAs(string $basePath, array $platform, int $effectiveUserId): string
+    {
         $basePath = self::normalizeInstallBasePath($basePath);
         self::assertInstallBaseIsNotFilesystemRoot($basePath);
-        $effectiveUserId = self::effectiveUserId();
         self::assertSafeDirectory($basePath, 'installation base', $effectiveUserId);
         $versionDirectory = self::versionDirectory($basePath);
         self::assertSafeDirectory($versionDirectory, 'version directory', $effectiveUserId);
@@ -434,6 +443,126 @@ final class SupervisorBinary
         return DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $normalized);
     }
 
+    /**
+     * "uid 82 (www-data)", or "uid 82" for a uid the user database does not name.
+     */
+    public static function describeUser(int $uid): string
+    {
+        $name = self::userName($uid);
+
+        return $name === null ? "uid {$uid}" : "uid {$uid} ({$name})";
+    }
+
+    /**
+     * The user as chown and the installer's --owner option take it: the name
+     * when the user database has one, otherwise the number.
+     */
+    public static function userArgument(int $uid): string
+    {
+        return self::userName($uid) ?? (string) $uid;
+    }
+
+    /**
+     * An absolute spelling of a path for a message. The checks run on paths
+     * relative to a pinned working directory, which mean nothing in a log.
+     */
+    public static function displayPath(string $path): string
+    {
+        if (str_starts_with($path, DIRECTORY_SEPARATOR)) {
+            return $path;
+        }
+        $directory = getcwd();
+        if (!is_string($directory) || $directory === '') {
+            return $path;
+        }
+        $relative = (string) preg_replace('#^(?:\.' . preg_quote(DIRECTORY_SEPARATOR, '#') . ')+#', '', $path);
+
+        return $relative === '.' || $relative === ''
+            ? $directory
+            : rtrim($directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $relative;
+    }
+
+    /**
+     * Why an lstat() result breaks the installation's ownership and permission
+     * rules, naming the path, the condition and, for a wrong owner, both users
+     * and $ownerHint. The callers keep their own checks and their own first
+     * sentence, which logs and scripts may match on, and append this to it.
+     * Empty when the metadata breaks none of these rules.
+     *
+     * @param array<string, int>|false $metadata
+     */
+    public static function explainUnsafePath(
+        string $path,
+        array|false $metadata,
+        bool $directory,
+        int $effectiveUserId,
+        ?string $ownerHint = null,
+    ): string {
+        if (!is_array($metadata)) {
+            return "{$path} does not exist or cannot be inspected.";
+        }
+        $type = $metadata['mode'] & 0170000;
+        if ($type === 0120000) {
+            return "{$path} is a symbolic link, which is never followed.";
+        }
+        if ($type !== ($directory ? 0040000 : 0100000)) {
+            return $directory ? "{$path} is not a directory." : "{$path} is not a regular file.";
+        }
+
+        $problems = [];
+        $owner = $metadata['uid'] ?? null;
+        $ownedByAnother = $owner !== $effectiveUserId;
+        if ($ownedByAnother) {
+            $problems[] = "{$path} is owned by "
+                . (is_int($owner) ? self::describeUser($owner) : 'an unknown user')
+                . ', not by the effective user ' . self::describeUser($effectiveUserId) . '.';
+        }
+        $sharedWrite = $metadata['mode'] & 0022;
+        if ($sharedWrite !== 0) {
+            $problems[] = sprintf(
+                '%s has mode %04o, which grants %s write access; remove it with chmod go-w %s.',
+                $path,
+                $metadata['mode'] & 07777,
+                match ($sharedWrite) {
+                    0020 => 'group',
+                    0002 => 'world',
+                    default => 'group and world',
+                },
+                $path,
+            );
+        }
+        if ($ownedByAnother && $ownerHint !== null) {
+            $problems[] = $ownerHint;
+        }
+
+        return implode(' ', $problems);
+    }
+
+    private static function userName(int $uid): ?string
+    {
+        $entry = function_exists('posix_getpwuid') ? @posix_getpwuid($uid) : false;
+        $name = is_array($entry) ? ($entry['name'] ?? null) : null;
+
+        return is_string($name) && $name !== '' && preg_match('/[\x00-\x20\x7F]/', $name) !== 1
+            ? $name
+            : null;
+    }
+
+    /**
+     * The way out when the launcher's user does not own the installation: an
+     * image built as root and run as www-data is the usual cause.
+     */
+    private static function launcherOwnerHint(string $path, int $effectiveUserId): string
+    {
+        $user = self::userArgument($effectiveUserId);
+        if ($effectiveUserId === 0) {
+            return "Install it as the user that runs the supervisor, or run chown -R {$user} {$path}.";
+        }
+
+        return "Install it as the user that runs the supervisor, run chown -R {$user} {$path}, "
+            . "or install it as root with php artisan queen:supervisor-install --owner={$user}.";
+    }
+
     /** @return array<string, int> */
     private static function assertSafeDirectory(string $path, string $description, int $effectiveUserId): array
     {
@@ -442,8 +571,16 @@ final class SupervisorBinary
             || ($metadata['mode'] & 0170000) !== 0040000
             || ($metadata['mode'] & 0022) !== 0
             || ($metadata['uid'] ?? null) !== $effectiveUserId) {
+            $display = self::displayPath($path);
             throw new RuntimeException(
-                "The Queen supervisor {$description} must be a real, owned directory without group/world write access.",
+                "The Queen supervisor {$description} must be a real, owned directory without group/world write access. "
+                . self::explainUnsafePath(
+                    $display,
+                    $metadata,
+                    true,
+                    $effectiveUserId,
+                    self::launcherOwnerHint($display, $effectiveUserId),
+                ),
             );
         }
 
@@ -502,11 +639,47 @@ final class SupervisorBinary
                 fclose($handle);
             }
             throw new RuntimeException(
-                "The Queen supervisor {$description} is unsafe, non-executable or oversized. Reinstall it.",
+                "The Queen supervisor {$description} is unsafe, non-executable or oversized. Reinstall it. "
+                . self::explainUnsafeFile($path, $before, $opened, $maximumBytes, $effectiveUserId, $executable),
             );
         }
 
         return ['handle' => $handle, 'metadata' => $opened];
+    }
+
+    /**
+     * @param array<string, int>|false $before the path's lstat() before it was opened
+     * @param array<string, int>|false $opened the opened file's fstat()
+     */
+    private static function explainUnsafeFile(
+        string $path,
+        array|false $before,
+        array|false $opened,
+        int $maximumBytes,
+        int $effectiveUserId,
+        bool $executable,
+    ): string {
+        $display = self::displayPath($path);
+        $detail = self::explainUnsafePath(
+            $display,
+            $before,
+            false,
+            $effectiveUserId,
+            self::launcherOwnerHint($display, $effectiveUserId),
+        );
+        if ($detail !== '') {
+            return $detail;
+        }
+        if (!is_array($opened)) {
+            return "{$display} cannot be opened for reading.";
+        }
+
+        return match (true) {
+            $executable && ($opened['mode'] & 0100) === 0 => "{$display} is not executable by its owner.",
+            $opened['size'] < 1 => "{$display} is empty.",
+            $opened['size'] > $maximumBytes => "{$display} is larger than {$maximumBytes} bytes.",
+            default => "{$display} changed while it was being opened.",
+        };
     }
 
     /** @param array<string, int> $opened */

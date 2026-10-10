@@ -24,12 +24,15 @@ final class FailureMatrixReportCommand extends Command
         $jobs = [];
         foreach ($log->read($runId) as $event) {
             $job = $event['job_id'];
-            $jobs[$job] ??= ['events' => [], 'pids' => []];
-            $jobs[$job]['events'][] = [$event['event'], $event['attempt'], round($event['at'], 3), $event['exception']];
+            $jobs[$job] ??= ['events' => [], 'pids' => [], 'hosts' => []];
+            // The pid last, so readers of the first four fields are unchanged.
+            $jobs[$job]['events'][] = [$event['event'], $event['attempt'], round($event['at'], 3), $event['exception'], $event['pid']];
             $jobs[$job]['pids'][$event['pid']] = true;
+            $jobs[$job]['hosts'][(string) ($event['host'] ?? '')] = true;
         }
         foreach ($jobs as &$job) {
             $job['pids'] = array_keys($job['pids']);
+            $job['hosts'] = array_map('strval', array_keys($job['hosts']));
         }
         unset($job);
         ksort($jobs);

@@ -112,6 +112,10 @@ final class JobMetricsRecorder
 
     public function flush(): void
     {
+        // A forked process never writes the counts it inherited, under the
+        // key of the process it was forked from, even when it stops before
+        // its first loop.
+        $this->forThisProcess();
         if (!$this->dirty || $this->bucket === null) {
             return;
         }

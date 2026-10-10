@@ -69,6 +69,13 @@ verifiedBy:
 # totalled only at instants every queue has), SupervisorActivity.vue opens on that sum and filters
 # on a selected queue, Supervisors.vue gives the card's links their route. The two paragraphs on
 # queue history say so; publication, decoding and the counts are unchanged.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): SupervisorState's
+# readiness() and capacityHealth() also read the files of workers whose pops fail, on the
+# supervisor's host, and `status --json` adds not_consuming to each pool. The published document,
+# and this contract, are unchanged.
+# sourceOfTruth re-read 2026-10-10 (probe user): SupervisorState's refusal of a state that another
+# user owns now names the owner and the reader; the status document and its liveness and readiness
+# rules are unchanged. Nothing this page states changes.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.

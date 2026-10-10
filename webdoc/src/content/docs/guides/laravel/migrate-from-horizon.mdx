@@ -55,6 +55,18 @@ sourceOfTruth:
 # takes its connection's; the failed-job provider leaves other drivers' records to Laravel,
 # without the lock; the connector applies the pool's settings to the worked connection alone. The
 # pool row says so.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
+# registers WorkerPopGuard, QueenQueue::pop reports to it, and `queen:supervisor status --json` lists
+# the workers that do not consume; `--check` also fails after a minute of failed pops. The rehearsal
+# still asks for `--check` to pass. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue throws
+# UnsafeJobTimeoutException, a LogicException with the same message, for a job timeout its lease
+# cannot cover, so a supervised worker exits; the paragraph on that refusal says so.
+# sourceOfTruth re-read 2026-10-10 (probe user): queen:supervisor's refusal of a state that another
+# user owns now names the owner and the reader and shows su and securityContext.runAsUser; its
+# checks and exit codes are unchanged, and the state directory stays the supervisor user's. Nothing
+# this page states changes.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider and JobMetricsRecorder now count timed-out attempts and $this->fail() as failed; the page links the monitoring section that compares runtimes with Horizon. Nothing else this page states changes.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place
@@ -108,10 +120,11 @@ workers: job tags and silenced jobs, wait-time notifications, retained throughpu
 snapshots, dashboard access and multi-host visibility, `horizon:clear`, the failed-job workflows in
 your runbooks, per-supervisor pause and continue, and any deploy automation that calls
 `horizon:terminate`. Queen covers tags, wait notifications, per-job metrics and multi-host
-visibility with its own [monitoring](/guides/laravel/monitoring/). Silenced jobs, job lists,
-batches in the dashboard, Slack and SMS routes and per-supervisor controls have no equivalent yet,
-so decide where each of those will live before the cutover. [Queen or
-Horizon](/guides/laravel/queen-vs-horizon/) compares the two feature by feature.
+visibility with its own [monitoring](/guides/laravel/monitoring/); to check that a class runs as
+fast on Queen, [compare its runtime with Horizon's](/guides/laravel/monitoring/#compare-with-horizon).
+Silenced jobs, job lists, batches in the dashboard, Slack and SMS routes and per-supervisor
+controls have no equivalent yet, so decide where each of those will live before the cutover.
+[Queen or Horizon](/guides/laravel/queen-vs-horizon/) compares the two feature by feature.
 
 ## Install Queen beside Horizon
 
@@ -351,8 +364,9 @@ pool's `timeout` declares a longer `$timeout` in its class.
 Without renewal, the driver refuses a job whose own `$timeout` is not shorter than `retry_after`,
 and a job with `$timeout = 0`, which would run with no limit at all. The worker reports the error
 and leaves the job, which comes back after its lease expires and is refused again: it never runs
-and never reaches `tries`. Give the job a `$timeout` above 0 and below `retry_after`, raise
-`retry_after`, or turn renewal on.
+and never reaches `tries`. Since PHP client 2.4.2 a worker started by a supervisor also exits, so
+its pool's restarts show the error in `queen:supervisor status`. Give the job a `$timeout` above 0
+and below `retry_after`, raise `retry_after`, or turn renewal on.
 
 A large `retry_after` also costs more on Queen than on Redis. When a worker dies, its lease holds
 the whole stripe, so the jobs behind its job wait up to `retry_after` seconds, unless its renewer

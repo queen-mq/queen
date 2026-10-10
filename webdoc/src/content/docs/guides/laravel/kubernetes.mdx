@@ -12,6 +12,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Commands/SupervisorControlCommand.php
   - clients/client-php/src/Laravel/Commands/SupervisorInstallCommand.php
   - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
   - clients/client-php/src/Laravel/Supervisor/ReplicaCoordinator.php
   - clients/client-php/src/Laravel/Supervisor/QueueWatcher.php
   - clients/client-php/src/Laravel/Dashboard/PrometheusMetrics.php
@@ -49,6 +50,14 @@ sourceOfTruth:
 # loop, starts a fork server again at queue:restart when prefork has none, reaps a dead server's
 # workers when the master is PID 1, and closes a circuit only with the probe. The probes, the
 # drain and the sizing this page states are unchanged.
+# sourceOfTruth re-read 2026-10-10 (installation owner, PHP client 2.4.2): the launcher refuses an
+# installation another user owns, and SupervisorInstallCommand takes --owner. Build the image
+# installed as root and ran as www-data, which exits 70; it now passes --owner=www-data and shows
+# COPY --chown for a multi-stage build.
+# sourceOfTruth re-read 2026-10-10 (probe user): SupervisorControlCommand and SupervisorState refuse
+# a reader that does not own the state, root included, as before, and the refusal now names the
+# owner and the reader and shows su and securityContext.runAsUser. The Deployment gains the
+# readiness probe, and the probes section says to run the probes as the supervisor's user.
 ---
 
 This page puts the supervisor features together for the setup most teams end up with: Laravel
@@ -138,14 +147,37 @@ state directory must be private to the supervisor's user, under parents only roo
 Kubernetes `emptyDir` is world-writable without the sticky bit, so it can be neither the state
 directory nor one of its parents.
 
+The launcher starts the binary only when the user it runs as owns the installation, each of its
+directories and files. An image that installs as root and runs the supervisor as `www-data` fails
+at start with exit code 70, and the message names the installation's owner and the launcher's
+user. Since PHP client 2.4.2, `--owner=www-data` lets root install and verify as itself and then
+give the installation to `www-data`, with the same modes:
+
 ```dockerfile
 # The command-line opcache is shared by the forked workers.
 RUN echo "opcache.enable_cli=1" > "$PHP_INI_DIR/conf.d/opcache-cli.ini"
-RUN install -d -m 0755 /opt/queen-supervisor-bin \
- && QUEEN_SUPERVISOR_INSTALL_PATH=/opt/queen-supervisor-bin php artisan queen:supervisor-install \
+RUN QUEEN_SUPERVISOR_INSTALL_PATH=/opt/queen-supervisor-bin \
+    php artisan queen:supervisor-install --owner=www-data \
  && install -d -o www-data -g www-data -m 0700 /var/lib/queen-supervisor
 USER www-data
 ```
+
+`--owner` needs root, a user that exists where the installer runs (or a numeric uid), and a
+non-thread-safe PHP command line; FrankenPHP's PHP is thread-safe and refuses it. In a multi-stage
+build, the copy into the runtime stage decides the owner, so give it `--chown`, with or without
+`--owner` in the build stage. Without `--chown`, the directory that `COPY` creates belongs to
+root, even where the files in it keep their owner, and the launcher refuses it:
+
+```dockerfile
+# Build stage, as root.
+RUN php artisan queen:supervisor-install --install-path=/opt/queen-supervisor-bin
+
+# Runtime stage.
+COPY --from=build --chown=www-data:www-data /opt/queen-supervisor-bin /opt/queen-supervisor-bin
+ENV QUEEN_SUPERVISOR_INSTALL_PATH=/opt/queen-supervisor-bin
+```
+
+You can also run the installer as `www-data`, in a directory that already belongs to it.
 
 `vendor/bin/queen-supervisor` verifies the installed binary and then replaces itself with it, so
 the Rust supervisor is the container's main process and receives Kubernetes' SIGTERM directly.
@@ -181,6 +213,12 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["php", "artisan", "queen:supervisor", "status", "--check"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
 ```
 
 On SIGTERM the supervisor stops starting workers and sends SIGTERM to each of them, so they finish
@@ -193,8 +231,67 @@ finishing. A pod that crashes still counts in the coordination until its key exp
 can be short by its share for up to one control-loop bound.
 
 Each probe boots Laravel once, so keep its period in tens of seconds. `status --check-liveness`
-asks only whether the master is alive. `status --check` also requires every pool to be ready, and
-fits a readiness probe if anything routes traffic to the pod.
+asks only whether the master is alive. `status --check` also requires every pool to be ready: as
+the readiness probe it holds a rolling update until the new pod's pools serve, and it fits anything
+that routes traffic to the pod.
+
+Run the probes as the supervisor's user. The state directory is private to that user, and the
+status command refuses any other, root included. An exec probe runs as the container's user, so
+with `USER www-data` in the image, as above, or with `securityContext.runAsUser` set to the
+supervisor's uid, nothing else is needed. If the container
+starts as root instead, because an entrypoint prepares the state directory and then starts the
+supervisor as `www-data`, the probes run as root and fail with `must be owned by root or the
+current user`, and the failing liveness probe restarts the pod. Wrap each probe's command in `su`:
+
+```yaml
+          livenessProbe:
+            exec:
+              command: ["su", "-s", "/bin/sh", "www-data", "-c", "php artisan queen:supervisor status --check-liveness"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["su", "-s", "/bin/sh", "www-data", "-c", "php artisan queen:supervisor status --check"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+```
+
+`su` keeps the working directory, so `artisan` resolves as before. Do the same for `pause`,
+`continue` and `terminate` run through `kubectl exec`. Since PHP client 2.4.2 the refusal goes on
+to name the state's owner and the user asking, and shows this `su` command and the
+`securityContext.runAsUser` value to use.
+
+Readiness depends on the broker: `queue_depth_unavailable` when the master cannot read it, and,
+since PHP client 2.4.2, `pool_not_consuming` when every worker of a pool has failed every pop for a
+minute. A readiness or startup probe that includes them takes the pods out of a rollout for as long
+as the broker is unreachable, and a rollout that waits for ready pods, such as one with
+`maxUnavailable: 0` or `helm upgrade --atomic`, stops or is rolled back. If broker outages should
+raise an alert rather than stop a deploy, keep `--check-liveness` for liveness and read readiness
+yourself, without those codes, from a script that needs only Composer's autoloader:
+
+```php
+<?php // scripts/queen-ready.php: exits 1 unless the supervisor is ready, broker aside
+
+use Queen\Laravel\Supervisor\SupervisorState;
+
+require __DIR__ . '/../vendor/autoload.php';
+
+$state = new SupervisorState('/run/queen-supervisor'); // queen.supervisor.state_directory
+$status = $state->status();
+if ($status === null) {
+    exit(1);
+}
+$issues = array_filter(
+    $state->readiness($status)['issues'],
+    fn (array $issue): bool => !in_array($issue['code'], ['queue_depth_unavailable', 'pool_not_consuming'], true),
+);
+exit($issues === [] ? 0 : 1);
+```
+
+A worker that works the wrong connection, or whose pops fail on a `LogicException`, still fails
+readiness this way: it exits, its pool's restarts back off, and its circuit opens.
 
 Without coordination the rule is one master per application and consumer group: one replica, no
 autoscaler, and `strategy: { type: Recreate }`.

@@ -22,6 +22,8 @@ final class BenchmarkConfigCommand extends Command
             'laravel' => InstalledVersions::getPrettyVersion('laravel/framework'),
             'horizon' => InstalledVersions::getPrettyVersion('laravel/horizon'),
             'queen_client' => InstalledVersions::getPrettyVersion('queen-mq/php-client'),
+            // BENCH_OPCACHE_CLI, as PHP read it for this process.
+            'opcache_cli' => ini_get('opcache.enable_cli') === '1',
             'benchmark' => config('benchmark'),
             'horizon_supervisor' => array_replace(
                 is_array($horizonDefaults) ? $horizonDefaults : [],
