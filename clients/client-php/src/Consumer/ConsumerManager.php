@@ -604,17 +604,36 @@ class ConsumerManager
         }
 
         if ($this->nowMillis() >= $leaseRenewalTime) {
-            // Fire async renewal — don't block processing
+            // The renewals of the pop's leases, sent together, each bounded by the
+            // renewal interval: past it another is due anyway, and a broker that
+            // does not answer must not hold the handler for the whole request
+            // timeout, longer than the lease. A renewal that failed, or renewed
+            // nothing, leaves the message to another consumer once its lease
+            // expires while this handler still runs: the log says so.
             try {
                 // One renewal per lease: the messages of a pop share it.
-                $leaseIds = array_unique(array_filter(array_column($messages, 'leaseId'), fn($id) => $id !== null));
+                $leaseIds = array_values(array_unique(array_filter(array_column($messages, 'leaseId'), fn($id) => $id !== null)));
                 $promises = [];
                 foreach ($leaseIds as $leaseId) {
-                    $promises[] = $this->httpClient->postAsync("/api/v1/lease/{$leaseId}/extend", []);
+                    $promises[(string) $leaseId] = $this->httpClient->postAsync(
+                        '/api/v1/lease/' . rawurlencode((string) $leaseId) . '/extend',
+                        [],
+                        max(1_000, $intervalMillis),
+                    );
                 }
-                if (!empty($promises)) {
-                    // Settle without throwing — renewal failure is non-fatal
-                    HttpClient::settleAll($promises);
+                foreach ($promises === [] ? [] : HttpClient::settleAll($promises) as $leaseId => $outcome) {
+                    $renewed = ($outcome['state'] ?? null) === 'fulfilled' ? ($outcome['value']['renewed'] ?? null) : null;
+                    if (is_int($renewed) && $renewed > 0) {
+                        continue;
+                    }
+                    $reason = ($outcome['reason'] ?? null) instanceof \Throwable
+                        ? $outcome['reason']->getMessage()
+                        : 'the broker renewed no lease';
+                    error_log(sprintf(
+                        'Queen consume() could not renew lease %s: %s; another consumer may get its messages once it expires',
+                        $leaseId,
+                        $reason,
+                    ));
                 }
             } catch (\Throwable $e) {
                 // Lease renewal failure is non-fatal

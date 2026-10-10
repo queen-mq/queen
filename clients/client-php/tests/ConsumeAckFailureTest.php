@@ -68,6 +68,43 @@ final class ConsumeAckFailureTest extends TestCase
         $this->assertStringContainsString('ack storage exploded', $logged);
     }
 
+    /**
+     * The automatic renewal of renewLease(): one that renewed nothing leaves
+     * the message to another consumer once its lease expires, while the
+     * handler still runs. The log says so; the lease id is sent encoded, and
+     * the request waits no longer than the renewal interval.
+     */
+    public function testARenewalThatRenewedNothingIsReported(): void
+    {
+        $message = fn (string $id): array => ['transactionId' => $id, 'partitionId' => 'p-1', 'leaseId' => 'lease/1', 'data' => []];
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => ['messages' => [$message('t-1'), $message('t-2')]]],
+            ['status' => 200, 'json' => ['success' => true]],
+            ['status' => 200, 'json' => ['success' => true, 'renewed' => 0]],
+        ], ['status' => 200, 'json' => ['success' => true]]);
+        $queen = new Queen([
+            'url' => 'http://queen.test:6632',
+            'retryAttempts' => 1,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        // The renewal is due before the second message.
+        $logged = self::errorLogOf(fn () => $queen->queue('orders')->group('workers')->limit(2)
+            ->renewLease(true, 1)->each()
+            ->consume(function (): void {
+                usleep(5_000);
+            })->execute());
+
+        $extends = array_keys(array_filter(
+            $handler->requests,
+            fn ($request): bool => str_ends_with($request->getUri()->getPath(), '/extend'),
+        ));
+        $this->assertCount(1, $extends);
+        $this->assertSame('/api/v1/lease/lease%2F1/extend', $handler->requests[$extends[0]]->getUri()->getPath());
+        $this->assertLessThanOrEqual(1, $handler->options[$extends[0]]['timeout'] ?? null);
+        $this->assertStringContainsString('could not renew lease lease/1: the broker renewed no lease', $logged);
+    }
+
     public function testASuccessfulAckLogsNothing(): void
     {
         $handler = new PlanHandler(
