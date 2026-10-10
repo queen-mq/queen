@@ -15,6 +15,9 @@ sourceOfTruth:
 # throughput on few partitions): txn.rs plans a transaction's ack, KV and timer parts on the control step;
 # push.rs creates a partition with its first message; groups.rs keeps a tenant in one raft group;
 # topic_config.rs accepts `cleanup.policy=compact` and keeps every record. The page states each as before.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/groups.rs
+# changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
+# QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 For building applications, Queen is the better choice: services that handle events per customer,

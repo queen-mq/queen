@@ -40,6 +40,9 @@ digest: >-
 # sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
 # sealed for retention or its size and not for its age): batcher.rs warns in the log when the log
 # files' mapped indexes pass 70% of vm.max_map_count. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/groups.rs
+# changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
+# QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 Queen is one process per node, built around one idea: decide every write once, on the leader, and

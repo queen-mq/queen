@@ -27,7 +27,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/s3_inproc.rs
 */}
 
-The broker is configured entirely through environment variables: 112 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 113 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set.
 
@@ -106,6 +106,7 @@ The broker is configured entirely through environment variables: 112 of them, li
 | `QUEEN_RAFT_PLANNER_QUEUE_DEPTH` | integer | `1024` |  |
 | `QUEEN_RAFT_PURGE_HOLD_S` | integer | `600` |  |
 | `QUEEN_RAFT_READY_LAG_MS` | integer | `2000` |  |
+| `QUEEN_RAFT_READY_QUORUM_MS` | integer | `5000` |  |
 | `QUEEN_RAFT_REPLICATOR` | string | `local (openraft for a cluster)` |  |
 | `QUEEN_RAFT_TOKEN` | string | `(empty)` |  |
 | `QUEEN_TENANT_GROUPS` | string | `(empty: placement by hash)` |  |

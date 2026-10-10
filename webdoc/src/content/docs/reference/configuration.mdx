@@ -56,6 +56,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): dedup.rs
 # changes its module comment only; the QUEEN_RAFT_ROWS_WINDOW row already named the dedup window
 # alone.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs,
+# facade/real.rs change what /health answers (raft.quorumAckMs; ready needs the leader's majority
+# within QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no

@@ -27,6 +27,9 @@ verifiedBy:
 sidebar:
   label: "Kafka clients"
   order: 7
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs gains
+# QUEEN_RAFT_READY_QUORUM_MS (5000), the window of /health's new majority test. Nothing this page
+# states changes.
 ---
 
 Your Kafka producers, consumers and admin tools can use Queen as they are: change

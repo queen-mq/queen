@@ -47,6 +47,9 @@ sourceOfTruth:
 # are as described.
 # sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): dedup.rs
 # changes its module comment only; the probe of step 3 is as described.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/real.rs,
+# handlers/raft.rs change what /health answers (raft.quorumAckMs; ready needs the leader's majority
+# within QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 A worker's step in Queen is three calls at most: it pops a batch, does its work, and commits a

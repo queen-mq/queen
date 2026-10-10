@@ -23,6 +23,9 @@ sidebar:
 # sourceOfTruth re-read 2026-10-08 (locks): main.rs declares the locks module; metrics.rs gained
 # queen_locks_ops_total, queen_locks_op_duration_milliseconds and the KV op label `check`. The ephemeral
 # families are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs gains
+# QUEEN_RAFT_READY_QUORUM_MS (5000), the window of /health's new majority test. Nothing this page
+# states changes.
 ---
 
 An ephemeral queue keeps its messages in memory and nowhere else. A push is a memory write and a

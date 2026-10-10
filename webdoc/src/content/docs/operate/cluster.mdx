@@ -46,6 +46,10 @@ verifiedBy:
 # sealed for retention or its size and not for its age): facade/real.rs exports
 # queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): the lost-majority
+# paragraph, the readiness advice, the wiped voter and the limits follow; the healthcheck comment is
+# the Compose file's; the /health sample gains quorumAckMs, with a value from the loopback run of
+# 2026-10-10.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They
@@ -126,7 +130,7 @@ curl -s localhost:36632/health | jq -c .raft
 ```
 
 ```json
-{"role":"follower","leader":true,"term":3,"applied":13,"commit":13,"lag":0,"storageReady":true,"clusterVersion":6,"kinds":6,"apply":{"failure":null,"skipped":[]}}
+{"role":"follower","leader":true,"term":3,"applied":13,"commit":13,"lag":0,"quorumAckMs":109,"storageReady":true,"clusterVersion":6,"kinds":6,"apply":{"failure":null,"skipped":[]}}
 ```
 
 `applied` equal to `commit`, the same 13 the leader reports, means node 3 has applied everything
@@ -161,7 +165,8 @@ x-node: &node
   # default). Docker's 10 s default would kill it halfway.
   stop_grace_period: 60s
   healthcheck:
-    # 200 once the node knows a leader and has caught up, 503 "settling" before.
+    # 200 while the node knows a leader that hears from a majority and has
+    # caught up, 503 "settling" otherwise.
     test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:6632/health"]
     interval: 5s
     timeout: 3s
@@ -270,10 +275,11 @@ kill -9 of the leader or of a follower and SIGTERM of the leader lost none of 3,
 writes, and no leader change took more than 4 s. The guarantees behind those numbers are
 [Jepsen-tested](/concepts/guarantees/).
 
-Losing the majority deserves a look, because the node left standing does not notice. With nodes 1
-and 3 of the Compose cluster stopped, node 2 went on answering `/health` with `200`,
-`"status":"healthy"` and `"role":"leader"`, while a push to it waited out its 30 s deadline and
-got this:
+Losing the majority deserves a look, because the node left standing takes five seconds to say so.
+With nodes 1 and 3 of the Compose cluster stopped, node 2 went on answering `/health` with `200`
+for five seconds, and from then on with `503` and `"status":"settling"`, its `quorumAckMs` counting
+how long it had been without a majority. A push sent to it waited out its 30 s deadline and got
+this:
 
 ```text
 HTTP/1.1 503 Service Unavailable
@@ -413,10 +419,10 @@ another node timed is held past its expiry, and it lengthens the pause before a 
 consumption. Lease exclusivity across a leader change holds only while the nodes' clocks agree
 within that bound, so run NTP or chrony on every node.
 
-`/health` answers 200 once a node knows a leader and has caught up
-([monitoring](/operate/monitoring/#health)), so use it for readiness. For alerts use a write probe
-([recovery](/operate/recovery/)), because a node that lost its quorum keeps answering 200, as node 2 did
-above.
+`/health` answers 200 while a node knows a leader, has caught up, and that leader hears from a
+majority ([monitoring](/operate/monitoring/#health)), so use it for readiness. For alerts add a
+write probe ([recovery](/operate/recovery/)): `/health` trails a lost majority by five seconds, as
+node 2's did above, and it does not show whether entries commit.
 
 ### Change the membership
 
@@ -449,7 +455,9 @@ curl -X POST http://queen-1:6632/api/v1/system/raft/membership/promote \
 ```
 
 Remove a member before you wipe its disk. A voter that comes back empty under its old id is never
-repaired: it looks healthy and its clients hang.
+repaired, and requests sent to it hang. Its `/health` answers `503`, with `applied` at 0 and a
+`lag` counted from the epoch, once the cluster is more than 1000 entries ahead of it, so a
+readiness probe keeps clients away. Only removing it and adding it again brings it back.
 
 ### Raft groups
 
@@ -466,8 +474,8 @@ while it has data, because there is no migration yet, so pin a large tenant befo
 
 ### Recovery
 
-When something looks wrong, start with a write probe rather than `/health`, because a node that
-lost its quorum can keep answering 200:
+When something looks wrong, start with a write probe rather than `/health`: a write proves that
+the cluster commits, and `/health` only says what one node knows.
 
 ```bash
 curl -m 10 -X PUT http://queen-1:6632/api/v1/kv/ops/probe \
@@ -486,8 +494,8 @@ wrong), and [Backups and restore](/operate/recovery-backups/) covers snapshots o
   [standby cluster](/operate/standby/) elsewhere replays this one and takes over.
 - Losing a majority stops writes, and losing a majority of the disks for good can lose acknowledged
   data.
-- `/health` can stay 200 on a node that lost its quorum, and on an empty node that never caught up
-  (F8 and F2 in `test/recovery/FINDINGS.md`). Alert on the write probe.
+- `/health` trails a lost majority by five seconds and does not prove that entries commit. Alert
+  on the write probe.
 - The raft port is plain HTTP with a shared token: keep it on a private network. A standby cluster
   reads this one on that port, with a token of its own.
 - Peer addresses are fixed at the first boot. Changing them on a live cluster is a forced recovery.

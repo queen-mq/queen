@@ -23,6 +23,9 @@ sourceOfTruth:
   - protocols/queen-kafka/compat/CLIENT_MATRIX.md
   - server/src/kafka_inproc.rs
   - server/src/config.rs
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs gains
+# QUEEN_RAFT_READY_QUORUM_MS (5000), the window of /health's new majority test. Nothing this page
+# states changes.
 ---
 
 This is the contract a Kafka client gets from Queen, in the form you check things against: the

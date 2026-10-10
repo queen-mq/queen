@@ -40,6 +40,9 @@ verifiedBy:
 # no longer counts completedRetentionSeconds in how long a push keeps its row. The
 # dedupWindowSeconds row already named the dedup window alone; the completedRetentionSeconds row
 # describes the messages it removes, as before.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/real.rs
+# changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
+# QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a

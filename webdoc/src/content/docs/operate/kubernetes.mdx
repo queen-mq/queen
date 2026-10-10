@@ -41,6 +41,10 @@ sourceOfTruth:
 # sealed for retention or its size and not for its age): facade/real.rs exports
 # queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): the readiness
+# paragraph names the third condition and what a rolling update waits for (minReadySeconds between
+# the pods of a Parallel StatefulSet from Kubernetes 1.34 only), the limits say what Ready proves,
+# and two sentences point to the operator.
 ---
 
 On Kubernetes a Queen cluster is a StatefulSet of three (or five) pods. Each pod gets its own
@@ -48,7 +52,9 @@ PersistentVolumeClaim, the pods find each other through a headless Service, a cl
 carries the HTTP port, and a disruption budget lets voluntary evictions take one pod at a time. The
 repository ships no Helm chart, so the manifest below is the complete deployment, in namespace
 `queen`, to adapt or template in your own chart. It is the shape a production deployment of 2.0
-runs, and the fields that are not obvious are explained after it.
+runs, and the fields that are not obvious are explained after it. The
+[operator](/operate/operator/) runs the same cluster from one object, and changes its voters,
+replaces a node and upgrades it through the membership API.
 
 ## The manifest
 
@@ -166,11 +172,14 @@ The startup and liveness probes are a TCP connect on 6632. The node binds its po
 store and the replicator have opened, so an open port means the boot finished, and 360 probes of 5
 seconds give a long log replay 30 minutes.
 
-Readiness is `/health`, which answers `503 settling` while the node knows no leader or while its
-apply lags behind the leader's commits. The Service stops sending clients to a pod that is
-settling, and `minReadySeconds` gives a rolling update time to catch up before it moves to the next
-pod. Never point liveness at `/health`: an election, or a lost majority, would then restart every
-pod at once, which is the one thing that cannot help.
+Readiness is `/health`, which answers `503 settling` while the node knows no leader, while its
+leader has not heard from a majority for five seconds, or while its apply lags behind the leader's
+commits ([monitoring](/operate/monitoring/#health)). The Service stops sending clients to a pod that is
+settling, and a rolling update does not move to the next pod before this one is Ready. From
+Kubernetes 1.34 it also waits `minReadySeconds` more. Earlier versions ignore that field between
+the pods of a StatefulSet whose `podManagementPolicy` is `Parallel`, as this one's has to be, and
+move on at the first passing probe. Never point liveness at `/health`: an election, or a lost
+majority, would then restart every pod at once, which is the one thing that cannot help.
 
 ## What SIGTERM does
 
@@ -220,9 +229,9 @@ clients: a smaller volume keeps filling from replication.
 The manifest above runs `latest`, the current release. For a cluster you keep, pin the version it
 runs, because a pod that restarts on `latest` pulls whatever release is current by then, and an
 upgrade should be a step you take. Change the image tag and apply. The RollingUpdate replaces one
-pod at a time, highest ordinal first,
-and waits for each to be Ready plus `minReadySeconds` before it moves on, which is the order a
-rolling upgrade of the cluster needs ([run a cluster](/operate/cluster/)).
+pod at a time, highest ordinal first, and waits for each to be Ready (and, from Kubernetes 1.34,
+for `minReadySeconds`) before it moves on, which is the order a rolling upgrade of the cluster
+needs ([run a cluster](/operate/cluster/)).
 
 ```bash
 kubectl -n queen set image statefulset/queen queen=ghcr.io/queen-mq/queen:<new-version>
@@ -237,8 +246,9 @@ must take the change, because a RollingUpdate waits forever for pods that cannot
 
 ## Fixed at the first boot
 
-The peer addresses are stored in the raft log. Scaling the StatefulSet does not add a voter, and
-these settings cannot change on a live cluster without a recovery:
+The peer addresses are stored in the raft log. Scaling the StatefulSet does not add a voter (the
+[operator](/operate/operator/) does that through the membership API), and these settings cannot
+change on a live cluster without a recovery:
 
 - `replicas` (add or remove voters through the membership API, one at a time);
 - the StatefulSet, headless Service and namespace names, which are part of the peer names;
@@ -278,9 +288,10 @@ transactional producers against a single node. See [Kafka](/guides/kafka/) and i
 
 ## Limits
 
-Ready is not proof of a quorum. A pod that lost its majority, and an empty pod that never caught
-up, can keep answering `/health` with `200`, so alert on a write probe as well
-([monitoring](/operate/monitoring/)).
+Ready is not proof that the cluster commits. A pod that lost its majority answers `/health` with
+`503` five seconds later, and three failed probes after that make it NotReady. `/health` says that
+the leader hears from a majority, not that entries commit, so alert on a write probe as well
+([monitoring](/operate/monitoring/#a-write-probe)).
 
 Delete one PVC at a time, and remove the member first. In a rehearsal, deleting two voters' volumes
 at once left a cluster that could not commit while every pod reported Ready (`F11` in

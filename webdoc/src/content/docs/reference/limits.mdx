@@ -46,6 +46,10 @@ sourceOfTruth:
 # batcher.rs warns near the limit and facade/real.rs exports queen_raft_qlog_index_maps.
 # sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): the row for
 # how long the hashes are kept drops completedRetentionSeconds (maintenance.rs, queue_cutoffs).
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs,
+# facade/mod.rs, facade/real.rs, handlers/raft.rs change what /health answers (raft.quorumAckMs;
+# ready needs the leader's majority within QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states
+# changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling

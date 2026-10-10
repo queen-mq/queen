@@ -48,6 +48,8 @@ verifiedBy:
 # sealed for retention or its size and not for its age): facade/real.rs exports
 # queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): the /health sample
+# gains quorumAckMs (a single node of this build).
 ---
 
 You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the
@@ -65,7 +67,7 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
    ```
 
    ```json
-   {"status":"healthy","engine":"raft","version":"2.2.0","raft":{"role":"leader","leader":true,"term":1,"applied":1,"commit":1,"lag":0,"storageReady":true,"clusterVersion":6,"kinds":6}}
+   {"status":"healthy","engine":"raft","version":"2.2.0","raft":{"role":"leader","leader":true,"term":1,"applied":1,"commit":1,"lag":0,"quorumAckMs":0,"storageReady":true,"clusterVersion":6,"kinds":6}}
    ```
 
    That is the whole installation. There is no database to start first, because the node keeps

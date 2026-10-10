@@ -34,6 +34,9 @@ digest: >-
 # sealed for retention or its size and not for its age): facade/real.rs exports
 # queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/groups.rs,
+# facade/real.rs change what /health answers (raft.quorumAckMs; ready needs the leader's majority
+# within QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 Queen has one idea, and every concept page zooms into a part of it. Every entity gets an ordered

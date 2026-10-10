@@ -34,6 +34,8 @@ sourceOfTruth:
 # sealed for retention or its size and not for its age): facade/real.rs exports
 # queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused);
 # it is in the generated table.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): the raft block of
+# GET /metrics gains quorumAckMs.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node
@@ -62,7 +64,8 @@ own port with `QUEEN_PROXY_PORT` and scrape `PORT` from inside your network.
 
 `GET /metrics` is a JSON summary for the dashboard: `uptime`, request and message totals, the
 process's resident memory, and a `raft` block with this node's `role`, whether it knows a
-`leader`, its `term`, `applied` and `commit` indexes and its `lag`. It is not Prometheus.
+`leader`, its `term`, `applied` and `commit` indexes, its `lag` and its `quorumAckMs`
+([monitoring](/operate/monitoring/#health)). It is not Prometheus.
 
 ## Reading the replicated log
 

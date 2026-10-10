@@ -11,6 +11,9 @@ sourceOfTruth:
   - server/src/rsm/planner/push.rs
   - server/src/rsm/facade/groups.rs
   - protocols/queen-kafka/src/topic_config.rs
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/groups.rs
+# changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
+# QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 Two questions separate these systems more than any feature list: how you keep order per entity when

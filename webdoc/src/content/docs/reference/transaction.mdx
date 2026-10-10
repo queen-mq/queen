@@ -33,6 +33,9 @@ sourceOfTruth:
 # sealed for retention or its size and not for its age): facade/real.rs exports
 # queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/real.rs,
+# handlers/raft.rs change what /health answers (raft.quorumAckMs; ready needs the leader's majority
+# within QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 `POST /api/v1/transaction` is the call Queen was built around. It writes a worker's whole step

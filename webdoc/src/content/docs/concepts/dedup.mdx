@@ -36,6 +36,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): dedup.rs
 # changes its module comment only; a duplicate is still judged inside dedupWindowSeconds and
 # nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/real.rs
+# changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
+# QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 Every message carries a `transactionId`. Push the same id to the same partition again, inside the

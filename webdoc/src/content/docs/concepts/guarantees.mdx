@@ -31,6 +31,8 @@ sourceOfTruth:
 # the log store gains what a seed and a standby's reads need. A standby answers 503 `standby`
 # with nothing applied, and is asynchronous and untested by Jepsen: one sentence and one limit.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): replicator/mod.rs names one more propose error (`Unwritable`: a leader's log took no entry and the node still leads) and the call that drops a pipeline. No guarantee changes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): a node cut off from
+# the majority answers /health with 503 after five seconds; the limit says so.
 ---
 
 We test Queen with Jepsen, on five nodes, under kill -9, network partitions, process pauses, clock
@@ -127,9 +129,10 @@ exact build you run; the suite is in `test/jepsen/`, for you to run.
   wait for it. Promoting the standby after the cluster is lost gives up the acked writes the
   standby had not read yet, and nothing older: that, and a planned switch that loses nothing, is
   what the failover workload (W12) checks. Its runs are on the [Jepsen](/benchmarks/jepsen/) page.
-- A node cut off from the majority keeps answering `/health` with 200 while every write it takes
-  times out with a 503 after 30 seconds, so check that a cluster can commit with a write, not with
-  `/health`.
+- A node cut off from the majority answers `/health` with 200 for five more seconds and with 503
+  from then on, and every write it takes times out with a 503 after 30 seconds. `/health` says that
+  the leader hears from a majority, not that entries commit, so check that a cluster can commit
+  with a write.
 - Transactions are single calls, delivery is at-least-once, and a side effect outside Queen is
   outside any commit.
 

@@ -131,6 +131,16 @@ qlog active file bit flip or truncation, sealed qlog damage that the boot reads,
   (3.7 s) -> both remaining nodes 200 throughout. On 2.0.3 the survivor said healthy for good.
   Test: rsm::tests::raft_cluster::a_node_without_its_quorum_stops_reporting_ready (fails with the
   window at 0).
+- AGAIN 2026-10-10 on the 2.2.0 code, where the fix ships (health-quorum.py: three processes on
+  loopback, kill -9, three runs): the leader left alone answers 503 from +5.00 and +5.03 s
+  (quorumAckMs 5021; the first run's polling was blocked by its own probe), with a write through
+  it at +3 s still hanging (000 after 5 s); 200 again 1.1, 1.8 and 2.0 s after one node is
+  started; a leader failover took 3.8, 3.5 and 3.5 s, and the two survivors answered 200 through
+  it, apart from one 503 each at the instant of the election in the first run (no leader known).
+  A follower stopped, wiped and started under its id answers 503 from its first answer (learner,
+  applied 0, lag from the epoch). That run was a DEBUG build, on which the node then applied
+  everything within 3.6 s: no evidence about F1, which was reproduced on release images (sc03c
+  was not run again).
 
 ## F9 (design note, not a bug) — the disk gate protects a node only from its OWN clients
 - S5: node 3 on a smaller disk. At 85% its gate closes (pushes sent to it: 507), but writes taken by the

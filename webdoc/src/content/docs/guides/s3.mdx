@@ -37,6 +37,9 @@ sidebar:
 # queue log, not the rows, so the hold and the export are as described.
 # sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): maintenance.rs
 # changes how long a push's row is kept, not the sink's retention hold this page describes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs gains
+# QUEEN_RAFT_READY_QUORUM_MS (5000), the window of /health's new majority test. Nothing this page
+# states changes.
 ---
 
 The broker can mirror its queues into an S3-compatible bucket, as JSONL or Parquet files in a Hive

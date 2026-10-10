@@ -44,9 +44,9 @@ verifiedBy:
   - test/recovery/k8s-K3-skip.sh
 digest: >-
   Queen recovery (2.0.0-beta.6): `/health` answering 200 does not prove a cluster can commit,
-  because a node cut off from its majority keeps the last leader it knew; test with a write such
-  as `PUT /api/v1/kv/ops/probe` with a `ttlSeconds`, which answers within a second when the
-  cluster commits. A node whose disk is lost or damaged is replaced by removing it from the
+  because it says that the leader heard from a majority in the last five seconds and writes
+  nothing; test with a write such as `PUT /api/v1/kv/ops/probe` with a `ttlSeconds`, which answers
+  within a second when the cluster commits. A node whose disk is lost or damaged is replaced by removing it from the
   membership first (`DELETE /api/v1/system/raft/membership/members/:id`), wiping it, starting it
   empty and adding it back as a learner, then promoting it; a voter that comes back empty without
   being removed never catches up. A majority of disks lost for good needs
@@ -77,6 +77,9 @@ digest: >-
 # retired directories are as described. Later the same night qlog/set.rs lowers its written seq at a
 # raft cut, which removes a refusal at start (raft log entries not all in the queue logs) that was a
 # bug and is not one of the refusals this page lists.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): a node without its
+# majority answers 503 five seconds later, so the survivor's paragraphs say that; F8 and F2 leave
+# the table of gaps, and F1's row says what /health answers for that node.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and
@@ -116,10 +119,10 @@ included, because there is no peer to hand them to.
 ## A cluster: start with a write
 
 With three or five nodes, the question that decides everything is whether the cluster can still
-commit, and `/health` cannot tell you. A node that lost its majority keeps the last leader it knew,
-so it goes on answering `200 healthy` with `"leader":true`. In the beta.6 rehearsal, with two of
-three nodes killed, the survivor said exactly that for as long as we watched, while every write
-sent through it hung. So ask with a write:
+commit, and `/health` answers only part of it. A node that lost its majority says so five seconds
+later, with a `503` and a `quorumAckMs` that keeps growing. But `/health` reads what the node knows
+of its contact with the others and writes nothing: a cluster whose nodes still answer each other
+and commit nothing looks healthy to it. So ask with a write:
 
 <Tabs>
 <TabItem label="Plain hosts">
@@ -199,8 +202,8 @@ On a healthy cluster every node reports the same term and an `applied` close to 
 `commit`. The membership is the leader's own view (`"source":"leader"`) whenever the node you asked
 can reach a leader. When it cannot, the answer says `"source":"follower"`, its `viewAgeMs` keeps
 growing and every member shows `"live":false`. After the probe itself, that is the clearest sign of
-a lost majority: the survivor in the rehearsal answered with a view 60 s old while its `/health`
-still said `healthy`. A node that will not start names the reason in its last `FATAL` line, in
+a lost majority, and the node's own `/health` says the same with its `503` and a `quorumAckMs`
+that grows. A node that will not start names the reason in its last `FATAL` line, in
 `journalctl`, `docker logs` or `kubectl logs --previous`.
 
 ## Find your case
@@ -368,7 +371,7 @@ caught up, and none of 6,900 acknowledged writes was lost.
 ## A majority is down, the disks are fine
 
 Two nodes of three are gone for a while: a lost machine, a zone outage, an OOM storm, an image that
-will not pull. Nothing commits, and the survivor may still call itself healthy. Bring the missing
+will not pull. Nothing commits, and the survivor answers `/health` with `503`. Bring the missing
 nodes back. Do not delete any volume, and do not force-recover: as soon as a majority runs, they
 elect a leader and the rest catch up.
 
@@ -530,8 +533,8 @@ converging, the kept side's data was whole and the other side's 50 writes were g
 ### The peer addresses changed
 
 The membership lives in the log together with each node's raft and HTTP address. Rename the hosts,
-the namespace or the headless Service under a running cluster, and no node can reach another, while
-each may still call itself healthy. The best fix is to put the old names back. Otherwise run the
+the namespace or the headless Service under a running cluster, and no node can reach another. The
+best fix is to put the old names back. Otherwise run the
 [forced recovery](#a-majority-of-the-disks-is-gone-for-good) with any node as the survivor (they all
 hold the data): it takes its new address from `QUEEN_RAFT_PEERS`, and the others are rebuilt under
 their new names. The rehearsal (beta.1) changed the namespace in every address and came back that
@@ -541,7 +544,7 @@ move the clients.
 ### Configuration mistakes
 
 - `refused this node's QUEEN_RAFT_TOKEN`: one node has a different token and is cut off from the
-  others, possibly while it says healthy. Give it the same value and restart it.
+  others. Give it the same value and restart it.
 - Rotating the token on purpose works as a rolling restart: change it everywhere, restart one node
   at a time, and the nodes with the new token form a majority once two have restarted. The
   rehearsal (beta.1) cost one extra election; the slowest request took 11 s and none of 1,598 writes
@@ -562,14 +565,15 @@ and every change had completed first.
 ## Known gaps
 
 The rehearsals found most of these. They are open as of 2.0.4: we checked each one against
-the code of 2.0.4, and reproduced the first three on 2.0.0-beta.6. The procedures above work around every one;
-the details and the fixes we have in mind are in `test/recovery/FINDINGS.md`.
+the code of 2.0.4, and reproduced the first on 2.0.0-beta.6 and again on 2.0.3. The procedures
+above work around every one; the details and the fixes we have in mind are in
+`test/recovery/FINDINGS.md`. Two that used to be on this list are closed in 2.2.0: a node cut off
+from its majority, and a voter that came back empty, no longer answer `/health` with `200` (F8,
+F2).
 
 | Gap | What it means for you |
 |---|---|
-| A node cut off from its majority keeps answering `/health` 200 with `"leader":true` (F8) | Readiness stays green and an alert on `/health` never fires. Alert on the write probe |
-| A node that applied nothing reports `lag` 0 (F2) | An empty node stuck as a voter looks healthy. Compare its `applied` with the leader's `commit` |
-| A voter whose log went backwards is never repaired unless it was removed first (F1). On Kubernetes, two volumes deleted at once leave a cluster that cannot commit while every pod is Ready (F11) | Remove before you wipe, one node at a time |
+| A voter whose log went backwards is never repaired unless it was removed first (F1). Its `/health` answers `503` once the cluster is more than 1000 entries ahead of it, and `200` below that. On Kubernetes, two volumes deleted at once leave a cluster that cannot commit (F11) | Remove before you wipe, one node at a time |
 | Damage in an old, sealed queue-log file is not found at boot. Pops through that node answer `500 record checksum` with no ERROR line, and auto-ack consumers lose the batch they claimed (F3) | Replace the node. Reads through the other nodes are complete |
 | A deleted queue-log file, or a deleted `qlog/SHARDS`, is not detected at boot (F4, F6) | Never delete files in a data directory |
 | A bit flip in `store/data.mdb` can crash the boot with exit code 139 and no log line (F5) | Treat a silent 139 at boot as a damaged store and replace the node |

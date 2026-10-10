@@ -16,6 +16,9 @@ sourceOfTruth:
   - clients/client-js/client-v2/kv/Kv.js
 verifiedBy:
   - clients/client-js/test-v2/kv.js
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs gains
+# QUEEN_RAFT_READY_QUORUM_MS (5000), the window of /health's new majority test. Nothing this page
+# states changes.
 ---
 
 KV holds the state a step changes, in the same replicated log as the messages, so a state change
