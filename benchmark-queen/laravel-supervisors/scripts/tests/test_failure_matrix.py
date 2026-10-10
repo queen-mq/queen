@@ -124,6 +124,17 @@ class FailureMatrixChecksTest(unittest.TestCase):
         self.assertEqual([1, 2], running.attempts_of("000000", "event_before"))
         self.assertEqual([(1.0, 2.0), (4.0, None)], running.attempts("000000"), "five fields read as four")
 
+    def test_each_run_reports_the_code_its_worker_booted_with(self) -> None:
+        jobs = matrix.Jobs({"jobs": {"000000": {"events": [
+            ["event_before", 1, 0.0, None, 7, None],
+            ["started", 1, 0.1, None, 7, {"code": "build"}],
+            ["started", 2, 5.0, None, 9, {"code": "deployed-1"}],
+            ["started", 3, 9.0, None, 9],
+        ], "pids": [7, 9]}}})
+
+        self.assertEqual(["build", "deployed-1", None], jobs.codes("000000"), "an older report has no detail")
+        self.assertEqual([], jobs.codes("000001"))
+
     def test_the_summary_lists_failed_checks_and_errors(self) -> None:
         text = matrix.summary([
             {"scenario": "a", "profile": "queen", "passed": True, "checks": [{"name": "x", "passed": True}]},

@@ -63,7 +63,8 @@ class FailureMatrixJob implements ShouldQueue
     public function handle(FailureMatrixLog $log): void
     {
         $attempt = $this->attempts();
-        $log->record($this->runId, $this->jobId, $attempt, 'started', $this->mode);
+        $log->record($this->runId, $this->jobId, $attempt, 'started', $this->mode, null,
+            ['code' => app('bench.deployed_code')]);
 
         if ($this->mode === 'throw' || ($this->mode === 'throw-once' && $attempt === 1)) {
             $log->record($this->runId, $this->jobId, $attempt, 'threw', $this->mode);

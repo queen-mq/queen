@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use App\Queue\RoutedConnector;
 use App\Support\BenchmarkEffectLedger;
+use App\Support\DeployedCode;
 use App\Support\FailureMatrixLog;
 use App\Support\JsonlResultSink;
 use App\Support\RetryingBatchRepository;
@@ -48,6 +49,9 @@ final class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+        // Loaded at boot, as application code is: see DeployedCode.
+        $this->app->instance('bench.deployed_code', DeployedCode::VERSION);
+
         // The routed lanes' default connection, which only dispatches.
         Queue::extend('routed', fn (): RoutedConnector => new RoutedConnector($this->app));
 
