@@ -95,7 +95,9 @@ for a few seconds; each URL got one try with no delay, so a request failed and `
 request now waits at the pace of `Retry-After`, for at most 10 seconds or its timeout, after a 503
 that says it did not run (`no_leader`, `standby`); a read, or a push whose every message has a
 `transactionId`, also after `retry`. A pop whose 503 says it may have run is never sent again.
-`consume()` backs off after a 5xx and goes on polling, and reports an ACK that failed.
+`consume()` backs off after a 5xx and goes on polling, and reports an ACK that failed. Its automatic
+lease renewal (`renewLease()`) waits at most the renewal interval instead of the request timeout,
+encodes the lease id, and reports a renewal that failed or renewed nothing.
 
 **PHP client: failover tries every backend, and a redirect or an empty answer is no success.** With
 every URL marked unhealthy, as an election leaves them, a request went to the first URL only; it now
