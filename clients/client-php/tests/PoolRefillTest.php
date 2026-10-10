@@ -55,6 +55,61 @@ final class PoolRefillTest extends TestCase
         $this->assertSame(2, $this->refillAfterNineExits(longLived: false));
     }
 
+    /** A second stop signal during the drain does not signal the workers again. */
+    public function testTheStopSignalReachesTheWorkersOnce(): void
+    {
+        [$supervisor] = $this->supervisor();
+        $child = proc_open(
+            ['/bin/sh', '-c', "trap 'echo term >> \"\$0\"' TERM; : > \"\$0.ready\"; while :; do sleep 1 & wait \$!; done", $this->directory . '/terms'],
+            [],
+            $pipes,
+        );
+        try {
+            $pid = proc_get_status($child)['pid'];
+            $deadline = microtime(true) + 10;
+            while (!is_file($this->directory . '/terms.ready') && microtime(true) < $deadline) {
+                usleep(10_000);
+            }
+            (new ReflectionProperty($supervisor, 'workerPids'))->setValue($supervisor, [1 => $pid]);
+            $stop = new ReflectionMethod(PhpSupervisor::class, 'stopOnSignal');
+
+            // Apart, as a second signal during the drain comes: two at once would merge.
+            $stop->invoke($supervisor);
+            usleep(500_000);
+            $stop->invoke($supervisor);
+            usleep(500_000);
+
+            $this->assertSame(1, substr_count((string) @file_get_contents($this->directory . '/terms'), 'term'));
+        } finally {
+            proc_terminate($child, SIGKILL);
+            proc_close($child);
+        }
+    }
+
+    /** A replacement that cannot start is a crash: the next start waits for the circuit. */
+    public function testAReplacementThatCannotStartWaitsForTheCircuit(): void
+    {
+        [$supervisor, $options] = $this->supervisor(['stable_after' => 1, 'restart_backoff' => 30]);
+        try {
+            $this->fill($supervisor, $options, 3);
+            usleep(1_200_000);
+            posix_kill($this->pool($supervisor)[0]->getPid(), SIGTERM);
+            $this->reapUntil($supervisor, $options, 2);
+
+            // The working directory is gone, so no worker can start.
+            $config = $this->property($supervisor, 'config');
+            $config['cwd'] = $this->directory . '/gone';
+            (new ReflectionProperty($supervisor, 'config'))->setValue($supervisor, $config);
+            $this->reconcile($supervisor, $options, 3);
+            $this->reconcile($supervisor, $options, 3);
+
+            $this->assertSame([1], array_values($this->property($supervisor, 'crashCount')), 'the failing start was retried at once');
+            $this->assertCount(2, $this->pool($supervisor));
+        } finally {
+            $this->stop($supervisor);
+        }
+    }
+
     /**
      * Fill a pool of ten, stop nine cleanly, once they have run stable_after
      * (1 s) or at once, reconcile once: the size of the pool after it.

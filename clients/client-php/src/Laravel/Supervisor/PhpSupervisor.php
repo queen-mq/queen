@@ -64,6 +64,8 @@ final class PhpSupervisor
     private ReplicaCoordinator|false|null $coordinator = null;
     private ForkServerClient|false|null $forkServer = null;
     private ?OrphanReaper $orphanReaper = null;
+    /** The stop-signal handler has sent the workers their SIGTERM. */
+    private bool $workersSignalled = false;
     /**
      * Per pool, the workers that left as expected and are not replaced yet,
      * owed a replacement that neither balance_max_shift nor the restart
@@ -533,6 +535,8 @@ final class PhpSupervisor
                     }
                 } catch (\Throwable $error) {
                     $this->registerCrash($name, $queue, $options, $error->getMessage());
+                    // A start that fails is a crash: the next waits for the circuit.
+                    $this->vacancies[$key] = 0;
                     break;
                 }
             }
@@ -1554,6 +1558,12 @@ final class PhpSupervisor
     private function stopOnSignal(): void
     {
         $this->stop();
+        // Once: a second signal during the drain could reach a pid the drain
+        // already reaped, and another process may hold it by then.
+        if ($this->workersSignalled) {
+            return;
+        }
+        $this->workersSignalled = true;
         foreach ($this->workerPids as $pid) {
             if ($pid > 0) {
                 @posix_kill($pid, SIGTERM);
