@@ -1292,8 +1292,25 @@ impl QLogSet {
         for log in logs {
             dropped += log.write().expect("qlog poisoned").truncate_seq_from(cut)?;
         }
+        self.forget_written_from(cut);
         self.recompute_totals();
         Ok(dropped)
+    }
+
+    /// After a cut at `cut`: nothing at or above it is written, or durable,
+    /// any more. The idle pass seals a file FOR the writer's next seq
+    /// (`written_seq + 1`); counted from the tail the cut removed, that is
+    /// above the seqs the next records carry, and an entry written into a
+    /// file created for a later seq is not found by its seq
+    /// ([`QLog::lower_empty_first_seq`]). (Jepsen, 2026-10-09: a follower
+    /// whose tail a new leader had overruled sealed its system log in the
+    /// moment before the leader's entries arrived, and after the next kill
+    /// refused to start: "raft log entries 25213..25214 are not all in the
+    /// queue logs".)
+    fn forget_written_from(&mut self, cut: u64) {
+        let below = cut.saturating_sub(1);
+        self.written_seq = self.written_seq.min(below);
+        self.durable_seq = self.durable_seq.min(below);
     }
 
     /// A Raft truncation of every log at `cut`: [`QLog::truncate_seq_from_across`]
@@ -1317,6 +1334,7 @@ impl QLogSet {
                 .expect("qlog poisoned")
                 .truncate_seq_from_across(cut)?;
         }
+        self.forget_written_from(cut);
         self.recompute_totals();
         Ok(dropped)
     }
@@ -1480,7 +1498,7 @@ impl QLogSet {
         let (f0, b0, file_id, base, fd) = {
             let g = log.read().expect("qlog poisoned");
             let (f0, b0) = (g.file_count() as u64, g.bytes());
-            if g.write_ready() {
+            if g.write_ready(records[0].seq()) {
                 let (id, base) = g.write_target();
                 (f0, b0, id, base, g.active_handle()?)
             } else {

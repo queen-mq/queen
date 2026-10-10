@@ -2810,6 +2810,133 @@ fn a_run_never_answers_for_a_file_that_was_cut_back_and_written_again() {
     check(&q, &truth, "after a reopen");
 }
 
+/// The same in the other order: the cut comes first, and the idle pass then
+/// seals a file and creates the next one for the seq the writer had reached
+/// BEFORE the cut. The entries the log takes next begin at the cut, below the
+/// seq that file was created for, and must be found by their seq, before and
+/// after a reopen. (Jepsen, 2026-10-09, the queue under kills on files sealed
+/// after 10 s: a follower's tail was overruled at entry 25213, its system log
+/// was sealed in the moment before the new leader's entries arrived, and
+/// after the next kill it refused to start: "raft log entries 25213..25214
+/// are not all in the queue logs (0 found)".)
+#[test]
+fn an_entry_written_into_a_file_created_for_a_later_seq_is_found() {
+    use super::{EntryInput, WriteRecord};
+    let td = TmpDir::new("late-first-seq");
+    let opts = QLogOptions::testing(1 << 20);
+    let (mut q, _) = QLog::open(td.path(), 31, opts).unwrap();
+    let entry = |q: &mut QLog, seq: u64| {
+        let e = entry_bytes(seq);
+        q.write_mixed(&[WriteRecord::Entry(EntryInput {
+            seq,
+            now_us: seq as i64,
+            copies: 1,
+            term: 4,
+            entry: &e,
+        })])
+        .unwrap();
+    };
+    // One seq at a time, as a restart asks: a file that claims to begin above
+    // the seq is not read.
+    let seqs = |q: &QLog| -> Vec<u64> {
+        (1..9u64)
+            .flat_map(|seq| q.entry_parts_between(seq, seq + 1).unwrap())
+            .map(|p| p.seq())
+            .collect()
+    };
+    for seq in 1..=5 {
+        entry(&mut q, seq);
+    }
+    q.sync().unwrap();
+    // A new leader overrules 4 and 5.
+    assert!(q.truncate_seq_from_across(4).unwrap() > 0);
+    // The file is sealed for the seq after the old tail, 6.
+    assert!(q.seal_active(6).unwrap());
+    assert_eq!(q.files().last().unwrap().first_seq, 6);
+    // The new leader's 4, 5 and 6 arrive.
+    entry(&mut q, 4);
+    assert_eq!(
+        q.files().last().unwrap().first_seq,
+        4,
+        "the file begins where its first record does"
+    );
+    entry(&mut q, 5);
+    entry(&mut q, 6);
+    q.sync().unwrap();
+    assert_eq!(seqs(&q), [1, 2, 3, 4, 5, 6]);
+    assert_eq!(q.durable_tail(), 6);
+    drop(q);
+    let (q, _) = QLog::open(td.path(), 31, opts).unwrap();
+    assert_eq!(seqs(&q), [1, 2, 3, 4, 5, 6], "after a reopen");
+    assert_eq!(q.durable_tail(), 6);
+    let firsts: Vec<u64> = q.files().iter().map(|f| f.first_seq).collect();
+    assert_eq!(firsts, [1, 4]);
+}
+
+/// And where it starts: a set that cut its logs back no longer counts the
+/// writer's next seq from the tail the cut removed, so the file the idle pass
+/// creates after the cut is created for the seq that comes next.
+#[test]
+fn after_a_cut_the_idle_pass_seals_for_the_seq_that_comes_next() {
+    use super::set::{QLogSet, SYSTEM_QUEUE_ID};
+    use super::{EntryInput, WriteRecord};
+    let td = TmpDir::new("cut-then-seal");
+    let root = td.path().join("qlog");
+    let mut set = QLogSet::new(root.clone(), QLogOptions::testing(1 << 20));
+    set.reopen_all().unwrap();
+    set.set_recovery_floor(u64::MAX);
+    let entry = |set: &mut QLogSet, seq: u64| {
+        let e = entry_bytes(seq);
+        set.write_mixed_for_qid(
+            SYSTEM_QUEUE_ID,
+            &[WriteRecord::Entry(EntryInput {
+                seq,
+                now_us: 1_000 + seq as i64,
+                copies: 1,
+                term: 4,
+                entry: &e,
+            })],
+        )
+        .unwrap();
+    };
+    let last_first = |set: &QLogSet| {
+        let l = set.log(SYSTEM_QUEUE_ID).expect("the system log");
+        let g = l.read().unwrap();
+        (g.file_count(), g.files().last().unwrap().first_seq)
+    };
+    for seq in 1..=5 {
+        entry(&mut set, seq);
+    }
+    set.sync().unwrap();
+    assert!(set.truncate_from_across(4).unwrap() > 0, "4 and 5 go");
+    // The system log has aged: the idle pass seals it. The next seq is 4.
+    let far = super::wall_now_us() + 3_600_000_000;
+    set.idle_pass(far, std::time::Duration::from_secs(600))
+        .unwrap();
+    assert_eq!(
+        last_first(&set),
+        (2, 4),
+        "sealed, and the new file is for seq 4"
+    );
+    for seq in 4..=6 {
+        entry(&mut set, seq);
+    }
+    set.sync().unwrap();
+    let found = |set: &QLogSet| -> Vec<u64> {
+        let l = set.log(SYSTEM_QUEUE_ID).expect("the system log");
+        let g = l.read().unwrap();
+        (1..9u64)
+            .flat_map(|seq| g.entry_parts_between(seq, seq + 1).unwrap())
+            .map(|p| p.seq())
+            .collect()
+    };
+    assert_eq!(found(&set), [1, 2, 3, 4, 5, 6]);
+    drop(set);
+    let mut set = QLogSet::new(root, QLogOptions::testing(1 << 20));
+    assert_eq!(set.reopen_all().unwrap(), 6, "the tail a restart finds");
+    assert_eq!(found(&set), [1, 2, 3, 4, 5, 6], "after a restart");
+}
+
 /// A raft cut can fall below the first seq of an active file that holds
 /// nothing yet: the idle pass sealed the file before it and created this one
 /// for the writer's next seq, and the entries from the cut on were then

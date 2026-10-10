@@ -1253,18 +1253,28 @@ impl QLog {
             if sz > FILE_HEADER_LEN && sz >= self.opts.segment_bytes {
                 self.roll(first_seq)?;
             }
+            // A file is created FOR a seq, and its first record must not be
+            // below it ([`QLog::lower_empty_first_seq`]): whatever created
+            // this one, it begins where its first record does.
+            self.lower_empty_first_seq(first_seq)?;
         }
         Ok(self.write_target())
     }
 
-    /// Whether the next group goes into the active file as it stands (no
-    /// create, no roll): then [`QLog::write_target`] is where.
-    pub(crate) fn write_ready(&self) -> bool {
+    /// Whether the next group, whose first record carries `first_seq`, goes
+    /// into the active file as it stands (no create, no roll, no first seq
+    /// to lower): then [`QLog::write_target`] is where.
+    pub(crate) fn write_ready(&self, first_seq: u64) -> bool {
         if self.active.is_none() {
             return false;
         }
         let sz = self.active_len();
-        !(sz > FILE_HEADER_LEN && sz >= self.opts.segment_bytes)
+        if sz > FILE_HEADER_LEN {
+            return sz < self.opts.segment_bytes;
+        }
+        // Empty: ready unless it was created for a later seq
+        // ([`QLog::prepare_write`] lowers it under the write lock).
+        self.files.last().is_some_and(|m| m.first_seq <= first_seq)
     }
 
     /// `(active file id, logical end)`: where the next group's bytes go.
@@ -2979,16 +2989,19 @@ impl QLog {
         Ok(dropped)
     }
 
-    /// After a cut at `cut`: an active file that holds no record does not keep
-    /// a first seq above the cut. A file is created FOR a seq (a roll, for
-    /// the group about to be written; the idle pass, for the writer's next
-    /// seq: [`QLog::seal_active`]), and once the entries from `cut` on are
-    /// dropped, the next record this log takes may carry any seq from `cut`
-    /// up. Left as it was, the header says the file holds nothing below a seq
-    /// that its first record is below, and a search by seq skips the file
-    /// ([`QLog::entry_parts_between`]): the entry is on disk and cannot be
-    /// read, by this node when it restarts or for a follower that needs it.
-    /// Durable before a record reuses those seqs, as the cut is.
+    /// An active file that holds no record does not keep a first seq above
+    /// `cut`: the seq a raft cut dropped the log back to
+    /// ([`QLog::truncate_seq_from`]), or the seq of the record about to be
+    /// written into it ([`QLog::prepare_write`]). A file is created FOR a seq
+    /// (a roll, for the group about to be written; the idle pass, for the
+    /// writer's next seq: [`QLog::seal_active`]), and a cut makes the log's
+    /// next record carry a lower one, whether the cut came after the file was
+    /// created or before it (the idle pass then still counted from the tail
+    /// the cut removed). Left as it was, the header says the file holds
+    /// nothing below a seq that its first record is below, and a search by
+    /// seq skips the file ([`QLog::entry_parts_between`]): the entry is on
+    /// disk and cannot be read, by this node when it restarts or for a
+    /// follower that needs it. Durable before a record takes that seq.
     fn lower_empty_first_seq(&mut self, cut: u64) -> io::Result<()> {
         let Some(last) = self.files.last().copied() else {
             return Ok(());
@@ -3004,13 +3017,19 @@ impl QLog {
             fsync_file(&f, self.opts.fsync)?;
         }
         self.files.last_mut().expect("active meta").first_seq = cut;
+        // The file before it holds nothing at or above this one's first seq.
+        let n = self.files.len();
+        if n >= 2 && self.files[n - 2].sealed {
+            let prev = &mut self.files[n - 2];
+            prev.max_seq = prev.max_seq.min(cut.saturating_sub(1));
+        }
         tracing::info!(
             target: "rsm",
             queue = self.queue_id,
             file = last.id,
             was = last.first_seq,
-            cut,
-            "rsm qlog: an empty file created for a later seq starts at the cut",
+            now = cut,
+            "rsm qlog: an empty file created for a later seq begins lower",
         );
         Ok(())
     }
