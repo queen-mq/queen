@@ -52,6 +52,13 @@ sourceOfTruth:
 # takes its connection's; the failed-job provider leaves other drivers' records to Laravel,
 # without the lock; the connector applies the pool's settings to the worked connection alone. The
 # pool row says so.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
+# registers WorkerPopGuard, QueenQueue::pop reports to it, and `queen:supervisor status --json` lists
+# the workers that do not consume; `--check` also fails after a minute of failed pops. The rehearsal
+# still asks for `--check` to pass. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue throws
+# UnsafeJobTimeoutException, a LogicException with the same message, for a job timeout its lease
+# cannot cover, so a supervised worker exits; the paragraph on that refusal says so.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place
@@ -348,8 +355,9 @@ pool's `timeout` declares a longer `$timeout` in its class.
 Without renewal, the driver refuses a job whose own `$timeout` is not shorter than `retry_after`,
 and a job with `$timeout = 0`, which would run with no limit at all. The worker reports the error
 and leaves the job, which comes back after its lease expires and is refused again: it never runs
-and never reaches `tries`. Give the job a `$timeout` above 0 and below `retry_after`, raise
-`retry_after`, or turn renewal on.
+and never reaches `tries`. Since PHP client 2.4.2 a worker started by a supervisor also exits, so
+its pool's restarts show the error in `queen:supervisor status`. Give the job a `$timeout` above 0
+and below `retry_after`, raise `retry_after`, or turn renewal on.
 
 A large `retry_after` also costs more on Queen than on Redis. When a worker dies, its lease holds
 the whole stripe, so the jobs behind its job wait up to `retry_after` seconds, unless its renewer

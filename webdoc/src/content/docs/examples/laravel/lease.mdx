@@ -23,6 +23,13 @@ verifiedBy:
 # pool's environment settings to the worked connection alone and keeps a connection's own url over
 # the default urls; SupervisorConfiguration takes a pool's queue and consumer_group from its
 # connection. The lease timing this page measures is unchanged; nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenQueue::pop tells a
+# supervised worker's WorkerPopGuard how each pop went, around the same pop; leases, fencing and
+# renewal are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
+# delivery that carries no Laravel job in the dead-letter queue at once, and a job timeout its lease
+# cannot cover throws UnsafeJobTimeoutException, the same message; this page's lease, expiry and
+# refusal are unchanged. Nothing this page states changes.
 ---
 
 Without lease renewal, a job that runs longer than `retry_after` goes to a second worker while the

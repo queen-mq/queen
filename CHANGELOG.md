@@ -16,6 +16,60 @@ backoff no longer closes it, which only the probe does, as in the PHP engine. Th
 longer lets a pool that balances inherit its own `QUEEN_LARAVEL_BLOCK_FOR`. These changes need a
 supervisor release; the worker-invocation record pins them.
 
+**Laravel: a supervised worker that cannot consume leaves, or says so.** Laravel's worker catches
+what a pop throws, reports it, sleeps a second and pops again, for as long as it lives, so a worker
+whose every pop failed stayed alive and counted as capacity: with the PHP client 2.3.1, forked
+workers that popped from a default connection that only dispatched threw on every pop for half an
+hour while `queen:supervisor status` said ready, at full capacity, with closed circuits. A worker
+started by either engine, spawned or forked, now tells two cases apart. When its loop works
+another connection than its pool's, or a pop on the pool's connection throws a `LogicException`
+(`InvalidArgumentException` included), no retry can help: it throws `WorkerCannotConsume` from its
+next loop, which reaches the application's exception handler, and exits 1, which both engines
+count as a crash, so the pool's restarts back off and its circuit opens. Any other failure, a
+broker that is down, slow or refusing, leaves the worker running, since restarting every worker of
+every pool would turn a short outage into a restart storm: the worker writes `<pid>.pop-failures`
+in the state directory's private `exits` directory, saying since when its pops fail, and the first
+pop that works, empty or not, removes it. A healthy worker writes nothing. `SupervisorState`
+reads the file for the workers a pool lists: `readiness()` reports `pool_not_consuming` when every
+running worker of a pool has failed every pop for 60 seconds, and `capacityHealth()` reports
+`pool_worker_not_consuming` when any has, so `queen:supervisor status --check` and
+`--check-capacity` fail; a shorter outage reports nothing, and the issues clear on their own.
+`status --json` lists those workers on each entry of `pool_status`, in `not_consuming` with the
+longest in `not_consuming_seconds`, however short their failure, for monitors with thresholds of
+their own. It works with the supervisor 0.8.0: both engines already pass the directory to their
+workers and empty it for every generation. The issue codes `status --json` reports are now listed
+in the supervisor guide as a stable contract.
+
+What an application sees change: a supervised worker may now exit 1 with `WorkerCannotConsume`
+where it used to loop on the same exception; workers write `exits/<pid>.pop-failures` in the state
+directory while their pops fail; and `readiness()` and `capacityHealth()`, with `status --check`
+and `--check-capacity`, report two new codes, `pool_not_consuming` and
+`pool_worker_not_consuming`. A readiness probe that passed during a broker outage now fails once
+the outage lasts 60 seconds; the Kubernetes guide shows how to leave these codes out of a probe
+that must not stop a rollout.
+
+**Laravel: a delivery that carries no Laravel job goes to the dead-letter queue at once.** A
+message whose data is not a JSON object, or names no `job` to call, made `pop()` throw, and the
+delivery was left to its lease. A lease expiry never charges the queue's retry limit, which only a
+failed ACK does (checked on the 2.0.4 broker with `retryLimit` 3 and `dlqAfterMaxRetries`: six
+expiries, six deliveries, no dead letter), so it came back at every expiry, forever, and the
+messages behind it on its partition never ran; on a queue with one partition, none did. The worker
+now files it into the dead-letter queue at its first delivery, as it does a failed job, reports a
+`NotALaravelJobException` to the application's exception handler with the delivery's transaction ID,
+queue, partition, delivery attempt and first 120 bytes, the same text as the dead-letter error, and
+pops again. No `failed_jobs` row is written: it was never a Laravel job. Since the PHP client 1.0.
+A Laravel job that fails for the last time also goes to the dead-letter queue, as before, beside
+its `failed_jobs` row, so a count of dead letters includes ordinary failures: the error text
+"carries no Laravel job" tells the deliveries of this paragraph from them.
+
+**Laravel: a job whose timeout its lease cannot cover ends a supervised worker.** A job with a
+`timeout` at or above `retry_after`, without lease renewal, made `pop()` throw a
+`RuntimeException` and was left to its lease, silently, at every delivery. Only a deploy fixes the
+job class or the connection, so the exception is now an `UnsafeJobTimeoutException`, a
+`LogicException` with the same message, and a worker started by a supervisor leaves at its next
+loop: its pool's restarts back off and the crash shows in `queen:supervisor status`. The delivery
+waits, to lease expiry, for a worker that runs the fixed code.
+
 ## PHP client 2.4.1 - 2026-10-09
 
 **Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the

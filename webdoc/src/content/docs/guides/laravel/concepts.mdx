@@ -80,6 +80,10 @@ sourceOfTruth:
 # resolved, reports a child's exception and leaves at once after queue:restart; QueenConnector
 # applies the pool's environment to the worked connection alone; the failed-job provider leaves
 # other drivers to Laravel. The failed-jobs and restart paragraphs say so.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): a supervised worker
+# leaves on a wrong connection or a LogicException from its pop, and otherwise writes since when its
+# pops fail beside its exit marker (WorkerExitMarker writes both); the fork server's child registers
+# the guard. The paragraph on a forked worker's files says so.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,
@@ -169,7 +173,9 @@ the stripes (`laravel`).
    the job and queues it again in one broker transaction. A job that fails for the last time is
    filed into the dead-letter queue with its error, and Laravel writes its `failed_jobs` row.
 5. **Crash.** A worker that dies sends no ACK. When the lease expires, the broker delivers the job
-   again.
+   again, as the next attempt: Laravel counts the runs the payload records plus the broker's
+   deliveries of it, so a job that kills its worker every time fails at `tries` like any other. An
+   expiry never charges the queue's own `retryLimit`, which only a failed ACK does.
 
 <Figure id="laravel/job-life" />
 
@@ -271,6 +277,17 @@ step. If the broker cannot be reached, the Laravel row stays and the command can
 `queue:retry` also resets the attempt count. Use these commands, or the dashboard's Retry button,
 which runs `queue:retry`: a replay from the Queen dashboard's dead-letter page knows nothing about
 `failed_jobs`.
+
+A delivery that carries no Laravel job, such as a message another producer pushed onto the queue,
+never will. Since PHP client 2.4.2 the worker files it into the dead-letter queue at its first
+delivery and reports it to the application's exception handler, with its transaction ID, partition,
+delivery attempt and first bytes; there is no `failed_jobs` row, so it shows only on the Queen
+dashboard's dead-letter page. Before, it was left to its lease, and since an expiry never charges
+the retry limit it came back forever and held its partition: on a queue with one partition, the
+whole queue. A job whose timeout its lease cannot cover (`timeout` at or above `retry_after`
+without lease renewal) is the opposite case: only a deploy fixes it, so a worker under a
+supervisor leaves, its pool shows the crash, and the job waits, to lease expiry, for a worker that
+runs the fixed code.
 
 A failed payload carries a retry ID of its own, fixed when the job fails. `queue:retry` pushes the
 job again under that ID instead of the job's UUID, so the deduplication record of the original
@@ -458,7 +475,8 @@ master, exactly as with a worker started on its own.
 - **The files** sit in private directories (mode 0700) of the master's state directory, written to
   a temporary name and renamed, so the master never reads half a file. Runtimes are written only
   for pools that scale with the `time` strategy. The exit reason tells a job timeout from a crash,
-  and `restart` makes the master start a new fork server.
+  and `restart` makes the master start a new fork server. A worker whose pops fail writes since
+  when beside its exit marker, until a pop works ([status](/guides/laravel/supervisors/#inspect-and-control-either-engine)).
 - **When the master dies,** the fork server sees its stdin close, or on Linux gets SIGTERM as its
   parent-death signal, and SIGKILLs every worker it forked. No worker outlives its master.
 - **Nothing the boot opened is shared.** The fork server closes the database and Redis connections,

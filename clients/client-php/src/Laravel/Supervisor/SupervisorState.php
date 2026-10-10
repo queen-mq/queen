@@ -18,6 +18,17 @@ final class SupervisorState
 
     private const MAX_EXIT_MARKER_ENTRIES = 8192;
 
+    /**
+     * A worker whose pops have all failed for this long is not consuming:
+     * readiness() and capacityHealth() report it. A shorter broker outage
+     * reports nothing. See WorkerPopGuard.
+     */
+    public const NOT_CONSUMING_AFTER_SECONDS = 60;
+
+    private const MAX_POP_FAILURES_BYTES = 2048;
+
+    private const MAX_POP_FAILURE_ERROR_BYTES = 512;
+
     private const DEFAULT_STALE_AFTER_SECONDS = 60;
 
     private const DEFAULT_CONTROL_TTL_SECONDS = 3600;
@@ -314,6 +325,12 @@ final class SupervisorState
                 || $pool['depth'] < 0) {
                 $issues[] = ['code' => 'queue_depth_unavailable', ...$identity];
             }
+            // Alive is not serving: every worker the pool has left has failed
+            // every pop for a while.
+            $running = $this->runningPids($pool);
+            if ($running !== [] && count($this->longNotConsuming($status, $pool)) === count($running)) {
+                $issues[] = ['code' => 'pool_not_consuming', ...$identity];
+            }
         }
 
         return ['ready' => $issues === [], 'issues' => $issues];
@@ -354,10 +371,166 @@ final class SupervisorState
                         'queue' => is_string($pool['queue'] ?? null) ? $pool['queue'] : '?',
                     ];
                 }
+                if ($this->longNotConsuming($status, $pool) !== []) {
+                    $issues[] = [
+                        'code' => 'pool_worker_not_consuming',
+                        'supervisor' => is_string($pool['supervisor'] ?? null) ? $pool['supervisor'] : '?',
+                        'queue' => is_string($pool['queue'] ?? null) ? $pool['queue'] : '?',
+                    ];
+                }
             }
         }
 
         return ['healthy' => $issues === [], 'issues' => $issues];
+    }
+
+    /**
+     * The workers of a pool whose pops have all failed since some moment,
+     * longest first, from the file each leaves in exits/ (WorkerPopGuard).
+     * Every one is listed, however short its failure: a monitor may apply a
+     * threshold of its own. Only the pids the status lists are read, so a
+     * file a dead worker left counts for nothing; and only for a status
+     * written on this host, whose pids are this host's processes.
+     *
+     * @param array<string, mixed> $status
+     * @param array<string, mixed> $pool one entry of the status's pool_status
+     * @return list<array{pid:int,seconds:int,failures:int,error:?string}>
+     */
+    public function workersNotConsuming(array $status, array $pool): array
+    {
+        $hostname = $status['hostname'] ?? null;
+        $running = $this->runningPids($pool);
+        if ($running === [] || (is_string($hostname) && $hostname !== '' && $hostname !== gethostname())) {
+            return [];
+        }
+        try {
+            $directory = $this->existingDirectoryMetadata();
+        } catch (RuntimeException) {
+            // Reading the status itself reports an unsafe directory.
+            return [];
+        }
+        $exits = $this->path('exits');
+        $exitsMetadata = @lstat($exits);
+        if ($directory === null
+            || !is_array($exitsMetadata)
+            || ($exitsMetadata['mode'] & 0170000) !== 0040000
+            || ($exitsMetadata['mode'] & 07777) !== 0700
+            || ($exitsMetadata['uid'] ?? null) !== ($directory['uid'] ?? null)) {
+            return [];
+        }
+        $now = time();
+        $workers = [];
+        foreach ($running as $pid) {
+            $document = $this->readPopFailures($exits . DIRECTORY_SEPARATOR . $pid . WorkerPopGuard::FILE_SUFFIX, $directory['uid']);
+            $since = $document['failing_since'] ?? null;
+            $failures = $document['failures'] ?? null;
+            if (!is_int($since) || $since < 1 || $since > $now + self::CLOCK_SKEW_SECONDS
+                || !is_int($failures) || $failures < 1) {
+                continue;
+            }
+            $error = $document['error'] ?? null;
+            $workers[] = [
+                'pid' => $pid,
+                'seconds' => max(0, $now - $since),
+                'failures' => $failures,
+                'error' => is_string($error)
+                    ? substr((string) preg_replace('/[\x00-\x1F\x7F]+/', ' ', $error), 0, self::MAX_POP_FAILURE_ERROR_BYTES)
+                    : null,
+            ];
+        }
+        usort($workers, static fn (array $left, array $right): int => [$right['seconds'], $left['pid']]
+            <=> [$left['seconds'], $right['pid']]);
+
+        return $workers;
+    }
+
+    /**
+     * The status with, on each pool_status entry, `not_consuming`: the
+     * workersNotConsuming() of the pool, and `not_consuming_seconds`: how
+     * long the first of them has not consumed, null when none.
+     *
+     * @param array<string, mixed> $status
+     * @return array<string, mixed>
+     */
+    public function withWorkersNotConsuming(array $status): array
+    {
+        $pools = $status['pool_status'] ?? null;
+        if (!is_array($pools) || !array_is_list($pools)) {
+            return $status;
+        }
+        $status['pool_status'] = array_map(function (mixed $pool) use ($status): mixed {
+            if (!is_array($pool)) {
+                return $pool;
+            }
+            $workers = $this->workersNotConsuming($status, $pool);
+
+            return [...$pool, 'not_consuming' => $workers, 'not_consuming_seconds' => $workers[0]['seconds'] ?? null];
+        }, $pools);
+
+        return $status;
+    }
+
+    /**
+     * The workers of a pool that have not consumed for NOT_CONSUMING_AFTER_SECONDS.
+     *
+     * @return list<array{pid:int,seconds:int,failures:int,error:?string}>
+     */
+    private function longNotConsuming(array $status, array $pool): array
+    {
+        return array_values(array_filter(
+            $this->workersNotConsuming($status, $pool),
+            static fn (array $worker): bool => $worker['seconds'] >= self::NOT_CONSUMING_AFTER_SECONDS,
+        ));
+    }
+
+    /** @return list<int> the distinct pids of a pool's running workers */
+    private function runningPids(array $pool): array
+    {
+        $pids = $pool['pids'] ?? null;
+        if (!is_array($pids) || !array_is_list($pids)) {
+            return [];
+        }
+
+        return array_values(array_unique(array_filter($pids, static fn (mixed $pid): bool => is_int($pid) && $pid > 0)));
+    }
+
+    /**
+     * A worker's pop-failures document: a small private regular file of the
+     * state's owner, never through a symbolic link; null otherwise.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function readPopFailures(string $path, int $owner): ?array
+    {
+        $metadata = @lstat($path);
+        if (!is_array($metadata)
+            || ($metadata['mode'] & 0170000) !== 0100000
+            || ($metadata['mode'] & 07777) !== 0600
+            || ($metadata['uid'] ?? null) !== $owner
+            || $metadata['size'] < 1
+            || $metadata['size'] > self::MAX_POP_FAILURES_BYTES) {
+            return null;
+        }
+        $handle = @fopen($path, 'rb');
+        if ($handle === false) {
+            return null;
+        }
+        $opened = fstat($handle);
+        $contents = false;
+        // The inode inspected above, not whatever the name points to now.
+        if (is_array($opened)
+            && ($opened['mode'] & 0170000) === 0100000
+            && $opened['dev'] === $metadata['dev']
+            && $opened['ino'] === $metadata['ino']) {
+            $contents = stream_get_contents($handle, self::MAX_POP_FAILURES_BYTES + 1);
+        }
+        fclose($handle);
+        if (!is_string($contents) || $contents === '' || strlen($contents) > self::MAX_POP_FAILURES_BYTES) {
+            return null;
+        }
+        $document = json_decode($contents, true, 4);
+
+        return is_array($document) ? $document : null;
     }
 
     /**

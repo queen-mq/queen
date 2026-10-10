@@ -67,6 +67,12 @@ sourceOfTruth:
 # pool takes its connection's queue and consumer_group; the connector scopes the pool's
 # environment to the worked connection. Nothing this page states changes; the versions table gains
 # 2.4.1 at its release.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
+# registers WorkerPopGuard and QueenQueue::pop reports to it, under a supervisor only. Nothing this
+# page states changes.
+# sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
+# delivery that carries no Laravel job in the dead-letter queue at once. Nothing this page states
+# changes.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and

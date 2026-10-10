@@ -60,6 +60,7 @@ class SupervisorControlCommand extends Command
             $status['readiness_issues'] = $readiness['issues'];
             $status['processing_healthy'] = $capacity['healthy'];
             $status['processing_health_issues'] = $capacity['issues'];
+            $status = $state->withWorkersNotConsuming($status);
             if ($this->option('json')) {
                 $this->line(json_encode($status, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
             } else {
