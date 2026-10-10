@@ -8454,6 +8454,62 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
         );
     }
 
+    /// A SIGSTOPped worker holds its reserved job and runs nothing, yet
+    /// try_wait sees it running and the status counts it as ready capacity,
+    /// for as long as it stays stopped.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "verified defect, policy not decided: resume it (SIGCONT), replace it, \
+                or only stop counting it as ready capacity"]
+    fn a_stopped_worker_is_not_ready_capacity() {
+        let directory = temporary_directory("stopped-worker");
+        let state = State::acquire(directory.to_str().unwrap()).unwrap();
+        let resolved = config(options("auto"));
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut worker = sleeping_worker(false);
+        signal_worker(&mut worker.child, libc::SIGSTOP);
+        let mut pools = Pools::from([(key.clone(), vec![worker])]);
+        let mut restarts = RestartStates::new();
+        thread::sleep(Duration::from_millis(100));
+        reap(
+            &resolved,
+            &mut pools,
+            &mut restarts,
+            &mut PendingTelemetryCleanup::new(),
+            None,
+        );
+        let desired = HashMap::from([(
+            "default".to_owned(),
+            HashMap::from([("high".to_owned(), 1), ("default".to_owned(), 0)]),
+        )]);
+        let depths = HashMap::from([(
+            "default".to_owned(),
+            HashMap::from([("high".to_owned(), 5), ("default".to_owned(), 0)]),
+        )]);
+        let status = state
+            .write_status(
+                "rust",
+                "running",
+                StatusSnapshot {
+                    config: &resolved,
+                    pools: &pools,
+                    restarts: &restarts,
+                    draining: &Draining::new(),
+                    desired: &desired,
+                    depths: &depths,
+                    depths_available: &HashMap::from([("default".to_owned(), true)]),
+                    replicas: &HashMap::new(),
+                },
+            )
+            .unwrap();
+        kill_pools(&mut pools);
+        drop(state);
+        fs::remove_dir_all(directory).unwrap();
+
+        assert_eq!(status["pool_status"][0]["queue"], "high");
+        assert_eq!(status["pool_status"][0]["ready"], false, "{status}");
+    }
+
     /// The broker calls of a stop (coordination leave, remote status) may
     /// take http_timeout per endpoint on a slow broker: they run only once
     /// every worker has its SIGTERM.
