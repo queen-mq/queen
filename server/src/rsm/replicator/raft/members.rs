@@ -640,6 +640,149 @@ mod tests {
         assert_eq!(st.kinds, None);
     }
 
+    /// What `/health` judges a node's contact with the cluster by (F8): the
+    /// silence of the voter that completes the majority, as the leader this
+    /// node follows saw it, aged by the copy.
+    #[test]
+    fn the_quorum_figure_is_the_silence_of_the_voter_that_completes_the_majority() {
+        let cm = |silences: &[Option<u64>], voters: usize, age: Option<u64>| {
+            let members = silences
+                .iter()
+                .enumerate()
+                .map(|(i, ms)| MemberSeen {
+                    id: i as u64 + 1,
+                    voter: i < voters,
+                    http: String::new(),
+                    raft: String::new(),
+                    last_ack_ms: *ms,
+                    matched: None,
+                    kinds: None,
+                })
+                .collect();
+            ClusterMembers {
+                node_id: 1,
+                leader: Some(1),
+                term: 7,
+                view: Some(MembersView {
+                    leader: 1,
+                    term: 7,
+                    members,
+                }),
+                view_age: age.map(Duration::from_millis),
+            }
+        };
+        let ms = |c: ClusterMembers| c.quorum_ack_age().map(|d| d.as_millis() as u64);
+
+        // A leader (its own silence 0) with both followers answering: the
+        // second voter completes the majority of three.
+        assert_eq!(ms(cm(&[Some(0), Some(40), Some(90)], 3, Some(0))), Some(40));
+        // One follower dead: the other still completes it.
+        assert_eq!(
+            ms(cm(&[Some(0), Some(60), Some(90_000)], 3, Some(0))),
+            Some(60)
+        );
+        // Both silent: the leader has lost its quorum, and says for how long.
+        assert_eq!(
+            ms(cm(&[Some(0), Some(7_000), Some(9_000)], 3, Some(0))),
+            Some(7_000)
+        );
+        // A follower reads its copy aged: cut off from the leader, every
+        // member's silence grows with it, the leader's included.
+        assert_eq!(
+            ms(cm(&[Some(0), Some(40), Some(90)], 3, Some(6_000))),
+            Some(6_040)
+        );
+        // Five voters, a leader that still reaches one follower only: three
+        // are needed, so the follower it reaches reads no quorum either.
+        assert_eq!(
+            ms(cm(
+                &[Some(0), Some(30), Some(8_000), Some(8_100), Some(8_200)],
+                5,
+                Some(20)
+            )),
+            Some(8_020)
+        );
+        // A learner is not counted: two voters need both.
+        assert_eq!(
+            ms(cm(&[Some(0), Some(5_000), Some(10)], 2, Some(0))),
+            Some(5_000)
+        );
+        // A single voter is its own quorum.
+        assert_eq!(ms(ClusterMembers::single(1, 7)), Some(0));
+        // Fewer than a majority ever heard from, or no view yet: not known.
+        assert_eq!(ms(cm(&[Some(0), None, None], 3, Some(0))), None);
+        assert_eq!(ms(cm(&[Some(0), Some(1)], 2, None)), None);
+        let none = ClusterMembers {
+            view: None,
+            ..cm(&[], 0, None)
+        };
+        assert_eq!(ms(none), None);
+    }
+
+    /// The commit point a view shows is the highest index a majority of the
+    /// voters hold. It is what a follower measures its catch-up against when
+    /// the leader does not answer it: a voter that came back empty is still
+    /// listed at the index the leader believes it holds.
+    #[test]
+    fn the_commit_point_of_a_view_is_what_a_majority_of_the_voters_hold() {
+        let cm = |held: &[Option<u64>], voters: usize, age: Option<u64>| {
+            let members = held
+                .iter()
+                .enumerate()
+                .map(|(i, at)| MemberSeen {
+                    id: i as u64 + 1,
+                    voter: i < voters,
+                    http: String::new(),
+                    raft: String::new(),
+                    last_ack_ms: Some(0),
+                    matched: *at,
+                    kinds: None,
+                })
+                .collect();
+            ClusterMembers {
+                node_id: 1,
+                leader: Some(3),
+                term: 7,
+                view: Some(MembersView {
+                    leader: 3,
+                    term: 7,
+                    members,
+                }),
+                view_age: age.map(Duration::from_millis),
+            }
+        };
+        let at = |c: ClusterMembers| c.commit_seen().map(|(i, age)| (i, age.as_millis() as u64));
+
+        // Node 1 came back empty: the leader still lists it at 721, and the
+        // other two hold 1054. Two of three hold 1054.
+        assert_eq!(
+            at(cm(&[Some(721), Some(1054), Some(1054)], 3, Some(90))),
+            Some((1054, 90))
+        );
+        // A follower a little behind: the commit point is what two hold.
+        assert_eq!(
+            at(cm(&[Some(900), Some(1000), Some(1054)], 3, Some(0))),
+            Some((1000, 0))
+        );
+        // Five voters: the third highest.
+        assert_eq!(
+            at(cm(
+                &[Some(10), Some(50), Some(40), Some(30), Some(20)],
+                5,
+                Some(5)
+            )),
+            Some((30, 5))
+        );
+        // A learner far ahead of nothing is not counted.
+        assert_eq!(
+            at(cm(&[Some(7), Some(9), Some(9_999)], 2, Some(0))),
+            Some((7, 0))
+        );
+        // Fewer positions known than a majority, or no view: no reading.
+        assert_eq!(at(cm(&[Some(7), None, None], 3, Some(0))), None);
+        assert_eq!(at(cm(&[Some(7), Some(7)], 2, None)), None);
+    }
+
     /// The node that handed leadership away is remembered for the window, and
     /// only the last one.
     #[test]

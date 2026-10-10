@@ -1,0 +1,30 @@
+23:22:33 start files/bytes=1/175/ on_disk_qlog=1 dirs=2 dirx= index_maps= maps=339 fds=38 rows=0 anon/rss_MB=11 29 du_MB=1 health=200
+23:22:53 P files/bytes=501/1159009/ on_disk_qlog=501 dirs=502 dirx= index_maps= maps=531 fds=539 rows=2000 anon/rss_MB=24 44 du_MB=5 health=200
+23:23:13 P files/bytes=628/2224287/ on_disk_qlog=628 dirs=502 dirx= index_maps= maps=785 fds=539 rows=4100 anon/rss_MB=25 47 du_MB=6 health=200
+23:23:33 P files/bytes=884/3244913/ on_disk_qlog=884 dirs=502 dirx= index_maps= maps=1303 fds=539 rows=6100 anon/rss_MB=29 53 du_MB=9 health=200
+23:23:54 P files/bytes=1075/4263918/ on_disk_qlog=1075 dirs=502 dirx= index_maps= maps=1685 fds=539 rows=8100 anon/rss_MB=30 56 du_MB=11 health=200
+23:24:14 P files/bytes=1331/5285444/ on_disk_qlog=1331 dirs=502 dirx= index_maps= maps=2197 fds=539 rows=10100 anon/rss_MB=30 59 du_MB=13 health=200
+23:24:34 P files/bytes=1586/6306203/ on_disk_qlog=1586 dirs=502 dirx= index_maps= maps=2643 fds=539 rows=12100 anon/rss_MB=32 63 du_MB=15 health=200
+23:24:54 P files/bytes=1778/7325681/ on_disk_qlog=1778 dirs=502 dirx= index_maps= maps=3027 fds=539 rows=14100 anon/rss_MB=32 65 du_MB=17 health=200
+23:25:14 P files/bytes=2033/8346587/ on_disk_qlog=2033 dirs=502 dirx= index_maps= maps=3600 fds=539 rows=16100 anon/rss_MB=32 68 du_MB=19 health=200
+23:25:34 P files/bytes=2289/9368113/ on_disk_qlog=2289 dirs=502 dirx= index_maps= maps=3985 fds=539 rows=18100 anon/rss_MB=33 70 du_MB=22 health=200
+23:25:54 P files/bytes=2480/10386971/ on_disk_qlog=2480 dirs=502 dirx= index_maps= maps=4495 fds=539 rows=20100 anon/rss_MB=33 73 du_MB=23 health=200
+23:26:14 P files/bytes=2736/11408497/ on_disk_qlog=2736 dirs=502 dirx= index_maps= maps=4983 fds=539 rows=22100 anon/rss_MB=34 75 du_MB=25 health=200
+23:26:34 P files/bytes=2992/12430023/ on_disk_qlog=2992 dirs=502 dirx= index_maps= maps=5408 fds=539 rows=24100 anon/rss_MB=34 77 du_MB=28 health=200
+23:26:54 P files/bytes=3183/13448734/ on_disk_qlog=3183 dirs=502 dirx= index_maps= maps=5836 fds=539 rows=26100 anon/rss_MB=34 80 du_MB=29 health=200
+23:27:14 P files/bytes=3439/14470260/ on_disk_qlog=3439 dirs=502 dirx= index_maps= maps=6285 fds=539 rows=28100 anon/rss_MB=34 82 du_MB=31 health=200
+23:27:33 P-end files/bytes=3630/15438554/ on_disk_qlog=3630 dirs=502 dirx= index_maps= maps=6780 fds=538 rows=30000 anon/rss_MB=35 86 du_MB=33 health=200
+[final] queues=500 rounds=60 pushed=30000 errors=0 seconds=300
+23:28:18 P+45s files/bytes=3886/15447334/ on_disk_qlog=3886 dirs=502 dirx= index_maps= maps=7306 fds=538 rows=30000 anon/rss_MB=35 88 du_MB=35 health=200
+limit vm.max_map_count=1048576
+restart_s=.256380208
+23:28:23 restarted files/bytes=3886/15447334/ on_disk_qlog=3886 dirs=502 dirx= index_maps= maps=4631 fds=538 rows=30000 anon/rss_MB=23 64 du_MB=35 health=200
+23:28:26 deleted files/bytes=3508/13990125/ on_disk_qlog=3508 dirs=502 dirx= index_maps= maps=4639 fds=538 rows=0 anon/rss_MB=24 65 du_MB=32 health=200
+23:28:47 D files/bytes=559/214892/ on_disk_qlog=501 dirs=502 dirx= index_maps= maps=538 fds=538 rows=0 anon/rss_MB=21 46 du_MB=4 health=200
+23:29:07 D files/bytes=451/104117/ on_disk_qlog=419 dirs=420 dirx= index_maps= maps=538 fds=456 rows=0 anon/rss_MB=21 46 du_MB=4 health=200
+23:29:27 D files/bytes=417/63981/ on_disk_qlog=417 dirs=418 dirx= index_maps= maps=538 fds=454 rows=0 anon/rss_MB=21 46 du_MB=4 health=200
+23:29:47 D files/bytes=417/32403/ on_disk_qlog=417 dirs=418 dirx= index_maps= maps=538 fds=454 rows=0 anon/rss_MB=22 46 du_MB=4 health=200
+23:30:07 D files/bytes=363/11910/ on_disk_qlog=363 dirs=364 dirx= index_maps= maps=538 fds=400 rows=0 anon/rss_MB=22 46 du_MB=3 health=200
+23:30:27 D files/bytes=235/8108/ on_disk_qlog=235 dirs=236 dirx= index_maps= maps=538 fds=272 rows=0 anon/rss_MB=21 46 du_MB=2 health=200
+0
+MANYQ2_DONE

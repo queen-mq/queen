@@ -27,6 +27,10 @@ python3 wl.py verify                 # every acknowledged write present exactly 
 ./qr.sh down
 ```
 
+`health-quorum.py` needs none of this: three processes of a local build on loopback, and what
+`/health` answers when the majority is lost, when it returns, through a leader failover and for a
+voter that comes back empty (F8 and F2 in `FINDINGS.md`).
+
 `wl.py` records each write as `ok` (the broker said it stored it: it must survive) or `unknown`
 (timeout, 5xx: may or may not exist). `verify --nodes 1` reads through one node only, which is how a
 node that boots on damaged files is caught serving holes. `verify --allow-loss` reports instead of

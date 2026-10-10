@@ -1,0 +1,29 @@
+02:07:50 start n1 rows=400 cold=0 files=3 anon_MB=52 | n2 rows=400 cold=0 files=3 anon_MB=39 | n3 rows=400 cold=0 files=3 anon_MB=39 |
+02:08:20 P n1 rows=97380 cold=0 files=7 anon_MB=334 | n2 rows=97610 cold=0 files=7 anon_MB=195 | n3 rows=97834 cold=0 files=7 anon_MB=191 |
+02:08:50 P n1 rows=97353 cold=1431 files=11 anon_MB=510 | n2 rows=97580 cold=0 files=11 anon_MB=294 | n3 rows=97772 cold=0 files=11 anon_MB=294 |
+02:09:21 P n1 rows=96976 cold=13044 files=16 anon_MB=567 | n2 rows=92611 cold=0 files=16 anon_MB=341 | n3 rows=92756 cold=0 files=16 anon_MB=346 |
+02:09:51 P n1 rows=92195 cold=36440 files=22 anon_MB=594 | n2 rows=92293 cold=0 files=22 anon_MB=345 | n3 rows=92571 cold=0 files=22 anon_MB=345 |
+02:10:21 P n1 rows=92603 cold=59333 files=27 anon_MB=590 | n2 rows=92769 cold=0 files=27 anon_MB=353 | n3 rows=92974 cold=0 files=27 anon_MB=352 |
+02:10:51 P n1 rows=93247 cold=82681 files=31 anon_MB=594 | n2 rows=93444 cold=0 files=31 anon_MB=351 | n3 rows=93650 cold=0 files=31 anon_MB=354 |
+02:11:21 P n1 rows=94242 cold=106180 files=36 anon_MB=589 | n2 rows=94474 cold=0 files=36 anon_MB=354 | n3 rows=94695 cold=0 files=36 anon_MB=353 |
+02:11:51 P n1 rows=94604 cold=129508 files=42 anon_MB=584 | n2 rows=94788 cold=0 files=42 anon_MB=336 | n3 rows=94969 cold=0 files=42 anon_MB=358 |
+02:12:21 P n1 rows=95403 cold=152908 files=46 anon_MB=571 | n2 rows=95592 cold=0 files=46 anon_MB=348 | n3 rows=95815 cold=0 files=46 anon_MB=333 |
+02:12:51 P n1 rows=91269 cold=176025 files=51 anon_MB=575 | n2 rows=91360 cold=0 files=51 anon_MB=330 | n3 rows=86898 cold=0 files=51 anon_MB=335 |
+02:13:22 P n1 rows=40424 cold=236400 files=54 anon_MB=528 | n2 rows=40512 cold=0 files=54 anon_MB=303 | n3 rows=40604 cold=0 files=54 anon_MB=289 |
+02:13:52 P n1 rows=41820 cold=298457 files=57 anon_MB=504 | n2 rows=41873 cold=0 files=57 anon_MB=265 | n3 rows=41936 cold=0 files=57 anon_MB=265 |
+02:14:22 P n1 rows=42169 cold=361137 files=59 anon_MB=501 | n2 rows=42262 cold=0 files=59 anon_MB=265 | n3 rows=42343 cold=0 files=59 anon_MB=266 |
+02:14:52 P n1 rows=42643 cold=423977 files=62 anon_MB=487 | n2 rows=42713 cold=0 files=62 anon_MB=254 | n3 rows=42791 cold=0 files=62 anon_MB=255 |
+02:15:22 P n1 rows=39603 cold=483775 files=65 anon_MB=477 | n2 rows=39715 cold=0 files=65 anon_MB=228 | n3 rows=39796 cold=0 files=65 anon_MB=234 |
+02:15:52 P n1 rows=43196 cold=546322 files=67 anon_MB=470 | n2 rows=43301 cold=0 files=67 anon_MB=232 | n3 rows=43383 cold=0 files=67 anon_MB=231 |
+02:16:17 P-end n1 rows=27562 cold=612811 files=69 anon_MB=464 | n2 rows=27562 cold=0 files=69 anon_MB=230 | n3 rows=27562 cold=0 files=69 anon_MB=226 |
+[final] offered=884999 achieved=884999 shed=0 (msgs: offered=8849990 achieved=8849990 shed=0) pushErr=0 | pushed=8849990 popped=8849990 lag=0 | popErr=0 empty=60 | overall p50=2.90 p99=20.86 p999=33.54 ms | acked=8849990 ackErr=0 ackLag=0 ackAvg=5.11ms | e2e p50=133693.44 p99=133693.44 p999=133693.44 ms
+02:16:47 P+30s n1 rows=0 cold=612811 files=69 anon_MB=381 | n2 rows=0 cold=0 files=69 anon_MB=206 | n3 rows=0 cold=0 files=69 anon_MB=202 |
+02:17:26 verified n1 rows=0 cold=622080 files=69 anon_MB=436 | n2 rows=0 cold=0 files=69 anon_MB=118 | n3 rows=0 cold=0 files=69 anon_MB=117 |
+[verify] out vx-out: 8850190 records after 20s
+[verify] out vx-out: 8850190 records, idle 10s: scan complete after 28.5s
+[verify] rest of vx-in: 0 records, idle 10s: scan complete after 10.0s
+[verify] system=queen ledgers=1 produced=8849990 ambiguous=0 out_records=8850190 out_unique=8849990 duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=200 scan=38.8s | VERDICT PASS
+n1 warn/error: 0
+n2 warn/error: 0
+n3 warn/error: 0
+PIPE_DONE

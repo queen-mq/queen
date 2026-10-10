@@ -2,8 +2,9 @@
   <div class="topbar-wrap">
   <header class="topbar">
     <!-- Three parts: the page on the left, the broker in the middle, search
-         and the buttons on the right. The two sides share the rest equally,
-         so the middle is the bar's centre whatever the page is called. -->
+         and the buttons on the right, the account last. The two sides share
+         the rest equally, so the middle is the bar's centre whatever the page
+         is called. -->
     <div class="topbar-side">
     <!-- The sidebar's width: the full column or its rail of icons. A wide
          screen only; below that the sidebar is a drawer with its own button
@@ -67,6 +68,8 @@
     <button class="top-btn" @click="handleRefresh" :disabled="isRefreshing" title="Refresh">
       <svg style="width:15px; height:15px;" :class="{ 'animate-spin': isRefreshing }" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
     </button>
+
+    <UserMenu />
     </div>
   </header>
   </div>
@@ -77,8 +80,11 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { queues as queuesApi, consumers as consumersApi } from '@/api'
 import { collapsed, toggleSidebar, wide } from '@/composables/useSidebar'
+import { queueOf, queueLocation, consumerLocation } from '@/composables/navigation'
+import { useIdentity } from '@/stores/identity'
 import BrokerBar from '@/components/BrokerBar.vue'
 import ThemeMenu from '@/components/ThemeMenu.vue'
+import UserMenu from '@/components/UserMenu.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -90,7 +96,8 @@ const pageTitle = computed(() => {
   return route.meta.title || 'Overview'
 })
 const parentCrumb = computed(() =>
-  route.name === 'QueueDetail' ? { label: 'Queues', to: '/queues' } : null
+  route.name === 'QueueDetail' ? { label: 'Queues', to: '/queues' }
+    : queueOf(route) ? { label: queueOf(route), to: queueLocation(queueOf(route), route) } : null
 )
 
 const searchQuery = ref('')
@@ -116,10 +123,10 @@ const searchResults = computed(() => {
   const q = searchQuery.value.toLowerCase()
   const results = []
   queues.value.filter(x => x.name?.toLowerCase().includes(q)).slice(0, 5).forEach(x => {
-    results.push({ id: `q-${x.name}`, type: 'queue', name: x.name, partitions: x.partitions || 1, route: `/queues/${encodeURIComponent(x.name)}` })
+    results.push({ id: `q-${x.name}`, type: 'queue', name: x.name, partitions: x.partitions || 1, route: queueLocation(x.name, route) })
   })
   consumers.value.filter(x => x.name?.toLowerCase().includes(q)).slice(0, 5).forEach(x => {
-    results.push({ id: `c-${x.name}-${x.queueName}`, type: 'consumer', name: x.name, queueName: x.queueName, members: x.members || 0, route: `/consumers?search=${encodeURIComponent(x.name)}` })
+    results.push({ id: `c-${x.name}-${x.queueName}`, type: 'consumer', name: x.name, queueName: x.queueName, members: x.members || 0, route: consumerLocation(x, route) })
   })
   return results.slice(0, 10)
 })
@@ -136,17 +143,30 @@ const onSearchInput = () => { showResults.value = true; if (!searchDataLoaded.va
 const onSearchBlur = () => { setTimeout(() => { if (!searchQuery.value) { showResults.value = false; searchOpen.value = false } }, 150) }
 watch(searchQuery, () => { selectedIndex.value = 0; if (searchQuery.value) showResults.value = true })
 
+const { epoch } = useIdentity()
+let searchSequence = 0
 const loadSearchData = async () => {
   if (searchLoading.value) return
   searchLoading.value = true
+  const sequence = ++searchSequence
+  const clusterEpoch = epoch.value
   try {
     const [qr, cr] = await Promise.all([queuesApi.list(), consumersApi.list()])
+    if (sequence !== searchSequence || clusterEpoch !== epoch.value) return
     queues.value = Array.isArray(qr.data?.queues || qr.data) ? (qr.data?.queues || qr.data) : []
     consumers.value = Array.isArray(cr.data) ? cr.data : []
     searchDataLoaded.value = true
-  } catch { searchDataLoaded.value = true }
-  finally { searchLoading.value = false }
+  } catch { if (sequence === searchSequence) searchDataLoaded.value = false }
+  finally { if (sequence === searchSequence) searchLoading.value = false }
 }
+
+watch(epoch, () => {
+  searchSequence++
+  queues.value = []; consumers.value = []
+  searchDataLoaded.value = false; searchLoading.value = false
+  closeSearch()
+  loadSearchData()
+})
 
 const handleKeydown = (e) => {
   if (!(e.metaKey || e.ctrlKey)) return

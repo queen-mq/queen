@@ -2,12 +2,18 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  formatTimestamp, formatTimestampRange, formatTimestampRangeUtc,
+  formatDateTimeLocal, formatTimestamp, formatTimestampRange, formatTimestampRangeUtc,
   formatTimestampTime, formatTimestampUtc,
 } from '../src/composables/useFormat.js'
 
 const instant = '2026-09-03T14:03:06.000Z'
 const options = { timeZone: 'Europe/Rome' }
+
+test('a navigation window round-trips through local inputs without losing precision', () => {
+  const date = new Date('2026-10-01T00:00:12.345Z')
+  assert.equal(new Date(formatDateTimeLocal(date, true)).toISOString(), date.toISOString())
+  assert.equal(formatDateTimeLocal(date).length, 16)
+})
 
 test('absolute timestamps use one compact browser-local format', () => {
   assert.equal(

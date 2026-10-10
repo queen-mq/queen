@@ -50,6 +50,7 @@
       </div>
 
       <main class="app-page">
+        <QueueNavigation />
         <router-view />
       </main>
     </section>
@@ -63,6 +64,7 @@ import { computed, onUnmounted, provide, watch } from 'vue'
 
 import mark from '@/assets/q.svg?raw'
 import Sidebar from '@/components/Sidebar.vue'
+import QueueNavigation from '@/components/QueueNavigation.vue'
 import Header from '@/components/Header.vue'
 import ToastHost from '@/components/ToastHost.vue'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'

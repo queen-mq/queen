@@ -14,7 +14,7 @@
       <div class="triage-tools">
         <label class="triage-search"><span class="sr-only">Search queues or namespaces</span><input v-model="search" type="search" placeholder="Search queue or namespace…" class="input" /></label>
         <label><span class="sr-only">Queue triage filter</span><select v-model="filter" class="input" aria-label="Queue triage filter">
-          <option value="attention">Needs attention</option><option value="bad">Lag ≥ 5 minutes</option><option value="noReader">No reader</option><option value="growing">Pending increased</option><option value="all">All queues</option>
+          <option value="attention">Needs attention</option><option value="bad">Falling behind</option><option value="noReader">No reader</option><option value="growing">Pending increased</option><option value="all">All queues</option>
         </select></label>
         <span class="triage-order">Priority, then group lag</span>
       </div>
@@ -74,7 +74,7 @@
             <p v-if="selected.affected.length > 10">Showing 10 of {{ selected.affected.length }} groups. Open consumer groups for the full list.</p>
           </section>
           <p v-if="selected.reason === 'lag' && selected.pending === 0" class="triage-explanation">Zero pending excludes in-flight work. Group lag measures age before confirmation. Inspect in-flight jobs and group progress; these counts come from separate readings.</p>
-          <details class="triage-rules"><summary>How this is decided</summary><p>Consumer lag of at least 1 minute needs attention; at least 5 minutes is failing. Pending messages without a reader also need attention. A group that has never consumed does not count as a reader. Queues and Consumer groups use these same rules.</p><p>Pending change compares two queue readings in this browser, at most 2 minutes apart. It resets after a failed queue read or scope change. “—” means there is no comparable reading. An increase alone is not an alert. These readings are independent of the history range.</p></details>
+          <details class="triage-rules"><summary>How this is decided</summary><p>Consumer lag of at least {{ formatSpan(lines.lagWarnSeconds) }} needs attention; at least {{ formatSpan(lines.lagBadSeconds) }} is failing. A queue with lag lines of its own in <router-link to="/settings">Settings</router-link> is judged by those. Pending messages without a reader also need attention. A group that has never consumed does not count as a reader. Queues and Consumer groups use these same rules.</p><p>Pending change compares two queue readings in this browser, at most 2 minutes apart. It resets after a failed queue read or scope change. “—” means there is no comparable reading. An increase alone is not an alert. These readings are independent of the history range.</p></details>
         </template>
         <template v-else-if="selectedTenant">
           <div class="triage-status"><span class="g" :class="selectedTenant.sev" aria-hidden="true" /><strong>Tenant-wide issue</strong></div>
@@ -86,8 +86,8 @@
       </div>
       <div v-if="!detailUnavailable && (selected || selectedTenant)" class="modal-foot triage-drawer-footer">
         <template v-if="selected">
-          <RouterLink class="btn" :to="`/queues/${encodeURIComponent(selected.name)}`">Inspect queue →</RouterLink>
-          <RouterLink class="btn btn-ghost" :to="{ path: '/consumers', query: { search: selected.name } }">Inspect consumer groups →</RouterLink>
+          <RouterLink class="btn" :to="queueLocation(selected.name, route)">Inspect queue →</RouterLink>
+          <RouterLink class="btn btn-ghost" :to="queueLocation(selected.name, route, 'consumers')">Inspect consumer groups →</RouterLink>
         </template>
         <RouterLink v-else class="btn" :to="selectedTenant.to">Inspect failures →</RouterLink>
       </div>
@@ -96,9 +96,14 @@
 </template>
 
 <script setup>
+import { queueLocation } from '@/composables/navigation'
+const route = useRoute()
+import { useRoute } from 'vue-router'
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { formatNumber } from '@/composables/useApi'
 import { buildQueueTriage, filterQueueTriage, observePending } from '@/composables/queueTriage'
+import { formatSpan } from '@/composables/settingsDoc'
+import { useSettingsStore } from '@/stores/settingsStore'
 
 const props = defineProps({
   queues: { type: Array, default: () => [] }, groups: { type: Array, default: () => [] },
@@ -128,7 +133,8 @@ watch([() => props.groupsAt, () => props.groupsError], ([at, error]) => {
 const known = computed(() => !queueUnavailable.value && !groupsUnavailable.value)
 const errorText = computed(() => props.queuesError || props.groupsError)
 const readTime = at => new Date(at).toLocaleTimeString()
-const rows = computed(() => known.value ? buildQueueTriage(props.queues, props.groups, observation.value?.delta) : [])
+const { lines, linesFor } = useSettingsStore()
+const rows = computed(() => known.value ? buildQueueTriage(props.queues, props.groups, observation.value?.delta, linesFor) : [])
 const elapsed = computed(() => observation.value?.elapsed)
 const attentionCount = computed(() => rows.value.filter(r => r.sev).length)
 const search = ref(''), filter = ref('attention'), page = ref(1)

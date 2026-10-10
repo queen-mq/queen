@@ -1,6 +1,6 @@
 <template>
   <section class="queue-context" aria-label="Queue metrics on the current cluster">
-    <div class="context-head"><strong>Queue metrics · {{ actingClusterSlug || 'this cluster' }}</strong><RouterLink :to="{ name: 'QueueDetail', params: { queueName: queue } }">Open queue →</RouterLink></div>
+    <div class="context-head"><strong>Queue metrics · {{ actingClusterSlug || 'this cluster' }}</strong><RouterLink :to="queueLocation(queue, route)">Open queue →</RouterLink></div>
     <p>All consumers of this queue on this cluster. The supervisor’s connection is shown above.</p>
     <button class="btn btn-ghost" :disabled="loading" @click="read">{{ loading ? 'Reading…' : metrics ? 'Refresh queue metrics' : 'Load queue metrics' }}</button>
     <p v-if="error" role="status">{{ error }}</p>
@@ -13,6 +13,9 @@
 </template>
 
 <script setup>
+import { queueLocation } from '@/composables/navigation'
+const route = useRoute()
+import { useRoute } from 'vue-router'
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { system, describeApiError } from '@/api'
 import { formatNumber } from '@/composables/useApi'

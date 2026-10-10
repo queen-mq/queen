@@ -1,0 +1,46 @@
+23:07:52 start rows=0 parts=0 cold=na scan= files/bytes=2/490/ anon/rss/cpu=11 29 2
+23:08:02 P rows=249892 parts=249892 cold=na scan= files/bytes=4/168395754/ anon/rss/cpu=990 1035 201
+23:08:12 P rows=747324 parts=747324 cold=na scan= files/bytes=9/500904848/ anon/rss/cpu=2263 2370 318
+23:08:22 P rows=1245085 parts=1000000 cold=na scan= files/bytes=14/810270177/ anon/rss/cpu=3134 3369 356
+23:08:32 P rows=1742338 parts=1000000 cold=na scan= files/bytes=18/1094773016/ anon/rss/cpu=3595 4034 373
+23:08:42 P rows=2239617 parts=1000000 cold=na scan= files/bytes=22/1379606746/ anon/rss/cpu=4193 4829 383
+23:08:52 P rows=2736148 parts=1000000 cold=na scan= files/bytes=26/1663186114/ anon/rss/cpu=4737 5491 389
+23:09:02 P rows=3231466 parts=1000000 cold=na scan= files/bytes=30/1946523878/ anon/rss/cpu=5045 5942 389
+23:09:13 P rows=3722783 parts=1000000 cold=na scan= files/bytes=35/2227761397/ anon/rss/cpu=5317 6376 389
+23:09:23 P rows=4207094 parts=1000000 cold=na scan= files/bytes=39/2504456465/ anon/rss/cpu=5339 6560 389
+23:09:33 P rows=4698529 parts=1000000 cold=na scan= files/bytes=43/2785163830/ anon/rss/cpu=5343 6732 389
+23:09:43 P rows=5186936 parts=1000000 cold=na scan= files/bytes=47/3064319447/ anon/rss/cpu=5374 6919 389
+23:09:53 P rows=5678444 parts=1000000 cold=na scan= files/bytes=51/3345276762/ anon/rss/cpu=5502 7183 458
+23:10:03 P rows=6167700 parts=1000000 cold=na scan= files/bytes=55/3625597489/ anon/rss/cpu=5572 7385 458
+23:10:13 P rows=6659092 parts=1000000 cold=na scan= files/bytes=60/3905867826/ anon/rss/cpu=5732 7656 458
+23:10:23 P rows=7149325 parts=1000000 cold=na scan= files/bytes=64/4186314360/ anon/rss/cpu=5737 7740 458
+23:10:33 P rows=7640134 parts=1000000 cold=na scan= files/bytes=68/4466803019/ anon/rss/cpu=5834 7944 458
+23:10:43 P rows=8125774 parts=1000000 cold=na scan= files/bytes=72/4744325727/ anon/rss/cpu=5833 8039 458
+23:10:53 P rows=8606582 parts=1000000 cold=na scan= files/bytes=76/5019084903/ anon/rss/cpu=5899 8204 467
+23:11:04 P rows=9088766 parts=1000000 cold=na scan= files/bytes=80/5294846973/ anon/rss/cpu=5969 8371 467
+23:11:14 P rows=9574767 parts=1000000 cold=na scan= files/bytes=84/5572388150/ anon/rss/cpu=5986 8508 467
+23:11:24 P rows=10059268 parts=1000000 cold=na scan= files/bytes=88/5849377701/ anon/rss/cpu=6068 8721 467
+23:11:34 P rows=10540261 parts=1000000 cold=na scan= files/bytes=93/6124270045/ anon/rss/cpu=6172 8954 467
+23:11:44 P rows=11029533 parts=1000000 cold=na scan= files/bytes=97/6403854521/ anon/rss/cpu=6223 9114 467
+23:11:52 P-end rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6632313337/ anon/rss/cpu=6317 9302 474
+[final] offered=11749997 achieved=11429254 shed=320743 (msgs: offered=11749997 achieved=11429254 shed=320743) pushErr=0 | pushed=11429254 popped=0 lag=11429254 | popErr=0 empty=0 | overall p50=39.68 p99=166.91 p999=236.54 ms | acked=0 ackErr=0 ackLag=11429254 ackAvg=0.00ms | e2e p50=0.00 p99=0.00 p999=0.00 ms
+23:12:02 W rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6632330095/ anon/rss/cpu=5649 8682 474
+23:12:12 W rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6632348617/ anon/rss/cpu=5362 8437 474
+23:12:22 W rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6632366992/ anon/rss/cpu=5013 8125 474
+23:12:32 W rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6632385367/ anon/rss/cpu=4734 7868 474
+23:12:42 W rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6632403742/ anon/rss/cpu=4172 7321 474
+23:12:53 W rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6632422705/ anon/rss/cpu=3574 6728 38
+23:13:03 W rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6632425645/ anon/rss/cpu=3313 6467 38
+23:13:13 W rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6632425792/ anon/rss/cpu=3308 6462 38
+23:13:23 W rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6632425939/ anon/rss/cpu=3301 6455 38
+23:13:32 P+100s rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6632426086/ anon/rss/cpu=3301 6455 38
+23:13:42 C rows=11429254 parts=1000000 cold=na scan= files/bytes=101/6690963209/ anon/rss/cpu=4135 7296 38
+23:13:52 C rows=11429254 parts=1000000 cold=na scan= files/bytes=101/6701530847/ anon/rss/cpu=4166 7328 119
+23:14:02 C rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6650328127/ anon/rss/cpu=4243 7405 119
+23:14:12 C rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6648902724/ anon/rss/cpu=4239 7401 119
+23:14:23 C rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6648902871/ anon/rss/cpu=4224 7385 119
+23:14:33 C rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6648903018/ anon/rss/cpu=4221 7383 119
+23:14:33 C-end rows=11429254 parts=1000000 cold=na scan= files/bytes=100/6648903018/ anon/rss/cpu=4220 7382 119
+[final] offered=0 achieved=0 shed=0 (msgs: offered=0 achieved=0 shed=0) pushErr=0 | pushed=0 popped=11429254 lag=-11429254 | popErr=16 empty=208 | overall p50=0.00 p99=0.00 p999=0.00 ms | acked=11429254 ackErr=0 ackLag=-11429254 ackAvg=17.42ms | e2e p50=133693.44 p99=133693.44 p999=133693.44 ms
+0
+SPARSE_DONE

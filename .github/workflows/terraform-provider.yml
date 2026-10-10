@@ -1,0 +1,91 @@
+name: Terraform Provider
+
+# deploy/terraform-provider-queen: it builds, and its acceptance tests run
+# real plans and applies against a broker started in the job from the
+# released image, with Terraform and with OpenTofu.
+
+on:
+  push:
+    branches: [ "master" ]
+    paths:
+      - "deploy/terraform-provider-queen/**"
+      - ".github/workflows/terraform-provider.yml"
+  pull_request:
+    paths:
+      - "deploy/terraform-provider-queen/**"
+      - ".github/workflows/terraform-provider.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: terraform-provider-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cli: [terraform, tofu]
+    defaults:
+      run:
+        working-directory: deploy/terraform-provider-queen
+    env:
+      GOWORK: "off"
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.26'
+        cache-dependency-path: deploy/terraform-provider-queen/go.sum
+
+    - uses: hashicorp/setup-terraform@v3
+      if: matrix.cli == 'terraform'
+      with:
+        terraform_wrapper: false
+
+    - uses: opentofu/setup-opentofu@v1
+      if: matrix.cli == 'tofu'
+      with:
+        tofu_wrapper: false
+
+    - name: Vet and build
+      run: |
+        go vet ./...
+        go build ./...
+
+    # One node with the proxy (the control plane) and the S3 sink switched on.
+    # The tokens are made here, for this run only.
+    - name: Start a broker
+      run: |
+        CP_TOKEN=$(openssl rand -hex 24)
+        echo "QUEEN_CP_TOKEN=$CP_TOKEN" >> $GITHUB_ENV
+        docker run -d --name queen -p 127.0.0.1:6632:6632 -p 127.0.0.1:6711:6711 \
+          -e QUEEN_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+          -e QUEEN_PROXY_EMBEDDED=true -e QUEEN_PROXY_PORT=6711 \
+          -e QUEEN_PROXY_JWT_SECRET=$(openssl rand -hex 32) \
+          -e QUEEN_PROXY_CP_TOKEN=$CP_TOKEN \
+          -e QUEEN_PROXY_SPOOL_DIR=/var/lib/queen/raft/proxy-spool \
+          -e QUEEN_PROXY_BOOTSTRAP_TENANT=acme -e QUEEN_PROXY_DEFAULT_CLUSTER=acme \
+          -e QUEEN_PROXY_BOOTSTRAP_API_KEY=qk_test_$(openssl rand -hex 16) \
+          -e QUEEN_S3_EMBEDDED=true \
+          ghcr.io/queen-mq/queen:latest
+        for i in $(seq 1 60); do
+          [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:6632/health)" = 200 ] && exit 0
+          sleep 1
+        done
+        docker logs queen | tail -20
+        exit 1
+
+    - name: Acceptance tests
+      env:
+        TF_ACC: "1"
+        QUEEN_ENDPOINT: http://localhost:6632
+        QUEEN_CP_ENDPOINT: http://localhost:6711
+        QUEEN_TEST_CLUSTER: acme
+        CHECKPOINT_DISABLE: "1"
+      run: |
+        export TF_ACC_TERRAFORM_PATH="$(command -v ${{ matrix.cli }})"
+        if [ "${{ matrix.cli }}" = tofu ]; then export TF_ACC_PROVIDER_HOST=registry.opentofu.org; fi
+        go test ./internal/provider/ -count=1 -v

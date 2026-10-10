@@ -54,6 +54,7 @@ fn watermark(pid: u64, log_start: u64, txns_start: u64) -> Proposal {
         pid,
         log_start,
         txns_start,
+        rows: None,
     }
 }
 
@@ -62,6 +63,7 @@ fn wm_effect(pid: u64, log_start: u64, txns_start: u64) -> Effect {
         pid,
         log_start,
         txns_start,
+        rows: None,
     }
 }
 
@@ -524,6 +526,47 @@ fn a_partition_with_retention_moves_its_watermarks_as_before() {
                 Some(maintenance::Verdict::Watermark {
                     log_start: 10,
                     txns_start: 10,
+                    rows: None,
+                    more: false,
+                })
+            );
+            assert_eq!(
+                got,
+                maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, &cut)?
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Completed retention says when a consumed message leaves the log, and has
+/// no say in how long a row stays. A queue that deletes everything after a
+/// day and keeps consumed messages for a month: the rows of the messages the
+/// day's retention removed go with them. Until 2.2.0 the month was part of the
+/// txns window, and they stayed for it.
+#[test]
+fn completed_retention_keeps_no_row_past_the_dedup_window() {
+    // 10 rows two days old, then 10 from a minute ago.
+    let (_d, store) = store("completed-window", &[(1, part(0, 0, 19, NOW - 60_000_000))]);
+    txns_rows(&store, 1, 0, 10, NOW - 2 * DAY_US);
+    txns_rows(&store, 1, 10, 10, NOW - 60_000_000);
+    let cfg = maintenance::Config::default();
+    store
+        .read(|r| {
+            let mut qcfg = super::apply::queue_config(0);
+            qcfg.retention_enabled = true;
+            qcfg.retention_seconds = 86_400;
+            qcfg.completed_retention_seconds = 30 * 86_400;
+            let cut = maintenance::queue_cutoffs(r, NOW, &cfg, "t", "q", &qcfg);
+            let part = r.partition(1)?.expect("partition");
+            let got = maintenance::judge_partition(r, NOW, &cfg, 1, &part, &cut)?;
+            assert_eq!(
+                got,
+                Some(maintenance::Verdict::Watermark {
+                    log_start: 10,
+                    txns_start: 10,
+                    rows: None,
+                    more: false,
                 })
             );
             assert_eq!(
@@ -592,4 +635,241 @@ fn the_shortcuts_give_the_walks_verdict_in_every_case() {
     }
     assert_eq!(cases, 4 * 5 * 5);
     assert!(seen.iter().all(|n| *n > 0), "verdicts seen: {seen:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue version 6: the rows watermark
+// ---------------------------------------------------------------------------
+
+/// Ten rows two days old, then ten from a minute ago, in a queue with NO
+/// retention and a one-hour txns window. Before version 6 nothing could move
+/// (the rows followed the log, and the log never moves here), so the queue
+/// held one row in RAM per message for ever. With it the rows older than the
+/// window go, and the log stays where it is.
+#[test]
+fn rows_leave_at_the_txns_window_while_their_messages_stay() {
+    use crate::rsm::effect::RowsMark;
+    let (_d, store) = store("rows-window", &[(1, part(0, 0, 19, NOW - 60_000_000))]);
+    txns_rows(&store, 1, 0, 10, NOW - 2 * DAY_US);
+    txns_rows(&store, 1, 10, 10, NOW - 60_000_000);
+    let cfg = maintenance::Config::default();
+    store
+        .read(|r| {
+            let part = r.partition(1)?.expect("partition");
+            let txns = NOW - HOUR_US;
+            // Version 6, rows free to pass the log.
+            let cut = maintenance::cutoffs_v6_for_test(None, None, None, txns, true);
+            let got = maintenance::judge_partition(r, NOW, &cfg, 1, &part, &cut)?;
+            assert_eq!(
+                got,
+                Some(maintenance::Verdict::Watermark {
+                    log_start: 0,
+                    txns_start: 0,
+                    rows: Some(RowsMark {
+                        rows_start: 10,
+                        oldest_live_at_us: None,
+                    }),
+                    more: false,
+                })
+            );
+            assert_eq!(
+                got,
+                maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, &cut)?
+            );
+            // Version 6 with the switch off (or no queue-log reader): the
+            // rows keep following the log, so nothing moves.
+            let capped = maintenance::cutoffs_v6_for_test(None, None, None, txns, false);
+            assert_eq!(
+                maintenance::judge_partition(r, NOW, &cfg, 1, &part, &capped)?,
+                None
+            );
+            assert_eq!(
+                maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, &capped)?,
+                None
+            );
+            // Below version 6: as it always was.
+            let old = maintenance::cutoffs_for_test(None, None, None, txns);
+            assert_eq!(
+                maintenance::judge_partition(r, NOW, &cfg, 1, &part, &old)?,
+                None
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// With retention AND a shorter window, both move in one watermark: the log
+/// past what retention takes, the rows past what the window takes, and the
+/// hash-list watermark (which gates the queue log's reclaim) to the lower of
+/// the two.
+#[test]
+fn a_rows_watermark_keeps_the_hash_list_watermark_at_the_lower_of_log_and_rows() {
+    use crate::rsm::effect::RowsMark;
+    // 0..=9 three days old, 10..=19 two hours old, 20..=29 a minute old.
+    let (_d, store) = store("rows-log", &[(1, part(0, 0, 29, NOW - 60_000_000))]);
+    txns_rows(&store, 1, 0, 10, NOW - 3 * DAY_US);
+    txns_rows(&store, 1, 10, 10, NOW - 2 * HOUR_US);
+    txns_rows(&store, 1, 20, 10, NOW - 60_000_000);
+    let cfg = maintenance::Config::default();
+    store
+        .read(|r| {
+            let part = r.partition(1)?.expect("partition");
+            // Retention one day, window one hour.
+            let cut = maintenance::cutoffs_v6_for_test(
+                Some(NOW - DAY_US),
+                None,
+                None,
+                NOW - HOUR_US,
+                true,
+            );
+            let got = maintenance::judge_partition(r, NOW, &cfg, 1, &part, &cut)?;
+            assert_eq!(
+                got,
+                Some(maintenance::Verdict::Watermark {
+                    log_start: 10,
+                    txns_start: 10,
+                    rows: Some(RowsMark {
+                        rows_start: 20,
+                        oldest_live_at_us: None,
+                    }),
+                    more: false,
+                })
+            );
+            assert_eq!(
+                got,
+                maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, &cut)?
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// A step stops at the row limit and says so: the scanner judges the
+/// partition again at once instead of at its next round.
+#[test]
+fn a_full_step_asks_to_be_judged_again() {
+    let (_d, store) = store("rows-more", &[(1, part(0, 0, 2_499, NOW - 60_000_000))]);
+    txns_rows(&store, 1, 0, 2_500, NOW - 2 * DAY_US);
+    let cfg = maintenance::Config::default();
+    store
+        .read(|r| {
+            let part = r.partition(1)?.expect("partition");
+            let cut = maintenance::cutoffs_v6_for_test(None, None, None, NOW - HOUR_US, true);
+            match maintenance::judge_partition(r, NOW, &cfg, 1, &part, &cut)? {
+                Some(maintenance::Verdict::Watermark { rows, more, .. }) => {
+                    assert_eq!(rows.map(|m| m.rows_start), Some(cfg.row_limit as u64));
+                    assert!(more, "1,000 of 2,500 stale rows taken: more is due");
+                }
+                other => panic!("{other:?}"),
+            }
+            // The hot-partition judgment gives the same step.
+            let slice = maintenance::scan_pids(r, NOW, &cfg, &[1, 99])?;
+            assert_eq!(
+                slice.proposals.len(),
+                0,
+                "no queue row here: nothing judged"
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Retained messages that already lost their rows (`rows_start` past
+/// `log_start`): a node with no queue-log reader judges only the rows, never
+/// the log, and never takes the missing rows for a hole it may skip.
+#[test]
+fn unrowed_messages_are_not_judged_without_the_queue_log() {
+    let mut p = part(0, 0, 19, NOW - 60_000_000);
+    p.rows_start = 10;
+    p.unrowed_bytes = 640;
+    p.oldest_live_at_us = Some(NOW - 2 * DAY_US);
+    let (_d, store) = store("rows-unrowed", &[(1, p)]);
+    txns_rows(&store, 1, 10, 10, NOW - 60_000_000);
+    let cfg = maintenance::Config::default();
+    assert!(cfg.qlog.is_none());
+    store
+        .read(|r| {
+            let part = r.partition(1)?.expect("partition");
+            assert_eq!((part.rows_start, part.unrowed_bytes), (10, 640));
+            // Retention one day: the unrowed messages are two days old, but
+            // only the queue log can say where they end.
+            let cut = maintenance::cutoffs_v6_for_test(
+                Some(NOW - DAY_US),
+                None,
+                None,
+                NOW - HOUR_US,
+                false,
+            );
+            assert_eq!(
+                maintenance::judge_partition(r, NOW, &cfg, 1, &part, &cut)?,
+                None
+            );
+            assert_eq!(
+                maintenance::judge_partition_unskipped(r, NOW, &cfg, 1, &part, &cut)?,
+                None
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// The planner's second judgment of a rows proposal: nothing moves back,
+/// the hash-list watermark never passes the log or the rows, and the oldest
+/// stamp the scanner read is dropped when another log target is in flight.
+#[test]
+fn a_rows_proposal_is_judged_again_like_any_watermark() {
+    use crate::rsm::effect::RowsMark;
+    let mut p = part(5, 5, 99, NOW);
+    p.rows_start = 20;
+    let (_d, store) = store("rows-judge", &[(1, p)]);
+    let cfg = maintenance::Config::default();
+    let scan = ScanShared::new(&cfg);
+    let prop = |log_start, txns_start, rows_start, oldest| Proposal::Watermark {
+        pid: 1,
+        log_start,
+        txns_start,
+        rows: Some(RowsMark {
+            rows_start,
+            oldest_live_at_us: oldest,
+        }),
+    };
+    store
+        .read(|r| {
+            let ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
+            // Behind committed state everywhere: dropped.
+            let (effects, dropped) = judge(r, &ov, NOW, &scan, &[prop(3, 3, 10, Some(7))])?;
+            assert!(effects.is_empty());
+            assert_eq!(dropped, 1);
+            // Only the rows ahead: the log and the hash lists keep their place.
+            let (effects, _) = judge(r, &ov, NOW, &scan, &[prop(5, 5, 40, Some(7))])?;
+            assert_eq!(
+                effects,
+                vec![Effect::Watermark {
+                    pid: 1,
+                    log_start: 5,
+                    txns_start: 5,
+                    rows: Some(RowsMark {
+                        rows_start: 40,
+                        oldest_live_at_us: Some(7),
+                    }),
+                }]
+            );
+            // A stale log target: committed state wins, and the stamp read
+            // for the stale one is not carried.
+            let (effects, _) = judge(r, &ov, NOW, &scan, &[prop(4, 4, 40, Some(7))])?;
+            assert_eq!(
+                effects,
+                vec![Effect::Watermark {
+                    pid: 1,
+                    log_start: 5,
+                    txns_start: 5,
+                    rows: Some(RowsMark {
+                        rows_start: 40,
+                        oldest_live_at_us: None,
+                    }),
+                }]
+            );
+            Ok(())
+        })
+        .unwrap();
 }

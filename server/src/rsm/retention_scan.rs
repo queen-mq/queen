@@ -53,6 +53,9 @@ pub(crate) enum Proposal {
         pid: Pid,
         log_start: u64,
         txns_start: u64,
+        /// The version-6 tail, as the scanner judged it
+        /// ([`maintenance::Verdict::Watermark`]).
+        rows: Option<crate::rsm::effect::RowsMark>,
     },
     /// The partition looked dead (idle past the cleanup age).
     Delete { pid: Pid },
@@ -218,6 +221,15 @@ pub(crate) fn round_wait(last: Option<Instant>, now: Instant, every: Duration) -
 /// leadership gate, room in the queue, and the next round's start.
 const IDLE_POLL: Duration = Duration::from_millis(100);
 
+/// How long after a full step a hot partition is judged again: time for the
+/// step to be planned, committed and applied, so the next judgment starts
+/// where it ended (one that comes early proposes the same step, which the
+/// planner drops).
+const HOT_DELAY: Duration = Duration::from_millis(40);
+
+/// The most hot partitions remembered; past it the rounds alone carry on.
+const HOT_MAX: usize = 65_536;
+
 fn run<S: Store>(
     store: Arc<S>,
     cfg: maintenance::Config,
@@ -235,8 +247,19 @@ fn run<S: Store>(
     let mut round_started = Instant::now();
     let mut round_visited = 0u64;
     let mut round_proposed = 0u64;
+    // Partitions whose last step stopped at its row limit, and when each is
+    // due again ([`HOT_DELAY`] after the step was proposed). One step moves at
+    // most `row_limit` rows, and a round visits a partition once: without
+    // this a partition written faster than `row_limit` rows per round would
+    // never catch up, and its rows would pile up in RAM.
+    let mut hot: VecDeque<(Pid, Instant)> = VecDeque::new();
     while !shared.stop.load(Ordering::Acquire) {
-        if !shared.leading.load(Ordering::Acquire) || shared.queued() + slice > shared.cap {
+        if !shared.leading.load(Ordering::Acquire) {
+            hot.clear();
+            std::thread::sleep(IDLE_POLL);
+            continue;
+        }
+        if shared.queued() + slice > shared.cap {
             std::thread::sleep(IDLE_POLL);
             continue;
         }
@@ -246,13 +269,44 @@ fn run<S: Store>(
         if now_leadership != leadership {
             leadership = now_leadership;
             last_round = None;
+            hot.clear();
         }
+        // The hot partitions that are due, before the round's next slice.
+        let now = Instant::now();
+        let mut due: Vec<Pid> = Vec::new();
+        while due.len() < slice && hot.front().is_some_and(|(_, at)| *at <= now) {
+            due.push(hot.pop_front().expect("front").0);
+        }
+        if !due.is_empty() {
+            let result = store.read(|r| {
+                let now_us = wall_now_us().max(r.last_now_us()?);
+                maintenance::scan_pids(r, now_us, &cfg, &due)
+            });
+            match result {
+                Ok(found) => {
+                    shared
+                        .proposed
+                        .fetch_add(found.proposals.len() as u64, Ordering::Relaxed);
+                    if !found.proposals.is_empty() && shared.leading.load(Ordering::Acquire) {
+                        shared.lock().extend(found.proposals);
+                    }
+                    let again = Instant::now() + HOT_DELAY;
+                    hot.extend(found.more.into_iter().map(|pid| (pid, again)));
+                }
+                Err(e) => {
+                    tracing::warn!(target: "rsm", error = %e, "rsm retention scan (hot partitions) failed");
+                }
+            }
+        }
+        let hot_wait = hot
+            .front()
+            .map(|(_, at)| at.saturating_duration_since(Instant::now()));
         if cursor == 0 {
             // The next slice begins a round (the cursor is back at the first
             // partition only at a round's start).
             let wait = round_wait(last_round, Instant::now(), every);
             if !wait.is_zero() {
-                std::thread::sleep(wait.min(IDLE_POLL));
+                std::thread::sleep(wait.min(IDLE_POLL).min(hot_wait.unwrap_or(IDLE_POLL)));
                 continue;
             }
             let now = Instant::now();
@@ -279,6 +333,10 @@ fn run<S: Store>(
                 round_proposed += proposed;
                 if !found.proposals.is_empty() && shared.leading.load(Ordering::Acquire) {
                     shared.lock().extend(found.proposals);
+                }
+                if hot.len() < HOT_MAX {
+                    let again = Instant::now() + HOT_DELAY;
+                    hot.extend(found.more.iter().map(|pid| (*pid, again)));
                 }
                 if found.wrapped {
                     shared.rounds.fetch_add(1, Ordering::Relaxed);
@@ -349,19 +407,55 @@ pub(crate) fn judge<R: Reads + ?Sized>(
             Proposal::Watermark {
                 log_start,
                 txns_start,
+                rows,
                 ..
             } => {
-                let (cur_log, cur_txns) = in_flight.unwrap_or((part.log_start, part.txns_start));
+                // The rows of a version-1 watermark in flight follow its
+                // hash-list watermark (apply's rule).
+                let committed_rows = part.rows_start.max(part.txns_start);
+                let (cur_log, cur_txns, cur_rows) = match in_flight {
+                    Some((log, txns, rows)) => {
+                        (log, txns, rows.unwrap_or(committed_rows).max(txns))
+                    }
+                    None => (part.log_start, part.txns_start, committed_rows),
+                };
                 let log = log_start.max(cur_log);
-                let txns = txns_start.max(cur_txns).min(log);
-                if log > cur_log || txns > cur_txns {
-                    effects.push(Effect::Watermark {
-                        pid,
-                        log_start: log,
-                        txns_start: txns,
-                    });
-                } else {
-                    dropped += 1;
+                match rows {
+                    None => {
+                        let txns = txns_start.max(cur_txns).min(log);
+                        if log > cur_log || txns > cur_txns {
+                            effects.push(Effect::Watermark {
+                                pid,
+                                log_start: log,
+                                txns_start: txns,
+                                rows: None,
+                            });
+                        } else {
+                            dropped += 1;
+                        }
+                    }
+                    Some(m) => {
+                        let rows_start = m.rows_start.max(cur_rows);
+                        let txns = txns_start.max(cur_txns).min(log).min(rows_start);
+                        if log > cur_log || txns > cur_txns || rows_start > cur_rows {
+                            effects.push(Effect::Watermark {
+                                pid,
+                                log_start: log,
+                                txns_start: txns,
+                                rows: Some(crate::rsm::effect::RowsMark {
+                                    rows_start,
+                                    // The stamp the scanner read belongs to
+                                    // ITS log target: another one in flight
+                                    // makes it somebody else's frame.
+                                    oldest_live_at_us: m
+                                        .oldest_live_at_us
+                                        .filter(|_| log == log_start),
+                                }),
+                            });
+                        } else {
+                            dropped += 1;
+                        }
+                    }
                 }
             }
             Proposal::Delete { .. } => {

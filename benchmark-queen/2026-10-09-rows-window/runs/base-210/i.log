@@ -1,0 +1,24 @@
+qload tag= loader=0/1 mode=batch rate=300000 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=10s GOMAXPROCS=16 GOGC=400(default) seed=1791556398986185852
+  offered: 300000 msg/s = 3000.0 units/s (avg 100.0 msgs/unit) across 61 pacer workers (49.18 units/s each)
+  topics: 1 x 200 partitions (sync..sync), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 16 here (ci 0..15 of 16), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  queen: url=http://127.0.0.1:6632 (of 1) conns=2048 timeout=30s pop-width=10 pop-batch=1000 pop-timeout=2s lease=30s | configure: leaseTime=30 completedRetention=3600 dedup=0 retryLimit=1000000 | plain: consumers pop+ack the queue
+  [queen] http://127.0.0.1:6632 healthy: version 2.1.0, this node leader
+  [consume] 16 consumers of sync: pop width 10, batch 1000, long poll 2s, lease 30s, async batch acks (ack-inflight 256)
+READY 1791556345211
+[start] GO 14:32:25.211 (unix ms 1791556345211)
+[14:32:35] offered=   149989/s achieved=   149449/s shed=        0/s inflight=    54 | p50=   3.47 p99=   23.17 p999=   34.05 ms | push=1494500 pop=1493400 lag=1100 | errs push=0 pop=0 empty=0 gor=400 | ack=   149069/s ackErr=0 ackAvg=6.14ms | e2e p50=10.43 p99=48.90 p999=56.58 n=1493400 | e2e_local p50=10.43 p99=48.90 n=1493400
+[14:32:45] offered=   300021/s achieved=   300241/s shed=        0/s inflight=    32 | p50=   6.50 p99=   38.14 p999=   49.41 ms | push=4496900 pop=4494500 lag=2400 | errs push=0 pop=0 empty=0 gor=496 | ack=   300031/s ackErr=0 ackAvg=8.18ms | e2e p50=17.28 p99=63.74 p999=76.29 n=3001100 | e2e_local p50=17.28 p99=63.74 n=3001100
+[14:32:55] offered=   299920/s achieved=   300110/s shed=        0/s inflight=    13 | p50=   7.46 p99=   37.63 p999=   67.07 ms | push=7498100 pop=7493900 lag=4200 | errs push=0 pop=0 empty=0 gor=613 | ack=   299950/s ackErr=0 ackAvg=9.05ms | e2e p50=19.58 p99=98.82 p999=134.14 n=2999600 | e2e_local p50=19.58 p99=98.82 n=2999600
+[14:33:05] offered=   300018/s achieved=   300038/s shed=        0/s inflight=    11 | p50=   7.65 p99=   44.29 p999=   60.16 ms | push=10498400 pop=10495500 lag=2900 | errs push=0 pop=0 empty=0 gor=613 | ack=   300078/s ackErr=0 ackAvg=9.52ms | e2e p50=19.84 p99=66.05 p999=79.36 n=3001400 | e2e_local p50=19.84 p99=66.05 n=3001400
+[14:33:15] offered=   300019/s achieved=   299969/s shed=        0/s inflight=    16 | p50=   7.33 p99=   31.62 p999=   43.78 ms | push=13498100 pop=13495500 lag=2600 | errs push=0 pop=0 empty=0 gor=621 | ack=   299979/s ackErr=0 ackAvg=9.74ms | e2e p50=19.33 p99=52.48 p999=63.74 n=3000000 | e2e_local p50=19.33 p99=52.48 n=3000000
+[14:33:25] offered=   300024/s achieved=   300064/s shed=        0/s inflight=    11 | p50=   6.11 p99=   30.85 p999=   44.80 ms | push=16498700 pop=16495100 lag=3600 | errs push=0 pop=0 empty=0 gor=605 | ack=   300084/s ackErr=0 ackAvg=9.64ms | e2e p50=16.51 p99=50.43 p999=64.77 n=2999600 | e2e_local p50=16.51 p99=50.43 n=2999600
+[14:33:35] offered=   299989/s achieved=   299849/s shed=        0/s inflight=    24 | p50=   6.24 p99=   29.31 p999=   39.17 ms | push=19497500 pop=19493600 lag=3900 | errs push=0 pop=0 empty=0 gor=566 | ack=   299749/s ackErr=0 ackAvg=9.58ms | e2e p50=16.77 p99=53.50 p999=65.28 n=2998500 | e2e_local p50=16.77 p99=53.50 n=2998500
+[drain] consumers keep going for 9.994s (lag now 4200)
+[err consume #1] 14:33:44.040 pop sync: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+[14:33:45] offered=        0/s achieved=      260/s shed=        0/s inflight=     0 | p50=   6.88 p99=    8.90 p999=    8.90 ms | push=19500100 pop=19500100 lag=0 | errs push=0 pop=1 empty=79 gor=527 | ack=     1040/s ackErr=0 ackAvg=9.58ms | e2e p50=18.56 p99=24.45 p999=24.45 n=6500 | e2e_local p50=18.56 p99=24.45 n=6500
+[info] steady window 60s (after the ramp, before the producers stopped): offered 299999/s pushed 300045/s popped 299999/s cpu 401.4% = 1.34 cores per 100k msg/s (produce+consume)
+[info] errors consume=1 first: pop sync: HTTP 503: {"error":"the request deadline elapsed","code":"timeout"}
+[final] offered=195001 achieved=195001 shed=0 (msgs: offered=19500100 achieved=19500100 shed=0) pushErr=0 | pushed=19500100 popped=19500100 lag=0 | popErr=1 empty=79 | overall p50=6.69 p99=34.56 p999=50.94 ms | acked=19500100 ackErr=0 ackLag=0 ackAvg=9.58ms | e2e p50=17.79 p99=61.70 p999=104.96 ms
+load_cpu=327.8%

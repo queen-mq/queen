@@ -130,11 +130,24 @@ pub const VERSION_4: u16 = 4;
 /// refused, retryable (`kv_check_needs_cluster_version_5`).
 pub const VERSION_5: u16 = 5;
 
+/// The sixth catalogue version: [`Kind::Watermark`] carrying a partition's
+/// ROWS watermark ([`RowsMark`]). Until it, a message's `txns` row — its
+/// index entry, in RAM on every node — lived exactly as long as the message:
+/// a queue with long retention, or none, held one row per retained push for
+/// ever. With it a row leaves the store when it leaves the queue's txns
+/// window, whether or not its message is still retained, and the queue log's
+/// own index answers for what is older (`rows_start` on the partition row,
+/// [`crate::rsm::store::rows::PartitionRow::rows_start`]). The leader's
+/// retention emits it only where [`cluster_allows`]`(cluster, VERSION_6)`;
+/// below it a watermark keeps its version-1 shape and rows keep following
+/// `log_start`.
+pub const VERSION_6: u16 = 6;
+
 /// The highest catalogue version this build can decode and apply. The
 /// replicated cluster version (§12.8) may be lower; it never rises above the
 /// minimum of every member's value (D20). A node reports it to the leader on
 /// every append it answers.
-pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_5 as u32;
+pub const SUPPORTED_KINDS_VERSION: u32 = VERSION_6 as u32;
 
 /// The cluster version of a store that holds none, and of a member that
 /// reports none: 3. Every node of a 2.0.0-beta.1 cluster or later reads it
@@ -653,6 +666,21 @@ pub enum GarbageScope {
 // The catalogue
 // ---------------------------------------------------------------------------
 
+/// The version-6 tail of an [`Effect::Watermark`] ([`VERSION_6`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowsMark {
+    /// The partition's new `rows_start`: every `txns` row below it leaves the
+    /// store. At or above the effect's `txns_start`, and free to pass its
+    /// `log_start` (the rows of messages that are still retained).
+    pub rows_start: u64,
+    /// The stamp of the oldest message the partition still retains, when the
+    /// new `log_start` lies below `rows_start`: no row is left there for
+    /// apply to read it from, so the leader — which found it in its queue
+    /// log's index — carries it. `None`: apply keeps what the row holds, or
+    /// reads it from the rows as before.
+    pub oldest_live_at_us: Option<i64>,
+}
+
 /// One deterministic state change (§5.2). Apply executes these in the order
 /// they appear in the entry and nothing else.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -757,10 +785,15 @@ pub enum Effect {
     /// Move a partition's watermarks (retention, txns purge, max-wait
     /// eviction): `log_start` deletes segments below it, `txns_start` the
     /// dedup hash lists, which outlive the segments (D10).
+    ///
+    /// `rows` (catalogue [`VERSION_6`]) also moves `rows_start`, the first
+    /// offset that keeps its `txns` row: it may pass `log_start`, which the
+    /// version-1 shape never lets the rows do.
     Watermark {
         pid: Pid,
         log_start: u64,
         txns_start: u64,
+        rows: Option<RowsMark>,
     },
 
     /// Write a KV row (and the KV riders of a transaction). `version` is
@@ -987,6 +1020,10 @@ impl Effect {
             if !row.metadata.is_empty() {
                 return VERSION_2;
             }
+        }
+        // A watermark that moves the rows watermark is minted at version 6.
+        if let Effect::Watermark { rows: Some(_), .. } = self {
+            return VERSION_6;
         }
         match self.kind() {
             Kind::Noop
@@ -1278,10 +1315,15 @@ impl Effect {
                 pid,
                 log_start,
                 txns_start,
+                rows,
             } => {
                 w.u64(*pid);
                 w.u64(*log_start);
                 w.u64(*txns_start);
+                if let Some(m) = rows {
+                    w.u64(m.rows_start);
+                    w.opt_i64(m.oldest_live_at_us);
+                }
             }
 
             Effect::KvPut {
@@ -1504,6 +1546,8 @@ impl Effect {
         let known = match kind {
             Kind::TraceRecord | Kind::TraceTrim => version == VERSION_4,
             Kind::CursorSet => version == VERSION_1 || version == VERSION_2 || version == VERSION_3,
+            // Version 6: the watermark with its rows tail ([`RowsMark`]).
+            Kind::Watermark => version == VERSION_1 || version == VERSION_6,
             _ => version == VERSION_1,
         };
         if !known {
@@ -1668,6 +1712,14 @@ impl Effect {
                 pid: r.u64("pid")?,
                 log_start: r.u64("log_start")?,
                 txns_start: r.u64("txns_start")?,
+                rows: if version >= VERSION_6 {
+                    Some(RowsMark {
+                        rows_start: r.u64("rows_start")?,
+                        oldest_live_at_us: r.opt_i64("oldest_live_at_us")?,
+                    })
+                } else {
+                    None
+                },
             },
 
             Kind::KvPut => Effect::KvPut {

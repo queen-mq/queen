@@ -31,6 +31,8 @@ sourceOfTruth:
 # the log store gains what a seed and a standby's reads need. A standby answers 503 `standby`
 # with nothing applied, and is asynchronous and untested by Jepsen: one sentence and one limit.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): replicator/mod.rs names one more propose error (`Unwritable`: a leader's log took no entry and the node still leads) and the call that drops a pipeline. No guarantee changes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): a node cut off from
+# the majority answers /health with 503 after five seconds; the limit says so.
 ---
 
 We test Queen with Jepsen, on five nodes, under kill -9, network partitions, process pauses, clock
@@ -57,7 +59,7 @@ guarantee.
 
 The workloads are in `test/jepsen/src/jepsen/queen/workload/`. Three more, for the dead-letter
 queue (W7), retention (W8) and streams (W9), have run since P11 (2.0.0-alpha.6, 2026-09-28): they
-were not part of P26 and are part of the full campaign below, and the table above makes no claim
+were not part of P26 and are part of the two full campaigns below, and the table above makes no claim
 for them. [Jepsen](/benchmarks/jepsen/) has their results: W7 caught a real bug (a dead letter filed
 without its payload), fixed in `7a2a1711`, and one W9 run under bridge partitions ended unknown on
 2026-10-02, on a liveness problem whose cause was not found; the same test was valid on
@@ -80,12 +82,19 @@ partitions, bridges, a deaf leader, clock jumps, restarts, membership changes an
 all 65 were valid. The full campaign of 2026-10-08 and 09 ran 153 tests on `b69470031`, the code
 of 2.1.0: the 125 of P11, which are W1 to W10, and 28 lock and semaphore tests. 152 were valid;
 the other was judged invalid on test nodes whose clocks had drifted more than 500 ms apart, the
-limit named below, and was valid when it ran again. The campaigns before them found real bugs,
+limit named below, and was valid when it ran again. The campaign of 2026-10-09 and 10 ran 244
+tests on `3b1a6d9bb`, the code of 2.2.0 without its last three commits: those 153, 60 more for
+what 2.2.0 changes (rows that live two seconds, small log files that are sealed and reclaimed
+within a test, the shared-log layout) and 31 failovers of a standby cluster. All 244 were valid,
+one of them at its second run, after the harness had crashed in the first. The campaigns before
+them found real bugs,
 which is what they are for: a KV write that was acknowledged and never committed (a stale leader
 answering a read by index), a read that saw half a batch, a lease cut short by a forward jump of
-the leader's clock, and pops that stalled after a clock jump. So did the first run of the last
-one, on the build before the fixes of 2.1.0: a leader that no majority had acknowledged for two
-seconds stopped planning, and answered nothing for as long as it led. Each was fixed.
+the leader's clock, and pops that stalled after a clock jump. So did the first run of the 2.1.0
+campaign, on the build before its fixes: a leader that no majority had acknowledged for two
+seconds stopped planning, and answered nothing for as long as it led. And so did the first pass
+of the 2.2.0 one: two ways in which a node whose queue logs had just been tidied refused to
+start. Each was fixed.
 [Jepsen](/benchmarks/jepsen/) lists every campaign and every bug. No campaign is claimed for the
 exact build you run; the suite is in `test/jepsen/`, for you to run.
 
@@ -127,9 +136,10 @@ exact build you run; the suite is in `test/jepsen/`, for you to run.
   wait for it. Promoting the standby after the cluster is lost gives up the acked writes the
   standby had not read yet, and nothing older: that, and a planned switch that loses nothing, is
   what the failover workload (W12) checks. Its runs are on the [Jepsen](/benchmarks/jepsen/) page.
-- A node cut off from the majority keeps answering `/health` with 200 while every write it takes
-  times out with a 503 after 30 seconds, so check that a cluster can commit with a write, not with
-  `/health`.
+- A node cut off from the majority answers `/health` with 200 for five more seconds and with 503
+  from then on, and every write it takes times out with a 503 after 30 seconds. `/health` says that
+  the leader hears from a majority, not that entries commit, so check that a cluster can commit
+  with a write.
 - Transactions are single calls, delivery is at-least-once, and a side effect outside Queen is
   outside any commit.
 

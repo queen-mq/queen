@@ -53,6 +53,9 @@ pub(crate) struct Unload {
     /// this engine was built.
     pub unloaded: AtomicU64,
     pub loaded: AtomicU64,
+    /// Claims whose frames had no row any more and were read from the queue
+    /// log with no shard lock held ([`super::pop::Claimed::Cold`]).
+    pub cold_claims: AtomicU64,
     /// Parts dropped since the last log line, and when that was.
     since_log: AtomicU64,
     logged_us: AtomicI64,
@@ -66,6 +69,7 @@ pub struct EngineStats {
     pub partitions: usize,
     pub unloaded_total: u64,
     pub loaded_total: u64,
+    pub cold_claims_total: u64,
 }
 
 /// Whether nothing of the part lives only in memory or is due to happen in it:
@@ -206,6 +210,7 @@ impl Engine {
             partitions,
             unloaded_total: self.unload.unloaded.load(Ordering::Acquire),
             loaded_total: self.unload.loaded.load(Ordering::Acquire),
+            cold_claims_total: self.unload.cold_claims.load(Ordering::Acquire),
         }
     }
 

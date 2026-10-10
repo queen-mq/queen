@@ -554,8 +554,9 @@ struct OverlayPart {
     created: Option<Tagged<CreatedPart>>,
     appends: Vec<OverlayAppend>,
     /// A `Watermark` in the overlay (retention in flight): `(log_start,
-    /// txns_start)`.
-    watermark: Option<Tagged<(u64, u64)>>,
+    /// txns_start, rows_start)` — the last `None` for a version-1 watermark,
+    /// whose rows follow its `txns_start`.
+    watermark: Option<Tagged<(u64, u64, Option<u64>)>>,
 }
 
 impl OverlayPart {
@@ -990,9 +991,10 @@ impl Overlay {
                 pid,
                 log_start,
                 txns_start,
+                rows,
             } => {
                 self.parts.entry(*pid).or_default().watermark = Some(Tagged {
-                    v: (*log_start, *txns_start),
+                    v: (*log_start, *txns_start, rows.map(|m| m.rows_start)),
                     tag,
                 });
             }
@@ -1091,7 +1093,7 @@ impl Overlay {
         pid: Pid,
         tenant: &str,
         queue: &str,
-    ) -> Option<Option<(u64, u64)>> {
+    ) -> Option<Option<(u64, u64, Option<u64>)>> {
         if self.is_gone(pid) || self.queue_dropped(tenant, queue) {
             return None;
         }

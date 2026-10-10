@@ -523,6 +523,7 @@ impl Workload {
                 pid,
                 log_start: w,
                 txns_start: w,
+                rows: None,
             }],
         }))
     }

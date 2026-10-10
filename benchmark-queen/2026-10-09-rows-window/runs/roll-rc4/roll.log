@@ -1,0 +1,35 @@
+22:57:25 1. three nodes on the old build
+22:57:25   n1: 2.1.0 leader cv 5 kinds 5 applied 3 lag 0
+22:57:25   n2: 2.1.0 follower cv 5 kinds 5 applied 3 lag 0
+22:57:25   n3: 2.1.0 follower cv 5 kinds 5 applied 3 lag 0
+22:57:40    history written: pushed=280000, rows per node: n1=56000 n2=56000 n3=56000 
+22:57:50 2. node 3, then node 2, move to the new build
+22:57:54   n1: 2.1.0 leader cv 5 kinds 5 applied 40236 lag 0
+22:57:54   n2: 2.2.0 follower cv 5 kinds 6 applied 40257 lag 0
+22:57:54   n3: 2.2.0 follower cv 5 kinds 6 applied 40278 lag 0
+22:57:54    the cluster version is still 5 with one old node: OK
+22:57:54    rows per node (must still be there, the window is not on): n1=62395 n2=62400 n3=62403 
+22:57:54 3. node 3 goes back to the old build while the version has not risen
+22:57:54    the old build started on a directory the new one had written: OK
+22:57:58   n1: 2.1.0 leader cv 5 kinds 5 applied 42586 lag 0
+22:57:58   n2: 2.2.0 follower cv 5 kinds 6 applied 42603 lag 0
+22:57:58   n3: 2.1.0 follower cv 5 kinds 5 applied 42621 lag 0
+22:57:58 4. node 1 moves: the last one
+22:58:01    the cluster version rose to 6 by itself: OK
+22:58:01   n1: 2.2.0 follower cv 6 kinds 6 applied 43297 lag 0
+22:58:01   n2: 2.2.0 leader cv 6 kinds 6 applied 43315 lag 0
+22:58:01   n3: 2.2.0 follower cv 6 kinds 6 applied 43331 lag 0
+23:00:30    live traffic over the roll: [final] offered=74501 achieved=73536 shed=0 (msgs: offered=745010 achieved=735360 shed=0) pushErr=965 | pushed=735360 popped=735460 lag=-100 | popErr=638 empty=70 | overall p50=1.74 p99=17.54 p999=460.80 ms | acked=735360 ackErr=100 ackLag=0 ackAvg=4.84ms | e2e p50=5.41 p99=21364.74 p999=27918.34 ms
+23:00:30    rows per node after the window (hist's must be gone): n1=0 n2=0 n3=0 
+23:00:56    history read back: popped=280000 lag=-280000 | popErr=0
+23:00:56    claims from the queue log per node: n1=0 n2=869 n3=0 
+23:00:56 5. the old build on upgraded data
+23:01:02    the old build refused: RROR boot: FATAL: raft storage failed to open: open the openraft replicator at /root/improve/c3/data/n3: this build reads effect catalogue version 5, and the cluster this store belongs to writes version 6 (§12.8): run a release that reads it (the one the other nodes run), never an older one
+23:01:03   n1: 2.2.0 follower cv 6 kinds 6 applied 131812 lag 0
+23:01:03   n2: 2.2.0 leader cv 6 kinds 6 applied 131812 lag 0
+23:01:03   n3: 2.2.0 follower cv 6 kinds 6 applied 131812 lag 0
+23:01:03 errors and warnings per node (other than a peer being down during its restart):
+23:01:03   n1: 
+23:01:03   n2:       1 ERROR openraft::raft::stream_append: stream_append: RaftCore stopped: raft stopped;
+23:01:03   n3:       1 RROR boot: FATAL: raft storage failed to open: open the openraft replicator at /root/improve/c3/data/n3: this build reads effect catalogue version 5, and the cluster thi;      1 ERROR rsm: rsm: this build cannot read the log of the cluster this store belongs to: refusing to start node=3 cluster_version=6 reads=5;
+23:01:06 ROLL_DONE

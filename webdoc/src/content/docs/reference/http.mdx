@@ -32,6 +32,14 @@ sourceOfTruth:
 # makes it read-write (the generated route table lists it); the status-code table now names the lock
 # verdict. A new node reports clusterVersion 5. main.rs, facade/mod.rs, facade/real.rs and
 # proxy_embed.rs only carry the new module and the `check` refusal below version 5.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): the timestamp lookup
+# names the queue log's index for messages older than the rows.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): GET /health has
+# three conditions and quorumAckMs in its raft block.
 ---
 
 Every Queen node serves the whole API over plain HTTP with JSON bodies, on port 6632. There is no
@@ -148,13 +156,16 @@ with it, is on [errors](/reference/errors/).
 
 ## Health
 
-`GET /health` answers `200` with `"status": "healthy"` when this node knows a leader and its apply
-lag is within `QUEEN_RAFT_READY_LAG_MS` (2000 ms), and `503` with `"status": "settling"` otherwise.
-The body carries `engine`, `version` and a `raft` block (`role`, `leader`, `term`, `applied`,
-`commit`, `lag`, `storageReady`, `clusterVersion`, and `link` on a cluster that is part of a
-[standby](/operate/standby/) pair). Those two conditions are the whole check: the
-node does not contact the other members to answer, so a probe sees what this node believes. What
-that means during a quorum loss is on [recovery](/operate/recovery/).
+`GET /health` answers `200` with `"status": "healthy"` when this node knows a leader, its apply
+lag is within `QUEEN_RAFT_READY_LAG_MS` (2000 ms), and the leader it follows heard from a majority
+of the voters within `QUEEN_RAFT_READY_QUORUM_MS` (5000 ms). Otherwise it answers `503` with
+`"status": "settling"`. The body carries `engine`, `version` and a `raft` block (`role`, `leader`,
+`term`, `applied`, `commit`, `lag`, `quorumAckMs`, `storageReady`, `clusterVersion`, and `link` on
+a cluster that is part of a [standby](/operate/standby/) pair). Those three conditions are the
+whole check. The node contacts nobody to answer: it reads what replication already told it, so a
+probe sees what this node knows, and a node that lost its majority says so five seconds later. It
+does not prove that the cluster commits, which is why
+[monitoring](/operate/monitoring/#a-write-probe) pairs it with a write.
 
 ## Routes
 
@@ -233,8 +244,9 @@ Turns a time into an offset: for each entry, the first offset appended at or aft
 `offset` and `ts` are `null` when nothing was appended that late, and you start at
 `highWatermark`; a time older than the log answers its first retained offset. "Appended" means the
 broker's clock when the leader planned the write, never a time inside your payload. The lookup is a
-binary search over the partition's per-append rows, about log2(partition length) seeks, with no
-payload read.
+binary search over the partition's per-append rows, about log2(partition length) seeks, and, for
+messages older than the rows the store still holds, over the queue log's index; no payload is
+read.
 
 ### `POST /api/v1/partitions/changed`
 

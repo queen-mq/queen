@@ -48,6 +48,9 @@ pub struct AppState {
     // §14.1 — the apply-lag threshold `/health` gates `200 healthy` on
     // (`QUEEN_RAFT_READY_LAG_MS`).
     pub raft_ready_lag_ms: u64,
+    // ... and how recently the leader must have heard from a majority
+    // (`QUEEN_RAFT_READY_QUORUM_MS`, 0: not checked).
+    pub raft_ready_quorum_ms: u64,
 }
 
 // Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): per-queue scalar caches (lease time,

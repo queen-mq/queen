@@ -22,6 +22,8 @@ sourceOfTruth:
   - server/src/obs.rs
   - server/src/obs/panic_policy.rs
   - app/src/router/index.js
+  - app/src/composables/settingsDoc.js
+  - app/src/composables/useSeverity.js
   - app/src/views/Supervisors.vue
   - app/src/components/SupervisorGroupCard.vue
   - app/src/components/SupervisorActivity.vue
@@ -45,6 +47,28 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-09 (supervisors restyle): Supervisors.vue and its two card components use the
 # dashboard's shared card, stats and table; the card still shows workers against the target, pools needing
 # attention, heartbeat age, the queue list and its history. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): facade/real.rs
+# exports queen_consume_cold_claims_total and queen_raft_qlog_dirx (in the generated metrics table).
+# Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-09 (2.2.0): both /health examples name 2.2.0 and cluster version 6.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): a row for the log files' mapped indexes
+# against the kernel's limit (queen_raft_qlog_index_maps with its refused count, and the warning
+# batcher.rs logs past 70%).
+# sourceOfTruth re-read 2026-10-10 (pull requests 113 and 115 merged): SupervisorActivity.vue charts
+# all the reported queues of a card until one is selected and puts the list to the left;
+# Supervisors.vue passes the route to the card's links. The paragraph on published supervisors says
+# so, and the list of pages follows the router's new titles (Analytics is Performance, Queue
+# operations a tab of it).
+# sourceOfTruth re-read 2026-10-10 (dashboard settings; the Performance pages are gone): the router
+# drops /analytics and /operations (they redirect to the queue they named, or to Workload), moves KV
+# and Locks under Messaging, adds /settings and reaches Users from Members. The list of pages
+# follows, with a paragraph and a table for the lines of settingsDoc.js and their built-in values in
+# useSeverity.js.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): the /health section
+# states the three conditions, the lag of a node that applied nothing and quorumAckMs, with samples
+# from a three-node run of this build (test/recovery/health-quorum.py); the write probe and the
+# limits follow.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at
@@ -56,16 +80,36 @@ dashboard needs a login.
 ## The dashboard
 
 The dashboard is compiled into the binary from `app/`, so there is nothing else to deploy: open
-`http://<node>:6632/`. It has an Overview, Queue operations, the queues and each queue on its own,
-Ephemeral queues, Consumer groups, Messages, KV, Timers, Traces, Supervisors, Analytics, Workload and Dead
-letter. System shows the replicated log, each node with its role, term, indexes and store usage,
+`http://<node>:6632/`. It has an Overview, the queues and each queue on its own, Ephemeral queues,
+Messages, Dead letter, Timers, KV, Locks, Consumer groups, Supervisors, Workload (who does the
+work, by namespace or task, down to one queue), Traces and Settings. Filters, the time window and
+the page of a list are part of the address, so a reload, a shared link and the browser's Back land
+on the same view. System shows the replicated log, each node with its role, term, indexes and store usage,
 and the members; the bar at the top of every page says when a node refuses writes because its
 disk is full.
+
+Amber and red on those pages come from a few lines, and Settings is where a tenant moves them:
+for all its queues, or for one queue from that queue's page. A queue that no consumer group is
+meant to read can be marked so, and stops asking for attention.
+
+| Line | Needs attention | Failing |
+|---|---|---|
+| Consumer lag: the age of a group's oldest unconsumed message | 60 s | 300 s |
+| Backlog: the pending messages, as seconds of work at the rate they are acked | 300 s | 1800 s |
+| Failed acks, as a share of the acks attempted in the window | 1% | 5%, with at least 500 failures |
+| A node's memory, as a share of its limit | 80% | 90% |
+| A node's CPU, as a share of the CPUs it may use | 90% | never |
+
+The moved lines are one JSON document in the tenant's KV (namespace `queen.console`, key
+`settings`), so they are replicated with everything else and another tool can read them. A line
+left blank keeps the value above. Everyone who can open the dashboard sees the lines in force;
+saving needs the right to configure a queue, and on a cluster without KV the built-in lines stay.
 
 On the broker's port with JWT off, the dashboard runs as an administrator and shows everything.
 With the broker's JWT on, it cannot sign anyone in and points you to the proxy. Through the proxy,
 the same dashboard sits behind the console login: admins also get Members and API keys, and
-[operators](/operate/tenants/#the-console-and-sign-in) get System and Users.
+[operators](/operate/tenants/#the-console-and-sign-in) get System and, from Members, the Users of
+the whole cell.
 
 ### Published supervisors
 
@@ -75,8 +119,9 @@ process supervisors. Each card shows reported workers against the target, pools 
 attention, heartbeat age and worker allocations by queue. Groups with issues come first;
 search and engine filters retain all the instances of a matching group.
 
-Select a reported queue to view its last hour of traffic or sampled backlog. This history covers
-all consumers of that queue on the acting cluster, not just the application in the card; a
+Each card charts the last hour of traffic or sampled backlog of its reported queues: all of them
+together until you select one, and **All queues** returns to the sum. This history covers all
+consumers of those queues on the acting cluster, not just the application in the card; a
 supervisor may use another connection. Missing samples appear as gaps. SDK cards also show busy
 workers and cumulative handler failures; process supervisor cards show draining workers and
 free process slots. The [status reference](/reference/supervisor-status/#application-overview)
@@ -118,21 +163,36 @@ curl -s http://queen-1:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"follower","leader":true,"term":5,"applied":112,"commit":112,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"apply":{"failure":null,"skipped":[]}}}
+{"status":"healthy","engine":"raft","version":"2.2.0","raft":{"role":"follower","leader":true,"term":2,"applied":43,"commit":43,"lag":0,"quorumAckMs":270,"storageReady":true,"clusterVersion":6,"kinds":6,"apply":{"failure":null,"skipped":[]}}}
 ```
 
-It answers `200 healthy` when the node knows a leader and its `lag` is at most
-`QUEEN_RAFT_READY_LAG_MS` (2000), and `503 settling` otherwise. `lag` is 0 on the leader and on a
-single node. On a follower it is the age, in milliseconds, of the last entry it applied, counted
-once the follower is more than 1000 entries (`QUEEN_RAFT_READY_LAG_ENTRIES`) behind the leader's
-commit index, which it reads every second. A node that restarted far behind therefore reports
-`settling` until it has caught up, and a readiness probe keeps clients off it meanwhile.
+It answers `200 healthy` when three things hold, and `503 settling` otherwise: the node knows a
+leader, its `lag` is at most `QUEEN_RAFT_READY_LAG_MS` (2000), and its `quorumAckMs` is at most
+`QUEEN_RAFT_READY_QUORUM_MS` (5000).
+
+`lag` is 0 on the leader and on a single node. On a follower it is the age, in milliseconds, of the
+last entry it applied, counted once the follower is more than 1000 entries
+(`QUEEN_RAFT_READY_LAG_ENTRIES`) behind the leader's commit index, which it reads every second. A
+node that restarted far behind therefore reports `settling` until it has caught up, and a readiness
+probe keeps clients off it meanwhile. So does a node that came back empty: it has no entry to take
+the age of, and its `lag` is counted from the epoch.
+
+`quorumAckMs` is how long ago the leader this node follows last heard from a majority of the
+voters. A leader counts it from its own replication. A follower reads it in the view the leader
+puts on every append, heartbeats included, and adds the time since the last one arrived. So the
+figure grows on a leader that lost its followers and on a follower that lost its leader alike, and
+five seconds later the node stops calling itself healthy. A leader change does not take that long:
+in three runs on three local nodes it took 3.5 to 3.8 s, and the two remaining nodes answered `200`
+through it, apart from one `503` each at the instant of the election in one run, when no leader is
+known. `QUEEN_RAFT_READY_QUORUM_MS=0` turns the test off.
 
 | Field | Meaning |
 |---|---|
 | `role` | `leader`, `follower`, `learner`, `candidate` or `stopped`. With several raft groups, group 0's role, plus `+leader` when the node leads another group |
 | `leader` | Whether the node knows a leader |
 | `term`, `applied`, `commit` | The raft term, and this node's applied and committed indexes |
+| `lag` | Milliseconds this node's apply is behind, as above |
+| `quorumAckMs` | Milliseconds since the leader this node follows, or the node itself when it leads, heard from a majority of the voters. `null` before the first append reaches the node |
 | `apply.failure` | The entry that stopped apply on this node: its index, term, digest, class and error. `null` while apply runs. Cluster nodes only |
 | `apply.skipped` | Entries an operator told the node to step over |
 | `clusterVersion`, `kinds` | The data format the cluster writes, and the highest this build reads |
@@ -142,16 +202,17 @@ With several raft groups, the node is ready only when every group is.
 
 ## A write probe
 
-`/health` describes what a node believes, and a node can believe in a leader that can no longer
-commit anything. Here is a three-node cluster with two nodes killed: thirty seconds later the
-survivor still reports itself healthy, while a write through it waits until the client gives up.
+`/health` reports what a node knows of its contact with the cluster. It writes nothing, so it
+cannot prove that the cluster commits. Here is a three-node cluster three seconds after its two
+followers were killed: the leader still reports itself healthy, with a `quorumAckMs` that has
+started to grow, while a write through it waits until the client gives up.
 
 ```bash
 curl -s http://queen-1:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"leader","leader":true,"term":4,"applied":111,"commit":111,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"apply":{"failure":null,"skipped":[]}}}
+{"status":"healthy","engine":"raft","version":"2.2.0","raft":{"role":"leader","leader":true,"term":2,"applied":43,"commit":43,"lag":0,"quorumAckMs":3058,"storageReady":true,"clusterVersion":6,"kinds":6,"apply":{"failure":null,"skipped":[]}}}
 ```
 
 ```bash
@@ -161,7 +222,14 @@ curl -s -m 5 -o /dev/null -w '%{http_code} in %{time_total}s\n' -X PUT \
 ```
 
 ```text
-000 in 5.005479s
+000 in 5.000507s
+```
+
+Five seconds after the loss the same node answers `503`, and goes on answering it until a majority
+is back, which took one to two seconds after one of the two nodes was started again:
+
+```json
+{"status":"settling","engine":"raft","version":"2.2.0","raft":{"role":"leader","leader":true,"term":2,"applied":43,"commit":43,"lag":0,"quorumAckMs":8423,"storageReady":true,"clusterVersion":6,"kinds":6,"apply":{"failure":null,"skipped":[]}}}
 ```
 
 So alongside `/health`, run a write probe against every node every minute and alert when it fails
@@ -191,6 +259,7 @@ the families in [metrics](/reference/metrics/). These are the series worth an al
 | Memory grows | The process's anonymous memory against the container limit: `container_memory_rss` in Kubernetes, or the dashboard's memory meter (`anonBytes` in `/api/v1/raft/members`). `queen_process_resident_memory_bytes` and the pod's working set also count the store's LMDB file and the queue logs, page cache the kernel drops before it kills anything |
 | The leader holds many consumer parts | `queen_consume_engine{kind="parts"}`, on the leader; idle ones leave after `QUEEN_CONSUME_IDLE_UNLOAD_S` (600 s), counted in `queen_consume_parts_total{kind="unloaded"}` |
 | Traces pile up | `queen_raft_traces_stored` and `queen_raft_traces_map_bytes{kind="used"}`, against `QUEEN_RAFT_TRACE_RETENTION_S` |
+| The log files' indexes near the kernel's map limit | `queen_raft_qlog_index_maps{kind="mapped"}` against `{kind="limit"}` (`vm.max_map_count`); the node warns in its log past 70%. Past the limit an index is held in memory instead: `{kind="refused"}` counts them, and the node's memory grows by megabytes for each full file |
 | Ephemeral memory nears its ceiling (`503` above it) | `queen_ephemeral_bytes` against `QUEEN_EPHEMERAL_MAX_BYTES` (256 MiB) |
 | Ephemeral messages are dropped | `rate(queen_ephemeral_dropped_total[5m])` by `cause`: `bounds`, `ttl` or `retry` |
 | An ephemeral hand-over failed | `increase(queen_ephemeral_wipes_total[15m]) > 0` |
@@ -228,9 +297,9 @@ with `QUEEN_LOG_JSON=true`. `LOG_LEVEL` and `RUST_LOG` take the full filter synt
 
 ## Limits
 
-`/health` can stay `200` when nothing commits: a node that lost its majority keeps the leader it
-knew, and an empty node that never applied an entry reports `lag` 0 (`F8` and `F2` in
-`test/recovery/FINDINGS.md`). That is why the write probe above is not optional.
+`/health` is each node's own view. It trails a lost majority by `QUEEN_RAFT_READY_QUORUM_MS`, it
+says that the leader hears from a majority and not that entries commit, and a follower counts as
+caught up within 1000 entries of the leader. That is why the write probe above is not optional.
 
 Probe liveness with a TCP connect, never with `/health`. A `503` during an election is no reason to
 restart a node ([Kubernetes](/operate/kubernetes/#the-probes)).

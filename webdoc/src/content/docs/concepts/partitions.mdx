@@ -29,6 +29,20 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (locks): facade/real.rs refuses a transaction's KV `check` below cluster
 # version 5. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): phase2.rs maps one more propose error to a retry (an entry the log refused on a leader past its quorum lease; the read barrier that uses the mapping never returns it). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): the
+# dedupWindowSeconds row and the limits say a push's row is held for the window, not for the
+# message's life.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): maintenance.rs
+# no longer counts completedRetentionSeconds in how long a push keeps its row. The
+# dedupWindowSeconds row already named the dedup window alone; the completedRetentionSeconds row
+# describes the messages it removes, as before.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/real.rs
+# changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
+# QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a
@@ -113,7 +127,7 @@ curl -s -X POST http://localhost:6632/api/v1/configure -H 'content-type: applica
 | `leaseTime` | 60 s (300 s if `/configure` created the queue) | How long a pop's lease lasts unless the pop sends `leaseSeconds`. |
 | `retryLimit` | 3 | How many `failed` acks redeliver a message. The next `failed` files it in the dead-letter queue. |
 | `deadLetterQueue`, `dlqAfterMaxRetries` | `true` | File a message that ran out of retries in the DLQ. With both off, drop it and move on. |
-| `dedupWindowSeconds` | 3600 | How long a partition remembers `transactionId`s. `0` turns dedup off. |
+| `dedupWindowSeconds` | 3600 | How long a partition remembers `transactionId`s. `0` turns dedup off. It is also how long a push keeps its index row in memory (never less than 900 s): after that the message, if it is still retained, is read through the queue log's own index. |
 | `delayedProcessing` | 0 | Seconds after its push before a message can be delivered. |
 | `windowBuffer` | 0 | A partition delivers nothing until it has been quiet this many seconds, so a burst arrives as one batch. |
 | `retentionEnabled` | `false` | Must be `true` for the two options below to act. |
@@ -166,7 +180,11 @@ to it. Their contents are not in the replicated log, so a crashed node loses wha
   million took two thirds of a 31 GB node in the run above.
 - Retention is off by default. Every message is kept, and the disk grows, until you set
   `retentionEnabled` with a retention option, or `maxWaitTimeSeconds`. At 85% disk a node refuses
-  writes that grow storage (`507`).
+  writes that grow storage (`507`). Memory does not grow with what a queue retains: a push costs
+  a row in memory for its queue's dedup window, and only its bytes on disk after that. A consumer
+  further behind than that window reads its positions from disk, like its payloads. (A cluster
+  below version 6 keeps the row for as long as the message: see
+  [storage](/internals/storage/#retention-and-reclaim).)
 - An encrypted queue on a node without `QUEEN_ENCRYPTION_KEY` stores plaintext, silently: the push
   is not refused and nothing is logged. Dead letters of an encrypted queue are stored decrypted.
 - A partition that retention has emptied is deleted after 30 days without a write, a lease or a

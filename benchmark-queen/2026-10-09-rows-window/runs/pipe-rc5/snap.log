@@ -1,0 +1,31 @@
+01:05:42 start n1 rows=400 cold=0 files=3 anon_MB=45 | n2 rows=400 cold=0 files=3 anon_MB=47 | n3 rows=400 cold=0 files=3 anon_MB=39 |
+01:06:12 P n1 rows=94335 cold=0 files=7 anon_MB=248 | n2 rows=94569 cold=0 files=7 anon_MB=271 | n3 rows=94832 cold=0 files=7 anon_MB=185 |
+01:06:43 P n1 rows=94691 cold=0 files=11 anon_MB=358 | n2 rows=94899 cold=2699 files=11 anon_MB=398 | n3 rows=95105 cold=0 files=11 anon_MB=286 |
+01:07:13 P n1 rows=90229 cold=0 files=16 anon_MB=414 | n2 rows=90443 cold=17989 files=16 anon_MB=462 | n3 rows=90571 cold=0 files=16 anon_MB=337 |
+01:07:43 P n1 rows=90466 cold=0 files=21 anon_MB=406 | n2 rows=90692 cold=41135 files=21 anon_MB=481 | n3 rows=90892 cold=0 files=21 anon_MB=341 |
+01:08:13 P n1 rows=91137 cold=0 files=26 anon_MB=436 | n2 rows=91324 cold=64218 files=26 anon_MB=464 | n3 rows=91556 cold=0 files=26 anon_MB=335 |
+01:08:43 P n1 rows=91147 cold=0 files=30 anon_MB=430 | n2 rows=91328 cold=86672 files=30 anon_MB=475 | n3 rows=91528 cold=0 files=30 anon_MB=341 |
+01:09:13 P n1 rows=92231 cold=0 files=35 anon_MB=460 | n2 rows=92455 cold=109071 files=35 anon_MB=496 | n3 rows=92651 cold=0 files=36 anon_MB=351 |
+01:09:43 P n1 rows=93097 cold=0 files=41 anon_MB=455 | n2 rows=93294 cold=132067 files=41 anon_MB=470 | n3 rows=93484 cold=0 files=41 anon_MB=328 |
+01:10:14 P n1 rows=91875 cold=0 files=45 anon_MB=456 | n2 rows=92091 cold=153250 files=45 anon_MB=461 | n3 rows=92315 cold=0 files=45 anon_MB=333 |
+01:10:44 P n1 rows=89696 cold=0 files=50 anon_MB=424 | n2 rows=85363 cold=176160 files=50 anon_MB=487 | n3 rows=85450 cold=0 files=50 anon_MB=331 |
+01:11:14 P n1 rows=38308 cold=0 files=52 anon_MB=393 | n2 rows=38371 cold=233000 files=52 anon_MB=419 | n3 rows=38427 cold=0 files=52 anon_MB=286 |
+01:11:44 P n1 rows=38363 cold=0 files=55 anon_MB=351 | n2 rows=38427 cold=290250 files=55 anon_MB=389 | n3 rows=38502 cold=0 files=55 anon_MB=258 |
+01:12:14 P n1 rows=39434 cold=0 files=57 anon_MB=345 | n2 rows=39500 cold=347299 files=57 anon_MB=391 | n3 rows=39600 cold=0 files=57 anon_MB=258 |
+01:12:44 P n1 rows=39495 cold=0 files=60 anon_MB=341 | n2 rows=39565 cold=405802 files=60 anon_MB=381 | n3 rows=39646 cold=0 files=60 anon_MB=240 |
+01:13:14 P n1 rows=39282 cold=0 files=62 anon_MB=321 | n2 rows=39362 cold=463320 files=62 anon_MB=370 | n3 rows=39442 cold=0 files=62 anon_MB=229 |
+01:13:44 P n1 rows=39713 cold=0 files=65 anon_MB=312 | n2 rows=39788 cold=520729 files=65 anon_MB=365 | n3 rows=39855 cold=0 files=65 anon_MB=227 |
+01:14:15 P n1 rows=40228 cold=0 files=67 anon_MB=310 | n2 rows=40315 cold=578882 files=67 anon_MB=368 | n3 rows=40402 cold=0 files=67 anon_MB=226 |
+01:14:41 P-end n1 rows=26602 cold=0 files=69 anon_MB=307 | n2 rows=26602 cold=643946 files=69 anon_MB=376 | n3 rows=26602 cold=0 files=69 anon_MB=224 |
+[final] offered=885001 achieved=885001 shed=0 (msgs: offered=8850010 achieved=8850010 shed=0) pushErr=0 | pushed=8850010 popped=8850010 lag=0 | popErr=0 empty=47 | overall p50=3.50 p99=22.66 p999=38.66 ms | acked=8850010 ackErr=0 ackLag=0 ackAvg=5.26ms | e2e p50=133693.44 p99=133693.44 p999=133693.44 ms
+01:15:11 P+30s n1 rows=0 cold=0 files=69 anon_MB=259 | n2 rows=0 cold=643946 files=69 anon_MB=322 | n3 rows=0 cold=0 files=69 anon_MB=205 |
+01:15:51 verified n1 rows=0 cold=0 files=70 anon_MB=229 | n2 rows=0 cold=653161 files=70 anon_MB=246 | n3 rows=0 cold=0 files=70 anon_MB=108 |
+[verify] out vx-out: 8850210 records after 20s
+[verify] out vx-out: 8850210 records, idle 10s: scan complete after 29.5s
+[verify] rest of vx-in: 0 records, idle 10s: scan complete after 10.0s
+[verify] system=queen ledgers=1 produced=8850010 ambiguous=0 out_records=8850210 out_unique=8850010 duplicates=0 dup_records=0 missing=0 pending_in=0 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=200 scan=39.8s | VERDICT PASS
+n1 warn/error: 0
+n2 warn/error: 1
+      1  WARN openraft::core::heartbeat::worker: HeartbeatWorker(id=2, target=3) failed to send a heartbeat: Ok(Err(Network(NetworkError { source: BoxedErrorSource { inner: core
+n3 warn/error: 0
+PIPE_DONE

@@ -243,6 +243,10 @@ fn link_tree(src: &Path, dst: &Path, rel: &str, out: &mut Vec<FileEntry>) -> io:
         let ft = e.file_type()?;
         let child_rel = format!("{rel}/{n}");
         if ft.is_dir() {
+            // A retired queue-log directory (`q<id>.dead`): on its way out.
+            if n.contains(".dead") {
+                continue;
+            }
             link_tree(&e.path(), &dst.join(n), &child_rel, out)?;
             continue;
         }

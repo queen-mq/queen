@@ -5,7 +5,7 @@
 //! the same deterministic apply path as for client commands.
 
 use crate::rsm::dedup::TxnsRow;
-use crate::rsm::effect::{Effect, Pid};
+use crate::rsm::effect::{Effect, Pid, RowsMark};
 use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::store::keys;
 use crate::rsm::store::rows;
@@ -39,9 +39,9 @@ pub struct Config {
     /// The queue the next pass starts at, `None` = the first.
     pub walk_queue: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
     /// `QUEEN_RAFT_TXN_WINDOW_MIN_S` (default 900): the least time a message's
-    /// hash list — and so its queue-log record — is kept, whatever the queue's
-    /// dedup window and completed retention. The physical reclaim of a queue
-    /// log follows this watermark, so nothing is freed before it.
+    /// hash list — and so its queue-log record — is kept, however short the
+    /// queue's dedup window. The physical reclaim of a queue log follows this
+    /// watermark, so nothing is freed before it.
     pub txn_window_min_s: i64,
     /// Walk the partitions here, on the planning thread (the old way). Off
     /// when the background scanner ([`crate::rsm::retention_scan`]) walks them:
@@ -57,6 +57,18 @@ pub struct Config {
     /// rows; more due than this sets [`Planned::more`] and the next step runs
     /// at once.
     pub trace_trim_limit: usize,
+    /// `QUEEN_RAFT_ROWS_WINDOW` (default on): where the cluster reads
+    /// catalogue version 6, a partition's `txns` rows leave the store when
+    /// they leave the queue's txns window, whether or not their messages are
+    /// still retained ([`Cutoffs::rows_past_log`]). Off: rows keep following
+    /// `log_start`, as before version 6, so a queue holds one row in RAM per
+    /// retained push.
+    pub rows_window: bool,
+    /// This node's queue-log reader: where retention finds the appends of
+    /// messages that have no row any more (`[log_start, rows_start)`). `None`
+    /// (a batcher without a facade, or the queue log off): rows are never let
+    /// past `log_start` by this leader, and such messages are not judged.
+    pub qlog: Option<QLogReader>,
 }
 
 impl Default for Config {
@@ -74,6 +86,8 @@ impl Default for Config {
             partition_walk: true,
             traces_dir: None,
             trace_trim_limit: 512,
+            rows_window: true,
+            qlog: None,
         }
     }
 }
@@ -309,12 +323,16 @@ pub fn plan<R: Reads + ?Sized>(r: &R, now_us: i64, cfg: &Config) -> Result<Plann
                 Some(Verdict::Watermark {
                     log_start,
                     txns_start,
+                    rows,
+                    more,
                 }) => {
                     out.effects.push(Effect::Watermark {
                         pid,
                         log_start,
                         txns_start,
+                        rows,
                     });
+                    out.more |= more;
                     budget = budget.saturating_sub(1);
                 }
                 Some(Verdict::Delete) => {
@@ -409,6 +427,13 @@ pub(crate) struct Cutoffs {
     completed: Option<i64>,
     max_wait: Option<i64>,
     txns: i64,
+    /// The cluster reads catalogue version 6: a watermark carries its rows
+    /// tail ([`RowsMark`]).
+    v6: bool,
+    /// Rows may leave the store past `log_start` (version 6, the
+    /// `rows_window` switch on, and this node has a queue-log reader to judge
+    /// the messages they leave behind).
+    rows_past_log: bool,
 }
 
 impl Cutoffs {
@@ -438,6 +463,28 @@ pub(crate) fn cutoffs_for_test(
         completed,
         max_wait,
         txns,
+        v6: false,
+        rows_past_log: false,
+    }
+}
+
+/// [`cutoffs_for_test`] on a cluster at catalogue version 6, rows free to
+/// pass `log_start` when `rows_past_log`.
+#[cfg(test)]
+pub(crate) fn cutoffs_v6_for_test(
+    all: Option<i64>,
+    completed: Option<i64>,
+    max_wait: Option<i64>,
+    txns: i64,
+    rows_past_log: bool,
+) -> Cutoffs {
+    Cutoffs {
+        all,
+        completed,
+        max_wait,
+        txns,
+        v6: true,
+        rows_past_log,
     }
 }
 
@@ -459,21 +506,44 @@ pub(crate) fn queue_cutoffs<R: Reads + ?Sized>(
         .map(|v| v.min(sink_floor));
     let max_wait = (qcfg.max_wait_time_seconds > 0)
         .then(|| now_us.saturating_sub(qcfg.max_wait_time_seconds as i64 * 1_000_000));
-    let txn_window_s = i64::from(qcfg.dedup_window_seconds)
-        .max(i64::from(qcfg.completed_retention_seconds))
-        .max(cfg.txn_window_min_s.max(0));
+    // The txns window, how long a push keeps its row: the dedup window, and
+    // never under the node's floor. Completed retention was part of it until
+    // 2.2.0 and is not: it says when a consumed message leaves the LOG
+    // (`completed` above), and nothing reads a row older than the dedup window
+    // but an ack repeated after it (a probe ignores an older row, dedup.rs).
+    // With it, a queue that keeps its consumed messages for a month kept a
+    // month of rows in every node's memory.
+    let txn_window_s = i64::from(qcfg.dedup_window_seconds).max(cfg.txn_window_min_s.max(0));
+    // Catalogue version 6, read from committed state as every gate is (D20).
+    // A store that cannot say reads as below it: the old shape is always safe.
+    let v6 = r
+        .cluster_version()
+        .is_ok_and(|v| crate::rsm::effect::cluster_allows(v, crate::rsm::effect::VERSION_6));
     Cutoffs {
         all,
         completed,
         max_wait,
         txns: now_us.saturating_sub(txn_window_s * 1_000_000),
+        v6,
+        rows_past_log: v6
+            && cfg.rows_window
+            && cfg.qlog.is_some()
+            && crate::rsm::dedup::record_index_mode() != crate::rsm::dedup::IndexMode::Segment,
     }
 }
 
 /// What retention does to one partition now ([`judge_partition`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
-    Watermark { log_start: u64, txns_start: u64 },
+    Watermark {
+        log_start: u64,
+        txns_start: u64,
+        /// The version-6 tail ([`Cutoffs::v6`]); `None` below it.
+        rows: Option<RowsMark>,
+        /// A step stopped at its row limit: more is due for this partition
+        /// now, without waiting for the next round.
+        more: bool,
+    },
     Delete,
 }
 
@@ -545,48 +615,86 @@ fn judge_with<R: Reads + ?Sized>(
     skip: bool,
 ) -> Result<Option<Verdict>> {
     let log_cut = cut.log_cut();
-    let settled = part.txns_start >= part.log_start;
-    if skip && settled && log_cut.is_none() {
+    // Where the partition's rows begin (catalogue version 6: at or above
+    // `txns_start`, and past `log_start` when retained messages already lost
+    // theirs). Below version 6 it IS `txns_start`.
+    let rows_at = part.rows_start.max(part.txns_start);
+    // Retained messages without a row: `[log_start, rows_at)`.
+    let unrowed = part.log_start < rows_at;
+    // The partition holds no row at all (everything it has is unrowed, or it
+    // is empty): nothing to scan, nothing to expire.
+    let no_rows = rows_at as i64 > part.last_offset;
+    // Rows that can never pass the log (below version 6, or the switch off)
+    // and already start at or past it cannot move without the log.
+    let rows_capped = !cut.rows_past_log && rows_at >= part.log_start;
+    if skip && log_cut.is_none() && (no_rows || rows_capped) {
         return idle_verdict(r, now_us, cfg, pid, part);
     }
-    let mut segments = Vec::new();
+
     let prefix = keys::txns_prefix(pid);
-    let from = keys::txns(pid, part.txns_start);
-    let mut corrupt = false;
+    let from = keys::txns(pid, rows_at);
     // The oldest row's stamp (`None`: no row). One that does not decode is
     // fresh for no cutoff, so the scan below meets it and reports it.
     let mut oldest_at: Option<i64> = None;
     let mut oldest_bad = false;
-    r.scan_raw(Keyspace::Txns, &from, &prefix, 1, &mut |_key, value| {
-        match TxnsRow::decode(value) {
-            Ok(row) => oldest_at = Some(row.created_at_us),
-            Err(_) => oldest_bad = true,
-        }
-        false
-    })?;
+    if !no_rows {
+        r.scan_raw(Keyspace::Txns, &from, &prefix, 1, &mut |_key, value| {
+            match TxnsRow::decode(value) {
+                Ok(row) => oldest_at = Some(row.created_at_us),
+                Err(_) => oldest_bad = true,
+            }
+            false
+        })?;
+    }
     let fresh = |cutoff: i64| !oldest_bad && oldest_at.is_none_or(|at| at >= cutoff);
+
+    // Can the LOG move? Only through a log cutoff the oldest retained message
+    // is older than. With a row at `log_start` the oldest row bounds it (rows
+    // are in created order and none starts above the first retained frame);
+    // without one the partition row's own stamp does, and an unknown stamp
+    // lets the queue-log walk below decide.
+    let log_may_move = match log_cut {
+        None => false,
+        Some(c) if unrowed => part.oldest_live_at_us.is_none_or(|at| at < c),
+        Some(c) => !fresh(c),
+    };
+    // Can the ROWS move? Only with a row older than the txns cutoff, and, where
+    // they cannot pass the log, only up to where the log goes.
+    let rows_may_move = !no_rows && !fresh(cut.txns) && (!rows_capped || log_may_move);
+    if skip && !log_may_move && !rows_may_move {
+        return idle_verdict(r, now_us, cfg, pid, part);
+    }
     // Rows are in created order: when the oldest is newer than every cutoff,
     // nothing here is stale, and the full scan below would move no watermark.
     let newest_cut = log_cut.map_or(cut.txns, |c| c.max(cut.txns));
-    if fresh(newest_cut) || (skip && settled && log_cut.is_some_and(fresh)) {
+    if !unrowed && fresh(newest_cut) {
         return idle_verdict(r, now_us, cfg, pid, part);
     }
-    r.scan_raw(
-        Keyspace::Txns,
-        &from,
-        &prefix,
-        cfg.row_limit + 1,
-        &mut |key, value| match (keys::txns_base_of(key), TxnsRow::decode(value)) {
-            (Some(base), Ok(row)) => {
-                segments.push((base, row));
-                true
-            }
-            _ => {
-                corrupt = true;
-                false
-            }
-        },
-    )?;
+
+    // The rows themselves, when a judgment below reads them: the rows part,
+    // and the log part of a partition whose retained messages all have one.
+    let need_rows =
+        !no_rows && (!skip || oldest_bad || rows_may_move || (!unrowed && log_may_move));
+    let mut segments = Vec::new();
+    let mut corrupt = false;
+    if need_rows {
+        r.scan_raw(
+            Keyspace::Txns,
+            &from,
+            &prefix,
+            cfg.row_limit + 1,
+            &mut |key, value| match (keys::txns_base_of(key), TxnsRow::decode(value)) {
+                (Some(base), Ok(row)) => {
+                    segments.push((base, row));
+                    true
+                }
+                _ => {
+                    corrupt = true;
+                    false
+                }
+            },
+        )?;
+    }
     if corrupt {
         return Err(crate::rsm::store::StoreError::corrupt(
             Keyspace::Txns,
@@ -594,58 +702,140 @@ fn judge_with<R: Reads + ?Sized>(
         ));
     }
 
-    let mut log_target = part.log_start;
-    if let Some(cutoff) = cut.all {
-        log_target = log_target.max(stale_boundary(
-            &segments,
-            part.log_start,
-            cutoff,
-            None,
-            cfg.row_limit,
-        ));
-    }
-    if let Some(cutoff) = cut.max_wait {
-        log_target = log_target.max(stale_boundary(
-            &segments,
-            part.log_start,
-            cutoff,
-            None,
-            cfg.row_limit,
-        ));
-    }
-    if let Some(cutoff) = cut.completed {
+    // The cap of the completed-retention cutoff: one past the lowest
+    // committed cursor (`None`: no group reads the partition, nothing is
+    // "completed").
+    let mut completed_cap: Option<u64> = None;
+    if cut.completed.is_some() {
         let mut min_committed: Option<i64> = None;
         r.scan_cursors(pid, usize::MAX, &mut |_group, cursor| {
             min_committed =
                 Some(min_committed.map_or(cursor.committed, |old| old.min(cursor.committed)));
             true
         })?;
-        if let Some(cap) = min_committed.map(|v| v.saturating_add(1).max(0) as u64) {
-            log_target = log_target.max(stale_boundary(
-                &segments,
-                part.log_start,
-                cutoff,
-                Some(cap),
-                cfg.row_limit,
-            ));
+        completed_cap = min_committed.map(|v| v.saturating_add(1).max(0) as u64);
+    }
+    // The log target over one list of appends (rows, or the queue log's
+    // records for the unrowed range), and whether a cutoff stopped at its
+    // row limit.
+    let log_over = |appends: &[(u64, TxnsRow)]| -> (u64, bool) {
+        let mut target = part.log_start;
+        let mut full = false;
+        let mut take = |cutoff: i64, cap: Option<u64>| {
+            let (t, n) = stale_boundary_n(appends, part.log_start, cutoff, cap, cfg.row_limit);
+            full |= n >= cfg.row_limit.max(1);
+            target = target.max(t);
+        };
+        if let Some(cutoff) = cut.all {
+            take(cutoff, None);
         }
+        if let Some(cutoff) = cut.max_wait {
+            take(cutoff, None);
+        }
+        if let (Some(cutoff), Some(cap)) = (cut.completed, completed_cap) {
+            take(cutoff, Some(cap));
+        }
+        (target, full)
+    };
+
+    let mut log_target = part.log_start;
+    let mut more = false;
+    // The stamp of the oldest message left, when the new `log_start` stays
+    // inside the unrowed range: apply has no row to read it from.
+    let mut oldest_carry: Option<i64> = None;
+    if unrowed {
+        // The messages in `[log_start, rows_at)` have no row: their appends
+        // come from this node's queue-log index. A node without one (or
+        // without those files) judges nothing here; the rows part still runs.
+        if let (true, Some(q)) = (log_may_move || !skip, cfg.qlog.as_ref()) {
+            let found = unrowed_appends(q, part, pid, rows_at, cfg.row_limit + 1)?;
+            let (target, full) = log_over(&found);
+            // Never past the rows: the frames from `rows_at` on are judged
+            // from their rows, at the next step.
+            log_target = target.min(rows_at);
+            more |= full || (log_target == rows_at && log_target > part.log_start);
+            if log_target > part.log_start && log_target < rows_at {
+                oldest_carry = found
+                    .iter()
+                    .find(|(base, _)| *base >= log_target)
+                    .map(|(_, row)| row.created_at_us);
+            }
+        }
+    } else if log_cut.is_some() {
+        let (target, full) = log_over(&segments);
+        log_target = target;
+        more |= full;
     }
 
-    let txn_target = stale_boundary(
-        &segments,
-        part.txns_start,
-        cut.txns,
-        Some(log_target),
-        cfg.row_limit,
-    )
-    .min(log_target);
-    if log_target > part.log_start || txn_target > part.txns_start {
+    // The rows: every row older than the txns cutoff — capped at the log
+    // where rows cannot pass it (the version-1 rule).
+    let rows_target = if no_rows {
+        rows_at
+    } else if cut.rows_past_log {
+        let (t, n) = stale_boundary_n(&segments, rows_at, cut.txns, None, cfg.row_limit);
+        more |= n >= cfg.row_limit.max(1);
+        t
+    } else {
+        let (t, n) = stale_boundary_n(
+            &segments,
+            rows_at,
+            cut.txns,
+            Some(log_target),
+            cfg.row_limit,
+        );
+        more |= n >= cfg.row_limit.max(1);
+        t.min(log_target).max(rows_at)
+    };
+    // The hash-list watermark, which gates the queue log's reclaim: below it
+    // a record has neither its payload nor its row.
+    let txn_target = rows_target.min(log_target).max(part.txns_start);
+    if log_target > part.log_start || txn_target > part.txns_start || rows_target > rows_at {
         return Ok(Some(Verdict::Watermark {
             log_start: log_target,
             txns_start: txn_target,
+            rows: cut.v6.then_some(RowsMark {
+                rows_start: rows_target,
+                oldest_live_at_us: oldest_carry,
+            }),
+            more,
         }));
     }
     idle_verdict(r, now_us, cfg, pid, part)
+}
+
+/// The appends of the messages `part` retains without a row,
+/// `[log_start, rows_at)`, oldest first and at most `limit`, read from this
+/// node's queue-log index: `(base, end, created_at)` in a [`TxnsRow`] with no
+/// hashes, the shape [`stale_boundary`] judges.
+fn unrowed_appends(
+    q: &QLogReader,
+    part: &rows::PartitionRow,
+    pid: Pid,
+    rows_at: u64,
+    limit: usize,
+) -> Result<Vec<(u64, TxnsRow)>> {
+    let queue_id = QLogReader::queue_id_of(&part.tenant, &part.queue);
+    let mut out: Vec<(u64, TxnsRow)> = Vec::new();
+    q.claim_frames(
+        queue_id,
+        pid,
+        part.log_start,
+        rows_at,
+        false,
+        &mut |base, end, created_at_us, _hashes| {
+            out.push((
+                base,
+                TxnsRow {
+                    end,
+                    created_at_us,
+                    hashes: Vec::new(),
+                },
+            ));
+            out.len() < limit.max(1)
+        },
+    )
+    .map_err(|e| StoreError::Io(format!("qlog retention walk: {e}")))?;
+    Ok(out)
 }
 
 /// The partition-cleanup half of [`judge_partition`]: delete a partition idle
@@ -679,6 +869,9 @@ pub(crate) struct Slice {
     pub visited: usize,
     /// The slice reached the last partition: the cursor is back at the first.
     pub wrapped: bool,
+    /// Partitions whose step stopped at its row limit ([`Verdict::Watermark`]'s
+    /// `more`): they are due again as soon as the step has landed.
+    pub more: Vec<Pid>,
 }
 
 /// Up to `limit` partitions in pid order from `*cursor` — every partition of
@@ -726,6 +919,7 @@ pub(crate) fn scan_slice<R: Reads + ?Sized>(
         proposals: Vec::new(),
         visited: parts.len(),
         wrapped,
+        more: Vec::new(),
     };
     let mut queues: HashMap<(String, String), Option<Cutoffs>> = HashMap::new();
     for (pid, part) in parts {
@@ -750,11 +944,19 @@ pub(crate) fn scan_slice<R: Reads + ?Sized>(
             Some(Verdict::Watermark {
                 log_start,
                 txns_start,
-            }) => out.proposals.push(Proposal::Watermark {
-                pid,
-                log_start,
-                txns_start,
-            }),
+                rows,
+                more,
+            }) => {
+                out.proposals.push(Proposal::Watermark {
+                    pid,
+                    log_start,
+                    txns_start,
+                    rows,
+                });
+                if more {
+                    out.more.push(pid);
+                }
+            }
             Some(Verdict::Delete) => out.proposals.push(Proposal::Delete { pid }),
             None => {}
         }
@@ -762,6 +964,68 @@ pub(crate) fn scan_slice<R: Reads + ?Sized>(
     Ok(out)
 }
 
+/// [`scan_slice`] for the partitions named in `pids` (the hot ones of
+/// [`crate::rsm::retention_scan`], whose last step was full): each judged as
+/// the walk judges it.
+pub(crate) fn scan_pids<R: Reads + ?Sized>(
+    r: &R,
+    now_us: i64,
+    cfg: &Config,
+    pids: &[Pid],
+) -> Result<Slice> {
+    use crate::rsm::retention_scan::Proposal;
+    use std::collections::hash_map::Entry;
+    use std::collections::HashMap;
+
+    let mut out = Slice {
+        proposals: Vec::new(),
+        visited: pids.len(),
+        wrapped: false,
+        more: Vec::new(),
+    };
+    let mut queues: HashMap<(String, String), Option<Cutoffs>> = HashMap::new();
+    for &pid in pids {
+        if r.garbage(pid)?.is_some() {
+            continue;
+        }
+        let Some(part) = r.partition(pid)? else {
+            continue;
+        };
+        let cut = match queues.entry((part.tenant.clone(), part.queue.clone())) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(v) => {
+                let cut = r
+                    .queue(&part.tenant, &part.queue)?
+                    .map(|qcfg| queue_cutoffs(r, now_us, cfg, &part.tenant, &part.queue, &qcfg));
+                v.insert(cut)
+            }
+        };
+        let Some(cut) = cut.as_ref() else {
+            continue;
+        };
+        if let Some(Verdict::Watermark {
+            log_start,
+            txns_start,
+            rows,
+            more,
+        }) = judge_partition(r, now_us, cfg, pid, &part, cut)?
+        {
+            out.proposals.push(Proposal::Watermark {
+                pid,
+                log_start,
+                txns_start,
+                rows,
+            });
+            if more {
+                out.more.push(pid);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// [`stale_boundary_n`]'s target alone.
+#[cfg(test)]
 fn stale_boundary(
     rows: &[(u64, TxnsRow)],
     from: u64,
@@ -769,6 +1033,19 @@ fn stale_boundary(
     cap: Option<u64>,
     limit: usize,
 ) -> u64 {
+    stale_boundary_n(rows, from, cutoff_us, cap, limit).0
+}
+
+/// How far the appends of `rows` at or past `from` are stale — older than
+/// `cutoff_us`, and wholly below `cap` — taking at most `limit` of them: one
+/// past the last stale append's end, and how many were taken.
+fn stale_boundary_n(
+    rows: &[(u64, TxnsRow)],
+    from: u64,
+    cutoff_us: i64,
+    cap: Option<u64>,
+    limit: usize,
+) -> (u64, usize) {
     let mut target = from;
     let mut taken = 0usize;
     for (base, row) in rows {
@@ -784,7 +1061,7 @@ fn stale_boundary(
             break;
         }
     }
-    target
+    (target, taken)
 }
 
 fn sink_floor<R: Reads + ?Sized>(

@@ -1,0 +1,129 @@
+qload tag= loader=0/1 mode=batch rate=4000 msg/s batch=5 batch-max=0 max-inflight=5000 ramp=2s duration=51m0s report=30s drain=5s GOMAXPROCS=10 GOGC=400(default) seed=1791602534778219470
+  offered: 4000 msg/s = 800.0 units/s (avg 5.0 msgs/unit) across 17 pacer workers (47.06 units/s each)
+  topics: 1 x 50 partitions (kl..kl), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=50 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.7 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x5
+  consumers: 5 here (ci 0..4 of 5), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  queen: url=http://127.0.0.1:6641 (of 5) conns=2048 timeout=30s pop-width=5 pop-batch=200 pop-timeout=2s lease=30s | configure: leaseTime=30 completedRetention=3600 dedup=0 retryLimit=1000000 | plain: consumers pop+ack the queue
+  [queen] http://127.0.0.1:6641 healthy: version 2.2.0, this node follower
+  [consume] 5 consumers of kl: pop width 5, batch 200, long poll 2s, lease 30s, async batch acks (ack-inflight 256)
+READY 1791603272178
+[start] GO 03:34:32.178 (unix ms 1791603272178)
+[err produce #1] 03:34:40.220 Post "http://127.0.0.1:6641/api/v1/push": read tcp 127.0.0.1:40182->127.0.0.1:6641: read: connection reset by peer
+[err produce #2] 03:34:40.220 Post "http://127.0.0.1:6641/api/v1/push": read tcp 127.0.0.1:40182->127.0.0.1:6641: read: connection reset by peer
+[err produce #3] 03:34:40.220 Post "http://127.0.0.1:6641/api/v1/push": read tcp 127.0.0.1:40182->127.0.0.1:6641: read: connection reset by peer
+[err produce #5] 03:34:40.220 Post "http://127.0.0.1:6641/api/v1/push": read tcp 127.0.0.1:40182->127.0.0.1:6641: read: connection reset by peer
+[err produce #4] 03:34:40.220 Post "http://127.0.0.1:6641/api/v1/push": EOF
+[err ack #1] 03:34:40.220 Post "http://127.0.0.1:6641/api/v1/ack/batch": EOF
+[err ack #2] 03:34:40.220 Post "http://127.0.0.1:6641/api/v1/ack/batch": EOF
+[err ack #3] 03:34:40.220 Post "http://127.0.0.1:6641/api/v1/ack/batch": EOF
+[err ack #4] 03:34:40.220 Post "http://127.0.0.1:6641/api/v1/ack/batch": EOF
+[err ack #5] 03:34:40.220 Post "http://127.0.0.1:6641/api/v1/ack/batch": EOF
+[err consume #1] 03:34:40.220 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #3] 03:34:40.220 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #2] 03:34:40.220 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #4] 03:34:40.220 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #5] 03:34:40.220 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #10000] 03:34:48.211 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #20000] 03:34:52.921 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:35:02] offered=     3866/s achieved=     2752/s shed=        0/s inflight=  1261 | p50=   2.19 p99= 1335.30 p999= 1548.29 ms | push=82560 pop=69720 lag=12840 | errs push=5424 pop=5203 empty=0 gor=3820 | ack=     2321/s ackErr=90 ackAvg=4.90ms | e2e p50=6.88 p99=1744.90 p999=1974.27 n=69720 | e2e_local p50=6.88 p99=1744.90 n=69720
+[err produce #30000] 03:35:15.574 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #40000] 03:35:27.128 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:35:32] offered=     4000/s achieved=     3544/s shed=        0/s inflight=     0 | p50=   7.33 p99= 3031.04 p999= 3293.18 ms | push=188875 pop=165160 lag=23715 | errs push=9423 pop=8978 empty=5 gor=28 | ack=     3181/s ackErr=100 ackAvg=4.87ms | e2e p50=1466.37 p99=31064.06 p999=31850.50 n=95440 | e2e_local p50=1466.37 p99=31064.06 n=95440
+[err produce #50000] 03:35:39.934 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #10000] 03:35:40.532 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #60000] 03:35:49.865 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #70000] 03:36:01.045 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:36:02] offered=     4000/s achieved=     3086/s shed=        0/s inflight=   455 | p50=   3.79 p99= 2867.20 p999= 3162.11 ms | push=281455 pop=258350 lag=23105 | errs push=14453 pop=13678 empty=5 gor=1402 | ack=     3105/s ackErr=140 ackAvg=4.88ms | e2e p50=1761.28 p99=30539.78 p999=31064.06 n=93190 | e2e_local p50=1761.28 p99=30539.78 n=93190
+[err produce #80000] 03:36:14.733 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #90000] 03:36:24.544 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:36:32] offered=     4000/s achieved=     3428/s shed=        0/s inflight=     1 | p50=  14.02 p99= 3129.34 p999= 3194.88 ms | push=384305 pop=352385 lag=31920 | errs push=18337 pop=17282 empty=5 gor=4128 | ack=     3130/s ackErr=250 ackAvg=4.90ms | e2e p50=1712.13 p99=58982.40 p999=62652.42 n=94035 | e2e_local p50=1712.13 p99=58982.40 n=94035
+[err produce #100000] 03:36:37.623 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #20000] 03:36:41.332 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #110000] 03:36:44.488 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #120000] 03:36:58.208 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:37:02] offered=     3999/s achieved=     2818/s shed=        0/s inflight=   414 | p50=   2.58 p99= 2867.20 p999= 3063.81 ms | push=468855 pop=454210 lag=14645 | errs push=25012 pop=23683 empty=5 gor=1429 | ack=     3392/s ackErr=335 ackAvg=4.92ms | e2e p50=2834.43 p99=30539.78 p999=31850.50 n=101825 | e2e_local p50=2834.43 p99=30539.78 n=101825
+[err produce #130000] 03:37:08.143 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #140000] 03:37:16.671 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:37:32] offered=     4000/s achieved=     3320/s shed=        0/s inflight=     0 | p50=   9.41 p99= 2998.27 p999= 3162.11 ms | push=568440 pop=537835 lag=30605 | errs push=29508 pop=27812 empty=5 gor=4125 | ack=     2772/s ackErr=405 ackAvg=4.92ms | e2e p50=2441.22 p99=30539.78 p999=31850.50 n=83625 | e2e_local p50=2441.22 p99=30539.78 n=83625
+[err produce #150000] 03:37:33.566 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #30000] 03:37:43.053 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #160000] 03:37:43.155 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #170000] 03:37:56.603 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:38:02] offered=     4000/s achieved=     3017/s shed=        0/s inflight=     1 | p50=   3.18 p99= 3194.88 p999= 3391.49 ms | push=658960 pop=644135 lag=14825 | errs push=35406 pop=33290 empty=10 gor=1007 | ack=     3553/s ackErr=470 ackAvg=5.00ms | e2e p50=1810.43 p99=31326.21 p999=32636.93 n=106300 | e2e_local p50=1810.43 p99=31326.21 n=106300
+[err produce #180000] 03:38:03.515 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #190000] 03:38:11.650 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #200000] 03:38:22.161 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #210000] 03:38:30.941 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #40000] 03:38:31.139 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:38:32] offered=     4000/s achieved=     2736/s shed=        0/s inflight=     2 | p50=   2.42 p99= 1925.12 p999= 2113.54 ms | push=741035 pop=730215 lag=10820 | errs push=42992 pop=40824 empty=15 gor=30 | ack=     2867/s ackErr=570 ackAvg=5.24ms | e2e p50=765.95 p99=30277.63 p999=31326.21 n=86080 | e2e_local p50=765.95 p99=30277.63 n=86080
+[err produce #220000] 03:38:38.894 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #230000] 03:39:01.451 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:39:02] offered=     3999/s achieved=     3401/s shed=        0/s inflight=     1 | p50=   3.12 p99= 2965.50 p999= 3194.88 ms | push=843070 pop=820445 lag=22625 | errs push=46582 pop=44273 empty=15 gor=29 | ack=     3006/s ackErr=620 ackAvg=5.42ms | e2e p50=905.22 p99=28180.48 p999=29229.06 n=90230 | e2e_local p50=905.22 p99=28180.48 n=90230
+[err produce #240000] 03:39:19.776 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #250000] 03:39:27.835 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:39:32] offered=     4000/s achieved=     3135/s shed=        0/s inflight=     0 | p50=   3.66 p99= 2998.27 p999= 3194.88 ms | push=937130 pop=923040 lag=14090 | errs push=51770 pop=49376 empty=15 gor=30 | ack=     3418/s ackErr=680 ackAvg=5.50ms | e2e p50=1138.69 p99=28704.77 p999=30539.78 n=102595 | e2e_local p50=1138.69 p99=28704.77 n=102595
+[err produce #260000] 03:39:35.878 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #50000] 03:39:36.379 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #270000] 03:39:40.517 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:40:02] offered=     4000/s achieved=     3313/s shed=        0/s inflight=     0 | p50=   2.93 p99= 2113.54 p999= 2211.84 ms | push=1036510 pop=1023445 lag=13065 | errs push=55896 pop=53440 empty=20 gor=2004 | ack=     3343/s ackErr=740 ackAvg=5.62ms | e2e p50=1138.69 p99=29229.06 p999=32112.64 n=100405 | e2e_local p50=1138.69 p99=29229.06 n=100405
+[err produce #280000] 03:40:02.620 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #290000] 03:40:07.279 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #300000] 03:40:17.551 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #310000] 03:40:22.126 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #60000] 03:40:24.820 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #320000] 03:40:30.961 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:40:32] offered=     4000/s achieved=     2487/s shed=        0/s inflight=   439 | p50=   2.45 p99= 1859.58 p999= 1941.50 ms | push=1111115 pop=1095240 lag=15875 | errs push=64539 pop=62074 empty=22 gor=1354 | ack=     2391/s ackErr=835 ackAvg=5.66ms | e2e p50=407.55 p99=30539.78 p999=32374.78 n=71795 | e2e_local p50=407.55 p99=30539.78 n=71795
+[err produce #330000] 03:40:42.168 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #340000] 03:40:51.506 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #350000] 03:40:59.993 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:41:02] offered=     4000/s achieved=     2927/s shed=        0/s inflight=     1 | p50=   2.70 p99= 2342.91 p999= 2441.22 ms | push=1198920 pop=1169720 lag=29200 | errs push=71413 pop=68764 empty=31 gor=64 | ack=     2480/s ackErr=910 ackAvg=5.73ms | e2e p50=497.66 p99=28442.62 p999=28966.91 n=74480 | e2e_local p50=497.66 p99=28442.62 n=74480
+[err produce #360000] 03:41:04.601 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #70000] 03:41:05.391 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #370000] 03:41:14.617 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #380000] 03:41:22.569 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:41:32] offered=     4000/s achieved=     2891/s shed=        0/s inflight=   364 | p50=   2.74 p99= 2637.82 p999= 2834.43 ms | push=1285645 pop=1272210 lag=13435 | errs push=77704 pop=74988 empty=31 gor=1128 | ack=     3412/s ackErr=1045 ackAvg=5.67ms | e2e p50=864.26 p99=30539.78 p999=32374.78 n=102490 | e2e_local p50=864.26 p99=30539.78 n=102490
+[err produce #390000] 03:41:34.182 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #400000] 03:41:39.831 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #410000] 03:41:44.427 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #80000] 03:41:48.878 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #420000] 03:42:01.724 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:42:02] offered=     4000/s achieved=     2951/s shed=        0/s inflight=     2 | p50=   2.93 p99= 2244.61 p999= 2539.52 ms | push=1374175 pop=1366160 lag=8015 | errs push=84362 pop=81493 empty=31 gor=31 | ack=     3130/s ackErr=1105 ackAvg=5.71ms | e2e p50=1171.46 p99=30539.78 p999=31850.50 n=93950 | e2e_local p50=1171.46 p99=30539.78 n=93950
+[err produce #430000] 03:42:19.159 Post "http://127.0.0.1:6641/api/v1/push": read tcp 127.0.0.1:50350->127.0.0.1:6641: read: connection reset by peer
+[err produce #440000] 03:42:25.155 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #450000] 03:42:29.878 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:42:32] offered=     4000/s achieved=     3029/s shed=        0/s inflight=     0 | p50=   4.83 p99= 3031.04 p999= 3227.65 ms | push=1465035 pop=1457435 lag=7600 | errs push=90193 pop=87077 empty=41 gor=2117 | ack=     3039/s ackErr=1180 ackAvg=5.71ms | e2e p50=708.61 p99=30015.49 p999=31588.35 n=91275 | e2e_local p50=708.61 p99=30015.49 n=91275
+[err produce #460000] 03:42:39.265 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:43:02] offered=     4000/s achieved=     3544/s shed=        0/s inflight=     3 | p50=   3.38 p99= 3293.18 p999= 3457.02 ms | push=1571360 pop=1562025 lag=9335 | errs push=92924 pop=89787 empty=49 gor=32 | ack=     3486/s ackErr=1225 ackAvg=5.82ms | e2e p50=464.90 p99=28966.91 p999=30277.63 n=104590 | e2e_local p50=464.90 p99=28966.91 n=104590
+[err consume #90000] 03:43:02.440 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #470000] 03:43:14.589 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #480000] 03:43:24.018 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:43:32] offered=     3999/s achieved=     3272/s shed=        0/s inflight=     1 | p50=   2.77 p99= 3096.58 p999= 3293.18 ms | push=1669525 pop=1651355 lag=18170 | errs push=97289 pop=93964 empty=52 gor=3040 | ack=     2976/s ackErr=1275 ackAvg=5.89ms | e2e p50=301.06 p99=28442.62 p999=30277.63 n=89330 | e2e_local p50=301.06 p99=28442.62 n=89330
+[err produce #490000] 03:43:33.533 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #500000] 03:43:42.235 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #510000] 03:43:44.739 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err consume #100000] 03:43:48.556 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #520000] 03:43:56.254 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #530000] 03:44:00.978 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:44:02] offered=     4000/s achieved=     2389/s shed=        0/s inflight=   887 | p50=   2.48 p99= 2572.29 p999= 2703.36 ms | push=1741205 pop=1728150 lag=13055 | errs push=106070 pop=102655 empty=57 gor=2698 | ack=     2556/s ackErr=1375 ackAvg=5.85ms | e2e p50=937.98 p99=29229.06 p999=31064.06 n=76795 | e2e_local p50=937.98 p99=29229.06 n=76795
+[err produce #540000] 03:44:15.661 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #550000] 03:44:20.381 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #560000] 03:44:30.322 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:44:32] offered=     4000/s achieved=     3017/s shed=        0/s inflight=     1 | p50=   2.83 p99= 2899.97 p999= 3129.34 ms | push=1831715 pop=1816580 lag=15135 | errs push=112856 pop=109233 empty=61 gor=63 | ack=     2925/s ackErr=2055 ackAvg=5.84ms | e2e p50=1646.59 p99=30015.49 p999=30801.92 n=88430 | e2e_local p50=1646.59 p99=30015.49 n=88430
+[err consume #110000] 03:44:37.951 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #570000] 03:44:38.352 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #580000] 03:44:46.706 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:45:02] offered=     4000/s achieved=     2982/s shed=        0/s inflight=  1050 | p50=   2.45 p99= 1712.13 p999= 1892.35 ms | push=1921185 pop=1914135 lag=7050 | errs push=117913 pop=114134 empty=61 gor=3202 | ack=     3250/s ackErr=2095 ackAvg=5.86ms | e2e p50=610.30 p99=51642.37 p999=56885.25 n=97555 | e2e_local p50=610.30 p99=51642.37 n=97555
+[err produce #590000] 03:45:14.557 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #600000] 03:45:17.054 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #610000] 03:45:23.848 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[03:45:32] offered=     3999/s achieved=     3340/s shed=        0/s inflight=     1 | p50=   4.51 p99= 3063.81 p999= 3293.18 ms | push=2021385 pop=2005095 lag=16290 | errs push=122919 pop=119027 empty=69 gor=31 | ack=     3030/s ackErr=2175 ackAvg=6.04ms | e2e p50=440.32 p99=28180.48 p999=30277.63 n=90960 | e2e_local p50=440.32 p99=28180.48 n=90960
+[err consume #120000] 03:45:33.423 pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #620000] 03:45:33.524 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #630000] 03:45:38.090 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[err produce #640000] 03:45:42.759 Post "http://127.0.0.1:6641/api/v1/push": dial tcp 127.0.0.1:6641: connect: connection refused
+[info] steady window 630s (after the ramp, before the producers stopped): offered 4000/s pushed 3078/s popped 3072/s cpu 29.9% = 9.70 cores per 100k msg/s (produce+consume)
+[info] errors produce=641640 first: Post "http://127.0.0.1:6641/api/v1/push": read tcp 127.0.0.1:40182->127.0.0.1:6641: read: connection reset by peer
+[info] errors ack=257 first: Post "http://127.0.0.1:6641/api/v1/ack/batch": EOF
+[info] errors consume=124462 first: pop kl: Get "http://127.0.0.1:6641/api/v1/pop/queue/kl?batch=200&partitions=5&wait=true&timeout=2000&autoAck=false&leaseSeconds=30": dial tcp 127.0.0.1:6641: connect: connection refused
+[final] offered=539580 achieved=411252 shed=0 (msgs: offered=2697900 achieved=2056260 shed=0) pushErr=128328 | pushed=2056260 popped=2040160 lag=16100 | popErr=124462 empty=69 | overall p50=2.86 p99=2932.74 p999=3293.18 ms | acked=2037935 ackErr=2225 ackLag=18325 ackAvg=6.01ms | e2e p50=847.87 p99=30801.92 p999=55836.67 ms
+load_cpu=29.9%

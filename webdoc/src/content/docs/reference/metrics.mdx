@@ -28,6 +28,14 @@ sourceOfTruth:
 # /api/v1/locks; proxy_embed.rs maps the new KV refusal to its 503. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (promotion's answer): facade/real/phase2/link.rs changes two comments of the promote route, no metric family and no help text. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a standby's leader changes): facade/real/phase2/link.rs gains a `#[cfg(test)]` door to the leader's intake, which is not in the binary: no metric family and no help text. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): facade/real.rs
+# exports queen_consume_cold_claims_total and queen_raft_qlog_dirx; both are in the generated table.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused);
+# it is in the generated table.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): the raft block of
+# GET /metrics gains quorumAckMs.
 ---
 
 Every node serves Prometheus metrics in the text format on `GET /metrics/prometheus`. Each node
@@ -56,7 +64,8 @@ own port with `QUEEN_PROXY_PORT` and scrape `PORT` from inside your network.
 
 `GET /metrics` is a JSON summary for the dashboard: `uptime`, request and message totals, the
 process's resident memory, and a `raft` block with this node's `role`, whether it knows a
-`leader`, its `term`, `applied` and `commit` indexes and its `lag`. It is not Prometheus.
+`leader`, its `term`, `applied` and `commit` indexes, its `lag` and its `quorumAckMs`
+([monitoring](/operate/monitoring/#health)). It is not Prometheus.
 
 ## Reading the replicated log
 

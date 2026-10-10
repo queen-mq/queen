@@ -324,6 +324,61 @@ fn qlog_reclaim_from_env() -> bool {
     })
 }
 
+/// Say so, at most every ten minutes, while the sealed-file indexes this
+/// process maps are past 70% of what the kernel allows it
+/// (`vm.max_map_count`): past the cap an index is held in memory instead,
+/// megabytes for a full file. Small indexes are not mapped
+/// ([`crate::rsm::qlog::index::SMALL_INDEX`]), so this is about a node that
+/// retains a great deal: about 4 TB of log at 64 MiB a file and 65,530 maps.
+fn warn_near_map_limit() {
+    use crate::rsm::qlog::index::{mapped_views, max_map_count};
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let Some(limit) = max_map_count() else {
+        return;
+    };
+    let mapped = mapped_views();
+    if mapped.saturating_mul(10) < limit.saturating_mul(7) {
+        return;
+    }
+    let mut last = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.is_some_and(|at| at.elapsed() < Duration::from_secs(600)) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    tracing::warn!(
+        target: "rsm",
+        mapped,
+        limit,
+        "rsm qlog: the sealed log files' indexes use most of the memory maps the kernel allows \
+         this process (vm.max_map_count); raise it, or QUEEN_RAFT_SEGMENT_BYTES: past the limit \
+         an index is held in memory instead",
+    );
+}
+
+/// `QUEEN_QLOG_DIRX` (default on): whether the node keeps the cross-file
+/// directory of its queue logs (`qlog/dirx.rs`). Off: no run is built, and a
+/// lookup probes the sealed files one by one, newest first (runs already on
+/// disk are still used).
+fn qlog_dirx_from_env() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("QUEEN_QLOG_DIRX")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "0" | "false" | "off" | "no"
+        )
+    })
+}
+
+/// The wall time one directory pass may take before it leaves the rest to
+/// the next maintenance tick.
+const QLOG_DIRX_PASS_BUDGET: Duration = Duration::from_millis(500);
+
 impl BatcherConfig {
     /// Resolve from the environment. Called ONCE at boot by the storage seam
     /// (WP-1.7).
@@ -427,6 +482,9 @@ impl BatcherConfig {
                     "QUEEN_RAFT_TRACE_TRIM_LIMIT",
                     d.maintenance.trace_trim_limit as u64,
                 ) as usize,
+                rows_window: flag("QUEEN_RAFT_ROWS_WINDOW", d.maintenance.rows_window),
+                // The driver hands over its queue-log reader when it starts.
+                qlog: None,
             },
             keep_overlay: flag("QUEEN_RAFT_KEEP_OVERLAY", d.keep_overlay),
             lanes: std::env::var("QUEEN_LANES")
@@ -1949,6 +2007,9 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         // partitions, 3.4 h at 10M), and judging every proposal in control cost
         // ~2 ms of each serial cycle (2026-09-29).
         let mut cfg = self.cfg;
+        // Retention reads the queue log's index for the messages that have no
+        // row any more (catalogue version 6, `maintenance::Config::qlog`).
+        cfg.maintenance.qlog = self.qlog_reader.clone();
         let scan = match cfg.retention_scan {
             Some(scan_cfg) if maintenance_on => {
                 let shared = crate::rsm::retention_scan::ScanShared::new(&cfg.maintenance);
@@ -2503,6 +2564,22 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     error = %e,
                     "rsm qlog retention will retry"
                 ),
+            }
+            warn_near_map_limit();
+            // The cross-file directory of each log (`qlog/dirx.rs`): runs for
+            // the files sealed since the last pass, merged as they pile up.
+            if qlog_dirx_from_env() {
+                let t0 = std::time::Instant::now();
+                let steps = qlogs.dirx_maintain(t0 + QLOG_DIRX_PASS_BUDGET);
+                let took = t0.elapsed();
+                if steps > 0 && took >= Duration::from_millis(50) {
+                    tracing::info!(
+                        target: "rsm",
+                        steps,
+                        ms = took.as_millis() as u64,
+                        "rsm qlog directory pass"
+                    );
+                }
             }
         });
     }
@@ -3773,9 +3850,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let since = *self.stranded_since.get_or_insert_with(Instant::now);
         if since.elapsed() >= STRANDED_AFTER {
             self.stranded_since = None;
-            self.realign_while_leading(
-                "the driver waited for a change of role that did not come",
-            );
+            self.realign_while_leading("the driver waited for a change of role that did not come");
         }
     }
 
@@ -4041,9 +4116,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         if let Some(scan) = &self.scan {
             // An ordinary cluster's leader only: a standby's retention is its
             // source's, replayed.
-            scan.set_leading(
-                !self.paused && !self.stopped && !self.closing && self.link_primary(),
-            );
+            scan.set_leading(!self.paused && !self.stopped && !self.closing && self.link_primary());
         }
     }
 

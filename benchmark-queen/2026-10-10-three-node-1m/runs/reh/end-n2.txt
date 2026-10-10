@@ -1,0 +1,5 @@
+{"status":"healthy","engine":"raft","version":"2.2.0","raft":{"role":"follower","leader":true,"term":2,"applied":107853,"commit":107853,"lag":0,"quorumAckMs":126,"storageReady":true,"clusterVersion":6,"kinds":6,"apply":{"failure":null,"skipped":[]}}}
+{"appliedIndex":107853,"clusterId":"raft-fc1f3f8a","committedIndex":107853,"durableIndex":107853,"engine":"raft","error":null,"host":{"anonBytes":1422057472,"cpuPct":116.48002833333332,"cpuWindowSeconds":60,"cpus":16,"disk":{"gate":true,"highPct":85.0,"lowPct":80.0,"totalBytes":206900281344,"usedBytes":6393434112,"usedPct":3.0901041170504944,"writesRefused":false},"memLimitBytes":33652015104,"rssBytes":1994592256},"hostname":"n2","httpAddr":"10.114.0.19:6632","inflight":0,"lastLogIndex":107853,"leaderId":1,"local":true,"log":{"bytes":2894041005,"files":45},"nodeId":2,"proposals":0,"raftAddr":"10.114.0.19:7400","reachable":true,"replication":null,"role":"voter","self":2,"singleNode":false,"state":"follower","store":{"mapBytes":68719476736,"mapUsedPct":1.9782483577728271,"maxReaders":1024,"readersInUse":49,"usedBytes":1359441920},"term":2,"uptimeSeconds":93,"version":"2.2.0","voters":3}
+
+WARN_ERROR=0
+4.0G

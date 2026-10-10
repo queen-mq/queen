@@ -82,9 +82,12 @@ class TestQueenStreamsE2E:
                     })
                     tx += 1
                 expected_sums[partition] = s
-                # Send in chunks
+                # Send in chunks, to this partition: push() takes the partition
+                # from the builder and not from the items, so without it the
+                # 10k messages all land in "Default", and a worker stopped with
+                # a batch in hand keeps that one partition leased.
                 for off in range(0, len(items), 200):
-                    await q.queue(SOURCE_QUEUE).push(items[off:off + 200])
+                    await q.queue(SOURCE_QUEUE).partition(partition).push(items[off:off + 200])
 
             # 2. Start streaming query.
             # idle_flush_ms=2000 lets the runner flush ripe windows even
@@ -146,7 +149,8 @@ class TestQueenStreamsE2E:
                 }
                 for p in range(NUM_PARTITIONS)
             ]
-            await q.queue(SOURCE_QUEUE).push(tail_items)
+            for item in tail_items:
+                await q.queue(SOURCE_QUEUE).partition(item["partition"]).push([item])
             # Wait long enough for windowEnd + idle-flush to close the windows.
             await asyncio.sleep(10.0)
 

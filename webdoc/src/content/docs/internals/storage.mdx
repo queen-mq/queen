@@ -9,6 +9,8 @@ sidebar:
 sourceOfTruth:
   - server/src/rsm/qlog/mod.rs
   - server/src/rsm/qlog/set.rs
+  - server/src/rsm/qlog/dirx.rs
+  - server/src/rsm/qlog/index.rs
   - server/src/rsm/qlog/record.rs
   - server/src/rsm/qlog/codec.rs
   - server/src/rsm/store/mod.rs
@@ -26,6 +28,24 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (standby cluster): the layout names raft/link_holds.json and link.seed, and the snapshot paragraph says a standby's first node takes the same snapshot. snapshot.rs splits the stream's writer and its stager out of the install path, which behaves as described; log_store.rs and the purge are as described, with a standby holding the log as a follower that is behind does.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a seed's hold): snapshot.rs tells whoever asked for a streamed snapshot where its checkpoint is and that the stream is still being read, which is how a source node keeps its log for the standby it seeds. The snapshot paragraph now says which node keeps its log from when; the stream's content, the staging and the swap are as described.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): the layout names the
+# directory files, retention has three watermarks, and the limits name the mapped index files.
+# sourceOfTruth re-read 2026-10-09 (two housekeeping fixes): qlog/set.rs retires an empty log's
+# directory by a rename before it deletes it, and sweeps retired directories at a start (the reclaim
+# paragraph says so); qlog/mod.rs lowers the first seq of an empty file to a log cut; snapshot.rs
+# leaves retired directories out of a snapshot. The refusals at boot are as listed.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age, a failed roll leaves the file whole):
+# qlog/index.rs reads an index that fits a page into memory, and one the kernel refuses to map;
+# qlog/set.rs gives the kernel a read-ahead hint for old records and seals an aged active file only
+# for retention or its size; qlog/mod.rs makes a roll change nothing in memory until the sealed
+# file's index is open. The paragraphs on rolling, reclaim and limits say so. Later the same night
+# qlog/set.rs lowers its written seq at a raft cut and qlog/mod.rs lowers an empty file's first seq
+# at its first write, so an entry written after a cut is found by its seq: no paragraph describes
+# file headers, nothing here changes.
+# sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): maintenance.rs
+# computes a push's row time from the dedup window and the node's floor alone; the retention steps
+# say so.
 ---
 
 A node keeps three things on its own disk. The queue log files hold every message, and they are
@@ -49,6 +69,7 @@ $QUEEN_RAFT_DIR                    default /var/lib/queen/raft
     q0/                            the system log: entries that touch no queue
     q<queue id>/r00000001.qlog     a queue's log files, rolling
                 r00000001.qidx     the index of a sealed file
+                dirx-<a>-<b>.qdx   which of the sealed files a to b holds a partition's offsets
   raft/                            openraft only: vote, commit point, purge point, membership,
                                    and what the node keeps for a standby (link_holds.json)
   snapshots/                       a snapshot received from the leader, staged for the next boot
@@ -90,9 +111,23 @@ decompresses at one point.
 
 The active file rolls at `QUEEN_RAFT_SEGMENT_BYTES` (64 MiB). A sealed file is immutable and gets a
 `.qidx` index beside it, while the active file's index lives in RAM; a stale or missing `.qidx` is
-rebuilt by scanning its file. Both indexes carry append timestamps and offset ranges, so message
+rebuilt by scanning its file. A roll writes and opens that index before it changes anything in
+memory: one that fails (no file descriptor, a write error) leaves the file active, with every
+message in it still found, and the next roll seals it whole. Both indexes carry append timestamps and offset ranges, so message
 browsing can seek a historical window and select its page before reading payloads. Only appends
 containing a selected message need to be read and decompressed, once per append for that page.
+
+A log that retains a lot has many sealed files, and an index per file does not say which file
+holds a given partition's offset. Each log therefore keeps a directory beside its files
+(`dirx-<first>-<last>.qdx`): for a range of sealed files, one sorted entry per partition per file,
+"offsets `a` to `b` of this partition are in file `f`". A read of a message outside the active
+file asks the directory for the file and then that file's own `.qidx` for the record, so it costs
+a few lookups whatever the log retains, where it used to ask the sealed files one by one. The
+node's maintenance builds a directory file for every 16 sealed files that have none and merges 8
+of a size into one, with sequential I/O only and never on the log writer; the files it has not
+covered yet are asked directly. A directory file is derived data: one that is missing or damaged
+is removed at boot and built again from the `.qidx` files (`QUEEN_QLOG_DIRX=0` stops building
+them).
 
 `QUEEN_QLOG_SHARDS=K`, set before the directory is created, maps every queue onto K shared logs
 (`queue id % K`), so one write fsyncs at most K files however many queues it spans. That is the
@@ -174,12 +209,25 @@ Retention is decided once, on the leader, and executed on every node, like every
 
 1. **Decide.** A scanner on the leader walks every partition at `QUEEN_RAFT_RETENTION_SCAN_PER_S`
    (50,000), at most one round per `RETENTION_INTERVAL` (5000 ms). The planner checks each proposal
-   against the current state and logs two watermarks per partition: `log_start`, below which the
-   payloads are gone, and `txns_start`, below which the hash lists are gone. Hash lists are kept
-   for the longest of the queue's dedup window, its completed retention and
-   `QUEEN_RAFT_TXN_WINDOW_MIN_S` (900 s), so dedup outlives the payload. A partition with no write
-   for `PARTITION_CLEANUP_DAYS` (30), no retained message, no dead letter and no live lease is
-   deleted.
+   against the current state and logs three watermarks per partition: `log_start`, below which the
+   payloads are gone; `rows_start`, below which the store holds no index row; and `txns_start`,
+   the lower of the two, below which a record has neither and its file can be reclaimed. A push's
+   index row (its offsets, its timestamp and the hashes of its `transactionId`s) is kept for the
+   queue's dedup window, and never less than `QUEEN_RAFT_TXN_WINDOW_MIN_S` (900 s). That is
+   independent of the message and of the retention that keeps it (`retentionSeconds`,
+   `completedRetentionSeconds`): the row of a message retention already took stays for the rest
+   of that time, so dedup outlives the payload, and the row of a message that is still retained
+   goes at the end of it, so memory does not grow with what a queue retains.
+   The messages left without a row are served from the queue log's own index: a consumer that
+   far behind reads its positions from disk, as it reads its payloads. One watermark moves at
+   most `RETENTION_BATCH_SIZE` (1000) pushes of a partition, and a partition that has more due is
+   judged again at once. A partition with no write for `PARTITION_CLEANUP_DAYS` (30), no retained
+   message, no dead letter and no live lease is deleted.
+
+   Rows leave ahead of their messages only where the cluster is at version 6 (every node runs
+   a release that reads it; the version rises by itself and does not go back) and
+   `QUEEN_RAFT_ROWS_WINDOW` is on. Below it a row lives exactly as long as its message, as
+   before.
 2. **Reclaim.** Each node frees its own files below `txns_start`, one sealed file at a time. A file
    with no live record is unlinked. A partly live file is rewritten with only its live records; the
    copy is made without holding the log's lock (a sealed file is immutable) and swapped in under
@@ -190,13 +238,29 @@ Retention is decided once, on the leader, and executed on every node, like every
 Reclaim never touches the active file, nor a file holding a record above the last store checkpoint
 or, in a cluster, above the raft purge point. One pass examines at most 256 files, spends at most
 200 ms and rewrites at most one file. An active file that holds data older than
-`QUEEN_QLOG_SEAL_AGE_S` (600) is sealed so that reclaim can reach it.
+`QUEEN_QLOG_SEAL_AGE_S` (600) is sealed so that reclaim can reach it, when that is worth a file:
+reclaim found a dead message in it (it looks at 32 partitions of an aged active file a pass), or
+it holds an eighth of a full file. Age alone seals nothing, so a queue without retention gets a
+new file every 64 MiB and no other. A queue's log with nothing left
+in it is closed and its directory removed: renamed to `q<id>.dead` first and deleted after, so a
+stop in between leaves a retired directory, which the next start sweeps, and never a log with no
+file in it, which a start refuses.
 
 ## Limits
 
 Disk is freed by whole files: a partition's bytes go when its file dies or is rewritten, and a
 watermark that moves frees nothing by itself. RAM holds the whole store, since partitions,
 cursors, KV keys and request ids are loaded at boot on every node, so memory grows with them.
+Messages are not in that list: a push costs a row in RAM (about 200 bytes, measured on 2.1.0)
+for the queue's dedup window, 15 minutes at least, and nothing after it, so memory follows the
+push rate times that window and not the retention. Until the cluster is at version 6 the row
+stays as long as the message. A sealed log file's `.qidx` is memory-mapped, unless it fits one
+page (about 80 records): then it is read into memory and takes no mapping. Linux allows a
+process 65,530 mappings by default (`vm.max_map_count`), which is about 4 TB of log per node at
+64 MiB per file; `queen_raft_qlog_index_maps` shows the mapped indexes against that limit and
+the node warns in its log past 70% of it. Past the limit the kernel refuses a mapping and the
+index is held in memory instead (megabytes for a full file, counted in the same series), so
+raise the limit, or `QUEEN_RAFT_SEGMENT_BYTES`, before a node gets there.
 Traces are the exception: the trace file is page cache, a trace costs its row on disk and no RAM,
 and expiry (`QUEEN_RAFT_TRACE_RETENTION_S`, 7 days) deletes at most 512 of them per step.
 Replication protects against losing a minority of disks; losing a majority for good can lose

@@ -759,6 +759,11 @@ pub struct RaftHealth {
     pub applied: u64,
     pub commit: u64,
     pub lag_ms: u64,
+    /// How long ago (ms) the leader this node follows, or this node when it
+    /// leads, last heard from a majority of the voters
+    /// ([`crate::rsm::replicator::ClusterMembers::quorum_ack_age`]). `None`
+    /// while that is not known: no append has reached this node yet.
+    pub quorum_ack_ms: Option<u64>,
     /// Whether the state machine is wired and serving (false under the phase-1
     /// stub). Distinct from process liveness: the broker is up and answers
     /// `/health`, but the message path is not yet on the RSM.
@@ -800,17 +805,27 @@ impl RaftHealth {
             Some(l) => format!(",\"link\":{l}"),
             None => String::new(),
         };
+        let quorum = match self.quorum_ack_ms {
+            Some(ms) => ms.to_string(),
+            None => "null".to_string(),
+        };
         format!(
-            "{{\"role\":\"{}\",\"leader\":{},\"term\":{},\"applied\":{},\"commit\":{},\"lag\":{},\"storageReady\":{}{versions}{apply}{link}}}",
+            "{{\"role\":\"{}\",\"leader\":{},\"term\":{},\"applied\":{},\"commit\":{},\"lag\":{},\"quorumAckMs\":{quorum},\"storageReady\":{}{versions}{apply}{link}}}",
             self.role, self.leader_known, self.term, self.applied, self.commit, self.lag_ms, self.storage_ready
         )
     }
 
-    /// Whether `/health` should answer `200 healthy` (a leader is known and the
-    /// apply lag is under the ready threshold, §14.1). In phase 1 there is no
-    /// consensus lag to gate on, so the stub reports ready.
-    pub fn ready(&self, ready_lag_ms: u64) -> bool {
-        self.leader_known && self.lag_ms <= ready_lag_ms
+    /// Whether `/health` should answer `200 healthy` (§14.1): a leader is
+    /// known, the apply lag is under the ready threshold, and that leader
+    /// heard from a majority of the voters within `ready_quorum_ms`. A node
+    /// that lost its quorum keeps the id of the last leader it knew, so the
+    /// first test alone would hold forever; `ready_quorum_ms` 0 leaves the
+    /// third one out. In phase 1 there is no consensus to gate on, so the
+    /// stub reports ready.
+    pub fn ready(&self, ready_lag_ms: u64, ready_quorum_ms: u64) -> bool {
+        self.leader_known
+            && self.lag_ms <= ready_lag_ms
+            && (ready_quorum_ms == 0 || self.quorum_ack_ms.is_some_and(|ms| ms <= ready_quorum_ms))
     }
 }
 
@@ -1129,6 +1144,7 @@ impl Rsm for NotReady {
             applied: 0,
             commit: 0,
             lag_ms: 0,
+            quorum_ack_ms: Some(0),
             storage_ready: false,
             apply: None,
             cluster_version: None,
@@ -1177,5 +1193,56 @@ pub fn build(ctx: &RsmBuildCtx) -> Arc<dyn Rsm> {
     match BUILDER.get() {
         Some(f) => f(ctx),
         None => Arc::new(NotReady::with_notifier(ctx.notifier.clone())),
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::RaftHealth;
+
+    fn health(leader_known: bool, lag_ms: u64, quorum_ack_ms: Option<u64>) -> RaftHealth {
+        RaftHealth {
+            role: "follower".into(),
+            leader_known,
+            term: 3,
+            applied: 10,
+            commit: 10,
+            lag_ms,
+            quorum_ack_ms,
+            storage_ready: true,
+            apply: None,
+            cluster_version: None,
+            kinds: None,
+            link: None,
+        }
+    }
+
+    /// A node that lost its quorum keeps the id of the last leader it knew
+    /// (F8): knowing a leader is not enough, that leader must have heard from
+    /// a majority within the window.
+    #[test]
+    fn a_node_is_ready_only_while_its_leader_hears_from_a_majority() {
+        assert!(health(true, 0, Some(120)).ready(2000, 5000));
+        assert!(!health(true, 0, Some(5001)).ready(2000, 5000));
+        // Before the first append reaches a node, nothing is known.
+        assert!(!health(true, 0, None).ready(2000, 5000));
+        // The window turned off: the rule as it was.
+        assert!(health(true, 0, Some(60_000)).ready(2000, 0));
+        assert!(health(true, 0, None).ready(2000, 0));
+        // The other two tests still hold on their own.
+        assert!(!health(false, 0, Some(1)).ready(2000, 5000));
+        assert!(!health(true, 2001, Some(1)).ready(2000, 5000));
+    }
+
+    #[test]
+    fn the_health_block_carries_the_quorum_figure() {
+        let known = health(true, 0, Some(87)).to_json();
+        assert!(
+            known.contains("\"lag\":0,\"quorumAckMs\":87,\"storageReady\":true"),
+            "{known}"
+        );
+        let unknown = health(true, 0, None).to_json();
+        assert!(unknown.contains("\"quorumAckMs\":null"), "{unknown}");
+        serde_json::from_str::<serde_json::Value>(&unknown).expect("valid JSON");
     }
 }

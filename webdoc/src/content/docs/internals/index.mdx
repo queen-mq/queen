@@ -35,6 +35,14 @@ digest: >-
 # sourceOfTruth re-read 2026-10-08 (standby cluster): rsm gains the link module, the batcher a standby mode and a rule for stopping (a closing driver no longer waits on an entry that timed out), the engine a standby flag, the replicator what a standby reads and the hold on its log. A paragraph under Replication says what a standby cluster is; the planner, the lanes, the pipeline and the engine are as described.
 # sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only (a standby that had just elected a leader planned a client's command that had waited out the election). That a standby plans nothing of its own until it is promoted now holds across its leader changes too; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader; node.rs forwards the new call. Replication now says how the planner's entries reach openraft and when they wait. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): the store row and the
+# limits say memory follows the pushes of the last dedup window, not the retained messages.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): batcher.rs warns in the log when the log
+# files' mapped indexes pass 70% of vm.max_map_count. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/groups.rs
+# changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
+# QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 Queen is one process per node, built around one idea: decide every write once, on the leader, and
@@ -77,7 +85,7 @@ coordinate.
 | Planner | leader | Plans each command against committed state plus the entries in flight, builds one entry per cycle, proposes it. | `rsm/batcher.rs`, `rsm/batcher_lanes.rs`, `rsm/planner/` |
 | Raft log | every node | Orders and replicates entries. In a cluster openraft decides who leads and what is committed; the log itself is the queue log files. | `rsm/replicator/` |
 | Apply | every node | Executes committed entries in index order. The only writer of the store. | `rsm/apply.rs`, `rsm/apply_shard.rs` |
-| Store | every node | Queues, partitions, cursors, dedup rows, KV, timers, request ids, counters. Held in RAM, checkpointed to LMDB. | `rsm/store/` |
+| Store | every node | Queues, partitions, cursors, the dedup rows of recent pushes, KV, timers, request ids, counters. Held in RAM, checkpointed to LMDB. | `rsm/store/` |
 | Consumption engine | leader | Serves claims, leases and acks from memory and logs the changed cursor rows as checkpoints. | `rsm/consume/` |
 
 The same process can also run the Kafka wire facade (`QUEEN_KAFKA_EMBEDDED=true`) and the
@@ -209,7 +217,8 @@ data, because there is no migration between groups yet, so pin a large tenant wi
 the same `QUEEN_RAFT_GROUPS` on every node.
 
 The store is loaded into RAM in full at boot, so each node's memory grows with the partitions,
-cursors and KV keys of the groups it holds; traces are the exception, kept in their own LMDB file
+cursors and KV keys of the groups it holds, and with the pushes of the last dedup window, not with
+the messages it retains: those are read from the queue log. Traces are kept in their own LMDB file
 and read from disk. And a new leader serves no pops or acks for one
 checkpoint interval plus `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` after it takes over.
 

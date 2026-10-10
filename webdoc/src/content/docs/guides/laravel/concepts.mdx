@@ -75,11 +75,22 @@ sourceOfTruth:
 # version 5. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-09 (worker count and prefetch): QueenQueue leases one batch per
 # worker and runs its jobs sequentially; available partitions determine concurrent execution.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/pop.rs reads
+# messages whose rows are gone from the queue log, apply_shard.rs applies the watermark that removes
+# those rows, facade/real.rs exports two metric families. Claims, leases, retries and the DLQ are as
+# described.
 # sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): ForkServerCommand binds
 # queue:work's arguments after the command name, lets go of the queue connections the boot
 # resolved, reports a child's exception and leaves at once after queue:restart; QueenConnector
 # applies the pool's environment to the worked connection alone; the failed-job provider leaves
 # other drivers to Laravel. The failed-jobs and restart paragraphs say so.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/real.rs
+# changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
+# QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): a supervised worker
 # leaves on a wrong connection or a LogicException from its pop, and otherwise writes since when its
 # pops fail beside its exit marker (WorkerExitMarker writes both); the fork server's child registers

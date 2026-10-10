@@ -1,0 +1,17 @@
+# Three voters in namespace queen. The Secret is yours to create first:
+#
+#   kubectl create namespace queen
+#   kubectl -n queen create secret generic queen \
+#     --from-literal=QUEEN_RAFT_TOKEN="$(openssl rand -hex 32)" \
+#     --from-literal=QUEEN_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+apiVersion: queenmq.com/v1alpha1
+kind: QueenCluster
+metadata:
+  name: queen
+  namespace: queen
+spec:
+  version: "2.2.0"
+  replicas: 3
+  secretName: queen
+  storage:
+    size: 50Gi

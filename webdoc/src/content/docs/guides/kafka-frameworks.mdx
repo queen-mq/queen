@@ -15,6 +15,9 @@ sourceOfTruth:
 sidebar:
   label: "Kafka Streams, Connect and Flink"
   order: 7.5
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): offsets.rs answers a
+# timestamp lookup from the queue log's index for messages older than the rows the store holds; the
+# answer is the same offset.
 ---
 
 Kafka Streams, Kafka Connect and Flink ask more of a broker than produce and consume. They create

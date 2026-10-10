@@ -1,0 +1,12 @@
+[11:04:35] run b2-rc7-completed: queen-rc7, retention completed, 300s, 9 x 111111 msg/s, 500000 partitions, EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60
+[11:04:47] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":60,"deadLetterQueue":true,"dedupWindowSeconds":60,"delayedProcessing":0,"dlqAfterMaxRetries":true,"encryptionEnabled":false,"le
+
+  [warm] bench: 500000 partitions written and drained (500000 messages)
+  [warm] one message (no "ts") into each of 500000 partitions of bench in 2.5s; drained in 3.3s
+[create] done: bench x 500000 partitions
+[11:04:56] prefill of 500000 partitions took 7 s
+[11:04:58] load starts at 1791630318109 (in 20 s)
+[11:10:38] load processes done (3 of 3 loaders)
+[11:10:45] collected: 29 files; brokers stopped
+RUN_DONE

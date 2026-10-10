@@ -96,6 +96,7 @@ fn synthetic_entry(i: u64, base_pid: u64) -> Entry {
             pid,
             log_start: i,
             txns_start: i,
+            rows: None,
         });
     }
     effects.push(Effect::KvPut {

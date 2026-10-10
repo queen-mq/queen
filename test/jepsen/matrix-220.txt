@@ -1,0 +1,238 @@
+# 2.2.0 candidate (branch improvestorage, 2026-10-09/10): the whole campaign.
+#
+#   cd /root/jepsen-220 && RUNS=/root/runs-220 BIN=/root/bin/queen-220rc1 ./run-campaign.sh matrix-220.txt
+#
+# 1. The four tests of the rows matrix that were not valid on the first
+#    build (a node refused to start: an empty log directory left by a
+#    removal that stopped half-way, and an entry written after a log cut
+#    into a file created for a later seq), first.
+# 2. The rest of the rows matrix (matrix-rows.txt): rows that live two
+#    seconds, 256 KiB log files sealed after 10 s.
+# 3. sf: the default 24 h dedup window on the same small, quickly sealed
+#    files, so that sealing, reclaim, the removal of empty logs and the
+#    cross-file directory run under faults with rows that stay.
+# 4. The whole suite 2.1.0 passed (153 tests: P11's 125 and the 28 lock
+#    and semaphore tests), unchanged.
+
+# --- 1. not valid on the first build
+rw-w8-kill              --workload retention --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-lz-kill           --workload queue --w2-partitions 400 --lazyfs --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-slow-lz-kill      --workload queue --w2-partitions 400 --lazyfs --nemesis kill --db-targets one --slow-fsync-nodes n4,n5 --slow-fsync-ms 300 --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_DURABLE_EVERY_MS=20,QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-lz-kill           --workload retention --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+
+# --- 2. the rest of the rows matrix
+s-w2-rows               --workload queue --w2-partitions 400 --nemesis kill --time-limit 60 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-kill              --workload queue --w2-partitions 400 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-part              --workload queue --w2-partitions 400 --nemesis partition --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-kill-2000         --workload queue --w2-partitions 2000 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-kill              --workload pipeline --w5-partitions 200 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-member-snap       --workload queue --w2-partitions 400 --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5,QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-restart           --workload queue --w2-partitions 400 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-pause             --workload queue --w2-partitions 400 --nemesis pause --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-leader-deaf       --workload queue --w2-partitions 400 --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-part              --workload pipeline --w5-partitions 200 --nemesis partition --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-member-snap       --workload pipeline --w5-partitions 200 --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5,QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-kill-200          --workload retention --w2-partitions 200 --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-part              --workload retention --nemesis partition --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w1-kill              --workload log --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-lz-kill           --workload pipeline --w5-partitions 200 --lazyfs --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-restart           --workload pipeline --w5-partitions 200 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-restart           --workload retention --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-bridge            --workload queue --w2-partitions 400 --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-clock             --workload queue --w2-partitions 400 --nemesis clock --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-membership        --workload queue --w2-partitions 400 --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-leader-deaf       --workload pipeline --w5-partitions 200 --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-pause             --workload pipeline --w5-partitions 200 --nemesis pause --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w7-kill              --workload dlq --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w1-part              --workload log --nemesis partition --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-pause             --workload retention --nemesis pause --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-leader-deaf       --workload retention --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w7-part              --workload dlq --nemesis partition --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w1-restart           --workload log --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+d-w2-kill               --workload queue --nemesis kill --time-limit 300 --rate 200
+d-w2-part               --workload queue --nemesis partition --time-limit 300 --rate 200
+d-w5-kill               --workload pipeline --nemesis kill --time-limit 300 --rate 200
+d-w6-kill               --workload dedup --nemesis kill --time-limit 300 --rate 200
+d-w6-part               --workload dedup --nemesis partition --time-limit 300 --rate 200
+d-w3-kill               --workload register --nemesis kill --time-limit 300 --rate 100
+d-w4-kill               --workload elle --nemesis kill --time-limit 300 --rate 100
+d-w2-member-snap        --workload queue --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+
+# --- 3. small files, rows that stay
+sf-w2-kill              --workload queue --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+sf-w2-part              --workload queue --nemesis partition --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+sf-w2-lz-kill           --workload queue --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+sf-w2-restart           --workload queue --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+sf-w5-kill              --workload pipeline --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+sf-w5-lz-kill           --workload pipeline --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+sf-w8-kill              --workload retention --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+sf-w8-part              --workload retention --nemesis partition --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+sf-w8-lz-kill           --workload retention --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+sf-w1-kill              --workload log --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+sf-w1-lz-kill           --workload log --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+sf-w6-kill              --workload dedup --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+
+# --- 4. the suite of 2.1.0
+w11-lock-smoke          --workload locks --nemesis none --time-limit 120 --rate 200
+w11-sem-smoke           --workload semaphore --nemesis none --time-limit 120 --rate 200
+p11-w2-restart          --workload queue --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w5-restart          --workload pipeline --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w5-kill             --workload pipeline --nemesis kill --time-limit 300 --rate 200
+p11-w5-part             --workload pipeline --nemesis partition --time-limit 300 --rate 200
+p11-w5-lz-kill          --workload pipeline --lazyfs --nemesis kill --time-limit 300 --rate 200
+p11-w5-leader-deaf      --workload pipeline --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w2-kill             --workload queue --nemesis kill --time-limit 300 --rate 200
+p11-w2-part             --workload queue --nemesis partition --time-limit 300 --rate 200
+p11-w2-leader-deaf      --workload queue --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w5-pause            --workload pipeline --nemesis pause --time-limit 300 --rate 200
+p11-w5-bridge           --workload pipeline --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w2-pause            --workload queue --nemesis pause --time-limit 300 --rate 200
+p11-w2-lz-kill          --workload queue --lazyfs --nemesis kill --time-limit 300 --rate 200
+p11-w2-bridge           --workload queue --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w2-membership       --workload queue --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w5-membership       --workload pipeline --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w5-member-kill      --workload pipeline --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w5-corrupt-store    --workload pipeline --nemesis corrupt --corrupt-classes store --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 10
+p11-w2-clock-2          --workload queue --nemesis clock --time-limit 300 --rate 200
+p11-w2-clock-3          --workload queue --nemesis clock --time-limit 300 --rate 200
+p11-w5-clock-2          --workload pipeline --nemesis clock --time-limit 300 --rate 200
+p11-w7-kill             --workload dlq --nemesis kill --time-limit 300 --rate 200
+p11-w7-part             --workload dlq --nemesis partition --time-limit 300 --rate 200
+p11-w7-pause            --workload dlq --nemesis pause --time-limit 300 --rate 200
+p11-w7-leader-deaf      --workload dlq --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w7-lz-kill          --workload dlq --lazyfs --nemesis kill --time-limit 300 --rate 200
+p11-w7-bridge           --workload dlq --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w7-restart          --workload dlq --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w7-membership       --workload dlq --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w7-clock            --workload dlq --nemesis clock --time-limit 300 --rate 200
+p11-w2-member-snap      --workload queue --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+p11-w5-member-snap      --workload pipeline --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+p11-w2-slow-lz-kill     --workload queue --lazyfs --nemesis kill --db-targets one --slow-fsync-nodes n4,n5 --slow-fsync-ms 300 --env QUEEN_RAFT_DURABLE_EVERY_MS=20 --time-limit 300 --rate 200
+p11-w5-slow-lz-kill     --workload pipeline --lazyfs --nemesis kill --db-targets one --slow-fsync-nodes n4,n5 --slow-fsync-ms 300 --env QUEEN_RAFT_DURABLE_EVERY_MS=20 --time-limit 300 --rate 200
+w11-lock-kill           --workload locks --nemesis kill --time-limit 300 --rate 200
+w11-lock-part           --workload locks --nemesis partition --time-limit 300 --rate 200
+w11-lock-pause          --workload locks --nemesis pause --time-limit 300 --rate 200
+w11-lock-restart        --workload locks --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+w11-lock-leader-deaf    --workload locks --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+w11-lock-bridge         --workload locks --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+w11-lock-lz-kill        --workload locks --lazyfs --nemesis kill --time-limit 300 --rate 200
+w11-lock-membership     --workload locks --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+w11-lock-clock          --workload locks --nemesis clock --time-limit 300 --rate 200
+w11-lock-many-kill      --workload locks --w11-locks 12 --nemesis kill --time-limit 300 --rate 400
+w11-sem-kill            --workload semaphore --nemesis kill --time-limit 300 --rate 200
+w11-sem-part            --workload semaphore --nemesis partition --time-limit 300 --rate 200
+w11-sem-pause           --workload semaphore --nemesis pause --time-limit 300 --rate 200
+w11-sem-restart         --workload semaphore --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w6-restart          --workload dedup --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w3c-kill            --workload claim --nemesis kill --time-limit 300 --rate 100
+p11-w3c-part            --workload claim --nemesis partition --time-limit 300 --rate 100
+p11-w3c-lz-kill         --workload claim --lazyfs --nemesis kill --time-limit 300 --rate 100
+p11-w6-kill             --workload dedup --nemesis kill --time-limit 300 --rate 200
+p11-w6-part             --workload dedup --nemesis partition --time-limit 300 --rate 200
+p11-w6-lz-kill          --workload dedup --lazyfs --nemesis kill --time-limit 300 --rate 200
+p11-w6-leader-deaf      --workload dedup --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w3c-leader-deaf     --workload claim --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w6-pause            --workload dedup --nemesis pause --time-limit 300 --rate 200
+p11-w6-bridge           --workload dedup --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-kill             --workload log --nemesis kill --time-limit 300 --rate 200
+p11-w1-pause            --workload log --nemesis pause --time-limit 300 --rate 200
+p11-w1-part             --workload log --nemesis partition --time-limit 300 --rate 200
+p11-w1-lz-kill          --workload log --lazyfs --nemesis kill --time-limit 300 --rate 200 --nemesis-interval 10
+p11-w1-leader-deaf      --workload log --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-bridge           --workload log --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-membership       --workload log --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w6-membership       --workload dedup --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-member-kill      --workload log --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-member-lz-kill   --workload log --lazyfs --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w1-corrupt-store    --workload log --nemesis corrupt --corrupt-classes store --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 10
+p11-w1-corrupt-all      --workload log --nemesis corrupt --corrupt-remedy mix --time-limit 300 --rate 200 --nemesis-interval 10
+p11-w3c-pause-2         --workload claim --nemesis pause --time-limit 300 --rate 100
+p11-w3c-pause-3         --workload claim --nemesis pause --time-limit 300 --rate 100
+p11-w8-kill             --workload retention --nemesis kill --time-limit 300 --rate 200
+p11-w8-part             --workload retention --nemesis partition --time-limit 300 --rate 200
+p11-w8-pause            --workload retention --nemesis pause --time-limit 300 --rate 200
+p11-w8-leader-deaf      --workload retention --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w8-lz-kill          --workload retention --lazyfs --nemesis kill --time-limit 300 --rate 200
+p11-w8-bridge           --workload retention --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w8-restart          --workload retention --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w8-membership       --workload retention --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w8-clock            --workload retention --nemesis clock --time-limit 300 --rate 200
+p11-w9-kill             --workload streams --nemesis kill --time-limit 300 --rate 200
+p11-w9-part             --workload streams --nemesis partition --time-limit 300 --rate 200
+p11-w9-pause            --workload streams --nemesis pause --time-limit 300 --rate 200
+p11-w9-leader-deaf      --workload streams --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w9-lz-kill          --workload streams --lazyfs --nemesis kill --time-limit 300 --rate 200
+p11-w9-bridge           --workload streams --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w9-restart          --workload streams --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w9-membership       --workload streams --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w9-clock            --workload streams --nemesis clock --time-limit 300 --rate 200
+p11-w1-member-snap      --workload log --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+p11-w9-member-snap      --workload streams --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5
+p11-w1-slow-lz-kill     --workload log --lazyfs --nemesis kill --db-targets one --slow-fsync-nodes n4,n5 --slow-fsync-ms 300 --env QUEEN_RAFT_DURABLE_EVERY_MS=20 --time-limit 300 --rate 200
+p11-w4-kill             --workload elle --nemesis kill --time-limit 300 --rate 100
+p11-w3-kill             --workload register --nemesis kill --time-limit 300 --rate 100
+p11-w3-part             --workload register --nemesis partition --time-limit 300 --rate 100
+p11-w3-lz-kill          --workload register --lazyfs --nemesis kill --time-limit 300 --rate 100
+p11-w3-leader-deaf      --workload register --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w3-lead-part        --workload register --kv-route leader --nemesis partition --time-limit 300 --rate 100
+p11-w3-lead-deaf        --workload register --kv-route leader --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w3-kvdefault-kill   --workload register --no-kv-lift --kv-route leader --nemesis kill --time-limit 300 --rate 400
+p11-w3b-kill            --workload counter --nemesis kill --time-limit 300 --rate 100
+p11-w3b-part            --workload counter --nemesis partition --time-limit 300 --rate 100
+p11-w3b-lz-kill         --workload counter --lazyfs --nemesis kill --time-limit 300 --rate 100
+p11-w3-pause            --workload register --nemesis pause --time-limit 300 --rate 100
+p11-w3-bridge           --workload register --nemesis bridge --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w3-lead-kill        --workload register --kv-route leader --nemesis kill --time-limit 300 --rate 100
+p11-w3-lead-pause       --workload register --kv-route leader --nemesis pause --time-limit 300 --rate 100
+p11-w3b-pause           --workload counter --nemesis pause --time-limit 300 --rate 100
+p11-w3b-leader-deaf     --workload counter --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w3-membership       --workload register --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w3b-membership      --workload counter --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w10-kill            --workload timers --nemesis kill --time-limit 300 --rate 200
+p11-w10-part            --workload timers --nemesis partition --time-limit 300 --rate 200
+p11-w10-pause           --workload timers --nemesis pause --time-limit 300 --rate 200
+p11-w10-leader-deaf     --workload timers --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w10-lz-kill         --workload timers --lazyfs --nemesis kill --time-limit 300 --rate 200
+p11-w10-bridge          --workload timers --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w10-restart         --workload timers --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w10-membership      --workload timers --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w10-clock           --workload timers --nemesis clock --time-limit 300 --rate 200
+p11-w2-clock            --workload queue --nemesis clock --time-limit 300 --rate 200
+p11-w5-clock            --workload pipeline --nemesis clock --time-limit 300 --rate 200
+p11-w1-clock            --workload log --nemesis clock --time-limit 300 --rate 200
+p11-w3-clock            --workload register --nemesis clock --time-limit 300 --rate 100
+p11-w4-pause            --workload elle --nemesis pause --time-limit 300 --rate 100
+p11-w4-leader-deaf      --workload elle --nemesis leader-deaf --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w3c-pause           --workload claim --nemesis pause --time-limit 300 --rate 100
+p11-w3c-membership      --workload claim --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w4-restart          --workload elle --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w4-part             --workload elle --nemesis partition --time-limit 300 --rate 100
+p11-w4-lz-kill          --workload elle --lazyfs --nemesis kill --time-limit 300 --rate 100
+p11-w4-bridge           --workload elle --nemesis bridge --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w4-membership       --workload elle --nemesis membership --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w1-restart          --workload log --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20
+p11-w3-restart          --workload register --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w3b-restart         --workload counter --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+p11-w3c-restart         --workload claim --nemesis restart --time-limit 300 --rate 100 --nemesis-interval 20
+x-lock-all              --workload locks --nemesis all --time-limit 300 --rate 200
+x-lock-kill-nooffload   --workload locks --no-offload --nemesis kill --time-limit 300 --rate 200
+x-lock-part-nooffload   --workload locks --no-offload --nemesis partition --time-limit 300 --rate 200
+x-lock-pause-kill       --workload locks --lazyfs --nemesis pause-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+x-lock-part-kill        --workload locks --lazyfs --nemesis part-kill --time-limit 300 --rate 200 --nemesis-interval 5 --composite-phase 20
+x-lock-lanes1-kill      --workload locks --lanes 1 --nemesis kill --time-limit 300 --rate 200
+x-sem-clock             --workload semaphore --nemesis clock --time-limit 300 --rate 200
+x-sem-leader-deaf       --workload semaphore --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20
+x-sem-bridge            --workload semaphore --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20
+x-sem-lz-kill           --workload semaphore --lazyfs --nemesis kill --time-limit 300 --rate 200
+x-sem-membership        --workload semaphore --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+x-sem-wide-kill         --workload semaphore --w11-limit 8 --w11-locks 2 --nemesis kill --time-limit 300 --rate 400
+# sh: the shared-log layout (QUEEN_QLOG_SHARDS=4, eight queues), which no campaign had run: with
+# the default settings, and with rows that live two seconds on small files.
+sh-w2-kill              --workload queue --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+sh-w2-lz-kill           --workload queue --lazyfs --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+sh-w5-kill              --workload pipeline --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+sh-w1-part              --workload log --nemesis partition --time-limit 300 --rate 200 --queues 8 --env QUEEN_QLOG_SHARDS=4
+sh-rw-w2-kill           --workload queue --w2-partitions 400 --nemesis kill --time-limit 300 --rate 200 --queues 8 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4
+sh-rw-w2-lz-kill        --workload queue --w2-partitions 400 --lazyfs --nemesis kill --time-limit 300 --rate 200 --queues 8 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4
+sh-rw-w5-part           --workload pipeline --w5-partitions 200 --nemesis partition --time-limit 300 --rate 200 --queues 8 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4
+sh-rw-w8-kill           --workload retention --nemesis kill --time-limit 300 --rate 200 --queues 8 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10,QUEEN_QLOG_SHARDS=4

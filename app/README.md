@@ -35,12 +35,12 @@ and persist on this device; choosing System clears that override.
   renewal and when it expires. A permit is a KV row, so the page is the KV listing asked for
   the namespace `queen-locks` and a viewer can open it. Read-only: the drawer shows the guard
   a transaction carries and the release call for the lease period on screen, and sends neither
-- **Queue Operations** — per-queue throughput, lag and consumer health over a time range
-  (`QueueOperations.vue`). It inspects; it does not push, pop or ack
 - **Consumer Groups** — health, lag, subscription changes, seek, delete
 - **Message Tracing** — cross-message trace timeline viewer
-- **Analytics** and **Workload** — per-queue and per-group performance, and who is doing the
-  work grouped by namespace or task
+- **Workload** — who is doing the work, grouped by namespace or task and drilled down to a
+  queue: flow, lag, acks, dead letters, retention
+- **Settings** — the lines the console judges by, for the tenant and per queue: one JSON
+  document in the tenant's KV (`queen.console` / `settings`)
 - **Ephemeral** — the in-memory queue class, on its own page
 - **System** and **Users** — cell-level health, PostgreSQL internals (or, on a raft-mode broker,
   the replicated log and the Raft cluster's members) and account management (operators only;
@@ -49,8 +49,54 @@ and persist on this device; choosing System clears that override.
 There is **no pop inspector**, and there will not be one: a pop from a console takes a lease,
 steals from a real consumer and burns a retry attempt with nobody to ack it.
 
-The sidebar groups the views the way the router does: Overview, Routing, **State** (KV and
-Timers, the two surfaces that read stored state belonging to no queue), Observability, Cell.
+The sidebar groups the views by activity: Overview; **Messaging** (Queues, Ephemeral,
+Messages, Dead letter, Timers, KV, Locks); **Workers** (Consumer groups, Supervisors);
+**Analysis** (Workload, Traces, Settings); **Access** (Members, API keys); and **Cell**
+(System). Users has no row of its own: it is reached from Members.
+
+## Navigation paths
+
+The sidebar opens each section's general view. Opening a queue starts a contextual
+journey: the queue stays visible above the page, and its tabs switch between views
+of that same queue. The return link leads to the original list or analysis, with its
+filters intact. A direct queue URL returns to Queues.
+
+```mermaid
+flowchart TD
+  overview[Overview] --> queues[Queues and filtered lists]
+  search[Global search] --> queue[Queue overview]
+  search --> consumer[Exact consumer group and queue]
+  queues --> queue
+  overview --> consumer
+  queue <-->|Queue tabs| messages[Messages]
+  queue <-->|Queue tabs| failed[Failed messages]
+  queue <-->|Queue tabs| timers[Scheduled messages]
+  queue <-->|Queue tabs| consumer
+  queue <-->|Queue tabs| supervisors[Supervisors]
+  workload[Workload] -->|Selected queue and period| queue
+  workload -->|Selected queue| consumer
+  consumer -->|Queue's workers| supervisors
+  supervisors -->|Reported queue| queue
+  messages --> message[Message detail]
+  message <-->|Partition and transaction IDs| traces[Message trace events]
+  named[Trace-name search] --> traces
+  failed -->|Replay destination| messages
+  queue -->|Push result| messages
+  locks[Locks] -->|queen-locks namespace| kv[KV]
+```
+
+Ephemeral queues, access management and cell administration remain separate sidebar
+destinations because they describe different resources or scopes. Trace-name searches
+can span multiple queues; queue investigations reach traces through an actual message.
+Operations labels its tenant/cell panels separately from the selected queue's charts.
+
+Links use `composables/navigation.js` for encoded identities, the investigation period
+and a dashboard-only `returnTo`. `useRouteState` restores list filters on initial load,
+same-page navigation and browser Back/Forward. Page-local filters such as status and
+pagination stay local; queue tabs carry the queue, applied period and origin. Analysis
+pages use `useRouteRange` so custom inputs enter the URL only after Apply. KV prefixes
+and keyset cursors are deliberately not stored in the URL. Paged record lists start at
+25 items; the Queues count distinguishes matching queues from the loaded total.
 
 ## Tech Stack
 
@@ -209,7 +255,6 @@ app/
 │   │   └── ui.js                 # global error / toast surface
 │   ├── router/                   # routes + nav groups + role metadata + guard
 │   ├── views/                    # Page components
-│   │   ├── Analytics.vue
 │   │   ├── Consumers.vue
 │   │   ├── Dashboard.vue
 │   │   ├── DeadLetter.vue
@@ -218,7 +263,6 @@ app/
 │   │   ├── Locks.vue
 │   │   ├── Messages.vue
 │   │   ├── QueueDetail.vue
-│   │   ├── QueueOperations.vue
 │   │   ├── Queues.vue
 │   │   ├── System.vue
 │   │   ├── Timers.vue

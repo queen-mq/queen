@@ -86,6 +86,7 @@ mod replicator_crash;
 mod retention_per_file;
 mod retention_scan;
 mod roundtrip;
+mod rowless;
 pub(super) mod samples;
 mod stale_leader;
 mod store;

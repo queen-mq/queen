@@ -32,6 +32,16 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (locks): the KV part gained `check`, and TransactionBuilder.js gained
 # guard(lock); the parts table, the lease section and the kv_precondition row now say so. handlers/raft.rs
 # registers POST /api/v1/locks, which this page does not list.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): facade/real.rs
+# exports queen_consume_cold_claims_total and queen_raft_qlog_dirx. Nothing this page states
+# changes.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/groups.rs,
+# facade/real.rs, handlers/raft.rs change what /health answers (raft.quorumAckMs; ready needs the
+# leader's majority within QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 A transaction is one call that writes one step. It acks what the worker took, pushes the next

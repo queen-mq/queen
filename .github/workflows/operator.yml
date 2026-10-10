@@ -1,0 +1,95 @@
+name: Operator
+
+# deploy/operator: its tests on every change, and its image beside the
+# broker's on a release:
+#   ghcr.io/queen-mq/queen-operator
+#
+# The image is versioned from server.json, like the broker's and the chart's,
+# so one release number names all three. A package is PRIVATE the first time
+# it is published: flip `queen-operator` once by hand at
+# https://github.com/orgs/queen-mq/packages -> package -> Package settings.
+
+on:
+  push:
+    branches: [ "master", "release" ]
+    tags: [ "v*" ]
+    paths:
+      - "deploy/operator/**"
+      - ".github/workflows/operator.yml"
+      - "server/server.json"
+  pull_request:
+    paths:
+      - "deploy/operator/**"
+      - ".github/workflows/operator.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: operator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/operator
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.26'
+        cache-dependency-path: deploy/operator/go.sum
+
+    - name: Vet and test
+      run: make test
+
+    # The deep-copy code, the CRD, the role and install.yaml are generated
+    # from the code and committed: a change that forgot to regenerate them
+    # would ship a definition the operator does not match.
+    - name: Generated files are up to date
+      run: |
+        make generate manifests
+        git diff --exit-code -- . || { echo "run 'make generate manifests' in deploy/operator and commit the result"; exit 1; }
+
+  image:
+    needs: test
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: docker/setup-qemu-action@v3
+    - uses: docker/setup-buildx-action@v3
+
+    - name: Resolve the version
+      id: meta
+      run: |
+        VERSION=$(jq -r '.version' server/server.json)
+        test -n "$VERSION" || { echo "could not resolve the version"; exit 1; }
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+    - uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - uses: docker/build-push-action@v5
+      with:
+        context: deploy/operator
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository_owner }}/queen-operator:${{ steps.meta.outputs.version }}
+          ghcr.io/${{ github.repository_owner }}/queen-operator:latest
+        labels: |
+          org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          org.opencontainers.image.licenses=Apache-2.0
+        cache-from: type=gha,scope=queen-operator
+        cache-to: type=gha,scope=queen-operator,mode=max

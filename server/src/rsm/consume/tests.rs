@@ -311,6 +311,7 @@ impl H {
                 pid,
                 log_start,
                 txns_start: 0,
+                rows: None,
             },
             0,
         );

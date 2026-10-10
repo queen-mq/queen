@@ -1,0 +1,1 @@
+{"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"leader","leader":true,"term":4,"applied":8,"commit":8,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"apply":{"failure":null,"skipped":[]}}}

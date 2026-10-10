@@ -66,8 +66,10 @@ export const MAX_SEEDS = 610
 </script>
 
 <script setup>
+import { queueLocation } from '@/composables/navigation'
+const route = useRoute()
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { formatNumber, formatDuration } from '@/composables/useApi'
 import { describeApiError } from '@/api/errors'
 
@@ -343,8 +345,8 @@ const ariaLabel = computed(() =>
 )
 
 const open = (s) => {
-  if (perPartition.value) router.push({ path: '/messages', query: { queue: props.queueName, partition: s.partition } })
-  else router.push(`/queues/${encodeURIComponent(s.queue)}`)
+  if (perPartition.value) router.push(queueLocation(props.queueName, route, 'messages', { partition: s.partition }))
+  else router.push(queueLocation(s.queue, route))
 }
 </script>
 

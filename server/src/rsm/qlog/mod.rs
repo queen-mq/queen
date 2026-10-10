@@ -115,6 +115,7 @@
 //!   [`ReadCache`].)
 
 pub mod codec;
+pub mod dirx;
 pub mod index;
 pub(crate) mod pool;
 pub mod record;
@@ -650,8 +651,14 @@ pub struct QLog {
     active: Option<File>,
     /// The active file's index, in RAM.
     active_index: index::ActiveIndex,
-    /// Sealed files' immutable indexes, mmap'd, keyed by file id.
-    sealed: BTreeMap<u64, index::View>,
+    /// Sealed files' immutable indexes, keyed by file id: mapped, or in memory
+    /// when small ([`index::SMALL_INDEX`]). Shared with retention, which judges
+    /// a file from the same view with no lock on the log ([`QLog::sealed_view`]).
+    sealed: BTreeMap<u64, Arc<index::View>>,
+    /// The cross-file directory ([`dirx`]): runs saying which sealed file
+    /// holds a partition's offsets, ascending by the files they cover and
+    /// disjoint. A sealed file no run covers is probed directly.
+    dirx: Vec<dirx::Run>,
     /// PLAN_RAFT_DRAIN_FIX P3.2/P3.3: read fds + committed hash blocks, shared
     /// with in-flight reads that finish after the read guard is dropped.
     cache: Arc<ReadCache>,
@@ -686,6 +693,10 @@ pub struct QLog {
     /// Wall clock (µs) when the active file was created or reopened: the age of
     /// an active file that holds only entry records ([`QLog::active_age_us`]).
     active_opened_us: i64,
+    /// Retention found a dead message in the ACTIVE file
+    /// ([`set::QLogReader::reclaim_log`]): sealing it lets retention free
+    /// something ([`QLog::seal_helps`]). Cleared with every new active file.
+    seal_wanted: std::sync::atomic::AtomicBool,
     /// Retention rewrites a sealed file that mixes live and dead messages only
     /// once at least this percent of its message bytes is dead
     /// ([`QLog::set_compact_min_dead_pct`]); 0 = on the first dead message.
@@ -766,7 +777,7 @@ impl SeqPoints {
 }
 
 /// Wall clock in µs, for file ages. Never part of replicated state.
-fn wall_now_us() -> i64 {
+pub(crate) fn wall_now_us() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as i64)
@@ -965,7 +976,7 @@ impl QLog {
         }
 
         let mut files: Vec<FileMeta> = Vec::new();
-        let mut sealed: BTreeMap<u64, index::View> = BTreeMap::new();
+        let mut sealed: BTreeMap<u64, Arc<index::View>> = BTreeMap::new();
         let mut active_index = index::ActiveIndex::new();
         let mut active: Option<File> = None;
 
@@ -1068,7 +1079,7 @@ impl QLog {
                     meta.absorb(r.created_at_us);
                 }
                 files.push(meta);
-                sealed.insert(id, view);
+                sealed.insert(id, Arc::new(view));
             }
         }
 
@@ -1091,6 +1102,7 @@ impl QLog {
         let cache = Arc::new(ReadCache::new(dir.clone()));
         // The active file was just cut to its last verified record.
         let prealloc_end = files.last().map_or(0, |m| m.bytes);
+        let dirx = load_dirx(&dir, sealed.keys().next_back().copied());
         let qlog = QLog {
             dir,
             queue_id,
@@ -1099,6 +1111,7 @@ impl QLog {
             active,
             active_index,
             sealed,
+            dirx,
             cache,
             floor: Arc::new(AtomicU64::new(u64::MAX)),
             prealloc_end,
@@ -1112,6 +1125,7 @@ impl QLog {
             reclaim_checked: HashMap::new(),
             reclaim_cursor: FIRST_FILE_ID,
             active_opened_us: wall_now_us(),
+            seal_wanted: std::sync::atomic::AtomicBool::new(false),
             compact_min_dead_pct: compact_min_dead_pct_from_env().unwrap_or(0),
             drop_mark: Mutex::new((0, 0)),
             seq_points: Mutex::new(SeqPoints::default()),
@@ -1229,24 +1243,38 @@ impl QLog {
     /// created) file.
     pub(crate) fn prepare_write(&mut self, first_seq: u64) -> io::Result<(u64, u64)> {
         if self.active.is_none() {
-            self.create_active(FIRST_FILE_ID, first_seq)?;
+            // The first file of a log, or the one after its last: a roll that
+            // sealed a file and could not create the next one (no space, no
+            // file descriptor) leaves the log with none active.
+            let id = self.files.last().map_or(FIRST_FILE_ID, |m| m.id + 1);
+            self.create_active(id, first_seq)?;
         } else {
             let sz = self.active_len();
             if sz > FILE_HEADER_LEN && sz >= self.opts.segment_bytes {
                 self.roll(first_seq)?;
             }
+            // A file is created FOR a seq, and its first record must not be
+            // below it ([`QLog::lower_empty_first_seq`]): whatever created
+            // this one, it begins where its first record does.
+            self.lower_empty_first_seq(first_seq)?;
         }
         Ok(self.write_target())
     }
 
-    /// Whether the next group goes into the active file as it stands (no
-    /// create, no roll): then [`QLog::write_target`] is where.
-    pub(crate) fn write_ready(&self) -> bool {
+    /// Whether the next group, whose first record carries `first_seq`, goes
+    /// into the active file as it stands (no create, no roll, no first seq
+    /// to lower): then [`QLog::write_target`] is where.
+    pub(crate) fn write_ready(&self, first_seq: u64) -> bool {
         if self.active.is_none() {
             return false;
         }
         let sz = self.active_len();
-        !(sz > FILE_HEADER_LEN && sz >= self.opts.segment_bytes)
+        if sz > FILE_HEADER_LEN {
+            return sz < self.opts.segment_bytes;
+        }
+        // Empty: ready unless it was created for a later seq
+        // ([`QLog::prepare_write`] lowers it under the write lock).
+        self.files.last().is_some_and(|m| m.first_seq <= first_seq)
     }
 
     /// `(active file id, logical end)`: where the next group's bytes go.
@@ -1593,6 +1621,7 @@ impl QLog {
             self.files.push(FileMeta::empty(id, first_seq));
             self.active_index.open(id);
             self.active_opened_us = wall_now_us();
+            self.seal_wanted.store(false, Ordering::Release);
             return Ok(());
         }
         let path = file_path(&self.dir, id);
@@ -1620,6 +1649,7 @@ impl QLog {
         self.files.push(FileMeta::empty(id, first_seq));
         self.active_index.open(id);
         self.active_opened_us = wall_now_us();
+        self.seal_wanted.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -1648,6 +1678,67 @@ impl QLog {
             self.active_opened_us
         };
         Some(now_us.saturating_sub(since))
+    }
+
+    /// Whether sealing the active file now is worth a file: it holds no
+    /// message (entry records follow the recovery floor, not a partition's
+    /// watermark), retention found a dead message in it
+    /// ([`QLog::want_seal`]), or it has reached `min_bytes`.
+    ///
+    /// Age alone used to seal it. A queue that got a message now and then made
+    /// a new file every `QUEEN_QLOG_SEAL_AGE_S` for as long as it lived, with
+    /// nothing in those files retention could free: 144 files a day for a
+    /// queue, each with its index, its entry in every pass of retention and of
+    /// the directory, and its share of a start. A queue without retention
+    /// kept them all.
+    pub(crate) fn seal_helps(&self, min_bytes: u64) -> bool {
+        let Some(meta) = self.files.last() else {
+            return false;
+        };
+        meta.records == 0
+            || meta.min_created_at_us == i64::MAX
+            || meta.bytes >= min_bytes
+            || self.seal_wanted.load(Ordering::Acquire)
+    }
+
+    /// Retention's word that active file `file_id` holds a dead message; a
+    /// file that rolled since retention looked is not asked for.
+    pub(crate) fn want_seal(&self, file_id: u64) {
+        if self.active_index.file_id() == Some(file_id) {
+            self.seal_wanted.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether retention has yet to look at the active file for a dead
+    /// message: it holds messages and nobody asked for its seal.
+    pub(crate) fn seal_undecided(&self) -> bool {
+        self.active.is_some()
+            && !self.seal_wanted.load(Ordering::Acquire)
+            && self
+                .files
+                .last()
+                .is_some_and(|m| m.records > 0 && m.min_created_at_us != i64::MAX)
+    }
+
+    /// For retention's look at the ACTIVE file: of up to `max` partitions with
+    /// messages in it, from partition `from` on, the end of the first record
+    /// each has here, as `(pid, end)`. A partition's watermark only grows, so
+    /// if that record is live every later one of the partition is.
+    /// With the active file's id, for [`QLog::want_seal`].
+    pub(crate) fn active_firsts(&self, from: u64, max: usize) -> Option<(u64, Vec<(u64, u64)>)> {
+        let file_id = self.active_index.file_id()?;
+        Some((file_id, self.active_index.firsts(from, max)))
+    }
+
+    /// The index of sealed file `id` while it is still the `bytes` long file
+    /// retention listed ([`QLog::reclaim_candidates`]); `None` once the file
+    /// is gone or was rewritten.
+    pub(crate) fn sealed_view(&self, id: u64, bytes: u64) -> Option<Arc<index::View>> {
+        let at = self.files.partition_point(|m| m.id < id);
+        self.files
+            .get(at)
+            .filter(|m| m.id == id && m.sealed && m.bytes == bytes)?;
+        self.sealed.get(&id).cloned()
     }
 
     /// Seal a QUIET active file so retention can reclaim it: an active file is
@@ -1702,6 +1793,17 @@ impl QLog {
 
     /// Seal the active file — write its `.qidx`, map it, mark it sealed — and
     /// create the next active file whose first record will carry `first_seq`.
+    ///
+    /// Nothing in memory changes until the outgoing file's index is written
+    /// and open. A roll that failed there (the process out of file
+    /// descriptors or memory maps, a write error) used to return with the
+    /// active index already taken and the file marked sealed but in no map:
+    /// its messages, and those written to it afterwards, could not be found,
+    /// and the next roll wrote the index again from what the active index
+    /// held by then, a part of the file or nothing, which a restart then
+    /// trusted. Now a failed roll leaves the file active and whole (a stray
+    /// `.qidx` beside an active file is dropped at open and rewritten by the
+    /// roll that succeeds). The idle pass logs such a failure and goes on.
     fn roll(&mut self, first_seq: u64) -> io::Result<()> {
         // Fsync the outgoing active file's DATA before sealing it. A sealed file
         // must be FULLY durable: [`QLog::open`] treats a torn or damaged record
@@ -1719,6 +1821,7 @@ impl QLog {
             let logical = self.files.last().expect("active meta").bytes;
             if self.prealloc_end > logical {
                 f.set_len(logical)?;
+                self.prealloc_end = logical;
             }
             fsync_file(f, self.opts.fsync)?;
         }
@@ -1726,17 +1829,20 @@ impl QLog {
             let m = self.files.last().expect("active meta");
             (m.id, m.bytes)
         };
-        // `take` returns the records in (pid, base_offset) order (the map's
-        // order), which is exactly the order `index::encode` needs. Written
-        // WITHOUT its fsyncs: the roll runs on the log writer, which every
-        // write waits for, and a `.qidx` a crash leaves missing or torn is
-        // caught by its checksums and length at open and rebuilt by scanning
-        // the sealed file (which IS fsynced above).
-        let recs = self.active_index.take();
+        // A copy of the records in (pid, base_offset) order (the map's order),
+        // which is exactly the order `index::encode` needs: the active index
+        // keeps them until the sealed one is open. Written WITHOUT its
+        // fsyncs: the roll runs on the log writer, which every write waits
+        // for, and a `.qidx` a crash leaves missing or torn is caught by its
+        // checksums and length at open and rebuilt by scanning the sealed
+        // file (which IS fsynced above).
+        let recs = self.active_index.sorted();
         write_qidx_lazy(&self.dir, old_id, old_bytes, &recs)?;
-        self.files.last_mut().expect("active meta").sealed = true;
         let view = index::View::open(&qidx_path(&self.dir, old_id), Some(old_bytes))?;
-        self.sealed.insert(old_id, view);
+        drop(recs);
+        self.active_index.clear();
+        self.files.last_mut().expect("active meta").sealed = true;
+        self.sealed.insert(old_id, Arc::new(view));
         self.active = None;
         self.create_active(old_id + 1, first_seq)?;
         Ok(())
@@ -1746,31 +1852,69 @@ impl QLog {
     /// holding `(pid, offset)`, or `None` if no live file holds it (retention
     /// deleted it, or it was never written).
     pub fn locate(&self, pid: u64, offset: u64) -> Option<Located> {
-        if let Some((file_id, r)) = self.active_index.probe(pid, offset) {
-            return Some(Located {
-                file_id,
-                offset: r.offset,
-                len: r.len,
-                count: r.count,
-            });
-        }
-        for (file_id, view) in &self.sealed {
-            match view.probe(pid, offset) {
-                index::Probe::Hit(r) => {
-                    return Some(Located {
-                        file_id: *file_id,
-                        offset: r.offset,
-                        len: r.len,
-                        count: r.count,
-                    })
+        // The active file, then the sealed ones NEWEST first through the
+        // directory ([`QLog::locate_sealed`]). This used to ask every sealed
+        // file in turn, oldest first: a read of anything but the active file
+        // cost one probe per file the log retains.
+        self.locate_record(pid, offset).map(|(file_id, r)| Located {
+            file_id,
+            offset: r.offset,
+            len: r.len,
+            count: r.count,
+        })
+    }
+
+    /// The directory run covering sealed file `file_id`, if one does.
+    fn dirx_run_of(&self, file_id: u64) -> Option<&dirx::Run> {
+        let at = self.dirx.partition_point(|r| r.files().0 <= file_id);
+        at.checked_sub(1)
+            .map(|i| &self.dirx[i])
+            .filter(|r| r.covers(file_id))
+    }
+
+    /// The record holding `(pid, offset)` among the SEALED files, newest
+    /// first. A file a directory run covers is not probed: the run names the
+    /// one file of its range that can hold the offset (or says none can), so
+    /// the search costs one step per run plus one per file no run covers yet,
+    /// whatever the log retains. A partition's offsets only grow with the
+    /// file id, so an answer "past this partition's last offset here" from a
+    /// newer file or run ends the search.
+    fn locate_sealed(&self, pid: u64, offset: u64) -> Option<(u64, index::Record)> {
+        // Exclusive upper bound of the file ids still to visit.
+        let mut upper: Option<u64> = None;
+        loop {
+            let next = match upper {
+                None => self.sealed.iter().next_back(),
+                Some(u) => self.sealed.range(..u).next_back(),
+            };
+            let (&file_id, view) = next?;
+            match self.dirx_run_of(file_id) {
+                Some(run) => {
+                    match run.find(pid, offset) {
+                        dirx::Find::In(e) => {
+                            // The run names a candidate; the file's own index
+                            // is the authority (retention may have rewritten
+                            // or removed the file since).
+                            return match self.sealed.get(&e.file_id)?.probe(pid, offset) {
+                                index::Probe::Hit(r) => Some((e.file_id, r)),
+                                _ => None,
+                            };
+                        }
+                        dirx::Find::Gap | dirx::Find::After => return None,
+                        dirx::Find::Before | dirx::Find::Missing => {}
+                    }
+                    upper = Some(run.files().0);
                 }
-                // The offset falls in a gap this file's span covers: no other
-                // file can hold it.
-                index::Probe::Hole => return None,
-                _ => {}
+                None => {
+                    match view.probe(pid, offset) {
+                        index::Probe::Hit(r) => return Some((file_id, r)),
+                        index::Probe::Hole | index::Probe::After => return None,
+                        _ => {}
+                    }
+                    upper = Some(file_id);
+                }
             }
         }
-        None
     }
 
     /// Read one record by its position, checksum-verified. `file_id`/`offset`
@@ -1890,20 +2034,87 @@ impl QLog {
         }
     }
 
+    /// [`QLog::read_owned`] for a reader that goes through a partition's
+    /// offsets in order (a pop's render): `hint` is the sealed file its last
+    /// record came from, tried first ([`QLog::locate_record_hinted`]), and is
+    /// moved to this record's file. Old messages are then found in the file
+    /// the last one was in, not by a search from the newest file down.
+    pub fn read_owned_hinted(
+        &self,
+        pid: u64,
+        offset: u64,
+        hint: &mut Option<u64>,
+    ) -> io::Result<Option<OwnedRecord>> {
+        match self.plan_read(pid, offset, hint)? {
+            Some(step) => Ok(Some(step.read()?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Where [`QLog::read_owned_hinted`] reads, with the handle of that file:
+    /// the part of the read that needs this log's lock. The caller reads the
+    /// record with the lock RELEASED ([`ReadStep::read`]), as a walk does its
+    /// hash blocks ([`QLog::walk_plan`]): a pop that renders old messages
+    /// from disk never holds an append to their queue behind the read.
+    pub(crate) fn plan_read(
+        &self,
+        pid: u64,
+        offset: u64,
+        hint: &mut Option<u64>,
+    ) -> io::Result<Option<ReadStep>> {
+        let Some((file_id, r)) = self.locate_record_hinted(pid, offset, *hint) else {
+            return Ok(None);
+        };
+        *hint = Some(file_id);
+        Ok(Some(ReadStep {
+            file: self.cache.file(file_id)?,
+            cache: self.cache.clone(),
+            loc: Located {
+                file_id,
+                offset: r.offset,
+                len: r.len,
+                count: r.count,
+            },
+        }))
+    }
+
     /// The newest append before an offset and a timestamp (both exclusive),
     /// from index metadata only. Active-first for duplicate bases, matching
     /// the replay precedence of `locate_record`. Callers clip the
     /// returned batch to their snapshot's retained and applied offset bounds.
     pub fn record_before(&self, pid: u64, high: u64, before_us: i64) -> Option<index::Record> {
         let mut best = self.active_index.record_before(pid, high, before_us);
-        for view in self.sealed.values().rev() {
+        // The sealed files newest first, through the directory: a run names
+        // the one file of its range that holds the newest record below both
+        // bounds. Offsets (and stamps) only grow with the file id, so the
+        // first sealed record found is the newest there is.
+        let mut upper: Option<u64> = None;
+        loop {
             if best.is_some_and(|r| r.end >= high) {
                 break; // it holds high - 1; no older file can improve it
             }
-            if let Some(rec) = view.record_before(pid, high, before_us) {
+            let next = match upper {
+                None => self.sealed.iter().next_back(),
+                Some(u) => self.sealed.range(..u).next_back(),
+            };
+            let Some((&file_id, view)) = next else { break };
+            let found = match self.dirx_run_of(file_id) {
+                Some(run) => {
+                    upper = Some(run.files().0);
+                    run.extent_before(pid, high, before_us)
+                        .and_then(|e| self.sealed.get(&e.file_id))
+                        .and_then(|v| v.record_before(pid, high, before_us))
+                }
+                None => {
+                    upper = Some(file_id);
+                    view.record_before(pid, high, before_us)
+                }
+            };
+            if let Some(rec) = found {
                 if best.is_none_or(|b| rec.base_offset > b.base_offset) {
                     best = Some(rec);
                 }
+                break;
             }
         }
         best
@@ -1938,19 +2149,54 @@ impl QLog {
             return Some((file_id, r));
         }
         if let Some(h) = hint {
-            for (file_id, view) in self.sealed.range(h..) {
-                match view.probe(pid, offset) {
-                    index::Probe::Hit(r) => return Some((*file_id, r)),
-                    index::Probe::Hole => return None,
-                    _ => {}
-                }
+            if let Some(found) = self.locate_forward(pid, offset, h) {
+                return found;
             }
         }
-        for (file_id, view) in self.sealed.iter().rev() {
-            match view.probe(pid, offset) {
-                index::Probe::Hit(r) => return Some((*file_id, r)),
-                index::Probe::Hole | index::Probe::After => return None,
-                _ => {}
+        self.locate_sealed(pid, offset)
+    }
+
+    /// The forward leg of [`QLog::locate_record_hinted`]: the walk's last
+    /// file, then the files after it, a directory run at a time where one
+    /// covers them. A partition that is written all the time is found in the
+    /// hint's file or the next step, however far from the newest file the
+    /// walk is (a group reading a queue's history). `None`: not decided in
+    /// [`FORWARD_STEPS`] (a partition written rarely, whose next record lies
+    /// far ahead, or a hint that was past the record): the search from the
+    /// newest file decides.
+    fn locate_forward(
+        &self,
+        pid: u64,
+        offset: u64,
+        hint: u64,
+    ) -> Option<Option<(u64, index::Record)>> {
+        let mut from = hint;
+        for step in 0..FORWARD_STEPS {
+            let (&file_id, view) = self.sealed.range(from..).next()?;
+            // The hint's own file is asked directly, whatever run covers it.
+            let run = if step == 0 && file_id == hint {
+                None
+            } else {
+                self.dirx_run_of(file_id)
+            };
+            match run {
+                Some(run) => match run.find(pid, offset) {
+                    dirx::Find::In(e) => {
+                        return Some(match self.sealed.get(&e.file_id)?.probe(pid, offset) {
+                            index::Probe::Hit(r) => Some((e.file_id, r)),
+                            _ => None,
+                        });
+                    }
+                    dirx::Find::Gap => return Some(None),
+                    dirx::Find::Before => return None,
+                    dirx::Find::After | dirx::Find::Missing => from = run.files().1 + 1,
+                },
+                None => match view.probe(pid, offset) {
+                    index::Probe::Hit(r) => return Some(Some((file_id, r))),
+                    index::Probe::Hole => return Some(None),
+                    index::Probe::Before => return None,
+                    index::Probe::After | index::Probe::Missing => from = file_id + 1,
+                },
             }
         }
         None
@@ -1973,6 +2219,207 @@ impl QLog {
         self.cache
             .hash_put_many(&[(rec.pid, rec.base_offset, h.clone())], CachePut::IfRoom);
         Ok(h.to_vec())
+    }
+
+    /// The next records of a forward walk from `from` (the ones
+    /// [`QLog::claim_walk`] would take, `max` at most), each with the handle
+    /// of its file: the part of a walk that needs this log's lock. The
+    /// caller reads their hash blocks with the lock RELEASED
+    /// ([`read_walk_hashes`]), so a walk over old messages never holds an
+    /// append to this log behind its disk reads. Committed records never
+    /// change, and a handle taken here keeps reading the file as it was when
+    /// retention rewrites or removes it meanwhile.
+    pub(crate) fn walk_plan(
+        &self,
+        pid: u64,
+        from: u64,
+        committed_end: u64,
+        hint: &mut Option<u64>,
+        max: usize,
+    ) -> io::Result<Vec<WalkStep>> {
+        let mut out: Vec<WalkStep> = Vec::with_capacity(max.min(256));
+        let mut cur = from;
+        let mut fd: Option<(u64, Arc<File>)> = None;
+        while cur < committed_end && out.len() < max {
+            let Some((file_id, rec)) = self.locate_record_hinted(pid, cur, *hint) else {
+                break; // past the committed tail (the range is contiguous)
+            };
+            *hint = Some(file_id);
+            if rec.end > committed_end {
+                break; // uncommitted record: the overlay covers it
+            }
+            if fd.as_ref().is_none_or(|(id, _)| *id != file_id) {
+                fd = Some((file_id, self.cache.file(file_id)?));
+            }
+            cur = rec.end;
+            out.push(WalkStep {
+                file: fd.as_ref().expect("just set").1.clone(),
+                file_id,
+                rec,
+            });
+        }
+        Ok(out)
+    }
+
+    /// [`QLog::read_record_hashes`] for a forward walk, which keeps the file
+    /// handle and the read buffer between its records.
+    fn walk_hashes(
+        &self,
+        file_id: u64,
+        rec: &index::Record,
+        cache: bool,
+        fd: &mut Option<(u64, Arc<File>)>,
+        scratch: &mut Vec<u8>,
+    ) -> io::Result<Vec<u8>> {
+        if rec.count == 0 {
+            return Ok(Vec::new());
+        }
+        if cache {
+            if let Some(h) = self.cache.hash_get(rec.pid, rec.base_offset) {
+                return Ok(h.to_vec());
+            }
+        }
+        if fd.as_ref().is_none_or(|(id, _)| *id != file_id) {
+            *fd = Some((file_id, self.cache.file(file_id)?));
+        }
+        let f = &fd.as_ref().expect("just set").1;
+        let h = pread_hashes(f, &self.dir, file_id, rec, scratch)?;
+        if cache {
+            self.cache
+                .hash_put_many(&[(rec.pid, rec.base_offset, h.clone())], CachePut::IfRoom);
+        }
+        Ok(h.to_vec())
+    }
+
+    // -- the cross-file directory ([`dirx`]) ---------------------------------
+
+    /// How many directory runs this log has, and how many sealed files no run
+    /// covers (the files a lookup still probes one by one).
+    pub fn dirx_stats(&self) -> (usize, usize) {
+        let uncovered = self
+            .sealed
+            .keys()
+            .filter(|id| self.dirx_run_of(**id).is_none())
+            .count();
+        (self.dirx.len(), uncovered)
+    }
+
+    /// The next step of directory maintenance, decided under the log's read
+    /// lock; `None` when nothing is due. In order: a run for sealed files
+    /// that lie between runs (one was lost), a run for the newest sealed
+    /// files once [`dirx::BATCH`] of them are outside any run, a merge of
+    /// [`dirx::FANOUT`] adjacent runs of one size tier.
+    pub(crate) fn dirx_plan(&self) -> Option<dirx::Plan> {
+        let bytes_of = |id: u64| -> Option<u64> {
+            let at = self.files.partition_point(|m| m.id < id);
+            self.files
+                .get(at)
+                .filter(|m| m.id == id && m.sealed)
+                .map(|m| m.bytes)
+        };
+        let build = |ids: &[u64]| -> Option<dirx::Plan> {
+            let files: Vec<(u64, PathBuf, u64)> = ids
+                .iter()
+                .take(dirx::BUILD_MAX)
+                .map(|id| Some((*id, qidx_path(&self.dir, *id), bytes_of(*id)?)))
+                .collect::<Option<_>>()?;
+            (!files.is_empty()).then(|| dirx::Plan::Build {
+                dir: self.dir.clone(),
+                files,
+            })
+        };
+        // Sealed files outside every run, grouped by the runs between them.
+        let mut group: Vec<u64> = Vec::new();
+        for id in self.sealed.keys() {
+            if self.dirx_run_of(*id).is_some() {
+                // A group closed by a run above it: a hole in the directory.
+                if !group.is_empty() {
+                    return build(&group);
+                }
+            } else {
+                group.push(*id);
+            }
+        }
+        if group.len() >= dirx::BATCH {
+            return build(&group);
+        }
+        // FANOUT adjacent runs of one tier become one of the next.
+        let tiers: Vec<u32> = self.dirx.iter().map(|r| dirx::tier(r.len())).collect();
+        let mut at = 0;
+        while at < tiers.len() {
+            let mut to = at;
+            while to < tiers.len() && tiers[to] == tiers[at] {
+                to += 1;
+            }
+            if to - at >= dirx::FANOUT {
+                let runs = &self.dirx[at..at + dirx::FANOUT];
+                return Some(dirx::Plan::Merge {
+                    dir: self.dir.clone(),
+                    runs: runs.iter().map(|r| r.path().to_path_buf()).collect(),
+                    lo: runs[0].files().0,
+                    hi: runs[dirx::FANOUT - 1].files().1,
+                    live: self.sealed.keys().copied().collect(),
+                });
+            }
+            at = to;
+        }
+        None
+    }
+
+    /// Take a run [`dirx::Plan::run`] wrote into the directory, under the
+    /// log's write lock. The runs it replaces (those inside its range) go,
+    /// with their files; a run that would overlap one it does not replace is
+    /// dropped instead (the log changed under the build: planned again).
+    ///
+    /// `run` is the run already opened (and so verified) by the caller, with
+    /// no lock held: only the swap happens here.
+    pub(crate) fn dirx_install(&mut self, run: dirx::Run) {
+        let (lo, hi) = run.files();
+        let inside = |r: &dirx::Run| r.files().0 >= lo && r.files().1 <= hi;
+        if self
+            .dirx
+            .iter()
+            .any(|r| !inside(r) && r.files().0 <= hi && r.files().1 >= lo)
+        {
+            let _ = std::fs::remove_file(run.path());
+            return;
+        }
+        let mut kept = Vec::with_capacity(self.dirx.len() + 1);
+        for r in std::mem::take(&mut self.dirx) {
+            if inside(&r) {
+                if r.path() != run.path() {
+                    let _ = std::fs::remove_file(r.path());
+                }
+            } else {
+                kept.push(r);
+            }
+        }
+        let at = kept.partition_point(|r| r.files().0 < lo);
+        kept.insert(at, run);
+        self.dirx = kept;
+    }
+
+    /// Whether a directory run covers nothing any more: every file of its
+    /// range was removed by retention.
+    pub(crate) fn dirx_has_dead_runs(&self) -> bool {
+        self.dirx.iter().any(|r| {
+            self.sealed
+                .range(r.files().0..=r.files().1)
+                .next()
+                .is_none()
+        })
+    }
+
+    /// Remove the directory runs whose files are all gone.
+    pub(crate) fn dirx_gc(&mut self) {
+        let sealed = &self.sealed;
+        self.dirx.retain(|r| {
+            let live = sealed.range(r.files().0..=r.files().1).next().is_some();
+            if !live {
+                let _ = std::fs::remove_file(r.path());
+            }
+            live
+        });
     }
 
     /// Walk partition `pid`'s committed records FORWARD from `from_offset`, in
@@ -2003,8 +2450,30 @@ impl QLog {
         want_hashes: bool,
         cb: &mut dyn FnMut(u64, u64, i64, Option<Vec<u8>>) -> bool,
     ) -> io::Result<()> {
+        self.claim_walk_with(pid, from_offset, committed_end, want_hashes, true, cb)
+    }
+
+    /// [`QLog::claim_walk`], with the hash blocks it reads going through the
+    /// hash cache (`cache`) or not. Not through it: the walk over messages
+    /// whose index rows left the store, which reads each record once and
+    /// would fill a cache that only the band reads of `DEDUP_INDEX=segment`
+    /// ever clear.
+    pub fn claim_walk_with(
+        &self,
+        pid: u64,
+        from_offset: u64,
+        committed_end: u64,
+        want_hashes: bool,
+        cache: bool,
+        cb: &mut dyn FnMut(u64, u64, i64, Option<Vec<u8>>) -> bool,
+    ) -> io::Result<()> {
         let mut cur = from_offset;
         let mut hint: Option<u64> = None;
+        // The walk's own file handle and read buffer: a claim of a thousand
+        // one-message records took the fd map's mutex a thousand times, and
+        // sixteen consumers queued on it.
+        let mut fd: Option<(u64, Arc<File>)> = None;
+        let mut scratch: Vec<u8> = Vec::new();
         while cur < committed_end {
             let Some((file_id, rec)) = self.locate_record_hinted(pid, cur, hint) else {
                 break; // past the committed tail (the range is contiguous)
@@ -2014,7 +2483,7 @@ impl QLog {
                 break; // uncommitted record: the overlay covers it (the invariant)
             }
             let hashes = if want_hashes {
-                Some(self.read_record_hashes(file_id, &rec)?)
+                Some(self.walk_hashes(file_id, &rec, cache, &mut fd, &mut scratch)?)
             } else {
                 None
             };
@@ -2486,6 +2955,9 @@ impl QLog {
         let (mut fresh, _) = QLog::open(&root, self.queue_id, self.opts)?;
         fresh.set_recovery_floor(floor);
         *self = fresh;
+        // The file that was cut may hold nothing now and still carry the seq
+        // of the record it began with, above the cut.
+        self.lower_empty_first_seq(cut)?;
         tracing::warn!(
             target: "rsm",
             queue = self.queue_id,
@@ -2512,6 +2984,58 @@ impl QLog {
     /// first record at or above `cut`; every record after it must be at or above
     /// `cut` too (refused otherwise). Returns the bytes dropped.
     pub fn truncate_seq_from(&mut self, cut: u64) -> io::Result<u64> {
+        let dropped = self.cut_active_from(cut)?;
+        self.lower_empty_first_seq(cut)?;
+        Ok(dropped)
+    }
+
+    /// An active file that holds no record does not keep a first seq above
+    /// `cut`: the seq a raft cut dropped the log back to
+    /// ([`QLog::truncate_seq_from`]), or the seq of the record about to be
+    /// written into it ([`QLog::prepare_write`]). A file is created FOR a seq
+    /// (a roll, for the group about to be written; the idle pass, for the
+    /// writer's next seq: [`QLog::seal_active`]), and a cut makes the log's
+    /// next record carry a lower one, whether the cut came after the file was
+    /// created or before it (the idle pass then still counted from the tail
+    /// the cut removed). Left as it was, the header says the file holds
+    /// nothing below a seq that its first record is below, and a search by
+    /// seq skips the file ([`QLog::entry_parts_between`]): the entry is on
+    /// disk and cannot be read, by this node when it restarts or for a
+    /// follower that needs it. Durable before a record takes that seq.
+    fn lower_empty_first_seq(&mut self, cut: u64) -> io::Result<()> {
+        let Some(last) = self.files.last().copied() else {
+            return Ok(());
+        };
+        if last.sealed || last.bytes > FILE_HEADER_LEN || last.first_seq <= cut {
+            return Ok(());
+        }
+        {
+            let f = OpenOptions::new()
+                .write(true)
+                .open(file_path(&self.dir, last.id))?;
+            f.write_all_at(&cut.to_le_bytes(), 16)?;
+            fsync_file(&f, self.opts.fsync)?;
+        }
+        self.files.last_mut().expect("active meta").first_seq = cut;
+        // The file before it holds nothing at or above this one's first seq.
+        let n = self.files.len();
+        if n >= 2 && self.files[n - 2].sealed {
+            let prev = &mut self.files[n - 2];
+            prev.max_seq = prev.max_seq.min(cut.saturating_sub(1));
+        }
+        tracing::info!(
+            target: "rsm",
+            queue = self.queue_id,
+            file = last.id,
+            was = last.first_seq,
+            now = cut,
+            "rsm qlog: an empty file created for a later seq begins lower",
+        );
+        Ok(())
+    }
+
+    /// [`QLog::truncate_seq_from`]'s cut of the active file.
+    fn cut_active_from(&mut self, cut: u64) -> io::Result<u64> {
         if self.files.iter().all(|m| m.max_seq < cut) {
             return Ok(0);
         }
@@ -2954,7 +3478,7 @@ impl QLog {
         self.cache.forget_file(id);
         self.cache.clear_hashes();
         self.seq_points.lock_unpoisoned().forget_file(id);
-        self.sealed.insert(id, view);
+        self.sealed.insert(id, Arc::new(view));
         if let Some(meta) = self.files.iter_mut().find(|meta| meta.id == id) {
             meta.bytes = at;
             meta.records = records.len() as u64;
@@ -3032,7 +3556,7 @@ impl QLog {
         self.cache.forget_file(id);
         self.cache.clear_hashes();
         self.seq_points.lock_unpoisoned().forget_file(id);
-        self.sealed.insert(id, view);
+        self.sealed.insert(id, Arc::new(view));
         if let Some(meta) = self.files.iter_mut().find(|meta| meta.id == id) {
             meta.bytes = at;
             meta.records = records.len() as u64;
@@ -3178,6 +3702,54 @@ fn read_located_in(f: &File, dir: &Path, loc: &Located) -> io::Result<OwnedRecor
         ));
     }
     owned_from(&rr)
+}
+
+/// How many steps (a file, or a directory run of files) a forward walk's
+/// lookup takes from its hint before the search from the newest file takes
+/// over ([`QLog::locate_forward`]).
+const FORWARD_STEPS: usize = 4;
+
+/// One record of a walk planned under the log's lock ([`QLog::walk_plan`]).
+pub(crate) struct WalkStep {
+    file: Arc<File>,
+    file_id: u64,
+    pub(crate) rec: index::Record,
+}
+
+/// One record's read planned under the log's lock ([`QLog::plan_read`]).
+pub(crate) struct ReadStep {
+    file: Arc<File>,
+    /// For the directory in a read error's message.
+    cache: Arc<ReadCache>,
+    loc: Located,
+}
+
+impl ReadStep {
+    /// The whole record, checksum-verified, read with no lock held.
+    pub(crate) fn read(&self) -> io::Result<OwnedRecord> {
+        read_located_in(&self.file, &self.cache.dir, &self.loc)
+    }
+}
+
+impl WalkStep {
+    /// Have the kernel start reading this step's whole record
+    /// ([`fadvise_willneed`]): its ids for the walk, its payload for the pop
+    /// that renders it next.
+    pub(crate) fn will_need(&self) {
+        fadvise_willneed(&self.file, self.rec.offset, u64::from(self.rec.len));
+    }
+}
+
+/// The hash block of a planned walk step, read with no lock held.
+pub(crate) fn read_walk_hashes(
+    dir: &Path,
+    step: &WalkStep,
+    scratch: &mut Vec<u8>,
+) -> io::Result<Vec<u8>> {
+    if step.rec.count == 0 {
+        return Ok(Vec::new());
+    }
+    Ok(pread_hashes(&step.file, dir, step.file_id, &step.rec, scratch)?.to_vec())
 }
 
 /// PLAN_RAFT_DRAIN_FIX P3.2: the hash block of one located record from ONLY its
@@ -3722,6 +4294,54 @@ fn dead_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// The directory runs of a log directory ([`dirx`]), ascending by the files
+/// they cover and disjoint. A run that does not open (torn, damaged) or that
+/// overlaps one already taken (a merge interrupted between its rename and
+/// the removal of what it replaced) is removed: maintenance builds what is
+/// missing again from the `.qidx` files, and the lookups probe those files
+/// directly until then.
+fn load_dirx(dir: &Path, newest_sealed: Option<u64>) -> Vec<dirx::Run> {
+    let mut found: Vec<(u64, u64, PathBuf)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("dirx-") && name.ends_with(".tmp") {
+            let _ = std::fs::remove_file(entry.path());
+        } else if let Some((lo, hi)) = dirx::parse_name(name) {
+            found.push((lo, hi, entry.path()));
+        }
+    }
+    // Among runs that begin together the widest first: the merged run wins
+    // over the runs it was made from.
+    found.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    let mut out: Vec<dirx::Run> = Vec::new();
+    for (lo, hi, path) in found {
+        // A run describes sealed files, which never change but to lose
+        // records. One that reaches past the newest sealed file names a file
+        // that was cut back and opened for appends again (a follower's log
+        // after a snapshot or a leader change,
+        // [`QLog::truncate_seq_from_across`]), or files that are gone and
+        // whose ids will be used again: it would miss what is written there
+        // next. It goes; the files get a run again once they are sealed.
+        if newest_sealed.is_none_or(|newest| hi > newest)
+            || out.last().is_some_and(|r| r.files().1 >= lo)
+        {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        match dirx::Run::open(&path) {
+            Ok(run) if run.files() == (lo, hi) => out.push(run),
+            _ => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    out
+}
+
 /// Remove the files a retention pass dropped but had not unlinked yet.
 fn remove_graveyard(dir: &Path) -> io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
@@ -3929,6 +4549,31 @@ pub fn drop_behind_bytes() -> u64 {
         (env_usize("QUEEN_QLOG_DROP_BEHIND_MB").unwrap_or(DROP_BEHIND_DEFAULT_MB) as u64)
             .saturating_mul(1 << 20)
     })
+}
+
+/// Ask the kernel to start reading `len` bytes of `f` at `from` into the page
+/// cache (`POSIX_FADV_WILLNEED`). It returns at once: the reads it starts
+/// overlap, and a `pread` of those bytes then finds them or waits for them. A
+/// hint only, so a failure is ignored. Linux; a no-op elsewhere.
+pub(crate) fn fadvise_willneed(f: &File, from: u64, len: u64) {
+    if len == 0 {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: a plain syscall on an fd `f` keeps open for the call.
+        let _ = unsafe {
+            libc::posix_fadvise(
+                f.as_raw_fd(),
+                from as libc::off_t,
+                len as libc::off_t,
+                libc::POSIX_FADV_WILLNEED,
+            )
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (f, from);
 }
 
 /// Ask the kernel to drop `[from, to)` of `f` from the page cache

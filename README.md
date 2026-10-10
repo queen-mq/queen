@@ -15,7 +15,7 @@ On three nodes it carries 1M msg/s in and out of one queue of 10M partitions.
 
 Queen speaks HTTP but is also compatible with Kafka clients.
 
-[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/start/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.1
+[Documentation](https://queenmq.com) · [Quickstart](https://queenmq.com/start/quickstart/) · [Benchmarks](https://queenmq.com/benchmarks/) · [MCP for agents](https://queenmq.com/start/ai-agents/) · [Try it free on Queen Cloud](https://queenmq.cloud) · Apache-2.0 · v2.2
 
 </div>
 
@@ -75,7 +75,7 @@ Redpanda 26.2.3 and Pulsar 4.2.4 on the same machines. Each row links to the run
 | [Transactions](https://queenmq.com/benchmarks/transactions/) | 10 messages per transaction at 9,000 msg/s: commit p99 **4 ms**, e2e p99 19 ms (Kafka 34 and 51 ms, Pulsar 32 and 50 ms). |
 | [Kafka clients](https://queenmq.com/benchmarks/kafka-clients/) | franz-go at 1,000,000 msg/s through Queen's Kafka port, e2e p99 91 ms. |
 | [Soak](https://queenmq.com/benchmarks/soak/) | 500,000 msg/s for 3 h 23 min over 1,000,000 partitions, through a kill -9 of the leader and of a follower: e2e p99 86 ms in the median window. |
-| [Jepsen](https://queenmq.com/benchmarks/jepsen/) | **153 tests** on the code of 2.1.0: 152 valid, and the other, judged on test nodes whose clocks had drifted apart, valid when run again. No acknowledged message lost, no lease held twice, transactions atomic. |
+| [Jepsen](https://queenmq.com/benchmarks/jepsen/) | **244 tests** on the code of 2.2.0: all valid, one of them at its second run, after the test harness had crashed in the first. No acknowledged message lost, no lease held twice, transactions atomic. |
 | [Laravel](https://queenmq.com/benchmarks/laravel/) | 2,753 jobs/s with 32 workers on one node, against 1,124 for Horizon on Redis. |
 
 Where Queen is behind: with few partitions and very high rates, Kafka carries more (4M msg/s at
@@ -124,6 +124,15 @@ Cursor, VS Code, Codex and Claude Desktop: [AI agents](https://queenmq.com/start
 See [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [contributing guide](https://queenmq.com/internals/contributing/). Benchmark claims need an archived
 artifact under `benchmark-queen/`, and doc pages name the source files they describe.
+
+## Built on
+
+Queen stands on open-source work. Thank you to the maintainers of:
+
+- [openraft](https://github.com/databendlabs/openraft): the raft consensus that replicates the log
+- [heed](https://github.com/meilisearch/heed): LMDB storage for the raft log
+- [tokio](https://tokio.rs) and [axum](https://github.com/tokio-rs/axum): the async runtime and HTTP
+- [Jepsen](https://jepsen.io): the fault-injection tests the broker runs against
 
 ## License
 

@@ -445,8 +445,18 @@ impl RaftFacade {
     /// behind answers its clients only once it has applied what the leader
     /// had (read-your-writes), so it reports `settling` until it caught up:
     /// a readiness probe keeps clients off it, and a rolling restart waits
-    /// for it before it stops the next node. The leader, a single node, a
-    /// node that cannot reach the leader, and an idle cluster report 0.
+    /// for it before it stops the next node. A node that came back empty has
+    /// applied nothing and reports the age of the epoch. The leader, a single
+    /// node, a node that cannot reach the leader (`quorum_ack_ms` is what
+    /// says so) and an idle cluster report 0.
+    ///
+    /// The commit index is the leader's own answer when there is a recent
+    /// one, and otherwise the commit point of the view the leader puts on its
+    /// appends ([`commit_reading`]). A voter that came back empty under its id
+    /// gets no answer (it does not know the membership it would ask through)
+    /// while the leader's appends still reach it: without the view it reported
+    /// 0 with nothing applied, and passed for healthy (F1, F2 in
+    /// `test/recovery`).
     fn catch_up_lag_ms(&self, applied: u64, role: &crate::rsm::replicator::Role) -> u64 {
         use std::sync::atomic::Ordering::Relaxed;
         if matches!(role, crate::rsm::replicator::Role::Leader { .. }) {
@@ -456,14 +466,45 @@ impl RaftFacade {
             use crate::rsm::store::{Store, TypedReads};
             self.store.read(|r| r.last_now_us()).unwrap_or(0)
         };
+        let now_us = wall_micros();
+        let (leader_index, at_ms) = commit_reading(
+            (
+                self.leader_commit.index.load(Relaxed),
+                self.leader_commit.at_ms.load(Relaxed),
+            ),
+            || self.repl.members().commit_seen(),
+            now_us / 1000,
+        );
         catch_up_lag(
-            self.leader_commit.index.load(Relaxed),
-            self.leader_commit.at_ms.load(Relaxed),
+            leader_index,
+            at_ms,
             applied,
             ready_lag_entries(),
-            wall_micros(),
+            now_us,
             last_now_us,
         )
+    }
+}
+
+/// How old a reading of the leader's commit index may be and still be one.
+const COMMIT_READING_MAX_AGE_MS: i64 = 5_000;
+
+/// The leader's commit index and when it was read (wall ms, 0 = never): what
+/// the leader `answered` this node's own question while that is recent, else
+/// what the view on the leader's appends shows (`seen`: the index and the
+/// view's age, read only when needed).
+fn commit_reading(
+    answered: (u64, i64),
+    seen: impl FnOnce() -> Option<(u64, Duration)>,
+    now_ms: i64,
+) -> (u64, i64) {
+    let (_, at_ms) = answered;
+    if at_ms != 0 && now_ms - at_ms <= COMMIT_READING_MAX_AGE_MS {
+        return answered;
+    }
+    match seen() {
+        Some((index, age)) => (index, now_ms - age.as_millis() as i64),
+        None => answered,
     }
 }
 
@@ -479,22 +520,22 @@ fn catch_up_lag(
     now_us: i64,
     last_now_us: impl FnOnce() -> i64,
 ) -> u64 {
-    if at_ms == 0 || now_us / 1000 - at_ms > 5_000 {
+    if at_ms == 0 || now_us / 1000 - at_ms > COMMIT_READING_MAX_AGE_MS {
         return 0;
     }
     if leader_index.saturating_sub(applied) <= slack {
         return 0;
     }
-    let last = last_now_us();
-    if last <= 0 {
-        return 0;
-    }
+    // A node that applied nothing has no entry to take the age of: the age
+    // is counted from the epoch, which no ready threshold lets through.
+    let last = last_now_us().max(0);
     ((now_us - last) / 1000).max(1) as u64
 }
 
 #[cfg(test)]
 mod catch_up_lag_tests {
-    use super::catch_up_lag;
+    use super::{catch_up_lag, commit_reading};
+    use std::time::Duration;
 
     const NOW: i64 = 1_790_820_000_000_000;
 
@@ -525,6 +566,48 @@ mod catch_up_lag_tests {
             catch_up_lag(1_000_000, NOW / 1000, 1_000_000, 1000, NOW, old),
             0
         );
+    }
+
+    /// A voter that came back empty under its old id (F1, F2): thousands of
+    /// entries behind with nothing applied, it must not pass for caught up.
+    #[test]
+    fn a_node_behind_that_applied_nothing_is_never_ready() {
+        let lag = catch_up_lag(50_000, NOW / 1000, 0, 1000, NOW, || 0);
+        assert_eq!(lag, (NOW / 1000) as u64);
+        // A fresh cluster, where the leader holds little too: within the slack.
+        assert_eq!(catch_up_lag(40, NOW / 1000, 0, 1000, NOW, || 0), 0);
+    }
+
+    /// The leader's own answer wins while it is recent. Without one, the view
+    /// on the leader's appends says where the commit point is, as of its age:
+    /// that is the only reading a voter that came back empty ever gets.
+    #[test]
+    fn the_view_on_the_appends_stands_in_for_an_answer_the_leader_never_gave() {
+        let now_ms = NOW / 1000;
+        let seen = || Some((9_000, Duration::from_millis(120)));
+        // A recent answer: the view is not even read.
+        assert_eq!(
+            commit_reading((7_000, now_ms - 900), || panic!("not read"), now_ms),
+            (7_000, now_ms - 900)
+        );
+        // Never answered, or not for over 5 s: the view, as old as it is.
+        assert_eq!(commit_reading((0, 0), seen, now_ms), (9_000, now_ms - 120));
+        assert_eq!(
+            commit_reading((7_000, now_ms - 5_001), seen, now_ms),
+            (9_000, now_ms - 120)
+        );
+        // Neither: what there was, which `catch_up_lag` takes for no reading.
+        assert_eq!(commit_reading((0, 0), || None, now_ms), (0, 0));
+        // An empty voter the leader's appends still reach is never ready.
+        let (index, at_ms) = commit_reading((0, 0), seen, now_ms);
+        assert_eq!(
+            catch_up_lag(index, at_ms, 0, 1000, NOW, || 0),
+            now_ms as u64
+        );
+        // A view that stopped arriving ages out like an answer does.
+        let (index, at_ms) =
+            commit_reading((0, 0), || Some((9_000, Duration::from_secs(6))), now_ms);
+        assert_eq!(catch_up_lag(index, at_ms, 0, 1000, NOW, || 0), 0);
     }
 }
 
@@ -625,6 +708,13 @@ impl RaftFacade {
                 )))
             })
             .expect("read the retention cutoffs")
+    }
+
+    /// How many claims the consumption engine served from the queue log,
+    /// their index rows gone from the store.
+    #[cfg(test)]
+    pub(crate) fn cold_claims_for_test(&self) -> u64 {
+        self.engine.engine_stats().cold_claims_total
     }
 
     /// As if a pop's answer had waited in vain for this node to apply `index`.
@@ -868,10 +958,10 @@ impl RaftFacade {
             } else {
                 let mut o = match raft_opts.take() {
                     Some(o) => o,
-                    None => crate::rsm::replicator::raft::RaftOpts::from_env(
-                        storage_pressure_enabled,
-                    )
-                    .map_err(|e| e.to_string())?,
+                    None => {
+                        crate::rsm::replicator::raft::RaftOpts::from_env(storage_pressure_enabled)
+                            .map_err(|e| e.to_string())?
+                    }
                 };
                 o.join = true;
                 raft_opts = Some(o);
@@ -4036,31 +4126,35 @@ fn render_pop_body(
         let mut off = claim.start_offset;
         // DIAG (render gaps): one bounded wait per claim for a missing record.
         let mut waited = false;
+        // The log file the claim's last record was read from: its next one
+        // is looked for there first.
+        let mut file_hint: Option<u64> = None;
         while off <= claim.end_offset {
             // The payload bytes: from the QUEUE LOG when the knob is on (Phase
             // A2), else the segment files. Both return the same `(base_offset,
             // created_at, count, blob)` for a committed offset, so the rendered
             // wire body is byte-identical.
             let popped: Option<(u64, i64, u32, Vec<u8>)> = match (qlog_reader, qlog_qid) {
-                (Some(ql), Some(qid)) => match ql.read_owned(qid, claim.pid, off) {
-                    Ok(Some(r)) => Some((r.base_offset, r.created_at_us, r.count, r.payload)),
-                    Ok(None) if !waited => {
-                        waited = true;
-                        use crate::rsm::dbgctr::{inc, C};
-                        inc(&C.render_gap_claims, 1);
-                        let before = ql.describe(qid, claim.pid, off);
-                        let mut got = None;
-                        for _ in 0..50 {
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                            if let Ok(Some(r)) = ql.read_owned(qid, claim.pid, off) {
-                                got = Some(r);
-                                break;
+                (Some(ql), Some(qid)) => {
+                    match ql.read_owned_hinted(qid, claim.pid, off, &mut file_hint) {
+                        Ok(Some(r)) => Some((r.base_offset, r.created_at_us, r.count, r.payload)),
+                        Ok(None) if !waited => {
+                            waited = true;
+                            use crate::rsm::dbgctr::{inc, C};
+                            inc(&C.render_gap_claims, 1);
+                            let before = ql.describe(qid, claim.pid, off);
+                            let mut got = None;
+                            for _ in 0..50 {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                                if let Ok(Some(r)) = ql.read_owned(qid, claim.pid, off) {
+                                    got = Some(r);
+                                    break;
+                                }
                             }
-                        }
-                        static LOGGED: std::sync::atomic::AtomicU64 =
-                            std::sync::atomic::AtomicU64::new(0);
-                        if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 {
-                            eprintln!(
+                            static LOGGED: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(0);
+                            if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 {
+                                eprintln!(
                                 "RENDER_GAP pid={} off={off} claim={}..={} attempt={} recovered={} | {before} || after: {}",
                                 claim.pid,
                                 claim.start_offset,
@@ -4069,23 +4163,24 @@ fn render_pop_body(
                                 got.is_some(),
                                 ql.describe(qid, claim.pid, off)
                             );
-                        }
-                        match got {
-                            Some(r) => {
-                                inc(&C.render_gap_recovered, 1);
-                                Some((r.base_offset, r.created_at_us, r.count, r.payload))
                             }
-                            None => None,
+                            match got {
+                                Some(r) => {
+                                    inc(&C.render_gap_recovered, 1);
+                                    Some((r.base_offset, r.created_at_us, r.count, r.payload))
+                                }
+                                None => None,
+                            }
+                        }
+                        Ok(None) => None,
+                        Err(e) => {
+                            return Err(format!(
+                                "read pop payload (qlog) at pid {} off {off}: {e}",
+                                claim.pid
+                            ))
                         }
                     }
-                    Ok(None) => None,
-                    Err(e) => {
-                        return Err(format!(
-                            "read pop payload (qlog) at pid {} off {off}: {e}",
-                            claim.pid
-                        ))
-                    }
-                },
+                }
                 _ => match reader.read_at_within(info.bucket, claim.pid, off, &info.sealed, dl) {
                     Ok(Some(f)) => Some((f.base_offset, f.created_at_us, f.count, f.blob)),
                     Ok(None) => None,
@@ -5287,6 +5382,25 @@ impl Rsm for RaftFacade {
             "queen_consume_parts_total{{kind=\"loaded\"}} {}\nqueen_consume_parts_total{{kind=\"unloaded\"}} {}\n",
             es.loaded_total, es.unloaded_total
         ));
+        out.push_str("# HELP queen_consume_cold_claims_total Claims of messages whose index row had left the store: their frames were read from the queue log, with no consume lock held\n# TYPE queen_consume_cold_claims_total counter\n");
+        out.push_str(&format!(
+            "queen_consume_cold_claims_total {}\n",
+            es.cold_claims_total
+        ));
+        out.push_str("# HELP queen_raft_qlog_index_maps Sealed log files whose index is memory-mapped (small indexes are held in memory), the maps the kernel allows this process (vm.max_map_count, 0 when unknown), and the maps it has refused since the start (those indexes are held in memory too)\n# TYPE queen_raft_qlog_index_maps gauge\n");
+        out.push_str(&format!(
+            "queen_raft_qlog_index_maps{{kind=\"mapped\"}} {}\nqueen_raft_qlog_index_maps{{kind=\"limit\"}} {}\nqueen_raft_qlog_index_maps{{kind=\"refused\"}} {}\n",
+            crate::rsm::qlog::index::mapped_views(),
+            crate::rsm::qlog::index::max_map_count().unwrap_or(0),
+            crate::rsm::qlog::index::refused_maps()
+        ));
+        if let Some(q) = self.qlog_reader.as_ref() {
+            let (runs, uncovered) = q.dirx_totals();
+            out.push_str("# HELP queen_raft_qlog_dirx The queue logs' cross-file directory: runs on disk, and sealed files no run covers yet (a lookup probes those one by one)\n# TYPE queen_raft_qlog_dirx gauge\n");
+            out.push_str(&format!(
+                "queen_raft_qlog_dirx{{kind=\"runs\"}} {runs}\nqueen_raft_qlog_dirx{{kind=\"uncovered_files\"}} {uncovered}\n"
+            ));
+        }
         out.push_str(&self.link_prometheus());
         out
     }
@@ -5506,6 +5620,11 @@ impl Rsm for RaftFacade {
             applied: m.applied_index,
             commit: m.committed_index,
             lag_ms: self.catch_up_lag_ms(m.applied_index, &role),
+            quorum_ack_ms: self
+                .repl
+                .members()
+                .quorum_ack_age()
+                .map(|age| age.as_millis() as u64),
             storage_ready: !matches!(role, crate::rsm::replicator::Role::Stopped),
             apply: self.repl.apply_status(),
             cluster_version: Some(self.cluster_version()),

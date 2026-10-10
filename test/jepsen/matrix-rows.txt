@@ -1,0 +1,68 @@
+# Rows window (cluster version 6): a push's index row leaves the store when
+# the queue's dedup window has passed, and a consumer behind it reads from the
+# queue log. Branch improvestorage, 2026-10-09.
+#
+#   cd /root/jepsen-rows && RUNS=/root/runs-rows BIN=/root/bin/queen-rows ./run-campaign.sh matrix-rows.txt
+#
+# 1. Two smokes: the harness, the binary and the new option.
+# 2. R: the consumption workloads with rows that live 2 seconds
+#    (--dedup-window 2, QUEEN_RAFT_TXN_WINDOW_MIN_S=2, a retention scan every
+#    second) and 256 KiB log files sealed after 10 s, so that consumers read
+#    messages without rows after every fault and in the final drain, the
+#    cross-file directory is built, and snapshots and log cuts meet it.
+#    W8 retention sets its own 5 s dedup window; W7 dlq keeps the 24 h one.
+#    The queue workload runs on 400 partitions and the pipeline on 200: on
+#    the default 8 (4) the consumers keep up and almost never read a message
+#    whose row is gone (the first launch showed 0 claims from the queue log).
+#    A dequeue takes a random partition, so with 400 of them at rate 200 a
+#    message waits a few seconds: about half the claims find rows and half
+#    do not, and many batches cross the line between the two.
+# 3. D: the default configuration on the same binary (rows never expire in a
+#    5-minute test): what 2.1.0 passed must still pass.
+
+# --- 1. smokes
+s-w2-rows               --workload queue --w2-partitions 400 --nemesis kill --time-limit 60 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+s-w2-default            --workload queue --nemesis kill --time-limit 60 --rate 200
+
+# --- 2. R: rows that live 2 seconds
+rw-w2-kill              --workload queue --w2-partitions 400 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-part              --workload queue --w2-partitions 400 --nemesis partition --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-kill-2000         --workload queue --w2-partitions 2000 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-kill              --workload pipeline --w5-partitions 200 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-kill              --workload retention --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-member-snap       --workload queue --w2-partitions 400 --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5,QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-lz-kill           --workload queue --w2-partitions 400 --lazyfs --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-restart           --workload queue --w2-partitions 400 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-pause             --workload queue --w2-partitions 400 --nemesis pause --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-leader-deaf       --workload queue --w2-partitions 400 --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-part              --workload pipeline --w5-partitions 200 --nemesis partition --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-member-snap       --workload pipeline --w5-partitions 200 --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5,QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-kill-200          --workload retention --w2-partitions 200 --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-part              --workload retention --nemesis partition --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w1-kill              --workload log --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-slow-lz-kill      --workload queue --w2-partitions 400 --lazyfs --nemesis kill --db-targets one --slow-fsync-nodes n4,n5 --slow-fsync-ms 300 --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_DURABLE_EVERY_MS=20,QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-lz-kill           --workload pipeline --w5-partitions 200 --lazyfs --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-restart           --workload pipeline --w5-partitions 200 --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-restart           --workload retention --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-lz-kill           --workload retention --lazyfs --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-bridge            --workload queue --w2-partitions 400 --nemesis bridge --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-clock             --workload queue --w2-partitions 400 --nemesis clock --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w2-membership        --workload queue --w2-partitions 400 --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-leader-deaf       --workload pipeline --w5-partitions 200 --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w5-pause             --workload pipeline --w5-partitions 200 --nemesis pause --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w7-kill              --workload dlq --nemesis kill --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w1-part              --workload log --nemesis partition --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-pause             --workload retention --nemesis pause --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w8-leader-deaf       --workload retention --nemesis leader-deaf --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w7-part              --workload dlq --nemesis partition --time-limit 300 --rate 200 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rw-w1-restart           --workload log --nemesis restart --time-limit 300 --rate 200 --nemesis-interval 20 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+
+# --- 3. D: the default configuration
+d-w2-kill               --workload queue --nemesis kill --time-limit 300 --rate 200
+d-w2-part               --workload queue --nemesis partition --time-limit 300 --rate 200
+d-w5-kill               --workload pipeline --nemesis kill --time-limit 300 --rate 200
+d-w6-kill               --workload dedup --nemesis kill --time-limit 300 --rate 200
+d-w6-part               --workload dedup --nemesis partition --time-limit 300 --rate 200
+d-w3-kill               --workload register --nemesis kill --time-limit 300 --rate 100
+d-w4-kill               --workload elle --nemesis kill --time-limit 300 --rate 100
+d-w2-member-snap        --workload queue --nemesis membership,kill --time-limit 300 --rate 200 --nemesis-interval 20 --env QUEEN_RAFT_LOG_KEEP=16,QUEEN_RAFT_PURGE_HOLD_S=5

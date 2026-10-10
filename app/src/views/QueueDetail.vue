@@ -34,20 +34,13 @@
             <template v-else>{{ describeApiError(detailError) }}</template>
           </p>
           <button class="btn btn-ghost" @click="fetchAll">Retry</button>
-          <button class="btn btn-ghost" @click="$router.push('/queues')">Back to queues</button>
+          <button class="btn btn-ghost" @click="router.push(safeReturnTo(route.query.returnTo) || '/queues')">Back to results</button>
         </div>
       </div>
     </div>
 
     <template v-else-if="statusData">
       <PageHead :title="queueName" :live="refreshAgo">
-        <template #lead>
-          <button @click="$router.push('/queues')" class="detail-back" title="Back to queues" aria-label="Back to queues">
-            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
-          </button>
-        </template>
         <template #title><span class="qd-ns">{{ nameParts.ns }}</span>{{ nameParts.rest }}</template>
         <template #sub>
           <span v-if="queueData?.namespace">Namespace <b>{{ queueData.namespace }}</b> · </span>
@@ -60,9 +53,9 @@
             <button
               v-for="r in timeRanges"
               :key="r.value"
-              :class="{ on: selectedRange === r.value }"
-              :aria-pressed="selectedRange === r.value ? 'true' : 'false'"
-              @click="selectedRange = r.value"
+              :class="{ on: !linkedWindow && selectedRange === r.value }"
+              :aria-pressed="!linkedWindow && selectedRange === r.value ? 'true' : 'false'"
+              @click="contextFrom = ''; contextTo = ''; selectedRange = r.value"
             >{{ r.label }}</button>
           </div>
         </template>
@@ -74,18 +67,6 @@
           <button v-if="can('produce')" @click="pushOpen = true" class="btn btn-primary">Push message</button>
         </template>
       </PageHead>
-
-      <!-- The queue's other views, one click away. A dead-letter depth is a
-           standing to-do list, not something failing now: the count beside
-           the label is the signal. -->
-      <PageTools>
-        <button class="btn btn-ghost" @click="goMessages">Messages</button>
-        <button class="btn btn-ghost" @click="goDLQ">
-          Dead letter
-          <span v-if="totalMessages.deadLetter > 0" class="qd-badge">{{ formatNumber(totalMessages.deadLetter) }}</span>
-        </button>
-        <button class="btn btn-ghost" @click="goTraces">Traces</button>
-      </PageTools>
 
       <!-- ====================================================================
            What needs you on this queue — a failed refresh first, then the
@@ -278,7 +259,7 @@
         <div class="card-header">
           <h3 id="qd-focus-title">{{ focus.title }}</h3>
           <span class="card-sub">{{ focus.sub }}</span>
-          <span class="muted">last {{ selectedRange }}</span>
+          <span class="muted">{{ rangeLabel }}</span>
         </div>
         <div class="card-body">
           <div v-if="opsError" class="panel-err">{{ describeApiError(opsError) }}</div>
@@ -391,6 +372,26 @@
               options, the namespace and the task. The dimmed three are not among them.
             </template>
           </p>
+
+          <!-- Not broker configuration: the lines the console judges this queue
+               by (Settings). They are here because this is where one looks
+               when a queue is amber and should not be. The two lag lines are
+               always stated; the others only when this queue has its own. -->
+          <div class="qd-lines-head">
+            <h4>Console settings</h4>
+            <span class="qd-lines-sub">{{ ownLines ? 'this queue has its own' : 'the tenant’s lines' }} · <router-link to="/settings">Settings</router-link></span>
+            <button v-if="canSetLines" class="qd-config-link" @click="linesOpen = true">Change</button>
+          </div>
+          <ul class="qd-settings">
+            <li v-for="meta in shownLines" :key="meta.key">
+              <span :title="meta.help">{{ meta.group }} · {{ meta.label.toLowerCase() }}</span>
+              <b>{{ meta.unit === 's' ? formatSpan(queueLines[meta.key]) : formatLine(meta, queueLines[meta.key]) }}<i v-if="ownLines && ownLines[meta.key] !== undefined">this queue</i></b>
+            </li>
+            <li v-for="flag in shownFlags" :key="flag.key">
+              <span :title="flag.help">{{ flag.label }}</span>
+              <b>Yes<i>this queue</i></b>
+            </li>
+          </ul>
       </div>
       </div>
     </template>
@@ -435,6 +436,8 @@
          refetches the page rather than patching anything locally: the status
          route is the one that describes this queue, and two sources of the same
          six numbers would drift. -->
+    <QueueLinesModal :open="linesOpen" :queue="queueName" @close="linesOpen = false" />
+
     <QueueConfigModal
       :open="configOpen"
       mode="edit"
@@ -449,6 +452,9 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useRouteState } from '@/composables/useRouteState'
+import { queueLocation, safeReturnTo, validWindow } from '@/composables/navigation'
+import { rangeMinutes } from '@/composables/useRouteRange'
 import {
   analytics, queues as queuesApi, system as systemApi,
   consumers as consumersApi, describeApiError,
@@ -463,6 +469,8 @@ import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import { useGroupsStore } from '@/stores/groupsStore'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { QUEUE_FLAGS, QUEUE_LINES, formatLine, formatSpan } from '@/composables/settingsDoc'
 import { queueAttention } from '@/composables/useAttention'
 import { semanticColors } from '@/composables/useChartTheme'
 import {
@@ -472,10 +480,10 @@ import MetricTile from '@/components/MetricTile.vue'
 import PartitionSunflower, { MAX_SEEDS } from '@/components/PartitionSunflower.vue'
 import { routeSupport } from '@/stores/routeSupport'
 import PageHead from '@/components/PageHead.vue'
-import PageTools from '@/components/PageTools.vue'
 import RowChart from '@/components/RowChart.vue'
 import PushMessageModal from '@/components/PushMessageModal.vue'
 import QueueConfigModal from '@/components/QueueConfigModal.vue'
+import QueueLinesModal from '@/components/QueueLinesModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -517,14 +525,17 @@ const pushOpen = ref(false)
 const configOpen = ref(false)
 
 const selectedRange = ref('1h')
+const contextFrom = ref(''), contextTo = ref('')
+useRouteState({ range: selectedRange, from: contextFrom, to: contextTo })
+const linkedWindow = computed(() => validWindow(contextFrom.value, contextTo.value))
 const timeRanges = [
   { label: '1h',  value: '1h',  minutes: 60 },
   { label: '6h',  value: '6h',  minutes: 360 },
   { label: '24h', value: '24h', minutes: 1440 },
 ]
-// The resolved window, restated once in the scope strip. There is no custom
-// range on this page, so it is always a quick range.
+// Preserve an investigation window received from another view.
 const rangeLabel = computed(() => {
+  if (linkedWindow.value) return `${formatTimestamp(linkedWindow.value.from)} → ${formatTimestamp(linkedWindow.value.to)}`
   const r = timeRanges.find(t => t.value === selectedRange.value)
   return `last ${r ? r.label : selectedRange.value}`
 })
@@ -548,11 +559,10 @@ const selectedMetric = ref('throughput')
 // Time range helpers
 // ---------------------------------------------------------------------------
 const getTimeRangeParams = () => {
-  const r = timeRanges.find(x => x.value === selectedRange.value) || timeRanges[0]
   const now = new Date()
   return {
-    from: new Date(now.getTime() - r.minutes * 60 * 1000).toISOString(),
-    to: now.toISOString(),
+    from: (linkedWindow.value?.from || new Date(now.getTime() - rangeMinutes(selectedRange.value) * 60_000)).toISOString(),
+    to: (linkedWindow.value?.to || now).toISOString(),
     queue: queueName.value,
   }
 }
@@ -764,10 +774,18 @@ const lagLatest = computed(() => {
     max: latestFinite(l.map(x => x.max)),
   }
 })
-// An age is already proportional, so the thresholds are the app's, unchanged —
-// they just come from useSeverity now, in seconds, like everywhere else.
+// An age is already proportional, so it is judged against two lines and
+// nothing else: this queue's own when Settings holds some, else the tenant's.
+const settingsStore = useSettingsStore()
+const queueLines = computed(() => settingsStore.linesFor(queueName.value))
+const ownLines = computed(() => settingsStore.settings.value.queues.get(queueName.value) || null)
+const shownLines = computed(() => QUEUE_LINES.filter((m) => m.group === 'Consumer lag' || ownLines.value?.[m.key] !== undefined))
+const shownFlags = computed(() => QUEUE_FLAGS.filter((f) => ownLines.value?.[f.key] === true))
+// The capability that configures a queue, on a document that was read.
+const canSetLines = computed(() => can('queueAdmin') && settingsStore.state.value === 'ready')
+const linesOpen = ref(false)
 const lagNumClass = (ms) => (
-  ms === null || ms === undefined ? '' : numTone(timeLagSeverity(ms / 1000))
+  ms === null || ms === undefined ? '' : numTone(timeLagSeverity(ms / 1000, queueLines.value))
 )
 // MetricRow.severity expects a key like 'warn' / 'bad'; map from the raw ms.
 const lagSeverityKey = computed(() => lagNumClass(lagLatest.value.max))
@@ -849,7 +867,7 @@ const errorsContext = computed(() => {
   return `${formatNumber(t)} of ${formatNumber(delivered)} delivered (${((t / delivered) * 100).toFixed(2)}%)`
 })
 const errorsSeverity = computed(() =>
-  ackFailureSeverity({ failed: errorsTotal.value, attempts: deliveredTotal.value })
+  ackFailureSeverity({ failed: errorsTotal.value, attempts: deliveredTotal.value }, queueLines.value)
 )
 
 // ---------------------------------------------------------------------------
@@ -971,7 +989,7 @@ const banners = computed(() => {
     out.push({
       tone: errorsSeverity.value,
       title: 'Ack failures in window',
-      detail: `${formatNumber(errorsTotal.value)} ack failure${errorsTotal.value === 1 ? '' : 's'} across the last ${selectedRange.value}${deliveredTotal.value ? ` — ${((errorsTotal.value / deliveredTotal.value) * 100).toFixed(2)}% of deliveries` : ''}.`,
+      detail: `${formatNumber(errorsTotal.value)} ack failure${errorsTotal.value === 1 ? '' : 's'} across ${rangeLabel.value}${deliveredTotal.value ? ` — ${((errorsTotal.value / deliveredTotal.value) * 100).toFixed(2)}% of deliveries` : ''}.`,
     })
   }
   // Four outcomes, not two: 'none' below the floor, 'hold' while the conflation
@@ -1006,7 +1024,7 @@ const banners = computed(() => {
 // Seconds of work at the rate this queue is actually acking, not a raw depth:
 // 50 000 pending drains in four seconds at 12k/s and never drains at 0/s.
 const drainPerSec = computed(() => latestFinite(history.value.map(x => x.ackPerSecond)))
-const pendingNumClass = (n) => backlogSeverity({ pending: n, drainPerSec: drainPerSec.value })
+const pendingNumClass = (n) => backlogSeverity({ pending: n, drainPerSec: drainPerSec.value }, queueLines.value)
 
 // ---------------------------------------------------------------------------
 // Formatters
@@ -1086,7 +1104,7 @@ const queueSev = computed(() => {
   const groups = groupsStore.groups.value
   if (groups === null || groupsStore.error.value !== null) return 'ok'
   const here = { name: queueName.value, messages: { pending: totalMessages.value.pending } }
-  return queueAttention([here], groups)[0]?.sev || 'ok'
+  return queueAttention([here], groups, settingsStore.linesFor)[0]?.sev || 'ok'
 })
 // Each seed's lag — the age of the oldest message its slowest reader has not
 // consumed — comes from /resources/partitions, for the seeds the flower can
@@ -1113,19 +1131,11 @@ const partitionSeeds = computed(() => partitions.value.map(p => {
   return { name, partitions: 1, pending, lag, sev: pending > 0 ? queueSev.value : 'ok' }
 }))
 
-function goMessages() {
-  router.push({ path: '/messages', query: { queue: queueName.value } })
-}
 function goDLQ() {
-  router.push({ path: '/dlq', query: { queue: queueName.value } })
-}
-function goTraces() {
-  router.push({ path: '/traces', query: { queue: queueName.value } })
+  router.push(queueLocation(queueName.value, route, 'failed'))
 }
 function goConsumers() {
-  // Consumers reads `search` off the query on mount and matches it against both
-  // the group and the queue name.
-  router.push({ path: '/consumers', query: { search: queueName.value } })
+  router.push(queueLocation(queueName.value, route, 'consumers'))
 }
 
 // ---------------------------------------------------------------------------
@@ -1221,7 +1231,7 @@ const deleteQueue = async () => {
 // is hidden); a private setInterval here would keep spending the tenant's
 // metered request budget off screen.
 useAutoRefresh(fetchAll)
-watch(selectedRange, fetchOps)
+watch([selectedRange, contextFrom, contextTo], fetchOps)
 watch(queueName, () => {
   loading.value = true
   detailError.value = null
@@ -1313,6 +1323,15 @@ onMounted(fetchAll)
   text-underline-offset: 2px;
 }
 .qd-config-link:hover { color: var(--accent-text); }
+
+.qd-lines-head {
+  display: flex; align-items: baseline; gap: 10px; padding: 12px 16px 2px;
+  border-top: 1px solid var(--bd);
+}
+.qd-lines-head h4 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-hi); }
+.qd-lines-sub { font-size: 12px; color: var(--text-low); }
+.qd-lines-sub a { color: var(--text-mid); text-decoration: underline; text-underline-offset: 2px; }
+.qd-lines-head .qd-config-link { margin-left: auto; font-size: 12px; }
 
 /* The delete modal uses the shared shell — .modal-backdrop / .modal-card /
    .modal-foot — and the shared .panel-err for its form error, so it is not a

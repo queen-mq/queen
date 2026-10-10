@@ -5,6 +5,199 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+## 2.2.0
+
+**Server: a queue's memory no longer grows with the messages it keeps.** Every push left a row in
+the memory of every node (about 200 bytes: where the append begins and ends, when it was written,
+the hash of each `transactionId`), and the row stayed until retention removed the message. A queue
+with retention off, or with days of it, held a row for its whole history in RAM, on each node, and a
+restart loaded them all again. A row now leaves the store when the queue's dedup window has passed
+(`dedupWindowSeconds`, 3,600 s by default, and never less than `QUEEN_RAFT_TXN_WINDOW_MIN_S`,
+900 s), whatever the retention: `retentionSeconds` and `completedRetentionSeconds` say how long a
+message stays on disk, and no longer how long its row stays in memory (until 2.1.0 a longer
+`completedRetentionSeconds` was also the least time a row was kept). Messages older than that are
+read from the queue log, which always held them: a consumer far behind, a group that subscribes at a
+past instant, a lookup by timestamp, and retention itself. Memory now follows the push rate times
+the window, not the size of the queue. On one 16-core VM, 20,000 single pushes a second for five
+minutes with retention off and a 60-second window: 2.1.0 ended with 5.95 million rows and 1.8 GB,
+and still held 1.4 GB after the pushes stopped; this build stayed at 1.2 million rows while they ran
+and held no row and 0.3 GB 75 seconds after. Consumers at the tail are served from memory as before:
+at 300,000 messages a second the push p50 was 8.5 to 9.4 ms on this build and 8.8 to 9.0 ms on
+2.1.0, over five runs on ten cores of that VM.
+The backlog of that run, 5.9 million messages with no row left, was read back by 16 consumers at
+about 500,000 messages a second, against about 520,000 on 2.1.0, which read it from memory. While
+it was being read, the traffic at the tail kept its 300,000 messages a second, with a push p50 of
+9 to 10 ms on both builds. From the disk it is the same on both: with 32 GB of
+backlog (48.75 million messages) and the page cache dropped, the consumers read it back at about
+360,000 messages a second on this build and 375,000 on 2.1.0, and the broker's own memory stayed
+at 0.6 GB against 2.2 GB. A walk over old messages asks the kernel for a chunk of records at
+once as soon as one read has waited for the disk, so the reads overlap. A queue of 99 GB (149
+million messages, retention off) left the broker with 0.4 GB of memory once its rows had gone, and
+the node started on it in 3.5 seconds with a cold page cache. The runs are in
+`benchmark-queen/2026-10-09-rows-window/`.
+On three 16-core machines, at 1,000,000 messages a second in and out of one queue of 500,000
+partitions for five minutes, this build and 2.1.0 both carried the rate with nothing shed and no
+error. With retention off, where 2.1.0 removes nothing, its leader's memory grew from 2.3 to
+11.1 GB and was still growing, and this build's stayed under 7.1 GB and fell to 5.1 GB, for eight
+more points of the apply thread on each node (55% against 47% on the leader) and 4 to 7% on the
+p99s. With consumed messages removed after a minute on both, the two builds could not be told
+apart (`benchmark-queen/2026-10-10-three-node-1m/`).
+The change needs cluster version 6, which the leader raises by itself once every node runs this
+release; from then on 2.1.0 and older refuse to start on that data, and
+`QUEEN_RAFT_CLUSTER_VERSION_MS=0` keeps the way back open while the release bakes. Until the
+version is 6, rows stay as long as their messages, as before. `QUEEN_RAFT_ROWS_WINDOW=0` does the
+same on purpose. New metric: `queen_consume_cold_claims_total`, the claims served from the queue
+log.
+
+**Server: reading an old message no longer asks every log file.** A read by offset asked the
+sealed log files one after the other, oldest first, so its cost grew with what the queue retained.
+It now asks the newest first, where consumers usually are, and for the rest reads a directory of
+the sealed files: small sorted files beside the log (`dirx-*.qdx`) that say which file holds which
+offsets of which partition. They are built in the background once 16 sealed files have none,
+merged as they pile up, checked when the log is opened, and built again if lost; a node without
+them answers the same, more slowly. `QUEEN_QLOG_DIRX=0` turns the building off. New metric:
+`queen_raft_qlog_dirx`, the directory files and the sealed files none of them covers yet.
+
+**Server: retention keeps up with a busy partition.** One retention round moved a partition by at
+most 1,000 pushes (`RETENTION_BATCH_SIZE`), and a round starts every `RETENTION_INTERVAL` (5 s):
+a partition written faster than 200 pushes a second fell behind retention for good, and its rows
+piled up in memory. A partition that has more due is now judged again 40 ms later, until it has
+caught up.
+
+**Server: an ack repeated long after its message was pushed.** A `completed` ack of a message that
+was already acked is still a no-op. The broker recognises it while the message's row exists (the
+dedup window), and after that while the message is among the last 65,536 its group consumed from
+that partition; an older one is answered as not found. On a queue without retention, 2.1.0
+recognised it for as long as the queue existed, and on a queue with retention for at least as long
+as it kept the message.
+
+**Server: a quiet queue no longer makes a log file every ten minutes.** A log file is sealed when
+it is full (64 MiB), and a quiet one by age, so that retention can free what expired in it: every
+`QUEEN_QLOG_SEAL_AGE_S` (600 s) the file of any queue that had a message in it was sealed, whether
+or not retention had anything to free. A queue that got a message now and then made 144 files a
+day, each with its index, and a queue without retention kept them all. An aged file is now sealed
+only when that is worth a file: retention found a message in it that has expired or whose queue
+is gone, or it holds an eighth of a full file. A queue without retention gets a new file every
+64 MiB and no other. On a VM, 500 queues with a message each every 5 seconds for five minutes,
+retention off and the seal age at a twentieth of its default (what 100 minutes do at 600 s):
+2.1.0 ended with 3,630 files and 6,780 memory maps, this build with the 501 it started with and
+537 maps. With a retention of 20 seconds on the same queues, files are sealed as their messages
+expire and freed as they die: between 130 and 260 of them at any time, and none 45 seconds after
+the last message.
+
+**Server: the kernel's limit on memory maps cannot stop a node.** Every sealed log file kept its
+index memory-mapped, twice (the log's own map and retention's), and the kernel allows a process
+65,530 maps unless `vm.max_map_count` is raised: about 32,700 sealed files. Past that the next
+file could not be sealed (see the entry below for what that did), and with twice as many files
+no start succeeded, since a start maps every index. Reached by size, the first is 2 TB of log on
+a node; reached by quiet queues at 144 files a day each, it is 227 days of one queue, or ten days
+of 23. Three changes. An index that fits one page (about 80 records) is read into memory
+and takes no map. Retention judges a file from the log's own index, so a file has one map: 65,530
+of them is 4 TB of log at 64 MiB a file. And an index the kernel refuses to map is held in memory
+instead, with a warning, so the limit costs memory and never the node. New series
+`queen_raft_qlog_index_maps` (`mapped`, `limit`, `refused`), and a warning in the log past 70% of
+the limit. Every release since 2.0.0 has the limit; a node on one of them is as close to it as
+twice its `queen_raft_log_storage{kind="files"}`.
+
+**Server: a log file that could not be sealed keeps its messages.** Sealing a file writes its
+index and opens it. When that failed (the process out of memory maps or file descriptors, a write
+error) the file was left marked as sealed with no index in memory: its messages, and those
+written to it afterwards, could not be found until a restart. The next attempt then wrote the
+index again from what memory still held, a part of the file or nothing, and a restart trusted
+that index, so those messages stayed on disk and out of reach. A seal now changes nothing until
+the index is written and open: a failed one leaves the file as it was, and the next one seals it
+whole. Every release since 2.0.0 has this.
+
+**Server: an entry written after a log cut can be read.** A log file is created for a sequence
+number: by a roll, for the group about to be written, and by the idle pass, which seals a quiet
+file and creates the next one for the writer's next number. When a follower cuts its log back (a
+tail a new leader overruled), the entries it takes next carry lower numbers than that, in two
+ways. The cut can come after the seal, and the empty file kept the number it was created for. Or
+it can come before: the idle pass still counted the writer's next number from the tail the cut
+had removed, and a file sealed in the moment before the new leader's entries arrived was created
+too high. Either way an entry went into a file whose header said it held nothing that low, a
+search by number skipped the file, and at its next start the node refused:
+`raft log entries N..N+1 are not all in the queue logs`. A cut now lowers the first number of an
+empty file and the writer's own count, and a file begins where its first record does, whatever
+created it. Every release since 2.0.0 has this; it needs a log sealed around the moment a node's
+entries are overruled, which the default seal age of 600 seconds makes rare. Found by Jepsen on
+logs sealed after 10 seconds: the first way by four tests that were not valid, the second in the
+node logs of a test that was, because the other four nodes had carried it.
+
+**Server: a node starts after an empty queue log was removed half-way.** A queue's log whose files
+have all been reclaimed is closed and its directory deleted. The deletion was done in place, and
+could stop between the last file and the directory: a crash, or a filesystem that keeps a deleted
+file while it is open and then refuses to remove the directory (FUSE, NFS). The directory that
+was left, with no file in it, is what a log that lost its records looks like, and the next start
+refused it: `it ends at seq 0, below seq N, which this node fsync'd and applied`. The directory is
+now renamed to `q<id>.dead` in one step and deleted after that is durable; a start sweeps such
+directories, and a snapshot leaves them out. Every release since 2.0.0 has this too. Found by
+Jepsen under power loss, where it took every node of a cluster down one after the other.
+
+**Server: `/health` no longer says healthy without a majority.** A node answered `200 healthy` as
+long as it knew a leader and its apply was not behind. A leader that had lost every follower, and
+a follower cut off from its leader, kept that leader's name and said healthy for good; a voter
+that came back with an empty disk said it from its first answer. On Kubernetes, where `/health` is
+the readiness probe, the Service kept sending clients to a node that could not serve them, and a
+rolling update moved on to the next pod before the one it had restarted was back in the cluster.
+`/health` now also needs the leader the node follows (itself, when it leads) to have heard from a
+majority of the voters within `QUEEN_RAFT_READY_QUORUM_MS` (5000 ms; `0` turns the check off), and
+the body says how long ago that was, in `raft.quorumAckMs`. A node that has applied nothing while
+the cluster is more than `QUEEN_RAFT_READY_LAG_ENTRIES` ahead answers `503 settling`: its catch-up
+is now measured against the commit point the leader's appends carry when the leader does not
+answer its question. An election stays `200`: the figure is the silence of a majority, not the
+absence of a leader. Do not point a liveness probe at `/health`: a lost majority would restart
+every pod.
+
+**Dashboard: moving between views keeps what you were looking at.** The selected queue, the time
+window, the filters and the page of a list are part of the address: they survive a reload, a
+shared link and the browser's Back, and they follow you from a queue to its messages, its
+consumer groups and its traces. A queue's pages share a breadcrumb and tabs. The sidebar is
+grouped by what you do (Messaging, Workers, Analysis), with KV and Locks under Messaging. A
+filtered list says how many of the total it shows. Who is signed in, and the way out, are in a
+menu at the right of the top bar; an operator reaches Users from Members.
+
+**Dashboard: the lines it judges by can be moved.** What turns a queue or a consumer group amber
+or red was fixed in the code: a group 60 seconds behind, five minutes of backlog, 1% of acks
+failing, a node at 80% of its memory. A new Settings page states those lines and lets a tenant
+move them, for all its queues or for one queue (also from the queue's own page), and mark a queue
+that no consumer group is meant to read. The moved lines are one JSON document in the tenant's KV
+(`queen.console` / `settings`), written with a version check, so two people cannot overwrite each
+other. A blank line keeps the built-in value; saving needs the right to configure a queue.
+
+**Dashboard: the two Performance pages are gone.** Analytics and Queue operations showed, with
+their own charts, what Workload, a queue's own page and System already hold: Workload goes from
+a namespace or a task down to one queue (flow, lag, acks, dead letters, retention). A link to
+`/analytics` or `/operations` lands on the queue it named, or on Workload, with the same time
+window.
+
+**Dashboard: a supervisor card charts all its queues.** The activity chart of a card opened on the
+first queue the application reports. It now opens on the sum of all of them, each counted once
+whatever the number of replicas, and the list of queues, now to the left of the chart, filters it
+to one.
+
+**Kubernetes: an operator runs a cluster from one object.** `deploy/operator` is an operator and
+its `QueenCluster` definition (`queenmq.com/v1alpha1`). It creates the StatefulSet, the Services
+and the disruption budget of the Kubernetes page and does what a StatefulSet cannot. It restarts
+the pods one at a time with the leader last, each behind a write that commits. It adds and removes
+voters through the membership API, a node leaving the membership before its pod stops. It replaces
+a pod whose volume is lost (the annotation `queenmq.com/replace-pod`), and it grows the volumes. It
+restarts nothing while a voter is behind and does not catch up, and says so. It uses the broker's
+HTTP API as it is and keeps no state outside the object. It takes no backups, it does not take
+over a cluster applied by hand, and its API may still change. These steps ran on k3s against 2.0.3
+on 2026-10-08, under a write load of 6,100 pushes of which none was lost; on this release its unit
+tests ran, and those runs were not repeated. The image is `ghcr.io/queen-mq/queen-operator`, built
+by the `Operator` workflow. Docs: `operate/operator`.
+
+**Terraform: a provider for queues and the S3 sink.** `deploy/terraform-provider-queen` is a
+provider for Terraform and OpenTofu with two resources. `queen_queue` declares a queue's options:
+one you leave out stays as the broker has it, and destroying the resource forgets the queue and
+deletes it only with `delete_on_destroy`. `queen_s3_sink` declares a cluster's S3 sink through
+the control plane, with a `secret_key` that is write-only and never enters the state. Its
+acceptance tests pass against this release with Terraform 1.15.8 and OpenTofu 1.13.1. It is not in
+a registry yet: build it and point the CLI at the build with `dev_overrides`. Docs:
+`operate/terraform`.
+
 ## PHP client 2.4.3 - 2026-10-10
 
 **Laravel: the PHP client pins supervisor 0.8.1.** `queen:supervisor-install` installs 0.8.1, with

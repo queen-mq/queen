@@ -69,6 +69,7 @@
         <label class="tool-field">
           <span class="tool-label">Show</span>
           <select v-model.number="pageSize" class="input">
+            <option :value="25">25</option>
             <option :value="50">50</option>
             <option :value="100">100</option>
             <option :value="200">200</option>
@@ -111,9 +112,8 @@
         </div>
 
         <!-- Two columns, so six errors cost three rows of height. Each row is a
-             filter for the table below, not a label. No percentage column: the
-             default page size is 100, where a share and a count are the same
-             two digits — the strip above already carries the proportion. -->
+             filter for the table below, not a label. The strip above carries
+             the proportion; each error below carries its row count. -->
         <div class="dlq-err-grid">
           <button
             v-for="entry in visibleErrorGroups"
@@ -339,10 +339,7 @@
               <router-link
                 v-if="replayResult.target"
                 class="btn btn-ghost dlq-verdict-link"
-                :to="{ path: '/messages', query: {
-                  queue: replayResult.target.queue,
-                  partition: replayResult.target.partition,
-                } }"
+                :to="queueLocation(replayResult.target.queue, route, 'messages', { partition: replayResult.target.partition, from: undefined, to: undefined, range: '1h' })"
               >
                 Open {{ replayResult.target.queue }} in Messages
               </router-link>
@@ -594,6 +591,10 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { useRouteState } from '@/composables/useRouteState'
+import { queueLocation } from '@/composables/navigation'
+const route = useRoute()
 import { dlq, queues as queuesApi, describeApiError } from '@/api'
 import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
 import { formatDlqMarkdown } from '@/composables/useDlqMarkdown'
@@ -636,7 +637,8 @@ const showAllErrors = ref(false)
 const filterQueue = ref('')
 const filterGroup = ref('')
 const page = ref(1)
-const pageSize = ref(100)
+const pageSize = ref(25)
+const { restoring: restoringRoute } = useRouteState({ queue: filterQueue, group: filterGroup, page, limit: pageSize })
 // Flipped off when a response carries more rows than it was asked for: that
 // broker is not applying the limit, so offering "Next" would page nothing.
 const serverPaginates = ref(true)
@@ -1160,7 +1162,13 @@ const submitReplay = async () => {
 // of a private setInterval: under the proxy every poll is metered.
 useRefresh(fetchMessages, { auto: true })
 
-watch([filterQueue, pageSize], reload)
+watch([filterQueue, pageSize, filterGroup, page], (values, previous) => {
+  if (restoringRoute.value) fetchMessages()
+  else if (values[0] !== previous[0] || values[1] !== previous[1]) {
+    page.value = 1
+    fetchMessages()
+  }
+})
 
 // In setup, not onMounted: the first paint must be the loading state, not the
 // "dead letter queue is empty" state we have not asked about yet.

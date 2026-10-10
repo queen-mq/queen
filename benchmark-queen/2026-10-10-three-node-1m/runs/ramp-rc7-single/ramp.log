@@ -1,0 +1,30 @@
+[11:38:16] ramp ramp-rc7-single: queen-rc7, retention completed, 1 messages a push, pops over 100 partitions, steps of 75s at: 50000 100000 150000 200000 300000 400000
+[11:38:26] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+[create] done: bench x 500000 partitions
+[11:40:24] == 50000: 9 load processes
+   steady window 60s: offered 49,995/s  pushed 49,992/s  consumed 49,956/s  loader cpu 10.0 cores
+   whole run: offered 3,499,660  achieved 3,499,660  shed 0  push errors 0  pop errors 0  ack errors 0  popped 3,499,660  lag at end 0
+   push ms p50 6.8 p99 56.3 p999 446.5   e2e ms p50 18.7 p99 557.1 p999 671.7  (n=3,499,660)
+   per 10 s, pushed/consumed in k msg/s: 25/25 50/50 50/50 50/50 50/48 50/52 50/50 25/25
+   windows after the ramp: pushed min 49,897 max 50,091  consumed min 47,603  worst window e2e p99 758 ms
+   n1: cpu 8.8 cores; threads tokio-rt-worker 391%, queen-rsm-apply 139%, queen-raft 122%, queen-rsm-ckpt 33%, consume-serve 25%; anon GB start 2.3 max 5.5 end 4.8; rows max 3,147,348 end 2,648,937; MemFree min 23.5 GB
+   n2: cpu 4.8 cores; threads tokio-rt-worker 272%, queen-rsm-apply 113%, queen-raft 36%, queen-rsm-ckpt 32%, queen-raft-log 16%; anon GB start 0.8 max 2.9 end 2.5; rows max 3,147,348 end 2,648,937; MemFree min 26.2 GB
+   n3: cpu 4.8 cores; threads tokio-rt-worker 273%, queen-rsm-apply 117%, queen-raft 37%, queen-rsm-ckpt 32%, queen-raft-log 16%; anon GB start 0.8 max 3.3 end 2.6; rows max 3,147,348 end 2,646,889; MemFree min 25.8 GB
+== 50000: 0 load processes
+   50,000: offered 49,995 pushed 49,992 consumed 49,956 shed 0 errors 0 lag 0 | push p50 6.8 p99 56.3 | e2e p50 18.7 p99 557.1 | n1 8.5c apply 138% raft 118%; n2 4.7c apply 113% raft 36%; n3 4.7c apply 116% raft 36% | loaders 10.0c  OK 
+[11:42:13] == 100000: 9 load processes
+   steady window 60s: offered 99,999/s  pushed 74,400/s  consumed 74,448/s  loader cpu 13.3 cores
+   whole run: offered 6,999,950  achieved 5,361,056  shed 1,638,894  push errors 0  pop errors 0  ack errors 0  popped 5,361,056  lag at end 0
+   push ms p50 548.9 p99 983.0 p999 1097.7   e2e ms p50 3244.0 p99 4128.8 p999 4390.9  (n=5,361,056)
+   per 10 s, pushed/consumed in k msg/s: 49/34 78/69(shed 18) 73/73(shed 27) 74/75(shed 26) 73/84(shed 29) 71/78(shed 29) 78/67(shed 22) 41/55(shed 13)
+   windows after the ramp: pushed min 71,013 max 78,273  consumed min 66,846  worst window e2e p99 4358 ms
+   n1: cpu 11.2 cores; threads tokio-rt-worker 591%, queen-rsm-apply 178%, queen-rsm-ckpt 72%, queen-raft 71%, queen-planner 31%; anon GB start 3.9 max 8.8 end 5.9; rows max 4,994,511 end 3,920,550; MemFree min 19.5 GB
+   n2: cpu 5.3 cores; threads tokio-rt-worker 286%, queen-rsm-apply 142%, queen-rsm-ckpt 64%, queen-raft-log 17%, queen-raft 16%; anon GB start 2.1 max 4.9 end 3.5; rows max 4,926,736 end 3,920,550; MemFree min 23.8 GB
+   n3: cpu 5.3 cores; threads tokio-rt-worker 284%, queen-rsm-apply 147%, queen-rsm-ckpt 65%, queen-raft 17%, queen-raft-log 17%; anon GB start 2.2 max 4.9 end 3.5; rows max 4,926,736 end 3,920,550; MemFree min 23.9 GB
+== 100000: 0 load processes
+  100,000: offered 99,999 pushed 74,400 consumed 74,448 shed 1,638,894 errors 0 lag 0 | push p50 548.9 p99 983.0 | e2e p50 3244.0 p99 4128.8 | n1 10.9c apply 174% raft 70%; n2 5.4c apply 150% raft 16%; n3 5.5c apply 155% raft 17% | loaders 13.3c  NOT CARRIED 
+[11:42:13] stopping at 100000
+n1 WARN_ERROR=11
+n2 WARN_ERROR=0
+n3 WARN_ERROR=0
+RAMP_DONE

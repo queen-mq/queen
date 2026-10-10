@@ -22,8 +22,8 @@ export function observePending(previous, queues, at) {
   return { current, delta, elapsed: comparable ? elapsed : null }
 }
 
-export function buildQueueTriage(queues = [], groups = [], deltas = new Map()) {
-  const issues = new Map(queueAttention(queues, groups).map(i => [i.name, i]))
+export function buildQueueTriage(queues = [], groups = [], deltas = new Map(), linesFor) {
+  const issues = new Map(queueAttention(queues, groups, linesFor).map(i => [i.name, i]))
   const byQueue = new Map()
   for (const g of groups) {
     if (!byQueue.has(g.queueName)) byQueue.set(g.queueName, [])
@@ -32,9 +32,9 @@ export function buildQueueTriage(queues = [], groups = [], deltas = new Map()) {
   return queues.filter(q => q?.name).map(q => {
     const issue = issues.get(q.name)
     const all = byQueue.get(q.name) || []
-    const affected = all.filter(g => ['bad', 'warn'].includes(groupAttention(g)))
+    const affected = all.filter(g => ['bad', 'warn'].includes(groupAttention(g, linesFor)))
       .sort((a, b) => (count(b.maxTimeLag) || 0) - (count(a.maxTimeLag) || 0))
-    const live = all.filter(g => groupAttention(g) !== 'mute')
+    const live = all.filter(g => groupAttention(g, linesFor) !== 'mute')
     const lags = live.map(g => count(g.maxTimeLag)).filter(n => n !== null)
     return {
       name: q.name, namespace: q.namespace || '', pending: count(q.messages?.pending),

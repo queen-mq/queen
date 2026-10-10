@@ -140,8 +140,10 @@ const GROUPS = [
   ["Retention and background jobs", (n) =>
     n.startsWith("RETENTION") || n.startsWith("PARTITION_CLEANUP") || n === "QUEEN_PARTITION_CLEANUP_ENABLED" ||
     n === "QUEEN_RAFT_RETENTION_VISIT" || n === "QUEEN_RAFT_TXN_WINDOW_MIN_S" || n === "QUEEN_RAFT_TRACE_RETENTION_S" ||
+    n === "QUEEN_RAFT_ROWS_WINDOW" ||
     n.startsWith("METRICS_") || n.startsWith("QUEEN_DASH_")],
-  ["Storage and replication", (n) => n.startsWith("QUEEN_RAFT_") || n === "QUEEN_QLOG_SHARDS" || n === "QUEEN_TENANT_GROUPS"],
+  ["Storage and replication", (n) =>
+    n.startsWith("QUEEN_RAFT_") || n === "QUEEN_QLOG_SHARDS" || n === "QUEEN_QLOG_DIRX" || n === "QUEEN_TENANT_GROUPS"],
   // A standby cluster and the source it replays (operate/standby).
   ["Standby cluster", (n) => n.startsWith("QUEEN_LINK_")],
   ["Authentication", (n) => n.startsWith("JWT_")],
@@ -384,6 +386,20 @@ const EXTRA_VARS = [
     name: "QUEEN_RAFT_TXN_WINDOW_MIN_S",
     type: "integer",
     def: "900",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "QUEEN_RAFT_ROWS_WINDOW",
+    type: "boolean",
+    def: "true",
+    aliases: [],
+    source: "server/src/rsm/batcher.rs",
+  },
+  {
+    name: "QUEEN_QLOG_DIRX",
+    type: "boolean",
+    def: "true",
     aliases: [],
     source: "server/src/rsm/batcher.rs",
   },

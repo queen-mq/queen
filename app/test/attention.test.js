@@ -16,6 +16,27 @@ test('a group is judged by the age of what it has not read', () => {
   assert.equal(groupAttention(g('a', 300)), 'bad')
 })
 
+test("a queue with its own lines is judged by them, and its neighbours are not", () => {
+  const slow = { lagWarnSeconds: 600, lagBadSeconds: 1800 }
+  const linesFor = (queue) => (queue === 'batch' ? slow : undefined)
+  assert.equal(groupAttention(g('batch', 400, 'Lagging'), linesFor), 'ok')
+  assert.equal(groupAttention(g('batch', 700), linesFor), 'warn')
+  assert.equal(groupAttention(g('live', 400), linesFor), 'bad')
+  const out = queueAttention([q('batch', 10), q('live', 10)], [g('batch', 400), g('live', 400)], linesFor)
+  assert.deepEqual(out.map((i) => [i.name, i.sev]), [['live', 'bad']])
+  // Handed straight to Array.map, the index must not be read as a lookup.
+  assert.deepEqual([g('a', 0), g('a', 90)].map(groupAttention), ['ok', 'warn'])
+})
+
+test('a queue nobody is expected to read is not flagged for having no reader', () => {
+  const linesFor = (queue) => (queue === 'archive' ? { lagWarnSeconds: 60, lagBadSeconds: 300, noReaderOk: true } : undefined)
+  const out = queueAttention([q('archive', 83), q('orders', 83)], [], linesFor)
+  assert.deepEqual(out.map((i) => [i.name, i.reason]), [['orders', 'noReader']])
+  // The flag is about readers only: a group that IS there and is behind still counts.
+  const late = queueAttention([q('archive', 83)], [g('archive', 400)], linesFor)
+  assert.deepEqual(late.map((i) => [i.name, i.sev, i.reason]), [['archive', 'bad', 'lag']])
+})
+
 test('a group that has never consumed is not an alarm', () => {
   assert.equal(groupAttention(g('a', 90_000, 'Dead')), 'mute')
 })

@@ -1,0 +1,61 @@
+21:38:18 start rows=0 cold=na dirx= files/bytes=2/491/ anon/rss/cpu=11 28 2 pagecache_MB=444 disk_read_MB=33850
+21:38:33 P rows=149781 cold=na dirx= files/bytes=16/997205584/ anon/rss/cpu=370 468 179 pagecache_MB=853 disk_read_MB=33850.9
+21:38:48 P rows=375520 cold=na dirx= files/bytes=39/2500378990/ anon/rss/cpu=666 864 235 pagecache_MB=1054 disk_read_MB=33850.9
+21:39:03 P rows=601656 cold=na dirx= files/bytes=61/4003671661/ anon/rss/cpu=884 1181 256 pagecache_MB=1257 disk_read_MB=33851
+21:39:18 P rows=827520 cold=na dirx= files/bytes=83/5506379479/ anon/rss/cpu=1095 1494 266 pagecache_MB=1458 disk_read_MB=33851.2
+21:39:33 P rows=1053390 cold=na dirx= files/bytes=106/7009057047/ anon/rss/cpu=1328 1834 266 pagecache_MB=1850 disk_read_MB=33851.2
+21:39:48 P rows=1279176 cold=na dirx= files/bytes=128/8510830196/ anon/rss/cpu=1418 2103 266 pagecache_MB=2094 disk_read_MB=33851.3
+21:40:03 P rows=1505172 cold=na dirx= files/bytes=150/10014172440/ anon/rss/cpu=1595 2381 266 pagecache_MB=2193 disk_read_MB=33851.3
+21:40:18 P rows=1730949 cold=na dirx= files/bytes=173/11516028665/ anon/rss/cpu=1647 2612 313 pagecache_MB=2327 disk_read_MB=33851.6
+21:40:33 P rows=1956960 cold=na dirx= files/bytes=195/13019681531/ anon/rss/cpu=1736 2800 313 pagecache_MB=2429 disk_read_MB=33851.6
+21:40:48 P rows=2182889 cold=na dirx= files/bytes=217/14522604035/ anon/rss/cpu=1783 2985 313 pagecache_MB=2564 disk_read_MB=33851.6
+21:41:03 P rows=2408866 cold=na dirx= files/bytes=240/16026104580/ anon/rss/cpu=1874 3149 313 pagecache_MB=2669 disk_read_MB=33851.7
+21:41:18 P rows=2634832 cold=na dirx= files/bytes=262/17529390506/ anon/rss/cpu=1914 3309 315 pagecache_MB=2803 disk_read_MB=33851.9
+21:41:33 P rows=2860789 cold=na dirx= files/bytes=284/19032675578/ anon/rss/cpu=1971 3437 315 pagecache_MB=2905 disk_read_MB=33852.3
+21:41:48 P rows=3086602 cold=na dirx= files/bytes=307/20534567043/ anon/rss/cpu=2022 3608 315 pagecache_MB=3035 disk_read_MB=33852.3
+21:42:04 P rows=3312603 cold=na dirx= files/bytes=329/22038180910/ anon/rss/cpu=2121 3778 315 pagecache_MB=3139 disk_read_MB=33852.4
+21:42:19 P rows=3538557 cold=na dirx= files/bytes=351/23541296157/ anon/rss/cpu=2172 3952 312 pagecache_MB=3272 disk_read_MB=33852.4
+21:42:34 P rows=3764485 cold=na dirx= files/bytes=374/25044278031/ anon/rss/cpu=2260 4111 312 pagecache_MB=3371 disk_read_MB=33852.5
+21:42:49 P rows=3990336 cold=na dirx= files/bytes=396/26546662989/ anon/rss/cpu=2307 4277 312 pagecache_MB=3504 disk_read_MB=33852.6
+21:43:04 P rows=4216273 cold=na dirx= files/bytes=418/28049756653/ anon/rss/cpu=2430 4471 312 pagecache_MB=3606 disk_read_MB=33852.6
+21:43:19 P rows=4442048 cold=na dirx= files/bytes=441/29551551716/ anon/rss/cpu=2502 4663 311 pagecache_MB=3736 disk_read_MB=33852.7
+21:43:34 P rows=4668019 cold=na dirx= files/bytes=463/31055032149/ anon/rss/cpu=2584 4815 311 pagecache_MB=3846 disk_read_MB=33852.7
+21:43:48 P-end rows=4875003 cold=na dirx= files/bytes=484/32432106822/ anon/rss/cpu=2616 4960 311 pagecache_MB=3971 disk_read_MB=33852.8
+21:45:08 P+80s rows=4875003 cold=na dirx= files/bytes=484/32432147982/ anon/rss/cpu=2014 4537 170 pagecache_MB=4048 disk_read_MB=33852.8
+33G	/root/improve/data/single
+21:45:10 cache-dropped rows=4875003 cold=na dirx= files/bytes=484/32432147982/ anon/rss/cpu=2014 4537 170 pagecache_MB=2374 disk_read_MB=33889.7
+21:45:15 C1 rows=4875003 cold=na dirx= files/bytes=484/32432871637/ anon/rss/cpu=2158 4680 170 pagecache_MB=3721 disk_read_MB=35213.2
+21:45:21 C1 rows=4875003 cold=na dirx= files/bytes=484/32433749510/ anon/rss/cpu=2178 4701 25 pagecache_MB=5057 disk_read_MB=36615.2
+21:45:26 C1 rows=4875003 cold=na dirx= files/bytes=484/32434589287/ anon/rss/cpu=2188 4711 25 pagecache_MB=6273 disk_read_MB=37888
+21:45:31 C1 rows=4875003 cold=na dirx= files/bytes=484/32435433373/ anon/rss/cpu=2195 4718 25 pagecache_MB=7581 disk_read_MB=39175
+21:45:36 C1 rows=4875003 cold=na dirx= files/bytes=484/32436260416/ anon/rss/cpu=2195 4718 25 pagecache_MB=8798 disk_read_MB=40449.3
+21:45:41 C1 rows=4875003 cold=na dirx= files/bytes=484/32437124245/ anon/rss/cpu=2193 4716 25 pagecache_MB=10042 disk_read_MB=41752.6
+21:45:42 C1-end rows=4875003 cold=na dirx= files/bytes=484/32437253307/ anon/rss/cpu=2206 4729 25 pagecache_MB=10216 disk_read_MB=41934.2
+21:45:50 M rows=4878710 cold=na dirx= files/bytes=485/32498855187/ anon/rss/cpu=2169 4692 25 pagecache_MB=2417 disk_read_MB=42022.3
+21:45:55 M rows=4890103 cold=na dirx= files/bytes=488/32687943564/ anon/rss/cpu=2250 4774 25 pagecache_MB=2606 disk_read_MB=42030.4
+21:46:00 M rows=4905259 cold=na dirx= files/bytes=492/32939186630/ anon/rss/cpu=2344 4869 25 pagecache_MB=2677 disk_read_MB=42077.5
+21:46:05 M rows=4920531 cold=na dirx= files/bytes=496/33192457240/ anon/rss/cpu=2514 5041 25 pagecache_MB=2689 disk_read_MB=42077.6
+21:46:10 replay starts
+21:46:10 M rows=4935695 cold=na dirx= files/bytes=499/33444210717/ anon/rss/cpu=2641 5188 25 pagecache_MB=2816 disk_read_MB=42131.1
+21:46:15 M rows=4950927 cold=na dirx= files/bytes=503/33691571908/ anon/rss/cpu=2876 5488 25 pagecache_MB=3489 disk_read_MB=42706.1
+21:46:20 M rows=4966143 cold=na dirx= files/bytes=507/33938868435/ anon/rss/cpu=2984 5661 263 pagecache_MB=4130 disk_read_MB=43248.4
+21:46:25 M rows=4981477 cold=na dirx= files/bytes=510/34188161843/ anon/rss/cpu=3095 5837 263 pagecache_MB=4822 disk_read_MB=43844.4
+21:46:30 M rows=4996668 cold=na dirx= files/bytes=514/34434956383/ anon/rss/cpu=3207 6012 263 pagecache_MB=5499 disk_read_MB=44424.5
+21:46:35 M rows=5011935 cold=na dirx= files/bytes=518/34683053488/ anon/rss/cpu=3336 6206 263 pagecache_MB=6254 disk_read_MB=45085.5
+21:46:40 M rows=5027112 cold=na dirx= files/bytes=521/34930046155/ anon/rss/cpu=3397 6332 263 pagecache_MB=7034 disk_read_MB=45775.3
+21:46:46 M rows=5042366 cold=na dirx= files/bytes=525/35177577455/ anon/rss/cpu=3527 6526 263 pagecache_MB=7870 disk_read_MB=46520
+21:46:51 M rows=5057609 cold=na dirx= files/bytes=529/35425679919/ anon/rss/cpu=3646 6709 263 pagecache_MB=8672 disk_read_MB=47230.7
+21:46:56 M rows=5072797 cold=na dirx= files/bytes=533/35673824084/ anon/rss/cpu=3697 6825 263 pagecache_MB=9473 disk_read_MB=47938.9
+21:47:01 M rows=5088171 cold=na dirx= files/bytes=536/35921790002/ anon/rss/cpu=3797 6963 263 pagecache_MB=10245 disk_read_MB=48696.2
+21:47:06 M rows=5103371 cold=na dirx= files/bytes=540/36169094122/ anon/rss/cpu=3799 7015 263 pagecache_MB=11058 disk_read_MB=49421.1
+21:47:11 replay ends
+21:47:11 M rows=5118558 cold=na dirx= files/bytes=544/36415594783/ anon/rss/cpu=3750 7006 263 pagecache_MB=11804 disk_read_MB=50148.2
+21:47:16 M rows=5130003 cold=na dirx= files/bytes=546/36602076695/ anon/rss/cpu=3772 7163 385 pagecache_MB=12236 disk_read_MB=50513.2
+21:47:21 M rows=5130003 cold=na dirx= files/bytes=546/36603498889/ anon/rss/cpu=3561 6952 385 pagecache_MB=12468 disk_read_MB=50754.6
+21:47:25 M-end rows=5130003 cold=na dirx= files/bytes=546/36603499292/ anon/rss/cpu=3539 6930 385 pagecache_MB=12468 disk_read_MB=50754.6
+21:47:35 R rows=255000 cold=na dirx= files/bytes=418/27992035615/ anon/rss/cpu=2108 5154 385 pagecache_MB=5799 disk_read_MB=50756.1
+21:47:45 R rows=255000 cold=na dirx= files/bytes=64/4178534692/ anon/rss/cpu=1843 5013 385 pagecache_MB=5801 disk_read_MB=50756.1
+21:47:45 R-end rows=255000 cold=na dirx= files/bytes=64/4178534692/ anon/rss/cpu=1843 5013 385 pagecache_MB=5801 disk_read_MB=50756.1
+7.2G	/root/improve/data/single
+0
+COLD_DONE

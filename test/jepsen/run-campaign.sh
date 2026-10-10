@@ -2,6 +2,8 @@
 # run-matrix.sh for a long unattended campaign: the same summary.txt lines,
 # plus a wall-clock cap per test (LIMIT seconds, default 2400: past it the
 # test's whole process group is killed and the line says CRASHED(rc=124)),
+# a look at every node's log for a refusal to start or a panic (the line
+# then says REFUSED(...), whatever the history's verdict),
 # and one line per test in $RUNS/PROGRESS.txt ($RUNS/progress.py).
 #
 #   RUNS=/root/runs-p8 BIN=/root/bin/queen-X ./run-campaign.sh matrix.txt
@@ -42,6 +44,19 @@ while read -r label args; do
   elif grep -q "Analysis invalid" "$log"; then v=INVALID
   elif grep -q "Errors occurred during analysis" "$log"; then v=UNKNOWN
   else v="CRASHED(rc=$rc)"; fi
+  # A valid history does not say that every node stayed up: one that refused to
+  # start, or panicked, is the broker's bug even when the others carried the
+  # test (2026-10-09: two of five nodes refused in a test judged valid). The
+  # corruption tests damage a node's files on purpose: there a refusal is the
+  # right answer.
+  case " $args " in
+    *" --nemesis corrupt "*) ;;
+    *)
+      if [ -n "$store" ]; then
+        bad=$(grep -l -E "FATAL|panicked at" "$store"/*/queen.log 2>/dev/null | wc -l | tr -d ' ')
+        [ "$bad" -gt 0 ] && v="REFUSED($bad node logs with FATAL or a panic; history $v)"
+      fi ;;
+  esac
   echo "$(date -u +%FT%TZ) done  $label: $v store=$store log=$log" >> "$RUNS/summary.txt"
   python3 "$RUNS/progress.py" "$label" "$RUNS" >> "$RUNS/PROGRESS.txt" 2>&1 || true
 done < "${1:?matrix file}"

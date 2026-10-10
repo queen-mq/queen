@@ -20,6 +20,15 @@ const { standalone } = useIdentity()
 //   navParent: the nav row that stands for this page when it has none of its
 //              own: that row is the one lit while you are here.
 //   proxyOnly: the broker-direct dashboard has no pxdb-backed account store.
+function performanceMoved(to) {
+  const query = {}
+  for (const key of ['range', 'from', 'to']) {
+    if (typeof to.query[key] === 'string' && to.query[key]) query[key] = to.query[key]
+  }
+  const queue = typeof to.query.queue === 'string' ? to.query.queue : ''
+  return queue ? { path: `/queues/${encodeURIComponent(queue)}`, query } : { path: '/workload', query }
+}
+
 const routes = [
   {
     path: '/',
@@ -32,23 +41,13 @@ const routes = [
     }
   },
   {
-    path: '/operations',
-    name: 'QueueOperations',
-    component: () => import('@/views/QueueOperations.vue'),
-    meta: {
-      title: 'Queue operations', subtitle: 'Per-queue throughput, lag, and consumer health',
-      requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'operations', order: 1 },
-    }
-  },
-  {
     path: '/queues',
     name: 'Queues',
     component: () => import('@/views/Queues.vue'),
     meta: {
       title: 'Queues', subtitle: 'Manage message queues and partitions',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'queues', order: 1 },
+      nav: { group: 'Messaging', icon: 'queues', order: 1 },
     }
   },
   {
@@ -73,7 +72,7 @@ const routes = [
     meta: {
       title: 'Ephemeral queues', subtitle: 'RAM-class queues — contents survive nothing',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'ephemeral', order: 2 },
+      nav: { group: 'Messaging', icon: 'ephemeral', order: 2 },
     }
   },
   {
@@ -83,7 +82,7 @@ const routes = [
     meta: {
       title: 'Consumer groups', subtitle: 'Monitor consumer lag and status',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'consumers', order: 3 },
+      nav: { group: 'Workers', icon: 'consumers', order: 1 },
     }
   },
   {
@@ -93,21 +92,18 @@ const routes = [
     meta: {
       title: 'Messages', subtitle: 'Browse, inspect and push messages',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'messages', order: 4 },
+      nav: { group: 'Messaging', icon: 'messages', order: 4 },
     }
   },
   {
-    // Routing, beside the queues it is used with (Alice, 2026-09-28; it had
-    // its own "State" group). Read-class and tenant-scoped — the console list
-    // is `Read` at the proxy by prefix (/api/v1/resources), so a Viewer may
-    // browse it, which the batch route /api/v1/kv would never allow.
+    // Tenant-scoped read access to the key-value store.
     path: '/kv',
     name: 'Kv',
     component: () => import('@/views/Kv.vue'),
     meta: {
       title: 'KV', subtitle: 'Browse the key-value store, namespace by namespace',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'kv', order: 5 },
+      nav: { group: 'Messaging', icon: 'kv', order: 7 },
     }
   },
   {
@@ -121,7 +117,7 @@ const routes = [
     meta: {
       title: 'Timers', subtitle: 'Scheduled messages waiting to fire, per queue',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'timers', order: 6 },
+      nav: { group: 'Messaging', icon: 'timers', order: 6 },
     }
   },
   {
@@ -135,7 +131,7 @@ const routes = [
     meta: {
       title: 'Locks', subtitle: 'Who holds each lock and semaphore, and until when',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'locks', order: 7 },
+      nav: { group: 'Messaging', icon: 'locks', order: 8 },
     }
   },
   {
@@ -145,7 +141,7 @@ const routes = [
     meta: {
       title: 'Traces', subtitle: 'Track message flows across queues',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'traces', order: 2 },
+      nav: { group: 'Analysis', icon: 'traces', order: 3 },
     }
   },
   {
@@ -155,19 +151,14 @@ const routes = [
     meta: {
       title: 'Supervisors', subtitle: 'Published supervisor status and worker pool health',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'system', order: 6 },
+      nav: { group: 'Workers', icon: 'system', order: 2 },
     }
   },
-  {
-    path: '/analytics',
-    name: 'Analytics',
-    component: () => import('@/views/Analytics.vue'),
-    meta: {
-      title: 'Analytics', subtitle: 'Throughput and performance trends',
-      requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'analytics', order: 3 },
-    }
-  },
+  // The two Performance pages are gone: what they showed is on Workload, on a
+  // queue's own page and on System. A link someone kept still lands somewhere
+  // that answers it — the queue it named, else Workload — on the same window.
+  { path: '/analytics', redirect: performanceMoved },
+  { path: '/operations', redirect: performanceMoved },
   {
     // Who is doing the work. Tenant-scoped: /api/v1/analytics/workload counts
     // only this tenant's queues, and its `tenant` total is what every share on
@@ -178,7 +169,7 @@ const routes = [
     meta: {
       title: 'Workload', subtitle: 'Who is doing the work, how much, and what is stuck',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'workload', order: 4 },
+      nav: { group: 'Analysis', icon: 'workload', order: 2 },
     }
   },
   {
@@ -188,7 +179,21 @@ const routes = [
     meta: {
       title: 'Dead letter', subtitle: 'Inspect, replay and purge failed messages',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'dlq', order: 5 },
+      nav: { group: 'Messaging', icon: 'dlq', order: 5 },
+    }
+  },
+  {
+    // The lines this console judges by, for the acting tenant: one document in
+    // its KV (stores/settingsStore.js). 'read' because the page states the
+    // lines in force to anyone; saving is offered to queueAdmin, the capability
+    // that configures a queue.
+    path: '/settings',
+    name: 'Settings',
+    component: () => import('@/views/Settings.vue'),
+    meta: {
+      title: 'Settings', subtitle: 'The lines this console judges by',
+      requires: 'read', scope: 'tenant',
+      nav: { group: 'Analysis', icon: 'settings', order: 4 },
     }
   },
   {
@@ -227,10 +232,8 @@ const routes = [
     }
   },
   {
-    // Cell-level: every account on the cell. Not a row of its own: a live
-    // operator is an admin on every cluster, so Members is always in their nav
-    // too, and the two lists are the same people at two scopes. Members'
-    // "Every tenant" switch opens this page (components/AccessScope.vue).
+    // Accounts across the cell. No row of its own: it is reached from Members
+    // through the scope switch both pages carry (components/AccessScope.vue).
     path: '/users',
     name: 'Users',
     component: () => import('@/views/Users.vue'),

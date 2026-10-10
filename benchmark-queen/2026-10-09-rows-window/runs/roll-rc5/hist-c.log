@@ -1,0 +1,18 @@
+qload tag= loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=1s duration=1s report=5s drain=25s GOMAXPROCS=10 GOGC=400(default) seed=1791589888768296914
+  topics: 1 x 100 partitions (hist..hist), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=100 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 8 here (ci 0..7 of 8), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  queen: url=http://127.0.0.1:6632 (of 3) conns=2048 timeout=30s pop-width=5 pop-batch=500 pop-timeout=2s lease=30s | configure: leaseTime=30 completedRetention=3600 dedup=0 retryLimit=1000000 | plain: consumers pop+ack the queue
+  [queen] http://127.0.0.1:6632 healthy: version 2.2.0, this node follower
+  [consume] 8 consumers of hist: pop width 5, batch 500, long poll 2s, lease 30s, async batch acks (ack-inflight 256)
+  [produce] -rate 0: no producers
+READY 1791590339406
+[start] GO 23:58:59.406 (unix ms 1791590339406)
+[drain] consumers keep going for 25s (lag now -280000)
+[23:59:04] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=0 pop=280000 lag=-280000 | errs push=0 pop=0 empty=16 gor=51 | ack=    55999/s ackErr=0 ackAvg=8.44ms | e2e p50=133693.44 p99=133693.44 p999=133693.44 n=280000 | e2e_local p50=133693.44 p99=133693.44 n=280000
+[23:59:09] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=0 pop=280000 lag=-280000 | errs push=0 pop=0 empty=40 gor=51 | ack=        0/s ackErr=0 ackAvg=8.44ms | e2e p50=0.00 p99=0.00 p999=0.00 n=0 | e2e_local p50=0.00 p99=0.00 n=0
+[23:59:14] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=0 pop=280000 lag=-280000 | errs push=0 pop=0 empty=64 gor=51 | ack=        0/s ackErr=0 ackAvg=8.44ms | e2e p50=0.00 p99=0.00 p999=0.00 n=0 | e2e_local p50=0.00 p99=0.00 n=0
+[23:59:19] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=0 pop=280000 lag=-280000 | errs push=0 pop=0 empty=88 gor=51 | ack=        0/s ackErr=0 ackAvg=8.44ms | e2e p50=0.00 p99=0.00 p999=0.00 n=0 | e2e_local p50=0.00 p99=0.00 n=0
+[23:59:24] offered=        0/s achieved=        0/s shed=        0/s inflight=     0 | p50=   0.00 p99=    0.00 p999=    0.00 ms | push=0 pop=280000 lag=-280000 | errs push=0 pop=0 empty=112 gor=51 | ack=        0/s ackErr=0 ackAvg=8.44ms | e2e p50=0.00 p99=0.00 p999=0.00 n=0 | e2e_local p50=0.00 p99=0.00 n=0
+[final] offered=0 achieved=0 shed=0 (msgs: offered=0 achieved=0 shed=0) pushErr=0 | pushed=0 popped=280000 lag=-280000 | popErr=0 empty=112 | overall p50=0.00 p99=0.00 p999=0.00 ms | acked=280000 ackErr=0 ackLag=-280000 ackAvg=8.44ms | e2e p50=133693.44 p99=133693.44 p999=133693.44 ms
+load_cpu=9.7%

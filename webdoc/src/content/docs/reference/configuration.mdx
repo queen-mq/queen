@@ -43,6 +43,22 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-08 (a standby's election): batcher.rs launches an ordinary planning cycle on an ordinary cluster only. No setting was added or changed. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a leader past its lease): raft/mod.rs keeps a leader's entries out of openraft's hands while no quorum has acknowledged it for 1.5 s (openraft refuses a write past a 2 s lease) and drops the entries of a pipeline the driver has abandoned; batcher.rs restarts its pipeline in the same term after an entry the log refused, and after 5 s paused while the role watch still names it leader. No setting was added or changed. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a seed's hold): raft/link.rs leaves a seeded standby's first hold when its snapshot is asked for, kept for QUEEN_LINK_HOLD_S like any other. No variable is added and no default changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window):
+# QUEEN_RAFT_ROWS_WINDOW and QUEEN_QLOG_DIRX join the table.
+# sourceOfTruth re-read 2026-10-09 (two housekeeping fixes): qlog/set.rs retires an empty log's
+# directory by a rename before deleting it; no variable is added or changed.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): qlog/set.rs reads old messages a chunk at a
+# time with a read-ahead hint and seals an aged active file only when retention has a dead message
+# in it or it holds an eighth of a full file (the QUEEN_QLOG_SEAL_AGE_S row says so); batcher.rs
+# warns near the kernel's map limit, facade/real.rs exports a series for it; no variable is added.
+# Later the same night qlog/set.rs lowers its written seq at a raft cut: no variable changes.
+# sourceOfTruth re-read 2026-10-10 (completed retention no longer holds a row): dedup.rs
+# changes its module comment only; the QUEEN_RAFT_ROWS_WINDOW row already named the dedup window
+# alone.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs,
+# facade/real.rs change what /health answers (raft.quorumAckMs; ready needs the leader's majority
+# within QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 ---
 
 A node reads its whole configuration from environment variables when it starts. There is no
@@ -94,6 +110,8 @@ on by default turns off only with `0`, `false`, `off` or `no`.
 | `QUEEN_RAFT_REQUEST_ID_WINDOW_S` | `60` | How long a committed command's outcome answers a retry under the same request id. |
 | `QUEEN_RAFT_ANSWER_AT_COMMIT` | on | Answer pushes and acks when their entry commits, without waiting for it to apply on the leader. |
 | `QUEEN_RAFT_DEDUP_INDEX` | `txns` | How each append's `transactionId` hashes are indexed: `txns` (one row per append), `segment` (read back from the queue log) or `rows`. |
+| `QUEEN_RAFT_ROWS_WINDOW` | on | A push's index row leaves memory when it leaves the queue's dedup window (never before 900 s), whether or not the message is still retained; older messages are read through the queue log's own index. Needs cluster version 6. Off: a row stays for as long as its message. |
+| `QUEEN_QLOG_DIRX` | on | Keep the directory that says which file of a queue log holds a partition's offsets, so a read of an old message does not ask every file. Off: no new directory file is built. |
 
 ### Admission
 
@@ -142,8 +160,9 @@ what each one does. A cluster with none of them set is neither a standby nor rea
 | `QUEEN_RAFT_SEGMENT_BYTES` | `67108864` (64 MiB) | The size at which a queue-log file rolls. |
 | `QUEEN_RAFT_QLOG_ZSTD_LEVEL` | `1` | zstd level for queue-log payloads; `0` stores them raw. |
 | `QUEEN_QLOG_LANES` | `1` (1 to 64) | Queue-log lanes per queue. Read only when the data directory is created. |
+| `QUEEN_QLOG_SHARDS` | `0` (0 to 4096) | Shared queue logs. `0` gives every queue a log of its own; `K` maps every queue onto one of K shared logs, the layout for thousands of queues: a write fsyncs at most K files, and files fill at the rate of all the queues in them. Read only when the data directory is created. |
 | `QUEEN_QLOG_COMPACT_MIN_DEAD_PCT` | unset | Rewrite a sealed file once this percentage of it is dead. Unset: a per-queue log file on its first dead message, a shared one at 50%. |
-| `QUEEN_QLOG_SEAL_AGE_S` | `600` | An active file holding data this old is sealed so retention can reclaim it; `0` never seals by age. |
+| `QUEEN_QLOG_SEAL_AGE_S` | `600` | An active file holding data this old is sealed so retention can reclaim it, once retention has a dead message in it or it holds an eighth of a full file; `0` never seals by age. |
 | `QUEEN_STORE_SCRUB_EVERY_S` | `21600` | How often the whole store is re-verified in the background; `0` turns the scrub off. |
 | `QUEEN_STORE_SCRUB_ROWS_PER_S` | `2000` | The scrub's pace. |
 | `QUEEN_RAFT_RETENTION_SCAN_PER_S` | `50000` | Partitions the leader's retention scanner walks per second. |

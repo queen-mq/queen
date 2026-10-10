@@ -1,7 +1,7 @@
 <template>
   <div class="view-container">
 
-    <PageHead title="Queues" :sub="lastFetched ? formatNumber(queues.length) : ''" :live="refreshAgo">
+    <PageHead title="Queues" :sub="headSub" :live="refreshAgo">
       <template #actions>
         <button v-if="can('queueAdmin')" class="btn btn-primary" @click="showCreate = true">Create queue</button>
       </template>
@@ -156,7 +156,9 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { useRouteState } from '@/composables/useRouteState'
+import { queueLocation } from '@/composables/navigation'
 import { queues as queuesApi, system as systemApi, describeApiError } from '@/api'
 import { formatNumber, toNum } from '@/composables/useApi'
 import { queueAttention } from '@/composables/useAttention'
@@ -167,12 +169,14 @@ import { useToast } from '@/composables/useToast'
 import { useGroupsStore } from '@/stores/groupsStore'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import QueueConfigModal from '@/components/QueueConfigModal.vue'
 import QueueHealthGrid from '@/components/QueueHealthGrid.vue'
 import PageHead from '@/components/PageHead.vue'
 import PageTools from '@/components/PageTools.vue'
 
 const router = useRouter()
+const route = useRoute()
 const { can } = useIdentity()
 const { notifySuccess } = useToast()
 
@@ -206,6 +210,7 @@ const searchQuery = ref('')
 const filterNamespace = ref(ALL)
 const filterTask = ref(ALL)
 const sortBy = ref('health')
+useRouteState({ search: searchQuery, namespace: filterNamespace, task: filterTask, sort: sortBy })
 
 // Modal state
 // The create form. It is not prefilled from anything on this page: a create
@@ -292,6 +297,15 @@ const filteredQueues = computed(() => {
   return result
 })
 
+const headSub = computed(() => {
+  if (!lastFetched.value) return ''
+  const total = queues.value.length
+  const count = `${formatNumber(total)} ${total === 1 ? 'queue' : 'queues'}`
+  return hasActiveFilter.value
+    ? `Showing ${formatNumber(filteredQueues.value.length)} of ${count}`
+    : count
+})
+
 // Methods — fetchQueues is now thin shim around the shared store.
 // On mount we use the cache (instant if Consumers/Dashboard already loaded
 // queues); on auto-refresh we force-bust so we get fresh data.
@@ -352,12 +366,13 @@ const fetchQueueOps = async () => {
 // listing (a full scan on the broker — stores/groupsStore), kept fresher here
 // because this is the page that shows the verdicts.
 const groupsStore = useGroupsStore()
+const { linesFor } = useSettingsStore()
 const groupsFailed = computed(() => groupsStore.error.value !== null)
 const fetchGroups = () => groupsStore.fetchGroups({ ttlMs: 25_000 })
 const attention = computed(() => {
   const groups = groupsStore.groups.value
   if (groups === null) return null
-  return new Map(queueAttention(queuesStore.queues.value, groups).map((a) => [a.name, a]))
+  return new Map(queueAttention(queuesStore.queues.value, groups, linesFor).map((a) => [a.name, a]))
 })
 
 // Auto-refresh forces fresh queues; mount-time call reuses cache.
@@ -370,7 +385,7 @@ const refreshAll = async () => {
 }
 
 const viewQueue = (queue) => {
-  router.push(`/queues/${queue.name}`)
+  router.push(queueLocation(queue.name, route))
 }
 
 const confirmDelete = (queue) => {

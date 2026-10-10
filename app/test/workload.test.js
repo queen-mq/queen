@@ -113,6 +113,49 @@ test('findings come back worst first', () => {
   assert.equal(f[0].sev, 'bad')
 })
 
+test("a group is judged by the lag lines of its own queue, on every level", () => {
+  const groups = new Map([
+    ['batch', [{ name: 'g', queueName: 'batch', maxTimeLag: 400, partitionsWithLag: 1, members: 1, state: 'Lagging' }]],
+    ['live', [{ name: 'g', queueName: 'live', maxTimeLag: 90, partitionsWithLag: 1, members: 1, state: 'Stable' }]],
+  ])
+  const meta = new Map([['batch', { namespace: 'ns', task: '' }], ['live', { namespace: 'ns', task: '' }]])
+  const w = { pushMessages: 0, popMessages: 0, popEmpty: 0, parkedAvg: 0, ackSuccess: 0, ackFailed: 0, maxLagMs: null, avgLagMs: null }
+  const n = { pending: 0, pendingWithoutGroup: 0, queuesTouched: 1, partitions: 1, deadLetter: 0 }
+  const payload = (keys) => ({ tenant: { window: w }, rows: keys.map((key) => ({ key, window: { ...w }, now: { ...n }, series: {} })) })
+  const slow = { lagWarnSeconds: 600, lagBadSeconds: 1800 }
+  const linesFor = (queue) => (queue === 'batch' ? slow : undefined)
+
+  // Built-in lines: batch is past 300 s, live past 60 s.
+  assert.deepEqual(enrichRows(payload(['batch', 'live']), groups, meta, 'queue').map((r) => r.sev), ['bad', 'warn'])
+  // batch has its own: 400 s is inside them. live keeps the built-in two.
+  const rows = enrichRows(payload(['batch', 'live']), groups, meta, 'queue', linesFor)
+  assert.deepEqual(rows.map((r) => [r.key, r.lagSev, r.sev]), [['batch', null, 'mute'], ['live', 'warn', 'warn']])
+  // One namespace row holding both: the oldest message is batch's, the verdict is live's.
+  const ns = enrichRows(payload(['ns']), groups, meta, 'namespace', linesFor)
+  assert.equal(ns[0].oldest, 400)
+  assert.equal(ns[0].sev, 'warn')
+  assert.deepEqual(findings(ns, 'namespace', 'last 1h', { linesFor }).map((f) => [f.sev, f.text]), [['warn', 'g on live is 1m 30s behind']])
+})
+
+test('messages with no consumer group are not an alarm where no reader is expected', () => {
+  const groups = new Map([['live', [{ name: 'g', queueName: 'live', maxTimeLag: 0, partitionsWithLag: 0, members: 1, state: 'Stable' }]]])
+  const meta = new Map([['archive', { namespace: 'ns', task: '' }], ['spool', { namespace: 'ns', task: '' }], ['live', { namespace: 'ns', task: '' }]])
+  const w = { pushMessages: 5, popMessages: 5, popEmpty: 0, parkedAvg: 0, ackSuccess: 0, ackFailed: 0, maxLagMs: null, avgLagMs: null }
+  const n = { pending: 9, pendingWithoutGroup: 9, queuesWithoutGroup: 2, queuesTouched: 1, partitions: 1, deadLetter: 0 }
+  const payload = (keys) => ({ tenant: { window: w }, rows: keys.map((key) => ({ key, queues: 3, window: { ...w }, now: { ...n }, series: {} })) })
+  const flagged = (...names) => (queue) => (names.includes(queue) ? { lagWarnSeconds: 60, lagBadSeconds: 300, noReaderOk: true } : undefined)
+
+  // One queue: its own flag decides.
+  assert.deepEqual(enrichRows(payload(['archive', 'spool']), groups, meta, 'queue', flagged('archive')).map((r) => r.sev), ['ok', 'bad'])
+  // A namespace: let off only when every queue of it that has no group is one of those.
+  assert.equal(enrichRows(payload(['ns']), groups, meta, 'namespace', flagged('archive'))[0].sev, 'bad')
+  const all = enrichRows(payload(['ns']), groups, meta, 'namespace', flagged('archive', 'spool'))
+  assert.equal(all[0].sev, 'ok')
+  assert.deepEqual(findings(all, 'namespace', 'last 1h', { linesFor: flagged('archive', 'spool') }), [])
+  // With no settings at all the rule is what it was.
+  assert.equal(enrichRows(payload(['ns']), groups, meta, 'namespace')[0].sev, 'bad')
+})
+
 test('flowSeries: at most five series, Other last, gaps preserved', () => {
   const rows = enrichRows(Q, groupsByQueue(), queueMeta(), 'queue')
   assert.ok(rows.length > 5, 'the queue fixture should have more than five rows')

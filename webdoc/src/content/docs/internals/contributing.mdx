@@ -42,6 +42,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-09 (queen-protocol 1.4.0): server/Cargo.toml requires queen-protocol 1.4.0, the
 # wire-types crate with the lock types; toolchain, features and build commands are unchanged. Nothing this page
 # states changes.
+# sourceOfTruth re-read 2026-10-09 (2.2.0): server/Cargo.toml moves the broker to 2.2.0; its
+# toolchain, its features and the commands on this page are unchanged.
 ---
 
 Queen is one repository with one Rust binary at its center: the broker, which links the proxy and
@@ -85,7 +87,8 @@ QUEEN_RAFT_DIR=./queen-data ./server/target/release/queen
 curl -s localhost:6632/health
 ```
 
-`/health` answers `503` with `"status":"settling"` until the node knows a leader and has caught up,
+`/health` answers `503` with `"status":"settling"` until the node knows a leader that hears from a
+majority and has caught up,
 then `200`. Delete the directory to start empty. The version comes from `server/server.json`
 (`server/build.rs` embeds it), the minimum Rust version is 1.88 (`rust-version` in
 `server/Cargo.toml`), and `./build.sh` builds the product image from the root `Dockerfile`.

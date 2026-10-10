@@ -323,6 +323,10 @@ impl Rsm for GroupRouter {
             h.leader_known &= o.leader_known;
             h.storage_ready &= o.storage_ready;
             h.lag_ms = h.lag_ms.max(o.lag_ms);
+            h.quorum_ack_ms = match (h.quorum_ack_ms, o.quorum_ack_ms) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                _ => None,
+            };
             // Each group has its own cluster version: the lowest is what every
             // group writes.
             h.cluster_version = match (h.cluster_version, o.cluster_version) {

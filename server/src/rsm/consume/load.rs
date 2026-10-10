@@ -65,11 +65,20 @@ impl Engine {
         r: &'a R,
         seg: &'a Option<super::frames::SegSource>,
     ) -> Frames<'a, R> {
-        Frames {
-            r,
-            seg: seg.as_ref(),
-            mode: self.mode(),
-        }
+        Frames::new(r, seg.as_ref(), self.mode())
+    }
+
+    /// [`Engine::frames`] for a pop: a walk under the consume shard lock does
+    /// not read the queue log, it notes what it needs
+    /// ([`super::frames::Frames::defer_cold`]).
+    pub(crate) fn frames_deferring<'a, R: Reads + ?Sized>(
+        &self,
+        r: &'a R,
+        seg: &'a Option<super::frames::SegSource>,
+    ) -> Frames<'a, R> {
+        let mut fr = Frames::new(r, seg.as_ref(), self.mode());
+        fr.defer_cold = true;
+        fr
     }
 
     /// The group the engine holds for `(tenant, queue, name)`, created from the
@@ -317,12 +326,14 @@ impl Engine {
             tail: now_head.last_offset,
             log_start: now_head.log_start,
             txns_start: now_head.txns_start,
+            rows_start: now_head.rows_start.max(now_head.txns_start),
             last_append_us: 0,
             watchers: Default::default(),
         });
         pi.tail = pi.tail.max(now_head.last_offset);
         pi.log_start = pi.log_start.max(now_head.log_start);
         pi.txns_start = pi.txns_start.max(now_head.txns_start);
+        pi.rows_start = pi.rows_start.max(now_head.rows_start).max(pi.txns_start);
         if !pi.watchers.contains(&g.id) {
             pi.watchers.push(g.id);
         }

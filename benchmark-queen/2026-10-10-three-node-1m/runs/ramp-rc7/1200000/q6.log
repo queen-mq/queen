@@ -1,0 +1,23 @@
+qload tag=ramp-rc7-1200000 loader=6/9 mode=batch rate=133333 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m15s report=10s drain=10s GOMAXPROCS=16 GOGC=400(default) seed=1791631550217498070
+  offered: 133333 msg/s = 1333.3 units/s (avg 100.0 msgs/unit) across 27 pacer workers (49.38 units/s each)
+  topics: 1 x 500000 partitions (bench..bench), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=500000 starting at 333333
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":6,...}), pool 64x100
+  consumers: 33 here (ci 198..230 of 297), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[6 7 8]
+  queen: url=http://10.114.0.14:6632 (of 3) conns=2048 timeout=30s pop-width=10 pop-batch=1000 pop-timeout=2s lease=30s | configure: leaseTime=30 completedRetention=3600 dedup=0 retryLimit=1000000 | plain: consumers pop+ack the queue
+  [queen] http://10.114.0.14:6632 healthy: version 2.2.0, this node leader
+  [consume] 33 consumers of bench: pop width 10, batch 1000, long poll 2s, lease 30s, async batch acks (ack-inflight 256)
+READY 1791631548332
+[start] waiting 11.181s for the common start 1791631559513
+[start] GO 11:25:59.513 (unix ms 1791631559513)
+[11:26:09] offered=    66664/s achieved=    66514/s shed=        0/s inflight=    16 | p50=   7.26 p99=   36.10 p999=   43.78 ms | push=665100 pop=680500 lag=-15400 | errs push=0 pop=0 empty=198 gor=277 | ack=    67935/s ackErr=0 ackAvg=11.06ms | e2e p50=22.91 p99=66.05 p999=80.38 n=680500 | e2e_local p50=22.91 p99=66.05 n=228700
+[11:26:19] offered=   133320/s achieved=   133310/s shed=        0/s inflight=    16 | p50=  10.82 p99=   56.58 p999=   69.12 ms | push=1998200 pop=2026800 lag=-28600 | errs push=0 pop=0 empty=198 gor=363 | ack=   134470/s ackErr=0 ackAvg=14.94ms | e2e p50=32.13 p99=99.84 p999=120.32 n=1346300 | e2e_local p50=32.64 p99=101.89 n=445000
+[11:26:29] offered=   133281/s achieved=   133351/s shed=        0/s inflight=    10 | p50=  10.82 p99=   47.87 p999=   56.58 ms | push=3331800 pop=3385600 lag=-53800 | errs push=0 pop=0 empty=198 gor=356 | ack=   135831/s ackErr=0 ackAvg=15.80ms | e2e p50=32.13 p99=93.70 p999=110.08 n=1358800 | e2e_local p50=32.38 p99=94.72 n=446500
+[11:26:39] offered=   133365/s achieved=   133355/s shed=        0/s inflight=     8 | p50=  10.69 p99=   45.82 p999=   63.23 ms | push=4665400 pop=4745200 lag=-79800 | errs push=0 pop=0 empty=198 gor=353 | ack=   136015/s ackErr=0 ackAvg=16.16ms | e2e p50=31.87 p99=91.65 p999=118.27 n=1359600 | e2e_local p50=32.13 p99=87.55 n=445500
+[11:26:49] offered=   133353/s achieved=   131233/s shed=        0/s inflight=   222 | p50=  35.07 p99=  193.54 p999=  220.16 ms | push=5977600 pop=5988400 lag=-10800 | errs push=0 pop=0 empty=198 gor=975 | ack=   124032/s ackErr=0 ackAvg=19.20ms | e2e p50=428.03 p99=815.10 p999=839.68 n=1244200 | e2e_local p50=432.13 p99=815.10 n=415300
+[11:26:59] offered=   133339/s achieved=   135389/s shed=        0/s inflight=    17 | p50=  47.87 p99=  452.61 p999=  473.09 ms | push=7331500 pop=7494600 lag=-163100 | errs push=0 pop=0 empty=198 gor=1419 | ack=   150959/s ackErr=0 ackAvg=22.40ms | e2e p50=234.50 p99=1138.69 p999=1171.46 n=1505200 | e2e_local p50=234.50 p99=1138.69 n=499000
+[11:27:09] offered=   133330/s achieved=   133350/s shed=        0/s inflight=    15 | p50=  14.02 p99=   74.24 p999=   97.79 ms | push=8665000 pop=8835300 lag=-170300 | errs push=0 pop=0 empty=198 gor=1417 | ack=   134020/s ackErr=0 ackAvg=22.45ms | e2e p50=40.70 p99=140.29 p999=171.01 n=1340700 | e2e_local p50=41.22 p99=140.29 n=447700
+[drain] consumers keep going for 9.988s (lag now -187400)
+[11:27:19] offered=    66668/s achieved=    66818/s shed=        0/s inflight=     0 | p50=  15.42 p99=   75.26 p999=   89.60 ms | push=9333200 pop=9524400 lag=-191200 | errs push=0 pop=0 empty=267 gor=1370 | ack=    69178/s ackErr=0 ackAvg=22.56ms | e2e p50=48.38 p99=134.14 p999=144.38 n=689100 | e2e_local p50=49.41 p99=129.54 n=223000
+[info] steady window 60s (after the ramp, before the producers stopped): offered 133331/s pushed 133331/s popped 135913/s cpu 240.4% = 1.80 cores per 100k msg/s (produce+consume)
+[final] offered=93332 achieved=93332 shed=0 (msgs: offered=9333200 achieved=9333200 shed=0) pushErr=0 | pushed=9333200 popped=9524400 lag=-191200 | popErr=0 empty=363 | overall p50=12.86 p99=407.55 p999=456.70 ms | acked=9524400 ackErr=0 ackLag=-191200 ackAvg=22.56ms | e2e p50=38.14 p99=1044.48 p999=1138.69 ms
+load_cpu=175.0%

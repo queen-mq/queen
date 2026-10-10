@@ -1,0 +1,5 @@
+{"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"follower","leader":true,"term":2,"applied":312275,"commit":312275,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5,"apply":{"failure":null,"skipped":[]}}}
+{"appliedIndex":312275,"clusterId":"raft-fc1f3f8a","committedIndex":312275,"durableIndex":312275,"engine":"raft","error":null,"host":{"anonBytes":8280997888,"cpuPct":445.1764,"cpuWindowSeconds":60,"cpus":16,"disk":{"gate":true,"highPct":85.0,"lowPct":80.0,"totalBytes":206900281344,"usedBytes":61764521984,"usedPct":29.852314159644877,"writesRefused":false},"memLimitBytes":33652015104,"rssBytes":18353258496},"hostname":"n2","httpAddr":"10.114.0.19:6632","inflight":0,"lastLogIndex":312275,"leaderId":1,"local":true,"log":{"bytes":49118607702,"files":730},"nodeId":2,"proposals":0,"raftAddr":"10.114.0.19:7400","reachable":true,"replication":null,"role":"voter","self":2,"singleNode":false,"state":"follower","store":{"mapBytes":68719476736,"mapUsedPct":15.068542957305908,"maxReaders":1024,"readersInUse":47,"usedBytes":10355023872},"term":2,"uptimeSeconds":359,"version":"2.1.0","voters":3}
+
+WARN_ERROR=0
+56G

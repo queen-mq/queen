@@ -1,0 +1,7 @@
+# rc7 = commit 8f5342d29 (the code of 2.2.0 with /health needing a majority): a short pass on the final binary.
+rc7-w2-kill        --workload queue --nemesis kill --time-limit 300 --rate 200
+rc7-w2-part        --workload queue --nemesis partition --time-limit 300 --rate 200
+rc7-w1-membership  --workload log --nemesis membership --time-limit 300 --rate 200 --nemesis-interval 20
+rc7-rw-w2-kill     --workload queue --w2-partitions 400 --nemesis kill --time-limit 300 --rate 200 --dedup-window 2 --env QUEEN_RAFT_TXN_WINDOW_MIN_S=2,RETENTION_INTERVAL=1000,QUEEN_RAFT_SEGMENT_BYTES=262144,QUEEN_QLOG_SEAL_AGE_S=10
+rc7-w3b-lz-kill    --workload counter --lazyfs --nemesis kill --time-limit 300 --rate 100
+rc7-w2-clock       --workload queue --nemesis clock --time-limit 300 --rate 200

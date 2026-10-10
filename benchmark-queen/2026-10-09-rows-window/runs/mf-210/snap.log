@@ -1,0 +1,38 @@
+22:30:14 start files/bytes=1/175/ dirx= maps=339 fds=38 dirs=2 anon/rss_MB=9 27 health=200
+22:30:34 P files/bytes=994/4697447/ dirx= maps=2196 fds=56 dirs=3 anon/rss_MB=18 46 health=200
+22:30:54 P files/bytes=2133/10077684/ dirx= maps=4551 fds=56 dirs=3 anon/rss_MB=24 63 health=200
+22:31:14 P files/bytes=3270/15453849/ dirx= maps=6315 fds=57 dirs=3 anon/rss_MB=29 77 health=200
+22:31:34 P files/bytes=4409/20832374/ dirx= maps=8867 fds=56 dirs=3 anon/rss_MB=34 95 health=200
+22:31:54 P files/bytes=5545/26208545/ dirx= maps=10660 fds=75 dirs=3 anon/rss_MB=39 107 health=200
+22:32:14 P files/bytes=6681/31582423/ dirx= maps=12732 fds=74 dirs=3 anon/rss_MB=40 118 health=200
+22:32:34 P files/bytes=7816/36956137/ dirx= maps=15509 fds=76 dirs=3 anon/rss_MB=44 133 health=200
+22:32:54 P files/bytes=8953/42335521/ dirx= maps=16648 fds=75 dirs=3 anon/rss_MB=45 140 health=200
+22:33:14 P files/bytes=10092/47716607/ dirx= maps=19889 fds=76 dirs=3 anon/rss_MB=48 156 health=200
+22:33:34 P files/bytes=11229/53096082/ dirx= maps=21025 fds=76 dirs=3 anon/rss_MB=49 163 health=200
+22:33:54 P files/bytes=12368/58481227/ dirx= maps=24831 fds=76 dirs=3 anon/rss_MB=52 182 health=200
+22:34:15 P files/bytes=13501/63858887/ dirx= maps=25965 fds=63 dirs=3 anon/rss_MB=53 188 health=200
+22:34:35 P files/bytes=14639/69241183/ dirx= maps=27103 fds=62 dirs=3 anon/rss_MB=54 195 health=200
+22:34:55 P files/bytes=15773/74621384/ dirx= maps=31689 fds=63 dirs=3 anon/rss_MB=58 217 health=200
+22:35:15 P files/bytes=16909/80002157/ dirx= maps=32826 fds=62 dirs=3 anon/rss_MB=59 224 health=200
+22:35:35 P files/bytes=18043/85380472/ dirx= maps=33960 fds=61 dirs=3 anon/rss_MB=62 232 health=200
+22:35:55 P files/bytes=19181/90765752/ dirx= maps=35767 fds=61 dirs=3 anon/rss_MB=64 242 health=200
+22:36:15 P files/bytes=20318/96144674/ dirx= maps=40656 fds=60 dirs=3 anon/rss_MB=67 265 health=200
+22:36:35 P files/bytes=21454/101526983/ dirx= maps=41791 fds=55 dirs=3 anon/rss_MB=70 274 health=200
+22:36:55 P files/bytes=22593/106912718/ dirx= maps=42928 fds=55 dirs=3 anon/rss_MB=72 282 health=200
+22:37:15 P files/bytes=23729/112293626/ dirx= maps=44065 fds=56 dirs=3 anon/rss_MB=74 288 health=200
+22:37:35 P files/bytes=24866/117676717/ dirx= maps=47051 fds=56 dirs=3 anon/rss_MB=77 304 health=200
+22:37:55 P files/bytes=26003/123061654/ dirx= maps=52004 fds=56 dirs=3 anon/rss_MB=78 326 health=200
+22:38:15 P files/bytes=27138/128447153/ dirx= maps=53140 fds=55 dirs=3 anon/rss_MB=80 333 health=200
+22:38:36 P files/bytes=28274/133827931/ dirx= maps=54276 fds=55 dirs=3 anon/rss_MB=82 340 health=200
+22:38:56 P files/bytes=29410/139213503/ dirx= maps=55414 fds=64 dirs=3 anon/rss_MB=83 346 health=200
+22:39:16 P files/bytes=30548/144598711/ dirx= maps=56550 fds=64 dirs=3 anon/rss_MB=85 354 health=200
+22:39:36 P files/bytes=31685/149981950/ dirx= maps=59177 fds=64 dirs=3 anon/rss_MB=87 368 health=200
+22:39:56 P files/bytes=32821/155368606/ dirx= maps=65431 fds=64 dirs=3 anon/rss_MB=93 400 health=200
+22:40:14 P-end files/bytes=33833/160186728/ dirx= maps=67138 fds=40 dirs=3 anon/rss_MB=95 410 health=200
+[final] offered=239001 achieved=239001 shed=0 (msgs: offered=239001 achieved=239001 shed=0) pushErr=0 | pushed=239001 popped=0 lag=239001 | popErr=0 empty=0 | overall p50=1.43 p99=4.83 p999=27.01 ms | acked=0 ackErr=0 ackLag=239001 ackAvg=0.00ms | e2
+22:40:44 P+30s files/bytes=33834/160187054/ dirx= maps=67139 fds=39 dirs=3 anon/rss_MB=94 409 health=200
+limit vm.max_map_count=1048576
+0
+restart_s=.795379559
+22:40:48 restarted files/bytes=33834/160187054/ dirx= maps=34566 fds=39 dirs=3 anon/rss_MB=77 256 health=200
+MANYQ_DONE

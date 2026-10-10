@@ -51,10 +51,7 @@ use serde_json::{json, Value};
 
 use super::reads::{fetch_partition_name, walk_payloads, Part};
 use super::{read_error, ApiOut, RaftFacade, ReqCtx, RsmError};
-use crate::rsm::dedup::TxnsRow;
-use crate::rsm::effect::Pid;
-use crate::rsm::store::keys;
-use crate::rsm::store::{Keyspace, Reads, Store, StoreError, TypedReads};
+use crate::rsm::store::{Store, TypedReads};
 
 /// The fetch route's own ceiling, for the same reason: one request is one
 /// store transaction.
@@ -95,65 +92,7 @@ fn timestamp_ms(v: &Value) -> Option<i64> {
     .filter(|ms| *ms >= 0)
 }
 
-/// The first row at or past offset `from`, as `(base, row)`. One seek.
-fn row_at_or_after<R: Reads + ?Sized>(
-    r: &R,
-    pid: Pid,
-    from: u64,
-) -> Result<Option<(u64, TxnsRow)>, StoreError> {
-    let mut found = None;
-    let mut bad = false;
-    r.scan_raw(
-        Keyspace::Txns,
-        &keys::txns(pid, from),
-        &keys::txns_prefix(pid),
-        1,
-        &mut |k, v| {
-            match (keys::txns_base_of(k), TxnsRow::decode(v)) {
-                (Some(base), Ok(row)) => found = Some((base, row)),
-                _ => bad = true,
-            }
-            false
-        },
-    )?;
-    if bad {
-        return Err(StoreError::corrupt(Keyspace::Txns, "txns row"));
-    }
-    Ok(found)
-}
-
-/// The first append of partition `pid` in `[from, to)` whose stamp is at or
-/// after `at_us`, as `(its first offset, its stamp)`; `None` when every
-/// append there is older.
-///
-/// A binary search over OFFSETS. `seek(x)` is the first row whose base is at
-/// or past `x`; "`seek(x)` is past `to` or not older than `at_us`" is false and
-/// then true as `x` grows, because the stamps rise with the offsets. The
-/// smallest `x` where it holds is one past the base of the last older append,
-/// and `seek` there is the answer.
-pub(super) fn first_appended_at_or_after<R: Reads + ?Sized>(
-    r: &R,
-    pid: Pid,
-    from: u64,
-    to: u64,
-    at_us: i64,
-) -> Result<Option<(u64, i64)>, StoreError> {
-    let (mut lo, mut hi) = (from, to);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        match row_at_or_after(r, pid, mid)? {
-            Some((base, row)) if base < to && row.created_at_us < at_us => {
-                // Every probe up to this row's base finds this row or an
-                // earlier one, all older: the answer is past it.
-                lo = base.saturating_add(1);
-            }
-            _ => hi = mid,
-        }
-    }
-    Ok(row_at_or_after(r, pid, lo)?
-        .filter(|(base, _)| *base < to)
-        .map(|(base, row)| (base.max(from), row.created_at_us)))
-}
+use crate::rsm::dedup::first_appended_at_or_after;
 
 impl RaftFacade {
     pub(super) async fn api_fetch_offsets(
@@ -218,7 +157,32 @@ impl RaftFacade {
                         let at = if log_start >= high {
                             None
                         } else if indexed {
-                            first_appended_at_or_after(r, pid, log_start, high, at_us)?
+                            // The retained messages that lost their row
+                            // (catalogue version 6) are searched in the queue
+                            // log's index, the rest in the rows.
+                            let rows_at = row.rows_start.max(row.txns_start);
+                            let below = rows_at.min(high);
+                            let mut at = None;
+                            if log_start < below {
+                                if let Some(q) = qlog.as_ref() {
+                                    let qid = crate::rsm::qlog::set::QLogReader::queue_id_of(
+                                        &tenant, queue,
+                                    );
+                                    let first = q
+                                        .record_before(qid, pid, below, at_us)
+                                        .map_or(log_start, |rec| rec.end.max(log_start));
+                                    if first < below {
+                                        at = q
+                                            .record_before(qid, pid, first + 1, i64::MAX)
+                                            .map(|rec| (first, rec.created_at_us));
+                                    }
+                                }
+                            }
+                            let rows_from = log_start.max(rows_at);
+                            if at.is_none() && rows_from < high {
+                                at = first_appended_at_or_after(r, pid, rows_from, high, at_us)?;
+                            }
+                            at
                         } else {
                             let mut sealed = Vec::new();
                             if list_sealed {

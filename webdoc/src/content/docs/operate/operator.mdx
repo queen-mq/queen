@@ -1,0 +1,214 @@
+---
+title: Kubernetes operator
+description: "The Queen operator runs a cluster from a QueenCluster object and does what a StatefulSet cannot: change the voters, replace a node, grow the volumes and restart the pods leader last, each behind a write that commits."
+type: how-to
+tier: operate
+sidebar:
+  order: 3.5
+sourceOfTruth:
+  - deploy/operator/api/v1alpha1/queencluster_types.go
+  - deploy/operator/internal/controller/plan.go
+  - deploy/operator/internal/controller/resources.go
+  - deploy/operator/internal/controller/observe.go
+  - deploy/operator/internal/controller/queencluster_controller.go
+  - deploy/operator/internal/broker/client.go
+  - deploy/operator/config/manager/manager.yaml
+  - deploy/operator/examples/queencluster.yaml
+  - server/src/handlers/raft.rs
+  - server/src/rsm/replicator/raft/admin.rs
+---
+
+The [manifest](/operate/kubernetes/) installs a cluster, and a rolling update takes a new version
+through it. A StatefulSet stops there: it cannot add a voter, it cannot replace a node whose volume
+is lost, it cannot grow its volumes, and its rolling update moves on as soon as a pod is Ready. Those
+are the steps of the [recovery](/operate/recovery/) runbook, done by hand through the membership
+API. The operator does them for you, from one object.
+
+It works with the broker as it is: it uses the same HTTP API you would, on port 6632, and keeps no
+state of its own outside the `QueenCluster`.
+
+## Install
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/queen-mq/queen/master/deploy/operator/install.yaml
+```
+
+That is the `QueenCluster` definition, a ClusterRole, and the operator as a Deployment in the
+namespace `queen-system`. Then a cluster is a Secret and an object:
+
+```bash
+kubectl create namespace queen
+kubectl -n queen create secret generic queen \
+  --from-literal=QUEEN_RAFT_TOKEN="$(openssl rand -hex 32)" \
+  --from-literal=QUEEN_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+```
+
+```yaml
+apiVersion: queenmq.com/v1alpha1
+kind: QueenCluster
+metadata:
+  name: queen
+  namespace: queen
+spec:
+  version: "2.2.0"
+  replicas: 3
+  secretName: queen
+  storage:
+    size: 50Gi
+```
+
+```bash
+kubectl -n queen get queencluster
+```
+
+```text
+NAME    VERSION   VOTERS    COMMITS   PHASE   AGE
+queen   2.2.0     [1,2,3]   true      Ready   40s
+```
+
+The pods and the Services have the names of the [manifest](/operate/kubernetes/#the-manifest)
+(`queen`, `queen-headless`), and the spec takes the settings you would edit there: `resources`,
+`podAntiAffinity`, `zoneSpread`, `proxy`, `kafka`, `env`. `COMMITS` is a write the operator sends
+once a minute: it is `true` while the cluster commits, which `/health` cannot tell you.
+
+## Upgrade
+
+Change `spec.version`, or anything else that reaches the pods:
+
+```bash
+kubectl -n queen patch queencluster queen --type merge -p '{"spec":{"version":"<new-version>"}}'
+```
+
+The operator restarts one pod at a time, the ones that do not lead from the highest ordinal and
+the leader last, so leadership moves once. Before it stops a pod, every other voter has to be Ready
+for `minReadySeconds` (30), live and caught up as the leader sees it, and a write has to commit
+through a pod that stays. `status.message` says what it waits for:
+
+```text
+Upgrading   restarting pod 2
+Upgrading   pod 1 is next: pod 2 is not Ready
+Upgrading   pod 1 is next: pod 2 has been Ready for less than 30s
+Upgrading   restarting pod 1
+Upgrading   restarting pod 0
+Ready
+```
+
+In our test (three nodes on k3s, 2.0.2 to 2.0.3, a client pushing five messages a second through
+the Service) every push was acknowledged on its first try.
+
+A pod that is not Ready on the old version goes first, whatever its ordinal: it serves nobody, and
+the new version may be what repairs it. A StatefulSet's own rolling update waits for it to be Ready
+and never ends.
+
+## Change the voters
+
+```bash
+kubectl -n queen patch queencluster queen --type merge -p '{"spec":{"replicas":5}}'
+```
+
+`kubectl -n queen describe queencluster queen` lists the steps it took:
+
+```text
+adding pods for 5 voters
+adding node 4 as a learner
+adding node 5 as a learner
+promoting nodes 4 and 5 to voters
+```
+
+The new nodes are promoted in one change, once both have caught up, so the cluster never rests on
+four voters. Going down, each node leaves the membership while its pod still runs, and the pod and
+its volume claim go right after it. A node that leads hands leadership away first:
+
+```text
+node 5 leads: stopping its pod once so it hands leadership away before it is removed
+removing node 5 from the membership
+removing the pods above node 4
+removing node 4 from the membership
+removing the pods above node 3
+```
+
+A request in flight on a node at the moment it leaves the membership waits out its deadline and
+has to be sent again, as with any node that stops.
+
+## Replace a node
+
+When one pod's volume is lost, damaged or stale (the "replace" rows of the
+[recovery](/operate/recovery/#find-your-case) table), name the pod:
+
+```bash
+kubectl -n queen annotate queencluster queen queenmq.com/replace-pod=queen-1
+```
+
+```text
+replacing pod 1
+removing node 2 from the membership
+deleting the volume of pod 1
+adding node 2 as a learner
+promoting node 2 to voters
+pod 1 is a voter again
+```
+
+The order is the one that keeps the cluster whole: out of the membership first, then the volume,
+then back in as a learner that copies everything from the leader. The annotation is removed at the
+end. In our test it took 29 seconds under load, and the client noticed nothing.
+
+The operator does not decide this for you, but it tells you when it is needed. A voter whose
+volume was deleted, or put back from a copy, without being removed first comes back under its id
+and never catches up. The operator sees a voter that is behind the leader and does not move, says
+so, and restarts nothing while it lasts:
+
+```text
+Upgrading   pod 1 is next: node 1 is behind the leader and does not catch up (72 entries behind):
+            if its volume was wiped or put back from a copy, it has to be replaced
+```
+
+A rolling update that only read the pods' readiness would have stopped a second voter there, and
+left one of three.
+
+## Grow the volumes
+
+```bash
+kubectl -n queen patch queencluster queen --type merge -p '{"spec":{"storage":{"size":"100Gi"}}}'
+```
+
+The operator asks every claim for the new size, waits for the volumes to grow, restarts (one at a
+time, as in an upgrade) a pod whose file system needs it, and then creates the StatefulSet again
+around its running pods, because Kubernetes does not let a StatefulSet's volume template be edited.
+The pods are not restarted by that last step. A StorageClass that does not allow expansion answers
+through the status:
+
+```text
+Blocked   the volume of pod 0 cannot grow: persistentvolumeclaims "data-queen-0" is forbidden:
+          only dynamically provisioned pvc can be resized and the storageclass that provisions
+          the pvc must support resize
+```
+
+Volumes never shrink.
+
+## What it leaves to you
+
+Everything that can lose data: a [forced recovery](/operate/recovery/#a-majority-of-the-disks-is-gone-for-good),
+an apply skip, two clusters where there was one. The operator reports the state and stops:
+`Degraded` with the reason when a pod is down or a voter is behind, `Blocked` when only a person
+can decide. Deleting the `QueenCluster` deletes the pods and keeps every volume claim, and an
+object created again under the same name picks them up.
+
+## Limits
+
+- The operator reaches each pod at its own DNS name on port 6632. With a NetworkPolicy on the
+  cluster, let the `queen-system` namespace in. It does not support a broker port that asks for
+  authentication.
+- The object's name, the namespace, the ports and the cluster domain are fixed at the first boot,
+  as with the [manifest](/operate/kubernetes/#fixed-at-the-first-boot): the definition refuses a
+  change to them.
+- It does not take over a cluster applied from the manifest. It gives its objects the same names
+  and other labels, and a StatefulSet keeps the selector it was created with. A `QueenCluster`
+  created under that cluster's name, in its namespace, would point its Services at pods that do
+  not exist: give the object a namespace or a name of its own.
+- A cluster of one voter restarts with its only pod, so an upgrade stops it for a moment.
+- Growing volumes was tested on k3s with the storage driver's part played by hand, because its
+  volumes cannot grow. The restart of a pod whose file system waits for one is covered by unit
+  tests only.
+- It takes no backups. Snapshots of the volumes are still yours to schedule
+  ([backups](/operate/recovery-backups/)).
+- This is the first version of the API (`v1alpha1`): a field may still change.

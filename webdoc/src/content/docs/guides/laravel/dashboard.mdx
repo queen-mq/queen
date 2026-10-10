@@ -77,6 +77,13 @@ sourceOfTruth:
 # probe and reads its fork servers' events once per loop; the dashboard config reads
 # QUEEN_DASHBOARD_ENABLED through filter_var, so 1 turns it on. Nothing else this page states
 # changes.
+# sourceOfTruth re-read 2026-10-10 (pull request 115 merged): app/src/router/index.js renames two
+# pages and regroups the sidebar of the broker's dashboard; no path changes, and the messages page
+# still reads queue and status from the address, so the links this panel builds (/queues/{queue},
+# /messages?queue=&status=) open what they did. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (dashboard settings; the Performance pages are gone):
+# app/src/router/index.js drops /analytics and /operations and adds /settings. The paths this
+# panel links to (/queues/{queue} and its messages) are as they were.
 # sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
 # registers WorkerPopGuard; SupervisorState's readiness and capacity read the workers' pop failures
 # on the supervisor's host. The panel reads the published status, which does not change. Nothing

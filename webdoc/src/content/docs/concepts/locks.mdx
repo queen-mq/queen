@@ -20,6 +20,9 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-js/test-v2/locks.js
   - server/src/rsm/tests/facade_locks.rs
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): effect.rs adds
+# catalogue version 6 (a watermark may carry where a partition's rows begin). The KV check this page
+# describes stays at version 5.
 ---
 
 A lock in Queen is a lease: one holder at a time, for a lifetime the holder declares and keeps

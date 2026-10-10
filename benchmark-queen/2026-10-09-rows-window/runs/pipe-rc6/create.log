@@ -1,0 +1,10 @@
+qload tag= loader=0/1 mode=batch rate=0 msg/s batch=100 batch-max=0 max-inflight=5000 ramp=10s duration=1m10s report=10s drain=0s GOMAXPROCS=10 GOGC=400(default) seed=1791597544475826718
+  topics: 1 x 200 partitions (vx..vx), entities/topic=0 (explicit partition) | picker: topics=rr entities: rr over space=200 starting at 0
+  payload: goload jsonEvent target 256 B, avg 289.5 B raw, ~320 B stamped ({"ts":µs,"src":0,...}), pool 64x100
+  consumers: 4 here (ci 0..3 of 4), poll=1000 proc-us=0 ack=async ack-inflight=256 local-src=[0]
+  queen: url=http://127.0.0.1:6632 (of 3) conns=2048 timeout=30s pop-width=10 pop-batch=1000 pop-timeout=2s lease=10s | configure: leaseTime=30 completedRetention=3600 dedup=0 retryLimit=1000000 | txn: vx-in -> workers (txn-size 10, linger 1s, one /transaction = acks with leases + pushes) -> vx-out, 4 read-committed readers
+  [queen] http://127.0.0.1:6632 healthy: version 2.2.0, this node leader
+  [warm] vx-in: 200 partitions written and drained (200 messages)
+  [warm] vx-out: 200 partitions written and drained (200 messages)
+  [warm] one message (no "ts") into each of 200 partitions of vx-in, vx-out in 0.0s; drained in 0.4s
+[create] done: vx-in, vx-out x 200 partitions

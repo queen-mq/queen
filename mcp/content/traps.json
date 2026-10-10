@@ -329,6 +329,25 @@
     ]
   },
   {
+    "id": "dedup-window-is-broker-memory",
+    "title": "dedupWindowSeconds is also how long every push stays in the broker's memory",
+    "applies": [
+      "all"
+    ],
+    "severity": "perf",
+    "symptom": "Broker memory follows a queue's push rate and stays high; a queue given a dedup window of a day or a week \"to be safe\" holds tens of millions of rows on every node.",
+    "cause": "Each push leaves a row of about 200 bytes (16 more for each further message in it) in the memory of every node, for the queue's dedupWindowSeconds: 3600 by default, never less than 900. Since broker 2.2.0 that window alone sets it: retention does not, and messages older than the window are read from disk. Memory is the push rate times the window: 1,000 pushes a second is 3.6 million rows (about 0.7 GB a node) at the default hour and 86 million (about 17 GB) at a day.",
+    "fix": "Set dedupWindowSeconds to the longest time a producer may send the same transactionId again (minutes, as a rule), not to how long messages must be kept. Keeping is retentionSeconds and completedRetentionSeconds, which cost disk only. A row is per push, so messages of one partition sent in one push share one.",
+    "code": {
+      "js": "await queen.queue('orders')\n  .config({ dedupWindowSeconds: 900, retentionEnabled: true, retentionSeconds: 604800 })\n  .create()"
+    },
+    "source": [
+      "https://queenmq.com/concepts/partitions/",
+      "https://queenmq.com/internals/storage/",
+      "server/src/rsm/maintenance.rs:516"
+    ]
+  },
+  {
     "id": "timer-not-before-and-absent",
     "title": "A timer fires not before deliverAt, never exactly at it, and a cancel that answers absent may mean it already fired",
     "applies": [

@@ -85,7 +85,7 @@
           <span
             v-if="(g.maxTimeLag || 0) > 0"
             class="cc"
-            :class="`sev-${timeLagSev(g.maxTimeLag)}`"
+            :class="`sev-${timeLagSev(g)}`"
           >
             {{ fmtLag(g.maxTimeLag) }}
           </span>
@@ -144,6 +144,7 @@ import { computed } from 'vue'
 
 import { isConflating } from '@/composables/useConflation'
 import { consumerGroupSeverity, laggingPartitionsSeverity, timeLagSeverity } from '@/composables/useSeverity'
+import { useSettingsStore } from '@/stores/settingsStore'
 
 const props = defineProps({
   /**
@@ -182,12 +183,15 @@ defineEmits(['select', 'view', 'move-now', 'seek', 'delete'])
  * group's partitions. Dead groups stay mute — informational, not an alert. */
 const SEV_RANK = { ok: 0, ice: 0, mute: 1, warn: 2, bad: 3 }
 
+// A group's age is judged by the lines of its queue (Settings).
+const { linesFor } = useSettingsStore()
+
 function cardSev(g) {
-  return consumerGroupSeverity({ state: g.state, maxTimeLag: g.maxTimeLag })
+  return consumerGroupSeverity({ state: g.state, maxTimeLag: g.maxTimeLag }, linesFor(g.queueName))
 }
 
-function timeLagSev(seconds) {
-  return timeLagSeverity(seconds)
+function timeLagSev(g) {
+  return timeLagSeverity(g.maxTimeLag, linesFor(g.queueName))
 }
 
 function lagPartsSev(g) {

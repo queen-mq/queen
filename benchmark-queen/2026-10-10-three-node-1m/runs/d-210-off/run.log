@@ -1,0 +1,12 @@
+[10:57:51] run d-210-off: queen-210, retention off, 300s, 9 x 111111 msg/s, 500000 partitions, EXTRA=QUEEN_RAFT_TXN_WINDOW_MIN_S=60
+[10:58:02] roles: n1 healthy leader | n2 healthy follower | n3 healthy follower
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":0,"deadLetterQueue":true,"dedupWindowSeconds":60,"delayedProcessing":0,"dlqAfterMaxRetries":true,"encryptionEnabled":false,"lea
+
+  [warm] bench: 500000 partitions written and drained (500000 messages)
+  [warm] one message (no "ts") into each of 500000 partitions of bench in 2.4s; drained in 3.3s
+[create] done: bench x 500000 partitions
+[10:58:11] prefill of 500000 partitions took 6 s
+[10:58:13] load starts at 1791629913323 (in 20 s)
+[11:03:52] load processes done (3 of 3 loaders)
+[11:03:59] collected: 26 files; brokers stopped
+RUN_DONE

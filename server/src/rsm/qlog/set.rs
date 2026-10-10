@@ -324,6 +324,9 @@ pub struct QLogSet {
     idle_at: Option<std::time::Instant>,
     /// Where the next [`QLogSet::idle_pass`] resumes (a log id).
     idle_cursor: u64,
+    /// Directories of logs the idle pass retired ([`retire_dir`]) and could
+    /// not delete at once: tried again at each pass.
+    retired: Vec<PathBuf>,
     /// The fsync'd tail of every log a sync covered, for the applier to record
     /// ([`QLogSet::track_tails`]); `None` when nobody records them.
     tails: Option<Arc<QlogTails>>,
@@ -800,6 +803,7 @@ impl QLogSet {
             shards: Arc::new(AtomicU64::new(0)),
             idle_at: None,
             idle_cursor: 0,
+            retired: Vec::new(),
             tails: None,
         }
     }
@@ -1125,6 +1129,7 @@ impl QLogSet {
     pub fn reopen_all_guarded(&mut self, durable: u64) -> io::Result<u64> {
         self.load_lanes()?;
         self.load_shards()?;
+        sweep_retired_dirs(&self.root);
         let rd = match std::fs::read_dir(&self.root) {
             Ok(rd) => rd,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -1287,8 +1292,25 @@ impl QLogSet {
         for log in logs {
             dropped += log.write().expect("qlog poisoned").truncate_seq_from(cut)?;
         }
+        self.forget_written_from(cut);
         self.recompute_totals();
         Ok(dropped)
+    }
+
+    /// After a cut at `cut`: nothing at or above it is written, or durable,
+    /// any more. The idle pass seals a file FOR the writer's next seq
+    /// (`written_seq + 1`); counted from the tail the cut removed, that is
+    /// above the seqs the next records carry, and an entry written into a
+    /// file created for a later seq is not found by its seq
+    /// ([`QLog::lower_empty_first_seq`]). (Jepsen, 2026-10-09: a follower
+    /// whose tail a new leader had overruled sealed its system log in the
+    /// moment before the leader's entries arrived, and after the next kill
+    /// refused to start: "raft log entries 25213..25214 are not all in the
+    /// queue logs".)
+    fn forget_written_from(&mut self, cut: u64) {
+        let below = cut.saturating_sub(1);
+        self.written_seq = self.written_seq.min(below);
+        self.durable_seq = self.durable_seq.min(below);
     }
 
     /// A Raft truncation of every log at `cut`: [`QLog::truncate_seq_from_across`]
@@ -1312,6 +1334,7 @@ impl QLogSet {
                 .expect("qlog poisoned")
                 .truncate_seq_from_across(cut)?;
         }
+        self.forget_written_from(cut);
         self.recompute_totals();
         Ok(dropped)
     }
@@ -1475,7 +1498,7 @@ impl QLogSet {
         let (f0, b0, file_id, base, fd) = {
             let g = log.read().expect("qlog poisoned");
             let (f0, b0) = (g.file_count() as u64, g.bytes());
-            if g.write_ready() {
+            if g.write_ready(records[0].seq()) {
                 let (id, base) = g.write_target();
                 (f0, b0, id, base, g.active_handle()?)
             } else {
@@ -1595,10 +1618,13 @@ impl QLogSet {
     /// The writer's housekeeping over every open log — the writer is the single
     /// writer of every log, so rolling one here races no append:
     ///
-    /// - SEAL an active file whose data is older than `seal_age` (0 = never).
-    ///   A log rolls only on size, and retention never touches the active
-    ///   file, so a queue that went quiet kept its last file (up to the roll
-    ///   size) forever, however long ago its messages expired.
+    /// - SEAL an active file whose data is older than `seal_age` (0 = never)
+    ///   when that is worth a file ([`QLog::seal_helps`]): retention found a
+    ///   dead message in it, or it holds an eighth of a full file. A log rolls
+    ///   only on size, and retention never touches the active file, so a queue
+    ///   that went quiet kept its last file (up to the roll size) forever,
+    ///   however long ago its messages expired. The system log is sealed on
+    ///   age alone.
     /// - REMOVE a per-queue log with nothing left (no sealed file, an empty
     ///   active file): close it and delete its directory. A deleted queue ends
     ///   here once retention has unlinked its files; a later write re-creates
@@ -1607,6 +1633,7 @@ impl QLogSet {
     /// Logs written since the last sync are skipped (they are busy anyway).
     pub fn idle_pass(&mut self, now_us: i64, seal_age: std::time::Duration) -> io::Result<()> {
         let seal_age_us = i64::try_from(seal_age.as_micros()).unwrap_or(i64::MAX);
+        let seal_min_bytes = (self.opts.segment_bytes / SEAL_MIN_FRACTION).max(1);
         let next_seq = self.written_seq.saturating_add(1);
         let per_queue = self.shards() == 0;
         // Resume after the last log this pass acted on: a roll costs a few
@@ -1635,8 +1662,12 @@ impl QLogSet {
             }
             let (seal, empty) = {
                 let g = log.read().expect("qlog poisoned");
-                let seal =
-                    seal_age_us > 0 && g.active_age_us(now_us).is_some_and(|a| a >= seal_age_us);
+                // Aged, and worth a file: the system log's entries follow the
+                // recovery floor, a queue log is sealed for retention or for
+                // its size ([`QLog::seal_helps`]).
+                let seal = seal_age_us > 0
+                    && g.active_age_us(now_us).is_some_and(|a| a >= seal_age_us)
+                    && (id == SYSTEM_QUEUE_ID || g.seal_helps(seal_min_bytes));
                 (seal, g.is_removable())
             };
             if seal {
@@ -1657,21 +1688,65 @@ impl QLogSet {
                     replace_total(&self.totals.files, g.file_count() as u64, 0);
                     replace_total(&self.totals.bytes, g.bytes(), 0);
                 }
-                match std::fs::remove_dir_all(&dir) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
+                // Closed before its files go (a reader that still holds the
+                // log keeps them open a moment longer, and loses nothing).
+                drop(log);
+                // The directory leaves its NAME in one step, and its content
+                // goes after that is durable. Deleting it in place can stop
+                // half-way (a crash; a filesystem that keeps a deleted file
+                // while it is open and then refuses the rmdir, as FUSE and
+                // NFS do), and what it leaves, `q<id>` with no file in it, is
+                // what a log that lost its records looks like: the next start
+                // refused it ("it ends at seq 0, below seq N"). A start now
+                // finds either the whole log or a retired directory to sweep.
+                match retire_dir(&self.root, &dir) {
+                    Ok(Some(dead)) => {
+                        self.retired.push(dead);
+                        removed += 1;
+                    }
+                    Ok(None) => removed += 1,
+                    Err(e) => {
+                        // Still a whole, empty log under its name: a later
+                        // write or the next start opens it as it is.
+                        tracing::warn!(
+                            target: "rsm",
+                            queue = id,
+                            error = %e,
+                            "qlog idle pass could not retire an empty log's directory",
+                        );
+                    }
                 }
-                removed += 1;
             }
         }
         if removed > 0 {
             std::fs::File::open(&self.root)?.sync_all()?;
         }
+        self.sweep_retired();
         if sealed + removed > 0 {
             tracing::debug!(target: "rsm", sealed, removed, "qlog idle pass");
         }
         Ok(())
+    }
+
+    /// Delete the directories the idle pass retired. One that cannot go yet
+    /// (a reader still has a file of it open, on a filesystem that keeps the
+    /// file in the directory until then) stays on the list for the next pass;
+    /// a restart sweeps whatever is left ([`sweep_retired_dirs`]).
+    fn sweep_retired(&mut self) {
+        self.retired
+            .retain(|dead| match std::fs::remove_dir_all(dead) {
+                Ok(()) => false,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    tracing::debug!(
+                        target: "rsm",
+                        dir = %dead.display(),
+                        error = %e,
+                        "qlog idle pass: a retired log directory is not gone yet",
+                    );
+                    true
+                }
+            });
     }
 
     /// The open log for a queue id, for the read-match / reopen tests. Test-only:
@@ -1691,6 +1766,12 @@ impl QLogSet {
 /// one for the planner's `DEDUP_INDEX=segment` dedup read. Every method keys by
 /// `queue_id` ([`QLogSet::queue_id_of`]) and reads under the queue's read lock,
 /// off the SAME live logs the applier appends to.
+impl std::fmt::Debug for QLogReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("QLogReader")
+    }
+}
+
 #[derive(Clone)]
 pub struct QLogReader {
     logs: SharedLogs,
@@ -1723,15 +1804,29 @@ pub(crate) struct ReclaimState {
     cursors: std::collections::HashMap<u64, u64>,
     /// Per `(log, file)`: how far the file is known dead.
     files: std::collections::HashMap<(u64, u64), FileProgress>,
+    /// Per log: the partition the next look at its ACTIVE file starts from,
+    /// and when a look that found nothing dead in the whole file may start
+    /// over ([`QLogReader::judge_active`]).
+    active_from: std::collections::HashMap<u64, (u64, Option<std::time::Instant>)>,
 }
+
+/// How many partitions of a log's active file one retention pass looks up to
+/// find a dead message in it ([`QLogReader::judge_active`]).
+const ACTIVE_LOOK: usize = 32;
+
+/// An aged active file is sealed without a dead message in it once it holds
+/// this fraction of a full file ([`QLog::seal_helps`]): what a start scans of
+/// a quiet log, and what its index keeps in memory, stay an eighth of a file.
+pub const SEAL_MIN_FRACTION: u64 = 8;
 
 /// One sealed file's retention progress. A sealed `.qidx` lists its records
 /// sorted by `(pid, base_offset)`, so each pid is one contiguous run and costs
 /// one watermark lookup.
 struct FileProgress {
-    /// The file's index, mapped on its own so the judging holds no queue lock.
-    /// A sealed index never changes; a rewrite of the file drops this entry.
-    view: super::index::View,
+    /// The file's index, the log's own view of it ([`QLog::sealed_view`]): the
+    /// judging holds no queue lock, and the file has one map, not two. A
+    /// sealed index never changes; a rewrite of the file drops this entry.
+    view: Arc<super::index::View>,
     /// Index records `[0, pos)` are known dead. Deadness never reverses while
     /// the process runs: a `txns_start` never moves back (the apply refuses
     /// it), a pid is never handed out twice, and a partition's log does not
@@ -1921,6 +2016,73 @@ impl Drop for ReclaimPause {
     }
 }
 
+/// What a retired log directory's name ends with (`q<id>.dead`,
+/// `q<id>.dead.<n>`): never a log's own name, so a start does not open it.
+const RETIRED_MARK: &str = ".dead";
+
+/// Take an empty log's directory `dir` (`<root>/q<id>`) out of the way: one
+/// rename to a retired name in `root`. `None` when it is already gone. The
+/// caller makes the rename durable and deletes the content afterwards.
+fn retire_dir(root: &std::path::Path, dir: &std::path::Path) -> io::Result<Option<PathBuf>> {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return Err(io::Error::other("a queue log directory has no name"));
+    };
+    for n in 0..1_000u32 {
+        let dead = if n == 0 {
+            root.join(format!("{name}{RETIRED_MARK}"))
+        } else {
+            root.join(format!("{name}{RETIRED_MARK}.{n}"))
+        };
+        if dead.exists() {
+            // An earlier retirement of this queue's log that could not be
+            // deleted yet: this one gets its own name.
+            continue;
+        }
+        return match std::fs::rename(dir, &dead) {
+            Ok(()) => Ok(Some(dead)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        };
+    }
+    Err(io::Error::other(
+        "too many retired directories of one queue log",
+    ))
+}
+
+/// Remove every retired log directory under `root` (a start, before the logs
+/// are opened): what an idle pass renamed and did not get to delete.
+fn sweep_retired_dirs(root: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !(name.starts_with('q') && name.contains(RETIRED_MARK)) {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+            tracing::warn!(
+                target: "rsm",
+                dir = %entry.path().display(),
+                error = %e,
+                "rsm qlog: a retired log directory could not be removed",
+            );
+        }
+    }
+}
+
+/// How many records a walk over old messages looks up per hold of its
+/// queue's lock ([`QLogReader::walk_frames`]).
+const WALK_CHUNK: usize = 128;
+
+/// A read of a few hundred bytes that took this long waited for the disk: the
+/// page cache answers in a few microseconds.
+const COLD_READ: std::time::Duration = std::time::Duration::from_micros(50);
+
 impl QLogReader {
     /// Pause retention (no file is unlinked or rewritten) until the guard is
     /// dropped: a snapshot links every file and needs them to stay put. A
@@ -2014,6 +2176,144 @@ impl QLogReader {
         }
     }
 
+    /// One pass of directory maintenance over every log ([`super::dirx`]):
+    /// one step per log — a run built for sealed files that have none, or
+    /// adjacent runs merged — and then again over the logs that have more to
+    /// do, until none has or `deadline`. Returns the steps taken.
+    ///
+    /// One step a pass was not enough for a log that seals a build's worth of
+    /// files between two passes (16 files: about 200 MB a second at 64 MiB a
+    /// file): every pass built, none merged, and the runs a lookup steps
+    /// through piled up by one a pass for as long as the load lasted.
+    ///
+    /// A step reads only sealed, immutable files and is written and verified
+    /// with NO lock on the log; taking the finished run is a swap under the
+    /// log's write lock.
+    pub(crate) fn dirx_maintain(&self, deadline: std::time::Instant) -> usize {
+        let mut done = 0;
+        let mut ids = self.log_ids();
+        let mut first_round = true;
+        while !ids.is_empty() {
+            let mut more = Vec::new();
+            for id in ids {
+                if std::time::Instant::now() >= deadline {
+                    return done;
+                }
+                let Some(log) = self.log(id) else { continue };
+                let plan = log.read().expect("qlog poisoned").dirx_plan();
+                if let Some(plan) = plan {
+                    // A sealed file that went away under the step (retention)
+                    // fails it: the next pass plans it again.
+                    match plan.run().and_then(|b| super::dirx::Run::open(&b.path)) {
+                        Ok(run) => {
+                            log.write().expect("qlog poisoned").dirx_install(run);
+                            done += 1;
+                            more.push(id);
+                        }
+                        Err(e) => tracing::debug!(
+                            target: "rsm",
+                            log = id,
+                            error = %e,
+                            "rsm qlog directory step failed; it is planned again",
+                        ),
+                    }
+                }
+                if first_round && log.read().expect("qlog poisoned").dirx_has_dead_runs() {
+                    log.write().expect("qlog poisoned").dirx_gc();
+                }
+            }
+            first_round = false;
+            ids = more;
+        }
+        done
+    }
+
+    /// Directory runs and sealed files outside any run, over every log
+    /// (`queen_raft_qlog_dirx`).
+    pub fn dirx_totals(&self) -> (usize, usize) {
+        let mut out = (0, 0);
+        for id in self.log_ids() {
+            if let Some(log) = self.log(id) {
+                let (runs, uncovered) = log.read().expect("qlog poisoned").dirx_stats();
+                out.0 += runs;
+                out.1 += uncovered;
+            }
+        }
+        out
+    }
+
+    /// Tests: let the next look at every active file start now.
+    #[cfg(test)]
+    pub(crate) fn forget_active_rests(&self) {
+        let mut state = self
+            .reclaim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for at in state.active_from.values_mut() {
+            at.1 = None;
+        }
+    }
+
+    /// Retention's look at log `log_id`'s ACTIVE file. Retention never frees
+    /// an active file, and the writer's idle pass seals an aged one only when
+    /// that lets retention free something ([`QLog::seal_helps`]): here the
+    /// file is asked for when one of its messages is dead (its partition is
+    /// gone, or its watermark has passed the record).
+    ///
+    /// A pass looks up at most [`ACTIVE_LOOK`] partitions, the first record of
+    /// each, and the next pass goes on from there; a look that went through
+    /// the whole file and found nothing dead starts over a quarter of the
+    /// seal age later, so a queue without retention costs a few lookups every
+    /// few minutes. Only an aged file is looked at (a younger one is not
+    /// sealed whatever it holds), and only until it is asked for.
+    fn judge_active(
+        log_id: u64,
+        log: &Arc<RwLock<QLog>>,
+        state: &mut ReclaimState,
+        live_start: &mut dyn FnMut(u64) -> io::Result<Option<u64>>,
+        budget: &mut ReclaimBudget,
+    ) -> io::Result<()> {
+        let seal_age = seal_age_from_env();
+        let max = ACTIVE_LOOK.min(budget.lookups);
+        if seal_age.is_zero() || max == 0 {
+            return Ok(());
+        }
+        let seal_age_us = i64::try_from(seal_age.as_micros()).unwrap_or(i64::MAX);
+        let (from, rest_until) = state.active_from.get(&log_id).copied().unwrap_or((0, None));
+        if rest_until.is_some_and(|until| std::time::Instant::now() < until) {
+            return Ok(());
+        }
+        let looked = {
+            let g = log.read().expect("qlog poisoned");
+            let aged = g
+                .active_age_us(super::wall_now_us())
+                .is_some_and(|a| a >= seal_age_us);
+            if !aged || !g.seal_undecided() {
+                return Ok(());
+            }
+            g.active_firsts(from, max)
+        };
+        let Some((file_id, firsts)) = looked else {
+            return Ok(());
+        };
+        // Fewer than asked for: the look reached the file's last partition.
+        // The next one starts over, after a rest.
+        let mut next = match firsts.last() {
+            Some((pid, _)) if firsts.len() >= max => (pid.saturating_add(1), None),
+            _ => (0, Some(std::time::Instant::now() + seal_age / 4)),
+        };
+        for (pid, end) in firsts {
+            budget.lookups = budget.lookups.saturating_sub(1);
+            if live_start(pid)?.is_none_or(|start| end <= start) {
+                log.read().expect("qlog poisoned").want_seal(file_id);
+                next = (0, None);
+                break;
+            }
+        }
+        state.active_from.insert(log_id, next);
+        Ok(())
+    }
+
     /// Per-file retention for log `log_id`: judge its sealed files one at a
     /// time from their own `.qidx`, looking up only the partitions that have
     /// records in them, and remember how far each file is known dead.
@@ -2045,8 +2345,10 @@ impl QLogReader {
         let Some(log) = self.log(log_id) else {
             state.files.retain(|(l, _), _| *l != log_id);
             state.cursors.remove(&log_id);
+            state.active_from.remove(&log_id);
             return Ok(out);
         };
+        Self::judge_active(log_id, &log, state, live_start, budget)?;
         let cand = log.read().expect("qlog poisoned").reclaim_candidates();
         state
             .files
@@ -2070,21 +2372,10 @@ impl QLogReader {
             let progress = match state.files.entry((log_id, id)) {
                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::hash_map::Entry::Vacant(v) => {
-                    let path = super::qidx_path(&cand.dir, id);
-                    let view = match super::index::View::open(&path, Some(bytes)) {
-                        Ok(view) => view,
-                        Err(e) => {
-                            // Gone since the listing, or an index the log
-                            // rebuilds at its next open: judge it later.
-                            tracing::debug!(
-                                target: "rsm",
-                                log = log_id,
-                                file = id,
-                                error = %e,
-                                "rsm qlog retention skips a file it cannot map",
-                            );
-                            continue;
-                        }
+                    // Gone or rewritten since the listing: judged later.
+                    let view = log.read().expect("qlog poisoned").sealed_view(id, bytes);
+                    let Some(view) = view else {
+                        continue;
                     };
                     let msg_bytes = view
                         .records()
@@ -2334,6 +2625,29 @@ impl QLogReader {
         }
     }
 
+    /// [`QLogReader::read_owned`] for the consecutive offsets of one
+    /// partition ([`QLog::read_owned_hinted`]).
+    pub fn read_owned_hinted(
+        &self,
+        queue_id: u64,
+        pid: u64,
+        offset: u64,
+        hint: &mut Option<u64>,
+    ) -> io::Result<Option<OwnedRecord>> {
+        let Some(l) = self.log_for(queue_id, pid) else {
+            return Ok(None);
+        };
+        // The lookup under the queue's lock, the read after it.
+        let step = l
+            .read()
+            .expect("qlog poisoned")
+            .plan_read(pid, offset, hint)?;
+        match step {
+            Some(step) => Ok(Some(step.read()?)),
+            None => Ok(None),
+        }
+    }
+
     /// Seek a message-list candidate using only the active/sealed indexes.
     pub fn record_before(
         &self,
@@ -2371,6 +2685,88 @@ impl QLogReader {
                 cb,
             ),
             None => Ok(()),
+        }
+    }
+
+    /// [`QLogReader::claim_frames`] over messages whose index rows left the
+    /// store. Two things differ. The hash blocks it reads stay out of the
+    /// hash cache (each record is read once, and nothing but the band reads
+    /// of `DEDUP_INDEX=segment` would clear them again). And the queue's lock
+    /// is held only while the next [`WALK_CHUNK`] records are looked up in
+    /// the index ([`QLog::walk_plan`]): their hash blocks are read with the
+    /// lock released, so a group reading a queue's history does not hold the
+    /// appends to that queue behind its disk reads.
+    pub fn walk_frames(
+        &self,
+        queue_id: u64,
+        pid: u64,
+        from_offset: u64,
+        committed_end: u64,
+        want_hashes: bool,
+        cb: &mut dyn FnMut(u64, u64, i64, Option<Vec<u8>>) -> bool,
+    ) -> io::Result<()> {
+        let Some(l) = self.log_for(queue_id, pid) else {
+            return Ok(());
+        };
+        if !want_hashes {
+            // The index alone: nothing is read from the files.
+            return l.read().expect("qlog poisoned").claim_walk_with(
+                pid,
+                from_offset,
+                committed_end,
+                false,
+                false,
+                cb,
+            );
+        }
+        let dir = l.read().expect("qlog poisoned").dir().to_path_buf();
+        let mut cur = from_offset;
+        let mut hint: Option<u64> = None;
+        let mut scratch: Vec<u8> = Vec::new();
+        // Old messages are in files the page cache no longer holds (a node
+        // drops written pages behind its tail). Read one by one, every record
+        // waits for the disk in turn, and twice: here for its ids, then in
+        // the pop's render for its payload. So once a read has waited
+        // ([`COLD_READ`]), the kernel is asked for every record of a chunk,
+        // whole, before the chunk is read: the disk reads overlap, and the
+        // render finds its payloads in memory. A read that did not wait
+        // turns it off again.
+        let mut cold = false;
+        loop {
+            let steps = l.read().expect("qlog poisoned").walk_plan(
+                pid,
+                cur,
+                committed_end,
+                &mut hint,
+                WALK_CHUNK,
+            )?;
+            let planned = steps.len();
+            let advised = cold;
+            if advised {
+                for step in &steps {
+                    step.will_need();
+                }
+            }
+            for (i, step) in steps.iter().enumerate() {
+                let began = std::time::Instant::now();
+                let hashes = super::read_walk_hashes(&dir, step, &mut scratch)?;
+                if i == 0 {
+                    cold = began.elapsed() >= COLD_READ;
+                    if cold && !advised {
+                        for step in &steps {
+                            step.will_need();
+                        }
+                    }
+                }
+                let r = &step.rec;
+                cur = r.end;
+                if !cb(r.base_offset, r.end - 1, r.created_at_us, Some(hashes)) {
+                    return Ok(());
+                }
+            }
+            if planned < WALK_CHUNK {
+                return Ok(()); // the committed tail, or the end of what is there
+            }
         }
     }
 

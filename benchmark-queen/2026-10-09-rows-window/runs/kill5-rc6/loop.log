@@ -1,0 +1,37 @@
+03:46:42 cycle 10: ok; tails overruled so far: 2, first seq lowered: 0
+03:47:26 cycle 20: ok; tails overruled so far: 3, first seq lowered: 0
+03:48:09 cycle 30: ok; tails overruled so far: 3, first seq lowered: 0
+03:48:52 cycle 40: ok; tails overruled so far: 3, first seq lowered: 0
+03:49:37 cycle 50: ok; tails overruled so far: 3, first seq lowered: 0
+03:50:20 cycle 60: ok; tails overruled so far: 3, first seq lowered: 0
+03:51:04 cycle 70: ok; tails overruled so far: 3, first seq lowered: 0
+03:51:48 cycle 80: ok; tails overruled so far: 3, first seq lowered: 0
+03:52:34 cycle 90: ok; tails overruled so far: 3, first seq lowered: 0
+03:53:19 cycle 100: ok; tails overruled so far: 3, first seq lowered: 0
+03:54:04 cycle 110: ok; tails overruled so far: 3, first seq lowered: 0
+03:54:50 cycle 120: ok; tails overruled so far: 6, first seq lowered: 0
+03:55:36 cycle 130: ok; tails overruled so far: 6, first seq lowered: 0
+03:56:23 cycle 140: ok; tails overruled so far: 6, first seq lowered: 0
+03:57:10 cycle 150: ok; tails overruled so far: 6, first seq lowered: 0
+03:57:56 cycle 160: ok; tails overruled so far: 6, first seq lowered: 0
+03:58:43 cycle 170: ok; tails overruled so far: 6, first seq lowered: 0
+03:59:30 cycle 180: ok; tails overruled so far: 6, first seq lowered: 0
+04:00:18 cycle 190: ok; tails overruled so far: 7, first seq lowered: 0
+04:01:05 cycle 200: ok; tails overruled so far: 7, first seq lowered: 0
+04:01:52 cycle 210: ok; tails overruled so far: 7, first seq lowered: 0
+04:02:40 cycle 220: ok; tails overruled so far: 7, first seq lowered: 0
+04:03:30 cycle 230: ok; tails overruled so far: 7, first seq lowered: 0
+04:04:19 cycle 240: ok; tails overruled so far: 7, first seq lowered: 0
+04:05:08 cycle 250: ok; tails overruled so far: 7, first seq lowered: 0
+04:05:57 cycle 260: ok; tails overruled so far: 7, first seq lowered: 0
+04:06:46 cycle 270: ok; tails overruled so far: 7, first seq lowered: 0
+04:07:36 cycle 280: ok; tails overruled so far: 7, first seq lowered: 0
+04:08:25 cycle 290: ok; tails overruled so far: 7, first seq lowered: 0
+04:09:13 cycle 300: ok; tails overruled so far: 7, first seq lowered: 0
+04:09:15 cycles run: 300 of 300, bad=0
+04:09:16 n1: FATAL lines 0, panics 0, tails overruled 1, across a sealed file 0, first seq lowered 0
+04:09:17 n2: FATAL lines 0, panics 0, tails overruled 1, across a sealed file 0, first seq lowered 0
+04:09:18 n3: FATAL lines 0, panics 0, tails overruled 3, across a sealed file 0, first seq lowered 0
+04:09:19 n4: FATAL lines 0, panics 0, tails overruled 1, across a sealed file 0, first seq lowered 0
+04:09:20 n5: FATAL lines 0, panics 0, tails overruled 1, across a sealed file 0, first seq lowered 0
+KILLLOOP_DONE

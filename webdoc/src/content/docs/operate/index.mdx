@@ -58,6 +58,17 @@ digest: >-
 # example now shows.
 # sourceOfTruth re-read 2026-10-09 (queen-protocol 1.4.0): server/Cargo.toml requires queen-protocol 1.4.0, the
 # wire-types crate with the lock types; the broker's version and build are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): facade/real.rs
+# exports queen_consume_cold_claims_total and queen_raft_qlog_dirx. Nothing else this page states changes.
+# sourceOfTruth re-read 2026-10-09 (2.2.0): server/Cargo.toml moves the broker to 2.2.0; the /health
+# example is a fresh 2.2.0 node's (cluster version 6, one entry applied).
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): the /health sample
+# gains quorumAckMs (a single node of this build), and the list of pages gains the operator and
+# Terraform.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its
@@ -110,7 +121,7 @@ curl -s localhost:6632/health
 ```
 
 ```json
-{"status":"healthy","engine":"raft","version":"2.1.0","raft":{"role":"leader","leader":true,"term":1,"applied":0,"commit":0,"lag":0,"storageReady":true,"clusterVersion":5,"kinds":5}}
+{"status":"healthy","engine":"raft","version":"2.2.0","raft":{"role":"leader","leader":true,"term":1,"applied":1,"commit":1,"lag":0,"quorumAckMs":0,"storageReady":true,"clusterVersion":6,"kinds":6}}
 ```
 
 The dashboard is at `http://localhost:6632/`, and the image carries the CLI, so
@@ -204,6 +215,10 @@ broker's port is plain HTTP; TLS is on the proxy's listener or in front of the n
 - [Run a cluster](/operate/cluster/): three or five nodes as one Raft cluster, starting from the
   tested Compose file in `deploy/compose/three-node/`, with quorum, failures and rolling upgrades.
 - [Kubernetes](/operate/kubernetes/): the StatefulSet, its volumes, probes and upgrades.
+- [Kubernetes operator](/operate/operator/): a cluster from one `QueenCluster` object, with the
+  voters, a node replacement, the volumes and the upgrades done through the membership API.
+- [Terraform](/operate/terraform/): queue configuration and a cluster's S3 sink declared beside
+  the infrastructure they depend on.
 - [Tenants, API keys and quotas](/operate/tenants/): the proxy inside the broker and its control
   plane.
 - [Security](/operate/security/): which port serves what, authentication, the raft token, TLS and

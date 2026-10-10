@@ -61,12 +61,22 @@ sourceOfTruth:
 # queue driver and Horizon; nothing this page states changes.
 # sourceOfTruth re-read 2026-10-09 (PHP client 2.4.0): 2.4.0 adds locks, semaphores, the transaction guard and
 # the KV check to the client and pins supervisor 0.8.0, as 2.3.1 does. The Versions section says so.
+# sourceOfTruth re-read 2026-10-09 (rows leave the store at the dedup window): consume/pop.rs reads
+# messages whose rows are gone from the queue log; facade/real.rs exports two metric families.
+# Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-09 (review fixes, PHP client 2.4.1): config/queen.php reads every
 # switch variable through filter_var; the failed-job provider leaves other drivers' records to
 # Laravel, and failed_jobs with its commands stay unchanged for a Queen job, as the table says; a
 # pool takes its connection's queue and consumer_group; the connector scopes the pool's
 # environment to the worked connection. Nothing this page states changes; the versions table gains
 # 2.4.1 at its release.
+# sourceOfTruth re-read 2026-10-10 (log files: small indexes take no memory map, a quiet file is
+# sealed for retention or its size and not for its age): facade/real.rs exports
+# queen_raft_qlog_index_maps (the mapped log-file indexes, the kernel's limit, the maps it refused).
+# Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): facade/real.rs
+# changes what /health answers (raft.quorumAckMs; ready needs the leader's majority within
+# QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
 # registers WorkerPopGuard and QueenQueue::pop reports to it, under a supervisor only. Nothing this
 # page states changes.

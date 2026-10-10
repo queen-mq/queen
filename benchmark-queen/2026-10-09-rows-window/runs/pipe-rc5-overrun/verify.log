@@ -1,0 +1,9 @@
+[verify] queen http://127.0.0.1:6632: 1 ledgers from /root/improve/runs/pipe-rc5/ids; reading vx-out (group verify, from the first message) then the rest of vx-in
+[verify] out vx-out: 4231000 records after 10s
+[verify] out vx-out: 9045000 records after 20s
+[verify] out vx-out: 10048360 records after 30s
+[verify] out vx-out: 10048360 records, idle 10s: scan complete after 32.5s
+[verify] rest of vx-in: 148000 records after 10s
+[verify] rest of vx-in: 148000 records, idle 10s: scan complete after 10.4s
+[verify] system=queen ledgers=1 produced=17849960 ambiguous=0 out_records=10048360 out_unique=10048160 duplicates=0 dup_records=0 missing=7653800 pending_in=148000 in_and_out=0 extra=0 ambiguous_in_out=0 rereads=0 unparsed=0 warm=200 scan=43.3s | VERDICT FAIL
+[verify] first missing: src=0 seq=5648840, src=0 seq=5648841, src=0 seq=5648842, src=0 seq=5648843, src=0 seq=5648844

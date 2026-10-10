@@ -220,6 +220,10 @@ pub struct Config {
     /// §14.1 — `/health` answers `200 healthy` while the apply lag is under this
     /// (`QUEEN_RAFT_READY_LAG_MS`), else `503 settling`.
     pub raft_ready_lag_ms: u64,
+    /// `/health` answers `200 healthy` only while the leader this node follows
+    /// (itself, when it leads) heard from a majority of the voters within this
+    /// (`QUEEN_RAFT_READY_QUORUM_MS`), else `503 settling`. 0: not checked.
+    pub raft_ready_quorum_ms: u64,
     /// The disk gate: writes that grow storage are refused (`507`) once the
     /// data directory's filesystem is at least this percent used
     /// (`QUEEN_RAFT_DISK_HIGH_PCT`, default 85).
@@ -571,6 +575,7 @@ pub fn log_effective(cfg: &Config) {
         target: "boot",
         data_dir = %cfg.raft_dir,
         ready_lag_ms = cfg.raft_ready_lag_ms,
+        ready_quorum_ms = cfg.raft_ready_quorum_ms,
         disk_high_pct = cfg.raft_disk_high_pct,
         disk_low_pct = cfg.raft_disk_low_pct,
         planner_queue_depth = cfg.raft_planner_queue_depth,
@@ -728,6 +733,7 @@ pub fn load() -> Config {
         tenancy_header,
         raft_dir: env_str("QUEEN_RAFT_DIR", "/var/lib/queen/raft"),
         raft_ready_lag_ms: env_int("QUEEN_RAFT_READY_LAG_MS", 2000).max(0) as u64,
+        raft_ready_quorum_ms: env_int("QUEEN_RAFT_READY_QUORUM_MS", 5000).max(0) as u64,
         raft_disk_high_pct: env_pct("QUEEN_RAFT_DISK_HIGH_PCT", 85.0),
         raft_disk_low_pct: env_pct("QUEEN_RAFT_DISK_LOW_PCT", 80.0),
         raft_planner_queue_depth: env_int("QUEEN_RAFT_PLANNER_QUEUE_DEPTH", 1024).max(1) as usize,

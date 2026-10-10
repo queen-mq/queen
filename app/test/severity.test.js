@@ -30,6 +30,7 @@ import {
   quorumSeverity,
   raftHeartbeatSeverity,
   raftLagSeverity,
+  setLinesReader,
   storeMapSeverity,
   timeLagSeverity,
 } from '../src/composables/useSeverity.js'
@@ -203,9 +204,49 @@ test('eviction is attention only once it is a real share of what was read', () =
 test('a consumer group that is behind is a real state and keeps its colour', () => {
   assert.equal(consumerGroupSeverity({ state: 'Stable', maxTimeLag: 0 }), 'ok')
   assert.equal(consumerGroupSeverity({ state: 'Dead', maxTimeLag: 9_000 }), 'mute')
-  assert.equal(consumerGroupSeverity({ state: 'Lagging', maxTimeLag: 10 }), 'warn')
   assert.equal(consumerGroupSeverity({ state: 'Lagging', maxTimeLag: 400 }), 'bad')
   assert.equal(consumerGroupSeverity({ state: 'Stable', maxTimeLag: 120 }), 'warn')
+})
+
+test("a group is judged by its queue's lines, not by the broker's fixed 300 s", () => {
+  const slow = { ...THRESHOLDS, lagWarnSeconds: 600, lagBadSeconds: 1800 }
+  // The broker says Lagging past 300 s whatever the queue is for.
+  assert.equal(consumerGroupSeverity({ state: 'Lagging', maxTimeLag: 400 }, slow), 'ok')
+  assert.equal(consumerGroupSeverity({ state: 'Lagging', maxTimeLag: 600 }, slow), 'warn')
+  assert.equal(consumerGroupSeverity({ state: 'Lagging', maxTimeLag: 1800 }, slow), 'bad')
+  assert.equal(consumerGroupSeverity({ state: 'Dead', maxTimeLag: 9_000 }, slow), 'mute')
+  assert.equal(timeLagSeverity(400, slow), 'ok')
+  assert.equal(timeLagSeverity(600, slow), 'warn')
+  assert.equal(timeLagSeverity(1800, slow), 'bad')
+  // Array.map hands an index where the lines go: it must not be read as lines.
+  assert.deepEqual([30, 90, 400].map(timeLagSeverity), ['ok', 'warn', 'bad'])
+})
+
+test("a queue's own backlog and ack lines are the ones its numbers are judged by", () => {
+  const own = { ...THRESHOLDS, backlogWarnSeconds: 3600, backlogBadSeconds: 7200, ackWarnRate: 0.2, ackBadRate: 0.5 }
+  // 10 minutes of work waiting: attention by the built-in line, nothing by this queue's.
+  assert.equal(backlogSeverity({ pending: 6000, drainPerSec: 10 }), 'warn')
+  assert.equal(backlogSeverity({ pending: 6000, drainPerSec: 10 }, own), '')
+  assert.equal(backlogSeverity({ pending: 80_000, drainPerSec: 10 }, own), 'bad')
+  // 10% of acks failing.
+  assert.equal(ackFailureSeverity({ failed: 1000, succeeded: 9000 }), 'bad')
+  assert.equal(ackFailureSeverity({ failed: 1000, succeeded: 9000 }, own), '')
+  assert.equal(ackFailureSeverity({ failed: 3000, succeeded: 7000 }, own), 'warn')
+})
+
+test('the lines in force are the built-in ones until a reader is installed', () => {
+  assert.equal(memoryShareSeverity(0.85), 'warn')
+  setLinesReader(() => ({ ...THRESHOLDS, memWarnShare: 0.9, memBadShare: 0.95, lagWarnSeconds: 600 }))
+  try {
+    assert.equal(memoryShareSeverity(0.85), '')
+    assert.equal(timeLagSeverity(120), 'ok')
+    // A queue's own lines still win over the ones in force.
+    assert.equal(timeLagSeverity(120, THRESHOLDS), 'warn')
+  } finally {
+    setLinesReader()
+  }
+  assert.equal(memoryShareSeverity(0.85), 'warn')
+  assert.equal(timeLagSeverity(120), 'warn')
 })
 
 test('one partition momentarily behind is what working looks like', () => {

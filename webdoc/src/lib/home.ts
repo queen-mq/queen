@@ -246,9 +246,9 @@ export const proof: { figure: string; unit: string; body: string; href: string }
     href: "/benchmarks/transactions/",
   },
   {
-    figure: "153",
-    unit: "Jepsen tests on the code of 2.1.0",
-    body: "Five nodes under kill -9, pauses, network partitions, clock jumps and power loss: 152 valid, and the other valid when run again with the test nodes' clocks set. No acknowledged message lost, no lease held twice. Testing, not proof.",
+    figure: "244",
+    unit: "Jepsen tests on the code of 2.2.0",
+    body: "Five nodes under kill -9, pauses, network partitions, clock jumps and power loss: all valid, one at its second run after the test harness crashed in the first. No acknowledged message lost, no lease held twice. Testing, not proof.",
     href: "/benchmarks/jepsen/",
   },
 ];
