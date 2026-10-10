@@ -16,6 +16,9 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenQueue::pop tells a
 # supervised worker's WorkerPopGuard how each pop went; striping and partition order are unchanged.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
+# delivery that carries no Laravel job in the dead-letter queue at once, which frees its stripe;
+# ordering within a stripe is unchanged. Nothing this page states changes.
 ---
 
 A job that implements `QueenPartitionable` waits until the job before it of the same customer has

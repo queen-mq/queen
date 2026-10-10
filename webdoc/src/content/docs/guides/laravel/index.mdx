@@ -70,6 +70,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
 # registers WorkerPopGuard and QueenQueue::pop reports to it, under a supervisor only. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
+# delivery that carries no Laravel job in the dead-letter queue at once. Nothing this page states
+# changes.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and

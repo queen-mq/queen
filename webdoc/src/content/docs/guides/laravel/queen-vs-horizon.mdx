@@ -56,6 +56,9 @@ sourceOfTruth:
 # to Laravel. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): a worker that cannot
 # pop leaves or is reported by status, where Horizon's keeps looping. The table gains that row.
+# sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
+# delivery that carries no Laravel job in the dead-letter queue at once. Nothing this page states
+# changes.
 ---
 
 Queen is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both
