@@ -77,12 +77,21 @@ jobs:
       matrix:
         php-version: ["8.3", "8.4"]
         phpts: ["nts"]
+        laravel: ["12"]
         include:
           # Thread-safe PHP (FrankenPHP embeds it) keeps a virtual working
           # directory that exec() never sees; the supervisor launcher and
           # installer must work there too.
           - php-version: "8.4"
             phpts: "ts"
+            laravel: "12"
+          # Applications in production still run Laravel 11, whose worker,
+          # events and console kernel differ from 12's in the details the
+          # supervisor relies on.
+          - php-version: "8.4"
+            phpts: "nts"
+            laravel: "11"
+    name: php-client-unit (PHP ${{ matrix.php-version }} ${{ matrix.phpts }}, Laravel ${{ matrix.laravel }})
     defaults:
       run:
         working-directory: clients/client-php
@@ -99,10 +108,20 @@ jobs:
           tools: composer:v2
       - name: Validate Composer metadata
         run: composer validate --strict
+      # Laravel 11 no longer gets security fixes, and Composer refuses every
+      # 11.x release for the advisories open against it: this cell lets
+      # laravel/framework through, for the tests alone.
+      - name: Select Laravel 11
+        if: matrix.laravel == '11'
+        run: |
+          composer config --json policy.advisories.ignore '["laravel/framework"]'
+          composer require --dev "orchestra/testbench:^9.0" --no-update --no-interaction
       - name: Resolve and install dependencies
         run: composer install --no-interaction --no-progress --prefer-dist
+      - name: Laravel version
+        run: composer show laravel/framework | grep '^versions'
       - name: Audit resolved dependencies
-        if: matrix.php-version == '8.4'
+        if: matrix.php-version == '8.4' && matrix.laravel == '12'
         run: composer audit --locked --no-interaction
       - name: PHPUnit unit suite
         run: vendor/bin/phpunit --testsuite Unit
