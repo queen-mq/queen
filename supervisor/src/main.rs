@@ -1,3 +1,14 @@
+/// One line to stderr, as the standard `eprintln!` writes it, in every module of
+/// this crate. A write that fails, to a pipe whose reader is gone for instance,
+/// is dropped: the standard macro panics, and a panic of the master ends every
+/// worker through PR_SET_PDEATHSIG.
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod coordination;
 mod lease;
 mod prefork;
@@ -8480,6 +8491,34 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
             "the master did not stop cleanly ({status:?}):\n{log}"
         );
         assert_eq!(started, 0, "a worker started after the SIGTERM:\n{log}");
+    }
+
+    /// A master whose stderr reader is gone, as a pipe whose logger stopped,
+    /// goes on supervising: its log lines are dropped.
+    #[cfg(unix)]
+    #[test]
+    fn a_master_whose_stderr_is_closed_goes_on() {
+        let directory = temporary_directory("closed-stderr");
+        // Workers that exit at once, so the master logs every pass.
+        write_fake_artisan(&directory, ": > \"ran.$$\"\nexit 0\n");
+        let document = supervisor_document(&directory, &closing_broker());
+        let path = directory.join("config.json");
+        write_private_file(&path, &serde_json::to_vec(&document).unwrap());
+        let mut supervisor = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::run_helper", "--ignored", "--nocapture"])
+            .env("QUEEN_RUN_HELPER_CONFIG", &path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(supervisor.stderr.take());
+        thread::sleep(Duration::from_secs(3));
+        let alive = matches!(supervisor.try_wait(), Ok(None));
+        let workers = count_files(&directory, "ran.");
+        stop_supervisor(supervisor);
+        let _ = fs::remove_dir_all(&directory);
+        assert!(alive, "the master ended when it could not write to stderr");
+        assert!(workers > 1, "no worker exited for the master to log");
     }
 
     /// Files in `directory` whose name starts with `prefix`.
