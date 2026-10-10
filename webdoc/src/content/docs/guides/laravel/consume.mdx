@@ -54,6 +54,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
 # registers WorkerPopGuard for workers a supervisor started; queen:consume is not one. Nothing this
 # page states changes.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider changes only the job-metrics listeners; queen:consume and its registration are unchanged. Nothing this page states changes.
 ---
 
 `php artisan queen:consume` reads a Queen queue and passes each message to a class of yours. Use it

@@ -17,6 +17,7 @@ sourceOfTruth:
   - clients/client-php/src/Laravel/Monitoring/QueueWaits.php
   - clients/client-php/src/Laravel/Monitoring/TagMonitor.php
   - clients/client-php/src/Laravel/Dashboard/JobMetricsReader.php
+  - clients/client-php/benchmarks/job-metrics.php
   - clients/client-php/src/Laravel/Dashboard/PrometheusMetrics.php
   - clients/client-php/src/Laravel/Commands/CheckWaitsCommand.php
   - clients/client-php/src/Laravel/Events/LongWaitDetected.php
@@ -65,6 +66,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
 # delivery that carries no Laravel job in the dead-letter queue at once; metrics, sizes and waits are
 # unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider records an attempt that outlives its timeout (JobTimedOut) and a job that calls $this->fail() as failed attempts, and JobMetricsRecorder::flush() starts over in a forked process; Jobs per class now says what an attempt covers and how each end counts, reads the keys from a script, compares with Horizon, and gives the cost benchmarks/job-metrics.php measured.
 ---
 
 The [dashboard](/guides/laravel/dashboard/) shows what the supervisors are doing. This page is about
@@ -89,7 +91,9 @@ snapshot command to schedule.
 ## Jobs per class
 
 The dashboard's **Jobs** page lists every job class that ran in the window you pick: jobs
-processed, failed attempts, jobs per minute and the average runtime of an attempt.
+processed, failed attempts, jobs per minute and the average runtime of an attempt. A supervisor
+starts its workers with `--quiet` (a pool's `quiet`, on by default), so Laravel prints no line per
+job: these numbers are the runtimes such a worker leaves.
 
 Each worker of a Queen connection counts these per class in memory and writes them at most once
 every ten seconds (also while it waits for its next job, and when it stops) to one key of its own,
@@ -100,13 +104,30 @@ jobs/v1/<bucket>/<worker>   {"classes": {"App\\Jobs\\SendInvoice": {"processed":
 ```
 
 That is one write per worker every ten seconds, never one per job, and no two workers ever write
-the same key. Keys expire after 25 hours, which bounds the longest window. `max_ms`, the longest
+the same key. With no-op jobs and an in-process broker, recording cost a worker 12 µs of CPU per
+job, 19 µs with the listeners of monitored tags, beside 148 µs for the rest of Laravel's work on
+such a job (Apple M5, PHP 8.4, `clients/client-php/benchmarks/job-metrics.php`). A write is about
+220 bytes for one class and 80 more for each other class; it took 0.7 ms on a broker on the same
+machine. Keys expire after 25 hours, which bounds the longest window. `max_ms`, the longest
 single attempt (PHP client 1.9.0), is not on the Jobs page: the Configuration page's
 [tuning advice](/guides/laravel/dashboard/#tuning-advice-and-settings) compares it with
 `shutdown_grace`. Records of earlier workers have no `max_ms`, and a class without one is not
 compared. Recording is best effort: since 1.9.0 it makes one attempt of at most two seconds, with
 no failover and no retry, and a failed write is dropped without ever reaching the job. A preforked worker starts its
 own counts after its fork.
+
+An attempt's runtime runs from Laravel's `JobProcessing` event to the end of the attempt: the job's
+middleware, its `handle()`, and the broker ACK when the worker sends it before the next job
+(`ack_batch` 1 and `ack_async` off, the default). Only the jobs of Queen connections are counted,
+not those of a Horizon worker of the same application.
+
+| The attempt ends when | It counts as |
+| --- | --- |
+| `handle()` returns | processed |
+| the job released itself, or middleware such as `WithoutOverlapping` released it | processed |
+| it throws, whether Laravel retries it or not | a failed attempt |
+| the job calls `$this->fail()`, or a delivery is past its tries | a failed attempt (`$this->fail()` counted as processed before PHP client 2.4.2) |
+| it outlives its timeout | a failed attempt, of about the timeout, written before Laravel kills the worker (not recorded before PHP client 2.4.2) |
 
 | Key of `config/queen.php` | Default | Meaning |
 | --- | --- | --- |
@@ -125,6 +146,46 @@ its [embedded proxy](/operate/tenants/#api-keys-and-roles) both treat as a read.
 route answers `403` or `404` does it fall back to a `getPrefix` through `POST /api/v1/kv`, the
 key/value route that also writes and needs read-write access. Before 2.0.0 the page used
 `getPrefix` alone, so a read-only token showed the metrics as unavailable.
+
+### Read them from a script
+
+The same route serves any HTTP client, with the same token. This sums the last hour per class,
+with `max_ms`, which the Jobs page does not show:
+
+```bash
+# Every key from the five-minute bucket of an hour ago on: keys sort by bucket.
+after="jobs/v1/$(printf '%010d' $(( $(date +%s) / 300 * 300 - 3600 )))"
+curl -s -X POST "$QUEEN_URL/api/v1/resources/kv/list" \
+  -H "Authorization: Bearer $QUEEN_READ_TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"namespace\":\"queen-metrics\",\"prefix\":\"jobs/v1/\",\"after\":\"$after\",\"limit\":1000}" |
+jq '[.rows[].value.classes | to_entries[]] | group_by(.key)
+    | map((map(.value.processed + .value.failed) | add) as $runs | {
+        class: .[0].key, runs: $runs, failed: (map(.value.failed) | add),
+        average_ms: ((map(.value.runtime_ms) | add) / $runs | floor),
+        max_ms: (map(.value.max_ms // 0) | max)})'
+```
+
+An answer with `"truncated": true` holds more rows: ask again with `after` set to its `nextAfter`.
+To end a window before now, drop the keys whose bucket is at or past its end. Keys expire after 25
+hours, so save a window you want to compare on another day.
+
+### Compare with Horizon
+
+Horizon's Metrics page shows each class's throughput and average runtime from the snapshots that
+`horizon:snapshot` takes, and keeps no history without that schedule. Its runtime runs from the
+job's reservation to its deletion, and an attempt that ends released is left out. Compare the
+averages over the same window, and keep three differences in mind:
+
+- Queen counts every attempt: a released one as processed, one that threw and is retried as
+  failed, both with their runtime. A class that `WithoutOverlapping` or a rate limiter releases
+  often shows more runs here, and shorter ones.
+- Queen's runtime includes the broker ACK, a few milliseconds, where Horizon's includes a Redis
+  delete. For short jobs, compare `max_ms` and the runs too.
+- An attempt that outlives its timeout counts here, as failed, since PHP client 2.4.2.
+
+Neither keeps percentiles. For a p50 or a p95, take per-job runtimes: Horizon's recent jobs carry
+them, and on Queen a [monitored tag](#monitored-tags) that the class's jobs carry from their
+`tags()` method records each job's runtime for `tags.retention_minutes`, at one write per job.
 
 ## Monitored tags
 

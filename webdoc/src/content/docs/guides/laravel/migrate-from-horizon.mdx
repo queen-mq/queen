@@ -63,6 +63,7 @@ sourceOfTruth:
 # user owns now names the owner and the reader and shows su and securityContext.runAsUser; its
 # checks and exit codes are unchanged, and the state directory stays the supervisor user's. Nothing
 # this page states changes.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider and JobMetricsRecorder now count timed-out attempts and $this->fail() as failed; the page links the monitoring section that compares runtimes with Horizon. Nothing else this page states changes.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place
@@ -116,10 +117,11 @@ workers: job tags and silenced jobs, wait-time notifications, retained throughpu
 snapshots, dashboard access and multi-host visibility, `horizon:clear`, the failed-job workflows in
 your runbooks, per-supervisor pause and continue, and any deploy automation that calls
 `horizon:terminate`. Queen covers tags, wait notifications, per-job metrics and multi-host
-visibility with its own [monitoring](/guides/laravel/monitoring/). Silenced jobs, job lists,
-batches in the dashboard, Slack and SMS routes and per-supervisor controls have no equivalent yet,
-so decide where each of those will live before the cutover. [Queen or
-Horizon](/guides/laravel/queen-vs-horizon/) compares the two feature by feature.
+visibility with its own [monitoring](/guides/laravel/monitoring/); to check that a class runs as
+fast on Queen, [compare its runtime with Horizon's](/guides/laravel/monitoring/#compare-with-horizon).
+Silenced jobs, job lists, batches in the dashboard, Slack and SMS routes and per-supervisor
+controls have no equivalent yet, so decide where each of those will live before the cutover.
+[Queen or Horizon](/guides/laravel/queen-vs-horizon/) compares the two feature by feature.
 
 ## Install Queen beside Horizon
 

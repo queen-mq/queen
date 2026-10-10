@@ -102,6 +102,18 @@ database has one, and how to run as the owner, such as
 themselves and the exit codes are unchanged: a probe must still run as the supervisor's user, and
 the Kubernetes guide now shows the probes wrapped in `su` for a container that starts as root.
 
+**Laravel job metrics: a timed-out attempt and a job that gives up with `fail()` count as failed.**
+A job that outlived its timeout was not recorded at all: Laravel's timeout handler raises
+`JobTimedOut`, then `WorkerStopping`, then kills the worker, and the recorder listened only to
+`JobProcessed` and `JobExceptionOccurred`. The Jobs page therefore missed those attempts, and a
+class's longest runs were missing from its runtime and from the `max_ms` that the tuning advice
+compares with `shutdown_grace`. Such an attempt is now a failed one, with its runtime, written at
+that `WorkerStopping` before the worker dies. A job that calls `$this->fail()` returns normally, and
+Laravel raises `JobProcessed` for it: it counted as processed, and now counts as a failed attempt.
+Since PHP client 1.7.0, where job metrics arrived. A forked worker also no longer writes counts it
+inherited from the fork server, under the server's key, if it stops before its first loop; Laravel's
+first loop already started them over, so no released version wrote them.
+
 ## PHP client 2.4.1 - 2026-10-09
 
 **Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the

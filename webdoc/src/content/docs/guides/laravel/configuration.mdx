@@ -66,6 +66,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (installation owner, PHP client 2.4.2): the launcher refuses an
 # installation another user owns, and SupervisorInstallCommand takes --owner. The native binary
 # section says so; the keys and defaults are unchanged.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider also listens to JobTimedOut and counts $this->fail() as failed; the job_metrics keys and defaults are unchanged. Nothing this page states changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. Since PHP client 2.1.0 the

@@ -8,6 +8,7 @@ use PHPUnit\Framework\TestCase;
 use Queen\Laravel\Dashboard\JobMetricsReader;
 use Queen\Laravel\Monitoring\JobMetricsRecorder;
 use Queen\Queen;
+use Queen\Tests\Support\MetricsBroker;
 use Queen\Tests\Support\PlanHandler;
 
 final class JobMetricsTest extends TestCase
@@ -95,6 +96,43 @@ final class JobMetricsTest extends TestCase
         $this->assertGreaterThanOrEqual(30, $counts['max_ms']);
         // Both runs took time, so a sum would reach runtime_ms.
         $this->assertLessThan($counts['runtime_ms'], $counts['max_ms'], 'one run, not the sum');
+    }
+
+    /**
+     * A preforked worker inherits its fork server's recorder. Laravel's first
+     * loop starts it over; a stop that came first wrote the counts it
+     * inherited, under the server's key.
+     */
+    public function testAForkedProcessThatStopsBeforeItsFirstJobWritesNothingItInherited(): void
+    {
+        if (!function_exists('pcntl_fork') || !function_exists('posix_kill')) {
+            $this->markTestSkipped('Needs ext-pcntl and ext-posix.');
+        }
+        $log = tempnam(sys_get_temp_dir(), 'qjm');
+        $broker = new MetricsBroker();
+        $broker->logTo($log);
+        $queen = $broker->queen();
+        $recorder = new JobMetricsRecorder(fn (): Queen => $queen, 'queen-metrics', fn (): float => $this->now);
+        // Written once, then a run not written yet.
+        $this->process($recorder, 'App\Jobs\A', false);
+        $this->process($recorder, 'App\Jobs\A', false);
+
+        $pid = pcntl_fork();
+        if ($pid === 0) {
+            try {
+                $recorder->flush();
+            } finally {
+                // No destructor or test may run here.
+                posix_kill(getmypid(), SIGKILL);
+            }
+        }
+        pcntl_waitpid($pid, $status);
+        $recorder->flush();
+        $writes = MetricsBroker::putsIn(MetricsBroker::logged($log));
+        unlink($log);
+
+        $this->assertSame([getmypid(), getmypid()], array_column($writes, 'pid'), 'the forked process wrote nothing');
+        $this->assertSame(2, $writes[1]['value']['classes']['App\Jobs\A']['processed']);
     }
 
     public function testACacheThatCannotBeResolvedCostsOnlyTheCache(): void
