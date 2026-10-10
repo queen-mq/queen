@@ -5,6 +5,7 @@ namespace Queen\Http;
 use GuzzleHttp\Client;
 use GuzzleHttp\Handler\CurlMultiHandler;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Promise\RejectedPromise;
 use GuzzleHttp\Promise\Promise;
 use GuzzleHttp\Promise\PromiseInterface;
 use GuzzleHttp\Promise\Utils as PromiseUtils;
@@ -160,7 +161,7 @@ class HttpClient
 
     public function getAsync(string $path, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): PromiseInterface
     {
-        return $this->executeRequestAsync($this->resolveUrl($affinityKey) . $path, 'GET', null, $requestTimeoutMillis);
+        return $this->requestAsyncReportingHealth('GET', $path, null, $requestTimeoutMillis, $affinityKey);
     }
 
     /**
@@ -187,17 +188,54 @@ class HttpClient
 
     public function postAsync(string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): PromiseInterface
     {
-        return $this->executeRequestAsync($this->resolveUrl($affinityKey) . $path, 'POST', $body, $requestTimeoutMillis);
+        return $this->requestAsyncReportingHealth('POST', $path, $body, $requestTimeoutMillis, $affinityKey);
     }
 
     public function putAsync(string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): PromiseInterface
     {
-        return $this->executeRequestAsync($this->resolveUrl($affinityKey) . $path, 'PUT', $body, $requestTimeoutMillis);
+        return $this->requestAsyncReportingHealth('PUT', $path, $body, $requestTimeoutMillis, $affinityKey);
     }
 
     public function deleteAsync(string $path, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): PromiseInterface
     {
-        return $this->executeRequestAsync($this->resolveUrl($affinityKey) . $path, 'DELETE', null, $requestTimeoutMillis);
+        return $this->requestAsyncReportingHealth('DELETE', $path, null, $requestTimeoutMillis, $affinityKey);
+    }
+
+    /**
+     * One try against one backend, as before, but its outcome now reaches
+     * the balancer as a synchronous request's does: a backend that does not
+     * answer, or answers 5xx, is marked unhealthy, so the next request (the
+     * next poll round of a consume() with concurrency > 1) goes to another
+     * one instead of back to it for as long as the caller runs.
+     */
+    private function requestAsyncReportingHealth(
+        string $method,
+        string $path,
+        ?array $body,
+        ?int $requestTimeoutMillis,
+        ?string $affinityKey,
+    ): PromiseInterface {
+        $url = $this->resolveUrl($affinityKey);
+        $promise = $this->executeRequestAsync($url . $path, $method, $body, $requestTimeoutMillis);
+        $loadBalancer = $this->loadBalancer;
+        if ($loadBalancer === null) {
+            return $promise;
+        }
+
+        return $promise->then(
+            function (mixed $result) use ($loadBalancer, $url): mixed {
+                $loadBalancer->markHealthy($url);
+                return $result;
+            },
+            function (mixed $reason) use ($loadBalancer, $url): PromiseInterface {
+                $statusCode = $reason instanceof \Throwable ? $this->getStatusCode($reason) : 0;
+                if ($statusCode === 0 || $statusCode >= 500) {
+                    $loadBalancer->markUnhealthy($url);
+                }
+
+                return new RejectedPromise($reason);
+            },
+        );
     }
 
     // ===========================

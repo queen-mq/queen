@@ -124,6 +124,43 @@ class HttpClientTest extends TestCase
         $this->assertCount(3, array_unique($handler->hosts()), 'a backend was tried twice while another was never tried');
     }
 
+    /**
+     * consume() with concurrency > 1 polls with getAsync(): one try, no
+     * failover in flight. It must still tell the balancer, or the next round
+     * goes back to the same dead backend for as long as the consumer runs.
+     */
+    public function testAnAsyncRequestThatFailsSendsTheNextOneToAnotherBackend(): void
+    {
+        $hosts = [];
+        $dead = null;
+        $handler = static function (\Psr\Http\Message\RequestInterface $request) use (&$hosts, &$dead): \GuzzleHttp\Promise\PromiseInterface {
+            $host = $request->getUri()->getHost();
+            $hosts[] = $host;
+            $dead ??= $host;
+            if ($host === $dead) {
+                return \GuzzleHttp\Promise\Create::rejectionFor(
+                    new \GuzzleHttp\Exception\ConnectException('cURL error 7: Connection refused', $request),
+                );
+            }
+
+            return new \GuzzleHttp\Promise\FulfilledPromise(new \GuzzleHttp\Psr7\Response(204));
+        };
+        $loadBalancer = new LoadBalancer(['http://queen-a:6632', 'http://queen-b:6632'], 'affinity');
+        $client = new HttpClient([
+            'loadBalancer' => $loadBalancer,
+            'handler' => HandlerStack::create($handler),
+        ]);
+        $pop = '/api/v1/pop/queue/orders?wait=true&timeout=100';
+
+        $first = HttpClient::settleAll([$client->getAsync($pop, 1_000, 'orders:*:workers')]);
+        $second = HttpClient::settleAll([$client->getAsync($pop, 1_000, 'orders:*:workers')]);
+
+        $this->assertSame('rejected', $first[0]['state']);
+        $this->assertSame('fulfilled', $second[0]['state'], 'the next poll went back to the dead backend');
+        $this->assertNotSame($hosts[0], $hosts[1]);
+        $this->assertFalse($loadBalancer->getHealthStatus()["http://{$dead}:6632"]['healthy']);
+    }
+
     public function testAsyncFailoverDoesNotForwardCredentialsAcrossARedirect(): void
     {
         $handler = new PlanHandler([
