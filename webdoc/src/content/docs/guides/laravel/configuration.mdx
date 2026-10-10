@@ -57,6 +57,7 @@ sourceOfTruth:
 # connection's, a connection's url is not replaced by the default urls, every switch variable
 # takes 1; the failed-job provider leaves other drivers' records to Laravel. The bullets, the urls
 # row and the pool table say so.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider also listens to JobTimedOut and counts $this->fail() as failed; the job_metrics keys and defaults are unchanged. Nothing this page states changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. Since PHP client 2.1.0 the

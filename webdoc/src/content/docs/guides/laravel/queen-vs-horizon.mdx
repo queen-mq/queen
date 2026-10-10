@@ -54,6 +54,7 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-09 (review fixes): the crash-loop circuit closes only with the
 # probe in both engines, as the table says; the failed-job provider leaves other drivers' records
 # to Laravel. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): JobMetricsRecorder::flush() starts over in a forked process, and timed-out attempts and $this->fail() count as failed; the page still describes live per-class metrics over up to a day. Nothing this page states changes.
 ---
 
 Queen is an alternative to Horizon and its Redis queue. Both run ordinary Laravel jobs and both

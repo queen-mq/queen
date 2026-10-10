@@ -77,6 +77,7 @@ sourceOfTruth:
 # probe and reads its fork servers' events once per loop; the dashboard config reads
 # QUEEN_DASHBOARD_ENABLED through filter_var, so 1 turns it on. Nothing else this page states
 # changes.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider records timed-out attempts and $this->fail() as failed attempts, so max_ms now covers a run cut by its timeout; the deploy advice still compares max_ms with shutdown_grace as stated. Nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the

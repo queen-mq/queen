@@ -67,6 +67,7 @@ sourceOfTruth:
 # pool takes its connection's queue and consumer_group; the connector scopes the pool's
 # environment to the worked connection. Nothing this page states changes; the versions table gains
 # 2.4.1 at its release.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider changes only the job-metrics listeners (timed-out attempts and $this->fail() count as failed). Nothing this page states changes.
 ---
 
 Queen can take over two jobs in a Horizon setup: holding the jobs, which Redis does today, and
