@@ -75,6 +75,37 @@ REFERENCE = "horizon"
 PREFORK_MODES = ("on", "off")
 
 
+# Settings a stack lays over every lane, after the scenario's: "*" for every engine, then the
+# engine's own. `cb3` is cb3's production layout: pools that balance by backlog, more than one
+# queue per pool (routed: BENCH_ROUTED_BALANCE), the command-line opcache on. The image decides
+# Laravel and PHP (BENCH_LARAVEL_VERSION, BENCH_PHP_VERSION at build time).
+STACKS: dict[str, dict[str, dict[str, str]]] = {
+    "default": {},
+    "cb3": {
+        "*": {
+            "BENCH_OPCACHE_CLI": "1", "BENCH_PROFILE": "auto", "BENCH_QUEUES": "benchmark,benchmark-low",
+            "BENCH_WORKERS": "2", "BENCH_MIN_WORKERS": "2", "BENCH_MAX_WORKERS": "4",
+            "BENCH_ROUTED_BALANCE": "auto", "BENCH_APP_MEMORY": "2048m",
+        },
+        # Horizon's minProcesses counts per queue: one for each of the two is Queen's two per pool.
+        "horizon": {"BENCH_MIN_WORKERS": "1"},
+    },
+}
+
+
+def stack_env(stack: str, profile: Profile) -> dict[str, str]:
+    layers = STACKS[stack]
+    return {**layers.get("*", {}), **layers.get(profile.engine, {})}
+
+
+def stack_versions(config_json: str, supervisor: str = "") -> dict:
+    """What a lane ran on, from `bench:config` and `queen-supervisor --version`."""
+    config = json.loads(config_json)
+    versions = {key: config.get(key) for key in ("php", "laravel", "horizon", "queen_client", "opcache_cli")}
+    versions["supervisor"] = supervisor.strip().removeprefix("queen-supervisor ") or None
+    return versions
+
+
 def lane_profiles(names: list[str], prefork: list[str]) -> list[Profile]:
     """Each Queen profile once per prefork mode; Horizon, which has no prefork, once.
     With prefork on a profile keeps its name, so earlier runs stay comparable."""
@@ -1121,13 +1152,18 @@ PARITY_SCENARIOS = ("job-timeout", "memory-limit", "stop-short", "stop-lease", "
                     "laravel-parity", "routed-parity")
 
 
-def run_lane(scenario: Scenario, profile: Profile, output: Path, only: frozenset[str] = frozenset()) -> dict:
-    lane = Lane(scenario.name, profile, scenario.env_for(profile), output, only)
+def run_lane(scenario: Scenario, profile: Profile, output: Path, only: frozenset[str] = frozenset(),
+             stack: str = "default") -> dict:
+    lane = Lane(scenario.name, profile, {**scenario.env_for(profile), **stack_env(stack, profile)}, output, only)
     print(f"\n== {scenario.name} / {profile.name} ({lane.project})", flush=True)
     result: dict = {"scenario": scenario.name, "profile": profile.name, "run_id": lane.run_id,
-                    "settings": {key: lane.env[key] for key in sorted(LANE_SETTINGS) if key in lane.env}}
+                    "settings": {key: lane.env[key] for key in sorted(LANE_SETTINGS) if key in lane.env},
+                    "stack": {"name": stack, "image": APP_IMAGE}}
     try:
         lane.up(scenario.replicas, scenario.prepare)
+        supervisor = "" if profile.engine != "queen-rust" else lane.docker(
+            "exec", lane.container(profile.engine), "queen-supervisor", "--version", check=False).stdout
+        result["stack"].update(stack_versions(lane.artisan("bench:config").stdout, supervisor))
         checks = scenario.run(lane)
         result["checks"] = [check.__dict__ for check in checks]
         result["passed"] = all(check.passed for check in checks)
@@ -1166,7 +1202,8 @@ def summary(results: list[dict]) -> str:
 
 # The settings a lane's result records, to tell its prefork mode, lease and layout apart.
 LANE_SETTINGS = ("BENCH_QUEEN_PREFORK", "BENCH_ROUTED", "BENCH_RETRY_AFTER", "BENCH_TIMEOUT", "BENCH_WORKERS",
-                 "QUEEN_PREFETCH", "BENCH_QUEEN_LEASE_SERVICE", "BENCH_QUEEN_COORDINATION")
+                 "QUEEN_PREFETCH", "BENCH_QUEEN_LEASE_SERVICE", "BENCH_QUEEN_COORDINATION", "BENCH_PROFILE",
+                 "BENCH_QUEUES", "BENCH_MIN_WORKERS", "BENCH_MAX_WORKERS", "BENCH_ROUTED_BALANCE", "BENCH_OPCACHE_CLI")
 
 
 def as_map(value: object) -> dict:
@@ -1252,6 +1289,8 @@ def main() -> int:
                              "named <profile>-prefork-off (default: on)")
     parser.add_argument("--only", default="",
                         help="run only these compatibility scenarios of a compatibility lane, by name")
+    parser.add_argument("--stack", default="default", choices=sorted(STACKS),
+                        help="settings laid over every lane: cb3 is cb3's production layout (default: default)")
     parser.add_argument("--build", action="store_true", help="rebuild the application image first")
     args = parser.parse_args()
 
@@ -1271,7 +1310,7 @@ def main() -> int:
     rows: list[dict] = []
     for scenario in (s for s in SCENARIOS if s.name in wanted):
         for profile in lane_profiles(args.profiles.split(","), prefork):
-            results.append(run_lane(scenario, profile, args.output, only))
+            results.append(run_lane(scenario, profile, args.output, only, args.stack))
             (args.output / "summary.md").write_text(summary(results), encoding="utf-8")
             rows = parity(results)
             (args.output / "parity.md").write_text(parity_markdown(rows), encoding="utf-8")

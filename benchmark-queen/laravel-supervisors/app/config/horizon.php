@@ -28,17 +28,20 @@ $supervisor = [
 $supervisors = ['bench' => $supervisor];
 if ($benchmark['routed']) {
     // The routed lanes: one Horizon supervisor per pool, on its `redis-<pool>`
-    // connection, with the pool's timeout and tries. No balancing: every
+    // connection, with the pool's timeout and tries. Balance off: every
     // worker works the pool's queues in order, as the Queen pools do.
+    // Balance auto: Horizon's minProcesses counts per queue, Queen's
+    // min_processes per pool, so a pool's minimum is shared out by queue.
+    $auto = $benchmark['routed_balance'] === 'auto';
     $supervisors = [];
     foreach ($benchmark['routed_pools'] as $name => $settings) {
         $supervisors[$name] = array_replace($supervisor, [
             'connection' => "redis-{$name}",
             'queue' => $settings['queues'],
-            'balance' => false,
-            'processes' => $settings['processes'],
-            'minProcesses' => $settings['processes'],
-            'maxProcesses' => $settings['processes'],
+            'balance' => $auto ? 'auto' : false,
+            'processes' => $settings['max'],
+            'minProcesses' => $auto ? max(1, intdiv($settings['min'], count($settings['queues']))) : $settings['min'],
+            'maxProcesses' => $settings['max'],
             'timeout' => $settings['timeout'],
             'tries' => $settings['tries'],
         ]);

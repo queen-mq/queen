@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 import unittest
@@ -215,6 +216,42 @@ class LaneProfilesTest(unittest.TestCase):
         self.assertEqual("60", scenario.env_for(matrix.PROFILES["horizon"])["BENCH_TIMEOUT"])
         self.assertEqual("30", scenario.env_for(matrix.PROFILES["queen-rust"])["BENCH_RETRY_AFTER"])
         self.assertEqual("25", scenario.env_for(matrix.PROFILES["queen-rust"])["BENCH_TIMEOUT"])
+
+
+class StackTest(unittest.TestCase):
+    def test_the_default_stack_changes_no_lane(self) -> None:
+        self.assertEqual({}, matrix.stack_env("default", matrix.PROFILES["queen-rust"]))
+
+    def test_cb3_balances_by_backlog_over_two_queues_with_the_cli_opcache_on_every_engine(self) -> None:
+        queen = matrix.stack_env("cb3", matrix.PROFILES["queen-rust"])
+        horizon = matrix.stack_env("cb3", matrix.PROFILES["horizon"])
+
+        for env in (queen, horizon):
+            self.assertEqual(("auto", "auto", "1"), (env["BENCH_PROFILE"], env["BENCH_ROUTED_BALANCE"],
+                                                     env["BENCH_OPCACHE_CLI"]))
+            self.assertGreater(len(env["BENCH_QUEUES"].split(",")), 1)
+        self.assertEqual("2", queen["BENCH_MIN_WORKERS"])
+        self.assertEqual("1", horizon["BENCH_MIN_WORKERS"], "Horizon's minProcesses counts per queue")
+
+    def test_a_stack_setting_wins_over_the_scenario_and_the_lane(self) -> None:
+        scenario = next(s for s in matrix.SCENARIOS if s.name == "laravel-parity")
+        profile = matrix.PROFILES["horizon"]
+
+        lane = matrix.Lane("s", profile, {**scenario.env_for(profile), **matrix.stack_env("cb3", profile)}, Path("/tmp"))
+
+        self.assertEqual("1", lane.env["BENCH_OPCACHE_CLI"], "the lane alone turns it off on Horizon")
+        self.assertEqual("4", lane.env["BENCH_MAX_WORKERS"])
+        self.assertEqual("database", lane.env["BENCH_CACHE_STORE"])
+
+    def test_stack_versions_come_from_bench_config_and_the_supervisor(self) -> None:
+        config = json.dumps({"php": "8.4.13", "laravel": "v11.55.1", "horizon": "v5.48.3",
+                             "queen_client": "dev-main", "opcache_cli": True, "benchmark": {}})
+
+        self.assertEqual({"php": "8.4.13", "laravel": "v11.55.1", "horizon": "v5.48.3", "queen_client": "dev-main",
+                          "opcache_cli": True, "supervisor": "0.8.0"},
+                         matrix.stack_versions(config, "queen-supervisor 0.8.0\n"))
+        self.assertIsNone(matrix.stack_versions(config)["supervisor"])
+        self.assertIsNone(matrix.stack_versions("{}")["opcache_cli"], "an older image reports no opcache")
 
 
 def outcome(same: dict | None = None, near: dict | None = None) -> dict:

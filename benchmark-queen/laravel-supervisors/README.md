@@ -440,6 +440,28 @@ python3 scripts/failure_matrix.py --output results/parity-$(date -u +%Y%m%dT%H%M
   --scenarios parity --profiles horizon,queen-php,queen-rust --prefork on,off
 ```
 
+Another stack is a build and a switch; unset, both keep the campaigns'
+Laravel 12 on PHP 8.3. The build arguments `BENCH_PHP_VERSION`,
+`BENCH_LARAVEL_VERSION`, `BENCH_HORIZON_VERSION` and `BENCH_COMPOSER_VERSION`
+resolve another Laravel at build time instead of the committed lock. Composer
+2.9 and later refuse a Laravel with a security advisory, and every Laravel 11
+has one: `BENCH_COMPOSER_ADVISORY_IGNORE_IDS` lets the named advisories
+through, for a test image only. `--stack cb3` lays cb3's layout over every
+lane: pools that balance by backlog over more than one queue, routed pools
+like cb3's (`BENCH_ROUTED_BALANCE=auto`), and the command-line opcache on.
+Each lane's JSON records the PHP, Laravel, Horizon and supervisor versions it
+ran:
+
+```console
+BENCH_APP_IMAGE=queen-laravel-supervisor-bench:parity-l11 BENCH_PHP_VERSION=8.4 \
+BENCH_COMPOSER_VERSION=2.10.3 BENCH_LARAVEL_VERSION=11.55.1 BENCH_HORIZON_VERSION=5.48.3 \
+BENCH_COMPOSER_ADVISORY_IGNORE_IDS="PKSA-d5tc-s1qs-h781 PKSA-m5cs-t1y6-qpcs PKSA-3r5d-mb8f-1qw9 PKSA-mdq4-51ck-6kdq" \
+docker compose --file compose.raft.yml --profile tools build producer
+BENCH_APP_IMAGE=queen-laravel-supervisor-bench:parity-l11 BENCH_BROKER_IMAGE=ghcr.io/queen-mq/queen:2.0.4 \
+python3 scripts/failure_matrix.py --output results/parity-l11 --stack cb3 --prefork on \
+  --scenarios death-timeout,death-sigkill,death-release-timeout,death-release-sigkill,routed-parity
+```
+
 ## Requirements
 
 - Docker Engine with Compose v2, profiles, health-condition dependencies and

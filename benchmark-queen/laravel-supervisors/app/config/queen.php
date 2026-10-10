@@ -44,21 +44,22 @@ if ($benchmark['routed']) {
     // their connection's. Balance off: every worker of a pool works its
     // queues in order, as Horizon's `balance => false` does, so all of them
     // serve the first queue, where the compatibility scenarios dispatch.
+    // Balance auto: cb3's, workers follow each queue's backlog.
     $supervisors = [];
     foreach ($benchmark['routed_pools'] as $name => $settings) {
         $supervisors[$name] = array_diff_key(array_replace($pool, [
             'connection' => "queen-{$name}",
             'queues' => array_map(static fn (string $queue): string => 'cb-backend.' . config('app.env') . ".{$queue}", $settings['queues']),
-            'balance' => 'off',
-            'processes' => $settings['processes'],
-            'min_processes' => $settings['processes'],
-            'max_processes' => $settings['processes'],
+            'balance' => $benchmark['routed_balance'],
+            'processes' => $settings['min'],
+            'min_processes' => $settings['min'],
+            'max_processes' => $settings['max'],
             'timeout' => $settings['timeout'],
             'retry_after' => $settings['retry_after'],
             'tries' => $settings['tries'],
         ]), ['consumer_group' => true]);
     }
-    $workers = array_sum(array_column($benchmark['routed_pools'], 'processes'));
+    $workers = array_sum(array_column($benchmark['routed_pools'], 'max'));
     // cb3's 330 s: the longest pool timeout, 300 s, and 30 s more.
     $shutdownGrace = max(array_column($benchmark['routed_pools'], 'timeout')) + 30;
 }

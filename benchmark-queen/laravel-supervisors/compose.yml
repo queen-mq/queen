@@ -82,6 +82,14 @@ x-app: &app
   build:
     context: ../..
     dockerfile: benchmark-queen/laravel-supervisors/Dockerfile
+    # The stack under test; unset, the committed lock (Laravel 12, PHP 8.3).
+    args:
+      BENCH_PHP_VERSION: ${BENCH_PHP_VERSION:-8.3}
+      BENCH_COMPOSER_VERSION: ${BENCH_COMPOSER_VERSION:-2.8.10}
+      PHP_REDIS_VERSION: ${BENCH_PHP_REDIS_VERSION:-6.1.0}
+      BENCH_LARAVEL_VERSION: ${BENCH_LARAVEL_VERSION:-}
+      BENCH_HORIZON_VERSION: ${BENCH_HORIZON_VERSION:-5.48.3}
+      BENCH_COMPOSER_ADVISORY_IGNORE_IDS: ${BENCH_COMPOSER_ADVISORY_IGNORE_IDS:-}
   user: "1000:1000"
   working_dir: /workspace/benchmark-queen/laravel-supervisors/app
   init: true
