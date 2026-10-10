@@ -16,6 +16,30 @@ backoff no longer closes it, which only the probe does, as in the PHP engine. Th
 longer lets a pool that balances inherit its own `QUEEN_LARAVEL_BLOCK_FOR`. These changes need a
 supervisor release; the worker-invocation record pins them.
 
+**Laravel: a supervised worker that cannot consume leaves, or says so.** Laravel's worker catches
+what a pop throws, reports it, sleeps a second and pops again, for as long as it lives, so a worker
+whose every pop failed stayed alive and counted as capacity: with the PHP client 2.3.1, forked
+workers that popped from a default connection that only dispatched threw on every pop for half an
+hour while `queen:supervisor status` said ready, at full capacity, with closed circuits. A worker
+started by either engine, spawned or forked, now tells two cases apart. When its loop works
+another connection than its pool's, or a pop on the pool's connection throws a `LogicException`
+(`InvalidArgumentException` included), no retry can help: it throws `WorkerCannotConsume` from its
+next loop, which reaches the application's exception handler, and exits 1, which both engines
+count as a crash, so the pool's restarts back off and its circuit opens. Any other failure, a
+broker that is down, slow or refusing, leaves the worker running, since restarting every worker of
+every pool would turn a short outage into a restart storm: the worker writes `<pid>.pop-failures`
+in the state directory's private `exits` directory, saying since when its pops fail, and the first
+pop that works, empty or not, removes it. A healthy worker writes nothing. `SupervisorState`
+reads the file for the workers a pool lists: `readiness()` reports `pool_not_consuming` when every
+running worker of a pool has failed every pop for 60 seconds, and `capacityHealth()` reports
+`pool_worker_not_consuming` when any has, so `queen:supervisor status --check` and
+`--check-capacity` fail; a shorter outage reports nothing, and the issues clear on their own.
+`status --json` lists those workers on each entry of `pool_status`, in `not_consuming` with the
+longest in `not_consuming_seconds`, however short their failure, for monitors with thresholds of
+their own. It works with the supervisor 0.8.0: both engines already pass the directory to their
+workers and empty it for every generation. The issue codes `status --json` reports are now listed
+in the supervisor guide as a stable contract.
+
 ## PHP client 2.4.1 - 2026-10-09
 
 **Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the

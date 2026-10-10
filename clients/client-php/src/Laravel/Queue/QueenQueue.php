@@ -13,6 +13,7 @@ use JsonException;
 use Queen\Builders\QueueBuilder;
 use Queen\Exceptions\HttpException;
 use Queen\Laravel\Contracts\QueenPartitionable;
+use Queen\Laravel\Supervisor\WorkerPopGuard;
 use Queen\Queen;
 use Queen\Support\Uuid;
 use RuntimeException;
@@ -111,6 +112,9 @@ class QueenQueue extends BaseQueue implements QueueContract
     /** The process that consumes; a child it forks must not settle its work. */
     private ?int $consumerPid = null;
 
+    /** Under a supervisor, on the pool's connection: hears how each pop went. */
+    private ?WorkerPopGuard $popGuard = null;
+
     /**
      * @param (\Closure(string, \Closure(): mixed): mixed)|null $failedJobRetryHandler
      * @param (\Closure(): Queen)|null $shutdownClient The client for the one
@@ -154,6 +158,12 @@ class QueenQueue extends BaseQueue implements QueueContract
     public function setContainer(Container $container): void
     {
         parent::setContainer($container);
+
+        // QueueManager names the connection before it injects the container.
+        if ($this->popGuard === null && $container->bound(WorkerPopGuard::class)) {
+            $guard = $container->make(WorkerPopGuard::class);
+            $this->popGuard = $guard->watches($this->getConnectionName()) ? $guard : null;
+        }
 
         if ($this->workerStoppingListenerRegistered || !$container->bound('events')) {
             return;
@@ -532,6 +542,24 @@ class QueenQueue extends BaseQueue implements QueueContract
     }
 
     public function pop($queue = null): ?QueenJob
+    {
+        if ($this->popGuard === null) {
+            return $this->popJob($queue);
+        }
+        try {
+            $job = $this->popJob($queue);
+        } catch (\Throwable $error) {
+            // Laravel's worker reports it and pops again; the guard decides
+            // whether the worker should leave or say it is not consuming.
+            $this->popGuard->popFailed($error);
+            throw $error;
+        }
+        $this->popGuard->popped();
+
+        return $job;
+    }
+
+    private function popJob(?string $queue): ?QueenJob
     {
         if ($this->shutDown) {
             throw new RuntimeException('Queen Laravel queue connection cannot pop after worker shutdown began.');
