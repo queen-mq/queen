@@ -3,6 +3,7 @@
 namespace Queen\Laravel\Commands;
 
 use Illuminate\Console\Command;
+use Queen\Laravel\Supervisor\ProcessIdentity;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
 use Queen\Laravel\Supervisor\SupervisorState;
 use RuntimeException;
@@ -32,7 +33,9 @@ class SupervisorControlCommand extends Command
             return self::INVALID;
         }
         try {
-            return $this->handleState(new SupervisorState($directory));
+            // The identity is resolved from the container so that a test can
+            // play root, as a Kubernetes exec probe often runs.
+            return $this->handleState(new SupervisorState($directory, $this->laravel->make(ProcessIdentity::class)));
         } catch (RuntimeException $error) {
             $this->components->error($error->getMessage());
 
@@ -60,6 +63,7 @@ class SupervisorControlCommand extends Command
             $status['readiness_issues'] = $readiness['issues'];
             $status['processing_healthy'] = $capacity['healthy'];
             $status['processing_health_issues'] = $capacity['issues'];
+            $status = $state->withWorkersNotConsuming($status);
             if ($this->option('json')) {
                 $this->line(json_encode($status, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
             } else {

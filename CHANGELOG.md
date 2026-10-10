@@ -16,6 +16,104 @@ backoff no longer closes it, which only the probe does, as in the PHP engine. Th
 longer lets a pool that balances inherit its own `QUEEN_LARAVEL_BLOCK_FOR`. These changes need a
 supervisor release; the worker-invocation record pins them.
 
+**Laravel: a supervised worker that cannot consume leaves, or says so.** Laravel's worker catches
+what a pop throws, reports it, sleeps a second and pops again, for as long as it lives, so a worker
+whose every pop failed stayed alive and counted as capacity: with the PHP client 2.3.1, forked
+workers that popped from a default connection that only dispatched threw on every pop for half an
+hour while `queen:supervisor status` said ready, at full capacity, with closed circuits. A worker
+started by either engine, spawned or forked, now tells two cases apart. When its loop works
+another connection than its pool's, or a pop on the pool's connection throws a `LogicException`
+(`InvalidArgumentException` included), no retry can help: it throws `WorkerCannotConsume` from its
+next loop, which reaches the application's exception handler, and exits 1, which both engines
+count as a crash, so the pool's restarts back off and its circuit opens. Any other failure, a
+broker that is down, slow or refusing, leaves the worker running, since restarting every worker of
+every pool would turn a short outage into a restart storm: the worker writes `<pid>.pop-failures`
+in the state directory's private `exits` directory, saying since when its pops fail, and the first
+pop that works, empty or not, removes it. A healthy worker writes nothing. `SupervisorState`
+reads the file for the workers a pool lists: `readiness()` reports `pool_not_consuming` when every
+running worker of a pool has failed every pop for 60 seconds, and `capacityHealth()` reports
+`pool_worker_not_consuming` when any has, so `queen:supervisor status --check` and
+`--check-capacity` fail; a shorter outage reports nothing, and the issues clear on their own.
+`status --json` lists those workers on each entry of `pool_status`, in `not_consuming` with the
+longest in `not_consuming_seconds`, however short their failure, for monitors with thresholds of
+their own. It works with the supervisor 0.8.0: both engines already pass the directory to their
+workers and empty it for every generation. The issue codes `status --json` reports are now listed
+in the supervisor guide as a stable contract.
+
+What an application sees change: a supervised worker may now exit 1 with `WorkerCannotConsume`
+where it used to loop on the same exception; workers write `exits/<pid>.pop-failures` in the state
+directory while their pops fail; and `readiness()` and `capacityHealth()`, with `status --check`
+and `--check-capacity`, report two new codes, `pool_not_consuming` and
+`pool_worker_not_consuming`. A readiness probe that passed during a broker outage now fails once
+the outage lasts 60 seconds; the Kubernetes guide shows how to leave these codes out of a probe
+that must not stop a rollout.
+
+**Laravel: a delivery that carries no Laravel job goes to the dead-letter queue at once.** A
+message whose data is not a JSON object, or names no `job` to call, made `pop()` throw, and the
+delivery was left to its lease. A lease expiry never charges the queue's retry limit, which only a
+failed ACK does (checked on the 2.0.4 broker with `retryLimit` 3 and `dlqAfterMaxRetries`: six
+expiries, six deliveries, no dead letter), so it came back at every expiry, forever, and the
+messages behind it on its partition never ran; on a queue with one partition, none did. The worker
+now files it into the dead-letter queue at its first delivery, as it does a failed job, reports a
+`NotALaravelJobException` to the application's exception handler with the delivery's transaction ID,
+queue, partition, delivery attempt and first 120 bytes, the same text as the dead-letter error, and
+pops again. No `failed_jobs` row is written: it was never a Laravel job. Since the PHP client 1.0.
+A Laravel job that fails for the last time also goes to the dead-letter queue, as before, beside
+its `failed_jobs` row, so a count of dead letters includes ordinary failures: the error text
+"carries no Laravel job" tells the deliveries of this paragraph from them.
+
+**Laravel: a job whose timeout its lease cannot cover ends a supervised worker.** A job with a
+`timeout` at or above `retry_after`, without lease renewal, made `pop()` throw a
+`RuntimeException` and was left to its lease, silently, at every delivery. Only a deploy fixes the
+job class or the connection, so the exception is now an `UnsafeJobTimeoutException`, a
+`LogicException` with the same message, and a worker started by a supervisor leaves at its next
+loop: its pool's restarts back off and the crash shows in `queen:supervisor status`. The delivery
+waits, to lease expiry, for a worker that runs the fixed code.
+
+**Laravel: a refused supervisor installation says why, and root can install it for the user that
+runs it.** The launcher starts the Rust supervisor only when the user it runs as owns each
+directory and file of the installation. Otherwise it stopped with exit code 70 and "The Queen
+supervisor installation base must be a real, owned directory without group/world write access.",
+which named neither the condition that failed nor the way out, since PHP client 1.3.0. An image
+that ran `queen:supervisor-install` as root and the supervisor as `www-data` stopped there, and so
+did the Dockerfile of the Kubernetes guide. The message now goes on with the path and the
+condition: missing, a symbolic link, not a directory, a mode that grants group or world write
+access, or another owner than the effective user, with both users by uid and name and the ways
+out. The binary, the receipt and the installer's own refusals do the same; the first sentence and
+the exit code are unchanged. `queen:supervisor-install --owner=<user>`, a name or a numeric uid,
+lets root install and verify as itself and then give the installation to that user, with the
+modes a normal install gives. It changes the owners from the files up to the base with `lchown()`,
+below the pinned base, so no other user can swap an entry before it changes. It is refused without
+root, for a user that does not exist, and on a thread-safe PHP, whose `chdir()` pins the base by
+name only. In a multi-stage build, `COPY --chown` gives the copied installation to the runtime
+user, as the Kubernetes guide now shows.
+
+**Laravel: a refused state says whose it is and whom to run as.** A Kubernetes exec probe runs as
+the container's user. In a container that starts as root and runs the supervisor as `www-data`,
+`queen:supervisor status --check` refused the state with "Queen supervisor state ancestor
+[/run/queen-supervisor] must be owned by root or the current user." and nothing else: the message
+did not say that the directory is `www-data`'s, that the probe ran as root, or that root is refused
+by design. The probe failed and Kubernetes restarted a healthy pod every few minutes. Since PHP
+client 1.3.0, where the supervisor arrived. Every refusal of a path that another user owns, root
+included, now goes on to say who owns it and who is asking, by uid and by name when the user
+database has one, and how to run as the owner, such as
+`su -s /bin/sh www-data -c "php artisan queen:supervisor status --check"` or
+`securityContext.runAsUser: 33` on the container. The first sentence of each message, the checks
+themselves and the exit codes are unchanged: a probe must still run as the supervisor's user, and
+the Kubernetes guide now shows the probes wrapped in `su` for a container that starts as root.
+
+**Laravel job metrics: a timed-out attempt and a job that gives up with `fail()` count as failed.**
+A job that outlived its timeout was not recorded at all: Laravel's timeout handler raises
+`JobTimedOut`, then `WorkerStopping`, then kills the worker, and the recorder listened only to
+`JobProcessed` and `JobExceptionOccurred`. The Jobs page therefore missed those attempts, and a
+class's longest runs were missing from its runtime and from the `max_ms` that the tuning advice
+compares with `shutdown_grace`. Such an attempt is now a failed one, with its runtime, written at
+that `WorkerStopping` before the worker dies. A job that calls `$this->fail()` returns normally, and
+Laravel raises `JobProcessed` for it: it counted as processed, and now counts as a failed attempt.
+Since PHP client 1.7.0, where job metrics arrived. A forked worker also no longer writes counts it
+inherited from the fork server, under the server's key, if it stops before its first loop; Laravel's
+first loop already started them over, so no released version wrote them.
+
 ## PHP client 2.4.1 - 2026-10-09
 
 **Laravel prefork: a forked worker works the connection it was given.** The supervisor sends the

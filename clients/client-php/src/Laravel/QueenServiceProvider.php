@@ -21,6 +21,7 @@ use Queen\Laravel\Queue\QueenQueue;
 use Illuminate\Queue\Events\JobExceptionOccurred;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
+use Illuminate\Queue\Events\JobTimedOut;
 use Illuminate\Queue\Events\Looping;
 use Illuminate\Queue\Events\WorkerStopping;
 use Queen\Laravel\Dashboard\ThroughputReader;
@@ -32,6 +33,7 @@ use Queen\Laravel\Queue\SyncedFailedJobProvider;
 use Queen\Laravel\Supervisor\SupervisorConfiguration;
 use Queen\Laravel\Supervisor\SupervisorState;
 use Queen\Laravel\Supervisor\WorkerExitMarker;
+use Queen\Laravel\Supervisor\WorkerPopGuard;
 use Queen\Laravel\Supervisor\WorkerTelemetry;
 use Queen\Queen;
 use RuntimeException;
@@ -589,6 +591,8 @@ class QueenServiceProvider extends ServiceProvider
         // Under a supervisor: tell the master when Laravel's job timeout, or
         // --memory after a job, ends this worker, so it counts no crash.
         WorkerExitMarker::listenFromEnvironment($this->app['events']);
+        // Under a supervisor: a worker that cannot consume leaves, or says so.
+        WorkerPopGuard::listenFromEnvironment($this->app);
         $this->registerJobMetrics();
     }
 
@@ -610,13 +614,23 @@ class QueenServiceProvider extends ServiceProvider
                 $recorder()->start($event->job);
             }
         });
+        // A job that gives up with $this->fail() returns normally, and Laravel
+        // raises JobProcessed for it: it failed all the same.
         $events->listen(JobProcessed::class, function (JobProcessed $event) use ($isQueen, $recorder): void {
             if ($isQueen($event->connectionName)) {
-                $recorder()->finish($event->job, false);
+                $recorder()->finish($event->job, $event->job->hasFailed() === true);
             }
         });
         // A final failure raises JobExceptionOccurred before JobFailed; count it once.
         $events->listen(JobExceptionOccurred::class, function (JobExceptionOccurred $event) use ($isQueen, $recorder): void {
+            if ($isQueen($event->connectionName)) {
+                $recorder()->finish($event->job, true);
+            }
+        });
+        // A job that outlives its timeout raises neither: Laravel's handler
+        // raises JobTimedOut, then WorkerStopping, which writes this attempt,
+        // then kills the worker. Without it the longest runs went unrecorded.
+        $events->listen(JobTimedOut::class, function (JobTimedOut $event) use ($isQueen, $recorder): void {
             if ($isQueen($event->connectionName)) {
                 $recorder()->finish($event->job, true);
             }

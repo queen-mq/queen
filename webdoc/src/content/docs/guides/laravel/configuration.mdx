@@ -57,6 +57,16 @@ sourceOfTruth:
 # connection's, a connection's url is not replaced by the default urls, every switch variable
 # takes 1; the failed-job provider leaves other drivers' records to Laravel. The bullets, the urls
 # row and the pool table say so.
+# sourceOfTruth re-read 2026-10-10 (worker pop guard, PHP client 2.4.2): QueenServiceProvider
+# registers WorkerPopGuard; QueenQueue::pop reports to it. The state directory row names the files
+# of workers whose pops fail; no setting changes.
+# sourceOfTruth re-read 2026-10-10 (dead-lettered deliveries, PHP client 2.4.2): QueenQueue files a
+# delivery that carries no Laravel job in the dead-letter queue at once; no setting or message on this
+# page changes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-10 (installation owner, PHP client 2.4.2): the launcher refuses an
+# installation another user owns, and SupervisorInstallCommand takes --owner. The native binary
+# section says so; the keys and defaults are unchanged.
+# sourceOfTruth re-read 2026-10-10 (job metrics, PHP client 2.4.2): QueenServiceProvider also listens to JobTimedOut and counts $this->fail() as failed; the job_metrics keys and defaults are unchanged. Nothing this page states changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. Since PHP client 2.1.0 the
@@ -266,7 +276,7 @@ ownership is checked before Laravel's row changes ([failed jobs](/guides/laravel
 | `supervisor.read_bearer_token` | unset | Token for the depth reads, the event-driven poll, the dashboard's reads and `queen:check-waits`. When unset: the connection's token. Variable: `QUEEN_SUPERVISOR_READ_BEARER_TOKEN`. |
 | `supervisor.shutdown_grace` | `75` | How long a stopping worker may finish its job before it is killed, in seconds. |
 | `supervisor.process_limit` | `256` | Most child processes the master runs, renewal helpers included, at most 4,096. |
-| `supervisor.state_directory` | `storage/queen-supervisor` | The private directory for status, the lock, controls, telemetry and exit markers. Variable: `QUEEN_SUPERVISOR_STATE_DIRECTORY`. |
+| `supervisor.state_directory` | `storage/queen-supervisor` | The private directory for status, the lock, controls, telemetry, exit markers and the notes of workers whose pops fail. Variable: `QUEEN_SUPERVISOR_STATE_DIRECTORY`. |
 | `supervisor.telemetry_ttl` | `300` | How long worker runtime samples are kept for the `time` strategy, in seconds. |
 | `supervisor.remote_status.enabled` | `false` | Also publish the status to the broker, for a dashboard on another host. Variable: `QUEEN_SUPERVISOR_REMOTE_STATUS`. |
 | `supervisor.remote_status.connection` | `queen` | The queue connection whose broker and write credential are used. |
@@ -392,7 +402,10 @@ The launcher, `vendor/bin/queen-supervisor`, reads neither `config/queen.php` no
 for the binary in `QUEEN_SUPERVISOR_INSTALL_PATH` from its own environment, and otherwise in
 `storage/queen-supervisor-bin` under the directory it starts in. When you install elsewhere, set
 the variable in the service's environment too
-([run the Rust engine](/guides/laravel/supervisors/#run-the-rust-engine)).
+([run the Rust engine](/guides/laravel/supervisors/#run-the-rust-engine)). The user that runs the
+launcher must own the installation. Install as that user, or as root with
+`queen:supervisor-install --owner=<user>` (PHP client 2.4.2), or copy it into a container image
+with `COPY --chown` ([build the image](/guides/laravel/kubernetes/#build-the-image)).
 
 ## Refused at start
 

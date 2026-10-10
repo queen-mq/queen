@@ -294,6 +294,15 @@ php artisan queen:supervisor-install
 vendor/bin/queen-supervisor --php php --artisan artisan
 ```
 
+The launcher runs the binary only for the user that owns the installation, and exits 70 otherwise.
+Install as the user that runs the supervisor, or as root with `--owner=www-data` (not on a
+thread-safe PHP). In a multi-stage Docker build, copy the installation with `--chown`:
+
+```dockerfile
+COPY --from=build --chown=www-data:www-data /opt/queen-supervisor-bin /opt/queen-supervisor-bin
+ENV QUEEN_SUPERVISOR_INSTALL_PATH=/opt/queen-supervisor-bin
+```
+
 ```php
 'supervisor' => [
     'poll_interval'   => 3,

@@ -19,13 +19,16 @@ use Throwable;
  * - `release-once`: releases itself on its first attempt, succeeds after;
  * - `fail`: marks itself failed without throwing;
  * - `memory`: grows the worker to `allocateMib` MiB in use and keeps it for the
- *   worker's life, then succeeds; above PHP's memory_limit the attempt dies.
+ *   worker's life, then succeeds; above PHP's memory_limit the attempt dies;
+ * - `release-then-ok`: releases itself for a second on its first run, then
+ *   works as `ok`. Its first run is told by the log, not by attempts(), so a
+ *   backend that counted the release wrongly still releases only once.
  */
 class FailureMatrixJob implements ShouldQueue
 {
     use Queueable;
 
-    public const MODES = ['ok', 'throw', 'throw-once', 'release-once', 'fail', 'memory'];
+    public const MODES = ['ok', 'throw', 'throw-once', 'release-once', 'fail', 'memory', 'release-then-ok'];
 
     /** Memory kept for the life of the worker, so the worker's --memory check trips. */
     private static array $ballast = [];
@@ -72,6 +75,12 @@ class FailureMatrixJob implements ShouldQueue
 
             return;
         }
+        if ($this->mode === 'release-then-ok' && !$this->releasedBefore($log)) {
+            $log->record($this->runId, $this->jobId, $attempt, 'released', $this->mode);
+            $this->release(1);
+
+            return;
+        }
         if ($this->mode === 'fail') {
             $log->record($this->runId, $this->jobId, $attempt, 'failed_by_job', $this->mode);
             $this->fail(new RuntimeException('failure matrix: failed by the job'));
@@ -97,6 +106,17 @@ class FailureMatrixJob implements ShouldQueue
             $this->mode,
             $exception === null ? null : $exception::class,
         );
+    }
+
+    private function releasedBefore(FailureMatrixLog $log): bool
+    {
+        foreach ($log->read($this->runId) as $event) {
+            if ($event['job_id'] === $this->jobId && $event['event'] === 'released') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** A signal must not shorten the declared work. */

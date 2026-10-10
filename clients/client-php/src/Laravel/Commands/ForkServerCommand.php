@@ -10,6 +10,7 @@ use Illuminate\Queue\QueueManager;
 use Queen\Laravel\Supervisor\Prefork\ForkSafety;
 use Queen\Laravel\Supervisor\Prefork\ForkServer;
 use Queen\Laravel\Supervisor\WorkerExitMarker;
+use Queen\Laravel\Supervisor\WorkerPopGuard;
 use Queen\Laravel\Supervisor\WorkerTelemetry;
 use Symfony\Component\Console\Command\Command as SymfonyCommand;
 use Symfony\Component\Console\Input\ArgvInput;
@@ -188,6 +189,7 @@ class ForkServerCommand extends Command
         $this->releaseBootResources();
         WorkerTelemetry::listenFromEnvironment($this->laravel['events']);
         WorkerExitMarker::listenFromEnvironment($this->laravel['events']);
+        WorkerPopGuard::listenFromEnvironment($this->laravel);
     }
 
     /**

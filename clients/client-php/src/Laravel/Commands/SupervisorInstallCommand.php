@@ -14,6 +14,7 @@ class SupervisorInstallCommand extends Command
         {--base-url= : HTTPS mirror base URL for both manifest and artifact}
         {--manifest-sha256= : Trusted expected SHA-256 of the release manifest}
         {--install-path= : Application-local binary installation directory}
+        {--owner= : As root, give the installation to this user (name or uid), the one that runs the supervisor}
         {--force : Revalidate and replace an existing installation}';
 
     protected $description = 'Install the pinned native Queen supervisor with SHA-256 verification';
@@ -58,6 +59,7 @@ class SupervisorInstallCommand extends Command
                 releaseBaseUrl: $baseUrl,
                 force: (bool) $this->option('force'),
                 manifestSha256: $manifestSha256,
+                owner: $this->optionString('owner'),
             );
         } catch (\Throwable $exception) {
             $this->components->error($exception->getMessage());
@@ -66,8 +68,11 @@ class SupervisorInstallCommand extends Command
         }
 
         $action = $result['installed'] ? 'Installed' : 'Verified existing';
+        $owner = is_int($result['owner_uid'] ?? null)
+            ? ', owned by ' . SupervisorBinary::describeUser($result['owner_uid'])
+            : '';
         $this->components->info(
-            "{$action} Queen supervisor {$result['version']} ({$result['target']})",
+            "{$action} Queen supervisor {$result['version']} ({$result['target']}){$owner}",
         );
         $this->line($result['binary']);
 

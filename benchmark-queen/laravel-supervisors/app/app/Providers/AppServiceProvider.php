@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Queue\RoutedConnector;
 use App\Support\BenchmarkEffectLedger;
 use App\Support\FailureMatrixLog;
 use App\Support\JsonlResultSink;
@@ -47,9 +48,14 @@ final class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+        // The routed lanes' default connection, which only dispatches.
+        Queue::extend('routed', fn (): RoutedConnector => new RoutedConnector($this->app));
+
         // The Laravel compatibility lanes: one rate-limited job per second,
-        // and Laravel's queue events recorded for the compatibility jobs.
+        // one per minute and run, and Laravel's queue events recorded for the
+        // compatibility jobs.
         RateLimiter::for('compat', static fn (): Limit => Limit::perSecond(1));
+        RateLimiter::for('compat-minute', static fn (object $job): Limit => Limit::perMinute(1)->by((string) ($job->runId ?? 'compat')));
         Queue::before(static fn (JobProcessing $event) => self::recordEvent('event_before', $event->job));
         Queue::after(static fn (JobProcessed $event) => self::recordEvent('event_after', $event->job));
         Queue::failing(static fn (JobFailed $event) => self::recordEvent('event_failing', $event->job, $event->exception));
@@ -58,7 +64,10 @@ final class AppServiceProvider extends ServiceProvider
     private static function recordEvent(string $event, Job $job, ?\Throwable $exception = null): void
     {
         $payload = $job->payload();
-        if (!str_starts_with((string) ($payload['displayName'] ?? ''), 'App\\Jobs\\Compat\\')) {
+        $name = (string) ($payload['displayName'] ?? '');
+        // The failure matrix's jobs too: a delivery that Laravel fails before
+        // handle() (too many attempts) shows only as a JobProcessing event.
+        if (!str_starts_with($name, 'App\\Jobs\\Compat\\') && !str_starts_with($name, 'App\\Jobs\\FailureMatrix')) {
             return;
         }
         $command = (string) ($payload['data']['command'] ?? '');
