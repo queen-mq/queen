@@ -1219,7 +1219,11 @@ final class SupervisorState
         if ($metadata !== false && ($metadata['mode'] & 0170000) !== 0100000) {
             throw new RuntimeException("Queen supervisor lock [{$path}] must not be a symbolic link.");
         }
-        $handle = @fopen($path, 'c+b');
+        // Close-on-exec ('e'): a worker the master starts must not inherit
+        // the lock. After a SIGKILL or an out-of-memory kill of the master
+        // under a PID 1 that survives it, orphaned workers held it, and the
+        // next master refused to start for as long as they lived.
+        $handle = @fopen($path, 'c+be');
         $current = @lstat($path);
         $opened = is_resource($handle) ? fstat($handle) : false;
         if (!is_resource($handle)
