@@ -486,19 +486,11 @@ class ConsumerManager
             }
 
             if ($autoAck) {
-                $context = $group !== null ? ['group' => $group] : [];
-                if ($affinityKey !== null) {
-                    $context['affinityKey'] = $affinityKey;
-                }
-                $this->queen->ack($message, true, $context);
+                $this->acknowledge($message, true, $group, $affinityKey);
             }
         } catch (\Throwable $error) {
             if ($autoAck) {
-                $context = $group !== null ? ['group' => $group] : [];
-                if ($affinityKey !== null) {
-                    $context['affinityKey'] = $affinityKey;
-                }
-                $this->queen->ack($message, false, $context);
+                $this->acknowledge($message, false, $group, $affinityKey);
                 return;
             }
             throw $error;
@@ -522,23 +514,44 @@ class ConsumerManager
             }
 
             if ($autoAck) {
-                $context = $group !== null ? ['group' => $group] : [];
-                if ($affinityKey !== null) {
-                    $context['affinityKey'] = $affinityKey;
-                }
-                $this->queen->ack($messages, true, $context);
+                $this->acknowledge($messages, true, $group, $affinityKey);
             }
         } catch (\Throwable $error) {
             if ($autoAck) {
-                $context = $group !== null ? ['group' => $group] : [];
-                if ($affinityKey !== null) {
-                    $context['affinityKey'] = $affinityKey;
-                }
-                $this->queen->ack($messages, false, $context);
+                $this->acknowledge($messages, false, $group, $affinityKey);
                 return;
             }
             throw $error;
         }
+    }
+
+    /**
+     * Acknowledge what a handler took, after it returned or threw. Queen::ack()
+     * returns a failure rather than throwing it, and the loop goes on either
+     * way: the messages come back when their lease expires, and this log line
+     * is the one place that says why.
+     *
+     * @param array $messages One message, or a list of them.
+     */
+    private function acknowledge(array $messages, bool $completed, ?string $group, ?string $affinityKey): void
+    {
+        $context = $group !== null ? ['group' => $group] : [];
+        if ($affinityKey !== null) {
+            $context['affinityKey'] = $affinityKey;
+        }
+
+        $result = $this->queen->ack($messages, $completed, $context);
+        if (($result['success'] ?? false) === true) {
+            return;
+        }
+
+        $error = $result['error'] ?? 'no reason given';
+        error_log(sprintf(
+            'Queen consume() could not acknowledge %d message(s) as %s: %s; the broker delivers them again when their lease expires',
+            array_is_list($messages) ? count($messages) : 1,
+            $completed ? 'completed' : 'failed',
+            is_string($error) ? $error : (string) json_encode($error),
+        ));
     }
 
     /**
