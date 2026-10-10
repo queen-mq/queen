@@ -2384,15 +2384,26 @@ where
                 let _ = sender.send(request());
             }
         });
-    if spawned.is_err() {
-        let taken = request.lock().ok().and_then(|mut request| request.take());
-        return taken.map(|request| request());
-    }
+    let helper = match spawned {
+        Ok(helper) => helper,
+        Err(_) => {
+            let taken = request.lock().ok().and_then(|mut request| request.take());
+            return taken.map(|request| request());
+        }
+    };
     loop {
         match answer.recv_timeout(Duration::from_millis(50)) {
             Ok(value) => return Some(value),
             Err(mpsc::RecvTimeoutError::Timeout) if running.load(Ordering::SeqCst) => {}
-            Err(_) => return None,
+            Err(mpsc::RecvTimeoutError::Timeout) => return None,
+            // The request ended without an answer: it panicked, which run
+            // inline it would have done here. Not a stop.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if let Err(panic) = helper.join() {
+                    std::panic::resume_unwind(panic);
+                }
+                return None;
+            }
         }
     }
 }
@@ -7367,6 +7378,17 @@ mod tests {
 
     /// A request to a broker that does not answer takes http_timeout per
     /// endpoint: a stop does not wait for it.
+    #[test]
+    fn a_broker_request_that_panics_is_not_taken_for_a_stop() {
+        let running = AtomicBool::new(true);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            unless_stopped(&running, || -> u8 { panic!("the request failed") })
+        }));
+
+        assert!(outcome.is_err(), "a panic reads as a stop: {outcome:?}");
+        assert!(running.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn a_stop_abandons_a_broker_request_in_flight() {
         let running = Arc::new(AtomicBool::new(true));
