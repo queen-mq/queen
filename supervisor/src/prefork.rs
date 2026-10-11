@@ -233,6 +233,12 @@ impl ForkServer {
         self.exits.remove(&pid)
     }
 
+    /// The server's pid.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub(crate) fn is_alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
@@ -436,27 +442,53 @@ impl WorkerProcess {
     }
 }
 
+/// The Laravel package's fork server fixture, for the tests that run a real
+/// fork server. None, once said, when this host lacks PHP with pcntl and
+/// posix or the package's dependencies (`composer install` in
+/// clients/client-php). On CI nothing is skipped: a missing dependency fails
+/// the test there instead of letting it pass unseen.
+#[cfg(all(test, unix))]
+pub(crate) fn test_fixture() -> Option<std::path::PathBuf> {
+    let client = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../clients/client-php");
+    let fixture = client.join("tests/Fixtures/Prefork/fork_server.php");
+    let php_available = Command::new("php")
+        .arg("-r")
+        .arg("exit(function_exists('pcntl_fork') && function_exists('posix_setsid') ? 0 : 1);")
+        .status()
+        .is_ok_and(|status| status.success());
+    if php_available && fixture.exists() && client.join("vendor/autoload.php").exists() {
+        return Some(fixture);
+    }
+    skip_unless_ci(
+        std::env::var("CI").is_ok_and(|ci| !matches!(ci.as_str(), "" | "0" | "false")),
+        "PHP with pcntl/posix and the Laravel package (composer install in clients/client-php) are required",
+    );
+    None
+}
+
+/// Skip a test whose dependency `reason` names is missing, except on `ci`.
+#[cfg(test)]
+pub(crate) fn skip_unless_ci(ci: bool, reason: &str) {
+    assert!(!ci, "{reason}; CI must run this test, not skip it");
+    eprintln!("skipped: {reason}");
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
+    #[test]
+    fn a_missing_fork_server_dependency_skips_only_off_ci() {
+        skip_unless_ci(false, "PHP is missing");
+        let on_ci = std::panic::catch_unwind(|| skip_unless_ci(true, "PHP is missing"));
+        assert!(on_ci.is_err(), "CI skipped a fork server test");
+    }
+
     /// The Laravel package's protocol fixture; None when PHP or the
     /// package's dependencies are not installed on this host.
     fn fixture_config() -> Option<Config> {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../clients/client-php/tests/Fixtures/Prefork/fork_server.php");
-        let autoload =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../clients/client-php/vendor/autoload.php");
-        let php_available = Command::new("php")
-            .arg("-r")
-            .arg("exit(function_exists('pcntl_fork') && function_exists('posix_setsid') ? 0 : 1);")
-            .status()
-            .is_ok_and(|status| status.success());
-        if !php_available || !fixture.exists() || !autoload.exists() {
-            eprintln!("skipped: PHP with pcntl/posix and the Laravel package are required");
-            return None;
-        }
+        let fixture = test_fixture()?;
         let mut config: Config = serde_json::from_value(serde_json::json!({
             "version": 2,
             "cwd": fixture.parent().unwrap(),

@@ -22,13 +22,21 @@ use Throwable;
  *   worker's life, then succeeds; above PHP's memory_limit the attempt dies;
  * - `release-then-ok`: releases itself for a second on its first run, then
  *   works as `ok`. Its first run is told by the log, not by attempts(), so a
- *   backend that counted the release wrongly still releases only once.
+ *   backend that counted the release wrongly still releases only once;
+ * - `throw-binary`: always throws, with a message that is not UTF-8, as a
+ *   database error that quotes a latin-1 value does;
+ * - `orphan`: starts a process in the background that outlives the job by
+ *   three seconds, as a job that starts a converter does, then works as
+ *   `ok`. The process is an orphan at once, left to whichever process reaps
+ *   orphans: PID 1, or a subreaper.
  */
 class FailureMatrixJob implements ShouldQueue
 {
     use Queueable;
 
-    public const MODES = ['ok', 'throw', 'throw-once', 'release-once', 'fail', 'memory', 'release-then-ok'];
+    public const MODES = [
+        'ok', 'throw', 'throw-once', 'release-once', 'fail', 'memory', 'release-then-ok', 'throw-binary', 'orphan',
+    ];
 
     /** Memory kept for the life of the worker, so the worker's --memory check trips. */
     private static array $ballast = [];
@@ -70,6 +78,10 @@ class FailureMatrixJob implements ShouldQueue
             $log->record($this->runId, $this->jobId, $attempt, 'threw', $this->mode);
             throw new RuntimeException("failure matrix: {$this->mode} on attempt {$attempt}");
         }
+        if ($this->mode === 'throw-binary') {
+            $log->record($this->runId, $this->jobId, $attempt, 'threw', $this->mode);
+            throw new RuntimeException("failure matrix: no row for 'caf\xE9 \xFF\xFE' on attempt {$attempt}");
+        }
         if ($this->mode === 'release-once' && $attempt === 1) {
             $log->record($this->runId, $this->jobId, $attempt, 'released', $this->mode);
             $this->release(2);
@@ -87,6 +99,10 @@ class FailureMatrixJob implements ShouldQueue
             $this->fail(new RuntimeException('failure matrix: failed by the job'));
 
             return;
+        }
+        if ($this->mode === 'orphan') {
+            // Detached from this process: it lives on when the worker is killed.
+            exec('sh -c "sleep 3" > /dev/null 2>&1 &');
         }
         if ($this->mode === 'memory') {
             $missing = $this->allocateMib * 1024 * 1024 - memory_get_usage(true);

@@ -53,7 +53,8 @@ x-app-environment: &app-environment
   BENCH_FAILED_LIMIT: ${BENCH_FAILED_LIMIT:-1000}
   BENCH_RESULTS_DIRECTORY: /results
   QUEEN_URL: http://broker:6632
-  QUEEN_URLS: http://broker:6632
+  # Every node of a three-node lane (BENCH_QUEEN_URLS); the one node otherwise.
+  QUEEN_URLS: ${BENCH_QUEEN_URLS:-http://broker:6632}
   QUEEN_QUEUE: ${BENCH_QUEUE:-benchmark}
   QUEEN_CONSUMER_GROUP: ${BENCH_GROUP:-benchmark}
   QUEEN_PREFETCH: ${QUEEN_PREFETCH:-1}
@@ -93,9 +94,12 @@ x-app: &app
       BENCH_LARAVEL_VERSION: ${BENCH_LARAVEL_VERSION:-}
       BENCH_HORIZON_VERSION: ${BENCH_HORIZON_VERSION:-5.48.3}
       BENCH_COMPOSER_ADVISORY_IGNORE_IDS: ${BENCH_COMPOSER_ADVISORY_IGNORE_IDS:-}
+      BENCH_PHP_CLIENT_VERSION: ${BENCH_PHP_CLIENT_VERSION:-}
   user: "1000:1000"
   working_dir: /workspace/benchmark-queen/laravel-supervisors/app
-  init: true
+  # An init process as PID 1 reaps the orphans of killed jobs. A Kubernetes pod
+  # has none: BENCH_APP_INIT=false makes the supervisor PID 1, as there.
+  init: ${BENCH_APP_INIT:-true}
   restart: "no"
   cpus: ${BENCH_APP_CPUS:-4.0}
   mem_limit: ${BENCH_APP_MEMORY:-1024m}
@@ -141,17 +145,23 @@ services:
       timeout: 2s
       retries: 10
 
-  broker:
+  broker: &broker
     # Raft storage: one node on a local data directory, no external database.
     # Built outside this compose file from the raft branch; BENCH_BROKER_IMAGE
     # runs a released server instead, such as ghcr.io/queen-mq/queen:2.0.4.
     image: ${BENCH_BROKER_IMAGE:-queen-laravel-supervisor-broker:raft}
-    profiles: [queen-php, queen-rust]
-    environment:
+    profiles: [queen-php, queen-rust, queen-installed, queen-previous]
+    environment: &broker-environment
       QUEEN_RAFT_DIR: /var/lib/queen/data
       PORT: "6632"
       QUEEN_POP_FUSION: ${QUEEN_POP_FUSION:-0}
       LOG_LEVEL: warn
+      # A three-node lane (the cluster profile) replicates with openraft over
+      # these peers; unset, the node is a single voter.
+      QUEEN_RAFT_REPLICATOR: ${BENCH_RAFT_REPLICATOR:-}
+      QUEEN_RAFT_PEERS: ${BENCH_RAFT_PEERS:-}
+      QUEEN_RAFT_TOKEN: queen-bench-raft-token
+      QUEEN_RAFT_NODE_ID: "1"
     restart: "no"
     # The whole backend budget, like Redis's: on PostgreSQL storage the broker
     # and the database split it.
@@ -171,6 +181,26 @@ services:
       interval: 1h
       timeout: 3s
       retries: 30
+
+  # The other two nodes of a three-node lane, as production runs the broker.
+  broker-2:
+    <<: *broker
+    profiles: [cluster]
+    environment:
+      <<: *broker-environment
+      QUEEN_RAFT_NODE_ID: "2"
+    volumes:
+      - broker-2-buffers:/var/lib/queen/data
+
+  broker-3:
+    <<: *broker
+    profiles: [cluster]
+    environment:
+      <<: *broker-environment
+      QUEEN_RAFT_NODE_ID: "3"
+    volumes:
+      - broker-3-buffers:/var/lib/queen/data
+
   horizon:
     <<: *app
     profiles: [horizon]
@@ -238,6 +268,69 @@ services:
       timeout: 3s
       retries: 10
 
+  # The Rust supervisor as docs/guides/laravel/kubernetes deploys it from an
+  # image that installs it as root for the user that runs it: the release the
+  # image build installed with --owner, started by the Composer launcher. The
+  # container starts as root, as one whose entrypoint prepares the state
+  # directory does, and runs the launcher as that user; so the probes run as
+  # root and must wrap the status command in su.
+  queen-installed:
+    <<: *app
+    profiles: [queen-installed]
+    user: "0:0"
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      <<: *app-environment
+      BENCH_LANE: queen-installed
+      BENCH_CONNECTION: queen
+      QUEUE_CONNECTION: queen
+      QUEEN_SUPERVISOR_INSTALL_PATH: /opt/queen-supervisor-bin
+    command:
+      - sh
+      - -ceu
+      - >-
+        sleep 2;
+        exec setpriv --reuid=1000 --regid=1000 --init-groups
+        vendor/bin/queen-supervisor --php /usr/local/bin/php --artisan artisan
+    tmpfs:
+      - /run/queen-supervisor:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=1000,gid=1000
+    healthcheck:
+      test: [CMD-SHELL, "su -s /bin/sh benchmark -c 'php artisan queen:supervisor status --check --no-ansi' >/dev/null 2>&1"]
+      start_interval: 1s
+      start_period: 30s
+      interval: 1h
+      timeout: 5s
+      retries: 10
+
+  # The previous release of the PHP client, beside the lane's own replica on
+  # the same queue, as during a rolling upgrade (failure_matrix.py
+  # rolling-upgrade). Its image is built with BENCH_PHP_CLIENT_VERSION, and it
+  # runs the PHP engine, whatever the lane's.
+  queen-previous:
+    <<: *app
+    image: ${BENCH_PREVIOUS_APP_IMAGE:-queen-laravel-supervisor-bench:previous}
+    profiles: [queen-previous]
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      <<: *app-environment
+      BENCH_LANE: queen-previous
+      BENCH_CONNECTION: queen
+      QUEUE_CONNECTION: queen
+    command: [sh, -ceu, "sleep 2; exec php artisan queen:supervise"]
+    tmpfs:
+      - /run/queen-supervisor:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=1000,gid=1000
+    healthcheck:
+      test: [CMD-SHELL, php artisan queen:supervisor status --check --no-ansi >/dev/null 2>&1]
+      start_interval: 1s
+      start_period: 30s
+      interval: 1h
+      timeout: 3s
+      retries: 10
+
   # Explicitly targeted by the runner; its tools-only profile prevents it from
   # consuming resources while a supervisor lane is being measured.
   producer:
@@ -255,3 +348,5 @@ volumes:
     name: ${BENCH_RESULTS_VOLUME:-queen-laravel-supervisor-results}
   redis-data:
   broker-buffers:
+  broker-2-buffers:
+  broker-3-buffers:

@@ -18,6 +18,9 @@ final class PhpSupervisor
     private const CRASH_CIRCUIT_THRESHOLD = 5;
 
     private const FORK_SERVER_BOOT_SECONDS = 60;
+    /** After a fork server fails to boot, the next boot waits this long, doubling each time. */
+    private const FORK_SERVER_RETRY_SECONDS = 60;
+    private const FORK_SERVER_RETRY_MAX_SECONDS = 900;
 
     private const FORK_TIMEOUT_SECONDS = 5;
 
@@ -60,9 +63,24 @@ final class PhpSupervisor
     private RemoteStatusPublisher|false|null $remoteStatus = null;
     private ReplicaCoordinator|false|null $coordinator = null;
     private ForkServerClient|false|null $forkServer = null;
+    private ?OrphanReaper $orphanReaper = null;
+    /** The stop-signal handler has sent the workers their SIGTERM. */
+    private bool $workersSignalled = false;
+    /**
+     * Per pool, the workers that left as expected and are not replaced yet,
+     * owed a replacement that neither balance_max_shift nor the restart
+     * circuit holds back; see reap() and reconcile().
+     *
+     * @var array<string, int>
+     */
+    private array $vacancies = [];
     private bool $preforkFailed = false;
     /** A worker of the current fork server stopped for queue:restart. */
     private bool $forkServerStale = false;
+    /** Fork server boots that failed in a row, and when the next may start. */
+    private int $forkBootFailures = 0;
+    private ?float $forkBootRetryAt = null;
+    private bool $forkBootDeferred = false;
     /** @var list<ForkServerClient> replaced servers, open until their workers are gone */
     private array $retiredForkServers = [];
     /** @var array<string, QueueWatcher>|null event-driven watchers by connection; null when disabled */
@@ -75,6 +93,8 @@ final class PhpSupervisor
     private array $lastEvaluated = [];
     /** Where workers leave exit markers; null until it is ready. */
     private ?string $exitMarkers = null;
+    /** Since when the status write fails; null while it works. */
+    private ?float $statusFailingSince = null;
 
     public function __construct(
         private QueueManager $queues,
@@ -111,6 +131,7 @@ final class PhpSupervisor
                 }
                 $this->reapDraining();
                 $this->tickForkServers();
+                $this->reapOrphans();
                 $this->refreshForkServer();
                 $this->observeStableWorkers();
 
@@ -134,6 +155,10 @@ final class PhpSupervisor
                 // performs its own fail-open reconcile from the last target.
                 $unavailableConnections = [];
                 foreach ($this->config['supervisors'] as $name => $options) {
+                    // Stopped: no other pool's depth call delays the drain.
+                    if (!$this->running) {
+                        break;
+                    }
                     if (!$pollDue && !isset($eventDue[$name])) {
                         continue;
                     }
@@ -239,7 +264,7 @@ final class PhpSupervisor
                 if (!$this->running) {
                     break;
                 }
-                $this->writeStatus($this->paused ? 'paused' : 'running');
+                $this->writeLoopStatus();
                 if ($pollDue) {
                     $lastPoll = microtime(true);
                 } else {
@@ -280,6 +305,29 @@ final class PhpSupervisor
     public function stop(): void
     {
         $this->running = false;
+    }
+
+    /**
+     * The status write of each pass. One that failed, on a full or failing
+     * disk, ended the master, which drained every worker. The workers keep
+     * running and the write is retried each pass, while status.json ages and
+     * the probes report the master stale; only once it has failed for
+     * heartbeat_timeout, when every reader calls it stale, does the master
+     * stop.
+     */
+    private function writeLoopStatus(): void
+    {
+        try {
+            $this->writeStatus($this->paused ? 'paused' : 'running');
+            $this->statusFailingSince = null;
+        } catch (SupervisorStateWriteException $failure) {
+            $now = microtime(true);
+            $this->statusFailingSince ??= $now;
+            if ($now - $this->statusFailingSince >= (int) ($this->config['heartbeat_timeout'] ?? 60)) {
+                throw $failure;
+            }
+            $this->emit("Queen supervisor could not write its status; it retries: {$failure->getMessage()}\n", 'err');
+        }
     }
 
     /**
@@ -450,7 +498,17 @@ final class PhpSupervisor
 
         foreach ($desired as $queue => $target) {
             $pool =& $this->processes[$name][$queue];
-            while ($budget > 0 && $target > count($pool)) {
+            $key = $this->poolKey($name, (string) $queue);
+            while ($target > count($pool)) {
+                // Replacing workers that left as expected, up to the count the
+                // pool had, is no scale-up: a pool that lost most of its
+                // workers at once (queue:restart after a deploy, max_time) is
+                // refilled now, not one balance_max_shift per balance_cooldown.
+                // Nor does it wait for the circuit, which is about crashes.
+                $replaces = ($this->vacancies[$key] ?? 0) > 0;
+                if (!$replaces && $budget <= 0) {
+                    break;
+                }
                 // A process remains part of the global capacity budget until
                 // it has actually exited. This prevents a slow graceful drain
                 // from temporarily oversubscribing process_limit while a
@@ -459,24 +517,31 @@ final class PhpSupervisor
                 if ($this->remainingProcessSlots() < $processCost) {
                     break;
                 }
-                $permission = $this->restartPermission($name, $queue);
+                $permission = $replaces ? 'normal' : $this->restartPermission($name, $queue);
                 if ($permission === null) {
                     break;
                 }
                 try {
                     $process = $this->startWorker($name, $queue, $options);
                     if ($permission === 'probe') {
-                        $key = $this->poolKey($name, $queue);
                         $this->restartPhase[$key] = 'probe';
                         $this->restartProbes[spl_object_id($process)] = $key;
                     }
                     $pool[] = $process;
-                    $budget--;
+                    if ($replaces) {
+                        $this->vacancies[$key]--;
+                    } else {
+                        $budget--;
+                    }
                 } catch (\Throwable $error) {
                     $this->registerCrash($name, $queue, $options, $error->getMessage());
+                    // A start that fails is a crash: the next waits for the circuit.
+                    $this->vacancies[$key] = 0;
                     break;
                 }
             }
+            // Owed no more than the pool lacks: a lower target cancels the rest.
+            $this->vacancies[$key] = min($this->vacancies[$key] ?? 0, max(0, $target - count($pool)));
         }
     }
 
@@ -664,9 +729,19 @@ final class PhpSupervisor
                 self::FORK_SERVER_BOOT_SECONDS,
                 fn (): bool => !$this->running,
             );
+            $this->forkBootFailures = 0;
+            $this->forkBootRetryAt = null;
             $this->emit("prefork: fork server started\n", 'out');
         } catch (\Throwable $error) {
             $this->forkServer = false;
+            // A boot can take FORK_SERVER_BOOT_SECONDS, during which nothing
+            // is reaped or restarted: the next one waits, 60 s doubling to 15
+            // minutes, however many queue:restart exits ask for it meanwhile.
+            $this->forkBootFailures++;
+            $this->forkBootRetryAt = microtime(true) + min(
+                self::FORK_SERVER_RETRY_SECONDS * 2 ** min($this->forkBootFailures - 1, 16),
+                self::FORK_SERVER_RETRY_MAX_SECONDS,
+            );
             $this->emit("prefork disabled, spawning workers: {$error->getMessage()}\n", 'err');
         }
     }
@@ -693,7 +768,18 @@ final class PhpSupervisor
      */
     private function refreshForkServer(): void
     {
-        if ($this->forkServerStale) {
+        $wait = $this->forkBootRetryAt === null ? 0.0 : $this->forkBootRetryAt - microtime(true);
+        if ($this->forkServerStale && $wait > 0) {
+            // The last boot failed: this request waits for the next boot, and
+            // workers are spawned meanwhile.
+            if ($this->forkBootFailures > 0 && !$this->forkBootDeferred) {
+                $this->emit(sprintf(
+                    "prefork: queue:restart received; the last fork server failed to boot, so the next boot waits %ds and workers are spawned meanwhile\n",
+                    (int) ceil($wait),
+                ), 'err');
+                $this->forkBootDeferred = true;
+            }
+        } elseif ($this->forkServerStale) {
             if ($this->forkServer instanceof ForkServerClient) {
                 $this->retiredForkServers[] = $this->forkServer;
             }
@@ -701,8 +787,9 @@ final class PhpSupervisor
             $this->preforkFailed = false;
             $this->emit("prefork: queue:restart received, starting a new fork server\n", 'out');
             $this->startForkServer();
+            $this->forkServerStale = false;
+            $this->forkBootDeferred = false;
         }
-        $this->forkServerStale = false;
 
         $retired = [];
         foreach ($this->retiredForkServers as $server) {
@@ -796,6 +883,17 @@ final class PhpSupervisor
                     && (($process instanceof ForkedProcess && $process->server() === $this->forkServer)
                         || $this->preforkWantsAServer())) {
                     $this->forkServerStale = true;
+                }
+                // A worker that left as expected (queue:restart, its memory
+                // limit, Laravel's job timeout, or having run stable_after) is
+                // owed a replacement outside the budget and the circuit. A
+                // young exit is not, even with status 0: Laravel's worker exits
+                // 0 when it loses its database, every second through an outage.
+                if ($announced === WorkerExitMarker::RESTART
+                    || $announced === WorkerExitMarker::MEMORY
+                    || $announced === WorkerExitMarker::TIMEOUT
+                    || (!$wasProbe && $runtime >= (float) $options['stable_after'])) {
+                    $this->vacancies[$restartKey] = ($this->vacancies[$restartKey] ?? 0) + 1;
                 }
                 if ($poolHadProbe && !$wasProbe) {
                     continue;
@@ -1176,6 +1274,22 @@ final class PhpSupervisor
         ];
     }
 
+    /**
+     * The orphans that come to the master as PID 1, as a process a job leaves
+     * behind does: reaped, so their zombies do not use up the container's pids.
+     * Its own workers and fork servers keep their exit statuses for reap().
+     */
+    private function reapOrphans(): void
+    {
+        $tracked = array_values($this->workerPids);
+        foreach ([$this->forkServer, ...$this->retiredForkServers] as $server) {
+            if ($server instanceof ForkServerClient) {
+                $tracked[] = $server->pid();
+            }
+        }
+        ($this->orphanReaper ??= new OrphanReaper())->reap($tracked);
+    }
+
     private function reapDraining(): void
     {
         $remaining = [];
@@ -1419,15 +1533,41 @@ final class PhpSupervisor
     private function installSignalHandlers(): void
     {
         pcntl_async_signals(true);
-        pcntl_signal(SIGINT, fn () => $this->stop());
-        pcntl_signal(SIGTERM, fn () => $this->stop());
+        pcntl_signal(SIGINT, fn () => $this->stopOnSignal());
+        pcntl_signal(SIGTERM, fn () => $this->stopOnSignal());
         if (defined('SIGQUIT')) {
-            pcntl_signal(SIGQUIT, fn () => $this->stop());
+            pcntl_signal(SIGQUIT, fn () => $this->stopOnSignal());
         }
         if (defined('SIGHUP')) {
             // A dropped terminal, or an operator's HUP: a drain, as the Rust
             // master does, not a hard death that leaves the workers behind.
-            pcntl_signal(SIGHUP, fn () => $this->stop());
+            pcntl_signal(SIGHUP, fn () => $this->stopOnSignal());
+        }
+    }
+
+    /**
+     * A stop signal: the workers get their SIGTERM from the handler. The loop
+     * sees the stop only after the broker calls of its pass, the heartbeat
+     * and each pool's depth, each up to http_timeout per endpoint: with a
+     * broker that stopped answering, the workers got their SIGTERM tens of
+     * seconds late, and the platform's stop deadline killed them in the
+     * middle of a job. The handler only signals the pids it tracks, and
+     * touches no Process the interrupted code may be updating; the drain
+     * signals every worker again and waits for them.
+     */
+    private function stopOnSignal(): void
+    {
+        $this->stop();
+        // Once: a second signal during the drain could reach a pid the drain
+        // already reaped, and another process may hold it by then.
+        if ($this->workersSignalled) {
+            return;
+        }
+        $this->workersSignalled = true;
+        foreach ($this->workerPids as $pid) {
+            if ($pid > 0) {
+                @posix_kill($pid, SIGTERM);
+            }
         }
     }
 
@@ -1468,6 +1608,7 @@ final class PhpSupervisor
                 $this->processes[$supervisor][$queue] = [];
             }
         }
+        $this->vacancies = [];
     }
 
     private function resume(): void

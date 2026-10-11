@@ -160,7 +160,7 @@ class ConsumerManager
         $clientTimeout = $wait ? $timeoutMillis + 5000 : $timeoutMillis;
         $url = "{$path}?{$baseParams}";
         $pollPolicy = $this->httpClient->getRetry429Policy($wait ? Retry429Policy::KIND_POP : null);
-        $consecutive429 = 0;
+        $consecutiveBackoffs = 0;
 
         while ($running) {
             if (function_exists('pcntl_signal_dispatch')) {
@@ -213,7 +213,7 @@ class ConsumerManager
             }
 
             // Process results per worker
-            $rateLimitError = null;
+            $backoffError = null;
             foreach ($results as $w => $outcome) {
                 if (!$running) {
                     break;
@@ -222,11 +222,12 @@ class ConsumerManager
                 if ($outcome['state'] === 'rejected') {
                     $error = $outcome['reason'];
 
-                    // 429: the async path can't retry in flight without
+                    // 429, or a transient 5xx such as the 503 of a leader
+                    // election: the async path can't retry in flight without
                     // blocking every other worker on the shared multi-handle,
                     // so remember it and pace the next poll round once, below.
-                    if ($error instanceof HttpException && $error->statusCode === 429) {
-                        $rateLimitError = $error;
+                    if ($error instanceof HttpException && ($error->statusCode === 429 || $error->isTransient())) {
+                        $backoffError = $error;
                         continue;
                     }
 
@@ -234,7 +235,10 @@ class ConsumerManager
                     if ($isTimeout && $wait) {
                         continue; // Normal for long polling
                     }
-                    $isNetwork = str_contains($error->getMessage(), 'Connection refused') || str_contains($error->getMessage(), 'cURL error');
+                    // An answer that is not the broker's (empty or malformed, as a
+                    // gateway's during a rollout) passes like a network error.
+                    $isNetwork = str_contains($error->getMessage(), 'Connection refused') || str_contains($error->getMessage(), 'cURL error')
+                        || $error instanceof \UnexpectedValueException;
                     if ($isNetwork) {
                         usleep(1_000_000);
                         continue;
@@ -304,11 +308,11 @@ class ConsumerManager
 
             // One backoff for the whole round: every worker shares the tenant
             // bucket, so N sleeps would only stall the poll N times over.
-            if ($rateLimitError !== null) {
-                usleep($pollPolicy->delayMillis($consecutive429, $rateLimitError->retryAfterSeconds) * 1000);
-                $consecutive429++;
+            if ($backoffError !== null) {
+                usleep($pollPolicy->delayMillis($consecutiveBackoffs, $backoffError->retryAfterSeconds) * 1000);
+                $consecutiveBackoffs++;
             } else {
-                $consecutive429 = 0;
+                $consecutiveBackoffs = 0;
             }
 
             // Check global limit
@@ -342,7 +346,7 @@ class ConsumerManager
         $lastMessageTime = $idleMillis !== null ? $this->nowMillis() : null;
         $retryKind = $wait ? Retry429Policy::KIND_POP : null;
         $pollPolicy = $this->httpClient->getRetry429Policy($retryKind);
-        $consecutive429 = 0;
+        $consecutiveBackoffs = 0;
 
         while ($running) {
             if (function_exists('pcntl_signal_dispatch')) {
@@ -370,7 +374,7 @@ class ConsumerManager
                 // wait=true is a long-poll: mark it so a 429 backs off and keeps
                 // waiting instead of giving up after the bounded push-like budget.
                 $result = $this->httpClient->get("{$path}?{$baseParams}", $clientTimeout, $affinityKey, $retryKind);
-                $consecutive429 = 0;
+                $consecutiveBackoffs = 0;
 
                 // Ahead of the empty-response shortcut: an old broker answers an
                 // empty pop with a bodiless 204, which arrives here as null, and
@@ -439,9 +443,13 @@ class ConsumerManager
                 // for a wait=true poll), so getting here means an explicit
                 // maxAttempts override ran out. Keep polling behind the same
                 // backoff rather than hot-looping against the limiter.
-                if ($error instanceof HttpException && $error->statusCode === 429) {
-                    usleep($pollPolicy->delayMillis($consecutive429, $error->retryAfterSeconds) * 1000);
-                    $consecutive429++;
+                // A transient 5xx (the 503 of a leader election, which lasts
+                // a few seconds, or a pop whose outcome the broker could not
+                // tell) backs off the same way, at the pace of Retry-After,
+                // instead of ending the consumer.
+                if ($error instanceof HttpException && ($error->statusCode === 429 || $error->isTransient())) {
+                    usleep($pollPolicy->delayMillis($consecutiveBackoffs, $error->retryAfterSeconds) * 1000);
+                    $consecutiveBackoffs++;
                     continue;
                 }
 
@@ -450,7 +458,10 @@ class ConsumerManager
                     continue;
                 }
 
-                $isNetwork = str_contains($error->getMessage(), 'Connection refused') || str_contains($error->getMessage(), 'cURL error');
+                // An answer that is not the broker's (empty or malformed, as a
+                // gateway's during a rollout) passes like a network error.
+                $isNetwork = str_contains($error->getMessage(), 'Connection refused') || str_contains($error->getMessage(), 'cURL error')
+                    || $error instanceof \UnexpectedValueException;
                 if ($isNetwork) {
                     usleep(1_000_000);
                     continue;
@@ -481,19 +492,11 @@ class ConsumerManager
             }
 
             if ($autoAck) {
-                $context = $group !== null ? ['group' => $group] : [];
-                if ($affinityKey !== null) {
-                    $context['affinityKey'] = $affinityKey;
-                }
-                $this->queen->ack($message, true, $context);
+                $this->acknowledge($message, true, $group, $affinityKey);
             }
         } catch (\Throwable $error) {
             if ($autoAck) {
-                $context = $group !== null ? ['group' => $group] : [];
-                if ($affinityKey !== null) {
-                    $context['affinityKey'] = $affinityKey;
-                }
-                $this->queen->ack($message, false, $context);
+                $this->acknowledge($message, false, $group, $affinityKey);
                 return;
             }
             throw $error;
@@ -517,23 +520,44 @@ class ConsumerManager
             }
 
             if ($autoAck) {
-                $context = $group !== null ? ['group' => $group] : [];
-                if ($affinityKey !== null) {
-                    $context['affinityKey'] = $affinityKey;
-                }
-                $this->queen->ack($messages, true, $context);
+                $this->acknowledge($messages, true, $group, $affinityKey);
             }
         } catch (\Throwable $error) {
             if ($autoAck) {
-                $context = $group !== null ? ['group' => $group] : [];
-                if ($affinityKey !== null) {
-                    $context['affinityKey'] = $affinityKey;
-                }
-                $this->queen->ack($messages, false, $context);
+                $this->acknowledge($messages, false, $group, $affinityKey);
                 return;
             }
             throw $error;
         }
+    }
+
+    /**
+     * Acknowledge what a handler took, after it returned or threw. Queen::ack()
+     * returns a failure rather than throwing it, and the loop goes on either
+     * way: the messages come back when their lease expires, and this log line
+     * is the one place that says why.
+     *
+     * @param array $messages One message, or a list of them.
+     */
+    private function acknowledge(array $messages, bool $completed, ?string $group, ?string $affinityKey): void
+    {
+        $context = $group !== null ? ['group' => $group] : [];
+        if ($affinityKey !== null) {
+            $context['affinityKey'] = $affinityKey;
+        }
+
+        $result = $this->queen->ack($messages, $completed, $context);
+        if (($result['success'] ?? false) === true) {
+            return;
+        }
+
+        $error = $result['error'] ?? 'no reason given';
+        error_log(sprintf(
+            'Queen consume() could not acknowledge %d message(s) as %s: %s; the broker delivers them again when their lease expires',
+            array_is_list($messages) ? count($messages) : 1,
+            $completed ? 'completed' : 'failed',
+            is_string($error) ? $error : (string) json_encode($error),
+        ));
     }
 
     /**
@@ -580,17 +604,36 @@ class ConsumerManager
         }
 
         if ($this->nowMillis() >= $leaseRenewalTime) {
-            // Fire async renewal — don't block processing
+            // The renewals of the pop's leases, sent together, each bounded by the
+            // renewal interval: past it another is due anyway, and a broker that
+            // does not answer must not hold the handler for the whole request
+            // timeout, longer than the lease. A renewal that failed, or renewed
+            // nothing, leaves the message to another consumer once its lease
+            // expires while this handler still runs: the log says so.
             try {
                 // One renewal per lease: the messages of a pop share it.
-                $leaseIds = array_unique(array_filter(array_column($messages, 'leaseId'), fn($id) => $id !== null));
+                $leaseIds = array_values(array_unique(array_filter(array_column($messages, 'leaseId'), fn($id) => $id !== null)));
                 $promises = [];
                 foreach ($leaseIds as $leaseId) {
-                    $promises[] = $this->httpClient->postAsync("/api/v1/lease/{$leaseId}/extend", []);
+                    $promises[(string) $leaseId] = $this->httpClient->postAsync(
+                        '/api/v1/lease/' . rawurlencode((string) $leaseId) . '/extend',
+                        [],
+                        max(1_000, $intervalMillis),
+                    );
                 }
-                if (!empty($promises)) {
-                    // Settle without throwing — renewal failure is non-fatal
-                    HttpClient::settleAll($promises);
+                foreach ($promises === [] ? [] : HttpClient::settleAll($promises) as $leaseId => $outcome) {
+                    $renewed = ($outcome['state'] ?? null) === 'fulfilled' ? ($outcome['value']['renewed'] ?? null) : null;
+                    if (is_int($renewed) && $renewed > 0) {
+                        continue;
+                    }
+                    $reason = ($outcome['reason'] ?? null) instanceof \Throwable
+                        ? $outcome['reason']->getMessage()
+                        : 'the broker renewed no lease';
+                    error_log(sprintf(
+                        'Queen consume() could not renew lease %s: %s; another consumer may get its messages once it expires',
+                        $leaseId,
+                        $reason,
+                    ));
                 }
             } catch (\Throwable $e) {
                 // Lease renewal failure is non-fatal

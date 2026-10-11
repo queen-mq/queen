@@ -123,6 +123,8 @@ class FailureMatrixChecksTest(unittest.TestCase):
         self.assertIsNone(matrix.run_in_progress(four_fields, "000000"), "a report without pids names no worker")
         self.assertEqual([1, 2], running.attempts_of("000000", "event_before"))
         self.assertEqual([(1.0, 2.0), (4.0, None)], running.attempts("000000"), "five fields read as four")
+        self.assertEqual([7, 9], running.pids("000000", "started"), "the worker of each run")
+        self.assertEqual([], four_fields.pids("000000", "started"), "a report without pids names no worker")
 
     def test_each_run_reports_the_code_its_worker_booted_with(self) -> None:
         jobs = matrix.Jobs({"jobs": {"000000": {"events": [
@@ -150,7 +152,8 @@ class FailureMatrixChecksTest(unittest.TestCase):
         names = [s.name for s in matrix.SCENARIOS]
 
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual({"horizon", "queen-php", "queen-rust", "queen-rust-fast", "queen-php-fast"}, set(matrix.PROFILES))
+        self.assertEqual({"horizon", "queen-php", "queen-rust", "queen-rust-fast", "queen-php-fast", "queen-installed"},
+                         set(matrix.PROFILES))
         self.assertEqual(("horizon", "queen-php", "queen-rust"), matrix.DEFAULT_PROFILES)
 
     def test_a_soak_report_with_empty_php_arrays_reads_as_maps(self) -> None:
@@ -227,6 +230,86 @@ class LaneProfilesTest(unittest.TestCase):
         self.assertEqual("60", scenario.env_for(matrix.PROFILES["horizon"])["BENCH_TIMEOUT"])
         self.assertEqual("30", scenario.env_for(matrix.PROFILES["queen-rust"])["BENCH_RETRY_AFTER"])
         self.assertEqual("25", scenario.env_for(matrix.PROFILES["queen-rust"])["BENCH_TIMEOUT"])
+
+
+class ScenarioLanesTest(unittest.TestCase):
+    def test_a_scenario_of_the_queen_engines_has_no_horizon_lane(self) -> None:
+        scenario = next(s for s in matrix.SCENARIOS if s.name == "probe-broker-hung")
+        lanes = matrix.scenario_profiles(scenario, ["horizon", "queen-php", "queen-rust"], ["on", "off"])
+
+        self.assertEqual(["queen-php", "queen-php-prefork-off", "queen-rust", "queen-rust-prefork-off"],
+                         [p.name for p in lanes])
+
+    def test_a_scenario_of_its_own_engine_runs_on_it_whatever_the_profiles(self) -> None:
+        scenario = next(s for s in matrix.SCENARIOS if s.name == "install-owner")
+
+        self.assertEqual(["queen-installed"],
+                         [p.name for p in matrix.scenario_profiles(scenario, ["horizon", "queen-rust"], ["on"])])
+
+    def test_a_scenario_of_every_engine_runs_on_the_selected_profiles(self) -> None:
+        scenario = next(s for s in matrix.SCENARIOS if s.name == "string-timeout")
+
+        self.assertEqual(["horizon", "queen-rust"],
+                         [p.name for p in matrix.scenario_profiles(scenario, ["horizon", "queen-rust"], ["on"])])
+
+    def test_every_profile_engine_is_a_compose_service_with_a_broker_or_redis(self) -> None:
+        compose = matrix.COMPOSE_FILE.read_text()
+        broker_profiles = re.search(r"\n  broker:(?: &broker)?\n(?:    .*\n)*?    profiles: \[([^\]]*)\]", compose)
+
+        self.assertIsNotNone(broker_profiles)
+        for profile in matrix.PROFILES.values():
+            self.assertIn(f"\n  {profile.engine}:\n", compose, profile.engine)
+            if profile.connection == "queen":
+                self.assertIn(profile.engine, broker_profiles.group(1), profile.engine)
+
+    def test_every_group_of_the_ci_workflow_names_known_scenarios(self) -> None:
+        workflow = (matrix.BENCH.parents[1] / ".github/workflows/laravel-matrix.yml").read_text()
+        named = set()
+        for value in re.findall(r"scenarios=(?:\$scenarios,)?([a-z0-9,-]+)", workflow):
+            named |= set(value.split(","))
+
+        self.assertTrue(named)
+        self.assertEqual(set(), named - {s.name for s in matrix.SCENARIOS} - {"parity"})
+        # Every scenario runs in some group.
+        self.assertEqual(set(), {s.name for s in matrix.SCENARIOS} - named - set(matrix.PARITY_SCENARIOS))
+
+    def test_a_three_node_lane_lists_every_node_to_the_clients_and_as_raft_peers(self) -> None:
+        single = matrix.Lane("s", matrix.PROFILES["queen-rust"], {}, Path("/tmp"))
+        cluster = matrix.Lane("s", matrix.PROFILES["queen-rust"], {}, Path("/tmp"), broker_nodes=3)
+
+        self.assertEqual(("broker",), single.brokers)
+        self.assertNotIn("BENCH_QUEEN_URLS", single.env)
+        self.assertEqual(("broker", "broker-2", "broker-3"), cluster.brokers)
+        self.assertEqual("http://broker:6632,http://broker-2:6632,http://broker-3:6632", cluster.env["BENCH_QUEEN_URLS"])
+        self.assertEqual("1=broker:7400/broker:6632,2=broker-2:7400/broker-2:6632,3=broker-3:7400/broker-3:6632",
+                         cluster.env["BENCH_RAFT_PEERS"])
+        compose = matrix.COMPOSE_FILE.read_text()
+        for key in ("BENCH_QUEEN_URLS", "BENCH_RAFT_PEERS", "BENCH_RAFT_REPLICATOR"):
+            self.assertIn("${" + key + ":", compose)
+        for node in cluster.brokers[1:]:
+            self.assertIn(f"\n  {node}:\n", compose)
+
+    def test_the_start_order_lists_every_start_and_a_rerun_keeps_its_job_in_place(self) -> None:
+        jobs = matrix.Jobs({"jobs": {
+            "000000": {"events": [["started", 1, 1.0, None, 7], ["completed", 1, 1.5, None, 7]]},
+            "000001": {"events": [["started", 1, 2.0, None, 7], ["started", 2, 4.5, None, 8],
+                                  ["completed", 2, 4.8, None, 8]]},
+            "000002": {"events": [["started", 1, 5.0, None, 8], ["completed", 1, 5.3, None, 8]]},
+        }})
+
+        starts = matrix.start_order(jobs, matrix.ids(0, 3))
+
+        self.assertEqual([(1.0, "000000"), (2.0, "000001"), (4.5, "000001"), (5.0, "000002")], starts)
+        self.assertEqual(["000000", "000001", "000002"], list(dict.fromkeys(job for _, job in starts)))
+
+    def test_a_status_gives_its_issue_codes_and_the_longest_wait_of_its_workers(self) -> None:
+        status = {"readiness_issues": [{"code": "pool_not_consuming", "queue": "q"}, {"code": "queue_depth_unavailable"}],
+                  "pool_status": [{"not_consuming_seconds": None}, {"not_consuming_seconds": 61}, "garbage"]}
+
+        self.assertEqual(["pool_not_consuming", "queue_depth_unavailable"], matrix.issue_codes(status, "readiness_issues"))
+        self.assertEqual([], matrix.issue_codes(status, "processing_health_issues"))
+        self.assertEqual(61, matrix.not_consuming_seconds(status))
+        self.assertIsNone(matrix.not_consuming_seconds({}))
 
 
 class StackTest(unittest.TestCase):

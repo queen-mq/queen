@@ -7,6 +7,7 @@ use PHPUnit\Framework\TestCase;
 use Queen\Http\HttpClient;
 use Queen\Http\LoadBalancer;
 use Queen\Exceptions\HttpException;
+use Queen\Queen;
 use Queen\Tests\Support\PlanHandler;
 
 class HttpClientTest extends TestCase
@@ -92,6 +93,96 @@ class HttpClientTest extends TestCase
         $this->assertFalse($loadBalancer->getHealthStatus()['http://queen-a:6632']['healthy']);
     }
 
+    /**
+     * A leader election can leave every backend marked unhealthy: the
+     * balancer then offers one URL whatever it is asked, and the failover
+     * must still go on to the others.
+     */
+    #[\PHPUnit\Framework\Attributes\TestWith(['round-robin'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['affinity'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['session'])]
+    public function testFailoverTriesEveryBackendWhenAllAreMarkedUnhealthy(string $strategy): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 500, 'json' => ['error' => 'down']],
+            ['status' => 500, 'json' => ['error' => 'down']],
+            ['status' => 200, 'json' => ['ok' => true]],
+        ]);
+        $urls = ['http://queen-a:6632', 'http://queen-b:6632', 'http://queen-c:6632'];
+        $loadBalancer = new LoadBalancer($urls, $strategy);
+        foreach ($urls as $url) {
+            $loadBalancer->markUnhealthy($url);
+        }
+        $client = new HttpClient([
+            'loadBalancer' => $loadBalancer,
+            'enableFailover' => true,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $this->assertSame(['ok' => true], $client->get('/api/v1/status', affinityKey: 'orders:*:workers'));
+        $this->assertSame(3, $handler->count());
+        $this->assertCount(3, array_unique($handler->hosts()), 'a backend was tried twice while another was never tried');
+    }
+
+    /** A URL listed twice is one backend: failover ends with that backend's error. */
+    public function testAUrlListedTwiceIsOneBackendForFailover(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 500, 'json' => ['error' => 'down']],
+            ['status' => 500, 'json' => ['error' => 'down']],
+        ]);
+        $client = new HttpClient([
+            'loadBalancer' => new LoadBalancer(['http://queen-a:6632', 'http://queen-a:6632'], 'affinity'),
+            'enableFailover' => true,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        try {
+            $client->get('/api/v1/status', affinityKey: 'orders:*:workers');
+            $this->fail('a backend that answers 500 succeeded');
+        } catch (\Queen\Exceptions\HttpException $error) {
+            $this->assertSame(500, $error->statusCode);
+        }
+        $this->assertSame(1, $handler->count());
+    }
+
+    /**
+     * consume() with concurrency > 1 polls with getAsync(): one try, no
+     * failover in flight. It must still tell the balancer, or the next round
+     * goes back to the same dead backend for as long as the consumer runs.
+     */
+    public function testAnAsyncRequestThatFailsSendsTheNextOneToAnotherBackend(): void
+    {
+        $hosts = [];
+        $dead = null;
+        $handler = static function (\Psr\Http\Message\RequestInterface $request) use (&$hosts, &$dead): \GuzzleHttp\Promise\PromiseInterface {
+            $host = $request->getUri()->getHost();
+            $hosts[] = $host;
+            $dead ??= $host;
+            if ($host === $dead) {
+                return \GuzzleHttp\Promise\Create::rejectionFor(
+                    new \GuzzleHttp\Exception\ConnectException('cURL error 7: Connection refused', $request),
+                );
+            }
+
+            return new \GuzzleHttp\Promise\FulfilledPromise(new \GuzzleHttp\Psr7\Response(204));
+        };
+        $loadBalancer = new LoadBalancer(['http://queen-a:6632', 'http://queen-b:6632'], 'affinity');
+        $client = new HttpClient([
+            'loadBalancer' => $loadBalancer,
+            'handler' => HandlerStack::create($handler),
+        ]);
+        $pop = '/api/v1/pop/queue/orders?wait=true&timeout=100';
+
+        $first = HttpClient::settleAll([$client->getAsync($pop, 1_000, 'orders:*:workers')]);
+        $second = HttpClient::settleAll([$client->getAsync($pop, 1_000, 'orders:*:workers')]);
+
+        $this->assertSame('rejected', $first[0]['state']);
+        $this->assertSame('fulfilled', $second[0]['state'], 'the next poll went back to the dead backend');
+        $this->assertNotSame($hosts[0], $hosts[1]);
+        $this->assertFalse($loadBalancer->getHealthStatus()["http://{$dead}:6632"]['healthy']);
+    }
+
     public function testAsyncFailoverDoesNotForwardCredentialsAcrossARedirect(): void
     {
         $handler = new PlanHandler([
@@ -103,10 +194,162 @@ class HttpClientTest extends TestCase
             'handler' => HandlerStack::create($handler),
         ]);
 
-        $this->assertSame([], $client->getAsyncWithFailover('/depth')->wait());
+        try {
+            $client->getAsyncWithFailover('/depth')->wait();
+            $this->fail('A redirect was taken for an answer.');
+        } catch (HttpException $exception) {
+            $this->assertSame(302, $exception->statusCode);
+        }
         $this->assertFalse($handler->options[0]['allow_redirects']);
         $this->assertSame('Bearer read-secret', $handler->requests[0]->getHeaderLine('Authorization'));
         $this->assertSame(1, $handler->count());
+    }
+
+    /**
+     * A body json_encode() refuses (here a string that is not UTF-8) is the
+     * caller's error: nothing was sent, so no backend is to blame and no
+     * retry can help.
+     */
+    public function testABodyThatCannotBeEncodedFailsAtOnceAndLeavesEveryBackendHealthy(): void
+    {
+        $handler = new PlanHandler([], ['status' => 201, 'json' => [['status' => 'queued']]]);
+        $loadBalancer = new LoadBalancer(['http://queen-a:6632', 'http://queen-b:6632'], 'round-robin');
+        $client = new HttpClient([
+            'loadBalancer' => $loadBalancer,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $started = microtime(true);
+        try {
+            $client->post('/api/v1/push', ['items' => [['queue' => 'q', 'payload' => "caf\xE9"]]]);
+            $this->fail('A body json_encode() refuses was sent.');
+        } catch (\JsonException $exception) {
+            $this->assertStringContainsString('UTF-8', $exception->getMessage());
+        }
+
+        $this->assertSame(0, $handler->count());
+        $this->assertLessThan(0.5, microtime(true) - $started, 'no backoff for a request that was never sent');
+        foreach ($loadBalancer->getHealthStatus() as $url => $status) {
+            $this->assertTrue($status['healthy'], "{$url} was marked unhealthy for the caller's body");
+        }
+    }
+
+    public function testABodyThatCannotBeEncodedIsNotRetriedAgainstASingleBackend(): void
+    {
+        $handler = new PlanHandler([], ['status' => 201, 'json' => [['status' => 'queued']]]);
+        $client = new HttpClient([
+            'baseUrl' => 'http://queen.test:6632',
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $started = microtime(true);
+        try {
+            $client->post('/api/v1/push', ['items' => [['queue' => 'q', 'payload' => "caf\xE9"]]]);
+            $this->fail('A body json_encode() refuses was sent.');
+        } catch (\JsonException) {
+        }
+
+        $this->assertSame(0, $handler->count());
+        $this->assertLessThan(0.5, microtime(true) - $started, 'the default 1 s + 2 s backoff ran');
+    }
+
+    /**
+     * The client never follows a redirect (it could forward the token), so a
+     * redirect answers nothing the caller asked: a gateway's http->https 307
+     * must not read as a stored push.
+     */
+    public function testARedirectIsAnErrorThatIsNeitherRetriedNorFailedOver(): void
+    {
+        $handler = new PlanHandler([], ['status' => 307, 'body' => '']);
+        $loadBalancer = new LoadBalancer(['http://queen-a:6632', 'http://queen-b:6632'], 'round-robin');
+        $client = new HttpClient([
+            'loadBalancer' => $loadBalancer,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        try {
+            $client->post('/api/v1/push', ['items' => [['queue' => 'q', 'payload' => [], 'transactionId' => 't-1']]]);
+            $this->fail('A redirect was taken for an answer.');
+        } catch (HttpException $exception) {
+            $this->assertSame(307, $exception->statusCode);
+        }
+        $this->assertSame(1, $handler->count());
+        foreach ($loadBalancer->getHealthStatus() as $status) {
+            $this->assertTrue($status['healthy']);
+        }
+    }
+
+    public function testAPushAnsweredWithARedirectIsNotReportedAsStored(): void
+    {
+        $handler = new PlanHandler([], ['status' => 307, 'body' => '']);
+        $queen = new Queen(['url' => 'http://queen.test:6632', 'handler' => HandlerStack::create($handler)]);
+
+        $stored = null;
+        $failed = null;
+        $queen->queue('orders')->push(['id' => 1])
+            ->onSuccess(function (array $items) use (&$stored): void {
+                $stored = $items;
+            })
+            ->onError(function (array $items, \Throwable $error) use (&$failed): void {
+                $failed = $error;
+            })
+            ->execute();
+
+        $this->assertNull($stored, 'the push was reported stored');
+        $this->assertInstanceOf(HttpException::class, $failed);
+        $this->assertSame(1, $handler->count());
+    }
+
+    /**
+     * Push, ACK and transaction always answer a JSON body: an empty one (or a
+     * 204) confirms nothing, so it must not pass for success.
+     */
+    #[\PHPUnit\Framework\Attributes\TestWith([200])]
+    #[\PHPUnit\Framework\Attributes\TestWith([201])]
+    #[\PHPUnit\Framework\Attributes\TestWith([204])]
+    public function testAPushOrAnAckAnsweredWithoutABodyIsAnError(int $status): void
+    {
+        $handler = new PlanHandler([], ['status' => $status, 'body' => '']);
+        $queen = new Queen([
+            'url' => 'http://queen.test:6632',
+            'retryAttempts' => 1,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $stored = null;
+        $failed = null;
+        $queen->queue('orders')->push(['id' => 1])
+            ->onSuccess(function (array $items) use (&$stored): void {
+                $stored = $items;
+            })
+            ->onError(function (array $items, \Throwable $error) use (&$failed): void {
+                $failed = $error;
+            })
+            ->execute();
+        $this->assertNull($stored, "a push answered {$status} without a body was reported stored");
+        $this->assertNotNull($failed);
+
+        $message = ['transactionId' => 't-1', 'partitionId' => 'p-1', 'leaseId' => 'l-1'];
+        $this->assertFalse($queen->ack($message)['success'], 'a single ACK without an answer succeeded');
+        $this->assertFalse($queen->ack([$message])['success'], 'a batch ACK without an answer succeeded');
+    }
+
+    public function testAnEmptyPopIsABodiless204AndAnEmpty200IsAnError(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 204, 'body' => ''],
+            ['status' => 200, 'body' => ''],
+        ]);
+        $queen = new Queen([
+            'url' => 'http://queen.test:6632',
+            'retryAttempts' => 1,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $this->assertSame([], $queen->queue('orders')->wait(false)->pop());
+
+        $this->expectException(\UnexpectedValueException::class);
+        $queen->queue('orders')->wait(false)->pop();
     }
 
     public function testMalformedSuccessfulJsonUsesTheNormalRetryBoundary(): void

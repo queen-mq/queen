@@ -227,6 +227,45 @@ class LaravelSupervisorProductionTest extends TestCase
         fclose($lock);
     }
 
+    /**
+     * The master's workers inherited supervisor.lock. After a SIGKILL or an
+     * out-of-memory kill of the master under a PID 1 that survives (systemd,
+     * supervisord, a shell entrypoint), its orphaned workers held the lock,
+     * and the next master refused to start for as long as they lived.
+     */
+    public function testAProcessTheMasterStartedDoesNotHoldItsLock(): void
+    {
+        if (!function_exists('pcntl_fork') || !function_exists('posix_kill')) {
+            $this->markTestSkipped('Needs ext-pcntl and ext-posix.');
+        }
+        $stateDirectory = $this->temporaryDirectory() . '/state';
+        $workerPidFile = dirname($stateDirectory) . '/worker.pid';
+        $master = pcntl_fork();
+        if ($master === -1) {
+            $this->fail('Unable to fork.');
+        }
+        if ($master === 0) {
+            try {
+                $lock = (new SupervisorState($stateDirectory))->acquireLock();
+                $worker = proc_open([PHP_BINARY, '-r', 'sleep(30);'], [], $pipes);
+                file_put_contents($workerPidFile, (string) proc_get_status($worker)['pid']);
+            } finally {
+                posix_kill(getmypid(), SIGKILL);
+            }
+        }
+        pcntl_waitpid($master, $status);
+        $worker = (int) @file_get_contents($workerPidFile);
+        $this->assertGreaterThan(0, $worker);
+
+        try {
+            $this->assertTrue(posix_kill($worker, 0), 'the worker outlives its master');
+            $lock = (new SupervisorState($stateDirectory))->acquireLock();
+            fclose($lock);
+        } finally {
+            posix_kill($worker, SIGKILL);
+        }
+    }
+
     public function testAcquiredGenerationFailsClosedAfterStateDirectoryReplacement(): void
     {
         $stateDirectory = $this->temporaryDirectory();
@@ -514,7 +553,13 @@ class LaravelSupervisorProductionTest extends TestCase
     public function testConfigurationRejectsUnsafeLeaseRenewalTimingAcrossAllBackends(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('lease renewal timing budget');
+        // 60 + 2 x (5 s x 3 URLs) + 2 + 1 + 1 = 94 s, and what to change.
+        $this->expectExceptionMessage(
+            'Queen supervisor [jobs] lease renewal timing budget [94 s] must be shorter than retry_after [90 s]. '
+            . 'It is the renewal interval [60 s], twice a renewal that tries every broker URL [5 s x 3 URLs], '
+            . 'the kill grace [2 s], the safety margin [1 s] and 1 s. Raise retry_after, or lower '
+            . 'lease_renewal_timeout or lease_renewal_interval.',
+        );
 
         SupervisorConfiguration::resolve([
             'supervisor' => [

@@ -73,6 +73,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (supervisor 0.8.1): SupervisorBinary pins 0.8.1; this page names
 # no supervisor version, and the installer keys and defaults are unchanged. Nothing this page states
 # changes.
+# sourceOfTruth re-read 2026-10-11 (review fixes, unreleased): failover counts a URL listed twice
+# once; consume() backs off after an answer that is not the broker's; a replacement that cannot
+# start waits for the circuit; the PHP stop signal reaches the workers once; the Rust master handles
+# SIGTERM during its configuration export and drops a log line it cannot write. Nothing this page
+# states changes.
 ---
 
 Every setting of the Laravel integration lives in `config/queen.php`. Since PHP client 2.1.0 the
@@ -189,6 +194,17 @@ A few more variables are read outside `config/queen.php`, from the environment o
 With a single URL the load-balancing keys have no effect. With several, `enable_failover` takes the
 place of `retry_attempts`: each backend gets one try, and a backend that failed is skipped for
 `health_retry_after`.
+
+Since PHP client 2.4.4 a failover that finds every backend marked unhealthy still tries each one,
+not only the first. While a cluster elects a leader, its nodes answer 503 `no_leader`: a request
+waits the election out at the pace of the `Retry-After` header, for at most 10 seconds or its
+`timeout`, without using up its tries. A read, or a push whose every message has a `transactionId`
+(the broker drops a second copy, and a Laravel job always has one), also waits after a 503 `retry`.
+A pop whose 503 says it may have run (`outcome_unknown`, `timeout` or `retry`) is never sent again,
+so a lease is never taken twice. A redirect is an error, never followed or retried: check the URL.
+An answer without a body where the broker always sends one (a push, an ACK, a transaction, a pop
+with status 200) is an error too, no longer a success. A body that cannot be encoded as JSON, such
+as a string that is not UTF-8, fails at once, with no request sent and no backend marked unhealthy.
 
 <Aside type="caution">
 Two defaults differ from the plain PHP client's, because `config/queen.php` sets its own:
@@ -429,7 +445,7 @@ checks when either engine starts, and `php artisan queen:supervisor-config` show
 | `pop_ahead` needs `lease_renewal` | connector | `Queen Laravel pop_ahead requires lease_renewal so the batch it pops ahead remains fenced.` |
 | `ack_async` needs `ack_batch` 1 | connector | `Queen Laravel ack_async requires ack_batch 1: a batch already defers its ACKs.` |
 | The renewal timing fits in `retry_after` | connector | `Queen Laravel lease_renewal timing is unsafe: interval + two request budgets + retry + kill grace + safety margin must be shorter than retry_after.` |
-| The same rule for a pool | supervisor | `Queen supervisor [default] lease renewal timing budget must be shorter than retry_after.` |
+| The same rule for a pool, where a renewal may try every broker URL | supervisor | `Queen supervisor [default] lease renewal timing budget [44 s] must be shorter than retry_after [30 s]. It is the renewal interval [10 s], twice a renewal that tries every broker URL [5 s x 3 URLs], the kill grace [2 s], the safety margin [1 s] and 1 s. Raise retry_after, or lower lease_renewal_timeout or lease_renewal_interval.` (three URLs; the budget and its parts since PHP client 2.4.4) |
 | A pool's `retry_after` exceeds its `timeout` | supervisor | `Queen supervisor [default] retry_after must be longer than timeout.` |
 | `shutdown_grace` exceeds every pool's `timeout` | supervisor | `Queen supervisor shutdown_grace must be longer than every worker timeout.` |
 | The pools fit `process_limit`, two slots per worker with lease renewal | supervisor | `Queen supervisor [default] exceeds process_limit [256].` |

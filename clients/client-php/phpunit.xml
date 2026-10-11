@@ -30,7 +30,9 @@
             <directory>tests/RedisIntegration</directory>
         </testsuite>
     </testsuites>
-    <source>
+    <!-- Deprecations raised inside the dependencies alone are not the
+         client's: the PHP 8.5 cell of CI fails on the others. -->
+    <source ignoreIndirectDeprecations="true">
         <include>
             <directory>src</directory>
         </include>

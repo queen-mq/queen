@@ -70,6 +70,9 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
 # supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): QueenQueue: a dead-letter error is
+# valid UTF-8 and at most 8 KiB, and the timeout handler's dead-letter ACK is bounded. The job
+# metrics this page states are unchanged; the harness's job-metrics scenario checks them.
 ---
 
 The [dashboard](/guides/laravel/dashboard/) shows what the supervisors are doing. This page is about

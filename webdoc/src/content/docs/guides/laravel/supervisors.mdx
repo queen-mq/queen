@@ -85,6 +85,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (probe user): SupervisorState refuses a reader that does not own
 # the state, root included, as before; the refusal now names the owner and the reader and shows su
 # and securityContext.runAsUser. The commands section says to run them as the supervisor's user.
+# sourceOfTruth re-read 2026-10-11 (review fixes, unreleased): failover counts a URL listed twice
+# once; consume() backs off after an answer that is not the broker's; a replacement that cannot
+# start waits for the circuit; the PHP stop signal reaches the workers once; the Rust master handles
+# SIGTERM during its configuration export and drops a log line it cannot write. Nothing this page
+# states changes.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
@@ -380,15 +385,28 @@ exit, which is how the master tells them from a crash. Every other non-zero exit
 failure, including a SIGKILL without that marker, such as the OOM killer's. Before 1.9.0 a burst of
 job timeouts could open the circuit and hold a healthy pool at one worker.
 
+Since PHP client 2.4.4 and supervisor 0.8.2, those three exits and a worker that stopped for
+`queue:restart` are also replaced outside `balance_max_shift` and whatever the circuit says, up to
+the size the pool had: a pool that loses most of its workers at once, as at a deploy, is refilled in
+one cycle, and a worker that stops at `--max-time` while a probe runs is replaced at once. Any other
+exit, even with status 0, waits for the budget and the circuit as before: Laravel's worker exits 0
+when it loses its database connection, every second through an outage.
+
 Laravel's worker catches what a pop throws, reports it, sleeps a second and pops again, so a worker
 whose every pop fails stays alive and looks like capacity. Since PHP client 2.4.2 a worker started
 by either engine tells the two cases apart. When its loop works another connection than its pool's,
 or a pop throws a `LogicException` (an `InvalidArgumentException` included), no retry can help: the
 worker throws `WorkerCannotConsume` from its next loop, which reaches the application's exception
-handler, and exits 1, a crash like any other. When the broker is down, slow or refusing, a restart
-cannot help either, and restarting every worker would turn a short outage into a restart storm: the
-worker stays, and leaves a small file in the state directory saying since when its pops fail. The
-first pop that works, empty or not, removes it. `queen:supervisor status` reads it; see below.
+handler, and exits 1, a crash like any other. A job whose own `$timeout` its lease cannot cover
+no longer stops the worker since PHP client 2.4.4: that job fails alone, as [a migration
+note](/guides/laravel/migrate-from-horizon/) explains. When the broker is down, slow or refusing, a
+restart cannot help either, and restarting every worker would turn a short outage into a restart
+storm: the worker stays, and leaves a small file in the state directory saying since when its pops
+fail. A pop that works, empty or not, clears the failure of its own queue, and the file goes once
+no queue fails, so a worker of `--queue=high,low` whose every pop of `low` fails is reported even
+while `high` answers (PHP client 2.4.4). A pop that failed because the broker reset the connection
+no longer makes Laravel stop the worker as if it had lost its database (2.4.4).
+`queen:supervisor status` reads the file; see below.
 
 ## Run the Rust engine
 
@@ -475,11 +493,13 @@ TimeoutStopSec=90
 `KillMode=mixed` sends the first SIGTERM to the master alone, so the master drains each worker
 without killing its renewal helper early, and systemd still SIGKILLs the whole cgroup at the
 deadline. Keep `TimeoutStopSec` above `shutdown_grace`. For the PHP engine, the `ExecStart` is
-`/usr/bin/php artisan queen:supervise`. In a container whose entrypoint is the supervisor, run a
-real init process (`docker run --init`, Compose `init: true`, tini): a renewal helper can be
-orphaned for a moment after a forced kill and something has to reap it. A forked worker outlives a
-fork server the OOM killer took; a master that is PID 1 reaps that worker itself when it exits
-(PHP client 2.4.1).
+`/usr/bin/php artisan queen:supervise`. In a container whose entrypoint is the supervisor, the master
+is PID 1, and the processes that are orphaned come to it: a renewal helper after a forced kill, or a
+process a job started and left behind. Since PHP client 2.4.4 and supervisor 0.8.2 a master that is
+PID 1 reaps, on Linux, every zombie child it does not track, so a pod needs no init process; before,
+run one (`docker run --init`, Compose `init: true`, tini), or the zombies use up the container's
+pids. A forked worker outlives a fork server the OOM killer took; a master that is PID 1 reaps that
+worker itself when it exits (PHP client 2.4.1).
 
 ## Inspect and control either engine
 
@@ -512,6 +532,11 @@ pool runs at least as many workers as it wants, with a healthy restart circuit. 
 for a moment during a normal scale-up, which is why it is separate from readiness. In
 `status --json`, each entry of `pool_status` carries `capacity_satisfied`, so a scale-up that lags
 shows there without making readiness flap.
+
+A status the master cannot write, as on a full disk, no longer stops it at once (PHP client 2.4.4,
+supervisor 0.8.2): the workers keep running, the write is retried every pass, and the probes see
+the status grow stale. The master stops once the writes have failed for `heartbeat_timeout`, when
+every reader already calls it stale. Before, one failed write drained every worker.
 
 A live worker whose pops have all failed for 60 seconds is not consuming (PHP client 2.4.2). A pool
 in which every running worker is in that state is not ready, and one with any such worker is not at
@@ -619,7 +644,9 @@ the restart signal, and the master then starts a new fork server, so the workers
 on boot nothing and run the deployed code; the old server closes with the last worker it forked. A
 worker forked between the restart and that first exit leaves at once with the restart marker, and a
 master whose fork server had failed to boot, or to fork, starts one again at the next
-`queue:restart` (PHP client 2.4.1). A change to `config/queen.php` still needs the master restarted (`php artisan queen:supervisor
+`queue:restart` (PHP client 2.4.1). A boot can block the master for up to a minute, so after a boot
+that failed the next one waits 60 seconds, doubling to 15 minutes, and workers are spawned
+meanwhile (PHP client 2.4.4, supervisor 0.8.2). A change to `config/queen.php` still needs the master restarted (`php artisan queen:supervisor
 terminate`, then your process manager starts it again), as it does without prefork. Prefork needs
 PHP client 1.7.0 (supervisor 0.4.0); the restart and the checks above need PHP client 2.1.0.
 

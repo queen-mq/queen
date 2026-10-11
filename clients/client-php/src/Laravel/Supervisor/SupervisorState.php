@@ -810,19 +810,22 @@ final class SupervisorState
     {
         $this->ensureDirectory();
         $path = $this->path($file);
-        $temporary = tempnam($this->directory, '.queen-');
+        // A full or failing disk is a SupervisorStateWriteException, which the
+        // master retries, and not the warning that Laravel's error handler
+        // would turn into an ErrorException.
+        $temporary = @tempnam($this->directory, '.queen-');
         if ($temporary === false) {
-            throw new RuntimeException("Unable to create a temporary state file in [{$this->directory}].");
+            throw new SupervisorStateWriteException("Unable to create a temporary state file in [{$this->directory}].");
         }
         try {
             $json = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
             if (strlen($json) > $this->maximumBytes($file)) {
                 throw new RuntimeException("Queen supervisor state [{$path}] exceeds its size limit.");
             }
-            if (file_put_contents($temporary, $json, LOCK_EX) !== strlen($json)
-                || !chmod($temporary, 0600)
-                || !rename($temporary, $path)) {
-                throw new RuntimeException("Unable to publish Queen supervisor state [{$path}].");
+            if (@file_put_contents($temporary, $json, LOCK_EX) !== strlen($json)
+                || !@chmod($temporary, 0600)
+                || !@rename($temporary, $path)) {
+                throw new SupervisorStateWriteException("Unable to publish Queen supervisor state [{$path}].");
             }
             $this->ensureDirectory();
         } catch (\Throwable $error) {
@@ -1219,7 +1222,11 @@ final class SupervisorState
         if ($metadata !== false && ($metadata['mode'] & 0170000) !== 0100000) {
             throw new RuntimeException("Queen supervisor lock [{$path}] must not be a symbolic link.");
         }
-        $handle = @fopen($path, 'c+b');
+        // Close-on-exec ('e'): a worker the master starts must not inherit
+        // the lock. After a SIGKILL or an out-of-memory kill of the master
+        // under a PID 1 that survives it, orphaned workers held it, and the
+        // next master refused to start for as long as they lived.
+        $handle = @fopen($path, 'c+be');
         $current = @lstat($path);
         $opened = is_resource($handle) ? fstat($handle) : false;
         if (!is_resource($handle)

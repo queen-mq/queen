@@ -6,9 +6,11 @@ use GuzzleHttp\Promise\PromiseInterface;
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Queue\Queue as QueueContract;
+use Illuminate\Database\DetectsLostConnections;
 use Illuminate\Queue\Events\WorkerStopping;
 use Illuminate\Queue\InvalidPayloadException;
 use Illuminate\Queue\Queue as BaseQueue;
+use Illuminate\Queue\TimeoutExceededException;
 use JsonException;
 use Queen\Builders\QueueBuilder;
 use Queen\Exceptions\HttpException;
@@ -35,6 +37,9 @@ class QueenQueue extends BaseQueue implements QueueContract
 
     /** A pop sent ahead never long-polls, so its answer is due at once. */
     private const POP_AHEAD_SETTLE_MILLIS = 5_000;
+
+    /** The dashboard shows a failure's summary up to the same bound. */
+    private const MAX_DEAD_LETTER_ERROR_BYTES = 8_192;
 
     /** @var array<string, array{messages: list<array>, next: int}> */
     private array $prefetched = [];
@@ -180,9 +185,9 @@ class QueenQueue extends BaseQueue implements QueueContract
 
     /**
      * Complete the deferred ACKs and hand back every unhandled prefetched
-     * delivery, in one transaction on the connector's single-attempt,
-     * two-second client. If it fails, everything falls back to durable lease
-     * expiry.
+     * delivery, in one transaction on the connector's bounded client: one
+     * attempt per backend, two seconds in all. If it fails, everything falls
+     * back to durable lease expiry.
      */
     public function shutdown(): void
     {
@@ -552,12 +557,48 @@ class QueenQueue extends BaseQueue implements QueueContract
         } catch (\Throwable $error) {
             // Laravel's worker reports it and pops again; the guard decides
             // whether the worker should leave or say it is not consuming.
-            $this->popGuard->popFailed($error);
-            throw $error;
+            $this->popGuard->popFailed($error, $this->getQueue($queue));
+            throw self::asFailedPop($error, $this->getQueue($queue));
         }
-        $this->popGuard->popped();
+        $this->popGuard->popped($this->getQueue($queue));
 
         return $job;
+    }
+
+    /**
+     * A failed pop as a supervised worker's loop should see it. One whose
+     * message reads, to Laravel, as a lost database connection ("reset by
+     * peer", "Broken pipe") stopped the worker with exit code 0, which the
+     * supervisor counts as clean and restarts without backoff, and its stop
+     * took the worker's pop-failures file back: with a broker that kept
+     * resetting connections, the pool restarted its workers in a loop and
+     * never said they were not consuming. Wrapped, it is a failed pop like
+     * any other; the broker's error is the previous exception.
+     */
+    private static function asFailedPop(\Throwable $error, string $queue): \Throwable
+    {
+        if ($error instanceof \LogicException) {
+            return $error;
+        }
+        $detector = new class () {
+            use DetectsLostConnections;
+
+            public function lost(\Throwable $error): bool
+            {
+                return $this->causedByLostConnection($error);
+            }
+        };
+        if (!$detector->lost($error)) {
+            return $error;
+        }
+        $failedPop = new RuntimeException(
+            "Queen Laravel could not pop [{$queue}]: the broker's connection failed ("
+                . get_class($error) . '); the worker pops again, see the previous exception.',
+            0,
+            $error,
+        );
+
+        return $detector->lost($failedPop) ? $error : $failedPop;
     }
 
     private function popJob(?string $queue): ?QueenJob
@@ -633,7 +674,15 @@ class QueenQueue extends BaseQueue implements QueueContract
         if ($messages === []) {
             return null;
         }
-        $this->acceptPopped($queue, $messages, $popStartedMillis);
+        try {
+            $this->acceptPopped($queue, $messages, $popStartedMillis);
+        } catch (\Throwable $untracked) {
+            // Leased all the same: hand the jobs back, as a batch popped
+            // ahead is, instead of leaving them to lease expiry, which
+            // charges each one an attempt.
+            $this->releaseUnstarted($messages, $queue, $untracked);
+            throw $untracked;
+        }
 
         return $this->takePrefetched($queue);
     }
@@ -890,7 +939,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             ));
         } catch (\Throwable $failure) {
             $this->reportQuietly(new RuntimeException(
-                'Queen Laravel could not hand back jobs it popped ahead, which will run after their lease expires: '
+                'Queen Laravel could not hand back jobs it popped, which will run after their lease expires: '
                     . $failure->getMessage() . ' (' . $reason->getMessage() . ')',
                 0,
                 $failure,
@@ -1040,7 +1089,8 @@ class QueenQueue extends BaseQueue implements QueueContract
         return null;
     }
 
-    private function makeJob(array $message, string $queue): QueenJob
+    /** The job of a delivery; null for one whose unsafe timeout failed it. */
+    private function makeJob(array $message, string $queue): ?QueenJob
     {
         if ($this->leaseRenewer !== null) {
             $leaseId = $this->leaseId($message);
@@ -1069,14 +1119,36 @@ class QueenQueue extends BaseQueue implements QueueContract
             $this->consumerGroup,
         );
 
-        try {
-            $this->assertJobTimeoutIsSafe($job);
-        } catch (\Throwable $timeoutFailure) {
-            $this->abandonDelivery($message);
-            throw $timeoutFailure;
+        $unsafe = $this->unsafeJobTimeout($job);
+        if ($unsafe !== null) {
+            $this->failUnsafeJob($job, $unsafe);
+
+            return null;
         }
 
         return $job;
+    }
+
+    /**
+     * Fail a job whose timeout its lease cannot cover, as Laravel fails one:
+     * the dead-letter queue, JobFailed (queue:work's failed-job row) and the
+     * job's failed(). Thrown from pop(), it ended the worker instead, and the
+     * lease expired without charging an attempt: the next worker popped the
+     * same job and ended too, so the pool crash-looped on it and its
+     * partition never moved. The exception names the setting to fix, and is
+     * reported as well.
+     */
+    private function failUnsafeJob(QueenJob $job, UnsafeJobTimeoutException $unsafe): void
+    {
+        $this->reportQuietly($unsafe);
+        try {
+            $job->fail($unsafe);
+        } catch (\Throwable $failure) {
+            // As Laravel's worker does with what fail() throws: report it and
+            // go on. A dead-letter ACK that failed left the delivery to lease
+            // expiry.
+            $this->reportQuietly($failure);
+        }
     }
 
     public function deleteReserved(
@@ -1087,17 +1159,50 @@ class QueenQueue extends BaseQueue implements QueueContract
         ?string $queue = null,
     ): void
     {
+        if ($failed && $exception instanceof TimeoutExceededException) {
+            $this->deadLetterTimedOut($message, $group, $exception, $queue);
+
+            return;
+        }
         $this->acknowledgeReserved($message, $group, $failed, $exception, $queue);
         // The job has ended: take in the batch popped ahead while it ran.
         $this->settlePendingPop();
     }
 
+    /**
+     * Dead-letter a job from Laravel's timeout handler, which fails it on
+     * timeout or on its last try, then kills the worker. The handler runs on
+     * SIGALRM: what throws there lands in the job's code, and JobTimedOut and
+     * the kill never come, so the job ran on past its timeout and a second
+     * worker got it after retry_after; the ordinary client alone could take
+     * three tries of 30 seconds. Here it is one bounded request, and a
+     * failure is only reported: the lease expires, the broker delivers the
+     * job again, and Laravel fails it past its tries. The kill's shutdown()
+     * hands back the rest.
+     */
+    private function deadLetterTimedOut(array $message, string $group, \Throwable $exception, ?string $queue): void
+    {
+        try {
+            $this->settlePendingAck(self::SHUTDOWN_ACK_TIMEOUT_MILLIS, retry: false);
+            $this->acknowledgeReserved($message, $group, true, $exception, $queue, $this->getBestEffortQueen());
+        } catch (\Throwable $failure) {
+            $this->reportQuietly(new RuntimeException(
+                'Queen Laravel could not dead-letter a job that timed out, which runs again after its lease expires: '
+                    . $failure->getMessage(),
+                0,
+                $failure,
+            ));
+        }
+    }
+
+    /** @param Queen|null $client the client of the ACKs; the ordinary one when null */
     private function acknowledgeReserved(
         array $message,
         string $group,
         bool $failed,
         ?\Throwable $exception,
         ?string $queue,
+        ?Queen $client = null,
     ): void {
         $this->settlePendingAck();
         $affinityKey = $queue !== null ? $this->affinityKey($queue, $group) : null;
@@ -1126,16 +1231,16 @@ class QueenQueue extends BaseQueue implements QueueContract
             // success acknowledgements first so a later batch failure cannot
             // obscure it. A DLQ transition invalidates same-partition tails.
             if ($failed) {
-                $this->flushAcknowledgements();
+                $this->flushAcknowledgementsWith($client ?? $this->queen);
                 $this->discardPrefetchedSiblings($message);
             }
 
-            $result = $this->queen->ack(
+            $result = ($client ?? $this->queen)->ack(
                 $message,
                 $failed ? 'dlq' : 'completed',
                 array_filter([
                     'group' => $group,
-                    'error' => $exception?->getMessage(),
+                    'error' => $exception !== null ? self::deadLetterError($exception) : null,
                     'affinityKey' => $affinityKey,
                 ], fn ($value) => $value !== null),
             );
@@ -1149,6 +1254,28 @@ class QueenQueue extends BaseQueue implements QueueContract
         $this->markDeliveryHandled($message);
         $this->endSettling();
         $this->settleLeaseMessage($message);
+    }
+
+    /**
+     * The error a dead-letter ACK carries: the failure's message, as valid
+     * UTF-8 and bounded. A QueryException with a latin-1 binding is not
+     * UTF-8, and its ACK could not be encoded: delete() threw inside
+     * Job::fail(), which then skipped failed() and the batch and chain
+     * callbacks, and the job failed again at its next delivery.
+     */
+    private static function deadLetterError(\Throwable $exception): string
+    {
+        $error = json_decode(
+            json_encode($exception->getMessage(), JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR),
+            false,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        if (strlen($error) <= self::MAX_DEAD_LETTER_ERROR_BYTES) {
+            return $error;
+        }
+
+        return mb_strcut($error, 0, self::MAX_DEAD_LETTER_ERROR_BYTES - 3, 'UTF-8') . '...';
     }
 
     private function sendAckDetached(array $message, string $group, ?string $affinityKey): bool
@@ -1230,6 +1357,11 @@ class QueenQueue extends BaseQueue implements QueueContract
     /** Flush successful ACKs deferred by ack_batch. */
     public function flushAcknowledgements(): void
     {
+        $this->flushAcknowledgementsWith($this->queen);
+    }
+
+    private function flushAcknowledgementsWith(Queen $queen): void
+    {
         while ($this->pendingAcknowledgements !== []) {
             $group = $this->pendingAcknowledgements[0]['group'];
             $affinityKey = $this->pendingAcknowledgements[0]['affinity_key'];
@@ -1244,7 +1376,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             }
 
             try {
-                $result = $this->queen->ack($messages, 'completed', array_filter([
+                $result = $queen->ack($messages, 'completed', array_filter([
                     'group' => $group,
                     'affinityKey' => $affinityKey,
                 ], fn ($value) => $value !== null));
@@ -1333,11 +1465,11 @@ class QueenQueue extends BaseQueue implements QueueContract
     }
 
     /**
-     * The client for writes that may fail, such as job metrics: one attempt,
-     * two seconds, no failover, no 429 retry. They run in a worker's job
-     * events and in WorkerStopping, where the ordinary client's retries would
-     * hold the worker; the ordinary client when the connector did not build
-     * this queue.
+     * The client for writes that may fail, such as job metrics: one attempt
+     * per backend, two seconds shared by the backends, no 429 retry. They
+     * run in a worker's job events and in WorkerStopping, where the ordinary
+     * client's retries would hold the worker; the ordinary client when the
+     * connector did not build this queue.
      */
     public function getBestEffortQueen(): Queen
     {
@@ -1640,29 +1772,38 @@ class QueenQueue extends BaseQueue implements QueueContract
         $this->journaled = [];
     }
 
-    private function assertJobTimeoutIsSafe(QueenJob $job): void
+    /** Why its lease cannot cover the job's timeout; null when it can. */
+    private function unsafeJobTimeout(QueenJob $job): ?UnsafeJobTimeoutException
     {
         $timeout = $job->timeout();
         if ($timeout === null) {
             // The worker CLI's --timeout is not part of Laravel's queue
             // connection contract. Supervisors validate it at startup.
-            return;
+            return null;
         }
 
-        // A deploy fixes the job class or the connection, nothing else: a
-        // supervised worker leaves (WorkerPopGuard), and its pool shows it.
+        // `$this->timeout = env('JOB_TIMEOUT')` gives a numeric string, which
+        // Laravel's worker coerces to the integer it arms its alarm with.
+        if (!is_int($timeout) && is_numeric($timeout) && (float) $timeout >= 0 && (float) $timeout < PHP_INT_MAX) {
+            $timeout = (int) $timeout;
+        }
+
+        // A deploy fixes the job class or the connection, nothing else: the
+        // job fails, and its exception names the setting to fix.
         if (!is_int($timeout) || $timeout < 0) {
-            throw new UnsafeJobTimeoutException(
+            return new UnsafeJobTimeoutException(
                 'Queen Laravel job timeout must be a non-negative integer or null.',
             );
         }
 
         if ($this->leaseRenewer === null && ($timeout === 0 || $timeout >= $this->retryAfter)) {
-            throw new UnsafeJobTimeoutException(
+            return new UnsafeJobTimeoutException(
                 "Queen Laravel job timeout [{$timeout}] must be positive and shorter than retry_after "
                 . "[{$this->retryAfter}] when lease_renewal is disabled.",
             );
         }
+
+        return null;
     }
 
     private function takePrefetched(string $queue): ?array

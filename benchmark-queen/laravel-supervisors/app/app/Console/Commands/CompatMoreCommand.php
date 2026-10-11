@@ -292,7 +292,7 @@ final class CompatMoreCommand extends CompatScenarioCommand
             && !isset($this->failedIds()['r1']), $this->count('r1', 'started') . ' runs');
         // The release counts as an attempt: the second run is attempt 2.
         $this->sameJobs(['r1']);
-        $this->near('r1 release(5) delay', $gap, 1.5);
+        $this->near('r1 release(5) delay', $gap, self::DELAY_TOLERANCE);
     }
 
     private function queueMonitor(): void

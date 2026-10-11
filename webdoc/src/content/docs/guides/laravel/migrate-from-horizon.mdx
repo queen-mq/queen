@@ -70,6 +70,11 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-10 (pop start, PHP client 2.4.3): QueenQueue::pop tells a
 # supervised worker's WorkerPopGuard when each pop begins, so a failed pop counts from its start.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (review fixes, unreleased): failover counts a URL listed twice
+# once; consume() backs off after an answer that is not the broker's; a replacement that cannot
+# start waits for the circuit; the PHP stop signal reaches the workers once; the Rust master handles
+# SIGTERM during its configuration export and drops a log line it cannot write. Nothing this page
+# states changes.
 ---
 
 A move from Horizon changes two things at once: Redis gives way to the Queen broker as the place
@@ -365,11 +370,14 @@ Laravel's own timeout still stops a job in both profiles; a job that must run lo
 pool's `timeout` declares a longer `$timeout` in its class.
 
 Without renewal, the driver refuses a job whose own `$timeout` is not shorter than `retry_after`,
-and a job with `$timeout = 0`, which would run with no limit at all. The worker reports the error
-and leaves the job, which comes back after its lease expires and is refused again: it never runs
-and never reaches `tries`. Since PHP client 2.4.2 a worker started by a supervisor also exits, so
-its pool's restarts show the error in `queen:supervisor status`. Give the job a `$timeout` above 0
-and below `retry_after`, raise `retry_after`, or turn renewal on.
+and a job with `$timeout = 0`, which would run with no limit at all. Since PHP client 2.4.4 that job
+fails at once, without running: it gets its failed-job row and its `failed()` call, it goes to the
+dead-letter queue, and the exception names the setting to change; the worker goes on with the next
+job. Before, the job was left to its lease and refused again at every delivery, so it never ran,
+never reached `tries` and held its partition, and from 2.4.2 every worker that popped it exited, so
+its pool crash-looped. A `$timeout` that is a numeric string, as `env()` returns it, counts as the
+number, as Laravel's worker reads it (2.4.4). Give the job a `$timeout` above 0 and below
+`retry_after`, raise `retry_after`, or turn renewal on.
 
 A large `retry_after` also costs more on Queen than on Redis. When a worker dies, its lease holds
 the whole stripe, so the jobs behind its job wait up to `retry_after` seconds, unless its renewer

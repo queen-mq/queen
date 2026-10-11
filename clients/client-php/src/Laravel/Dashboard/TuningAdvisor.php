@@ -99,7 +99,9 @@ final class TuningAdvisor
             static fn (array $class): bool => $class['max_ms'] !== null && $class['max_ms'] > $grace * 1000,
         ));
         usort($long, static fn (array $a, array $b): int => [$b['max_ms'], $a['class']] <=> [$a['max_ms'], $b['class']]);
-        $window = self::WINDOWS[$jobMetrics['range'] ?? null] ?? 'window';
+        // A null array offset is deprecated since PHP 8.5.
+        $range = $jobMetrics['range'] ?? null;
+        $window = is_string($range) ? (self::WINDOWS[$range] ?? 'window') : 'window';
 
         $advice = [];
         foreach (array_slice($long, 0, self::MAX_CLASSES) as $class) {

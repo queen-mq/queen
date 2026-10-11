@@ -4,13 +4,18 @@ namespace Queen\Tests;
 
 use DateInterval;
 use DateTimeImmutable;
+use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Promise\Create;
+use GuzzleHttp\Promise\PromiseInterface;
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Events\Dispatcher;
+use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\WorkerStopping;
 use PHPUnit\Framework\Attributes\TestWith;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\RequestInterface;
 use Queen\Exceptions\ConflationPolicyMismatchException;
 use Queen\Exceptions\HttpException;
 use Queen\Laravel\Contracts\QueenPartitionable;
@@ -633,6 +638,45 @@ class LaravelQueueDriverTest extends TestCase
         $queue->pop('emails');
     }
 
+    /**
+     * The shutdown hand-back went to one backend, without failover: with two
+     * URLs and one of them down, the prefetched tail was not handed back,
+     * waited for its lease, and was charged an attempt. It tries the other
+     * URL, within the same two-second bound.
+     */
+    public function testTheShutdownHandBackFailsOverToAnotherBackendWithinItsBound(): void
+    {
+        $plan = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([$this->payload('job-1'), $this->payload('job-2')])],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        $refused = [];
+        $handler = static function (RequestInterface $request, array $options) use ($plan, &$refused): PromiseInterface {
+            if ($request->getUri()->getHost() === 'queen-1.test') {
+                $refused[] = [$request->getUri()->getPath(), $options['timeout'] ?? null];
+
+                return Create::rejectionFor(new ConnectException('Connection refused', $request));
+            }
+
+            return $plan($request, $options);
+        };
+        [$queue] = $this->queueFor($plan, [
+            'urls' => ['http://queen-1.test:6632', 'http://queen-2.test:6632'],
+            'load_balancing_strategy' => 'round-robin',
+            'handler' => HandlerStack::create($handler),
+            'prefetch' => 2,
+        ]);
+
+        $queue->pop('emails');
+        $queue->shutdown();
+
+        $this->assertSame(['/api/v1/transaction'], array_column(array_slice($refused, 1), 0), 'tried the backend that is down first');
+        $this->assertCount(2, $plan->requests);
+        $handBack = $this->handBack($plan->requests[1]);
+        $this->assertSame(['job-1', 'job-2'], $this->copiedJobs($handBack));
+        $this->assertEquals([1, 1], [$refused[1][1], $plan->options[1]['timeout']], 'two backends share the two seconds');
+    }
+
     public function testShutdownCompletesDeferredSuccessAndHandsBackTheTailInOneTransaction(): void
     {
         $handler = new PlanHandler([
@@ -843,21 +887,107 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame(2, $restarted->pop('emails')->attempts(), 'a crash charges the tail one attempt');
     }
 
-    public function testUnrenewedJobSpecificTimeoutMustBeShorterThanRetryAfter(): void
+    /**
+     * A job whose timeout its lease cannot cover is wrong in its code, and
+     * only a deploy fixes it. Thrown from pop(), it ended the worker; the
+     * lease expired without charging an attempt, the next worker popped the
+     * same job and ended too, and the job never reached the dead-letter
+     * queue. It fails as Laravel fails a job: dead-letter queue, JobFailed
+     * (which queue:work's failed-job row listens to) and the job's failed().
+     */
+    #[TestWith([120, 'Queen Laravel job timeout [120] must be positive and shorter than retry_after [120] when lease_renewal is disabled.'])]
+    #[TestWith([0, 'Queen Laravel job timeout [0] must be positive and shorter than retry_after [120]'])]
+    #[TestWith(['600', 'Queen Laravel job timeout [600] must be positive and shorter than retry_after [120]'])]
+    #[TestWith([-1, 'Queen Laravel job timeout must be a non-negative integer or null.'])]
+    #[TestWith(['ten minutes', 'Queen Laravel job timeout must be a non-negative integer or null.'])]
+    public function testAJobWhoseTimeoutItsLeaseCannotCoverFailsAndThePopGoesOn(int|string $timeout, string $says): void
     {
         $payload = $this->payload('job-too-long');
-        $payload['timeout'] = 120;
+        $payload['job'] = FailureRecordingTestHandler::class . '@handle';
+        $payload['timeout'] = $timeout;
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popResponse($payload)],
+            ['status' => 200, 'json' => ['success' => true, 'leaseReleased' => true, 'dlq' => true]],
+            ['status' => 200, 'json' => $this->popResponse($this->payload('job-next'))],
+        ]);
+        [$queue] = $this->queueFor($handler);
+        $container = new Container();
+        $container->instance(ExceptionHandler::class, $reported = new RecordingExceptionHandler());
+        $container->instance(\Illuminate\Contracts\Events\Dispatcher::class, $events = new Dispatcher($container));
+        $failed = [];
+        $events->listen(JobFailed::class, function (JobFailed $event) use (&$failed): void {
+            $failed[] = $event;
+        });
+        $queue->setContainer($container);
+        FailureRecordingTestHandler::$failures = [];
+
+        $this->assertNull($queue->pop('emails'));
+
+        $this->assertSame('/api/v1/ack', $handler->requests[1]->getUri()->getPath());
+        $ack = json_decode((string) $handler->requests[1]->getBody(), true);
+        $this->assertSame('dlq', $ack['status']);
+        $this->assertSame('transaction-1', $ack['transactionId']);
+        $this->assertStringContainsString($says, $ack['error']);
+        $this->assertCount(1, $failed);
+        $this->assertInstanceOf(UnsafeJobTimeoutException::class, $failed[0]->exception);
+        $this->assertSame([$failed[0]->exception], FailureRecordingTestHandler::$failures, 'the job\'s failed()');
+        $this->assertSame([$failed[0]->exception], $reported->reported, 'the operator sees the setting to fix');
+        $this->assertSame('job-next', $queue->pop('emails')?->getJobId());
+    }
+
+    /**
+     * `$this->timeout = env('JOB_TIMEOUT')` gives a string. Laravel's worker
+     * arms its alarm with it as with the integer, and so does the driver.
+     */
+    #[TestWith(['60'])]
+    #[TestWith(['60.0'])]
+    public function testANumericStringTimeoutIsTheTimeoutLaravelArms(string $timeout): void
+    {
+        $payload = $this->payload('job-from-env');
+        $payload['timeout'] = $timeout;
         $handler = new PlanHandler([[
             'status' => 200,
             'json' => $this->popResponse($payload),
         ]]);
         [$queue] = $this->queueFor($handler);
 
-        // A LogicException: only a deploy fixes it, so a supervised worker leaves.
-        $this->expectException(UnsafeJobTimeoutException::class);
-        $this->expectExceptionMessage('job timeout [120]');
-        $this->expectExceptionMessage('retry_after [120]');
-        $queue->pop('emails');
+        $job = $queue->pop('emails');
+
+        $this->assertInstanceOf(QueenJob::class, $job);
+        $this->assertCount(1, $handler->requests, 'nothing was dead-lettered');
+    }
+
+    /**
+     * A QueryException with a latin-1 binding has a message that is not
+     * UTF-8. Its dead-letter ACK could not be encoded, so delete() threw
+     * inside Job::fail(): failed() and the batch and chain callbacks were
+     * skipped, and the job failed again after its lease expired, as
+     * MaxAttemptsExceeded, with a second failed-job row.
+     */
+    public function testAFailureWhoseMessageIsNotUtf8StillReachesTheDeadLetterQueue(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popResponse(['job' => FailureRecordingTestHandler::class . '@handle']
+                + $this->payload('job-latin1'))],
+            ['status' => 200, 'json' => ['success' => true, 'leaseReleased' => true, 'dlq' => true]],
+        ]);
+        [$queue] = $this->queueFor($handler);
+        $container = new Container();
+        $container->instance(\Illuminate\Contracts\Events\Dispatcher::class, new Dispatcher($container));
+        $queue->setContainer($container);
+        FailureRecordingTestHandler::$failures = [];
+        $job = $queue->pop('emails');
+        $failure = new \RuntimeException("caf\xE9 " . str_repeat('x', 100_000));
+
+        $job->fail($failure);
+
+        $this->assertCount(2, $handler->requests);
+        $this->assertSame('/api/v1/ack', $handler->requests[1]->getUri()->getPath());
+        $ack = json_decode((string) $handler->requests[1]->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('dlq', $ack['status']);
+        $this->assertStringStartsWith("caf\u{FFFD} xxx", $ack['error']);
+        $this->assertLessThanOrEqual(8192, strlen($ack['error']));
+        $this->assertSame([$failure], FailureRecordingTestHandler::$failures, 'the job\'s failed()');
     }
 
     /**
@@ -1010,6 +1140,36 @@ class LaravelQueueDriverTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('before tracked ACK');
         $queue->pop('emails');
+    }
+
+    /**
+     * A batch whose lease could not be tracked is leased all the same. The
+     * pop threw and left it to lease expiry, which charged every job an
+     * attempt, while a batch popped ahead was handed back. Both are handed
+     * back now, and the pop still throws.
+     */
+    public function testABatchWhoseLeaseCannotBeTrackedIsHandedBack(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([$this->payload('job-1'), $this->payload('job-2')])],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->trackFailure = 'child died before tracked ACK';
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 2);
+
+        try {
+            $queue->pop('emails');
+            $this->fail('A job whose lease is not tracked was handed to Laravel.');
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString('before tracked ACK', $error->getMessage());
+        }
+
+        $this->assertCount(2, $handler->requests);
+        $handBack = $this->handBack($handler->requests[1]);
+        $this->assertSame(['transaction-1', 'transaction-2'], array_column($handBack['acks'], 'transactionId'));
+        $this->assertSame(['job-1', 'job-2'], $this->copiedJobs($handBack));
+        $this->assertSame([0, 0], $this->copiedAttempts($handBack), 'no attempt charged');
     }
 
     public function testAmbiguousAckStopsRenewingAndDiscardsEveryPartitionInTheLease(): void
@@ -2126,6 +2286,22 @@ class DelayedPlanHandler
     {
         usleep($this->delayMicros);
         return ($this->inner)($request, $options);
+    }
+}
+
+class FailureRecordingTestHandler
+{
+    /** @var list<\Throwable> */
+    public static array $failures = [];
+
+    public function handle(): void
+    {
+    }
+
+    /** Laravel 12 passes the job too; Laravel 11 does not. */
+    public function failed(array $data, \Throwable $exception, string $uuid, mixed $job = null): void
+    {
+        self::$failures[] = $exception;
     }
 }
 

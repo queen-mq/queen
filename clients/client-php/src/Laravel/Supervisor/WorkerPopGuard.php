@@ -29,8 +29,10 @@ use Illuminate\Queue\Events\WorkerStopping;
  * restarting every worker of every pool would turn a short outage into a
  * restart storm. The worker stays, and leaves `<pid>.pop-failures` in the
  * master's private exits directory (QUEEN_SUPERVISOR_EXITS_DIR) saying since
- * when its pops fail, from the start of the first that failed; a pop that
- * succeeds, empty or not, removes it. A healthy worker writes nothing.
+ * when its pops fail, from the start of the first that failed. Each queue of
+ * the worker's list counts alone: a pop of a queue that succeeds, empty or
+ * not, clears that queue's failure, and the file goes once no queue fails.
+ * A healthy worker writes nothing.
  * SupervisorState reads the file for the pool's workers: see
  * SupervisorState::NOT_CONSUMING_AFTER_SECONDS.
  */
@@ -46,11 +48,22 @@ final class WorkerPopGuard
 
     private ?\Throwable $fatal = null;
 
-    private ?int $failingSince = null;
+    /**
+     * Since when the pops of each failing queue fail, and how often. A
+     * worker of --queue=high,low pops both each loop: a pop of high that
+     * works says nothing of low.
+     *
+     * @var array<string, int>
+     */
+    private array $failingSince = [];
+
+    /** @var array<string, int> */
+    private array $failures = [];
+
+    /** @var array<string, \Throwable> */
+    private array $errors = [];
 
     private ?int $popStartedAt = null;
-
-    private int $failures = 0;
 
     private ?int $publishedAt = null;
 
@@ -131,18 +144,25 @@ final class WorkerPopGuard
         $this->popStartedAt = ($this->clock)();
     }
 
-    public function popped(): void
+    /** A pop of $queue worked, empty or not. */
+    public function popped(?string $queue = null): void
     {
         $this->popStartedAt = null;
-        if ($this->failingSince === null) {
+        $key = $queue ?? '';
+        if (!isset($this->failingSince[$key])) {
             return;
         }
-        $this->failingSince = null;
-        $this->failures = 0;
-        $this->withdraw();
+        unset($this->failingSince[$key], $this->failures[$key], $this->errors[$key]);
+        if ($this->failingSince === []) {
+            $this->withdraw();
+
+            return;
+        }
+        // Another queue still fails, maybe since later.
+        $this->publish(($this->clock)(), end($this->errors));
     }
 
-    public function popFailed(\Throwable $error): void
+    public function popFailed(\Throwable $error, ?string $queue = null): void
     {
         $startedAt = $this->popStartedAt;
         $this->popStartedAt = null;
@@ -152,10 +172,14 @@ final class WorkerPopGuard
             return;
         }
         $now = ($this->clock)();
+        $key = $queue ?? '';
         // From the start of the pop: one that hung until its timeout, on a
         // broker that stopped answering, consumed nothing from then on.
-        $this->failingSince ??= min($startedAt ?? $now, $now);
-        $this->failures++;
+        $this->failingSince[$key] ??= min($startedAt ?? $now, $now);
+        $this->failures[$key] = ($this->failures[$key] ?? 0) + 1;
+        // Last in the list: the error the file shows once another recovers.
+        unset($this->errors[$key]);
+        $this->errors[$key] = $error;
         if ($this->publishedAt === null || $now - $this->publishedAt >= self::REFRESH_SECONDS) {
             $this->publish($now, $error);
         }
@@ -182,8 +206,8 @@ final class WorkerPopGuard
             'pid' => $pid,
             'supervisor' => $this->supervisor,
             'connection' => $this->connection,
-            'failing_since' => $this->failingSince,
-            'failures' => $this->failures,
+            'failing_since' => min($this->failingSince),
+            'failures' => array_sum($this->failures),
             'updated_at' => $now,
             'error' => strlen($message) > self::MAX_ERROR_BYTES
                 ? substr($message, 0, self::MAX_ERROR_BYTES - 3) . '...'

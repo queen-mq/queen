@@ -3,6 +3,7 @@
 namespace Queen\Consumer;
 
 use Queen\Exceptions\ConflationUnsupportedException;
+use Queen\Exceptions\HttpException;
 use Queen\Http\HttpClient;
 use Queen\Http\Retry429Policy;
 use Queen\Queen;
@@ -47,7 +48,7 @@ class HighLevelConsumer
     private ?string $affinityKey = null;
     /** [requested, queue, group, namespace, task] — see ConflationGuard. */
     private array $conflationScope = [false, null, null, null, null];
-    /** The connection error the pops have swallowed since the last answer; see lastPopError(). */
+    /** The connection or transient error the pops have swallowed since the last answer; see lastPopError(). */
     private ?string $lastPopError = null;
 
     public function __construct(HttpClient $httpClient, Queen $queen, array $options)
@@ -182,8 +183,36 @@ class HighLevelConsumer
                 return null;
             }
 
+            if ($this->backedOffAfterTransientError($error, $timeoutMs)) {
+                return null;
+            }
+
             throw $error;
         }
+    }
+
+    /**
+     * A transient 5xx (the 503 of a leader election, or a pop whose outcome
+     * the broker could not tell) is reported like a network error: nothing
+     * this time, and lastPopError() says why. The caller polls again as soon
+     * as this returns, so wait for its Retry-After first, within $timeoutMs.
+     */
+    private function backedOffAfterTransientError(\Throwable $error, int $timeoutMs): bool
+    {
+        // An answer that is not the broker's (empty or malformed, as a gateway's
+        // during a rollout) is transient too.
+        $unexpected = $error instanceof \UnexpectedValueException;
+        if (!$unexpected && (!$error instanceof HttpException || !$error->isTransient())) {
+            return false;
+        }
+
+        $this->lastPopError = $error->getMessage();
+        $pauseMillis = $error instanceof HttpException && $error->retryAfterSeconds !== null
+            ? (int) round($error->retryAfterSeconds * 1000)
+            : 1000;
+        usleep(max(0, min($pauseMillis, $timeoutMs)) * 1000);
+
+        return true;
     }
 
     /**
@@ -245,6 +274,9 @@ class HighLevelConsumer
                 $this->lastPopError = $error->getMessage();
                 return [];
             }
+            if ($this->backedOffAfterTransientError($error, $timeoutMs)) {
+                return [];
+            }
             throw $error;
         }
     }
@@ -290,8 +322,9 @@ class HighLevelConsumer
     }
 
     /**
-     * The connection error that consume() or consumeBatch() swallowed on the
-     * last pops, or null. Both return null or [] for it, as for an empty pop,
+     * The connection error, or transient broker error (a 502, 503 or 504,
+     * such as the 503 of a leader election), that consume() or
+     * consumeBatch() swallowed on the last pops, or null. Both return null or [] for it, as for an empty pop,
      * so this is how a caller tells a broker it cannot reach from a quiet
      * queue. A pop that gets an answer, empty or not, clears it; a long-poll
      * timeout leaves it as it was.

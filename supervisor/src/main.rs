@@ -1,3 +1,14 @@
+/// One line to stderr, as the standard `eprintln!` writes it, in every module of
+/// this crate. A write that fails, to a pipe whose reader is gone for instance,
+/// is dropped: the standard macro panics, and a panic of the master ends every
+/// worker through PR_SET_PDEATHSIG.
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod coordination;
 mod lease;
 mod prefork;
@@ -61,6 +72,10 @@ const CONTROL_CLOCK_SKEW_SECONDS: u64 = 5;
 const PROCESS_START_BUDGET_SECONDS: u64 = 5;
 const TELEMETRY_SCAN_BUDGET_SECONDS: u64 = 60;
 const CONTROL_LOOP_MARGIN_SECONDS: u64 = 5;
+// After a fork server failed to boot, the next boot waits this long, doubled
+// for every further failure up to the maximum; see ForkServerBoots.
+const FORK_SERVER_RETRY_SECONDS: u64 = 60;
+const FORK_SERVER_RETRY_MAX_SECONDS: u64 = 900;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -289,6 +304,11 @@ struct ScaleGuard {
 struct RestartGuard {
     consecutive_failures: u32,
     phase: RestartPhase,
+    /// Workers of the pool that left as expected since its last reconcile
+    /// (record_worker_exit), owed a replacement that neither balance_max_shift
+    /// nor the circuit holds back: refilling the pool to the size it had is no
+    /// scale-up, and the circuit is about crashes. Other exits wait for both.
+    vacancies: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -321,6 +341,72 @@ struct Control {
     _requested_at: Option<String>,
     requested_at_epoch: u64,
     expires_at_epoch: u64,
+}
+
+/// A control document State::command refused and removed: a bad request,
+/// such as one whose timestamps a clock step put in the future, not a fault
+/// of the state directory.
+#[derive(Debug)]
+struct RejectedControl(String);
+
+impl RejectedControl {
+    fn error(reason: impl std::fmt::Display) -> Box<dyn std::error::Error> {
+        Box::new(Self(reason.to_string()))
+    }
+
+    /// Remove the bad document at `path` and reject it. One that cannot be
+    /// removed would be read again on every loop and hold back every later
+    /// request: that is a fault of the state directory, which stops the master.
+    fn remove(path: &Path, reason: impl std::fmt::Display) -> Box<dyn std::error::Error> {
+        let removed = if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        };
+        match removed {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => format!(
+                "a bad control request ({reason}) could not be removed from {}: {error}",
+                path.display()
+            )
+            .into(),
+            _ => Self::error(reason),
+        }
+    }
+}
+
+impl std::fmt::Display for RejectedControl {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RejectedControl {}
+
+/// status.json could not be written, as on a full or failing disk: not a fault
+/// of the state directory's ownership, which write_status checks apart.
+#[derive(Debug)]
+struct StatusWriteFailed(String);
+
+impl std::fmt::Display for StatusWriteFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StatusWriteFailed {}
+
+/// Whether failed status writes stop the master. One failed write ended it,
+/// draining every worker; the workers now keep running and the write is
+/// retried each pass, while status.json ages and the probes report the master
+/// stale, until the writes have failed for heartbeat_timeout, when every
+/// reader calls it stale. As the PHP engine does.
+fn status_write_gives_up(
+    failing_since: &mut Option<Instant>,
+    now: Instant,
+    heartbeat_timeout: u64,
+) -> bool {
+    let since = *failing_since.get_or_insert(now);
+    now.duration_since(since) >= Duration::from_secs(heartbeat_timeout)
 }
 
 #[derive(Debug, Deserialize)]
@@ -431,8 +517,20 @@ fn main() {
 }
 
 fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
+    // Before the configuration export, which may take a minute: a master that
+    // is PID 1 ignores a signal it does not handle, so a SIGTERM during the
+    // export was lost, and the workers it then started were killed at the
+    // platform's deadline.
+    let running = Arc::new(AtomicBool::new(true));
+    let signal = Arc::clone(&running);
+    ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))?;
+
     let mut config = load_config(options)?;
     validate_config(&config)?;
+    if !running.load(Ordering::SeqCst) {
+        eprintln!("stopped while the configuration was read; no worker was started");
+        return Ok(());
+    }
     let state = State::acquire(&config.state_directory)?;
     // State::acquire validates the operator-provided spelling before
     // canonicalizing it. Every runtime consumer, including worker telemetry,
@@ -447,15 +545,20 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
     config.exit_markers = match prepare_exit_markers(&state.directory) {
         Ok(directory) => Some(directory.to_string_lossy().into_owned()),
         Err(error) => {
-            eprintln!("exit markers disabled, a job timeout counts as a crash: {error}");
+            eprintln!(
+                "exit markers disabled, a job timeout counts as a crash{}: {error}",
+                if config.prefork {
+                    " and queue:restart is not seen: the fork server is never replaced, \
+                     so forked workers keep running the code it booted until the supervisor \
+                     restarts"
+                } else {
+                    ""
+                }
+            );
             None
         }
     };
     config.lease_socket = start_lease_service(&config, &state.directory);
-
-    let running = Arc::new(AtomicBool::new(true));
-    let signal = Arc::clone(&running);
-    ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))?;
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(config.http_timeout))
@@ -475,7 +578,11 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(Instant::now);
     let mut paused = false;
     let mut last_command_nonce: Option<String> = None;
+    // Said once while the same bad request stays, as one that cannot be
+    // removed does.
+    let mut last_rejected_control: Option<String> = None;
     let mut status_failure: Option<String> = None;
+    let mut status_failing_since: Option<Instant> = None;
     let mut remote_status = config
         .remote_status
         .as_ref()
@@ -485,8 +592,9 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(|settings| Coordinator::new(settings, &state.instance_id, state.hostname.as_deref()));
     let coordinated_scopes = coordinated_scopes(&config);
+    let mut fork_boots = ForkServerBoots::default();
     let mut fork_server = if config.prefork {
-        match ForkServer::start(&config, &running) {
+        let server = match ForkServer::start(&config, &running) {
             Ok(server) => {
                 eprintln!("prefork: fork server started");
                 Some(Rc::new(RefCell::new(server)))
@@ -495,7 +603,9 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("prefork disabled, spawning workers: {error}");
                 None
             }
-        }
+        };
+        fork_boots.record(server.is_some(), Instant::now());
+        server
     } else {
         None
     };
@@ -507,6 +617,12 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         Some(settings) => Some(watch::start(&config, settings, Arc::clone(&running))?),
         None => None,
     };
+    // As PID 1 or a child subreaper this master inherits orphans; see
+    // reap_orphans.
+    #[cfg(target_os = "linux")]
+    let adopts_orphans = adopts_orphans();
+    #[cfg(target_os = "linux")]
+    let mut last_orphan_scan = Instant::now();
     // Pools still climbing towards a higher target after an event-driven
     // reconcile was held back by its step budget.
     let mut climbing: HashSet<String> = HashSet::new();
@@ -532,9 +648,13 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             replicas: &replica_counts,
         },
     )?;
-    remote_status::publish(&mut remote_status, &client, &status);
+    remote_status::publish_unless_stopped(&mut remote_status, &client, &status, &running);
     while running.load(Ordering::SeqCst) {
-        match state.command(last_command_nonce.as_deref()) {
+        let control = state.command(last_command_nonce.as_deref());
+        if control.is_ok() {
+            last_rejected_control = None;
+        }
+        match control {
             Ok(Some(control)) => {
                 last_command_nonce = Some(control.nonce);
                 let control_state = match control.command {
@@ -543,7 +663,11 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         // A paused replica serves nothing; the others take
                         // over its share.
                         if let Some(coordinator) = coordinator.as_mut() {
-                            coordinator.leave(&client, &scope_list(&coordinated_scopes));
+                            coordinator.leave(
+                                &client,
+                                &scope_list(&coordinated_scopes),
+                                Some(&running),
+                            );
                         }
                         replica_counts.clear();
                         last_depths.clear();
@@ -585,7 +709,25 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         replicas: &replica_counts,
                     },
                 ) {
-                    Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
+                    Ok(status) => {
+                        status_failing_since = None;
+                        remote_status::publish_unless_stopped(
+                            &mut remote_status,
+                            &client,
+                            &status,
+                            &running,
+                        )
+                    }
+                    Err(error)
+                        if error.is::<StatusWriteFailed>()
+                            && !status_write_gives_up(
+                                &mut status_failing_since,
+                                Instant::now(),
+                                config.heartbeat_timeout,
+                            ) =>
+                    {
+                        eprintln!("state status write failed; the workers keep running and it is retried: {error}");
+                    }
                     Err(error) => {
                         status_failure = Some(format!("state status write failed: {error}"));
                         running.store(false, Ordering::SeqCst);
@@ -593,9 +735,18 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Ok(None) => {}
+            // A bad request, already removed: the state directory passed
+            // its generation check, so supervision goes on without it.
+            Err(error) if error.is::<RejectedControl>() => {
+                let reason = error.to_string();
+                if last_rejected_control.as_ref() != Some(&reason) {
+                    eprintln!("control request discarded: {reason}");
+                }
+                last_rejected_control = Some(reason);
+            }
             Err(error) => {
                 // command() owns both the control document and the pinned
-                // generation fence. Treat any failure as infrastructure
+                // generation fence. Treat any other failure as infrastructure
                 // corruption: continuing could orchestrate workers after the
                 // state path was replaced and another master acquired it.
                 status_failure = Some(format!("state control read failed: {error}"));
@@ -622,10 +773,20 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         );
         reap_draining(&config, &mut draining, &mut pending_telemetry_cleanup);
         if restarted {
+            fork_boots.request(Instant::now());
+        }
+        if fork_boots.due(Instant::now()) {
             fork_server =
                 refresh_fork_server(&config, &running, fork_server.take(), &mut retired_forks);
+            fork_boots.record(fork_server.is_some(), Instant::now());
         }
         close_retired_forks(&mut retired_forks);
+        #[cfg(target_os = "linux")]
+        if adopts_orphans && last_orphan_scan.elapsed() >= Duration::from_secs(1) {
+            let servers = fork_server.iter().chain(retired_forks.iter());
+            reap_orphans(&tracked_children(&pools, &draining, servers));
+            last_orphan_scan = Instant::now();
+        }
         observe_stable_workers(&config, &mut pools, &mut restarts);
         let poll_due = last_poll.elapsed() >= Duration::from_secs(config.poll_interval);
         let event_due = match (&wakes, paused) {
@@ -653,7 +814,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
         if poll_due || !event_due.is_empty() {
             if poll_due {
                 if let (Some(coordinator), false) = (coordinator.as_mut(), paused) {
-                    coordinator.heartbeat(&client, &scope_list(&coordinated_scopes));
+                    coordinator.heartbeat(&client, &scope_list(&coordinated_scopes), &running);
                 }
                 if !paused {
                     replica_counts =
@@ -718,8 +879,13 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                         running.as_ref(),
                         MAX_DEPTH_POLL_CONCURRENCY,
                         |queue| {
-                            queue_depth(&client, queen, queue, &options.consumer_group)
-                                .map_err(|error| error.to_string())
+                            let (client, queen) = (client.clone(), queen.clone());
+                            let (queue, group) = (queue.to_owned(), options.consumer_group.clone());
+                            unless_stopped(&running, move || {
+                                queue_depth(&client, &queen, &queue, &group)
+                                    .map_err(|error| error.to_string())
+                            })
+                            .unwrap_or_else(|| Err("abandoned: the supervisor is stopping".into()))
                         },
                     ) {
                         Ok(ordered_depths) => depths.extend(ordered_depths),
@@ -843,7 +1009,25 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     replicas: &replica_counts,
                 },
             ) {
-                Ok(status) => remote_status::publish(&mut remote_status, &client, &status),
+                Ok(status) => {
+                    status_failing_since = None;
+                    remote_status::publish_unless_stopped(
+                        &mut remote_status,
+                        &client,
+                        &status,
+                        &running,
+                    )
+                }
+                Err(error)
+                    if error.is::<StatusWriteFailed>()
+                        && !status_write_gives_up(
+                            &mut status_failing_since,
+                            Instant::now(),
+                            config.heartbeat_timeout,
+                        ) =>
+                {
+                    eprintln!("state status write failed; the workers keep running and it is retried: {error}");
+                }
                 Err(error) => {
                     status_failure = Some(format!("state status write failed: {error}"));
                     running.store(false, Ordering::SeqCst);
@@ -900,7 +1084,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
             }
             // The other replicas take over this share while it drains.
             if let Some(coordinator) = coordinator.as_mut() {
-                coordinator.leave(&client, &scope_list(&coordinated_scopes));
+                coordinator.leave(&client, &scope_list(&coordinated_scopes), None);
             }
         },
     );
@@ -1891,21 +2075,24 @@ impl State {
                 || metadata.len() == 0
                 || metadata.len() > MAX_CONTROL_BYTES
             {
-                let _ = fs::remove_file(&path);
-                return Err("control command must be a small regular file".into());
+                return Err(RejectedControl::remove(
+                    &path,
+                    "control command must be a small regular file",
+                ));
             }
             #[cfg(unix)]
             if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o777 != 0o600 {
-                let _ = fs::remove_file(&path);
-                return Err("control command must be a private owned regular file".into());
+                return Err(RejectedControl::remove(
+                    &path,
+                    "control command must be a private owned regular file",
+                ));
             }
             let control: Control = match read_limited(&path, MAX_CONTROL_BYTES)
                 .and_then(|body| Ok(serde_json::from_str(&body)?))
             {
                 Ok(control) => control,
                 Err(error) => {
-                    let _ = fs::remove_file(&path);
-                    return Err(error);
+                    return Err(RejectedControl::remove(&path, error));
                 }
             };
             if control.nonce.is_empty()
@@ -1915,16 +2102,17 @@ impl State {
                 || control.instance_id.len() > 128
                 || control.instance_id.chars().any(char::is_control)
             {
-                let _ = fs::remove_file(&path);
-                return Err("control nonce is invalid".into());
+                return Err(RejectedControl::remove(&path, "control nonce is invalid"));
             }
             let now = now_epoch();
             if control.requested_at_epoch > now.saturating_add(CONTROL_CLOCK_SKEW_SECONDS)
                 || control.expires_at_epoch < control.requested_at_epoch
                 || control.expires_at_epoch < now
             {
-                let _ = fs::remove_file(&path);
-                return Err("control command is expired or has an invalid timestamp".into());
+                return Err(RejectedControl::remove(
+                    &path,
+                    "control command is expired or has an invalid timestamp",
+                ));
             }
             if Some(control.nonce.as_str()) == last_nonce || control.instance_id != self.instance_id
             {
@@ -2142,7 +2330,8 @@ impl State {
         if serde_json::to_vec(&status)?.len() as u64 > MAX_STATUS_BYTES {
             return Err(format!("supervisor status exceeds {MAX_STATUS_BYTES} bytes").into());
         }
-        atomic_json(&self.directory.join("status.json"), &status)?;
+        atomic_json(&self.directory.join("status.json"), &status)
+            .map_err(|error| StatusWriteFailed(error.to_string()))?;
         self.verify_directory()?;
         Ok(status)
     }
@@ -2260,6 +2449,54 @@ fn new_instance_id() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("{nanos:032x}{:08x}", std::process::id())
+}
+
+/// Run a blocking broker request on a thread of its own and wait for its
+/// answer while `running` holds; None once a stop is asked for. A stop does
+/// not wait for the request, which may take http_timeout per endpoint on a
+/// broker that does not answer: it is abandoned, and ends on its thread.
+/// Without a thread to spare, the request runs here, as before.
+pub(crate) fn unless_stopped<T, F>(running: &AtomicBool, request: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if !running.load(Ordering::SeqCst) {
+        return None;
+    }
+    let request = Arc::new(Mutex::new(Some(request)));
+    let (sender, answer) = mpsc::channel();
+    let shared = Arc::clone(&request);
+    let spawned = thread::Builder::new()
+        .name("queen-broker-request".into())
+        .spawn(move || {
+            let taken = shared.lock().ok().and_then(|mut request| request.take());
+            if let Some(request) = taken {
+                let _ = sender.send(request());
+            }
+        });
+    let helper = match spawned {
+        Ok(helper) => helper,
+        Err(_) => {
+            let taken = request.lock().ok().and_then(|mut request| request.take());
+            return taken.map(|request| request());
+        }
+    };
+    loop {
+        match answer.recv_timeout(Duration::from_millis(50)) {
+            Ok(value) => return Some(value),
+            Err(mpsc::RecvTimeoutError::Timeout) if running.load(Ordering::SeqCst) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => return None,
+            // The request ended without an answer: it panicked, which run
+            // inline it would have done here. Not a stop.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if let Err(panic) = helper.join() {
+                    std::panic::resume_unwind(panic);
+                }
+                return None;
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3170,10 +3407,12 @@ fn reconcile(
         while budget > 0 && target < pool.len() {
             if let Some(worker) = pool.pop() {
                 if worker.restart_probe {
+                    // Stopped, the probe proved nothing: the next worker is
+                    // a probe again, with the failures counted so far.
                     restarts
                         .entry((name.to_owned(), queue.clone()))
                         .or_default()
-                        .cancel_probe();
+                        .release_probe(Instant::now());
                 }
                 begin_termination(
                     worker,
@@ -3189,12 +3428,22 @@ fn reconcile(
         let target = desired.get(queue).copied().unwrap_or(0);
         let key = (name.to_owned(), queue.clone());
         let pool = pools.entry(key).or_default();
-        while budget > 0 && process_slots >= worker_process_cost && target > pool.len() {
-            let restart = restarts
-                .entry((name.to_owned(), queue.clone()))
-                .or_default();
-            let permission = restart.spawn_permission(Instant::now());
+        let restart = restarts
+            .entry((name.to_owned(), queue.clone()))
+            .or_default();
+        while process_slots >= worker_process_cost && target > pool.len() {
+            // A worker that left as expected is replaced whatever the circuit
+            // says, never by its probe, and outside the budget.
+            let replaces = restart.vacancies > 0;
+            let permission = if replaces {
+                SpawnPermission::Normal
+            } else {
+                restart.spawn_permission(Instant::now())
+            };
             if permission == SpawnPermission::Blocked {
+                break;
+            }
+            if !replaces && budget == 0 {
                 break;
             }
             match spawn_worker(
@@ -3208,11 +3457,17 @@ fn reconcile(
                 Ok(worker) => {
                     restart.mark_spawned(permission);
                     pool.push(worker);
-                    budget -= 1;
+                    if replaces {
+                        restart.vacancies -= 1;
+                    } else {
+                        budget -= 1;
+                    }
                     process_slots -= worker_process_cost;
                 }
                 Err(error) => {
                     let (delay, circuit_open) = restart.record_failure(options, Instant::now());
+                    // A start that fails is a crash: the next waits for the circuit.
+                    restart.vacancies = 0;
                     return Err(format!(
                         "could not start {name}:{queue}: {error}; {} for {}s",
                         if circuit_open {
@@ -3226,6 +3481,9 @@ fn reconcile(
                 }
             }
         }
+        // A replacement is owed only up to the target: one the circuit holds
+        // back starts once it allows, one the pool no longer wants never.
+        restart.vacancies = restart.vacancies.min(target.saturating_sub(pool.len()));
     }
     Ok(())
 }
@@ -3503,7 +3761,9 @@ fn reap(
                 {
                     restarted = true;
                 }
-                record_worker_exit(key, worker, status, announced, options, restart);
+                if record_worker_exit(key, worker, status, announced, options, restart) {
+                    restart.vacancies = restart.vacancies.saturating_add(1);
+                }
                 schedule_telemetry_cleanup(config, &key.0, pid, pending);
                 false
             }
@@ -3553,6 +3813,134 @@ fn refresh_fork_server(
     }
 }
 
+/// When a new fork server boots. A boot that fails may hold the control loop
+/// for up to prefork::BOOT_TIMEOUT, reaping, starting and reporting nothing,
+/// and queue:restart stops the workers one at a time, as each finishes its
+/// job. So after a failure, the next boot a queue:restart asks for waits
+/// FORK_SERVER_RETRY_SECONDS, doubled for every further failure up to
+/// FORK_SERVER_RETRY_MAX_SECONDS; the workers are spawned meanwhile.
+#[derive(Debug, Default)]
+struct ForkServerBoots {
+    failures: u32,
+    retry_at: Option<Instant>,
+    /// A queue:restart asked for a new server that has not booted yet.
+    requested: bool,
+}
+
+impl ForkServerBoots {
+    fn request(&mut self, now: Instant) {
+        if !self.requested {
+            if let Some(at) = self.retry_at.filter(|at| *at > now) {
+                eprintln!(
+                    "prefork: queue:restart received; the last fork server failed to boot, \
+                     so the next boot waits {}s and workers are spawned meanwhile",
+                    at.saturating_duration_since(now).as_secs()
+                );
+            }
+        }
+        self.requested = true;
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        self.requested && self.retry_at.is_none_or(|at| now >= at)
+    }
+
+    fn record(&mut self, booted: bool, now: Instant) {
+        self.requested = false;
+        if booted {
+            self.failures = 0;
+            self.retry_at = None;
+            return;
+        }
+        self.failures = self.failures.saturating_add(1);
+        let doublings = self.failures.saturating_sub(1).min(16);
+        let delay = FORK_SERVER_RETRY_SECONDS
+            .saturating_mul(1 << doublings)
+            .min(FORK_SERVER_RETRY_MAX_SECONDS);
+        self.retry_at = Some(now + Duration::from_secs(delay));
+    }
+}
+
+/// Whether orphaned processes come to this master: as PID 1, the container
+/// runtime's init when Kubernetes runs the Composer launcher that execs the
+/// binary, or as a child subreaper.
+#[cfg(target_os = "linux")]
+fn adopts_orphans() -> bool {
+    let mut subreaper: libc::c_int = 0;
+    // SAFETY: PR_GET_CHILD_SUBREAPER writes one int through the pointer.
+    std::process::id() == 1
+        || (unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut subreaper) } == 0
+            && subreaper != 0)
+}
+
+/// Every pid this master waits for itself: its workers, spawned, forked or
+/// draining (a forked one comes to it when its server dies), and its fork
+/// servers.
+#[cfg(target_os = "linux")]
+fn tracked_children<'a>(
+    pools: &Pools,
+    draining: &Draining,
+    servers: impl Iterator<Item = &'a Rc<RefCell<ForkServer>>>,
+) -> HashSet<u32> {
+    pools
+        .values()
+        .flatten()
+        .map(|worker| worker.child.id())
+        .chain(draining.iter().map(|entry| entry.worker.child.id()))
+        .chain(servers.map(|server| server.borrow().pid()))
+        .collect()
+}
+
+/// Reap the exited children of this master that it does not track. Laravel's
+/// job timeout SIGKILLs a worker alone: the processes its job started come
+/// to this master when it adopts orphans, and each would stay a zombie,
+/// filling the container's pids.max. A zombie's pid is not reused before it
+/// is reaped, so one that is not tracked never becomes a worker's, and a
+/// tracked worker's exit status stays for reap().
+#[cfg(target_os = "linux")]
+fn reap_orphans(tracked: &HashSet<u32>) {
+    let me = std::process::id();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return;
+    };
+    let mut reaped = 0usize;
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if tracked.contains(&pid) {
+            continue;
+        }
+        // state and ppid follow the command name, which may hold spaces.
+        let zombie_child = fs::read_to_string(entry.path().join("stat"))
+            .ok()
+            .and_then(|stat| {
+                let (_, tail) = stat.rsplit_once(") ")?;
+                let mut fields = tail.split_whitespace();
+                let state = fields.next()?;
+                let parent = fields.next()?.parse::<u32>().ok()?;
+                Some(state == "Z" && parent == me)
+            })
+            .unwrap_or(false);
+        let mut status = 0;
+        // SAFETY: waitpid on a zombie child of this process that nothing
+        // here waits for; WNOHANG never blocks.
+        if zombie_child
+            && unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) }
+                == pid as libc::pid_t
+        {
+            reaped += 1;
+        }
+    }
+    if reaped > 0 {
+        eprintln!("reaped {reaped} orphaned process(es) left by exited workers");
+    }
+}
+
 /// Close each replaced fork server once no worker it forked is left.
 fn close_retired_forks(retired: &mut Vec<Rc<RefCell<ForkServer>>>) {
     retired.retain(|server| {
@@ -3565,6 +3953,8 @@ fn close_retired_forks(retired: &mut Vec<Rc<RefCell<ForkServer>>>) {
 }
 
 /// `announced`: what the worker said about this exit; see announced_exit.
+/// Returns whether the worker left as expected, owed a replacement outside the
+/// budget and the circuit (RestartGuard::vacancies).
 fn record_worker_exit(
     key: &PoolKey,
     worker: &Worker,
@@ -3572,8 +3962,23 @@ fn record_worker_exit(
     announced: Option<AnnouncedExit>,
     options: &SupervisorConfig,
     restart: &mut RestartGuard,
-) {
+) -> bool {
     let uptime = worker.started_at.elapsed();
+    let long_lived = !worker.restart_probe && uptime >= Duration::from_secs(options.stable_after);
+    // Whether it left as expected, owed a replacement outside the budget and the
+    // circuit (RestartGuard::vacancies): after queue:restart, at its memory
+    // limit, after Laravel's job timeout, or having run stable_after. A young
+    // exit is not, even with status 0: Laravel's worker exits 0 when it loses
+    // its database or cache connection, every second through an outage.
+    let expected = long_lived
+        || matches!(
+            announced,
+            Some(
+                AnnouncedExit::QueueRestart
+                    | AnnouncedExit::MemoryLimit
+                    | AnnouncedExit::JobTimeout
+            )
+        );
     if matches!(restart.phase, RestartPhase::Probe) && !worker.restart_probe {
         eprintln!(
             "[{}:{}] pid={} exited with {status} after {:.3}s while restart probe is active; circuit unchanged",
@@ -3582,7 +3987,7 @@ fn record_worker_exit(
             worker.child.id(),
             uptime.as_secs_f64(),
         );
-        return;
+        return expected;
     }
     if status.success() {
         restart.record_healthy();
@@ -3593,7 +3998,7 @@ fn record_worker_exit(
             worker.child.id(),
             uptime.as_secs_f64(),
         );
-        return;
+        return expected;
     }
     if announced == Some(AnnouncedExit::MemoryLimit) {
         // A deliberate stop after a job, like --max-jobs: it made progress.
@@ -3604,12 +4009,12 @@ fn record_worker_exit(
             key.1,
             worker.child.id(),
         );
-        return;
+        return expected;
     }
     // Backoff is for short-lived exits. A worker that ran this long is not
     // crash-looping: queue:work exits 12 at --memory, and a job timeout kills
     // the worker.
-    if !worker.restart_probe && uptime >= Duration::from_secs(options.stable_after) {
+    if long_lived {
         restart.record_healthy();
         eprintln!(
             "[{}:{}] pid={} exited with {status} after {:.3}s; restarting",
@@ -3618,7 +4023,7 @@ fn record_worker_exit(
             worker.child.id(),
             uptime.as_secs_f64(),
         );
-        return;
+        return expected;
     }
     if announced == Some(AnnouncedExit::JobTimeout) {
         // The job failed, not the worker, however soon it came. A probe
@@ -3632,7 +4037,7 @@ fn record_worker_exit(
             key.1,
             worker.child.id(),
         );
-        return;
+        return expected;
     }
     let (delay, circuit_open) = restart.record_failure(options, Instant::now());
     eprintln!(
@@ -3648,6 +4053,7 @@ fn record_worker_exit(
         },
         delay.as_secs(),
     );
+    expected
 }
 
 /// Laravel SIGKILLs a worker whose job outlives its timeout, which looks like
@@ -3914,6 +4320,10 @@ fn drain_all(
     draining: &mut Draining,
     grace: Duration,
 ) {
+    // A pause empties every pool on purpose: nothing is owed after it.
+    for restart in restarts.values_mut() {
+        restart.vacancies = 0;
+    }
     for (pool, workers) in pools.iter_mut() {
         for worker in workers.drain(..) {
             if worker.restart_probe {
@@ -4180,6 +4590,76 @@ mod tests {
         Worker::new(child, restart_probe)
     }
 
+    /// A queue:work stand-in for `fake_php_config`: it says it is ready in
+    /// ready.<pid>, exits 0 on SIGTERM, as --max-jobs, --max-time and
+    /// queue:restart end a worker, and 1 on SIGUSR1, a crash.
+    #[cfg(unix)]
+    // `wait` returns at once for a trapped signal, and the loop forks once a
+    // second: several tests run pools of these at the same time.
+    const FAKE_WORKER: &str = "trap 'exit 0' TERM\ntrap 'exit 1' USR1\n: > \"ready.$$\"\n\
+                               while :; do sleep 1 & wait $!; done\n";
+
+    /// A configuration whose artisan is the shell `script`, run by /bin/sh as
+    /// its PHP binary, in a private temporary directory that is also its cwd
+    /// and state directory.
+    #[cfg(unix)]
+    fn fake_php_config(label: &str, script: &str) -> (Config, PathBuf) {
+        let directory = temporary_directory(label);
+        let artisan = write_fake_artisan(&directory, script);
+        let mut resolved = config(options("auto"));
+        resolved.php_binary = "/bin/sh".into();
+        resolved.artisan = artisan.to_string_lossy().into_owned();
+        resolved.cwd = directory.to_string_lossy().into_owned();
+        resolved.state_directory = directory.to_string_lossy().into_owned();
+        (resolved, directory)
+    }
+
+    /// Wait until every worker of `pool` running FAKE_WORKER is ready.
+    #[cfg(unix)]
+    fn await_fake_workers(directory: &Path, pool: &[Worker]) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        for worker in pool {
+            let ready = directory.join(format!("ready.{}", worker.child.id()));
+            while !ready.exists() {
+                // SAFETY: signal 0 only asks whether the pid exists.
+                let alive = unsafe { libc::kill(worker.child.id() as i32, 0) } == 0;
+                assert!(
+                    Instant::now() < deadline,
+                    "fake worker {} never said it was ready (alive: {alive})",
+                    worker.child.id(),
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    /// Reap until `pool` has `left` workers.
+    #[cfg(unix)]
+    fn reap_until(
+        config: &Config,
+        pools: &mut Pools,
+        restarts: &mut RestartStates,
+        key: &PoolKey,
+        left: usize,
+    ) {
+        let mut pending = PendingTelemetryCleanup::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pools[key].len() > left {
+            assert!(Instant::now() < deadline, "the workers never exited");
+            reap(config, pools, restarts, &mut pending, None);
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn kill_pools(pools: &mut Pools) {
+        for worker in pools.values_mut().flatten() {
+            signal_process_group(&mut worker.child, libc::SIGKILL);
+            let _ = worker.child.wait();
+        }
+        pools.clear();
+    }
+
     fn temporary_directory(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4306,6 +4786,256 @@ mod tests {
         let auto = options("auto");
         assert_eq!(reconcile_budget(&auto, 0, 0), 2);
         assert_eq!(reconcile_budget(&auto, 2, 0), 1);
+    }
+
+    /// queue:restart after a deploy, a --max-time wave or an OOM wave stops
+    /// most of a pool at once. Replacing what exited, up to the size the pool
+    /// had, is no scale-up: one reconcile refills it, not one
+    /// balance_max_shift step per balance_cooldown.
+    #[cfg(unix)]
+    #[test]
+    fn a_pool_that_lost_most_workers_at_once_is_refilled_in_one_reconcile() {
+        assert_eq!(
+            refill_after_nine_exits("mass-exit", true),
+            10,
+            "9 exits were replaced as a scale-up"
+        );
+    }
+
+    /// Laravel's worker exits 0 when it loses its database or cache connection,
+    /// every second through an outage: young exits stay on the budget.
+    #[cfg(unix)]
+    #[test]
+    fn young_exits_are_replaced_within_the_budget() {
+        assert_eq!(refill_after_nine_exits("young-exit", false), 2);
+    }
+
+    /// A replacement that cannot start is a crash: the next start waits for the
+    /// circuit instead of being retried at every reconcile.
+    #[cfg(unix)]
+    #[test]
+    fn a_replacement_that_cannot_start_waits_for_the_circuit() {
+        let (mut resolved, directory) = fake_php_config("failed-start", FAKE_WORKER);
+        let options = resolved.supervisors.get_mut("default").unwrap();
+        options.stable_after = 1;
+        options.restart_backoff = 30;
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut pools = Pools::new();
+        let mut restarts = RestartStates::new();
+        let mut draining = Draining::new();
+        while pools.get(&key).map_or(0, Vec::len) < 3 {
+            reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 3);
+        }
+        await_fake_workers(&directory, &pools[&key]);
+        thread::sleep(Duration::from_millis(1_200));
+        signal_worker(&mut pools.get_mut(&key).unwrap()[0].child, libc::SIGTERM);
+        reap_until(&resolved, &mut pools, &mut restarts, &key, 2);
+
+        // The working directory is gone, so no worker can start.
+        resolved.cwd = directory.join("gone").to_string_lossy().into_owned();
+        for _ in 0..2 {
+            let _ = reconcile(
+                &Launcher {
+                    config: &resolved,
+                    forks: None,
+                },
+                "default",
+                &resolved.supervisors["default"],
+                HashMap::from([("high".to_owned(), 3), ("default".to_owned(), 0)]),
+                &mut pools,
+                &mut restarts,
+                &mut draining,
+            );
+        }
+        let failures = restarts[&key].consecutive_failures;
+        kill_pools(&mut pools);
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(failures, 1, "the failing start was retried at once");
+    }
+
+    /// Fill a pool of ten fake workers, stop nine of them, cleanly, once they
+    /// have run stable_after (1 s) or at once, and reconcile once: the size of
+    /// the pool after it.
+    #[cfg(unix)]
+    fn refill_after_nine_exits(label: &str, long_lived: bool) -> usize {
+        let (mut resolved, directory) = fake_php_config(label, FAKE_WORKER);
+        resolved
+            .supervisors
+            .get_mut("default")
+            .unwrap()
+            .stable_after = if long_lived { 1 } else { 60 };
+        let options = &resolved.supervisors["default"];
+        let key = ("default".to_owned(), "high".to_owned());
+        let desired = || HashMap::from([("high".to_owned(), 10), ("default".to_owned(), 0)]);
+        let mut pools = Pools::new();
+        let mut restarts = RestartStates::new();
+        let mut draining = Draining::new();
+        let launcher = Launcher {
+            config: &resolved,
+            forks: None,
+        };
+        for _ in 0..10 {
+            reconcile(
+                &launcher,
+                "default",
+                options,
+                desired(),
+                &mut pools,
+                &mut restarts,
+                &mut draining,
+            )
+            .unwrap();
+        }
+        assert_eq!(pools[&key].len(), 10);
+        await_fake_workers(&directory, &pools[&key]);
+        if long_lived {
+            thread::sleep(Duration::from_millis(1_200));
+        }
+
+        for worker in pools.get_mut(&key).unwrap().iter_mut().skip(1) {
+            signal_worker(&mut worker.child, libc::SIGTERM);
+        }
+        reap_until(&resolved, &mut pools, &mut restarts, &key, 1);
+        assert_eq!(restarts[&key].state_name(), "closed");
+        reconcile(
+            &launcher,
+            "default",
+            options,
+            desired(),
+            &mut pools,
+            &mut restarts,
+            &mut draining,
+        )
+        .unwrap();
+
+        let refilled = pools[&key].len();
+        kill_pools(&mut pools);
+        fs::remove_dir_all(directory).unwrap();
+        refilled
+    }
+
+    /// One reconcile of the "default" pool towards `high` workers on its
+    /// queue "high".
+    #[cfg(unix)]
+    fn reconcile_high(
+        config: &Config,
+        pools: &mut Pools,
+        restarts: &mut RestartStates,
+        draining: &mut Draining,
+        high: usize,
+    ) {
+        reconcile(
+            &Launcher {
+                config,
+                forks: None,
+            },
+            "default",
+            &config.supervisors["default"],
+            HashMap::from([("high".to_owned(), high), ("default".to_owned(), 0)]),
+            pools,
+            restarts,
+            draining,
+        )
+        .unwrap();
+    }
+
+    /// One young crash puts the pool's circuit on a probe for stable_after.
+    /// Meanwhile a sibling that exits 0 (--max-jobs, --max-time) is replaced:
+    /// only a crash waits for the circuit.
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_exit_is_replaced_while_a_restart_probe_runs() {
+        let (mut resolved, directory) = fake_php_config("probe-siblings", FAKE_WORKER);
+        let options = resolved.supervisors.get_mut("default").unwrap();
+        options.restart_backoff = 0;
+        options.stable_after = 1;
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut pools = Pools::new();
+        let mut restarts = RestartStates::new();
+        let mut draining = Draining::new();
+        while pools.get(&key).map_or(0, Vec::len) < 5 {
+            reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 5);
+        }
+        await_fake_workers(&directory, &pools[&key]);
+
+        signal_worker(&mut pools.get_mut(&key).unwrap()[0].child, libc::SIGUSR1);
+        reap_until(&resolved, &mut pools, &mut restarts, &key, 4);
+        reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 5);
+        assert_eq!(restarts[&key].state_name(), "probe");
+        assert_eq!(pools[&key].len(), 5);
+        await_fake_workers(&directory, &pools[&key]);
+
+        // Two of the first workers stop, as at --max-time, having run stable_after.
+        thread::sleep(Duration::from_millis(1_200));
+        for worker in pools.get_mut(&key).unwrap().iter_mut().take(2) {
+            signal_worker(&mut worker.child, libc::SIGTERM);
+        }
+        reap_until(&resolved, &mut pools, &mut restarts, &key, 3);
+        reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 5);
+        let after_clean_exits = pools[&key].len();
+        let circuit = (
+            restarts[&key].state_name(),
+            restarts[&key].consecutive_failures,
+        );
+
+        // A young sibling's crash still waits for the probe: one of the
+        // replacements, once it handles signals.
+        await_fake_workers(&directory, &pools[&key]);
+        let crashed = pools
+            .get_mut(&key)
+            .unwrap()
+            .iter_mut()
+            .rev()
+            .find(|worker| !worker.restart_probe)
+            .map(|worker| signal_worker(&mut worker.child, libc::SIGUSR1));
+        if crashed.is_some() {
+            await_fake_workers(&directory, &pools[&key]);
+            reap_until(&resolved, &mut pools, &mut restarts, &key, 4);
+            reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 5);
+        }
+        let after_crash = pools[&key].len();
+
+        kill_pools(&mut pools);
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(after_clean_exits, 5, "clean exits waited for the probe");
+        assert_eq!(circuit, ("probe", 1));
+        assert_eq!(after_crash, 4, "a crash was replaced while the probe ran");
+    }
+
+    /// A probe that a scale-down stops proved nothing: the next worker is a
+    /// probe again, with the failures counted so far.
+    #[cfg(unix)]
+    #[test]
+    fn a_scaled_down_probe_leaves_the_circuit_as_it_was() {
+        let resolved = config(options("auto"));
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut pools = Pools::from([(
+            key.clone(),
+            vec![sleeping_worker(false), sleeping_worker(true)],
+        )]);
+        let mut restarts = RestartStates::from([(
+            key.clone(),
+            RestartGuard {
+                consecutive_failures: 2,
+                phase: RestartPhase::Probe,
+                ..RestartGuard::default()
+            },
+        )]);
+        let mut draining = Draining::new();
+
+        reconcile_high(&resolved, &mut pools, &mut restarts, &mut draining, 1);
+
+        let popped_probe = draining.iter().any(|entry| entry.worker.restart_probe);
+        let failures = restarts[&key].consecutive_failures;
+        let permission = restarts[&key].spawn_permission(Instant::now());
+        kill_pools(&mut pools);
+        for mut entry in draining {
+            signal_process_group(&mut entry.worker.child, libc::SIGKILL);
+            let _ = entry.worker.child.wait();
+        }
+        assert!(popped_probe);
+        assert_eq!(failures, 2, "stopping the probe closed the circuit");
+        assert_eq!(permission, SpawnPermission::Probe);
     }
 
     #[test]
@@ -4857,6 +5587,7 @@ mod tests {
         let mut guard = RestartGuard {
             consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
             phase: RestartPhase::Probe,
+            ..RestartGuard::default()
         };
 
         let (successful_sibling, success) = exited_worker(0, false);
@@ -4889,6 +5620,7 @@ mod tests {
         let mut failed_guard = RestartGuard {
             consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
             phase: RestartPhase::Probe,
+            ..RestartGuard::default()
         };
         let (mut failed_probe, failure) = exited_worker(1, true);
         failed_probe.started_at = Instant::now() - Duration::from_secs(options.stable_after + 1);
@@ -4910,6 +5642,7 @@ mod tests {
         let mut successful_guard = RestartGuard {
             consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
             phase: RestartPhase::Probe,
+            ..RestartGuard::default()
         };
         let (successful_probe, success) = exited_worker(0, true);
         record_worker_exit(
@@ -5025,21 +5758,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_queue_restart_replaces_the_fork_server_and_retires_the_old_one() {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../clients/client-php/tests/Fixtures/Prefork/fork_server.php");
-        let autoload =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../clients/client-php/vendor/autoload.php");
-        let php = Command::new("php")
-            .args([
-                "-r",
-                "exit(function_exists('pcntl_fork') && function_exists('posix_setsid') ? 0 : 1);",
-            ])
-            .status()
-            .is_ok_and(|status| status.success());
-        if !php || !fixture.exists() || !autoload.exists() {
-            eprintln!("skipped: PHP with pcntl/posix and the Laravel package are required");
+        let Some(fixture) = prefork::test_fixture() else {
             return;
-        }
+        };
         let (mut resolved, state_directory) = exit_marker_config("fork-server-restart");
         resolved.prefork = true;
         resolved.php_binary = "php".to_owned();
@@ -5156,26 +5877,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_pool_with_prefork_off_spawns_beside_the_fork_server() {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../clients/client-php/tests/Fixtures/Prefork/fork_server.php");
-        let autoload =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../clients/client-php/vendor/autoload.php");
-        let php = Command::new("php")
-            .args([
-                "-r",
-                "exit(function_exists('pcntl_fork') && function_exists('posix_setsid') ? 0 : 1);",
-            ])
-            .status()
-            .is_ok_and(|status| status.success());
-        if !php || !fixture.exists() || !autoload.exists() {
-            eprintln!("skipped: PHP with pcntl/posix and the Laravel package are required");
+        let Some(fixture) = prefork::test_fixture() else {
             return;
-        }
+        };
         let (mut resolved, state_directory) = exit_marker_config("pool-prefork-off");
         resolved.prefork = true;
         resolved.php_binary = "php".to_owned();
         resolved.artisan = fixture.to_string_lossy().into_owned();
-        resolved.cwd = fixture.parent().unwrap().to_string_lossy().into_owned();
+        // The fixture writes a spawned worker's report to a file named after its
+        // first argument, in the working directory: the test's own, not the
+        // checkout's.
+        resolved.cwd = state_directory.to_string_lossy().into_owned();
         let running = AtomicBool::new(true);
         let server = Rc::new(RefCell::new(
             ForkServer::start(&resolved, &running).unwrap(),
@@ -5307,6 +6019,7 @@ mod tests {
         let mut guard = RestartGuard {
             consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
             phase: RestartPhase::Probe,
+            ..RestartGuard::default()
         };
 
         record_worker_exit(
@@ -5426,6 +6139,7 @@ mod tests {
             RestartGuard {
                 consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
                 phase: RestartPhase::Probe,
+                ..RestartGuard::default()
             },
         )]);
 
@@ -5463,6 +6177,7 @@ mod tests {
                 phase: RestartPhase::Backoff {
                     until: Instant::now() + Duration::from_secs(30),
                 },
+                ..RestartGuard::default()
             },
         )]);
 
@@ -5481,21 +6196,7 @@ mod tests {
     /// with its state directory, or None without PHP and the package.
     #[cfg(unix)]
     fn fixture_fork_server_config(name: &str) -> Option<(Config, PathBuf)> {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../clients/client-php/tests/Fixtures/Prefork/fork_server.php");
-        let autoload =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../clients/client-php/vendor/autoload.php");
-        let php = Command::new("php")
-            .args([
-                "-r",
-                "exit(function_exists('pcntl_fork') && function_exists('posix_setsid') ? 0 : 1);",
-            ])
-            .status()
-            .is_ok_and(|status| status.success());
-        if !php || !fixture.exists() || !autoload.exists() {
-            eprintln!("skipped: PHP with pcntl/posix and the Laravel package are required");
-            return None;
-        }
+        let fixture = prefork::test_fixture()?;
         let (mut resolved, state_directory) = exit_marker_config(name);
         resolved.prefork = true;
         resolved.php_binary = "php".to_owned();
@@ -6279,6 +6980,92 @@ mod tests {
     }
 
     #[test]
+    fn failed_status_writes_stop_the_master_only_after_heartbeat_timeout() {
+        let start = Instant::now();
+        let mut since = None;
+
+        assert!(!status_write_gives_up(&mut since, start, 60));
+        assert!(!status_write_gives_up(
+            &mut since,
+            start + Duration::from_secs(59),
+            60
+        ));
+        assert!(status_write_gives_up(
+            &mut since,
+            start + Duration::from_secs(60),
+            60
+        ));
+        // A write that works starts the count again.
+        since = None;
+        assert!(!status_write_gives_up(
+            &mut since,
+            start + Duration::from_secs(61),
+            60
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_status_that_cannot_be_written_is_a_status_write_failure() {
+        let directory = temporary_directory("status-write");
+        let state = State::acquire(directory.to_str().unwrap()).unwrap();
+        // A non-empty directory in its place: the rename onto it fails, as a write
+        // to a full disk does.
+        let _ = fs::remove_file(directory.join("status.json"));
+        fs::create_dir(directory.join("status.json")).unwrap();
+        fs::write(directory.join("status.json").join("in-the-way"), b"x").unwrap();
+        let resolved = config(options("auto"));
+
+        let error = state
+            .write_status(
+                "rust",
+                "running",
+                StatusSnapshot {
+                    config: &resolved,
+                    pools: &Pools::new(),
+                    restarts: &RestartStates::new(),
+                    draining: &Draining::new(),
+                    desired: &HashMap::new(),
+                    depths: &HashMap::new(),
+                    depths_available: &HashMap::new(),
+                    replicas: &HashMap::new(),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.is::<StatusWriteFailed>(), "{error}");
+        drop(state);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bad_control_request_that_cannot_be_removed_stops_the_master() {
+        let directory = temporary_directory("control-stuck");
+        let state = State::acquire(directory.to_str().unwrap()).unwrap();
+        let control = directory.join("control.json");
+
+        // Rejected and removed: supervision goes on.
+        fs::create_dir(&control).unwrap();
+        let removable = state.command(None).unwrap_err();
+        assert!(removable.is::<RejectedControl>(), "{removable}");
+        assert!(!control.exists());
+
+        // Read again on every loop, it would hold back every later request.
+        fs::create_dir(&control).unwrap();
+        fs::write(control.join("stuck"), b"x").unwrap();
+        let stuck = state.command(None).unwrap_err();
+        assert!(!stuck.is::<RejectedControl>(), "{stuck}");
+        assert!(
+            stuck.to_string().contains("could not be removed"),
+            "{stuck}"
+        );
+
+        drop(state);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn control_commands_are_scoped_to_the_running_instance() {
         let directory = temporary_directory("control");
         let state = State::acquire(directory.to_str().unwrap()).unwrap();
@@ -6811,6 +7598,79 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
+    /// A request to a broker that does not answer takes http_timeout per
+    /// endpoint: a stop does not wait for it.
+    #[test]
+    fn a_broker_request_that_panics_is_not_taken_for_a_stop() {
+        let running = AtomicBool::new(true);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            unless_stopped(&running, || -> u8 { panic!("the request failed") })
+        }));
+
+        assert!(outcome.is_err(), "a panic reads as a stop: {outcome:?}");
+        assert!(running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_stop_abandons_a_broker_request_in_flight() {
+        let running = Arc::new(AtomicBool::new(true));
+        assert_eq!(unless_stopped(&running, || 7), Some(7));
+
+        let stop = Arc::clone(&running);
+        let stopper = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            stop.store(false, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let answer = unless_stopped(&running, || {
+            thread::sleep(Duration::from_secs(10));
+            7
+        });
+        stopper.join().unwrap();
+
+        assert_eq!(answer, None);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(unless_stopped(&running, || 7), None, "sent after a stop");
+    }
+
+    /// The same for the remote status a control-loop iteration publishes.
+    #[test]
+    fn a_stop_abandons_a_remote_status_publish_in_flight() {
+        let (hung, accepted) = hung_broker();
+        let settings: RemoteStatusConfig = serde_json::from_value(serde_json::json!({
+            "connection": {"urls": [&hung, &hung]},
+            "namespace": "queen-supervisor",
+            "key": "workers",
+            "interval": 1,
+            "ttl": 3_600,
+        }))
+        .unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let mut publisher = Some(RemoteStatusPublisher::new(&settings));
+        let running = Arc::new(AtomicBool::new(true));
+        let stop = Arc::clone(&running);
+        let stopper = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while accepted.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            stop.store(false, Ordering::SeqCst);
+        });
+        let document = serde_json::json!({
+            "state": "running",
+            "instance_id": "0123456789abcdef0123456789abcdef",
+        });
+        let started = Instant::now();
+
+        remote_status::publish_unless_stopped(&mut publisher, &client, &document, &running);
+        stopper.join().unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
     #[test]
     fn depth_http_request_is_scoped_authenticated_and_strict() {
         let (endpoint, request) =
@@ -6985,6 +7845,163 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
         signal_process_group(&mut child, libc::SIGKILL);
         let _ = child.wait();
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The master of spawn_worker_starts_queue_work_as_its_own_group_leader:
+    /// its fake PHP binary, cwd and pool.
+    #[cfg(unix)]
+    fn spawn_helper_config(directory: &Path) -> Config {
+        let mut resolved = config(options("auto"));
+        resolved.php_binary = "/bin/sh".into();
+        resolved.cwd = directory.join("app").to_string_lossy().into_owned();
+        resolved.artisan = directory.join("artisan").to_string_lossy().into_owned();
+        resolved
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper for spawn_worker_starts_queue_work_as_its_own_group_leader"]
+    fn spawn_worker_helper() {
+        let Some(directory) = std::env::var_os("QUEEN_SPAWN_HELPER_DIR") else {
+            return;
+        };
+        let directory = PathBuf::from(directory);
+        let resolved = spawn_helper_config(&directory);
+        let worker = spawn_worker(
+            &resolved,
+            "default",
+            "high",
+            &resolved.supervisors["default"],
+            false,
+            None,
+        )
+        .unwrap();
+        fs::write(directory.join("worker.pid"), worker.child.id().to_string()).unwrap();
+        // The parent test kills this master: a crash, not a drain.
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    /// spawn_worker as the master runs it: the PHP binary with the artisan
+    /// entry point, queue:work and the pool's arguments in that order, in the configured
+    /// cwd, with the worker's variables set and the master's own removed, as
+    /// the leader of its own process group, a child of the master. On Linux
+    /// the worker dies with its master (PDEATHSIG).
+    #[cfg(unix)]
+    #[test]
+    fn spawn_worker_starts_queue_work_as_its_own_group_leader() {
+        let directory = temporary_directory("spawn-worker");
+        fs::create_dir(directory.join("app")).unwrap();
+        let report = directory.to_str().unwrap();
+        write_fake_artisan(
+            &directory,
+            &format!(
+                "printf '%s\\n' \"$0\" \"$@\" > '{report}/argv.tmp'\n\
+                 pwd -P > '{report}/pwd'\n\
+                 env > '{report}/env'\n\
+                 ps -o pgid= -p $$ > '{report}/pgid' 2>/dev/null || cut -d' ' -f5 /proc/$$/stat > '{report}/pgid'\n\
+                 ps -o ppid= -p $$ > '{report}/ppid' 2>/dev/null || cut -d' ' -f4 /proc/$$/stat > '{report}/ppid'\n\
+                 mv '{report}/argv.tmp' '{report}/argv'\n\
+                 exec sleep 30\n"
+            ),
+        );
+        let mut master = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::spawn_worker_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("QUEEN_SPAWN_HELPER_DIR", &directory)
+            .env("QUEEN_SUPERVISOR_TELEMETRY_DIR", "/leaked/telemetry")
+            .env("QUEEN_SUPERVISOR_EXITS_DIR", "/leaked/exits")
+            .env("QUEEN_SUPERVISOR_LEASE_SOCKET", "/leaked/lease.sock")
+            .env("QUEEN_LARAVEL_BLOCK_FOR", "9")
+            .env("QUEEN_TEST_INHERITED", "kept")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !directory.join("argv").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let read = |name: &str| fs::read_to_string(directory.join(name)).unwrap_or_default();
+        let worker: i32 = read("worker.pid").trim().parse().unwrap_or(0);
+        let (argv, pwd, env) = (read("argv"), read("pwd"), read("env"));
+        let (pgid, ppid) = (read("pgid"), read("ppid"));
+
+        let _ = master.kill();
+        let _ = master.wait();
+        #[cfg(target_os = "linux")]
+        let fenced = {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let state = fs::read_to_string(format!("/proc/{worker}/stat"))
+                    .ok()
+                    .and_then(|stat| stat.rsplit_once(") ").map(|(_, tail)| tail.to_owned()))
+                    .and_then(|tail| tail.chars().next());
+                if state.is_none() || matches!(state, Some('Z' | 'X')) {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        };
+        if worker > 0 {
+            // SAFETY: plain signal delivery to the worker this test started.
+            unsafe {
+                libc::kill(-worker, libc::SIGKILL);
+                libc::kill(worker, libc::SIGKILL);
+            }
+        }
+        let resolved = spawn_helper_config(&directory);
+        let app = fs::canonicalize(directory.join("app")).unwrap();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(worker > 0, "the master never spawned the worker");
+        let (arguments, _) = worker_invocation(
+            &resolved,
+            "default",
+            "high",
+            &resolved.supervisors["default"],
+        );
+        let expected: Vec<String> = [resolved.artisan.clone(), "queue:work".to_owned()]
+            .into_iter()
+            .chain(arguments)
+            .collect();
+        assert_eq!(argv.lines().collect::<Vec<_>>(), expected);
+        assert_eq!(Path::new(pwd.trim()), app);
+        let variables: HashMap<&str, &str> = env
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect();
+        for (variable, value) in [
+            ("QUEEN_LARAVEL_CONSUMER_GROUP", "workers"),
+            ("QUEEN_LARAVEL_CONNECTION", "queen"),
+            ("QUEEN_LARAVEL_SUPERVISOR", "default"),
+            ("QUEEN_LARAVEL_RETRY_AFTER", "90"),
+            ("QUEEN_TEST_INHERITED", "kept"),
+        ] {
+            assert_eq!(variables.get(variable), Some(&value), "{variable}");
+        }
+        for removed in [
+            "QUEEN_SUPERVISOR_TELEMETRY_DIR",
+            "QUEEN_SUPERVISOR_EXITS_DIR",
+            "QUEEN_SUPERVISOR_LEASE_SOCKET",
+            "QUEEN_LARAVEL_BLOCK_FOR",
+        ] {
+            assert_eq!(variables.get(removed), None, "{removed} leaked");
+        }
+        assert_eq!(pgid.trim(), worker.to_string(), "not its own group leader");
+        assert_eq!(
+            ppid.trim(),
+            master.id().to_string(),
+            "not the master's child"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(fenced, "worker {worker} survived its master");
     }
 
     #[cfg(target_os = "linux")]
@@ -7278,6 +8295,590 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
             .unwrap();
         let response = client.get(url.to_str().unwrap()).send().unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess helper: the supervisor of the process tests"]
+    fn run_helper() {
+        // The configuration exported by this artisan script, as in production.
+        if let Some(artisan) = std::env::var_os("QUEEN_RUN_HELPER_EXPORT") {
+            run(&CliOptions {
+                config: None,
+                php: "/bin/sh".into(),
+                artisan: artisan.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+            return;
+        }
+        let Some(path) = std::env::var_os("QUEEN_RUN_HELPER_CONFIG") else {
+            return;
+        };
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("QUEEN_RUN_HELPER_SUBREAPER").is_some() {
+            // SAFETY: makes this helper the parent of its descendants' orphans,
+            // as PID 1 of a container is.
+            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
+        }
+        run(&CliOptions {
+            config: Some(PathBuf::from(path)),
+            php: "php".into(),
+            artisan: "artisan".into(),
+        })
+        .unwrap();
+    }
+
+    /// A supervisor process, run_helper, on the resolved configuration
+    /// `document`, logging to supervisor.log in `directory`.
+    #[cfg(unix)]
+    fn start_supervisor(
+        directory: &Path,
+        document: &serde_json::Value,
+        environment: &[(&str, &str)],
+    ) -> Child {
+        let path = directory.join("config.json");
+        write_private_file(&path, &serde_json::to_vec(document).unwrap());
+        let log = File::create(directory.join("supervisor.log")).unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "tests::run_helper", "--ignored", "--nocapture"])
+            .env("QUEEN_RUN_HELPER_CONFIG", &path)
+            .envs(environment.iter().copied())
+            .stdout(Stdio::null())
+            .stderr(log);
+        command.spawn().unwrap()
+    }
+
+    /// A resolved configuration for start_supervisor: one auto pool on
+    /// queue "high", whose artisan is the script write_fake_artisan left in
+    /// `directory`, against the broker at `broker`.
+    #[cfg(unix)]
+    fn supervisor_document(directory: &Path, broker: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": 2,
+            "cwd": directory,
+            "php_binary": "/bin/sh",
+            "artisan": directory.join("artisan"),
+            "state_directory": directory.join("state"),
+            "poll_interval": 1,
+            "http_timeout": 2,
+            "shutdown_grace": 5,
+            "telemetry_ttl": 300,
+            "process_limit": 8,
+            "queen": {"url": broker},
+            "supervisors": {"default": {
+                "connection": "queen", "consumer_group": "workers", "queues": ["high"],
+                "balance": "auto", "strategy": "size", "processes": 1, "min_processes": 1,
+                "max_processes": 2, "target_jobs_per_process": 10, "target_clear_seconds": 60.0,
+                "default_runtime_seconds": 1.0, "balance_cooldown": 1, "balance_max_shift": 1,
+                "sleep": 1, "timeout": 2, "tries": 1, "memory": 128, "backoff": 0,
+                "max_jobs": 0, "max_time": 0, "rest": 0, "force": false
+            }}
+        })
+    }
+
+    /// Write `script` as the artisan of `directory`, for the PHP binary
+    /// /bin/sh: $1 is the command, queue:work or queen:fork-server. A script
+    /// sh reads is never executed itself, so a fork in another test, which
+    /// may hold it open for writing a moment, cannot fail with ETXTBSY.
+    #[cfg(unix)]
+    fn write_fake_artisan(directory: &Path, script: &str) -> PathBuf {
+        let artisan = directory.join("artisan");
+        fs::write(&artisan, script).unwrap();
+        artisan
+    }
+
+    /// A broker that accepts every connection and never answers: its URL,
+    /// and how many connections it accepted so far.
+    fn hung_broker() -> (String, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        (url, accepted)
+    }
+
+    /// A broker that closes every connection at once.
+    fn closing_broker() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || listener.incoming().for_each(drop));
+        url
+    }
+
+    /// Wait for a file named `prefix` and a pid in `directory`; returns the pid.
+    #[cfg(unix)]
+    fn await_pid_file(directory: &Path, prefix: &str, timeout: Duration) -> Option<u32> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let found = fs::read_dir(directory).unwrap().find_map(|entry| {
+                entry
+                    .ok()?
+                    .file_name()
+                    .to_str()?
+                    .strip_prefix(prefix)?
+                    .parse()
+                    .ok()
+            });
+            if found.is_some() || Instant::now() >= deadline {
+                return found;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn stop_supervisor(mut supervisor: Child) {
+        let _ = supervisor.kill();
+        let _ = supervisor.wait();
+    }
+
+    /// A broker that accepts and never answers holds every coordination
+    /// heartbeat for http_timeout per endpoint. A SIGTERM then must reach the
+    /// workers at once: the platform's stop deadline counts from it, and
+    /// shutdown_grace only starts once the workers have their SIGTERM.
+    #[cfg(unix)]
+    #[test]
+    fn a_sigterm_during_a_hung_broker_call_reaches_the_workers_at_once() {
+        let directory = temporary_directory("hung-broker");
+        write_fake_artisan(
+            &directory,
+            "trap ': > \"terminated.$$\"; exit 0' TERM\n: > \"ready.$$\"\n\
+             while :; do sleep 0.05; done\n",
+        );
+        let (hung, accepted) = hung_broker();
+        let mut document = supervisor_document(&directory, &closing_broker());
+        document["coordination"] = serde_json::json!({
+            "connection": {"urls": [&hung, &hung]},
+            "namespace": "queen-supervisor",
+            "ttl": 60,
+        });
+        let supervisor = start_supervisor(&directory, &document, &[]);
+
+        let worker = await_pid_file(&directory, "ready.", Duration::from_secs(20));
+        // The next heartbeat, from its first endpoint on.
+        let before = accepted.load(Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while accepted.load(Ordering::SeqCst) == before && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let heartbeat_hung = accepted.load(Ordering::SeqCst) > before;
+        // SAFETY: plain signal delivery to the supervisor this test started.
+        unsafe { libc::kill(supervisor.id() as i32, libc::SIGTERM) };
+        let signalled = Instant::now();
+        let terminated = await_pid_file(&directory, "terminated.", Duration::from_secs(15));
+        let delay = signalled.elapsed();
+
+        stop_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+        assert!(worker.is_some(), "the worker never started:\n{log}");
+        assert!(heartbeat_hung, "no heartbeat reached the broker:\n{log}");
+        assert_eq!(
+            terminated, worker,
+            "the worker never had its SIGTERM:\n{log}"
+        );
+        assert!(
+            delay < Duration::from_millis(1_500),
+            "the workers had their SIGTERM {delay:?} after the master's"
+        );
+    }
+
+    /// A SIGTERM during the configuration export, which may take a minute,
+    /// stops the master before it starts a worker.
+    #[cfg(unix)]
+    #[test]
+    fn a_sigterm_during_the_configuration_export_starts_no_worker() {
+        let directory = temporary_directory("slow-export");
+        let document = supervisor_document(&directory, &closing_broker());
+        write_private_file(
+            &directory.join("config.json"),
+            &serde_json::to_vec(&document).unwrap(),
+        );
+        let artisan = write_fake_artisan(
+            &directory,
+            &format!(
+                "if [ \"$1\" = queen:supervisor-config ]; then sleep 2; cat '{}'; exit 0; fi\n\
+                 : > \"ready.$$\"\nwhile :; do sleep 1 & wait $!; done\n",
+                directory.join("config.json").display()
+            ),
+        );
+        let log = File::create(directory.join("supervisor.log")).unwrap();
+        let mut supervisor = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::run_helper", "--ignored", "--nocapture"])
+            .env("QUEEN_RUN_HELPER_EXPORT", &artisan)
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        thread::sleep(Duration::from_millis(700));
+        // SAFETY: plain signal delivery to the supervisor this test started.
+        unsafe { libc::kill(supervisor.id() as i32, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut status = None;
+        while status.is_none() && Instant::now() < deadline {
+            status = supervisor.try_wait().unwrap();
+            thread::sleep(Duration::from_millis(20));
+        }
+        let started = count_files(&directory, "ready.");
+        stop_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+        assert!(
+            status.is_some_and(|status| status.success()),
+            "the master did not stop cleanly ({status:?}):\n{log}"
+        );
+        assert_eq!(started, 0, "a worker started after the SIGTERM:\n{log}");
+    }
+
+    /// A master whose stderr reader is gone, as a pipe whose logger stopped,
+    /// goes on supervising: its log lines are dropped.
+    #[cfg(unix)]
+    #[test]
+    fn a_master_whose_stderr_is_closed_goes_on() {
+        let directory = temporary_directory("closed-stderr");
+        // Workers that exit at once, so the master logs every pass.
+        write_fake_artisan(&directory, ": > \"ran.$$\"\nexit 0\n");
+        let document = supervisor_document(&directory, &closing_broker());
+        let path = directory.join("config.json");
+        write_private_file(&path, &serde_json::to_vec(&document).unwrap());
+        let mut supervisor = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::run_helper", "--ignored", "--nocapture"])
+            .env("QUEEN_RUN_HELPER_CONFIG", &path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(supervisor.stderr.take());
+        thread::sleep(Duration::from_secs(3));
+        let alive = matches!(supervisor.try_wait(), Ok(None));
+        let workers = count_files(&directory, "ran.");
+        stop_supervisor(supervisor);
+        let _ = fs::remove_dir_all(&directory);
+        assert!(alive, "the master ended when it could not write to stderr");
+        assert!(workers > 1, "no worker exited for the master to log");
+    }
+
+    /// Files in `directory` whose name starts with `prefix`.
+    #[cfg(unix)]
+    fn count_files(directory: &Path, prefix: &str) -> usize {
+        fs::read_dir(directory)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Stop the supervisor as the platform does, with SIGTERM, and wait.
+    #[cfg(unix)]
+    fn terminate_supervisor(mut supervisor: Child) {
+        // SAFETY: plain signal delivery to the supervisor this test started.
+        unsafe { libc::kill(supervisor.id() as i32, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while matches!(supervisor.try_wait(), Ok(None)) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        stop_supervisor(supervisor);
+    }
+
+    #[test]
+    fn a_failed_fork_server_boot_backs_off_and_a_boot_resets_it() {
+        let now = Instant::now();
+        let mut boots = ForkServerBoots::default();
+        assert!(!boots.due(now), "booted without a queue:restart");
+        boots.request(now);
+        assert!(boots.due(now), "a working server waits for a queue:restart");
+
+        let mut waited = Vec::new();
+        for _ in 0..6 {
+            boots.record(false, now);
+            assert!(!boots.due(now), "booted again without a request");
+            boots.request(now);
+            waited.push(boots.retry_at.unwrap().duration_since(now).as_secs());
+            assert!(!boots.due(now + Duration::from_secs(waited[waited.len() - 1] - 1)));
+        }
+        assert_eq!(waited, [60, 120, 240, 480, 900, 900]);
+        assert!(boots.due(now + Duration::from_secs(900)));
+
+        boots.record(true, now);
+        boots.request(now);
+        assert!(boots.due(now));
+    }
+
+    /// A fork server that cannot boot (here it exits at once; a hung boot
+    /// holds the control loop for up to BOOT_TIMEOUT) is not booted again
+    /// for every worker queue:restart stops. Workers are spawned meanwhile.
+    #[cfg(unix)]
+    #[test]
+    fn a_fork_server_that_failed_to_boot_waits_before_booting_again() {
+        let directory = temporary_directory("fork-server-retry");
+        let boots = directory.join("boots");
+        write_fake_artisan(
+            &directory,
+            &format!(
+                "if [ \"$1\" = queen:fork-server ]; then echo boot >> '{}'; exit 1; fi\n\
+                 : > \"started.$$\"\n\
+                 sleep 0.3\n\
+                 umask 077\n\
+                 printf restart > \"$QUEEN_SUPERVISOR_EXITS_DIR/$$.tmp\"\n\
+                 mv \"$QUEEN_SUPERVISOR_EXITS_DIR/$$.tmp\" \"$QUEEN_SUPERVISOR_EXITS_DIR/$$\"\n",
+                boots.display()
+            ),
+        );
+        let mut document = supervisor_document(&directory, &closing_broker());
+        document["prefork"] = serde_json::json!(true);
+        let supervisor = start_supervisor(&directory, &document, &[]);
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while count_files(&directory, "started.") < 4 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let started = count_files(&directory, "started.");
+        let booted = fs::read_to_string(&boots)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        terminate_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(started >= 4, "no worker was spawned meanwhile:\n{log}");
+        assert_eq!(
+            booted, 1,
+            "the fork server booted for every queue:restart:\n{log}"
+        );
+    }
+
+    /// The state letter of /proc/<pid>/stat, None once the pid is gone.
+    #[cfg(target_os = "linux")]
+    fn process_state(pid: i32) -> Option<char> {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()?
+            .rsplit_once(") ")?
+            .1
+            .chars()
+            .next()
+    }
+
+    /// As PID 1 of a container, or a child subreaper, the master inherits
+    /// the children of a worker that Laravel's job timeout SIGKILLed: it
+    /// reaps them once they exit, instead of leaving zombies that fill
+    /// pids.max. A tracked worker's exit status stays its own.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_master_reaps_the_orphans_it_inherits() {
+        let directory = temporary_directory("orphans");
+        write_fake_artisan(
+            &directory,
+            "sleep 1 &\necho $! > \"orphan.$$\"\n: > \"ready.$$\"\n\
+             while :; do sleep 0.05; done\n",
+        );
+        let document = supervisor_document(&directory, &closing_broker());
+        let supervisor = start_supervisor(
+            &directory,
+            &document,
+            &[("QUEEN_RUN_HELPER_SUBREAPER", "1")],
+        );
+        let worker = await_pid_file(&directory, "ready.", Duration::from_secs(20));
+        let orphan: Option<i32> = worker.and_then(|worker| {
+            fs::read_to_string(directory.join(format!("orphan.{worker}")))
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+        });
+        if let Some(worker) = worker {
+            // Laravel's job timeout: SIGKILL to the worker alone.
+            // SAFETY: plain signal delivery to the worker the supervisor started.
+            unsafe { libc::kill(worker as i32, libc::SIGKILL) };
+        }
+        let status_path = directory.join("state").join("status.json");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (mut reaped, mut replaced) = (false, false);
+        while !(reaped && replaced) && Instant::now() < deadline {
+            reaped = orphan.is_some_and(|orphan| process_state(orphan).is_none());
+            replaced = fs::read_to_string(&status_path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .is_some_and(|status| {
+                    let pool = &status["pool_status"][0];
+                    pool["restart_failures"] == 1
+                        && !pool["pids"]
+                            .as_array()
+                            .is_some_and(|pids| pids.iter().any(|pid| *pid == worker.unwrap()))
+                });
+            thread::sleep(Duration::from_millis(50));
+        }
+        let state = orphan.and_then(process_state);
+        terminate_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(orphan.is_some(), "the worker never started:\n{log}");
+        assert!(reaped, "orphan {orphan:?} left in state {state:?}:\n{log}");
+        assert!(
+            replaced && !log.contains("wait failed"),
+            "the killed worker's exit was not the master's to classify:\n{log}"
+        );
+    }
+
+    /// A pause requested just before the clock stepped back reads as
+    /// requested in the future. The request is discarded; supervision, and
+    /// every worker, carries on.
+    #[cfg(unix)]
+    #[test]
+    fn a_control_request_from_the_future_is_discarded_and_supervision_goes_on() {
+        let directory = temporary_directory("control-clock-step");
+        write_fake_artisan(
+            &directory,
+            "trap ': > \"terminated.$$\"; exit 0' TERM\n: > \"ready.$$\"\n\
+             while :; do sleep 0.05; done\n",
+        );
+        let document = supervisor_document(&directory, &closing_broker());
+        let mut supervisor = start_supervisor(&directory, &document, &[]);
+        let worker = await_pid_file(&directory, "ready.", Duration::from_secs(20));
+        let state = directory.join("state");
+        let status = || -> serde_json::Value {
+            fs::read_to_string(state.join("status.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default()
+        };
+        let now = now_epoch();
+        let request = state.join("control.json.tmp");
+        write_private_file(
+            &request,
+            &serde_json::to_vec(&serde_json::json!({
+                "command": "pause",
+                "nonce": "request-from-the-future",
+                "instance_id": status()["instance_id"],
+                "requested_at_epoch": now + 10,
+                "expires_at_epoch": now + 40,
+            }))
+            .unwrap(),
+        );
+        fs::rename(&request, state.join("control.json")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state.join("control.json").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        // A few control-loop iterations after the request was read.
+        thread::sleep(Duration::from_millis(1_500));
+        let alive = matches!(supervisor.try_wait(), Ok(None));
+        let consumed = !state.join("control.json").exists();
+        let drained = count_files(&directory, "terminated.");
+        let reported = status()["state"].clone();
+        terminate_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(worker.is_some(), "the worker never started:\n{log}");
+        assert!(consumed, "the request was never read:\n{log}");
+        assert!(alive, "the supervisor stopped:\n{log}");
+        assert_eq!(drained, 0, "the workers were drained:\n{log}");
+        assert_eq!(reported, "running", "{log}");
+    }
+
+    /// Without its exit markers, prefork cannot tell a queue:restart from
+    /// any clean exit: the fork server is never replaced and forked workers
+    /// keep running the code it booted. The master says so when it starts.
+    #[cfg(unix)]
+    #[test]
+    fn disabled_exit_markers_warn_that_prefork_misses_queue_restart() {
+        let directory = temporary_directory("exit-markers-disabled");
+        let state = directory.join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        // A file where the exit-marker directory goes.
+        write_private_file(&state.join("exits"), b"");
+        write_fake_artisan(
+            &directory,
+            "if [ \"$1\" = queen:fork-server ]; then exit 1; fi\n: > \"ready.$$\"\n\
+             while :; do sleep 0.05; done\n",
+        );
+        let mut document = supervisor_document(&directory, &closing_broker());
+        document["prefork"] = serde_json::json!(true);
+        let supervisor = start_supervisor(&directory, &document, &[]);
+        let worker = await_pid_file(&directory, "ready.", Duration::from_secs(20));
+        terminate_supervisor(supervisor);
+        let log = fs::read_to_string(directory.join("supervisor.log")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert!(worker.is_some(), "the worker never started:\n{log}");
+        let warning = log
+            .lines()
+            .find(|line| line.starts_with("exit markers disabled"))
+            .unwrap_or_else(|| panic!("no warning:\n{log}"));
+        assert!(
+            warning.contains("queue:restart") && warning.contains("fork server"),
+            "{warning}"
+        );
+    }
+
+    /// A SIGSTOPped worker holds its reserved job and runs nothing, yet
+    /// try_wait sees it running and the status counts it as ready capacity,
+    /// for as long as it stays stopped.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "verified defect, policy not decided: resume it (SIGCONT), replace it, \
+                or only stop counting it as ready capacity"]
+    fn a_stopped_worker_is_not_ready_capacity() {
+        let directory = temporary_directory("stopped-worker");
+        let state = State::acquire(directory.to_str().unwrap()).unwrap();
+        let resolved = config(options("auto"));
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut worker = sleeping_worker(false);
+        signal_worker(&mut worker.child, libc::SIGSTOP);
+        let mut pools = Pools::from([(key.clone(), vec![worker])]);
+        let mut restarts = RestartStates::new();
+        thread::sleep(Duration::from_millis(100));
+        reap(
+            &resolved,
+            &mut pools,
+            &mut restarts,
+            &mut PendingTelemetryCleanup::new(),
+            None,
+        );
+        let desired = HashMap::from([(
+            "default".to_owned(),
+            HashMap::from([("high".to_owned(), 1), ("default".to_owned(), 0)]),
+        )]);
+        let depths = HashMap::from([(
+            "default".to_owned(),
+            HashMap::from([("high".to_owned(), 5), ("default".to_owned(), 0)]),
+        )]);
+        let status = state
+            .write_status(
+                "rust",
+                "running",
+                StatusSnapshot {
+                    config: &resolved,
+                    pools: &pools,
+                    restarts: &restarts,
+                    draining: &Draining::new(),
+                    desired: &desired,
+                    depths: &depths,
+                    depths_available: &HashMap::from([("default".to_owned(), true)]),
+                    replicas: &HashMap::new(),
+                },
+            )
+            .unwrap();
+        kill_pools(&mut pools);
+        drop(state);
+        fs::remove_dir_all(directory).unwrap();
+
+        assert_eq!(status["pool_status"][0]["queue"], "high");
+        assert_eq!(status["pool_status"][0]["ready"], false, "{status}");
     }
 
     /// The broker calls of a stop (coordination leave, remote status) may

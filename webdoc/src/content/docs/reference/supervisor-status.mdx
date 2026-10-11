@@ -76,6 +76,19 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-10 (probe user): SupervisorState's refusal of a state that another
 # user owns now names the owner and the reader; the status document and its liveness and readiness
 # rules are unchanged. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): SupervisorState, ConsumerManager,
+# coordination.rs, main.rs, remote_status.rs: status writes retried until heartbeat_timeout, broker
+# calls on a thread a stop abandons, a terminate publishes terminating after the worker fan-out. The
+# document's fields and their meaning are unchanged.
+# sourceOfTruth re-read 2026-10-11 (review fixes, unreleased): failover counts a URL listed twice
+# once; consume() backs off after an answer that is not the broker's; a replacement that cannot
+# start waits for the circuit; the PHP stop signal reaches the workers once; the Rust master handles
+# SIGTERM during its configuration export and drops a log line it cannot write. Nothing this page
+# states changes.
+# sourceOfTruth re-read 2026-10-11 (consume() lease renewal, unreleased): ConsumerManager's
+# automatic renewal waits at most the renewal interval, encodes the lease id and logs a renewal that
+# failed or renewed nothing. The renewal this page describes, the extend route and renewLease(), is
+# unchanged.
 ---
 
 The broker dashboard discovers published supervisor status in the `queen-supervisor` KV namespace.

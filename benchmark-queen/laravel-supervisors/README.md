@@ -463,6 +463,52 @@ python3 scripts/failure_matrix.py --output results/parity-l11 --stack balanced -
   --scenarios death-timeout,death-sigkill,death-release-timeout,death-release-sigkill,routed-parity
 ```
 
+### What only Queen has
+
+Eight scenarios run only on the Queen engines, since Horizon has no counterpart to
+compare with:
+
+| Scenario | What must hold |
+| --- | --- |
+| `probe-broker-hung` | the broker hangs (`docker pause`) for 150 s, longer than every timeout of a pop; the probes of [the Kubernetes guide](../../webdoc/src/content/docs/guides/laravel/kubernetes.mdx) run every 3 s: liveness passes throughout, readiness fails during the outage and says `pool_not_consuming`, and passes again within 60 s of the broker's return; the master and the same workers carry on and consume again |
+| `broker-slow` | every answer of the broker takes 1.5 s more (`tc netem` from a container in its network namespace) for a minute while jobs of 2 s run: each completes once, no lease lapses into a second run, and the pool stays ready |
+| `poison-messages` | a string that is not JSON, an object that names no job and a Laravel job whose class is gone, ahead of a job in one partition: the three go to the dead-letter queue at their first delivery, no worker dies, and the job behind them runs without waiting for a lease |
+| `job-metrics` | the Jobs page after every way an attempt ends (`bench:job-metrics`): returned and released attempts are processed; a throw, `fail()`, a timeout and a delivery past its tries are failed attempts; the longest attempt is the timed-out one |
+| `install-owner` | the `queen-installed` service: the image build installs the release as root with `--owner` ([Dockerfile](Dockerfile)), the container starts as root and runs the Composer launcher as the user. The installation and every process are the user's; the probe as root fails with a message naming the owner, `su` and `runAsUser`, and the probe wrapped in `su` passes; SIGTERM drains the job in flight and the supervisor exits 0 |
+| `broker-leader-kill` | a broker of three nodes, as production runs it (the `cluster` profile; the clients list every node): its leader is killed outright while 300 jobs run and the producer dispatches 50 more. The others elect a leader, dispatching does not fail, the readiness probe passes again within 60 s, and every job completes, twice only where an ACK died with the leader |
+| `partition-order` | one partition, as an ordered queue keeps one: 40 jobs, two workers, and the worker running one of them killed. The jobs start in dispatch order, never two at once, and the killed job runs again before any job behind it |
+| `rolling-upgrade` | a replica of the previous release of the PHP client (`queen-previous`, its image built with `BENCH_PHP_CLIENT_VERSION`) beside the lane's, coordinated on one queue, each dispatching: every job completes once whichever release dispatched and ran it, both replicas run jobs, and the previous one drains and exits 0 when the rollout stops it |
+
+`install-owner` runs on its own engine, whatever `--profiles` says. `rolling-upgrade` needs the
+image of the previous release:
+
+```console
+BENCH_APP_IMAGE=queen-laravel-supervisor-bench:previous BENCH_PHP_CLIENT_VERSION=2.4.3 \
+docker compose --file compose.raft.yml --profile tools build producer
+BENCH_PREVIOUS_APP_IMAGE=queen-laravel-supervisor-bench:previous \
+python3 scripts/failure_matrix.py --output results/upgrade --scenarios rolling-upgrade
+```
+
+Two more scenarios hold Queen to Horizon on job settings and failures Laravel accepts:
+`string-timeout`, a job whose `$timeout` is a numeric string, as `env()` returns it, ahead of
+two jobs in one partition; and `binary-failure`, a job whose exception message is not UTF-8,
+as a database error quoting a latin-1 value is. Each job must run, or fail once with its own
+exception, and no worker may leave for it.
+
+### In CI
+
+[`.github/workflows/laravel-matrix.yml`](../../.github/workflows/laravel-matrix.yml) runs
+the matrix in groups, on broker 2.0.4 and on the newest release: every night on master,
+on demand, and from the release workflows of the PHP client and the supervisor, which
+publish nothing while a lane fails. A pull request that
+changes the client, the supervisor or this harness runs the groups `queen`, `deaths`,
+`lifecycle` and `upgrade` on the newest broker; `upgrade` takes the newest client on
+Packagist as the previous release, which before a release is published is the one it
+follows. Every Sunday the soak runs instead, one lane per engine. A group is one `failure_matrix.py` command, so a failed
+lane is rerun locally with the group's arguments from the workflow and
+`BENCH_BROKER_IMAGE=ghcr.io/queen-mq/queen:<version>`. Each run uploads its results
+directory, and the job summary shows `summary.md` and `parity.md`.
+
 ## Requirements
 
 - Docker Engine with Compose v2, profiles, health-condition dependencies and

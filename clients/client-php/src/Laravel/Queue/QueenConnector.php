@@ -142,14 +142,20 @@ class QueenConnector implements ConnectorInterface
 
         // Graceful shutdown is a best-effort optimization: correctness falls
         // back to lease expiry when it fails. Give that final transaction one
-        // bounded attempt on one backend, independently of the ordinary
-        // client's retry/failover policy, so WorkerStopping can never consume
-        // the supervisor's entire shutdown grace.
+        // bounded attempt per backend, independently of the ordinary client's
+        // retry policy, so WorkerStopping can never consume the supervisor's
+        // entire shutdown grace. With failover the backends share the bound:
+        // on one backend alone, a backend that was down left the prefetched
+        // tail to lease expiry, which charged each job an attempt.
+        $backends = is_array($urls) && $urls !== [] ? count(array_unique($urls)) : 1;
+        $shutdownFailover = $backends > 1 && $clientConfig['enableFailover'] !== false;
         $shutdownClientConfig = $clientConfig;
-        $shutdownClientConfig['timeoutMillis'] = self::SHUTDOWN_RELEASE_TIMEOUT_MILLIS;
+        $shutdownClientConfig['timeoutMillis'] = $shutdownFailover
+            ? max(1, intdiv(self::SHUTDOWN_RELEASE_TIMEOUT_MILLIS, $backends))
+            : self::SHUTDOWN_RELEASE_TIMEOUT_MILLIS;
         $shutdownClientConfig['retryAttempts'] = 1;
         $shutdownClientConfig['retryDelayMillis'] = 0;
-        $shutdownClientConfig['enableFailover'] = false;
+        $shutdownClientConfig['enableFailover'] = $shutdownFailover;
         $shutdownClientConfig['retry429'] = ['maxAttempts' => 1, 'baseMs' => 1, 'capMs' => 1];
         $shutdownQueen = null;
         $shutdownClient = static function () use (&$shutdownQueen, $shutdownClientConfig): Queen {

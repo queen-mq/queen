@@ -61,6 +61,18 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-10 (/health needs a majority behind the leader): config.rs,
 # facade/real.rs, handlers/raft.rs change what /health answers (raft.quorumAckMs; ready needs the
 # leader's majority within QUEEN_RAFT_READY_QUORUM_MS). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-11 (stability fixes, unreleased): ConsumerManager: consume() backs
+# off after a 5xx and goes on polling, and logs an ACK that failed. The consume loop this page
+# describes is unchanged.
+# sourceOfTruth re-read 2026-10-11 (review fixes, unreleased): failover counts a URL listed twice
+# once; consume() backs off after an answer that is not the broker's; a replacement that cannot
+# start waits for the circuit; the PHP stop signal reaches the workers once; the Rust master handles
+# SIGTERM during its configuration export and drops a log line it cannot write. Nothing this page
+# states changes.
+# sourceOfTruth re-read 2026-10-11 (consume() lease renewal, unreleased): ConsumerManager's
+# automatic renewal waits at most the renewal interval, encodes the lease id and logs a renewal that
+# failed or renewed nothing. The renewal this page describes, the extend route and renewLease(), is
+# unchanged.
 ---
 
 A consumer group reads a queue at its own pace, with one cursor in each partition. Its workers

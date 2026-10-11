@@ -66,6 +66,22 @@ class CurlTransportTest extends TestCase
         $this->assertNull($client->get('/empty'));
     }
 
+    public function testABodyThatCannotBeEncodedIsNeverSentNorRetried(): void
+    {
+        $client = $this->client();
+        $this->assertTrue($this->usesCurlTransport($client));
+
+        $started = microtime(true);
+        try {
+            $client->post('/echo', ['payload' => "caf\xE9"]);
+            $this->fail('A body json_encode() refuses was sent.');
+        } catch (\JsonException) {
+        }
+
+        $this->assertLessThan(0.5, microtime(true) - $started, 'the default 1 s + 2 s backoff ran');
+        $this->assertSame([], $client->get('/received'));
+    }
+
     public function testRetryAfterReachesTheRateLimitException(): void
     {
         $client = $this->client(['retry429' => ['maxAttempts' => 1]]);

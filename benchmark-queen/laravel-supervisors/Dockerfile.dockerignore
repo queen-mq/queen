@@ -1,6 +1,8 @@
 # The Dockerfile is built from the repository root. Only the Rust supervisor,
-# Laravel client and benchmark fixture are inputs to this image.
+# Laravel client and benchmark fixture are inputs to this image, and the license
+# that the supervisor's release archive carries.
 *
+!LICENSE.md
 !supervisor/
 !supervisor/**
 !clients/

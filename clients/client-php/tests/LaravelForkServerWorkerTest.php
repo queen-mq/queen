@@ -130,6 +130,29 @@ final class LaravelForkServerWorkerTest extends TestCase
     }
 
     /**
+     * The server reads queue:restart's signal from the cache store at boot,
+     * and kept the store: every forked worker shared its connection, a
+     * memcached socket for one, so restart-signal reads, unique and overlap
+     * locks and maxExceptions counters could get each other's answers. The
+     * server lets the cache stores go too, and each worker builds its own.
+     */
+    public function testTheServerForgetsTheCacheStoresTheBootResolved(): void
+    {
+        $server = $this->server();
+        (new \ReflectionMethod($server, 'rememberRestartSignal'))->invoke($server);
+        $repository = $this->app['cache.store'];
+        $store = $repository->getStore();
+        $named = $this->app['cache']->store('file')->getStore();
+
+        (new \ReflectionMethod($server, 'releaseBootResources'))->invoke($server);
+
+        $this->assertNotSame($repository, $this->app['cache.store']);
+        $this->assertNotSame($store, $this->app['cache.store']->getStore());
+        $this->assertNotSame($store, $this->app['cache']->store()->getStore());
+        $this->assertNotSame($named, $this->app['cache']->store('file')->getStore());
+    }
+
+    /**
      * An application may bind a logger of its own as `log`; the server
      * forgets channels only from a LogManager, which has them.
      */

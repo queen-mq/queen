@@ -9,7 +9,7 @@ class HttpException extends \RuntimeException
      *                                       response body carries none. Named apart from the inherited
      *                                       integer $code, which \Exception owns.
      * @param float|null  $retryAfterSeconds Parsed Retry-After response header, only ever set on a 429
-     *                                       and null when the header is absent or non-numeric.
+     *                                       or a 503, and null when the header is absent or non-numeric.
      * @param string|null $reason            The kv/timers surfaces answer {error, reason, detail}: `error` is the
      *                                       branchable code, `reason` a finer STABLE identifier
      *                                       (kv_expiry_not_specified, kv_bad_ttl, timers_horizon, …) and `detail`
@@ -57,5 +57,18 @@ class HttpException extends \RuntimeException
     public function isRateLimited(): bool
     {
         return $this->statusCode === 429;
+    }
+
+    /**
+     * Whether the broker, or a gateway in front of it, could not answer for
+     * a short while (502, 503, 504): a raft cluster answers 503 for a few
+     * seconds while it elects a leader. A consumer loop backs off and polls
+     * again. A 503 raft_phase1_unsupported is a broker that cannot serve the
+     * route at all, which waiting does not change.
+     */
+    public function isTransient(): bool
+    {
+        return in_array($this->statusCode, [502, 503, 504], true)
+            && $this->errorCode !== 'raft_phase1_unsupported';
     }
 }

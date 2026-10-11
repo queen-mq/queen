@@ -11,6 +11,7 @@ use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Queue\Queue as QueueContract;
 use Illuminate\Queue\Connectors\ConnectorInterface;
+use Illuminate\Queue\Failed\NullFailedJobProvider;
 use Illuminate\Queue\Queue;
 use Orchestra\Testbench\TestCase;
 use PHPUnit\Framework\Attributes\TestWith;
@@ -18,6 +19,7 @@ use Psr\Http\Message\RequestInterface;
 use Queen\Exceptions\HttpException;
 use Queen\Laravel\Commands\ForkServerCommand;
 use Queen\Laravel\QueenServiceProvider;
+use Queen\Laravel\Queue\UnsafeJobTimeoutException;
 use Queen\Laravel\Supervisor\SupervisorState;
 use Queen\Laravel\Supervisor\WorkerExitMarker;
 use Queen\Laravel\Supervisor\WorkerPopGuard;
@@ -147,22 +149,35 @@ final class WorkerPopGuardTest extends TestCase
 
     /**
      * A job whose timeout its lease cannot cover is wrong in the code, and
-     * only a deploy fixes it: the worker leaves, so its pool shows it, and the
-     * delivery waits for a worker that runs the fixed code.
+     * only a deploy fixes it. The worker used to leave: the lease expired
+     * without charging an attempt, the next worker popped the same job and
+     * left too, and the pool crash-looped on one job that never reached the
+     * dead-letter queue. That job fails, as Laravel fails one, with the
+     * setting to fix in its exception, and the worker goes on.
      */
     #[TestWith(['spawned'])]
     #[TestWith(['forked'])]
-    public function testAJobWhoseTimeoutItsLeaseCannotCoverEndsTheWorker(string $mode): void
+    public function testAJobWhoseTimeoutItsLeaseCannotCoverFailsAndTheWorkerGoesOn(string $mode): void
     {
         $this->broker->answer($this->delivery(['job' => 'Handler@handle', 'uuid' => 'too-long', 'timeout' => 400]), times: 1);
+        $this->broker->answer(['success' => true, 'leaseReleased' => true, 'dlq' => true], times: 1);
         $worker = $this->superviseAs($mode);
+        $this->app->instance('queue.failer', $failer = new RecordingFailedJobProvider());
 
-        [$code, $output] = $this->work($mode, $worker, 'queen-batch', 5);
+        [$code, $output] = $this->work($mode, $worker, 'queen-batch', 3);
 
-        $this->assertSame(1, $code);
-        $this->assertSays('cannot pop from connection [queen-batch]: Queen\Laravel\Queue\UnsafeJobTimeoutException: '
-            . 'Queen Laravel job timeout [400] must be positive and shorter than retry_after [90]', $output);
-        $this->assertSame(2, $worker->loops);
+        $this->assertSame(0, $code, $output);
+        $this->assertSame(4, $this->broker->count(), 'one pop, its dlq ACK, two empty pops');
+        $this->assertNull($this->popFailures());
+        $says = 'Queen Laravel job timeout [400] must be positive and shorter than retry_after [90]';
+        $this->assertCount(1, $failer->logged, 'Laravel\'s failed-job row');
+        $this->assertSame('queen-batch', $failer->logged[0]['connection']);
+        $this->assertInstanceOf(UnsafeJobTimeoutException::class, $failer->logged[0]['exception']);
+        $this->assertStringContainsString($says, $failer->logged[0]['exception']->getMessage());
+        $ack = json_decode((string) $this->broker->requests[1]->getBody(), true);
+        $this->assertSame('/api/v1/ack', $this->broker->requests[1]->getUri()->getPath());
+        $this->assertSame('dlq', $ack['status']);
+        $this->assertStringContainsString($says, $ack['error']);
     }
 
     /**
@@ -249,6 +264,33 @@ final class WorkerPopGuardTest extends TestCase
         $this->assertFalse($seen[32], 'the file outlived a pop that worked');
     }
 
+    /**
+     * A pop that fails with "Connection reset by peer" or "Broken pipe" reads,
+     * to Laravel's worker, as a lost database connection: the worker stopped
+     * with exit code 0, which the supervisor counts as a clean exit, with no
+     * backoff, and its stop took the file back. A pool whose broker kept
+     * resetting its connections restarted its workers in a loop, and never
+     * said they were not consuming. The worker stays, as for any failed pop.
+     */
+    #[TestWith(['spawned', 'cURL error 56: Recv failure: Connection reset by peer'])]
+    #[TestWith(['forked', 'cURL error 55: Send failure: Broken pipe'])]
+    public function testAConnectionTheBrokerResetDoesNotStopTheWorker(string $mode, string $error): void
+    {
+        $this->broker->answer(new \RuntimeException($error));
+        $worker = $this->superviseAs($mode);
+        $seen = [];
+        $worker->onLoop = function (int $loop) use (&$seen): void {
+            $seen[$loop] = $this->popFailures();
+        };
+
+        [$code, $output] = $this->work($mode, $worker, 'queen-batch', 3);
+
+        $this->assertSame(0, $code, $output);
+        $this->assertSame(3, $worker->loops, 'the worker stopped');
+        $this->assertSame(3, $this->broker->count());
+        $this->assertStringContainsString($error, $seen[3]['error'] ?? '', 'the file says what the broker did');
+    }
+
     /** queue:work run by hand, or by Horizon, is Laravel's as it was. */
     public function testAWorkerNoSupervisorStartedIsLeftAsLaravelMadeIt(): void
     {
@@ -326,6 +368,46 @@ final class WorkerPopGuardTest extends TestCase
         $guard->popFailed($refused);
         $this->assertSame(1_300, $this->popFailures()['failing_since']);
         $this->assertSame(1, $this->popFailures()['failures']);
+    }
+
+    /**
+     * A worker of --queue=high,low pops both queues each loop. Any pop that
+     * worked, an empty one of high too, cleared the failure of low, so a
+     * queue whose every pop failed stayed hidden behind one that worked.
+     * Each queue keeps its own failure, and the file says since when the
+     * oldest one fails.
+     */
+    public function testAQueueWhosePopsFailIsNotHiddenByOneThatWorks(): void
+    {
+        $now = 1_000;
+        $this->app->instance(WorkerPopGuard::class, new WorkerPopGuard(
+            'batch',
+            'queen-batch',
+            new WorkerExitMarker($this->exitsDirectory),
+            function () use (&$now): int {
+                return $now;
+            },
+        ));
+        $this->broker->answer(fn () => str_contains($this->broker->lastPath, '/low') ? 503 : 204);
+        $queue = $this->app['queue']->connection('queen-batch');
+
+        foreach (range(0, 70, 10) as $elapsed) {
+            $now = 1_000 + $elapsed;
+            $this->assertNull($queue->pop('high'));
+            try {
+                $queue->pop('low');
+                $this->fail('the pop of low worked');
+            } catch (HttpException) {
+            }
+        }
+
+        $this->assertSame(1_000, $this->popFailures()['failing_since'], 'an empty pop of high hid low');
+        $this->assertSame(8, $this->popFailures()['failures']);
+
+        // Low works again: nothing fails any more.
+        $this->broker->answer(204);
+        $this->assertNull($queue->pop('low'));
+        $this->assertNull($this->popFailures());
     }
 
     /** The pool's QueenQueue tells the guard when each pop begins. */
@@ -712,7 +794,11 @@ final class BrokerScript
 
     private int|\Throwable|array|\Closure $default = 204;
 
-    private int $requests = 0;
+    /** @var list<RequestInterface> */
+    public array $requests = [];
+
+    /** The path of the request being answered. */
+    public string $lastPath = '';
 
     /**
      * Answer the next $times requests so, with a status, a failure or a JSON
@@ -730,12 +816,13 @@ final class BrokerScript
 
     public function count(): int
     {
-        return $this->requests;
+        return count($this->requests);
     }
 
     public function __invoke(RequestInterface $request, array $options): PromiseInterface
     {
-        $this->requests++;
+        $this->requests[] = $request;
+        $this->lastPath = $request->getUri()->getPath();
         $answer = array_shift($this->plan) ?? $this->default;
         if ($answer instanceof \Closure) {
             $answer = $answer();
@@ -793,5 +880,19 @@ final class DispatchOnlyConnector implements ConnectorInterface
                 throw new \LogicException('The routed queue connection only dispatches; workers pop from the pool connections.');
             }
         };
+    }
+}
+
+/** Laravel's failed-job store, keeping what queue:work logged. */
+final class RecordingFailedJobProvider extends NullFailedJobProvider
+{
+    /** @var list<array{connection: string, queue: string, payload: string, exception: \Throwable}> */
+    public array $logged = [];
+
+    public function log($connection, $queue, $payload, $exception)
+    {
+        $this->logged[] = compact('connection', 'queue', 'payload', 'exception');
+
+        return null;
     }
 }

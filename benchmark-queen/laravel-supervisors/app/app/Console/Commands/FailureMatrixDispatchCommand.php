@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Jobs\FailureMatrixJob;
 use App\Jobs\FailureMatrixPartitionedJob;
+use App\Jobs\FailureMatrixStringTimeoutJob;
 use Illuminate\Console\Command;
 use InvalidArgumentException;
 
@@ -11,7 +12,7 @@ final class FailureMatrixDispatchCommand extends Command
 {
     protected $signature = 'bench:matrix-dispatch
         {--run-id= : Run identifier}
-        {--mode=ok : ok, throw, throw-once, release-once, fail, memory or release-then-ok}
+        {--mode=ok : ok, throw, throw-once, release-once, fail, memory, release-then-ok, throw-binary, or string-timeout: a job whose timeout is a numeric string}
         {--jobs=1 : Number of jobs}
         {--first=0 : Number of the first job, so several dispatches can share a run}
         {--sleep-ms=0 : Work of each successful attempt}
@@ -41,6 +42,16 @@ final class FailureMatrixDispatchCommand extends Command
             throw new InvalidArgumentException('--partition: 1..128 letters, digits, dot, underscore, colon or dash.');
         }
         for ($index = $first; $index < $first + $jobs; ++$index) {
+            if ($mode === 'string-timeout') {
+                FailureMatrixStringTimeoutJob::dispatch(
+                    $runId,
+                    sprintf('%06d', $index),
+                    $partition === '' ? 'matrix-string-timeout' : $partition,
+                    (string) $this->integer('timeout', 1, 86_400),
+                )->onConnection($connection)->onQueue($queue);
+
+                continue;
+            }
             $job = $partition === '' ? FailureMatrixJob::class : FailureMatrixPartitionedJob::class;
             $job::dispatch(
                 ...($partition === '' ? [] : ['partition' => $partition]),

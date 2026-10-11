@@ -91,6 +91,13 @@ jobs:
           - php-version: "8.4"
             phpts: "nts"
             laravel: "11"
+          # The newest PHP, which the client's ^8.3 accepts: a deprecation it
+          # raises in the client's own code fails the cell, before a later PHP
+          # turns it into an error.
+          - php-version: "8.5"
+            phpts: "nts"
+            laravel: "12"
+            phpunit: "--fail-on-deprecation"
     name: php-client-unit (PHP ${{ matrix.php-version }} ${{ matrix.phpts }}, Laravel ${{ matrix.laravel }})
     defaults:
       run:
@@ -124,7 +131,9 @@ jobs:
         if: matrix.php-version == '8.4' && matrix.laravel == '12'
         run: composer audit --locked --no-interaction
       - name: PHPUnit unit suite
-        run: vendor/bin/phpunit --testsuite Unit
+        env:
+          PHPUNIT_ARGUMENTS: ${{ matrix.phpunit }}
+        run: vendor/bin/phpunit --testsuite Unit ${PHPUNIT_ARGUMENTS:+"$PHPUNIT_ARGUMENTS"}
       - name: Supervisor release/installer contract
         if: matrix.php-version == '8.3'
         working-directory: ${{ github.workspace }}
@@ -250,6 +259,19 @@ jobs:
         run: cargo test --manifest-path crates/queen-protocol/Cargo.toml --locked
       - name: client tests
         run: cargo test --manifest-path clients/client-rust/Cargo.toml --locked
+      # The supervisor's prefork tests boot the PHP client's fork server and
+      # need its Composer dependencies; without them they skipped, and under
+      # CI a skip now fails the test.
+      - name: Set up PHP 8.3 for the supervisor's fork-server tests
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pcntl, posix, dom, xml, xmlwriter
+          coverage: none
+          tools: composer:v2
+      - name: Install the PHP client's dependencies
+        working-directory: clients/client-php
+        run: composer install --no-interaction --no-progress --prefer-dist
       - name: Laravel supervisor tests
         run: cargo test --manifest-path supervisor/Cargo.toml --locked
       # `signals` is off by default, so nothing else in the repo ever compiles

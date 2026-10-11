@@ -5,6 +5,124 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## Unreleased
 
+**Laravel: a job whose timeout its lease cannot cover fails alone.** Without lease renewal, a job
+whose own `$timeout` is 0 or at least `retry_after` was refused at every delivery: it never ran,
+never reached `tries` and held its partition, and since PHP client 2.4.2 every supervised worker
+that popped it exited, so its pool crash-looped. The job now fails at once, without running, with
+its failed-job row, its `failed()` call and its dead-letter entry, and the exception names the
+setting to change; the worker goes on. A `$timeout` that is a numeric string, as `env()` returns it,
+counts as the number, as Laravel's worker reads it; it was refused even with renewal on.
+
+**Laravel: a failure whose message is not UTF-8 still reaches the dead-letter queue.** A failed
+job's error went into the dead-letter ACK as it was, and a message that is not UTF-8, as a database
+error quoting a latin-1 value is, could not be encoded: no ACK was sent, `failed()` and the batch
+and chain callbacks were skipped, and the job failed a second time as `MaxAttemptsExceededException`
+once its lease expired. The text is now made valid UTF-8 and bounded to 8 KiB.
+
+**Laravel: the dead-letter ACK in Laravel's timeout handler can never prevent the kill.** With
+`failOnTimeout`, or on the last attempt, Laravel's handler fails the job before it kills the
+worker, and that ACK used the ordinary client: up to 90 seconds on one URL, and an exception that
+landed in the job's code. The handler now makes one bounded attempt of 2 seconds that never throws;
+if it fails, the lease expires and the broker delivers the job again, past its tries.
+
+**Laravel and supervisor: a SIGTERM during a broker call reaches the workers sooner.** A SIGTERM
+that arrived while the master waited on the broker, for a heartbeat, a depth read or a status
+publish, reached the workers only after the rest of that pass, `http_timeout` per URL for each
+call, so a node drain during a broker outage could outlast `terminationGracePeriodSeconds`. The
+Rust master now runs those calls on a thread that a stop abandons, so its workers get SIGTERM at
+once; a request that panics on that thread is not taken for a stop. The PHP master signals its
+workers from its signal handler, which PHP runs once the call in progress returns: at most one
+`http_timeout` later.
+
+**Laravel and supervisor: a pool is refilled at once after a deploy, and a clean exit is replaced
+while a probe runs.** A worker that exited counted as a scale-up step, so an `auto` pool that lost
+most of its workers at once, as at `queue:restart`, came back one `balance_max_shift` per
+`balance_cooldown`; and while a crash held the restart circuit, no worker was replaced, so workers
+that stopped at `--max-time` left the pool shrinking to the probe. In both engines a worker that
+left as expected (at `queue:restart`, its memory limit or Laravel's job timeout, or after it ran
+`stable_after`) is now replaced outside the budget and whatever the circuit says, up to the size
+the pool had. Any other exit, even with status 0, waits for both as before: Laravel's worker exits
+0 when it loses its database, every second through an outage. A scale-down that stops the probe
+keeps the circuit's failure count.
+
+**Laravel and supervisor: a master that is PID 1 reaps the orphans it inherits.** In a container
+with no init process, as a Kubernetes pod is, a process a job started and left behind, or the lease
+helper of a killed worker, reparents to the master, and its zombie kept a pid until the container
+had none left to start a worker with. On Linux, both engines now reap every zombie child they do
+not track when they are PID 1, and the Rust master also when it is a child subreaper; their own
+workers and fork servers keep their exit statuses.
+
+**Laravel and supervisor: a status that cannot be written no longer drains every worker.** One
+failed write of `status.json`, on a full or failing disk, stopped the master and drained every
+worker. The workers now keep running and the write is retried every pass, while the probes see the
+status grow stale; the master stops once the writes have failed for `heartbeat_timeout`. A failure
+of the state directory's ownership or generation still stops it at once.
+
+**Laravel and supervisor: a fork server that failed to boot is not booted again at every exit.**
+After `queue:restart` each worker that stopped for it asked for a new fork server, and one that
+failed to boot was booted again each time, blocking the master for up to a minute per boot. After a
+failed boot the next one now waits 60 seconds, doubling to 15 minutes; the requests meanwhile share
+one boot, and workers are spawned in the meantime. With prefork on and the exit markers disabled,
+the Rust master's warning now says that `queue:restart` goes unseen.
+
+**Laravel: a supervised worker reports a queue whose pops fail, whatever its other queues do.** A
+pop that worked on any queue, an empty one included, cleared the worker's failure state, so with
+`--queue=high,low` a `low` whose every pop failed was never reported. Each queue's failure is now
+kept apart, in the same file. A pop that failed because the broker reset the connection ("reset by
+peer", "Broken pipe") no longer makes Laravel stop the worker with status 0 as if it had lost its
+database, which restarted it without backoff and removed its failure file.
+
+**Laravel: workers no longer inherit the supervisor lock, and the fork server releases the boot's
+cache stores.** The lock file was open in every process the master started, so after the master was
+killed where PID 1 survives (systemd, supervisord, a shell entrypoint), orphan workers held it and
+the next master refused to start. And the fork server kept the cache store connections the boot had
+opened, a memcached socket say, which every forked worker then shared. Both are closed now.
+
+**Laravel: the shutdown hand-back fails over, and a batch whose lease cannot be tracked is handed
+back.** With several broker URLs, the client that hands a worker's prefetched jobs back at shutdown
+tried one URL only, so with that node down the jobs waited for their lease and lost an attempt; it
+now tries the others within the same 2-second bound. A popped batch whose lease tracking failed is
+handed back at once, as the pop-ahead path already did.
+
+**Laravel: a refused lease renewal budget says what it is made of.** A renewal may try every broker
+URL, so with three URLs, the default `lease_renewal_timeout` and a `retry_after` of 30 seconds the
+budget is 44 seconds and the supervisor refuses to start. The refusal now gives the budget, its
+parts and the settings that shrink it. The dashboard's tuning advice no longer uses a null array
+offset, which PHP 8.5 deprecates.
+
+**PHP client: a request waits out a leader election.** A cluster that elects a leader answers 503
+for a few seconds; each URL got one try with no delay, so a request failed and `consume()` ended. A
+request now waits at the pace of `Retry-After`, for at most 10 seconds or its timeout, after a 503
+that says it did not run (`no_leader`, `standby`); a read, or a push whose every message has a
+`transactionId`, also after `retry`. A pop whose 503 says it may have run is never sent again.
+`consume()` backs off after a 5xx and goes on polling, and reports an ACK that failed. Its automatic
+lease renewal (`renewLease()`) waits at most the renewal interval instead of the request timeout,
+encodes the lease id, and reports a renewal that failed or renewed nothing.
+
+**PHP client: failover tries every backend, and a redirect or an empty answer is no success.** With
+every URL marked unhealthy, as an election leaves them, a request went to the first URL only; it now
+tries each. A 3xx read as a success with an empty result, so a push behind a redirecting proxy
+reported its messages stored; it is now an error, never followed or retried. An empty body where
+the broker always sends one (push, ACK, transaction, a pop with status 200) is an error too, after
+which `consume()` backs off and polls again, as after a network error. A body
+that cannot be encoded as JSON fails at once, with no request sent and no backend marked
+unhealthy; it marked every URL unhealthy and slept through the retries. Asynchronous requests now
+report the health of their backend, so a `consume()` with several workers leaves a dead node.
+
+**Supervisor: a SIGTERM during start-up, and a closed stderr, no longer cost the workers.** The
+signal handler was installed after the configuration export, which runs Artisan and may take a
+minute; a master that is PID 1 ignores a signal it does not handle, so a SIGTERM during the export
+was lost and the workers it then started were killed at the platform's deadline. The handler now
+comes first, and a stop during the export ends the master before it starts a worker. And the
+master logged with `eprintln!`, which panics when stderr is a pipe whose reader is gone; the panic
+ended the master and, through `PR_SET_PDEATHSIG`, every worker. A line it cannot write is now
+dropped.
+
+**Supervisor: a bad control request is discarded instead of stopping the master.** A control
+document that was expired, malformed or dated in the future by a clock step made the Rust master
+drain every worker and exit. It is now removed with one log line and supervision goes on, as in the
+PHP engine; one that cannot be removed still stops the master, as a fault of the state directory.
+
 ## 2.2.0 - 2026-10-10
 
 **Server: a queue's memory no longer grows with the messages it keeps.** Every push left a row in

@@ -58,6 +58,11 @@ sourceOfTruth:
 # a reader that does not own the state, root included, as before, and the refusal now names the
 # owner and the reader and shows su and securityContext.runAsUser. The Deployment gains the
 # readiness probe, and the probes section says to run the probes as the supervisor's user.
+# sourceOfTruth re-read 2026-10-11 (review fixes, unreleased): failover counts a URL listed twice
+# once; consume() backs off after an answer that is not the broker's; a replacement that cannot
+# start waits for the circuit; the PHP stop signal reaches the workers once; the Rust master handles
+# SIGTERM during its configuration export and drops a log line it cannot write. Nothing this page
+# states changes.
 ---
 
 This page puts the supervisor features together for the setup most teams end up with: Laravel
@@ -225,7 +230,11 @@ On SIGTERM the supervisor stops starting workers and sends SIGTERM to each of th
 their current job. While they drain, for up to `shutdown_grace` seconds, it leaves the coordination
 so that the other pods take its share at their next poll, and then it forces the rest down. Since
 PHP client 1.9.0 the workers get their SIGTERM before any broker call, so a slow broker cannot delay
-it. Keep
+it. A SIGTERM that arrives during a broker call reaches the workers at once with supervisor 0.8.2,
+and with the PHP engine of PHP client 2.4.4 once that one call returns, at most `http_timeout`
+later; before, both masters finished the pass first. A SIGTERM while the Rust master starts, as it
+exports the configuration, ends it before any worker starts (supervisor 0.8.2); before, as PID 1 it
+lost that signal and started workers the deadline then killed. Keep
 `terminationGracePeriodSeconds` above `shutdown_grace`, or Kubernetes kills jobs that were still
 finishing. A pod that crashes still counts in the coordination until its key expires, so capacity
 can be short by its share for up to one control-loop bound.

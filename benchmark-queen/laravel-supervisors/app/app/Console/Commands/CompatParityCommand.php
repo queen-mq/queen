@@ -62,7 +62,7 @@ final class CompatParityCommand extends CompatScenarioCommand
             $starts = $this->times($job, 'started');
             $released = $this->times($job, 'released');
             if (isset($starts[1], $released[0])) {
-                $this->near("{$job} release(1) delay", $starts[1] - $released[0], 1.5);
+                $this->near("{$job} release(1) delay", $starts[1] - $released[0], self::DELAY_TOLERANCE);
             }
         }
     }
@@ -121,10 +121,16 @@ final class CompatParityCommand extends CompatScenarioCommand
         // Laravel docs, Queues > Job Middleware > Rate Limiting: each release by
         // RateLimited counts as an attempt. One job per minute passes; the
         // other two (tries 3) are released each second until they fail.
+        // RateLimited checks the count and then adds to it: two workers that
+        // pick two jobs at the same moment can both pass, on every engine. So
+        // q1 has the minute to itself before q2 and q3 are dispatched.
         $jobs = ['q1', 'q2', 'q3'];
-        foreach ($jobs as $job) {
-            CompatMinuteLimitedJob::dispatch($this->run, $job, 'ok', 0, 3)->onConnection($this->connection)->onQueue($this->queue);
-        }
+        $dispatch = fn (string $job) => CompatMinuteLimitedJob::dispatch($this->run, $job, 'ok', 0, 3)
+            ->onConnection($this->connection)->onQueue($this->queue);
+        $dispatch('q1');
+        $this->waitFor(fn (): bool => $this->count('q1', 'completed') > 0 || $this->count('q1', 'failed_hook') > 0);
+        $dispatch('q2');
+        $dispatch('q3');
         $this->waitFor(fn (): bool => count(array_filter($jobs, fn (string $j): bool => $this->count($j, 'completed') > 0
             || $this->count($j, 'failed_hook') > 0)) === 3);
         $this->settle(3);
@@ -140,7 +146,7 @@ final class CompatParityCommand extends CompatScenarioCommand
             implode('; ', array_map(fn (string $j): string => $this->trail($j), $limited)));
         $this->check('with one failed-job row each', count(array_intersect($limited, array_keys($failed))) === 2,
             implode(',', array_keys($failed)));
-        // Which job wins the limiter is the workers' race: compare the shapes.
+        // Compare the shapes, as the other items do.
         $this->same('the job that passed', $passed === [] ? null : $this->summaryOf($passed[0]));
         $this->same('the jobs that were limited', array_map(fn (string $j): array => $this->summaryOf($j), $limited));
     }
