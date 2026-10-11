@@ -230,8 +230,8 @@ final class CompatCommand extends CompatScenarioCommand
             implode(', ', $this->observed['gaps_seconds']));
         $this->check('failed() ran once', $this->count('p1', 'failed_hook') === 1);
         $this->sameJobs(['p1']);
-        $this->near('backoff before the second run', $gaps[0], 1.5);
-        $this->near('backoff before the third run', $gaps[1], 1.5);
+        $this->near('backoff before the second run', $gaps[0], self::DELAY_TOLERANCE);
+        $this->near('backoff before the third run', $gaps[1], self::DELAY_TOLERANCE);
     }
 
     private function retryUntil(): void

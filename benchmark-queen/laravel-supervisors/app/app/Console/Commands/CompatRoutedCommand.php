@@ -106,7 +106,7 @@ final class CompatRoutedCommand extends CompatScenarioCommand
             $waited = $this->first($job, 'started') - $this->first('command', 'dispatched');
             // Laravel's Redis queue keeps due times in whole seconds: allow 1 s early.
             $this->check("{$job} waited its 4 s delay", $waited >= 3.0 && $waited <= 30, round($waited, 2) . ' s');
-            $this->near("{$job} delay", $waited, 1.5);
+            $this->near("{$job} delay", $waited, self::DELAY_TOLERANCE);
         }
     }
 

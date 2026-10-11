@@ -115,6 +115,14 @@ abstract class CompatScenarioCommand extends Command
         $this->outcome['same'][$key] = $value;
     }
 
+    /**
+     * The tolerance of a delay that ends when a worker picks the job: a pop
+     * that finds nothing waits block_for (1 s) and then sleep (1 s) on every
+     * engine, and Laravel's Redis queue can make the job due up to 1 s early.
+     * The same delay can read 0.2 s on one lane and 2.0 s on another.
+     */
+    protected const DELAY_TOLERANCE = 2.5;
+
     /** A time, in seconds, that Horizon and Queen must share within a tolerance. */
     protected function near(string $key, float $value, float $tolerance): void
     {
