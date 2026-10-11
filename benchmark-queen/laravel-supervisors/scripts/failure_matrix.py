@@ -174,6 +174,10 @@ class Jobs:
     def times(self, job: str, event: str) -> list[float]:
         return [e[2] for e in self.raw["jobs"].get(job, {}).get("events", []) if e[0] == event]
 
+    def pids(self, job: str, event: str) -> list[int]:
+        """The pid of the process that logged each `event` of the job."""
+        return [int(e[4]) for e in self.raw["jobs"].get(job, {}).get("events", []) if e[0] == event and len(e) > 4 and e[4]]
+
     def attempts(self, job: str) -> list[tuple[float, float | None]]:
         """Each attempt's start and end; the end is None when it was killed."""
         spans: list[tuple[float, float | None]] = []
@@ -537,7 +541,11 @@ def job_timeout(lane: Lane) -> list[Check]:
     jobs = lane.wait_until(lambda r: all(r.count(j, "failed_hook") for j in expected), 240, "all failed")
     jobs = lane.settle(5)
     workers_after = set(lane.wait_workers(int(lane.env["BENCH_WORKERS"])))
-    replaced = not workers_after & workers_before or not workers_before
+    # The workers whose attempt was cut short, not every worker: a Horizon pool that balances
+    # over two queues keeps a worker on the queue these jobs are not on. One of them was there
+    # before, or the pids the jobs logged are not the ones `workers()` lists.
+    cut_short = {pid for j in expected for pid in jobs.pids(j, "started")}
+    replaced = bool(cut_short & workers_before) and not cut_short & workers_after
     # The killed attempt holds its reservation (Redis) or lease (Queen) until
     # retry_after: Laravel retries it no sooner. Later is the engine's pace.
     lease = int(lane.env["BENCH_RETRY_AFTER"])
@@ -550,7 +558,8 @@ def job_timeout(lane: Lane) -> list[Check]:
     }, "near": {}}
     return [
         every(jobs, expected, "two attempts, both cut short", lambda j: jobs.count(j, "started") == 2),
-        Check("timed-out workers replaced", replaced, f"before {sorted(workers_before)} after {sorted(workers_after)}"),
+        Check("timed-out workers replaced", replaced,
+              f"before {sorted(workers_before)} cut short {sorted(cut_short)} after {sorted(workers_after)}"),
         *failed_finally(lane, jobs, expected),
     ]
 

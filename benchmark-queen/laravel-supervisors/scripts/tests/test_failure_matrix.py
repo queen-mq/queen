@@ -123,6 +123,8 @@ class FailureMatrixChecksTest(unittest.TestCase):
         self.assertIsNone(matrix.run_in_progress(four_fields, "000000"), "a report without pids names no worker")
         self.assertEqual([1, 2], running.attempts_of("000000", "event_before"))
         self.assertEqual([(1.0, 2.0), (4.0, None)], running.attempts("000000"), "five fields read as four")
+        self.assertEqual([7, 9], running.pids("000000", "started"), "the worker of each run")
+        self.assertEqual([], four_fields.pids("000000", "started"), "a report without pids names no worker")
 
     def test_each_run_reports_the_code_its_worker_booted_with(self) -> None:
         jobs = matrix.Jobs({"jobs": {"000000": {"events": [
