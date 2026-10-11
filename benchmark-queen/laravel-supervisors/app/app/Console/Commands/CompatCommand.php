@@ -217,6 +217,8 @@ final class CompatCommand extends CompatScenarioCommand
     {
         $this->policy('p1', 'throw', 0, tries: 3, backoff: [1, 3]);
         $this->waitFor(fn (): bool => $this->count('p1', 'failed_hook') > 0);
+        // Laravel writes the failed-job row on JobFailed, after failed() returns.
+        $this->settle(3);
         $starts = $this->times('p1', 'started');
         $throws = $this->times('p1', 'threw');
         $gaps = [($starts[1] ?? 0) - ($throws[0] ?? 0), ($starts[2] ?? 0) - ($throws[1] ?? 0)];
@@ -238,6 +240,8 @@ final class CompatCommand extends CompatScenarioCommand
     {
         $this->policy('t1', 'throw', 0, tries: 100, backoff: 1, retryForSeconds: 6);
         $this->waitFor(fn (): bool => $this->count('t1', 'failed_hook') > 0);
+        // Laravel writes the failed-job row on JobFailed, after failed() returns.
+        $this->settle(3);
         $starts = $this->times('t1', 'started');
         $span = ($this->first('t1', 'failed_hook') ?: 0) - ($starts[0] ?? 0);
         $this->observed['attempts'] = count($starts);
