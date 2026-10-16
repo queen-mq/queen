@@ -4,10 +4,7 @@
 # never become one (PLAN_RAFT.md rules of engagement). Build it from this
 # directory.
 #
-# openraft is pinned to the git commit that carries `LogEntryDiscarded`
-# (54094270, 2026-09-15). The published 0.10.0-alpha.34 does not have it: there
-# a client_write that was appended and then discarded comes back as a plain
-# `ForwardToLeader`, indistinguishable from "never appended" (GH#2095).
+# Use the published release containing `LogEntryDiscarded` (GH#2095).
 [package]
 name = "s3-consensus"
 version = "0.1.0"
@@ -16,7 +13,11 @@ rust-version = "1.88"
 publish = false
 
 [dependencies]
-openraft = { git = "https://github.com/databendlabs/openraft.git", rev = "54094270ede0b8a2eb6ed6ae990edc6ca19d98ec", features = ["serde", "type-alias"] }
+openraft = { version = "=0.10.0-alpha.37", features = ["serde", "type-alias"] }
+# Keep transitive prerelease dependencies on the same API version.
+openraft-macros = "=0.10.0-alpha.37"
+openraft-rt = "=0.10.0-alpha.37"
+openraft-rt-tokio = "=0.10.0-alpha.37"
 raft-log = "0.4.6"
 
 anyhow = "1"
@@ -32,7 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
-openraft-memstore = { git = "https://github.com/databendlabs/openraft.git", rev = "54094270ede0b8a2eb6ed6ae990edc6ca19d98ec" }
+openraft-memstore = { version = "=0.10.0-alpha.37" }
 tempfile = "3"
 
 [profile.release]
