@@ -145,6 +145,8 @@ verifiedBy:
 # states changes.
 # sourceOfTruth re-read 2026-10-16 (2.4.0): server/Cargo.toml says 2.4.0 (the broker is at 2.4.0),
 # and a pop falls back to JSON only for encrypted messages (c42ea1992).
+# sourceOfTruth re-read 2026-10-16 (openraft 0.10.0-alpha.37, PR 138): server/Cargo.toml only moves openraft; the
+# broker stays 2.4.0. Nothing this page states changes.
 ---
 
 Queen speaks JSON over HTTP, on port `6632`, so every client is a thin layer over the same

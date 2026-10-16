@@ -78,6 +78,8 @@ digest: >-
 # client that asks; a JSON request is served as before. Nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-16 (2.4.0): server/Cargo.toml says 2.4.0; the /health example is a
 # fresh 2.4.0 node's (cluster version 7). raft/mod.rs and facade/real.rs are otherwise as described.
+# sourceOfTruth re-read 2026-10-16 (openraft 0.10.0-alpha.37, PR 138): server/Cargo.toml only moves openraft from
+# a git pin to the crates.io release. Nothing this page states changes.
 ---
 
 A Queen node is one process and one directory. It serves the HTTP API, the dashboard and its
