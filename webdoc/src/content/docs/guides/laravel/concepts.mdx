@@ -114,6 +114,9 @@ sourceOfTruth:
 # outcome as runs (catalogue version 7) where the cluster reads 7; facade/real.rs keeps the framed
 # forms on for the queues that do not encrypt (c42ea1992) and tells the store whether the queue logs
 # hold the txns hashes. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-16 (windowBuffer cap): consume/pop.rs ends a windowBuffer hold one
+# window after the oldest message waiting for the group instead of one window after the newest
+# write. This page does not describe windowBuffer, and nothing it states changes.
 ---
 
 Your job classes do not change: they implement `ShouldQueue` and keep their middleware, `tries`,

@@ -57,6 +57,15 @@ without one nothing changes.
 
 ## Unreleased
 
+**Server: a `windowBuffer` hold ends one window after the oldest waiting message.** A queue's
+`windowBuffer` held a partition until it had gone that many seconds without a write, so a partition
+written more often than once a window delivered nothing for as long as the writes went on. A hold
+now ends `windowBuffer` seconds after the oldest message waiting for the group, the first after its
+cursor, whatever came since, and the group gets what has accumulated: a burst shorter than the
+window is still one batch, and under steady writes no message is held longer than the window. The
+end is read from that message's stored timestamp, so a new leader ends the hold at the same
+instant.
+
 **Laravel: a job whose timeout its lease cannot cover fails alone.** Without lease renewal, a job
 whose own `$timeout` is 0 or at least `retry_after` was refused at every delivery: it never ran,
 never reached `tries` and held its partition, and since PHP client 2.4.2 every supervised worker

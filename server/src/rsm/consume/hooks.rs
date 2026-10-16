@@ -188,7 +188,9 @@ impl Engine {
                 Some(_) => {}
             }
             // A delayed or windowed queue holds a partition that had no
-            // work until the new frames are old / quiet enough.
+            // work: its new frames start the delay and the window. Appends
+            // after them find work pending and do not move the hold; the
+            // claim then decides by the stored stamps.
             let hold = sh.groups.get(&gid).and_then(|gs| {
                 let q = &gs.g.cfg().queue;
                 let p = gs.parts.get(&pid)?;

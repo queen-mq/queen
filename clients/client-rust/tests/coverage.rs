@@ -399,11 +399,12 @@ async fn a_delayed_queue_with_a_window_buffer_still_delivers_everything() {
         .unwrap();
 
     // Two independent holds on the same messages, applied at different points
-    // of the pop: the window buffer refuses a partition whose newest segment is
-    // too young, the delayed deadline filters the segments themselves. Only the
-    // longer one may decide. Each option has its own test above and both would
-    // still pass if one cancelled the other here — a broker that dropped
-    // `delayedProcessing` once `windowBuffer` was set would serve these at ~1s.
+    // of the pop: the window buffer refuses a partition whose oldest waiting
+    // segment is too young, the delayed deadline filters the segments
+    // themselves. Only the longer one may decide. Each option has its own test
+    // above and both would still pass if one cancelled the other here — a
+    // broker that dropped `delayedProcessing` once `windowBuffer` was set would
+    // serve these at ~1s.
     sleep_ms(1200).await;
     let early = q.queue(&queue).batch(10).wait(false).pop().await.unwrap();
     assert!(

@@ -33,6 +33,10 @@
 //!   appends below the slowest group's cursor and nothing past it (an append
 //!   that cursor stops inside stays whole); that group then reads the rest
 //!   from the queue log, and the rest goes after it.
+//! - [`a_window_buffer_hold_ends_by_the_stamp_of_a_message_without_a_row`]:
+//!   a `windowBuffer` queue holds a partition until the stamp of the oldest
+//!   waiting message is a window old, and reads that stamp from the queue log
+//!   when the message has no row (a plain group and a conflating one).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -832,6 +836,73 @@ async fn a_queue_that_keeps_its_consumed_messages_keeps_no_row_for_them() {
     // So a second group still gets them all.
     let seen = drain(&facade, q, Some("second"), 10, true, &all()).await;
     expect_all(&seen, &parts, 0, 40, "second");
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The offsets of a pop's messages.
+fn offsets(body: &Value) -> Vec<u64> {
+    body["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|m| m["offset"].as_u64().expect("offset"))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_window_buffer_hold_ends_by_the_stamp_of_a_message_without_a_row() {
+    let dir = scratch("window");
+    let facade = open(&dir);
+    let q = "held";
+    configure(
+        &facade,
+        q,
+        json!({ "dedupWindowSeconds": 0, "windowBuffer": 2 }),
+    )
+    .await;
+    version_six(&facade).await;
+    let pushed = wall_us();
+    push(&facade, q, "a", 0, 3).await;
+    rows_gone(&facade, q, &["a"], 0).await;
+
+    // The oldest waiting message has no row: the window reads its stamp from
+    // the queue log, for a plain group and for a conflating one.
+    let conflating = PopOptions {
+        conflate: true,
+        ..all()
+    };
+    let before = facade.cold_claims_for_test();
+    assert!(pop(&facade, q, Some("plain"), 10, true, &all())
+        .await
+        .is_none());
+    assert!(pop(&facade, q, Some("last"), 10, true, &conflating)
+        .await
+        .is_none());
+    assert!(
+        wall_us() < pushed + 2_000_000,
+        "the empty pops came after the window: this machine is too slow for the test"
+    );
+    assert!(facade.cold_claims_for_test() > before, "no queue-log read");
+
+    // Once the window is over: the whole append, and its newest for the
+    // conflating group.
+    let mut got = Vec::new();
+    for (group, opts) in [("plain", all()), ("last", conflating)] {
+        let body = loop {
+            if let Some(b) = pop(&facade, q, Some(group), 10, true, &opts).await {
+                break b;
+            }
+            assert!(
+                wall_us() < pushed + 10_000_000,
+                "{group}: the window never ended"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        got.push(offsets(&body));
+    }
+    assert_eq!(got, vec![vec![0, 1, 2], vec![2]]);
 
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

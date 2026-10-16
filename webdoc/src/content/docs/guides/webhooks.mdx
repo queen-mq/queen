@@ -40,6 +40,9 @@ sidebar:
 # messages whose rows are gone from the queue log. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-13 (2.3.0): phase2/reads.rs gives POST /api/v1/fetch a ceiling for
 # the whole call and phase2/admin.rs only converts a frame's type. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-16 (windowBuffer cap): consume/pop.rs ends a windowBuffer hold one
+# window after the oldest message waiting for the group instead of one window after the newest
+# write. This page does not use windowBuffer, and nothing it states changes.
 ---
 
 Put every delivery in the partition of the endpoint it is for, let the broker's retry budget do the

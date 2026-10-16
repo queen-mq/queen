@@ -683,7 +683,7 @@ impl<'a, R: Reads + ?Sized> Frames<'a, R> {
     }
 
     /// The created_at of the append holding offset `off` (the window buffer's
-    /// newest segment, the delay of a head frame).
+    /// cap: the group's oldest waiting frame).
     pub fn created_at(&self, pid: Pid, off: u64) -> Result<Option<i64>> {
         let mut out = None;
         self.walk(pid, off, false, &mut |base, end, created, _| {

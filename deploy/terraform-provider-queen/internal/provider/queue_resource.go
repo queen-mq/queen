@@ -111,7 +111,7 @@ func (r *queueResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"delayed_processing": seconds(
 				"Seconds after its push before a message can be delivered."),
 			"window_buffer": seconds(
-				"A partition delivers nothing until it has been quiet this many seconds."),
+				"Seconds a group's new messages wait in their partition, counted from the oldest of them. Writes that keep coming do not extend the wait."),
 			"retention_enabled": flag(
 				"Must be true for `retention_seconds` and `completed_retention_seconds` to act."),
 			"retention_seconds": seconds(
