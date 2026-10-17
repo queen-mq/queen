@@ -55,6 +55,9 @@ verifiedBy:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (the catalog behind a plain mutex): queen.rs's queue-list cache
+# takes a std mutex instead of an async one, and produce reports its staging parts in /status.
+# Nothing this page states changes.
 ---
 
 Every message carries a `transactionId`. Push the same id to the same partition again, inside the

@@ -30,6 +30,9 @@ sourceOfTruth:
 # one fetch answer the ceiling of what the broker reads for it, where every partition was read to
 # its own budget before. The answer is as the page says: partitions filled in request order up to 32
 # MiB, the rest empty with their watermarks, the first batch at least one whole record.
+# sourceOfTruth re-read 2026-10-17 (the catalog behind a plain mutex): queen.rs's queue-list cache
+# takes a std mutex instead of an async one, and produce reports its staging parts in /status.
+# Nothing this page states changes.
 ---
 
 This is the contract a Kafka client gets from Queen, in the form you check things against: the
