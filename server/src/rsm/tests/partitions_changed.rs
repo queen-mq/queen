@@ -1055,3 +1055,88 @@ async fn fetch_log_carries_the_routes_transaction_ids() {
     );
     close(f, dir).await;
 }
+
+// ---------------------------------------------------------------------------
+// The fetch long poll's topic wake (2026-10-17)
+// ---------------------------------------------------------------------------
+
+/// A fetch parked on a quiet partition answers, empty, soon after another
+/// partition of its queue is written, instead of holding to the end of its
+/// wait. A Kafka client leaves the partitions it still holds records of out of
+/// its one fetch per broker, and asks for them again only once that fetch is
+/// back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_parked_fetch_answers_empty_when_another_partition_of_its_queue_is_written() {
+    let dir = scratch("topic-wake");
+    let f = Arc::new(RaftFacade::open(&build_ctx(&dir)).expect("open facade"));
+    push(
+        &f,
+        vec![json!({"queue":"log","partition":"a","payload":{"n":0}})],
+    )
+    .await;
+    let g = f.clone();
+    let parked = tokio::spawn(async move {
+        let t = Instant::now();
+        let out = g
+            .fetch_records(ctx(), from_zero("log", &["b"]), 5_000, 1)
+            .await
+            .expect("fetch");
+        (t.elapsed(), out)
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    push(
+        &f,
+        vec![json!({"queue":"log","partition":"a","payload":{"n":1}})],
+    )
+    .await;
+    let (took, out) = parked.await.expect("the fetch task");
+    assert!(
+        took < Duration::from_secs(2),
+        "held {took:?} of its 5 s wait"
+    );
+    assert!(
+        took >= Duration::from_millis(90),
+        "answered before the write: {took:?}"
+    );
+    assert!(out[0].records.is_empty(), "partition b was never written");
+    let f = Arc::try_unwrap(f).ok().expect("the fetch is done");
+    close(f, dir).await;
+}
+
+/// The early answer is an empty one: a fetch that has read fewer bytes than
+/// its `min_bytes` keeps waiting for them when another partition of its queue
+/// is written, so a client asking for batches still gets batches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_fetch_holding_fewer_than_min_bytes_keeps_waiting_when_its_queue_is_written() {
+    let dir = scratch("topic-wake-min");
+    let f = Arc::new(RaftFacade::open(&build_ctx(&dir)).expect("open facade"));
+    push(
+        &f,
+        vec![json!({"queue":"log","partition":"b","payload":{"n":0}})],
+    )
+    .await;
+    let g = f.clone();
+    let parked = tokio::spawn(async move {
+        let t = Instant::now();
+        let out = g
+            .fetch_records(ctx(), from_zero("log", &["b"]), 600, 1 << 20)
+            .await
+            .expect("fetch");
+        (t.elapsed(), out)
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    push(
+        &f,
+        vec![json!({"queue":"log","partition":"a","payload":{"n":1}})],
+    )
+    .await;
+    let (took, out) = parked.await.expect("the fetch task");
+    assert!(
+        took >= Duration::from_millis(550),
+        "answered after {took:?} with {} record(s), short of its min_bytes",
+        out[0].records.len()
+    );
+    assert_eq!(out[0].records.len(), 1);
+    let f = Arc::try_unwrap(f).ok().expect("the fetch is done");
+    close(f, dir).await;
+}

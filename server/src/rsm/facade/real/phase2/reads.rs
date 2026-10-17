@@ -392,8 +392,9 @@ impl RaftFacade {
     /// every second, the floor for a missed wake). The bytes are counted as the
     /// records are read, never by re-reading the answer.
     ///
-    /// A parked fetch also answers, with what it has, once it has waited
-    /// [`topic_wake_floor`] and its topic was written on this node meanwhile.
+    /// A parked fetch that has read nothing also answers, empty, once it has
+    /// waited [`topic_wake_floor`] and its topic was written on this node
+    /// meanwhile.
     /// A Kafka client keeps ONE fetch in flight per broker, and leaves out of
     /// it every partition it still holds records of: a partition it drains
     /// while this fetch is parked on quiet ones waits for this fetch to come
@@ -451,7 +452,13 @@ impl RaftFacade {
             }
             let error = answers.iter().any(|a| a.error.is_some());
             let now = std::time::Instant::now();
-            if error || bytes >= min_bytes || now >= deadline || (moved && now >= early) {
+            // The early answer is an EMPTY one: a fetch holding some bytes keeps
+            // waiting for its `min_bytes`, which is how a client asks for batches.
+            if error
+                || bytes >= min_bytes
+                || now >= deadline
+                || (moved && bytes == 0 && now >= early)
+            {
                 return Ok(answers);
             }
             // Capped at a second: the wake is the fast path, and the re-read on
