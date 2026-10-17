@@ -54,9 +54,27 @@ pub static FETCH_ENTRIES: Counter = Counter::new();
 pub static FETCH_RECORDS: Counter = Counter::new();
 pub static FETCH_EMPTY: Counter = Counter::new();
 
+/// One coalesced Produce: resolving its topics and staging its records (the
+/// envelope of every record), before the push.
+pub static PRODUCE_STAGE: Timing = Timing::new();
+/// The push into Queen of one coalesced Produce, to its answer.
+pub static PRODUCE_PUSH: Timing = Timing::new();
+/// Rendering the answers of one coalesced Produce.
+pub static PRODUCE_RENDER: Timing = Timing::new();
+/// Coalesced Produces handled, the requests they carried, and their records.
+pub static PRODUCE_PUSHES: Counter = Counter::new();
+pub static PRODUCE_REQUESTS: Counter = Counter::new();
+pub static PRODUCE_RECORDS: Counter = Counter::new();
+
 /// The whole report.
 pub fn snapshot() -> serde_json::Value {
     serde_json::json!({
+        "produceStage": PRODUCE_STAGE.snapshot(),
+        "producePush": PRODUCE_PUSH.snapshot(),
+        "produceRender": PRODUCE_RENDER.snapshot(),
+        "producePushes": PRODUCE_PUSHES.get(),
+        "produceRequests": PRODUCE_REQUESTS.get(),
+        "produceRecords": PRODUCE_RECORDS.get(),
         "commit": COMMIT.snapshot(),
         "commitCheck": COMMIT_CHECK.snapshot(),
         "commitWritten": COMMIT_WRITTEN.snapshot(),

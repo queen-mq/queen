@@ -284,6 +284,7 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
     // no binding exists and every entry below is answered INVALID_TXN_STATE by
     // the stage itself. That is deliberate — one gate, at the identity, rather
     // than a second opinion here that could disagree with it.
+    let started = std::time::Instant::now();
     let transactional =
         idempotent::transactional_id(req.transactional_id.as_ref().map(|id| id.0.as_str()));
 
@@ -297,19 +298,27 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
         txns: facade.txns.as_ref(),
     };
     let (items, slots) = stage_request(req, &plans, &idem);
+    crate::stats::PRODUCE_STAGE.record(started.elapsed());
+    crate::stats::PRODUCE_PUSHES.add(1);
+    crate::stats::PRODUCE_REQUESTS.add(1);
+    crate::stats::PRODUCE_RECORDS.add(items.len() as u64);
 
     // One push for the whole request, or none at all when nothing survived the
     // staging. A TRANSACTIONAL request never reaches it: its entries answer
     // `Slot::Staged` and leave `items` empty, because its write is EndTxn's.
     // `pushed` is what every Push slot is answered from.
+    let pushing = std::time::Instant::now();
     let pushed = if items.is_empty() {
         None
     } else {
         Some(facade.queen.push_raw(items, token).await)
     };
+    crate::stats::PRODUCE_PUSH.record(pushing.elapsed());
 
+    let rendering = std::time::Instant::now();
     let response = render(req, &slots, pushed.as_ref(), &idem);
     end_inflight(&slots, &idem);
+    crate::stats::PRODUCE_RENDER.record(rendering.elapsed());
     response
 }
 
@@ -378,6 +387,7 @@ pub async fn handle_coalesced(
     reqs: &[ProduceRequest],
     token: Option<&str>,
 ) -> Vec<Option<ProduceResponse>> {
+    let started = std::time::Instant::now();
     let tenant = facade.catalog.tenant_key(token);
     let mut items: Vec<RawPush> = Vec::new();
     // Per request: its slots, or the answer it already has (an invalid acks).
@@ -398,12 +408,20 @@ pub async fn handle_coalesced(
         };
         staged.push(Ok(stage_into(&mut items, req, &plans, &idem)));
     }
+    crate::stats::PRODUCE_STAGE.record(started.elapsed());
+    crate::stats::PRODUCE_PUSHES.add(1);
+    crate::stats::PRODUCE_REQUESTS.add(reqs.len() as u64);
+    crate::stats::PRODUCE_RECORDS.add(items.len() as u64);
+    let pushing = std::time::Instant::now();
     let pushed = if items.is_empty() {
         None
     } else {
         Some(facade.queen.push_raw(items, token).await)
     };
-    reqs.iter()
+    crate::stats::PRODUCE_PUSH.record(pushing.elapsed());
+    let rendering = std::time::Instant::now();
+    let answers = reqs
+        .iter()
         .zip(staged)
         .map(|(req, staged)| {
             let response = match staged {
@@ -430,7 +448,9 @@ pub async fn handle_coalesced(
                 Some(response)
             }
         })
-        .collect()
+        .collect();
+    crate::stats::PRODUCE_RENDER.record(rendering.elapsed());
+    answers
 }
 
 /// Every run the request accepted from an idempotent producer is no longer in
