@@ -3102,11 +3102,17 @@ pub struct Catalog {
     /// registry does, for the same reason.
     ///
     /// Held for a map read or a map write and never across an await on Queen.
-    entries: tokio::sync::Mutex<HashMap<TenantKey, Entry>>,
+    ///
+    /// A plain mutex, not an async one (2026-10-17): it is held for a map
+    /// read or write and never across an await, and the async mutex's fair
+    /// hand-off made every lookup queue behind a waiter whose thread was busy.
+    /// With the Kafka facade's produce, fetch and commit all reading the list
+    /// on one node at 1M msg/s, a cached lookup took 7.4 ms on average.
+    entries: std::sync::Mutex<HashMap<TenantKey, Entry>>,
     /// One refresh lock per tenant — the same key space as `entries`. THIS is
     /// what is held across the call to Queen, and holding it blocks only the
     /// callers that have no list to serve.
-    refreshes: tokio::sync::Mutex<HashMap<TenantKey, Arc<tokio::sync::Mutex<()>>>>,
+    refreshes: std::sync::Mutex<HashMap<TenantKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// How many scopes one catalog keeps an answer for.
@@ -3190,8 +3196,8 @@ impl Catalog {
             identities: crate::identity::Identities::new(Arc::clone(&api)),
             api,
             ttl,
-            entries: tokio::sync::Mutex::new(HashMap::new()),
-            refreshes: tokio::sync::Mutex::new(HashMap::new()),
+            entries: std::sync::Mutex::new(HashMap::new()),
+            refreshes: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -3305,7 +3311,7 @@ impl Catalog {
         key: &TenantKey,
         cred: CredentialKey,
     ) -> Option<Result<Arc<Vec<Queue>>>> {
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         let entry = entries.get_mut(key)?;
         if entry.probed_at.elapsed() >= self.ttl {
             return None;
@@ -3325,14 +3331,14 @@ impl Catalog {
 
     /// The last list that arrived for `key`, at any age.
     async fn in_hand(&self, key: &TenantKey) -> Option<Arc<Vec<Queue>>> {
-        let entries = self.entries.lock().await;
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         entries.get(key)?.queues.as_ref().map(Arc::clone)
     }
 
     /// The failure `cred`'s last call produced, while it is still inside the
     /// TTL.
     async fn remembered_failure(&self, key: &TenantKey, cred: CredentialKey) -> Option<Error> {
-        let entries = self.entries.lock().await;
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         let entry = entries.get(key)?;
         (entry.probed_at.elapsed() < self.ttl)
             .then(|| remembered(entry, cred))
@@ -3346,7 +3352,7 @@ impl Catalog {
     /// held stays, because two callers holding two different mutexes for one
     /// credential would be two calls to Queen where the point is to have one.
     async fn refresh_lock(&self, key: &TenantKey) -> Arc<tokio::sync::Mutex<()>> {
-        let mut refreshes = self.refreshes.lock().await;
+        let mut refreshes = self.refreshes.lock().unwrap_or_else(|p| p.into_inner());
         if refreshes.len() >= MAX_CREDENTIALS && !refreshes.contains_key(key) {
             refreshes.retain(|_, lock| Arc::strong_count(lock) > 1);
         }
@@ -3383,7 +3389,7 @@ impl Catalog {
         // narrows a topic, so a short scan must fall back to what was already
         // known rather than to the broker-wide default.
         let (previous, previous_floors, previous_floors_at) = {
-            let entries = self.entries.lock().await;
+            let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
             let e = entries.get(key);
             (
                 e.and_then(|e| e.queues.as_ref().map(|q| (Arc::clone(q), e.listed_at))),
@@ -3510,7 +3516,7 @@ impl Catalog {
                 }
                 let queues = Arc::new(queues);
                 let now = Instant::now();
-                let mut entries = self.entries.lock().await;
+                let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
                 make_room(&mut entries, key);
                 entries.insert(
                     key.clone(),
@@ -3530,7 +3536,7 @@ impl Catalog {
             Err(e) => {
                 // The failure is remembered whether or not it is served, so the
                 // callers behind this one do not each pay for it — see `Entry`.
-                let mut entries = self.entries.lock().await;
+                let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
                 make_room(&mut entries, key);
                 entries.insert(
                     key.clone(),
@@ -3574,7 +3580,10 @@ impl Catalog {
         // The tenant's entry, so the sibling credentials of the key that
         // created the topic see it too rather than each waiting out a TTL.
         let key = self.identities.known(token);
-        self.entries.lock().await.remove(&key);
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&key);
         Ok(())
     }
 
@@ -3591,7 +3600,10 @@ impl Catalog {
     ) -> Result<()> {
         self.api.create_queue_with(name, options, token).await?;
         let key = self.identities.known(token);
-        self.entries.lock().await.remove(&key);
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&key);
         Ok(())
     }
 
@@ -3604,7 +3616,10 @@ impl Catalog {
     pub async fn delete(&self, name: &str, token: Option<&str>) -> Result<Deleted> {
         let answer = self.api.delete_queue(name, token).await;
         let key = self.identities.known(token);
-        self.entries.lock().await.remove(&key);
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&key);
         answer
     }
 
@@ -3622,7 +3637,10 @@ impl Catalog {
     /// path.
     pub async fn invalidate(&self, token: Option<&str>) {
         let key = self.identities.known(token);
-        self.entries.lock().await.remove(&key);
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&key);
     }
 }
 
@@ -6008,7 +6026,7 @@ mod tests {
             catalog.refresh(Some(token)).await.unwrap();
         }
         assert_eq!(
-            catalog.entries.lock().await.len(),
+            catalog.entries.lock().unwrap().len(),
             2,
             "one tenant's two credentials are two queue-list caches"
         );
@@ -6030,7 +6048,7 @@ mod tests {
         // ...and a credential nobody could identify is its own entry rather
         // than joining a shared bucket.
         catalog.refresh(Some("key-d")).await.unwrap();
-        assert_eq!(catalog.entries.lock().await.len(), 3);
+        assert_eq!(catalog.entries.lock().unwrap().len(), 3);
     }
 
     /// A shared entry must not let one credential answer for another AT
@@ -6316,9 +6334,9 @@ mod tests {
             catalog.list(Some(&format!("guess-{i}"))).await.ok();
         }
 
-        assert_eq!(catalog.entries.lock().await.len(), MAX_CREDENTIALS);
+        assert_eq!(catalog.entries.lock().unwrap().len(), MAX_CREDENTIALS);
         assert!(
-            catalog.refreshes.lock().await.len() <= MAX_CREDENTIALS,
+            catalog.refreshes.lock().unwrap().len() <= MAX_CREDENTIALS,
             "the refresh locks grew past the bound the entries are held to"
         );
         // The credential that is being used is still cached: a flood of wrong
@@ -6349,7 +6367,7 @@ mod tests {
         let keys: Vec<String> = catalog
             .entries
             .lock()
-            .await
+            .unwrap()
             .keys()
             .map(|k| format!("{k:?}"))
             .collect();

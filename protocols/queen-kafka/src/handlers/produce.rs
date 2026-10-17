@@ -399,7 +399,9 @@ pub async fn handle_coalesced(
         }
         let transactional =
             idempotent::transactional_id(req.transactional_id.as_ref().map(|id| id.0.as_str()));
+        let planning = std::time::Instant::now();
         let plans = topic_plans(facade, req, token).await;
+        crate::stats::PRODUCE_PLANS.record(planning.elapsed());
         let idem = Idem {
             producers: &facade.producers,
             tenant: &tenant,
@@ -485,7 +487,9 @@ pub async fn stage_coalesced(
         }
         let transactional =
             idempotent::transactional_id(req.transactional_id.as_ref().map(|id| id.0.as_str()));
+        let planning = std::time::Instant::now();
         let plans = topic_plans(facade, req, token).await;
+        crate::stats::PRODUCE_PLANS.record(planning.elapsed());
         let idem = Idem {
             producers: &facade.producers,
             tenant: &tenant,
@@ -785,6 +789,7 @@ fn stage(
     let Some(raw) = p.records.as_ref().filter(|r| !r.is_empty()) else {
         return Slot::Empty;
     };
+    let checking = std::time::Instant::now();
 
     // The batch HEADERS first, without decompressing anything: they carry the
     // CRC (so a corrupt batch is caught before any codec is handed it), the
@@ -875,7 +880,11 @@ fn stage(
         );
     }
 
-    let batches = match decompress::decode_all(&mut raw.clone(), budget) {
+    crate::stats::PRODUCE_CHECK.record(checking.elapsed());
+    let decoding = std::time::Instant::now();
+    let decoded = decompress::decode_all(&mut raw.clone(), budget);
+    crate::stats::PRODUCE_DECODE.record(decoding.elapsed());
+    let batches = match decoded {
         Ok(batches) => batches,
         Err(Refusal::Corrupt(why)) => {
             // The headers decoded and the CRCs passed, so this is the records
@@ -934,6 +943,7 @@ fn stage(
     // The Queen partition NAME is the Kafka partition index written out — the
     // mapping the whole facade rests on.
     let partition = p.index.to_string();
+    let enveloping = std::time::Instant::now();
     for batch in &batches {
         // The headers as the producer sent them: in order, and with any name it
         // repeated still there. `Record.headers` is a map and has already lost
@@ -969,6 +979,7 @@ fn stage(
             });
         }
     }
+    crate::stats::PRODUCE_ENVELOPE.record(enveloping.elapsed());
     let produced = items.len() - start;
     let Some(id) = idem.txn else {
         return match produced {
