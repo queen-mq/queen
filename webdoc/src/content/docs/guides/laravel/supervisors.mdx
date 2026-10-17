@@ -98,6 +98,9 @@ sourceOfTruth:
 # and renders framed pops only for a client that asks, planner/timers.rs only converts a frame's
 # type, and phase2.rs and phase2/reads.rs give a fetch call a ceiling for the whole call. Nothing
 # else this page states changes.
+# sourceOfTruth re-read 2026-10-17 (a parked fetch answers when its topic is written): reads.rs's
+# fetch_wait also watches the topics it reads (QUEEN_FETCH_TOPIC_WAKE_MS). Nothing this page states
+# changes.
 ---
 
 The supervisor is the part of Horizon that starts `queue:work` processes, keeps the right number
