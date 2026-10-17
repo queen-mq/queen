@@ -60,8 +60,8 @@ sourceOfTruth:
 # planner/push.rs write a push's outcome as runs; the windows and limits in the tables are
 # unchanged. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-17 (a parked fetch answers when its topic is written): reads.rs's
-# fetch_wait also watches the topics it reads (QUEEN_FETCH_TOPIC_WAKE_MS). Nothing this page states
-# changes.
+# fetch_wait also watches the topics it reads (QUEEN_FETCH_TOPIC_WAKE_MS), and answers early only a
+# fetch that has read nothing. Nothing this page states changes.
 ---
 
 Most of Queen's limits exist to keep one request from costing everyone else: a body cap, a ceiling

@@ -35,6 +35,9 @@ sidebar:
 # kafka_inproc.rs carries that ceiling to the in-process read, which reads the partitions in order
 # while any of it is left. What a client sees is as the page says; Performance and the last overload
 # limit follow the 2.3.0-beta.1 measurement of 2026-10-13.
+# sourceOfTruth re-read 2026-10-17 (produce stage timings): handlers/produce.rs records produceStage,
+# producePush and produceRender in /status; nothing a produce does changes. Nothing this page states
+# changes.
 ---
 
 Your Kafka producers, consumers and admin tools can use Queen as they are: change

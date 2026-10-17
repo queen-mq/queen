@@ -110,8 +110,8 @@ sourceOfTruth:
 # that asks, planner/timers.rs only converts a frame's type, and phase2.rs and phase2/reads.rs give
 # a fetch call a ceiling for the whole call. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-17 (a parked fetch answers when its topic is written): reads.rs's
-# fetch_wait also watches the topics it reads (QUEEN_FETCH_TOPIC_WAKE_MS). Nothing this page states
-# changes.
+# fetch_wait also watches the topics it reads (QUEEN_FETCH_TOPIC_WAKE_MS), and answers early only a
+# fetch that has read nothing. Nothing this page states changes.
 ---
 
 The Laravel panel shows what this application's Queen supervisors are doing. It reads the state the
