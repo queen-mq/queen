@@ -3,6 +3,71 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 2.5.0
+
+**The Kafka facade carries 1,000,000 msg/s on the OpenMessaging Benchmark, with the stock Java
+clients.** Measured on 2026-10-17 on three GCP brokers (c4-standard-24-lssd) with the benchmark's
+own `driver-kafka` and its `kafka-throughput.yaml` producer settings: 1 KB messages on one topic of
+100 partitions, 4 producers and 4 consumers. At 500,000 msg/s the end-to-end p50/p99/p99.9 went from
+46/625/792 ms on 2.4.0 to 5/20/58; at 1,000,000 msg/s the facade carries the load (1,001,000 msg/s,
+14/87/151 ms), where 2.4.0 fell behind. Four idempotent producers writing 200,000 msg/s through the
+facade lost and reordered nothing when the raft leader was killed with `kill -9` or stopped in the
+middle of the run; the kill wrote one in-flight batch twice, the bound the facade's idempotence
+documents (its sequence windows live in the leader's memory). The runs and their method are in
+`benchmark-queen/2026-10-16-omb/RESULTS.md`.
+
+**The cluster version stays 7.** Nothing in 2.5.0 raises it: a cluster rolls from 2.4.0 to 2.5.0 one
+node at a time.
+
+**Server: openraft 0.10.0-alpha.37 from crates.io.** The consensus library was a git revision, alpha.34
+with the `LogEntryDiscarded` fix; it is now the published 0.10.0-alpha.37, with exact pins on its
+macros and runtime crates. Among its 58 further commits, leader I/O waits for the previous flush,
+heartbeats stop once a quorum is lost, replication backs off differently, and linearizable reads,
+which Queen's reads use, get a fix. From queen-mq/queen#138 by gerald (getong).
+
+**Server: a `windowBuffer` hold ends one window after the oldest waiting message.** A queue's
+`windowBuffer` held a partition until it had gone that many seconds without a write, so a partition
+written more often than once a window delivered nothing for as long as the writes went on. A hold
+now ends `windowBuffer` seconds after the oldest message waiting for the group, the first after its
+cursor, whatever came since, and the group gets what has accumulated: a burst shorter than the
+window is still one batch, and under steady writes no message is held longer than the window. The
+end is read from that message's stored timestamp, so a new leader ends the hold at the same
+instant.
+
+**Kafka facade: a parked fetch answers when its topic is written elsewhere on the node.** A Kafka
+client keeps one fetch in flight per broker and leaves out of it the partitions it still holds
+records of, so a partition it drained while that fetch was parked on quiet ones waited for the
+fetch to come back, up to `fetch.max.wait.ms` (500 ms in Java). A parked fetch that has read
+nothing now answers, empty, once it has waited `QUEEN_FETCH_TOPIC_WAKE_MS` (5 ms) and another
+partition of its topic was written on the node; an idle topic still parks to the client's wait, and
+a fetch holding fewer than its `min_bytes` keeps waiting for them. With the
+OpenMessaging Benchmark's stock Java consumer (1 KB, 100 partitions, 500,000 msg/s, three GCP
+nodes) the end-to-end p50/p99/p99.9 went from 46/625/792 ms to 9/32/55 ms.
+
+**Kafka facade: produce is pipelined on the leader and relayed from followers.** A facade served a
+connection one push at a time: a request waited for the push before it to commit on two disks
+before its own began, so most of a produce's time was queueing (p50 7.4 ms against 2.1 ms for the
+push itself). On the node that leads, a connection's next push is now sent as soon as the one before
+it is in the raft log, up to `QUEEN_KAFKA_PIPELINE` (8) in flight, and the answers keep request
+order; the log keeps the order they were sent in and commits a prefix, so a later push never lands
+without the ones before it. A pipelined push is never retried behind the client's back once it is in
+the log: a push that fails ends the connection, and the client sends again, in order, what it was not
+answered. On a follower, a client's produce goes as it came to the facade on the leader, over one
+connection per client connection (`QUEEN_KAFKA_RELAY`), instead of through the broker's forwarding,
+whose streams do not keep one connection's order. Every other request, and every connection
+elsewhere, is served as before.
+
+**Kafka facade: a topic lookup no longer queues behind the others.** The facade's catalog kept its
+list of queues behind a fair async mutex, so under a high produce rate every request's topic lookup
+waited its turn: at about 1,000,000 msg/s on 100 partitions it took 7.4 ms a request on the leader,
+and the facade fell behind its clients. The list is now behind a plain mutex, never held across an
+await.
+
+**Kafka facade: the facade's report in `/status` times every produce stage.** `producePlans` (the
+topic lookup), `produceCheck`, `produceDecode`, `produceEnvelope`, `producePush` and `produceRender`
+show where a slow produce spends its time, beside the `producePushes`, `produceRequests` and
+`produceRecords` counters.
+
 ## 2.4.0 - 2026-10-16
 
 **41% fewer bytes written a message, and end to end about three times faster at 3M msg/s.**
@@ -56,38 +121,6 @@ With a key, a framed pop reads the flags of each record's messages, one decompre
 without one nothing changes.
 
 ## Unreleased
-
-**Server: a `windowBuffer` hold ends one window after the oldest waiting message.** A queue's
-`windowBuffer` held a partition until it had gone that many seconds without a write, so a partition
-written more often than once a window delivered nothing for as long as the writes went on. A hold
-now ends `windowBuffer` seconds after the oldest message waiting for the group, the first after its
-cursor, whatever came since, and the group gets what has accumulated: a burst shorter than the
-window is still one batch, and under steady writes no message is held longer than the window. The
-end is read from that message's stored timestamp, so a new leader ends the hold at the same
-instant.
-
-**Kafka facade: a parked fetch answers when its topic is written elsewhere on the node.** A Kafka
-client keeps one fetch in flight per broker and leaves out of it the partitions it still holds
-records of, so a partition it drained while that fetch was parked on quiet ones waited for the
-fetch to come back, up to `fetch.max.wait.ms` (500 ms in Java). A parked fetch that has read
-nothing now answers, empty, once it has waited `QUEEN_FETCH_TOPIC_WAKE_MS` (5 ms) and another
-partition of its topic was written on the node; an idle topic still parks to the client's wait, and
-a fetch holding fewer than its `min_bytes` keeps waiting for them. With the
-OpenMessaging Benchmark's stock Java consumer (1 KB, 100 partitions, 500,000 msg/s, three GCP
-nodes) the end-to-end p50/p99/p99.9 went from 46/625/792 ms to 9/32/55 ms.
-
-**Kafka facade: produce is pipelined on the leader and relayed from followers.** A facade served a
-connection one push at a time: a request waited for the push before it to commit on two disks
-before its own began, so most of a produce's time was queueing (p50 7.4 ms against 2.1 ms for the
-push itself). On the node that leads, a connection's next push is now sent as soon as the one before
-it is in the raft log, up to `QUEEN_KAFKA_PIPELINE` (8) in flight, and the answers keep request
-order; the log keeps the order they were sent in and commits a prefix, so a later push never lands
-without the ones before it. A pipelined push is never retried behind the client's back once it is in
-the log: a push that fails ends the connection, and the client sends again, in order, what it was not
-answered. On a follower, a client's produce goes as it came to the facade on the leader, over one
-connection per client connection (`QUEEN_KAFKA_RELAY`), instead of through the broker's forwarding,
-whose streams do not keep one connection's order. Every other request, and every connection
-elsewhere, is served as before.
 
 **Laravel: a job whose timeout its lease cannot cover fails alone.** Without lease renewal, a job
 whose own `$timeout` is 0 or at least `retry_after` was refused at every delivery: it never ran,

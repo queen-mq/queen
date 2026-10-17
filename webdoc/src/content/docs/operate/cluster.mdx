@@ -67,6 +67,8 @@ verifiedBy:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (2.5.0): the upgrade paragraphs add 2.5.0, which leaves the cluster at
+# version 7.
 ---
 
 Three copies of the same binary, each told where the other two are, make a Queen cluster. They
@@ -389,6 +391,8 @@ from 2.3.0 to 2.4.0 under 4,500 messages a second with deduplication on: the ver
 while one node still ran 2.3.0, rose to 7 three seconds after the last one moved, and every
 `transactionId` pushed before, during and after the roll was answered as a duplicate when pushed
 again, also after a full restart (`benchmark-queen/2026-10-15-jepsen-24`).
+
+2.5.0 leaves the cluster at version 7: a cluster rolls from 2.4.0 to 2.5.0 one node at a time.
 
 ## Ephemeral queues in a cluster
 

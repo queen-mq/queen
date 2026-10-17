@@ -61,6 +61,7 @@ verifiedBy:
 # optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
 # Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
 # else takes the path it always took. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (2.5.0): the /health example is a fresh 2.5.0 node's (cluster version 7).
 ---
 
 You need Docker, curl and jq. You'll push an order, consume it, and then handle the next one the
@@ -78,7 +79,7 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
    ```
 
    ```json
-   {"status":"healthy","engine":"raft","version":"2.4.0","raft":{"role":"leader","leader":true,"term":1,"applied":1,"commit":1,"lag":0,"quorumAckMs":0,"storageReady":true,"clusterVersion":7,"kinds":7}}
+   {"status":"healthy","engine":"raft","version":"2.5.0","raft":{"role":"leader","leader":true,"term":1,"applied":1,"commit":1,"lag":0,"quorumAckMs":0,"storageReady":true,"clusterVersion":7,"kinds":7}}
    ```
 
    That is the whole installation. There is no database to start first, because the node keeps
