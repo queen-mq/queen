@@ -551,10 +551,11 @@ fn produce_acks(frame: &Bytes) -> Option<i16> {
 
 /// What a pipelined request leaves to answer: a relayed one's answer as the
 /// leader wrote it, or a local produce, answered when its turn comes
-/// ([`produce::PushedProduce::answer`]).
+/// ([`produce::PushedProduce::answer`]). The produce is boxed: it is some 440
+/// bytes, the replies 24.
 enum Pending {
     Replies(Vec<Reply>),
-    Produce(Vec<(i32, i16)>, produce::PushedProduce),
+    Produce(Vec<(i32, i16)>, Box<produce::PushedProduce>),
 }
 
 /// A pipelined request, or `None`: it failed, and the connection ends here.
@@ -867,7 +868,7 @@ where
                 let token = conn.facade.token().map(str::to_string);
                 inflight.push_back(tokio::spawn(async move {
                     let pushed = produce::push_staged(facade, staged, token, after, in_log).await?;
-                    Some(Pending::Produce(ids, pushed))
+                    Some(Pending::Produce(ids, Box::new(pushed)))
                 }));
                 continue;
             }
