@@ -2011,7 +2011,7 @@ dependencies = [
 
 [[package]]
 name = "queen-engine"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
