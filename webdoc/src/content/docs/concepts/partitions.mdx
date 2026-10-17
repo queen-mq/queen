@@ -57,6 +57,10 @@ verifiedBy:
 # window after the oldest message waiting for the group, no longer one window after the newest
 # write, so a partition written more often than once a window still delivers. The windowBuffer row
 # says so.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 A queue is a named set of partitions, and a partition is the ordered stream of one entity: a

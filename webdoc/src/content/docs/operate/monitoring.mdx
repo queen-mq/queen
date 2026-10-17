@@ -81,6 +81,10 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-16 (2.4.0): the /health examples show 2.4.0 and cluster version 7,
 # and the log table names the boot's warning about txns rows whose record is gone (raft/mod.rs,
 # txns_refill.rs). log_store.rs and facade/real.rs are otherwise as described.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 Every node serves its own dashboard at `/`, its health at `/health` and its metrics at

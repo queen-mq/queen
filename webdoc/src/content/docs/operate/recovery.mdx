@@ -92,6 +92,10 @@ digest: >-
 # sourceOfTruth re-read 2026-10-16 (2.4.0): the rollback paragraph names 2.4.0, which raises the
 # cluster version from 6 to 7; raft/mod.rs, log_store.rs, local.rs and facade/real.rs are otherwise
 # as described.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 Most failures need nothing from you. A node that crashes starts again on its own directory and

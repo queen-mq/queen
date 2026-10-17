@@ -34,6 +34,10 @@ digest: >-
 # sourceOfTruth re-read 2026-10-13 (a standby of several raft groups): facade/groups.rs now also answers the cluster link's two routes for every group and computes the placement a link call states, and raft/cluster.rs carries that placement to the link's routes. A tenant still lives in one raft group and a transaction is still one entry of its log: nothing this page states changes.
 # sourceOfTruth re-read 2026-10-16 (2.4.0): planner/push.rs and planner/txn.rs write a push's
 # outcome as runs (catalogue version 7) where the cluster reads 7. Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 **A message queue is the smallest thing Queen MQ does.**

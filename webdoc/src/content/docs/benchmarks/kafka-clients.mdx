@@ -14,6 +14,10 @@ sourceOfTruth:
 # broker the response's whole max_bytes as its ceiling (a third larger, for base64) and read the
 # partitions in order while any is left. Fetch still answers up to version 6, without sessions, as
 # "CPU" says. The page gains the five points measured on 2.3.0-beta.1 and "Still open" follows them.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 Queen speaks the Kafka wire protocol from inside the broker process (`QUEEN_KAFKA_EMBEDDED=true`),

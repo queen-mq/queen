@@ -34,6 +34,10 @@ verifiedBy:
 # ends, which no timer rule depends on. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-16 (2.4.0): batcher.rs reads the cluster version once per planning
 # cycle (push outcomes as runs at version 7). Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 A timer schedules a message for later. When it fires, the broker pushes the message into a real

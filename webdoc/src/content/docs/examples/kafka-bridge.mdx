@@ -16,6 +16,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-13 (2.3.0): queen-kafka's queen.rs hands a fetch's entries to the
 # broker with a ceiling for the whole call. Produce, the topic's settings and what the example shows
 # are unchanged.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 You do not have to move a Kafka shop to Queen all at once. In this program an order service keeps

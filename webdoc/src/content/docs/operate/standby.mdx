@@ -26,6 +26,10 @@ verifiedBy:
 # sourceOfTruth re-read 2026-10-08 (a promotion's queue): batcher_link.rs answers, at a promotion, what the link had queued behind it: a source entry `not_standby`, a second promotion done. Nothing this page states changes.
 # sourceOfTruth re-read 2026-10-08 (a seed's hold): raft/link.rs leaves a seeded standby's first hold on the node that sends its snapshot (the call names the standby, wire.rs); seed.rs draws the standby's id before that call, and batcher_link.rs and mirror.rs write it into the standby entry. The seeded section says what a seed needs from its source, and Watch it, the section on the source's log and two settings rows follow; nothing else this page states changes.
 # sourceOfTruth re-read 2026-10-13 (several raft groups): a standby may run several raft groups. facade/real.rs opens each group with its own source (driver.rs moves the configured addresses to the group's port), wire.rs adds the placement every call states and raft/network.rs answers another's with 409, seed.rs seeds each group from its own source group, and groups.rs answers the link's two routes for every group and promotes them all. New section "Several raft groups"; the opening, a promotion's step 2, two settings rows and the limits follow it. Nothing the page says of a cluster of one group changes.
+# sourceOfTruth re-read 2026-10-17 (the Kafka facade's pipelined produce): batcher.rs gains an
+# optional hook fired when a command's entry is proposed, the facade an ordered push (ReqCtx.ordered,
+# Rsm::leads / leader_node) and the Kafka facade a pipelined, relayed produce. A push from anything
+# else takes the path it always took. Nothing this page states changes.
 ---
 
 Three replicas protect you from losing a machine, and a [backup](/operate/recovery-backups/)
