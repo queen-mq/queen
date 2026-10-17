@@ -66,6 +66,15 @@ window is still one batch, and under steady writes no message is held longer tha
 end is read from that message's stored timestamp, so a new leader ends the hold at the same
 instant.
 
+**Kafka facade: a parked fetch answers when its topic is written elsewhere on the node.** A Kafka
+client keeps one fetch in flight per broker and leaves out of it the partitions it still holds
+records of, so a partition it drained while that fetch was parked on quiet ones waited for the
+fetch to come back, up to `fetch.max.wait.ms` (500 ms in Java). A parked fetch now answers, with
+what it has, once it has waited `QUEEN_FETCH_TOPIC_WAKE_MS` (5 ms) and another partition of its
+topic was written on the node; an idle topic still parks to the client's wait. With the
+OpenMessaging Benchmark's stock Java consumer (1 KB, 100 partitions, 500,000 msg/s, three GCP
+nodes) the end-to-end p50/p99/p99.9 went from 46/625/792 ms to 9/32/55 ms.
+
 **Laravel: a job whose timeout its lease cannot cover fails alone.** Without lease renewal, a job
 whose own `$timeout` is 0 or at least `retry_after` was refused at every delivery: it never ran,
 never reached `tries` and held its partition, and since PHP client 2.4.2 every supervised worker

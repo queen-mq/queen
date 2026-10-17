@@ -45,6 +45,8 @@ struct QueueGate {
     /// would wake every fetch of the topic on every append — 600 consumers of
     /// one topic re-reading their partitions per append. Each fetch owns one
     /// `Notify` registered under each of its partitions ([`PartitionWatch`]).
+    /// A fetch may also watch the whole queue, under [`TOPIC_WATCH`]
+    /// ([`Notifier::watch_topics`]): woken by an append to any partition.
     watchers: Mutex<HashMap<String, Vec<Arc<Notify>>>>,
 }
 
@@ -274,6 +276,24 @@ impl Notifier {
                 n.notify_one();
             }
         }
+        if let Some(list) = w.get(TOPIC_WATCH) {
+            for n in list {
+                n.notify_one();
+            }
+        }
+    }
+
+    /// Register a Kafka Fetch on every partition of each queue it reads: an
+    /// append to ANY partition of one of them is a permit on the watch's
+    /// `Notify`. A fetch parked on quiet partitions uses it to answer early
+    /// while its topic is written elsewhere on this node, so that its client
+    /// can ask again for the partitions it has drained since ([`TOPIC_WATCH`]).
+    pub fn watch_topics(self: &Arc<Self>, qkeys: &[String]) -> PartitionWatch {
+        let parts: Vec<(String, String)> = qkeys
+            .iter()
+            .map(|q| (q.clone(), TOPIC_WATCH.to_string()))
+            .collect();
+        self.watch_partitions(&parts)
     }
 
     pub async fn wait_queue(&self, qkey: &str, dur: Duration) -> bool {
@@ -428,6 +448,11 @@ impl Notifier {
     }
 }
 
+/// The watcher key of a fetch that watches a whole queue
+/// ([`Notifier::watch_topics`]). No partition is named this: a push with no
+/// partition name writes `Default`.
+pub const TOPIC_WATCH: &str = "";
+
 /// One Kafka Fetch's registration on the partitions it reads
 /// ([`Notifier::watch_partitions`]).
 pub struct PartitionWatch {
@@ -486,6 +511,30 @@ mod tests {
         );
         n.wake_partition("q", "3");
         assert!(w.wait(Duration::from_secs(1)).await);
+    }
+
+    /// A topic watch is woken by an append to any partition of its queue, and
+    /// not by one to another queue; a partition watch beside it still wakes
+    /// only on its own partitions.
+    #[tokio::test]
+    async fn a_topic_watch_wakes_on_any_partition_of_its_queue() {
+        let n = Notifier::new(false);
+        let own = n.watch_partitions(&[("q".into(), "1".into())]);
+        let topic = n.watch_topics(&["q".to_string()]);
+        n.wake_partition("r", "1");
+        assert!(
+            !topic.wait(Duration::from_millis(30)).await,
+            "woken by another queue"
+        );
+        n.wake_partition("q", "7");
+        assert!(topic.wait(Duration::from_secs(1)).await);
+        assert!(
+            !own.wait(Duration::from_millis(30)).await,
+            "the partition watch was woken by another partition"
+        );
+        drop(own);
+        drop(topic);
+        assert!(!n.watches_partitions());
     }
 
     /// An append that lands between the read and the park is a permit: the
