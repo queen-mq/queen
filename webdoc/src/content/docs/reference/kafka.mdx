@@ -33,6 +33,8 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-17 (the catalog behind a plain mutex): queen.rs's queue-list cache
 # takes a std mutex instead of an async one, and produce reports its staging parts in /status.
 # Nothing this page states changes.
+# sourceOfTruth re-read 2026-10-17 (conn.rs, 19b024495): the pipelined produce a connection waits on is
+# boxed (a clippy size lint); the pipelining, its order and its limits are unchanged. Nothing this page states changes.
 ---
 
 This is the contract a Kafka client gets from Queen, in the form you check things against: the
