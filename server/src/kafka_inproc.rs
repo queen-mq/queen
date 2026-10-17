@@ -233,6 +233,71 @@ impl LocalDispatch for RouterDispatch {
         })
     }
 
+    fn leads(&self) -> bool {
+        self.kv
+            .as_ref()
+            .is_some_and(|(rsm, _)| rsm.leads(crate::tenant::Tenant::default_tenant().as_str()))
+    }
+
+    fn leader_node(&self) -> Option<u64> {
+        self.kv
+            .as_ref()
+            .and_then(|(rsm, _)| rsm.leader_node(crate::tenant::Tenant::default_tenant().as_str()))
+    }
+
+    fn push_records_ordered(
+        &self,
+        bearer: Option<String>,
+        items: Vec<queen_kafka::queen::RawPush>,
+    ) -> queen_kafka::queen::OrderedLocal {
+        let Some((rsm, auth)) = self.kv.clone() else {
+            return queen_kafka::queen::OrderedLocal {
+                in_log: Box::pin(async { false }),
+                done: Box::pin(async { Err("no state machine for the record path".to_string()) }),
+            };
+        };
+        let (ordered, in_log) = crate::rsm::facade::OrderedPush::new();
+        let task = self.broker.spawn(async move {
+            let sub = match authorize(&auth, "/api/v1/push", bearer.as_deref()).await {
+                Ok(sub) => sub,
+                Err(refused) => return LocalAnswer::Refused(refused),
+            };
+            let tenant = crate::tenant::Tenant::default_tenant().as_str().to_string();
+            let mut ctx = crate::rsm::facade::ReqCtx::new(
+                tenant,
+                crate::rsm::facade::Deadline::after(RECORDS_BUDGET),
+            )
+            .with_producer_sub(sub);
+            ctx.ordered = Some(ordered);
+            let records = items
+                .into_iter()
+                .map(|i| crate::rsm::facade::RecordPush {
+                    queue: i.queue,
+                    partition: i.partition,
+                    payload: i.payload,
+                })
+                .collect();
+            match rsm.push_records(ctx, records).await {
+                Ok(out) => LocalAnswer::Done(
+                    out.into_iter()
+                        .map(|o| queen_kafka::queen::Pushed {
+                            status: o.status.to_string(),
+                            offset: o.offset.map(|v| v as i64),
+                        })
+                        .collect(),
+                ),
+                Err(e) => LocalAnswer::Refused(refusal(e).await),
+            }
+        });
+        queen_kafka::queen::OrderedLocal {
+            in_log: Box::pin(async move { in_log.await.unwrap_or(false) }),
+            done: Box::pin(async move {
+                task.await
+                    .map_err(|e| format!("the broker task serving an in-process push ended: {e}"))
+            }),
+        }
+    }
+
     fn fetch_records(
         &self,
         bearer: Option<String>,

@@ -33,13 +33,13 @@
 //! 1. The facade advertises itself as the sole node and the leader of every
 //!    partition, so a producer's `NetworkClient` holds exactly one connection to
 //!    it and every Produce of one producer session arrives on one socket.
-//! 2. `conn::connection` is serial by construction: it reads one frame,
-//!    awaits `dispatch` to completion, writes the response, and only then looks
-//!    at the next byte. `max.in.flight.requests.per.connection=5` is therefore
-//!    five requests on the WIRE and exactly one in the facade, processed in
-//!    arrival order — so check, push and commit cannot interleave with another
-//!    request for the same `(producer, partition)`. There is no second request
-//!    being processed.
+//! 2. `conn::connection` checks a connection's produce in arrival order. On
+//!    the node that leads it pipelines the pushes (2026-10-17): a batch is
+//!    checked while the batches before it may still be in flight, and
+//!    [`Producers::check`] accepts one that follows the newest in flight, as
+//!    it always did within one coalesced push; the runs are committed to the
+//!    window as the connection answers them, in request order too. Everywhere
+//!    else the connection is serial: one push, answered, then the next.
 //! 3. The producer itself never advances past a gap: under idempotence the Java
 //!    client and librdkafka both re-sequence on failure, which is why
 //!    `base_sequence == last_seq + 1` below is a check and not a race.

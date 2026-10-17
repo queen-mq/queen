@@ -1140,3 +1140,77 @@ async fn a_fetch_holding_fewer_than_min_bytes_keeps_waiting_when_its_queue_is_wr
     let f = Arc::try_unwrap(f).ok().expect("the fetch is done");
     close(f, dir).await;
 }
+
+// ---------------------------------------------------------------------------
+// Ordered pushes: the next one sent once this one is in the log (2026-10-17)
+// ---------------------------------------------------------------------------
+
+/// Pushes to one partition, each sent as soon as the one before it is in the
+/// log ([`crate::rsm::facade::OrderedPush`]) rather than when it is answered,
+/// land in the order they were sent, and the signal says `true`: every command
+/// of the push was proposed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ordered_pushes_sent_on_the_in_the_log_signal_keep_their_order() {
+    use crate::rsm::facade::{OrderedPush, RecordPush};
+    let dir = scratch("ordered");
+    let f = Arc::new(RaftFacade::open(&build_ctx(&dir)).expect("open facade"));
+    push(
+        &f,
+        vec![json!({"queue":"ord","partition":"p","payload":{"n":-1}})],
+    )
+    .await;
+    const N: i64 = 30;
+    let mut tasks = Vec::new();
+    let mut prev: Option<tokio::sync::oneshot::Receiver<bool>> = None;
+    for n in 0..N {
+        // The one before is in the log: send this one, before that one is
+        // answered.
+        if let Some(rx) = prev.take() {
+            assert!(
+                rx.await.unwrap_or(false),
+                "push {} was answered without its in-the-log signal",
+                n - 1
+            );
+        }
+        let (o, rx) = OrderedPush::new();
+        let mut c = ctx();
+        c.ordered = Some(o);
+        let g = f.clone();
+        tasks.push(tokio::spawn(async move {
+            g.push_records(
+                c,
+                vec![RecordPush {
+                    queue: "ord".into(),
+                    partition: "p".into(),
+                    payload: json!({ "n": n }).to_string().into_bytes(),
+                }],
+            )
+            .await
+        }));
+        prev = Some(rx);
+    }
+    for t in tasks {
+        let out = t.await.expect("push task").expect("push");
+        assert_eq!(out[0].status, "queued");
+    }
+    let got = f
+        .fetch_records(ctx(), from_zero("ord", &["p"]), 0, 1)
+        .await
+        .expect("fetch");
+    let seen: Vec<i64> = got[0]
+        .records
+        .iter()
+        .map(|r| {
+            serde_json::from_slice::<Value>(&r.payload).unwrap()["n"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect();
+    let want: Vec<i64> = (-1..N).collect();
+    assert_eq!(
+        seen, want,
+        "the partition holds the pushes in the order they were sent"
+    );
+    let f = Arc::try_unwrap(f).ok().expect("the pushes are done");
+    close(f, dir).await;
+}

@@ -453,6 +453,194 @@ pub async fn handle_coalesced(
     answers
 }
 
+/// One coalesced Produce staged in arrival order and not pushed yet
+/// ([`stage_coalesced`], [`push_staged`]): the connection's pipelined produce.
+pub struct StagedProduce {
+    reqs: Vec<ProduceRequest>,
+    /// Per request: its slots, or the answer it already has (an invalid acks).
+    staged: Vec<Result<Vec<Vec<Slot>>, ProduceResponse>>,
+    items: Vec<RawPush>,
+    tenant: crate::identity::TenantKey,
+}
+
+/// [`handle_coalesced`]'s first half: every request's topics resolved and its
+/// records staged, which is where an idempotent producer's sequences are
+/// checked. A connection calls it in arrival order, so the checks see the
+/// requests in the order the client sent them, whatever is still in flight
+/// before them (a batch that follows one in flight is accepted, as within one
+/// coalesced push).
+pub async fn stage_coalesced(
+    facade: &Facade,
+    reqs: Vec<ProduceRequest>,
+    token: Option<&str>,
+) -> StagedProduce {
+    let started = std::time::Instant::now();
+    let tenant = facade.catalog.tenant_key(token);
+    let mut items: Vec<RawPush> = Vec::new();
+    let mut staged: Vec<Result<Vec<Vec<Slot>>, ProduceResponse>> = Vec::with_capacity(reqs.len());
+    for req in &reqs {
+        if !matches!(req.acks, ACKS_NONE | ACKS_LEADER | ACKS_ALL) {
+            staged.push(Err(build(facade, req, token).await));
+            continue;
+        }
+        let transactional =
+            idempotent::transactional_id(req.transactional_id.as_ref().map(|id| id.0.as_str()));
+        let plans = topic_plans(facade, req, token).await;
+        let idem = Idem {
+            producers: &facade.producers,
+            tenant: &tenant,
+            txn: transactional,
+            txns: facade.txns.as_ref(),
+        };
+        staged.push(Ok(stage_into(&mut items, req, &plans, &idem)));
+    }
+    crate::stats::PRODUCE_STAGE.record(started.elapsed());
+    crate::stats::PRODUCE_PUSHES.add(1);
+    crate::stats::PRODUCE_REQUESTS.add(reqs.len() as u64);
+    crate::stats::PRODUCE_RECORDS.add(items.len() as u64);
+    StagedProduce {
+        reqs,
+        staged,
+        items,
+        tenant,
+    }
+}
+
+/// A pipelined produce whose push answered ([`push_staged`]), waiting for
+/// its turn to be answered ([`PushedProduce::answer`]). Answered in request
+/// order by the connection, so the sequence window takes the runs in that
+/// order too. Dropped unanswered — the push failed, or the connection ended
+/// first — its staged runs leave the in-flight list.
+pub struct PushedProduce {
+    facade: Facade,
+    reqs: Vec<ProduceRequest>,
+    staged: Vec<Result<Vec<Vec<Slot>>, ProduceResponse>>,
+    tenant: crate::identity::TenantKey,
+    pushed: Option<queen::Result<Vec<Pushed>>>,
+    answered: bool,
+}
+
+impl PushedProduce {
+    fn idem<'a>(&'a self, req: &'a ProduceRequest) -> Idem<'a> {
+        Idem {
+            producers: &self.facade.producers,
+            tenant: &self.tenant,
+            txn: idempotent::transactional_id(
+                req.transactional_id.as_ref().map(|id| id.0.as_str()),
+            ),
+            txns: self.facade.txns.as_ref(),
+        }
+    }
+
+    /// Every request's answer, `None` for an `acks=0` one.
+    pub fn answer(mut self) -> Vec<Option<ProduceResponse>> {
+        let rendering = std::time::Instant::now();
+        let answers = self
+            .reqs
+            .iter()
+            .zip(self.staged.iter())
+            .map(|(req, staged)| {
+                let response = match staged {
+                    Err(answered) => answered.clone(),
+                    Ok(slots) => {
+                        let idem = self.idem(req);
+                        let response = render(req, slots, self.pushed.as_ref(), &idem);
+                        end_inflight(slots, &idem);
+                        response
+                    }
+                };
+                if req.acks == ACKS_NONE {
+                    log_silent_failures(&response);
+                    None
+                } else {
+                    Some(response)
+                }
+            })
+            .collect();
+        self.answered = true;
+        crate::stats::PRODUCE_RENDER.record(rendering.elapsed());
+        answers
+    }
+}
+
+impl Drop for PushedProduce {
+    fn drop(&mut self) {
+        if self.answered {
+            return;
+        }
+        for (req, staged) in self.reqs.iter().zip(self.staged.iter()) {
+            if let Ok(slots) = staged {
+                end_inflight(slots, &self.idem(req));
+            }
+        }
+    }
+}
+
+/// [`handle_coalesced`]'s push for a pipelined connection: push the staged
+/// records once the push before them is in the log or answered (`after`
+/// fires), and open `in_log` for the next as soon as this push is in the log
+/// ([`queen::QueenApi::push_raw_ordered`]) or answered.
+///
+/// `None` when this push failed, or the one before it did: nothing more may
+/// be answered on the connection, which the caller closes, so that the client
+/// sends again, in order, what it has not been answered. A push sent behind
+/// one in the log lands after it, and the log commits a prefix, so a later
+/// push is never in the log without this one before it.
+pub async fn push_staged(
+    facade: Facade,
+    p: StagedProduce,
+    token: Option<String>,
+    after: Option<tokio::sync::oneshot::Receiver<()>>,
+    in_log: tokio::sync::oneshot::Sender<()>,
+) -> Option<PushedProduce> {
+    let StagedProduce {
+        reqs,
+        staged,
+        items,
+        tenant,
+    } = p;
+    let mut out = PushedProduce {
+        facade,
+        reqs,
+        staged,
+        tenant,
+        pushed: None,
+        answered: false,
+    };
+    if let Some(after) = after {
+        after.await.ok()?;
+    }
+    let mut in_log = Some(in_log);
+    let pushing = std::time::Instant::now();
+    if !items.is_empty() {
+        let queen::OrderedPushed {
+            in_log: proposed,
+            done,
+        } = out.facade.queen.push_raw_ordered(items, token.as_deref());
+        tokio::pin!(done);
+        let answer = tokio::select! {
+            biased;
+            answer = &mut done => answer,
+            proposed = proposed => {
+                if proposed {
+                    if let Some(tx) = in_log.take() {
+                        let _ = tx.send(());
+                    }
+                }
+                done.await
+            }
+        };
+        // A failed push answers nothing, and `in_log` is dropped, so the push
+        // behind this one is never sent.
+        out.pushed = Some(Ok(answer.ok()?));
+    }
+    crate::stats::PRODUCE_PUSH.record(pushing.elapsed());
+    if let Some(tx) = in_log.take() {
+        let _ = tx.send(());
+    }
+    Some(out)
+}
+
 /// Every run the request accepted from an idempotent producer is no longer in
 /// flight ([`idempotent::Producers::end`]). After [`render`], which commits
 /// the runs that landed, so the window holds them before they leave the

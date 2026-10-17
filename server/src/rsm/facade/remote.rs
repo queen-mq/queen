@@ -273,7 +273,7 @@ async fn submit_local(
         ),
         _ => None,
     };
-    super::intake::submit_here(engine, || cmd_tx.upgrade(), command, deadline).await
+    super::intake::submit_here(engine, || cmd_tx.upgrade(), command, deadline, None).await
 }
 
 /// The handler a cluster node installs on its replicator.

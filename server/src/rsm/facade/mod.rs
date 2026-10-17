@@ -160,6 +160,115 @@ pub struct ReqCtx {
     /// beside `entries`), whatever each entry may read by itself. `None`: the
     /// entries' own budgets are the only ones.
     pub fetch_max_bytes: Option<usize>,
+    /// A push whose caller sends its next push once this one is in the log
+    /// ([`OrderedPush`]): the Kafka facade's pipelined produce. `None` for
+    /// every other caller.
+    pub ordered: Option<std::sync::Arc<OrderedPush>>,
+    /// One command of an [`OrderedPush`], set by the push path itself.
+    pub ordered_group: Option<std::sync::Arc<OrderedGroup>>,
+}
+
+/// A push whose caller pipelines the next one behind it (2026-10-17, the Kafka
+/// facade's produce). The receiver from [`OrderedPush::new`] answers `true`
+/// once EVERY command of the push has been proposed — from then on anything
+/// submitted lands after it in the log — and `false` when the push ends without
+/// that (refused, answered at once, failed): the caller then waits for the
+/// push's own answer before sending the next, as without pipelining.
+///
+/// An ordered push is planned only where it arrives, by this node as leader:
+/// forwarded, its commands could reach the leader in any order
+/// (`replicator::raft::forward`). And once one of its commands was proposed it
+/// is never retried by the push path: a retry would land after the push the
+/// caller has already sent behind it. Both cases are answered as errors and the
+/// caller ends the connection, so the client sends its requests again in order.
+pub struct OrderedPush {
+    remaining: std::sync::atomic::AtomicUsize,
+    tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
+}
+
+impl OrderedPush {
+    pub fn new() -> (
+        std::sync::Arc<OrderedPush>,
+        tokio::sync::oneshot::Receiver<bool>,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (
+            std::sync::Arc::new(OrderedPush {
+                remaining: std::sync::atomic::AtomicUsize::new(usize::MAX),
+                tx: std::sync::Mutex::new(Some(tx)),
+            }),
+            rx,
+        )
+    }
+
+    /// The push is `n` commands: one [`OrderedGroup`] each. Called once.
+    pub(crate) fn arm(self: &std::sync::Arc<Self>, n: usize) -> Vec<std::sync::Arc<OrderedGroup>> {
+        self.remaining
+            .store(n, std::sync::atomic::Ordering::Release);
+        if n == 0 {
+            self.settle(true);
+        }
+        (0..n)
+            .map(|_| {
+                std::sync::Arc::new(OrderedGroup {
+                    push: self.clone(),
+                    fired: std::sync::atomic::AtomicBool::new(false),
+                })
+            })
+            .collect()
+    }
+
+    /// Answer the receiver, once.
+    pub(crate) fn settle(&self, proposed: bool) {
+        if let Some(tx) = self.tx.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = tx.send(proposed);
+        }
+    }
+}
+
+impl std::fmt::Debug for OrderedPush {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OrderedPush")
+    }
+}
+
+impl std::fmt::Debug for OrderedGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OrderedGroup(fired: {})", self.fired())
+    }
+}
+
+/// One command of an [`OrderedPush`], fired by the batcher's
+/// [`crate::rsm::batcher::ProposedHook`] when its entry is proposed.
+pub struct OrderedGroup {
+    push: std::sync::Arc<OrderedPush>,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+impl OrderedGroup {
+    pub(crate) fn hook(self: &std::sync::Arc<Self>) -> crate::rsm::batcher::ProposedHook {
+        let me = self.clone();
+        crate::rsm::batcher::ProposedHook(std::sync::Arc::new(move || me.fire()))
+    }
+
+    fn fire(&self) {
+        if self.fired.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        if self
+            .push
+            .remaining
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+        {
+            self.push.settle(true);
+        }
+    }
+
+    /// Whether this command was proposed.
+    pub(crate) fn fired(&self) -> bool {
+        self.fired.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 /// One push group's stored form: its frames, concatenated, as one zstd frame.
@@ -182,6 +291,8 @@ impl ReqCtx {
             stored_forms: None,
             pop_frames: false,
             fetch_max_bytes: None,
+            ordered: None,
+            ordered_group: None,
         }
     }
 
@@ -1036,6 +1147,20 @@ pub trait Rsm: Send + Sync {
 
     /// The `/health` raft block (§14.1). Cheap and non-async: a node-local read.
     fn health(&self) -> RaftHealth;
+
+    /// Whether this node leads the raft group that serves `tenant`, now: a
+    /// cheap read for a per-request decision (the Kafka facade pipelines its
+    /// produce only where the push is planned, [`OrderedPush`]).
+    fn leads(&self, _tenant: &str) -> bool {
+        false
+    }
+
+    /// The raft node that leads the group serving `tenant`, when this node
+    /// follows it and knows it: where a client's produce is relayed to by
+    /// the Kafka facade of a follower.
+    fn leader_node(&self, _tenant: &str) -> Option<u64> {
+        None
+    }
 
     /// Node-local Raft/store metric families appended to the ordinary process
     /// exporter.  Kept on the facade seam so the HTTP layer never reaches into

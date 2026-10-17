@@ -940,6 +940,27 @@ pub enum Reply {
 
 /// One submission on the batcher's channel: a command and where its answer
 /// goes. The receiver awaits `reply`.
+/// Fired once by the batcher when the entry carrying a submission's command
+/// is proposed: the command's place in the log is fixed, so anything submitted
+/// after it lands after it. A submission refused, answered at once, failed or
+/// dropped never fires it. The Kafka facade's pipelined produce uses it to send
+/// a connection's next push before this one commits, in order
+/// ([`crate::rsm::facade::OrderedPush`]).
+#[derive(Clone)]
+pub struct ProposedHook(pub std::sync::Arc<dyn Fn() + Send + Sync>);
+
+impl ProposedHook {
+    pub fn fire(&self) {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for ProposedHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProposedHook")
+    }
+}
+
 pub struct Submission {
     pub command: Command,
     pub reply: oneshot::Sender<Reply>,
@@ -969,6 +990,9 @@ pub struct Submission {
     /// arrival clock does not change what `queue_wait` reports. Follows the same
     /// metrics knob.
     pub enqueued_at: Option<Instant>,
+    /// Fired when this command's entry is proposed ([`ProposedHook`]). `None`
+    /// for every caller but the facade's ordered push.
+    pub proposed: Option<ProposedHook>,
 }
 
 impl Submission {
@@ -981,6 +1005,7 @@ impl Submission {
                 reply: tx,
                 received_at: at,
                 enqueued_at: at,
+                proposed: None,
             },
             rx,
         )
@@ -1859,6 +1884,8 @@ static PIPELINED_PLANNING: std::sync::LazyLock<bool> = std::sync::LazyLock::new(
 struct Launched {
     rx: tokio::sync::oneshot::Receiver<crate::rsm::store::Result<PlanOutput>>,
     replies: Vec<oneshot::Sender<Reply>>,
+    /// Each drained submission's [`ProposedHook`], by batch position.
+    hooks: Vec<Option<ProposedHook>>,
     received: Vec<Option<Instant>>,
     arrivals: Vec<Instant>,
     /// The request id of each drained transaction, by batch position (the
@@ -3062,8 +3089,14 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
 
         // Split the submissions: commands go to the blocking planner, reply
         // senders stay here in the same order.
-        let (commands, replies): (Vec<Command>, Vec<oneshot::Sender<Reply>>) =
-            batch.into_iter().map(|s| (s.command, s.reply)).unzip();
+        let mut hooks: Vec<Option<ProposedHook>> = Vec::with_capacity(batch.len());
+        let (commands, replies): (Vec<Command>, Vec<oneshot::Sender<Reply>>) = batch
+            .into_iter()
+            .map(|s| {
+                hooks.push(s.proposed);
+                (s.command, s.reply)
+            })
+            .unzip();
 
         let folded: Vec<(u64, Arc<Entry>)> = self
             .inflight
@@ -3155,6 +3188,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         Some(Launched {
             rx,
             replies,
+            hooks,
             received,
             arrivals,
             txn_ids,
@@ -3186,6 +3220,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let Launched {
             rx,
             replies,
+            hooks,
             received,
             arrivals,
             txn_ids,
@@ -3450,6 +3485,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
 
         let mut waiters: Vec<Waiter> = Vec::new();
         let mut deferred: Vec<Submission> = Vec::new();
+        // The hooks of the commands that wait on the entry proposed below.
+        let mut fire_after: Vec<ProposedHook> = Vec::new();
+        let mut hooks = hooks.into_iter();
 
         for (((slot, reply), arrived), txn_id) in out
             .slots
@@ -3458,6 +3496,14 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             .zip(received.into_iter())
             .zip(txn_ids.into_iter())
         {
+            let hook = hooks.next().flatten();
+            // A command planned to nothing writes nothing: there is no place
+            // in the log to keep, so what follows it may go now.
+            if matches!(slot, Slot::Empty(_)) {
+                if let Some(h) = &hook {
+                    h.fire();
+                }
+            }
             // A transaction this cycle did not log — refused, planned empty (a
             // lost KV precondition), or answered from an earlier commit of its
             // id: the reservation of its consumption half, if any, is released.
@@ -3476,14 +3522,24 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     reply,
                     received_at: arrived,
                     enqueued_at: crate::rsm::timing::stamp(),
+                    proposed: hook,
                 }),
                 Slot::Logged(request_id) | Slot::SameCycle(request_id) => {
                     waiters.push(Waiter::Command { request_id, reply });
+                    if let Some(h) = hook {
+                        fire_after.push(h);
+                    }
                 }
                 Slot::InFlightHit {
                     request_id,
                     outcome,
-                } => self.attach_inflight_hit(request_id, outcome, reply),
+                } => {
+                    // Its entry was proposed in an earlier cycle.
+                    if let Some(h) = hook {
+                        h.fire();
+                    }
+                    self.attach_inflight_hit(request_id, outcome, reply)
+                }
                 Slot::Empty(outcome) => match barrier_seq {
                     None => {
                         let _ = reply.send(Reply::Done { outcome, at: None });
@@ -3533,6 +3589,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     .record_dur(started.elapsed());
             }
             self.propose(seq, index, entry, waiters, bytes);
+            for h in fire_after.drain(..) {
+                h.fire();
+            }
             if let Some(planned) = link_planned {
                 self.link_proposed(planned, index);
             }
@@ -3600,6 +3659,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     reply,
                     received_at: arrived,
                     enqueued_at: crate::rsm::timing::stamp(),
+                    proposed: None,
                 }),
                 Slot::Immediate(r) => {
                     let _ = reply.send(r);

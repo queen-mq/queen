@@ -86,6 +86,7 @@ pub(super) async fn submit_here(
     batcher: impl FnOnce() -> Option<CommandTx>,
     command: Command,
     deadline: Instant,
+    proposed: Option<crate::rsm::batcher::ProposedHook>,
 ) -> Result<Reply, RsmError> {
     // A standby takes no client command (`crate::rsm::link`): neither its
     // engine nor its planner runs, so the answer is given here, at once. The
@@ -129,7 +130,7 @@ pub(super) async fn submit_here(
     let Some(tx) = batcher() else {
         return Err(RsmError::Internal("planner channel closed".into()));
     };
-    to_batcher(tx, command, deadline).await
+    to_batcher(tx, command, deadline, proposed).await
 }
 
 /// The engine's half of a transaction: validated and reserved against its
@@ -169,8 +170,10 @@ pub(super) async fn to_batcher(
     cmd_tx: CommandTx,
     command: Command,
     deadline: Instant,
+    proposed: Option<crate::rsm::batcher::ProposedHook>,
 ) -> Result<Reply, RsmError> {
-    let (sub, rx) = Submission::new(command);
+    let (mut sub, rx) = Submission::new(command);
+    sub.proposed = proposed;
     // The bounded channel absorbs back-pressure; a full channel waits, up to
     // the deadline.
     let remaining = deadline.saturating_duration_since(Instant::now());

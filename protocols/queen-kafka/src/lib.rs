@@ -71,6 +71,7 @@ use std::sync::{Arc, Mutex};
 /// from configuration and from Queen — nothing durable, per PLAN_QUEEN_KAFKA.md
 /// ("no durable state in the facade"), so a restart is a broker restart and
 /// clients recover the way they already know how to.
+#[derive(Clone)]
 pub struct Facade {
     /// The host and port handed to clients as the address of THIS node — node 0
     /// on its own, `QUEEN_KAFKA_NODE_ID` in a cluster. Validated at boot

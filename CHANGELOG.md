@@ -76,6 +76,19 @@ a fetch holding fewer than its `min_bytes` keeps waiting for them. With the
 OpenMessaging Benchmark's stock Java consumer (1 KB, 100 partitions, 500,000 msg/s, three GCP
 nodes) the end-to-end p50/p99/p99.9 went from 46/625/792 ms to 9/32/55 ms.
 
+**Kafka facade: produce is pipelined on the leader and relayed from followers.** A facade served a
+connection one push at a time: a request waited for the push before it to commit on two disks
+before its own began, so most of a produce's time was queueing (p50 7.4 ms against 2.1 ms for the
+push itself). On the node that leads, a connection's next push is now sent as soon as the one before
+it is in the raft log, up to `QUEEN_KAFKA_PIPELINE` (8) in flight, and the answers keep request
+order; the log keeps the order they were sent in and commits a prefix, so a later push never lands
+without the ones before it. A pipelined push is never retried behind the client's back once it is in
+the log: a push that fails ends the connection, and the client sends again, in order, what it was not
+answered. On a follower, a client's produce goes as it came to the facade on the leader, over one
+connection per client connection (`QUEEN_KAFKA_RELAY`), instead of through the broker's forwarding,
+whose streams do not keep one connection's order. Every other request, and every connection
+elsewhere, is served as before.
+
 **Laravel: a job whose timeout its lease cannot cover fails alone.** Without lease renewal, a job
 whose own `$timeout` is 0 or at least `retry_after` was refused at every delivery: it never ran,
 never reached `tries` and held its partition, and since PHP client 2.4.2 every supervised worker

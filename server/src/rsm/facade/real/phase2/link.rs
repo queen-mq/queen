@@ -253,7 +253,13 @@ impl RaftFacade {
         command: Command,
         deadline: std::time::Instant,
     ) -> Result<Reply, RsmError> {
-        crate::rsm::facade::intake::submit_here(engine, || Some(batcher.clone()), command, deadline)
-            .await
+        crate::rsm::facade::intake::submit_here(
+            engine,
+            || Some(batcher.clone()),
+            command,
+            deadline,
+            None,
+        )
+        .await
     }
 }
