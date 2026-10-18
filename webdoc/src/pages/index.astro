@@ -7,20 +7,23 @@ import { config } from "virtual:nimbus/config";
 import {
   HOME_TITLE,
   hero,
+  paradigm,
+  shifts,
   step,
   stepSection,
   roles,
-  partitionSection,
-  primitives,
-  doorsSection,
-  doors,
-  dashboardSection,
+  removeSection,
+  removals,
+  includedSection,
+  included,
+  dashboardShot,
   proofSection,
   proof,
-  runSection,
-  differentiators,
-  limits,
+  provenSection,
+  proven,
+  trySection,
   start,
+  closing,
 } from "../lib/home";
 
 /**
@@ -29,9 +32,9 @@ import {
  * ones scripts/check-markdown.mjs looks for in dist/index.md.
  *
  * The rhythm: a split hero, then sections that alternate between the page and
- * a card-coloured band, each with a small label, a title, one lead paragraph,
- * and one piece of evidence (code, a drawn figure, a chart, a screenshot) that
- * shows what the paragraph claims.
+ * a card-coloured band, in the order of the README's top half: the old way and
+ * the Queen way, the code, what you can remove, what is included, the numbers,
+ * proof, how to try it, and the closing line.
  */
 
 // The same pair Nimbus configures for MDX code blocks, with defaultColor off:
@@ -44,6 +47,7 @@ const h2 = "mt-3 text-2xl font-semibold tracking-tight text-foreground lg:text-[
 const lead = "mt-4 max-w-2xl text-base leading-relaxed text-muted-foreground";
 const card =
   "block rounded-xl border border-border bg-background p-5 no-underline transition-colors hover:border-border-strong";
+const cardStatic = "block rounded-xl border border-border bg-background p-5";
 ---
 
 <BaseLayout title={HOME_TITLE} description={config.description}>
@@ -65,7 +69,10 @@ const card =
                 {hero.headline}
               </span>
               {" "}
-              <span class="mt-4 block text-[1.125rem] font-medium leading-snug tracking-tight text-foreground/70 lg:text-[1.25rem]">
+              <span
+                class="block text-muted-foreground"
+                style="font-size: clamp(2.25rem, 3.4vw, 3.125rem); line-height: 1.04; font-weight: var(--nb-h1-weight); letter-spacing: -0.035em;"
+              >
                 {hero.subline}
               </span>
             </h1>
@@ -120,7 +127,36 @@ const card =
         </div>
       </section>
 
-      {/* One step, one commit */}
+      {/* The old way and the Queen way */}
+      <section class="border-t border-border bg-card">
+        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
+          <p class={eyebrow}>{paradigm.eyebrow}</p>
+          <div class="grid grid-cols-1 gap-12 lg:grid-cols-2 lg:gap-16">
+            <div>
+              <h2 data-md class={h2}>{paradigm.oldTitle}</h2>
+              {paradigm.old.map((t) => <p data-md class="mt-4 text-base leading-relaxed text-muted-foreground">{t}</p>)}
+            </div>
+            <div>
+              <h2 data-md class={h2}>{paradigm.newTitle}</h2>
+              {
+                shifts.map((x) => (
+                  <p data-md class="mt-4 text-base leading-relaxed text-muted-foreground">
+                    <a href={x.href} class="font-medium text-foreground no-underline hover:underline">
+                      {x.title}
+                    </a>{" "}
+                    {x.body}
+                  </p>
+                ))
+              }
+            </div>
+          </div>
+          <div class="mx-auto mt-16 max-w-3xl">
+            <Figure id="concepts/four-systems" />
+          </div>
+        </div>
+      </section>
+
+      {/* In code */}
       <section class="border-t border-border">
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <p class={eyebrow}>{stepSection.eyebrow}</p>
@@ -129,7 +165,7 @@ const card =
 
           <div class="home-code mt-12 overflow-hidden rounded-xl border border-border bg-card">
             <div class="flex items-center justify-between border-b border-border px-5 py-2.5 text-xs text-muted-foreground">
-              <span class="font-medium">One step, as one call</span>
+              <span class="font-medium">Push, then consume</span>
               <span>JavaScript</span>
             </div>
             <div class="overflow-x-auto px-5 py-4 text-[0.75rem]">
@@ -152,152 +188,101 @@ const card =
               </li>
             </ol>
           </div>
-
-          <div class="mt-12 grid grid-cols-1 gap-10 lg:grid-cols-12 lg:items-center">
-            <div class="lg:col-span-8">
-              <Figure id="concepts/four-systems" />
-            </div>
-            <div class="lg:col-span-4">
-              <p data-md class="text-[0.9375rem] leading-relaxed text-muted-foreground">{stepSection.after}</p>
-              <a href={stepSection.link.href} class="mt-4 inline-block text-[0.8125rem] font-medium">
-                {stepSection.link.label} →
-              </a>
-            </div>
-          </div>
+          <a href={stepSection.link.href} class="mt-6 inline-block text-[0.8125rem] font-medium">
+            {stepSection.link.label} →
+          </a>
         </div>
       </section>
 
-      {/* Partitions */}
+      {/* What you can remove: the titles are struck through because that is the claim */}
       <section class="border-t border-border bg-card">
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
-          <div class="grid grid-cols-1 gap-10 lg:grid-cols-12">
-            <div class="lg:col-span-4">
-              <p class={eyebrow}>{partitionSection.eyebrow}</p>
-              <h2 data-md class={h2}>{partitionSection.title}</h2>
-              <p data-md class="mt-4 text-base leading-relaxed text-muted-foreground">{partitionSection.lead}</p>
-              <p data-md class="mt-4 text-[0.9375rem] leading-relaxed text-muted-foreground">{partitionSection.after}</p>
-              <a href={partitionSection.link.href} class="mt-4 inline-block text-[0.8125rem] font-medium">
-                {partitionSection.link.label} →
-              </a>
-            </div>
-            <div class="lg:col-span-8 lg:pt-2">
-              <Figure id="benchmarks/partitions-p99" />
-            </div>
-          </div>
+          <p class={eyebrow}>{removeSection.eyebrow}</p>
+          <h2 data-md class={h2}>{removeSection.title}</h2>
+          <ul class="mt-12 grid grid-cols-1 gap-x-8 gap-y-8 sm:grid-cols-2 lg:grid-cols-5">
+            {
+              removals.map((r) => (
+                <li class="border-t border-border pt-5">
+                  <h3 data-md class="text-[0.9375rem] font-medium text-foreground line-through decoration-muted-foreground decoration-1">
+                    {r.title}
+                  </h3>
+                  <p data-md class="mt-2 text-[0.875rem] leading-relaxed text-muted-foreground">{r.body}</p>
+                </li>
+              ))
+            }
+          </ul>
         </div>
       </section>
 
-      {/* Primitives */}
+      {/* Also included */}
       <section class="border-t border-border">
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
-          <p class={eyebrow}>Everything in one log</p>
-          <h2 class={h2}>The pieces a step needs, sharing one commit</h2>
+          <p class={eyebrow}>{includedSection.eyebrow}</p>
+          <h2 data-md class={h2}>{includedSection.title}</h2>
           <div class="mt-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {
-              primitives.map((p) => (
-                <a href={p.href} class={card}>
-                  <div class="text-[0.9375rem] font-medium text-foreground">{p.title}</div>
-                  <p data-md class="mt-1.5 text-[0.8125rem] leading-relaxed text-muted-foreground">{p.body}</p>
+              included.map((c, i) => (
+                <a href={c.href} class={i === included.length - 1 ? `${card} sm:col-span-2` : card}>
+                  <div class="text-[0.9375rem] font-medium text-foreground">{c.title}</div>
+                  <p data-md class="mt-1.5 text-[0.8125rem] leading-relaxed text-muted-foreground">{c.body}</p>
                 </a>
               ))
             }
           </div>
+          <figure class="mt-12">
+            <div class="overflow-hidden rounded-xl border border-border">
+              {/* WebP at 2048 wide: twice the 1024px the frame reaches, so it stays
+                  sharp on a 2x screen at a quarter of the 2880px PNG's bytes. Only
+                  the visible one loads: a lazy image that is not rendered is not
+                  fetched. */}
+              <img
+                src={`/screenshots/${dashboardShot.image}-light.webp`}
+                alt={dashboardShot.alt}
+                width="2048"
+                height="1280"
+                loading="lazy"
+                decoding="async"
+                class="home-shot-light block h-auto w-full"
+              />
+              <img
+                src={`/screenshots/${dashboardShot.image}-dark.webp`}
+                alt={dashboardShot.alt}
+                width="2048"
+                height="1280"
+                loading="lazy"
+                decoding="async"
+                class="home-shot-dark block h-auto w-full"
+              />
+            </div>
+            <figcaption class="mt-3 text-[0.8125rem] text-muted-foreground">
+              {dashboardShot.caption} <a href="/operate/monitoring/">Monitoring →</a>
+            </figcaption>
+          </figure>
         </div>
       </section>
 
-      {/* Doors */}
-      <section class="border-t border-border bg-card">
-        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
-          <p class={eyebrow}>{doorsSection.eyebrow}</p>
-          <h2 data-md class={h2}>{doorsSection.title}</h2>
-          <p data-md class={lead}>{doorsSection.lead}</p>
-
-          <div class="mt-12 grid grid-cols-1 gap-8 lg:grid-cols-12">
-            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:col-span-6">
-              {
-                doors.map((d, i) => (
-                  <a href={d.href} class={i === doors.length - 1 && doors.length % 2 === 1 ? `${card} sm:col-span-2` : card}>
-                    <div class="text-[0.9375rem] font-medium text-foreground">{d.title}</div>
-                    <p data-md class="mt-1.5 text-[0.8125rem] leading-relaxed text-muted-foreground">{d.body}</p>
-                  </a>
-                ))
-              }
-            </div>
-            <div class="home-code overflow-hidden rounded-xl border border-border bg-background lg:col-span-6 lg:self-start">
-              <div class="border-b border-border px-4 py-2.5 text-xs font-medium text-muted-foreground">
-                {doorsSection.snippetTitle}
-              </div>
-              <div class="overflow-x-auto px-5 py-4 text-[0.75rem]">
-                <Code code={doorsSection.snippet} lang="bash" themes={SHIKI} defaultColor={false} />
-              </div>
-              <p class="border-t border-border px-4 py-3 text-[0.8125rem] text-muted-foreground">
-                The source copies the rows already there, then streams every committed change. A
-                sink is the same call with <code>"kind": "sink"</code>.
-                <a href="/guides/postgres/"> PostgreSQL →</a>
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Dashboard */}
-      <section class="border-t border-border">
-        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
-          <div class="grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-end">
-            <div class="lg:col-span-7">
-              <p class={eyebrow}>{dashboardSection.eyebrow}</p>
-              <h2 data-md class={h2}>{dashboardSection.title}</h2>
-            </div>
-            <div class="lg:col-span-5">
-              <p data-md class="text-[0.9375rem] leading-relaxed text-muted-foreground">{dashboardSection.lead}</p>
-              <a href={dashboardSection.link.href} class="mt-3 inline-block text-[0.8125rem] font-medium">
-                {dashboardSection.link.label} →
-              </a>
-            </div>
-          </div>
-          <div class="mt-12 overflow-hidden rounded-xl border border-border">
-            {/* WebP at 2048 wide: twice the 1024px the frame reaches, so it stays
-                sharp on a 2x screen at a quarter of the 2880px PNG's bytes. Only
-                the visible one loads: a lazy image that is not rendered is not
-                fetched. */}
-            <img
-              src={`/screenshots/${dashboardSection.image}-light.webp`}
-              alt={dashboardSection.alt}
-              width="2048"
-              height="1280"
-              loading="lazy"
-              decoding="async"
-              class="home-shot-light block h-auto w-full"
-            />
-            <img
-              src={`/screenshots/${dashboardSection.image}-dark.webp`}
-              alt={dashboardSection.alt}
-              width="2048"
-              height="1280"
-              loading="lazy"
-              decoding="async"
-              class="home-shot-dark block h-auto w-full"
-            />
-          </div>
-        </div>
-      </section>
-
-      {/* Proof */}
+      {/* Numbers */}
       <section class="border-t border-border bg-card">
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
           <p class={eyebrow}>{proofSection.eyebrow}</p>
           <h2 data-md class={h2}>{proofSection.title}</h2>
           <p data-md class={lead}>{proofSection.lead}</p>
-          <div class="mt-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div class="mt-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
             {
-              proof.map((p) => (
-                <a href={p.href} class={card}>
-                  <div class="text-2xl font-semibold tracking-tight text-foreground">{p.figure}</div>
-                  <div class="mt-1 text-[0.6875rem] uppercase tracking-wide text-muted-foreground">{p.unit}</div>
-                  <p data-md class="mt-3 text-[0.8125rem] leading-relaxed text-muted-foreground">{p.body}</p>
-                </a>
-              ))
+              proof.map((p) => {
+                const Tag = p.href ? "a" : "div";
+                return (
+                  <Tag href={p.href} class={p.href ? card : cardStatic}>
+                    <div class="text-2xl font-semibold tracking-tight text-foreground">{p.figure}</div>
+                    <div class="mt-1 text-[0.6875rem] uppercase tracking-wide text-muted-foreground">{p.unit}</div>
+                    <p data-md class="mt-3 text-[0.8125rem] leading-relaxed text-muted-foreground">{p.body}</p>
+                  </Tag>
+                );
+              })
             }
+          </div>
+          <div class="mt-12">
+            <Figure id="benchmarks/partitions-p99" />
           </div>
           <a href={proofSection.link.href} class="mt-8 inline-block text-[0.8125rem] font-medium">
             {proofSection.link.label} →
@@ -305,14 +290,14 @@ const card =
         </div>
       </section>
 
-      {/* Operations */}
+      {/* Proven */}
       <section class="border-t border-border">
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
-          <p class={eyebrow}>{runSection.eyebrow}</p>
-          <h2 class={h2}>{runSection.title}</h2>
-          <div class="mt-12 grid grid-cols-1 gap-x-12 gap-y-10 sm:grid-cols-2">
+          <p class={eyebrow}>{provenSection.eyebrow}</p>
+          <h2 data-md class={h2}>{provenSection.title}</h2>
+          <div class="mt-12 grid grid-cols-1 gap-x-12 gap-y-10 sm:grid-cols-3">
             {
-              differentiators.map((d) => (
+              proven.map((d) => (
                 <div class="border-t border-border pt-5">
                   <h3 class="text-[0.9375rem] font-medium text-foreground">
                     <a href={d.href} class="no-underline">
@@ -327,21 +312,28 @@ const card =
         </div>
       </section>
 
-      {/* Limits */}
+      {/* Try it */}
       <section class="border-t border-border bg-card">
-        <div class="mx-auto w-full max-w-5xl px-6 py-12 lg:px-10 lg:py-14">
-          <p data-md class="max-w-3xl text-[0.9375rem] leading-relaxed text-muted-foreground">
-            {limits}
-            <a href="/reference/limits/"> Read the full list before you design around it →</a>
-          </p>
-        </div>
-      </section>
-
-      {/* Start */}
-      <section class="border-t border-border">
         <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-24">
-          <h2 class="text-xl font-semibold tracking-tight text-foreground">Start here</h2>
-          <div class="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <p class={eyebrow}>{trySection.eyebrow}</p>
+          <h2 data-md class={h2}>{trySection.title}</h2>
+          <div class="mt-10 max-w-3xl space-y-4">
+            <div class="rounded-lg border border-border bg-background px-4 py-3">
+              <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{hero.run}</code></pre>
+            </div>
+            <p data-md class="pt-2 text-[0.9375rem] leading-relaxed text-muted-foreground">{trySection.pushNote}</p>
+            <div class="home-code overflow-hidden rounded-xl border border-border bg-background">
+              <div class="overflow-x-auto px-5 py-4 text-[0.75rem]">
+                <Code code={trySection.push} lang="bash" themes={SHIKI} defaultColor={false} />
+              </div>
+            </div>
+            <p data-md class="text-[0.9375rem] leading-relaxed text-muted-foreground">{trySection.after}</p>
+            <p data-md class="pt-2 text-[0.9375rem] leading-relaxed text-muted-foreground">{trySection.mcpNote}</p>
+            <div class="rounded-lg border border-border bg-background px-4 py-3">
+              <pre class="overflow-x-auto text-[0.75rem] leading-relaxed text-foreground"><code><span class="select-none text-muted-foreground">$ </span>{trySection.mcp}</code></pre>
+            </div>
+          </div>
+          <div class="mt-14 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {
               start.map((s) => (
                 <a href={s.href} class={card}>
@@ -351,6 +343,19 @@ const card =
               ))
             }
           </div>
+        </div>
+      </section>
+
+      {/* The last line */}
+      <section class="border-t border-border">
+        <div class="mx-auto w-full max-w-5xl px-6 py-20 lg:px-10 lg:py-28">
+          <p
+            data-md
+            class="text-center font-semibold text-foreground"
+            style="font-size: clamp(1.75rem, 3vw, 2.5rem); line-height: 1.1; letter-spacing: -0.03em;"
+          >
+            {closing}
+          </p>
         </div>
       </section>
 
