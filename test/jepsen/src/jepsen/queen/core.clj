@@ -1,6 +1,7 @@
 (ns jepsen.queen.core
   "Entry point: lein run test --bin /path/to/queen --workload log --nemesis ..."
   (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging :refer [info warn]]
             [jepsen [checker :as checker]
@@ -144,6 +145,44 @@
                          [node dirs]))]
         {:valid?    (empty? left)
          :leftovers left}))))
+
+(defn panic-checker
+  "No node's queen.log has a panic, a poisoned lock or NA-QLOG-I1 (a committed
+  queue-log record missing). One exception: the corrupt nemesis truncates its
+  victim's queue logs on purpose, and NA-QLOG-I1 is how that node refuses to
+  boot on them. A NA-QLOG-I1 line the nemesis recorded as the :why of a
+  :refused trial on that node is listed under :excused and does not fail the
+  test. One anywhere else (at runtime, after a restore, on another node) does,
+  and so does a panic or a poisoned lock on any node."
+  []
+  (reify checker/Checker
+    (check [this test history opts]
+      (let [; :why is the refusal's log line, cut to 400 characters.
+            refusals (->> history
+                          (filter #(and (= :corrupt-file (:f %))
+                                        (= :refused (:outcome (:value %)))))
+                          (keep (fn [{v :value}]
+                                  (when-not (str/blank? (:why v))
+                                    [(:node v) (:why v)])))
+                          vec)
+            refused? (fn [{:keys [node line]}]
+                       (and (re-find #"NA-QLOG-I1" line)
+                            (not (re-find #"panicked at|poison" line))
+                            (some (fn [[n why]]
+                                    (and (= n node) (str/starts-with? line why)))
+                                  refusals)))
+            found    (for [node (:nodes test)
+                           :let [f (store/path test node "queen.log")]
+                           :when (.exists f)
+                           line (with-open [r (io/reader f)]
+                                  (doall (filter #(re-find #"panicked at|NA-QLOG-I1|poison" %)
+                                                 (line-seq r))))]
+                       {:node node, :line line})
+            {excused true, matches false} (group-by (comp boolean refused?) found)]
+        {:valid?  (empty? matches)
+         :count   (count matches)
+         :matches (vec matches)
+         :excused (vec excused)}))))
 
 (defn membership-agreement-checker
   "Every node's OWN voter set, read from it after the test (raft-state.json),
@@ -315,9 +354,7 @@
                             :perf     (perf-checker {:nemeses (:perf nemesis)})
                             :clock    (checker/clock-plot)
                             :ex       (checker/unhandled-exceptions)
-                            :panic    (checker/log-file-pattern
-                                        #"panicked at|NA-QLOG-I1|poison"
-                                        "queen.log")
+                            :panic    (panic-checker)
                             :lazyfs   (lazyfs-checker)
                             :leftovers (leftovers-checker)
                             :members  (membership-agreement-checker)
