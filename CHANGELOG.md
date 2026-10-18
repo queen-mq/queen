@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## 2.5.0
+## 2.5.0 - 2026-10-18
 
 **The Kafka facade carries 1,000,000 msg/s on the OpenMessaging Benchmark, with the stock Java
 clients.** Measured on 2026-10-17 on three GCP brokers (c4-standard-24-lssd) with the benchmark's
@@ -17,7 +17,8 @@ documents (its sequence windows live in the leader's memory). The runs and their
 `benchmark-queen/2026-10-16-omb/RESULTS.md`.
 
 **The cluster version stays 7.** Nothing in 2.5.0 raises it: a cluster rolls from 2.4.0 to 2.5.0 one
-node at a time.
+node at a time, and back, as a node on 2.4.0 starts on and serves a directory 2.5.0 wrote. Tested on
+three droplets under load, with deduplication on (`benchmark-queen/2026-10-17-jepsen-25`).
 
 **Server: openraft 0.10.0-alpha.37 from crates.io.** The consensus library was a git revision, alpha.34
 with the `LogEntryDiscarded` fix; it is now the published 0.10.0-alpha.37, with exact pins on its
