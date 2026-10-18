@@ -8,7 +8,7 @@ Comprehensive test suite for the Queen Python client with 100% parity to the Nod
 
 ```bash
 docker run -d --name queen -p 6632:6632 -e QUEEN_RAFT_DIR=/var/lib/queen/raft \
-  -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
+  -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:2.5.0
 ```
 
 The integration tests expect an empty broker, and nothing cleans up after
@@ -285,7 +285,7 @@ with a fresh broker:
 ```bash
 docker rm -f queen && docker volume rm queen-data
 docker run -d --name queen -p 6632:6632 -e QUEEN_RAFT_DIR=/var/lib/queen/raft \
-  -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
+  -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:2.5.0
 ```
 
 ## Continuous Integration
@@ -303,7 +303,7 @@ jobs:
     
     services:
       queen:
-        image: ghcr.io/queen-mq/queen:latest
+        image: ghcr.io/queen-mq/queen:2.5.0
         env:
           QUEEN_RAFT_DIR: /var/lib/queen/raft
         ports:

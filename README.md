@@ -117,7 +117,7 @@ Full details: [queenmq.com/benchmarks](https://queenmq.com/benchmarks/)
 ## Try it
 
 ```bash
-docker run -p 6632:6632 ghcr.io/queen-mq/queen:latest
+docker run -p 6632:6632 ghcr.io/queen-mq/queen:2.5.0
 ```
 
 Push your first message:

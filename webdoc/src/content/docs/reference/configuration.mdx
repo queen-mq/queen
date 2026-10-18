@@ -83,7 +83,7 @@ default, with the value the code applies when you don't.
 ```bash
 docker run -p 6632:6632 -v queen-data:/var/lib/queen/raft \
   -e QUEEN_KV_MAX_VALUE_BYTES=262144 -e LOG_LEVEL=info \
-  ghcr.io/queen-mq/queen:latest
+  ghcr.io/queen-mq/queen:2.5.0
 ```
 
 In a cluster, give every node the same values except the per-node ones: `QUEEN_RAFT_NODE_ID`,

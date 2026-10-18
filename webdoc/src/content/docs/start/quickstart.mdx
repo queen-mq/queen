@@ -74,7 +74,7 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
 
    ```bash
    docker run -d --name queen -p 6632:6632 \
-     -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest
+     -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:2.5.0
    curl -s http://localhost:6632/health
    ```
 
@@ -86,8 +86,8 @@ as one transaction. Then you'll try to commit half a step and watch the broker r
    everything in a log on its own disk, under `/var/lib/queen/raft`, and the volume keeps that
    directory when the container is replaced. A single node is a raft group of one, so it reports
    itself as the leader. The image is published for linux/amd64 and linux/arm64, so Docker pulls
-   the one built for your machine, an Apple Silicon Mac included. `latest` is the current release
-   and moves with each one, so on anything you keep, pin the version tag instead.
+   the one built for your machine, an Apple Silicon Mac included. The command pins the version,
+   2.5.0; `latest` names the current release too, but it moves with each one.
 
    If `curl` prints nothing, the node is still starting, and `docker logs queen` says what it is
    doing. The dashboard is on the same port, at `http://localhost:6632`.

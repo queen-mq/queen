@@ -41,7 +41,7 @@ if ! curl -s http://localhost:6632/health > /dev/null 2>&1; then
     echo ""
     echo "Start the server:"
     echo "  docker run -d --name queen -p 6632:6632 -e QUEEN_RAFT_DIR=/var/lib/queen/raft \\"
-    echo "    -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:latest"
+    echo "    -v queen-data:/var/lib/queen/raft ghcr.io/queen-mq/queen:2.5.0"
     echo ""
     exit 1
 fi

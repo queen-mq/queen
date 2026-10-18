@@ -102,7 +102,7 @@ five times.
 ```bash
 docker run -d --name queen -p 6632:6632 \
   -v queen-data:/var/lib/queen/raft \
-  ghcr.io/queen-mq/queen:latest
+  ghcr.io/queen-mq/queen:2.5.0
 ```
 
 </TabItem>
@@ -111,7 +111,7 @@ docker run -d --name queen -p 6632:6632 \
 ```yaml
 services:
   queen:
-    image: ghcr.io/queen-mq/queen:latest
+    image: ghcr.io/queen-mq/queen:2.5.0
     ports: ["6632:6632"]
     volumes:
       - queen-data:/var/lib/queen/raft
