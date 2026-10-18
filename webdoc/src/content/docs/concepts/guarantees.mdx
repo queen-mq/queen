@@ -99,6 +99,9 @@ one of them at its second run, after the harness had crashed in the first. The c
 of them once their histories were checked again with more memory, one at its second run. The
 campaign of 2026-10-15 and 16 ran them again on `ed73dc1cb`, the code of 2.4.0, with 13 more that
 push several messages of a partition at once: all 257 were valid at their first run. The
+campaign of 2026-10-17 and 18 ran the 257 again on the code of 2.5.0: 256 were valid at their
+first run, and the 257th once the harness stopped counting a damaged node's own refusals to boot
+as panics. The
 campaigns before
 them found real bugs,
 which is what they are for: a KV write that was acknowledged and never committed (a stale leader

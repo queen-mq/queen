@@ -28,15 +28,19 @@ sourceOfTruth:
 # sourceOfTruth re-read 2026-10-16 (2.4.0: --batch-sends): core.clj, log.clj and dedup.clj gain
 # pushes of several messages of one partition, so a test writes push outcomes as runs; the workload
 # table says so. The campaigns on this page ran without it.
+# sourceOfTruth re-read 2026-10-18 (2.5.0: the panic checker): core.clj's panic check leaves out an
+# NA-QLOG-I1 line the corrupt nemesis recorded as its victim's reason to refuse a boot; "How a test
+# runs" says so.
 ---
 
 A million messages a second is worth nothing if one of them can go missing. We check that with
 Jepsen: five nodes, clients driving the native API as hard as they can, a nemesis that kills,
 pauses, partitions, skews clocks and cuts power, and checkers that read the whole history
 afterwards looking for a message lost, delivered twice, acked twice or seen out of order. The
-latest full campaign ran 257 tests on the code of 2.4.0, on 2026-10-15 and 16, a standby cluster's
-failover and pushes of several messages at once among them: all 257 came back valid at their first
-run. That is
+latest full campaign ran 257 tests on the code of 2.5.0, on 2026-10-17 and 18, a standby cluster's
+failover and pushes of several messages at once among them: all 257 came back valid, 256 at their
+first run and one once a checker of the harness stopped counting a node's own refusals to boot on
+a damaged file. That is
 evidence, not proof. Jepsen finds bugs and cannot show there are
 none, and further down is every bug it found in Queen 2.
 
@@ -53,7 +57,9 @@ one verdict line per test. The checkers judge the history, and three nodes of fi
 history while the other two are down, so after each test the script also reads every node's log:
 a node that refused to start or panicked turns the line into `REFUSED`, whatever the checkers
 said. The tests that damage a node's files on purpose are left out of that, because there a
-refusal is the right answer.
+refusal is the right answer. The panic checker inside each test, which looks for a panic, a
+poisoned lock or `NA-QLOG-I1` in every node's log, leaves out the same refusals since 2.5.0: an
+`NA-QLOG-I1` line the nemesis recorded as its victim's reason to refuse a boot.
 
 <Figure id="benchmarks/jepsen-test" />
 
@@ -118,6 +124,7 @@ lein run test --nodes n1,n2,n3,n4,n5 --username root --bin /root/bin/queen \
 | 2.2.0 | 2026-10-09 and 10 | `3b1a6d9bb`, the code of 2.2.0 without its last three commits | 244: the 153 of the 2.1.0 campaign, 40 of the first pass, 12 on the same small log files with rows that stay, 8 on shared logs, and 31 failovers, 4 of them with rows that live two seconds | 244 valid, one at its second run: the harness crashed in the first |
 | 2.3.0 | 2026-10-13 and 14 | `1c7136d4a`, the server code of 2.3.0, as the binary of the 2.3.0-beta.2 image | 244: the tests of the 2.2.0 campaign | 244 valid: three once their histories were checked again with more memory, one at its second run, after the harness crashed in the first |
 | 2.4.0 | 2026-10-15 and 16 | `ed73dc1cb`, the server code of 2.4.0 without its version line and the encryption fix of `c42ea1992` | 257: the 244 of the 2.3.0 campaign and 13 that push several messages of one partition at once | 257 valid, all at their first run |
+| 2.5.0 | 2026-10-17 and 18 | `3646d217f`, the server code of 2.5.0 without the boxing of `19b024495` (a lint fix in the Kafka facade), as the binary of the 2.5.0-beta.1 image | 257: the tests of the 2.4.0 campaign | 257 valid: 256 at their first run; `p11-w1-corrupt-all` failed the panic checker alone in both of its runs, on the node's own refusals to boot on a cut queue log, and both runs are valid under the fixed checker |
 
 The unknown of 2026-10-02 is W9 under bridge partitions. After the last heal, a follower's pops
 kept timing out for about 90 seconds although it had caught up, so the final reads did not finish
@@ -191,6 +198,7 @@ other checkers had found nothing. Their stored histories were checked again with
 three are valid, with no anomaly, no duplicate and no torn read. One failover test crashed in the
 harness before any load ran, for the reason the 2.2.0 campaign met on its sixth node, and it ran
 again valid. The binary wire forms that 2.3.0 adds were not part of it, as its clients speak JSON.
+The verdicts are in `benchmark-queen/2026-10-13-jepsen-230/`.
 
 The 2.4.0 campaign ran the same 244 tests on what that release changes, the bytes a message costs
 on disk: a push's outcome written as runs, the checkpoint's index rows without their hashes and the
@@ -204,7 +212,20 @@ workload under kills, partitions, restarts and power loss. It ran on one set of 
 every test was valid at its first run; lazyfs was built on every node before the first power
 loss. The encryption fix that 2.4.0 also carries was not part of it, as no test runs with an
 encryption key. The verdicts and the upgrade are in `benchmark-queen/2026-10-15-jepsen-24/`.
-The verdicts are in `benchmark-queen/2026-10-13-jepsen-230/`.
+
+The 2.5.0 campaign ran the same 257 tests on what that release changes: openraft
+0.10.0-alpha.37 in place of a git revision, a hook in the batcher, the path every push takes, for
+the Kafka facade's ordered pushes, and the end of a windowBuffer hold. It ran on one set of six
+nodes from 2026-10-17 15:05 to 2026-10-18 15:27 UTC, then a rolling upgrade from 2.4.0 to 2.5.0
+and back on three of them, at cluster version 7 throughout. 256 tests were valid at their first
+run. The 257th, `p11-w1-corrupt-all`, damages one node's files on purpose and checks that the node
+refuses them. In both of its runs every checker passed but the panic checker, which failed on
+`NA-QLOG-I1` lines that were that node's refusals to boot, each within a second of the nemesis
+cutting one of its queue logs short. Those refusals are the right answer, so the checker now leaves
+out exactly the lines the nemesis recorded as its victim's reason to refuse. Both stored runs are
+valid under it, and taking the nemesis's records out of their histories makes them fail again.
+The Kafka facade, which 2.5.0 changes the most, is outside these tests, as their clients use the
+native API. The verdicts and the upgrade are in `benchmark-queen/2026-10-17-jepsen-25/`.
 
 ## What the tests found
 
@@ -262,8 +283,8 @@ part of any.
 Lease exclusivity across a leader change needs the nodes' clocks within
 `QUEEN_RAFT_MAX_CLOCK_SKEW_MS` (500 ms) of each other. Losing a majority of the disks for good can
 lose acknowledged writes, since raft survives the loss of a minority. The full campaign last ran
-on `ed73dc1cb`; the server code of 2.4.0 adds the encryption fix of `c42ea1992` and its version
-line. No test sets a completed retention above its queue's dedup window, so
+on the binary of `3646d217f`; the server code of 2.5.0 adds the boxing of `19b024495` and nothing
+else. No test sets a completed retention above its queue's dedup window, so
 none of them checks the rule of 2.2.0 by which a queue's completed retention no longer extends how
 long a push keeps its row. A standby's failover
 has its own workload since 2026-10-08, on a standby that starts empty beside its source: a seeded
