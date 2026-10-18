@@ -21,6 +21,8 @@ sourceOfTruth:
 # body asks and a pop with the stored records for frames=true, all opt-in; a request in the JSON
 # forms is planned, committed and answered as before. The example names version 2.3.0. Nothing else
 # this page states changes.
+# sourceOfTruth re-read 2026-10-18 (2.5.0): the example names version 2.5.0, and so does the page.
+# Nothing else this page states changes.
 ---
 
 The [manifest](/operate/kubernetes/) installs a cluster, and a rolling update takes a new version
@@ -55,7 +57,7 @@ metadata:
   name: queen
   namespace: queen
 spec:
-  version: "2.3.0"
+  version: "2.5.0"
   replicas: 3
   secretName: queen
   storage:
@@ -68,7 +70,7 @@ kubectl -n queen get queencluster
 
 ```text
 NAME    VERSION   VOTERS    COMMITS   PHASE   AGE
-queen   2.3.0     [1,2,3]   true      Ready   40s
+queen   2.5.0     [1,2,3]   true      Ready   40s
 ```
 
 The pods and the Services have the names of the [manifest](/operate/kubernetes/#the-manifest)
